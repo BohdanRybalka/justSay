@@ -1,0 +1,92 @@
+"""Cloud STT provider — Groq Whisper (whisper-large-v3-turbo).
+
+Used for short audio clips (<= cloud_routing_threshold seconds) in normal style.
+Long audio and ai_prompt style go to Gemini.
+"""
+
+import asyncio
+import logging
+from pathlib import Path
+
+from app.stt.base import STTProvider, TranscriptionResult
+from app.stt.config import STTSettings
+
+log = logging.getLogger(__name__)
+
+
+class GroqWhisperSTTProvider(STTProvider):
+    """Groq-hosted Whisper (whisper-large-v3-turbo) for fast short-audio transcription.
+
+    Notes:
+        - Free tier file size limit: 25 MB (enforced upstream by /transcribe route).
+        - Accepted formats: WAV, MP3, FLAC, OGG. NOT .webm.
+        - Timeout on the SDK call: 10 s (generous for short audio).
+    """
+
+    _TIMEOUT_SECONDS: float = 10.0
+
+    def __init__(self, settings: STTSettings):
+        self._settings = settings
+        self._client = None
+
+    @property
+    def model_name(self) -> str:
+        return f"groq/{self._settings.groq_whisper_model}"
+
+    def _get_client(self):
+        if self._client is None:
+            if not self._settings.groq_api_key:
+                raise RuntimeError(
+                    "JUSTSAY_STT_GROQ_API_KEY is required for Groq Whisper STT"
+                )
+            from groq import Groq
+
+            self._client = Groq(api_key=self._settings.groq_api_key, timeout=self._TIMEOUT_SECONDS)
+        return self._client
+
+    async def transcribe(self, audio_path: Path, language: str = "uk", **kwargs) -> TranscriptionResult:
+        """Send audio file to Groq Whisper API. ``style`` kwarg is ignored (Groq can't structure)."""
+        client = self._get_client()
+        size_kb = audio_path.stat().st_size / 1024
+        log.info(
+            "Groq Whisper: POST transcriptions model=%s file=%s size=%.1fKB lang=%s",
+            self._settings.groq_whisper_model, audio_path.name, size_kb, language,
+        )
+
+        try:
+            text = await asyncio.to_thread(
+                self._call_groq, client, self._settings.groq_whisper_model, audio_path, language
+            )
+        except Exception:
+            log.exception("Groq Whisper call failed")
+            raise
+        return TranscriptionResult(text=text.strip() if text else "", tokens_used=None)
+
+    def cleanup(self) -> None:
+        """No persistent resources — HTTP client is stateless. Reset for consistency."""
+        self._client = None
+
+    @staticmethod
+    def _call_groq(client, model: str, audio_path: Path, language: str) -> str:
+        """Isolated SDK call — mockable in tests without installing groq."""
+        try:
+            with audio_path.open("rb") as fh:
+                response = client.audio.transcriptions.create(
+                    file=(audio_path.name, fh.read()),
+                    model=model,
+                    language=language,
+                    response_format="text",
+                )
+        except Exception as e:
+            # HTTP 429 (rate limit) bubbles up with a clearer message.
+            msg = str(e)
+            if "429" in msg or "rate_limit" in msg.lower():
+                raise RuntimeError(
+                    "Groq rate limit exceeded. Try again later or switch STT to Gemini."
+                ) from e
+            raise
+
+        # response_format="text" returns a plain string; some SDK versions wrap it.
+        if isinstance(response, str):
+            return response
+        return getattr(response, "text", str(response))

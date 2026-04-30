@@ -1,0 +1,162 @@
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+
+import numpy as np
+import pytest
+import soundfile as sf
+from pydantic import ValidationError
+
+from app.audio.config import AudioSettings
+from app.audio.recorder import MicrophoneRecorder
+
+
+@pytest.fixture
+def audio_settings(tmp_path):
+    return AudioSettings(sample_rate=16000, channels=1, temp_dir=tmp_path)
+
+
+@pytest.fixture
+def mock_stream():
+    """Mock sounddevice.InputStream to avoid requiring a real microphone."""
+    with patch("app.audio.recorder.sd.InputStream") as mock_cls:
+        stream_instance = MagicMock()
+        mock_cls.return_value = stream_instance
+        yield mock_cls, stream_instance
+
+
+def _simulate_audio_callback(recorder: MicrophoneRecorder, num_blocks: int = 5):
+    """Simulate sounddevice calling the audio callback with fake data."""
+    for _ in range(num_blocks):
+        fake_audio = np.random.uniform(-0.1, 0.1, (1024, 1)).astype(np.float32)
+        recorder._audio_callback(fake_audio, 1024, None, MagicMock())
+
+
+# --- Recording lifecycle ---
+
+
+@pytest.mark.asyncio
+async def test_start_recording(audio_settings, mock_stream):
+    mock_cls, stream_instance = mock_stream
+    recorder = MicrophoneRecorder(audio_settings)
+
+    await recorder.start()
+
+    assert recorder.is_recording is True
+    mock_cls.assert_called_once()
+    stream_instance.start.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_start_idempotent(audio_settings, mock_stream):
+    mock_cls, stream_instance = mock_stream
+    recorder = MicrophoneRecorder(audio_settings)
+
+    await recorder.start()
+    await recorder.start()  # second call protected by lock — no-op
+
+    mock_cls.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_returns_wav_file(audio_settings, mock_stream):
+    _, stream_instance = mock_stream
+    recorder = MicrophoneRecorder(audio_settings)
+
+    await recorder.start()
+    _simulate_audio_callback(recorder, num_blocks=10)
+    audio_path = await recorder.stop()
+
+    assert audio_path.exists()
+    assert audio_path.suffix == ".wav"
+    assert recorder.is_recording is False
+
+    data, samplerate = sf.read(str(audio_path))
+    assert samplerate == 16000
+    assert len(data) > 0
+
+
+@pytest.mark.asyncio
+async def test_stop_without_start_raises(audio_settings):
+    recorder = MicrophoneRecorder(audio_settings)
+
+    with pytest.raises(RuntimeError, match="Not recording"):
+        await recorder.stop()
+
+
+@pytest.mark.asyncio
+async def test_double_stop_raises(audio_settings, mock_stream):
+    _, _ = mock_stream
+    recorder = MicrophoneRecorder(audio_settings)
+
+    await recorder.start()
+    _simulate_audio_callback(recorder, num_blocks=3)
+    await recorder.stop()
+
+    with pytest.raises(RuntimeError, match="Not recording"):
+        await recorder.stop()
+
+
+# --- Audio level ---
+
+
+@pytest.mark.asyncio
+async def test_level_db_updates_during_recording(audio_settings, mock_stream):
+    _, _ = mock_stream
+    recorder = MicrophoneRecorder(audio_settings)
+
+    assert recorder.level_db == float("-inf")
+
+    await recorder.start()
+    _simulate_audio_callback(recorder, num_blocks=3)
+
+    assert recorder.level_db > float("-inf")
+    assert recorder.level_db < 0  # dBFS is always negative for non-clipping audio
+
+
+@pytest.mark.asyncio
+async def test_status_not_recording(audio_settings):
+    recorder = MicrophoneRecorder(audio_settings)
+
+    assert recorder.is_recording is False
+    assert recorder.duration_seconds == 0.0
+    assert recorder.level_db == float("-inf")
+    assert recorder.last_duration_seconds == 0.0
+
+
+@pytest.mark.asyncio
+async def test_last_duration_persists_after_stop(audio_settings, mock_stream):
+    """last_duration_seconds must remain populated after stop() so the pipeline
+    can route by audio length without re-reading the WAV."""
+    _, _ = mock_stream
+    recorder = MicrophoneRecorder(audio_settings)
+
+    await recorder.start()
+    _simulate_audio_callback(recorder, num_blocks=5)
+    # Force a known duration by back-dating the start.
+    import time
+    recorder._start_time = time.monotonic() - 7.5
+    await recorder.stop()
+
+    assert recorder.is_recording is False
+    # duration_seconds returns 0 after stop (by contract), but last_duration_seconds
+    # holds the captured span.
+    assert recorder.duration_seconds == 0.0
+    assert 7.0 < recorder.last_duration_seconds <= audio_settings.max_duration_seconds
+
+
+# --- Config validation ---
+
+
+def test_config_rejects_negative_sample_rate():
+    with pytest.raises(ValidationError):
+        AudioSettings(sample_rate=-1, channels=1)
+
+
+def test_config_rejects_zero_channels():
+    with pytest.raises(ValidationError):
+        AudioSettings(sample_rate=16000, channels=0)
+
+
+def test_config_default_max_duration():
+    s = AudioSettings()
+    assert s.max_duration_seconds == 300.0

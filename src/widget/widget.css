@@ -1,0 +1,147 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  background: #141423;
+  overflow: hidden;
+  height: 100%;
+  user-select: none;
+}
+
+.widget {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: #141423;
+  border: none;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+  transition: background 0.3s ease, filter 0.3s ease;
+}
+
+.widget:hover {
+  filter: brightness(1.1);
+}
+
+/* --- States --- */
+
+.widget.idle .widget-dot { background: #555; }
+
+.widget.recording {
+  background: #280f0f;
+}
+.widget.recording .widget-dot {
+  background: #ff3c3c;
+  animation: pulse-dot 1s ease-in-out infinite;
+}
+
+.widget.processing {
+  background: #1e190a;
+  cursor: wait;
+}
+.widget.processing .widget-dot {
+  background: #ff9800;
+  animation: spin-dot 1s linear infinite;
+}
+
+.widget.done {
+  background: #0f1e0f;
+}
+.widget.done .widget-dot { background: #4caf50; }
+
+.widget.error {
+  background: #1e0f0f;
+}
+.widget.error .widget-dot { background: #f44336; }
+
+/* --- Logo --- */
+
+.widget-logo {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+/* --- Dot --- */
+
+.widget-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.3); }
+}
+
+@keyframes spin-dot {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* --- Content (default text + duration) --- */
+
+.widget-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  flex: 1;
+}
+
+.widget-text {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.widget-duration {
+  font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  flex-shrink: 0;
+}
+
+/* --- Marquee (scrolling result text) --- */
+
+.widget-marquee {
+  display: none;
+  overflow: hidden;
+  flex: 1;
+  mask-image: linear-gradient(to right, transparent, black 8%, black 92%, transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent, black 8%, black 92%, transparent);
+}
+
+.widget-marquee.active {
+  display: block;
+}
+
+.marquee-inner {
+  display: inline-block;
+  white-space: nowrap;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.85);
+  animation: marquee-scroll var(--marquee-duration, 10s) linear infinite;
+  padding-left: 100%;
+}
+
+@keyframes marquee-scroll {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-100%); }
+}

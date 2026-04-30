@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JustSay Settings</title>
+  <link rel="stylesheet" href="/src/settings/settings.css" />
+</head>
+<body>
+  <div id="app" class="app">
+    <nav class="sidebar">
+      <div class="sidebar-header">JustSay</div>
+      <ul class="sidebar-nav">
+        <li><button class="nav-btn active" data-tab="general">General</button></li>
+        <li><button class="nav-btn" data-tab="models">Models</button></li>
+        <li><button class="nav-btn" data-tab="audio">Audio</button></li>
+        <li><button class="nav-btn" data-tab="storage">Storage</button></li>
+        <li><button class="nav-btn" data-tab="history">History</button></li>
+        <li><button class="nav-btn" data-tab="metrics">Metrics</button></li>
+      </ul>
+      <div class="sidebar-footer">
+        <span class="version" id="app-version">v0.1.0</span>
+      </div>
+    </nav>
+
+    <main class="content">
+      <div id="tab-content"></div>
+      <footer class="status-bar">
+        <span id="backend-status" class="status-indicator offline">Backend: Offline</span>
+      </footer>
+    </main>
+  </div>
+
+  <script type="module" src="/src/settings/settings.ts"></script>
+</body>
+</html>

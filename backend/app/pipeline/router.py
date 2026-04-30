@@ -1,0 +1,123 @@
+"""Pipeline endpoints — unified audio-to-text flows."""
+
+import logging
+import uuid
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, UploadFile
+from pydantic import BaseModel
+
+from app.audio import get_recorder
+from app.core.config import settings
+from app.pipeline.service import process_audio
+
+log = logging.getLogger(__name__)
+router = APIRouter()
+
+MAX_UPLOAD_SIZE = 25 * 1024 * 1024  # 25 MB
+ALLOWED_EXTENSIONS = {".wav", ".mp3", ".ogg", ".webm", ".flac"}
+
+
+class DictateResponse(BaseModel):
+    raw_text: str
+    cleaned_text: str
+    duration_ms: int
+    copied_to_clipboard: bool
+
+
+@router.post("/dictate", response_model=DictateResponse)
+async def dictate(language: str = "uk", style: str = "normal", copy_to_clipboard: bool = True):
+    """One-shot: stop recording -> transcribe -> clipboard.
+
+    Call POST /audio/start first, then call this endpoint when done speaking.
+    The recorder reports the captured duration via ``last_duration_seconds`` so
+    the pipeline can route short audio to Groq without re-reading the WAV.
+    """
+    recorder = get_recorder()
+    if not recorder.is_recording:
+        raise HTTPException(status_code=409, detail="Not recording. Call POST /audio/start first")
+
+    audio_path = await recorder.stop()
+    captured_duration = recorder.last_duration_seconds
+    log.info(
+        "Dictate: stopped recording. path=%s duration=%.2fs language=%s style=%s",
+        audio_path.name, captured_duration, language, style,
+    )
+
+    try:
+        result = await process_audio(
+            audio_path,
+            language=language,
+            style=style,
+            copy_to_clipboard=copy_to_clipboard,
+            audio_duration=captured_duration if captured_duration > 0.0 else None,
+        )
+        return DictateResponse(
+            raw_text=result.raw_text,
+            cleaned_text=result.cleaned_text,
+            duration_ms=result.duration_ms,
+            copied_to_clipboard=result.copied_to_clipboard,
+        )
+    except Exception as e:
+        log.exception("Pipeline failure")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Pipeline failed: {type(e).__name__}: {e}",
+        )
+    finally:
+        if audio_path.exists():
+            audio_path.unlink()
+
+
+@router.post("/process-file", response_model=DictateResponse)
+async def process_file(
+    file: UploadFile,
+    language: str = "uk",
+    style: str = "normal",
+    copy_to_clipboard: bool = True,
+):
+    """Process an uploaded audio file through the full pipeline."""
+    ext = Path(file.filename).suffix.lower() if file.filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Unsupported audio format")
+
+    temp_path = settings.audio.temp_dir / f"pipeline_{uuid.uuid4().hex}{ext}"
+
+    try:
+        settings.audio.temp_dir.mkdir(parents=True, exist_ok=True)
+
+        chunks = []
+        total = 0
+        while True:
+            chunk = await file.read(64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_UPLOAD_SIZE:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File too large (max {MAX_UPLOAD_SIZE // 1024 // 1024}MB)",
+                )
+            chunks.append(chunk)
+        temp_path.write_bytes(b"".join(chunks))
+
+        result = await process_audio(
+            temp_path, language=language, style=style, copy_to_clipboard=copy_to_clipboard
+        )
+        return DictateResponse(
+            raw_text=result.raw_text,
+            cleaned_text=result.cleaned_text,
+            duration_ms=result.duration_ms,
+            copied_to_clipboard=result.copied_to_clipboard,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("Pipeline failure")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Pipeline failed: {type(e).__name__}: {e}",
+        )
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()

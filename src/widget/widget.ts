@@ -1,0 +1,259 @@
+import { api } from "../api";
+
+// --- State ---
+
+type WidgetState = "idle" | "recording" | "processing" | "done" | "error";
+
+let state: WidgetState = "idle";
+let isTransitioning = false;
+let durationInterval: ReturnType<typeof setInterval> | null = null;
+let marqueeTimeout: ReturnType<typeof setTimeout> | null = null;
+
+// Settings (loaded from backend)
+let currentShortcut = "Ctrl+Alt+KeyV";
+let currentLanguage = "uk";
+let currentStyle = "normal";
+
+const MAX_MARQUEE_SECONDS = 20;
+
+// --- DOM ---
+
+const widget = document.getElementById("widget")!;
+const content = document.querySelector(".widget-content")! as HTMLElement;
+const text = document.getElementById("widget-text")!;
+const durationEl = document.getElementById("widget-duration")!;
+const marquee = document.getElementById("widget-marquee")!;
+const marqueeInner = document.getElementById("marquee-inner")!;
+
+// --- State management ---
+
+function setState(newState: WidgetState, message?: string) {
+  state = newState;
+  widget.className = `widget ${state}`;
+
+  if (durationInterval && state !== "recording") {
+    clearInterval(durationInterval);
+    durationInterval = null;
+  }
+
+  if (marqueeTimeout) {
+    clearTimeout(marqueeTimeout);
+    marqueeTimeout = null;
+  }
+
+  marquee.classList.remove("active");
+  content.style.display = "flex";
+
+  switch (state) {
+    case "idle":
+      text.textContent = "JustSay";
+      durationEl.textContent = "";
+      break;
+    case "recording":
+      text.textContent = "Recording";
+      startDurationTimer();
+      break;
+    case "processing":
+      text.textContent = "Processing";
+      durationEl.textContent = "";
+      break;
+    case "done":
+      showMarquee(message || "Done");
+      break;
+    case "error":
+      text.textContent = message || "Error";
+      durationEl.textContent = "";
+      setTimeout(() => {
+        if (state === "error") setState("idle");
+      }, 3000);
+      break;
+  }
+}
+
+function showMarquee(resultText: string) {
+  if (!resultText.trim()) {
+    setState("idle");
+    return;
+  }
+
+  content.style.display = "none";
+  marqueeInner.textContent = resultText;
+
+  const textWidth = marqueeInner.scrollWidth || resultText.length * 8;
+  const containerWidth = marquee.offsetWidth || 250;
+  const totalDistance = textWidth + containerWidth;
+  const speed = 50;
+  const rawDuration = totalDistance / speed;
+  const duration = Math.min(rawDuration, MAX_MARQUEE_SECONDS);
+
+  marquee.style.setProperty("--marquee-duration", `${duration}s`);
+  marquee.classList.add("active");
+
+  marqueeTimeout = setTimeout(() => {
+    if (state === "done") setState("idle");
+  }, duration * 1000 + 500);
+}
+
+function startDurationTimer() {
+  const start = Date.now();
+  const update = () => {
+    const elapsed = (Date.now() - start) / 1000;
+    durationEl.textContent = formatDuration(elapsed);
+  };
+  update();
+  durationInterval = setInterval(update, 100);
+}
+
+function formatDuration(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 10);
+  if (m > 0) return `${m}:${s.toString().padStart(2, "0")}.${ms}`;
+  return `${s}.${ms}s`;
+}
+
+// --- Recording flow ---
+
+async function startRecording() {
+  if (state === "recording" || state === "processing" || isTransitioning) return;
+
+  isTransitioning = true;
+  setState("recording");
+
+  try {
+    await api.audioStart();
+  } catch (e) {
+    setState("error", "Start failed");
+    console.error("Start recording failed:", e);
+  } finally {
+    isTransitioning = false;
+  }
+}
+
+async function stopAndProcess() {
+  if (state !== "recording" || isTransitioning) return;
+
+  isTransitioning = true;
+  setState("processing");
+
+  try {
+    const result = await api.dictate(currentLanguage, currentStyle);
+    setState("done", result.cleaned_text || "Done");
+  } catch (e) {
+    setState("error", "Failed");
+    console.error("Pipeline failed:", e);
+  } finally {
+    isTransitioning = false;
+  }
+}
+
+async function toggleRecording() {
+  if (isTransitioning) return;
+
+  if (state === "recording") {
+    await stopAndProcess();
+  } else if (state === "idle" || state === "done" || state === "error") {
+    await startRecording();
+  }
+}
+
+// --- Click ---
+
+widget.addEventListener("click", () => {
+  toggleRecording();
+});
+
+// --- Global shortcut ---
+
+let unregisterFn: (() => Promise<void>) | null = null;
+
+async function setupGlobalShortcut(shortcut: string) {
+  try {
+    const { register, unregister } = await import("@tauri-apps/plugin-global-shortcut");
+
+    // Unregister previous if exists
+    if (unregisterFn) {
+      try {
+        await unregisterFn();
+      } catch { /* ignore */ }
+    }
+
+    await register(shortcut, (event) => {
+      if (event.state === "Pressed") {
+        startRecording();
+      } else if (event.state === "Released") {
+        stopAndProcess();
+      }
+    });
+
+    unregisterFn = () => unregister(shortcut);
+    console.log(`Global shortcut registered: ${shortcut}`);
+  } catch (e) {
+    console.warn("Global shortcut not available:", e);
+  }
+}
+
+// --- Load settings ---
+
+async function loadSettings() {
+  try {
+    const settings = await api.getSettings();
+    currentLanguage = settings.language;
+    currentStyle = settings.transcription_style;
+    if (settings.shortcut !== currentShortcut) {
+      currentShortcut = settings.shortcut;
+      await setupGlobalShortcut(currentShortcut);
+    }
+  } catch (e) {
+    console.warn("Failed to load settings:", e);
+  }
+}
+
+// --- Listen for settings changes from Settings window ---
+
+async function listenForSettingsChanges() {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    await listen("settings-changed", async () => {
+      await loadSettings();
+    });
+  } catch {
+    // Not in Tauri
+  }
+}
+
+// --- Health check ---
+
+async function checkConnection() {
+  try {
+    await api.health();
+    if (state === "idle" && text.textContent === "Offline") {
+      text.textContent = "JustSay";
+    }
+  } catch {
+    if (state === "idle") {
+      text.textContent = "Offline";
+    }
+  }
+}
+
+// --- Init ---
+
+async function init() {
+  await checkConnection();
+  setInterval(checkConnection, 5000);
+
+  await loadSettings();
+  await setupGlobalShortcut(currentShortcut);
+  await listenForSettingsChanges();
+
+  // Signal Rust that webview is loaded
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("widget_ready");
+  } catch {
+    // Not in Tauri
+  }
+}
+
+init();

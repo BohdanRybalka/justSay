@@ -1,0 +1,28 @@
+{
+  "name": "justsay",
+  "version": "0.1.0",
+  "description": "Personal voice-processing OS with hybrid Cloud/Local AI architecture",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "backend": "cd backend && python -m uvicorn app.main:app --host 127.0.0.1 --port 9377 --reload",
+    "backend:install": "cd backend && pip install -e \".[dev,audio,cloud]\"",
+    "setup": "npm install && npm run backend:install",
+    "test": "cd backend && python -m pytest tests/ -v"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.7.0",
+    "@tauri-apps/plugin-global-shortcut": "^2.0.0",
+    "@tauri-apps/plugin-notification": "^2.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "typescript": "^5.5.3",
+    "vite": "^6.0.0"
+  }
+}

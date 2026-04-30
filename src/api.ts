@@ -1,0 +1,254 @@
+/**
+ * HTTP client for JustSay Python backend.
+ */
+
+const BASE_URL = "http://127.0.0.1:9377";
+
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const opts: RequestInit = {
+    method,
+    headers: { "Content-Type": "application/json" },
+  };
+  if (body) {
+    opts.body = JSON.stringify(body);
+  }
+  const resp = await fetch(`${BASE_URL}${path}`, opts);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+// --- Types ---
+
+export interface HealthResponse {
+  status: string;
+  version: string;
+  stt_mode: "cloud" | "local";
+  llm_mode: "cloud" | "local";
+}
+
+export interface RecordingStatus {
+  is_recording: boolean;
+  duration_seconds: number;
+  level_db: number;
+}
+
+export interface DictateResponse {
+  raw_text: string;
+  cleaned_text: string;
+  duration_ms: number;
+  copied_to_clipboard: boolean;
+}
+
+export interface UserSettings {
+  language: string;
+  shortcut: string;
+  output_dir: string;
+  stt_mode: "cloud" | "local";
+  llm_mode: "cloud" | "local";
+  whisper_model_size: string;
+  whisper_device: string;
+  ollama_host: string;
+  ollama_model: string;
+  max_recording_seconds: number;
+  transcription_style: "normal" | "ai_prompt";
+}
+
+export interface LocalSttStatus {
+  package_installed: boolean;
+  model_loaded: boolean;
+  model_name: string;
+  model_ram_mb: number | null;
+  gpu_available: boolean;
+  gpu_name: string | null;
+  device: string;
+  compute_type: string;
+}
+
+export interface OllamaModel {
+  name: string;
+  size_bytes: number | null;
+  parameter_size: string | null;
+}
+
+export interface LocalLlmStatus {
+  ollama_running: boolean;
+  ollama_version: string | null;
+  model_downloaded: boolean;
+  model_name: string;
+  model_size_bytes: number | null;
+  model_loaded: boolean;
+  vram_used_bytes: number | null;
+  available_models: OllamaModel[];
+}
+
+export interface GpuInfo {
+  name: string;
+  vram_total_mb: number;
+  vram_used_mb: number;
+  vram_free_mb: number;
+}
+
+export interface ResourceInfo {
+  cpu_cores: number;
+  cpu_threads: number;
+  ram_total_mb: number;
+  ram_used_mb: number;
+  ram_available_mb: number;
+  pid_ram_mb: number;
+  gpu: GpuInfo | null;
+}
+
+export interface StorageInfo {
+  temp_dir: string;
+  temp_size_bytes: number;
+  output_dir: string;
+}
+
+export interface CleanupResult {
+  freed_bytes: number;
+}
+
+export interface HistoryEntry {
+  id: string;
+  timestamp: string;
+  language: string;
+  style: string;
+  raw_text: string;
+  cleaned_text: string;
+  duration_ms: number;
+  model_name: string | null;
+  tokens_used: number | null;
+  audio_duration_seconds: number | null;
+  word_count: number | null;
+}
+
+export interface HistoryListResponse {
+  entries: HistoryEntry[];
+  total: number;
+}
+
+// --- API ---
+
+export const api = {
+  health: () => request<HealthResponse>("GET", "/health"),
+
+  audioStart: () => request<RecordingStatus>("POST", "/audio/start"),
+
+  audioStop: () => request<{ filename: string; duration_seconds: number }>("POST", "/audio/stop"),
+
+  audioStatus: () => request<RecordingStatus>("GET", "/audio/status"),
+
+  dictate: (language = "uk", style = "normal") =>
+    request<DictateResponse>("POST", `/pipeline/dictate?language=${language}&style=${style}`),
+
+  setSttMode: (mode: "cloud" | "local") =>
+    request("PUT", "/stt/mode", { mode }),
+
+  setLlmMode: (mode: "cloud" | "local") =>
+    request("PUT", "/llm/mode", { mode }),
+
+  // Resources
+  resources: () => request<ResourceInfo>("GET", "/resources"),
+
+  // Local mode status & control
+  sttLocalStatus: () => request<LocalSttStatus>("GET", "/stt/local/status"),
+  sttLocalLoad: () => request<{ loaded: boolean; model?: string }>("POST", "/stt/local/load"),
+  sttLocalUnload: () => request<{ unloaded: boolean }>("POST", "/stt/local/unload"),
+
+  llmLocalStatus: () => request<LocalLlmStatus>("GET", "/llm/local/status"),
+  llmLocalLoad: () => request<{ loaded: boolean; error: string | null }>("POST", "/llm/local/load"),
+  llmLocalUnload: () => request<{ unloaded: boolean; error: string | null }>("POST", "/llm/local/unload"),
+  llmLocalStart: () => request<{ started: boolean; error: string | null }>("POST", "/llm/local/start"),
+
+  // Settings
+  getSettings: () => request<UserSettings>("GET", "/settings"),
+
+  updateSettings: (updates: Partial<UserSettings>) =>
+    request<UserSettings>("PUT", "/settings", updates),
+
+  getStorageInfo: () => request<StorageInfo>("GET", "/settings/storage"),
+
+  cleanupTemp: () => request<CleanupResult>("POST", "/settings/cleanup"),
+
+  // History
+  getHistory: (limit = 50, offset = 0) =>
+    request<HistoryListResponse>("GET", `/history?limit=${limit}&offset=${offset}`),
+
+  deleteHistoryEntry: (id: string) =>
+    request<{ deleted: boolean }>("DELETE", `/history/${id}`),
+
+  clearHistory: () =>
+    request<{ deleted: number }>("DELETE", "/history"),
+};
+
+// --- SSE helpers for model download/pull ---
+
+export interface SSEProgress {
+  status: string;
+  completed?: number | null;
+  total?: number | null;
+  error?: string;
+  path?: string;
+}
+
+export function sseStream(
+  path: string,
+  onProgress: (data: SSEProgress) => void,
+  onDone: (data: SSEProgress) => void,
+  onError: (error: string) => void,
+): AbortController {
+  const controller = new AbortController();
+
+  fetch(`${BASE_URL}${path}`, {
+    method: "POST",
+    signal: controller.signal,
+  })
+    .then(async (resp) => {
+      if (!resp.ok || !resp.body) {
+        onError(`HTTP ${resp.status}`);
+        return;
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        let currentEvent = "";
+        for (const line of lines) {
+          if (line.startsWith("event: ")) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith("data: ")) {
+            try {
+              const data: SSEProgress = JSON.parse(line.slice(6));
+              if (currentEvent === "done") {
+                onDone(data);
+              } else if (currentEvent === "error") {
+                onError(data.error || "Unknown error");
+              } else {
+                onProgress(data);
+              }
+            } catch {
+              // skip malformed JSON
+            }
+          }
+        }
+      }
+    })
+    .catch((err) => {
+      if (err.name !== "AbortError") {
+        onError(String(err));
+      }
+    });
+
+  return controller;
+}

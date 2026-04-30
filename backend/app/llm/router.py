@@ -1,0 +1,93 @@
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from app.core.config import settings
+from app.core.schemas import ProviderModeUpdate
+from app.core.user_settings import update_user_settings
+from app.llm import get_llm_provider, clear_cache
+from app.llm.local_setup import (
+    LocalLlmStatus,
+    check_status as check_local_status,
+    load_ollama_model,
+    pull_model,
+    start_ollama,
+    unload_ollama_model,
+)
+
+router = APIRouter()
+
+
+MAX_TEXT_LENGTH = 100_000  # ~100KB
+
+
+class ProcessRequest(BaseModel):
+    text: str = Field(..., max_length=MAX_TEXT_LENGTH)
+    system_prompt: str = Field(..., max_length=MAX_TEXT_LENGTH)
+
+
+class ProcessResponse(BaseModel):
+    result: str
+    model: str
+
+
+@router.put("/mode")
+async def set_llm_mode(update: ProviderModeUpdate):
+    settings.llm.mode = update.mode
+    clear_cache()
+    update_user_settings({"llm_mode": update.mode.value})
+    provider = get_llm_provider(settings.llm)
+    return {"llm_mode": settings.llm.mode, "model": provider.model_name}
+
+
+@router.post("/process", response_model=ProcessResponse)
+async def process_text(req: ProcessRequest):
+    """Process text with the current LLM provider."""
+    if not req.text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    try:
+        provider = get_llm_provider(settings.llm)
+        result = await provider.process(req.text, req.system_prompt)
+        return ProcessResponse(result=result, model=provider.model_name)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Processing failed: {type(e).__name__}"
+        )
+
+
+@router.get("/local/status", response_model=LocalLlmStatus)
+async def llm_local_status():
+    """Check local LLM readiness: Ollama running, model pulled, VRAM usage."""
+    return await check_local_status(settings.llm)
+
+
+@router.post("/local/pull")
+async def llm_local_pull():
+    """Pull Ollama model with streaming progress via SSE."""
+    return StreamingResponse(
+        pull_model(settings.llm),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/local/start")
+async def llm_local_start():
+    """Attempt to start Ollama serve process if host is local."""
+    return await start_ollama(settings.llm)
+
+
+@router.post("/local/load")
+async def llm_local_load():
+    """Prime the Ollama model in memory (warm-up with empty prompt)."""
+    return await load_ollama_model(settings.llm)
+
+
+@router.post("/local/unload")
+async def llm_local_unload():
+    """Release Ollama VRAM by setting keep_alive=0."""
+    return await unload_ollama_model(settings.llm)
