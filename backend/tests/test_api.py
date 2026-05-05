@@ -29,7 +29,8 @@ async def test_config(client):
 
 
 @pytest.mark.asyncio
-async def test_switch_stt_mode(client):
+async def test_set_stt_mode_accepts_json_object(client):
+    """Wire format ``{"mode": "..."}`` must keep working after ProviderModeUpdate removal."""
     resp = await client.put("/stt/mode", json={"mode": "local"})
     assert resp.status_code == 200
     assert resp.json()["stt_mode"] == "local"
@@ -40,7 +41,7 @@ async def test_switch_stt_mode(client):
 
 
 @pytest.mark.asyncio
-async def test_switch_llm_mode(client):
+async def test_set_llm_mode_accepts_json_object(client):
     resp = await client.put("/llm/mode", json={"mode": "local"})
     assert resp.status_code == 200
     assert resp.json()["llm_mode"] == "local"
@@ -72,7 +73,7 @@ def _make_recorder_mock(duration: float, audio_path: Path) -> MagicMock:
 
 def _make_pipeline_result() -> ProcessingResult:
     return ProcessingResult(
-        raw_text="ok", cleaned_text="ok", duration_ms=100, copied_to_clipboard=True
+        text="ok", duration_ms=100, copied_to_clipboard=True
     )
 
 

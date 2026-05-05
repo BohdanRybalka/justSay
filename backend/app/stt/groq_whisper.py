@@ -8,6 +8,7 @@ import asyncio
 import logging
 from pathlib import Path
 
+from app.core.constants import GROQ_TIMEOUT_SECONDS
 from app.stt.base import STTProvider, TranscriptionResult
 from app.stt.config import STTSettings
 
@@ -20,10 +21,8 @@ class GroqWhisperSTTProvider(STTProvider):
     Notes:
         - Free tier file size limit: 25 MB (enforced upstream by /transcribe route).
         - Accepted formats: WAV, MP3, FLAC, OGG. NOT .webm.
-        - Timeout on the SDK call: 10 s (generous for short audio).
+        - Timeout on the SDK call: GROQ_TIMEOUT_SECONDS (generous for short audio).
     """
-
-    _TIMEOUT_SECONDS: float = 10.0
 
     def __init__(self, settings: STTSettings):
         self._settings = settings
@@ -41,7 +40,7 @@ class GroqWhisperSTTProvider(STTProvider):
                 )
             from groq import Groq
 
-            self._client = Groq(api_key=self._settings.groq_api_key, timeout=self._TIMEOUT_SECONDS)
+            self._client = Groq(api_key=self._settings.groq_api_key, timeout=GROQ_TIMEOUT_SECONDS)
         return self._client
 
     async def transcribe(self, audio_path: Path, language: str = "uk", **kwargs) -> TranscriptionResult:

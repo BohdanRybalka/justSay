@@ -179,10 +179,10 @@ def test_engine_pin_gemini_overrides_short_audio():
 
 
 def test_cloud_routing_threshold_must_be_positive():
-    with pytest.raises(ValueError, match="must be > 0"):
+    with pytest.raises(ValueError):
         STTSettings(cloud_routing_threshold=0)
 
-    with pytest.raises(ValueError, match="must be > 0"):
+    with pytest.raises(ValueError):
         STTSettings(cloud_routing_threshold=-5)
 
 

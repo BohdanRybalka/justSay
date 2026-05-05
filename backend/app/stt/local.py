@@ -3,31 +3,12 @@
 import asyncio
 import gc
 import logging
-import threading
 from pathlib import Path
 
 from app.stt.base import STTProvider, TranscriptionResult
 from app.stt.config import STTSettings
 
 log = logging.getLogger(__name__)
-
-
-# Module-level latch — captures the most recent load failure so the status
-# endpoint can surface it. Cleared on a successful load; updated atomically.
-_load_lock = threading.Lock()
-_last_load_error: str | None = None
-
-
-def get_last_load_error() -> str | None:
-    """Return the most recent load failure message, or None if last load succeeded."""
-    with _load_lock:
-        return _last_load_error
-
-
-def _set_last_load_error(message: str | None) -> None:
-    global _last_load_error
-    with _load_lock:
-        _last_load_error = message
 
 
 class LocalSTTProvider(STTProvider):
@@ -41,10 +22,15 @@ class LocalSTTProvider(STTProvider):
     def __init__(self, settings: STTSettings):
         self._settings = settings
         self._model = None
+        self._last_load_error: str | None = None
 
     @property
     def model_name(self) -> str:
         return f"whisper/{self._settings.whisper_model_size}"
+
+    @property
+    def last_load_error(self) -> str | None:
+        return self._last_load_error
 
     def _get_model(self):
         if self._model is None:
@@ -66,12 +52,12 @@ class LocalSTTProvider(STTProvider):
                     device=device,
                     compute_type=compute_type,
                 )
-                _set_last_load_error(None)
+                self._last_load_error = None
                 log.info("Whisper loaded successfully")
             except Exception as e:
                 # Format with type so the UI shows e.g. "OSError: [WinError 126] ..."
                 msg = f"{type(e).__name__}: {e}"
-                _set_last_load_error(msg)
+                self._last_load_error = msg
                 log.exception("Whisper load failed: %s", msg)
                 raise
         return self._model

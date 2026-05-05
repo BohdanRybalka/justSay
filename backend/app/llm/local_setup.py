@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 import httpx
 from pydantic import BaseModel
 
+from app.core.utils import sse_event
 from app.llm.config import LLMSettings
 
 log = logging.getLogger(__name__)
@@ -146,7 +147,7 @@ async def pull_model(llm_settings: LLMSettings) -> AsyncIterator[str]:
     Yields SSE-formatted strings. Caller wraps in StreamingResponse(media_type='text/event-stream').
     """
     if _pull_lock.locked():
-        yield _sse("error", {"status": "error", "error": "Pull already in progress"})
+        yield sse_event("error", {"status": "error", "error": "Pull already in progress"})
         return
 
     async with _pull_lock:
@@ -155,10 +156,10 @@ async def pull_model(llm_settings: LLMSettings) -> AsyncIterator[str]:
         try:
             async with httpx.AsyncClient(base_url=llm_settings.ollama_host, timeout=preflight_timeout) as client:
                 if not await _check_health(client):
-                    yield _sse("error", {"status": "error", "error": "Ollama not running"})
+                    yield sse_event("error", {"status": "error", "error": "Ollama not running"})
                     return
         except Exception:
-            yield _sse("error", {"status": "error", "error": "Ollama not running"})
+            yield sse_event("error", {"status": "error", "error": "Ollama not running"})
             return
 
         timeout = httpx.Timeout(connect=_CONNECT_TIMEOUT, read=None, write=None, pool=None)
@@ -169,7 +170,7 @@ async def pull_model(llm_settings: LLMSettings) -> AsyncIterator[str]:
                 async with client.stream("POST", "/api/pull", json=payload) as resp:
                     if resp.status_code != 200:
                         body = await resp.aread()
-                        yield _sse("error", {"status": "error", "error": f"HTTP {resp.status_code}: {body.decode('utf-8', errors='replace')[:300]}"})
+                        yield sse_event("error", {"status": "error", "error": f"HTTP {resp.status_code}: {body.decode('utf-8', errors='replace')[:300]}"})
                         return
 
                     async for line in resp.aiter_lines():
@@ -181,19 +182,19 @@ async def pull_model(llm_settings: LLMSettings) -> AsyncIterator[str]:
                             continue
 
                         if "error" in data:
-                            yield _sse("error", {"status": "error", "error": data["error"]})
+                            yield sse_event("error", {"status": "error", "error": data["error"]})
                             return
 
                         if data.get("status") == "success":
-                            yield _sse("done", {"status": "success"})
+                            yield sse_event("done", {"status": "success"})
                             return
 
-                        yield _sse("progress", data)
+                        yield sse_event("progress", data)
         except httpx.ConnectError as e:
-            yield _sse("error", {"status": "error", "error": f"Cannot reach Ollama at {llm_settings.ollama_host}: {e}"})
+            yield sse_event("error", {"status": "error", "error": f"Cannot reach Ollama at {llm_settings.ollama_host}: {e}"})
         except Exception as e:
             log.warning("Ollama pull failed: %s", e)
-            yield _sse("error", {"status": "error", "error": str(e)})
+            yield sse_event("error", {"status": "error", "error": str(e)})
 
 
 def _is_local_host(host_url: str) -> bool:
@@ -300,11 +301,6 @@ async def unload_ollama_model(llm_settings: LLMSettings) -> dict:
     except Exception as e:
         log.warning("Ollama unload failed: %s", e)
         return {"unloaded": False, "error": str(e)}
-
-
-def _sse(event: str, data: dict) -> str:
-    """Format a Server-Sent Event string."""
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 def _model_matches(actual: str, target: str) -> bool:

@@ -17,7 +17,3 @@ class ConfigResponse(BaseModel):
     llm_mode: ProviderMode
     stt_model: str
     llm_model: str
-
-
-class ProviderModeUpdate(BaseModel):
-    mode: ProviderMode

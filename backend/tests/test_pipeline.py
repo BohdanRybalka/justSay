@@ -1,5 +1,6 @@
+import asyncio
 from pathlib import Path
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -39,9 +40,9 @@ def cloud_mode():
     settings.llm.mode = original_llm
 
 
-def _make_stt_mock(text: str = "hello world"):
+def _make_stt_mock(text: str = "hello world", tokens: int | None = None):
     stt = MagicMock()
-    stt.transcribe = AsyncMock(return_value=TranscriptionResult(text=text, tokens_used=None))
+    stt.transcribe = AsyncMock(return_value=TranscriptionResult(text=text, tokens_used=tokens))
     stt.model_name = "mock/provider"
     return stt
 
@@ -56,13 +57,11 @@ async def test_pipeline_returns_stt_text_verbatim(
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         result = await process_audio(sample_wav, language="uk", style="normal")
 
-    assert result.raw_text == "Привіт світ"
-    assert result.cleaned_text == "Привіт світ"
+    assert result.text == "Привіт світ"
     assert result.copied_to_clipboard is True
     copy_mock.assert_called_once_with("Привіт світ")
     saved_kwargs = save_mock.call_args.kwargs
-    assert saved_kwargs["raw_text"] == "Привіт світ"
-    assert saved_kwargs["cleaned_text"] == "Привіт світ"
+    assert saved_kwargs["text"] == "Привіт світ"
     assert saved_kwargs["language"] == "uk"
     assert saved_kwargs["style"] == "normal"
     assert saved_kwargs["model_name"] == "mock/provider"
@@ -91,15 +90,18 @@ async def test_pipeline_does_not_copy_empty_text(
 async def test_pipeline_clipboard_failure_is_graceful(
     sample_wav, cloud_mode, _isolate_side_effects
 ):
-    copy_mock, _ = _isolate_side_effects
+    copy_mock, save_mock = _isolate_side_effects
     copy_mock.side_effect = RuntimeError("no clipboard")
     stt = _make_stt_mock("text")
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         result = await process_audio(sample_wav, language="uk", style="normal")
 
-    assert result.cleaned_text == "text"
+    assert result.text == "text"
     assert result.copied_to_clipboard is False
+    # Even when clipboard fails, the entry must still be saved.
+    assert save_mock.call_count == 1
+    assert save_mock.call_args.kwargs["text"] == "text"
 
 
 @pytest.mark.asyncio
@@ -111,15 +113,26 @@ async def test_pipeline_passes_style_to_provider(
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)) as routed:
         await process_audio(sample_wav, language="uk", style="ai_prompt")
 
-    # Provider selected with the right context...
     routed.assert_called_once()
     _, kwargs = routed.call_args
     assert kwargs["style"] == "ai_prompt"
 
-    # ...and style is forwarded to transcribe(**kwargs).
     stt.transcribe.assert_awaited_once()
     call_kwargs = stt.transcribe.await_args.kwargs
     assert call_kwargs.get("style") == "ai_prompt"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_records_ai_prompt_style_in_history(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    _, save_mock = _isolate_side_effects
+    stt = _make_stt_mock("ok")
+
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
+        await process_audio(sample_wav, language="uk", style="ai_prompt")
+
+    assert save_mock.call_args.kwargs["style"] == "ai_prompt"
 
 
 @pytest.mark.asyncio
@@ -128,9 +141,7 @@ async def test_pipeline_forwards_tokens_used_to_history(
 ):
     """tokens_used from STT result must reach save_entry unchanged."""
     _, save_mock = _isolate_side_effects
-    stt = MagicMock()
-    stt.transcribe = AsyncMock(return_value=TranscriptionResult(text="hello", tokens_used=1500))
-    stt.model_name = "mock/provider"
+    stt = _make_stt_mock("hello", tokens=1500)
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         await process_audio(sample_wav, language="uk", style="normal")
@@ -152,3 +163,61 @@ async def test_pipeline_respects_explicit_audio_duration(
 
     detect.assert_not_called()
     assert routed.call_args.kwargs["audio_duration"] == 12.5
+
+
+@pytest.mark.asyncio
+async def test_pipeline_passes_file_extension_to_routing(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    stt = _make_stt_mock("ok")
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)) as routed:
+        await process_audio(sample_wav, style="normal")
+    assert routed.call_args.kwargs["file_extension"] == ".wav"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_propagates_stt_failure(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """STT exception must bubble up; no history entry created."""
+    _, save_mock = _isolate_side_effects
+    stt = MagicMock()
+    stt.transcribe = AsyncMock(side_effect=RuntimeError("groq down"))
+    stt.model_name = "mock/provider"
+
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
+        with pytest.raises(RuntimeError, match="groq down"):
+            await process_audio(sample_wav, style="normal")
+
+    save_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_concurrent_invocations_save_independently(
+    cloud_mode, _isolate_side_effects, tmp_path
+):
+    """Five parallel pipeline runs must each emit one save_entry."""
+    _, save_mock = _isolate_side_effects
+
+    paths = []
+    for i in range(5):
+        audio = np.random.uniform(-0.05, 0.05, 16000).astype(np.float32)
+        p = tmp_path / f"sample-{i}.wav"
+        sf.write(str(p), audio, 16000)
+        paths.append(p)
+
+    def make_stt(idx: int):
+        m = MagicMock()
+        m.transcribe = AsyncMock(return_value=TranscriptionResult(text=f"text-{idx}", tokens_used=None))
+        m.model_name = "mock/provider"
+        return m
+
+    async def one(idx: int):
+        with patch("app.pipeline.service.get_routed_provider", return_value=(make_stt(idx), None)):
+            r = await process_audio(paths[idx], style="normal")
+        return r
+
+    results = await asyncio.gather(*[one(i) for i in range(5)])
+    texts = sorted(r.text for r in results)
+    assert texts == [f"text-{i}" for i in range(5)]
+    assert save_mock.call_count == 5

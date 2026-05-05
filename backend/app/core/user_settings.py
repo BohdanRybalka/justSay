@@ -123,10 +123,13 @@ def _validate_output_dir(value: object) -> Path:
 
     for forbidden in _FORBIDDEN_PARENTS:
         try:
-            if candidate.is_relative_to(forbidden):
-                raise ValueError(f"output_dir is inside a system directory: {forbidden}")
+            inside = candidate.is_relative_to(forbidden)
         except (ValueError, OSError):
+            # Different drives on Windows, or unresolvable path — skip this
+            # particular forbidden parent and check the rest.
             continue
+        if inside:
+            raise ValueError(f"output_dir is inside a system directory: {forbidden}")
 
     if candidate.exists():
         if not candidate.is_dir():

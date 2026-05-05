@@ -138,7 +138,7 @@ async function stopAndProcess() {
 
   try {
     const result = await api.dictate(currentLanguage, currentStyle);
-    setState("done", result.cleaned_text || "Done");
+    setState("done", result.text || "Done");
     showRouteBadge(result);
   } catch (e) {
     setState("error", "Failed");

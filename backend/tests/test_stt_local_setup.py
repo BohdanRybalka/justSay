@@ -2,13 +2,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.core.utils import sse_event
 from app.stt.config import STTSettings
 from app.stt import local_setup
 from app.stt.local_setup import (
     LocalSttStatus,
     _check_package_installed,
     _detect_gpu,
-    _sse,
     check_status,
     install_local_packages,
 )
@@ -87,26 +87,31 @@ def test_check_status_reports_missing_package():
 
 def test_check_status_surfaces_last_load_error():
     """When _get_model latched an error, status.last_error must contain it."""
-    from app.stt import local as local_module
+    from app.stt import clear_cache as clear_stt_cache
+    from app.stt.local import LocalSTTProvider
 
+    clear_stt_cache()
     settings = STTSettings()
-    local_module._set_last_load_error("OSError: [WinError 126] DLL not found")
+    # Force-create provider, then set its instance-level error.
+    from app.stt import _get_local
+
+    provider = _get_local(settings)
+    provider._last_load_error = "OSError: [WinError 126] DLL not found"
     try:
         with _apply(_patches(True, (False, None))):
             status = check_status(settings)
         assert status.last_error == "OSError: [WinError 126] DLL not found"
         assert status.model_loaded is False
     finally:
-        local_module._set_last_load_error(None)
+        clear_stt_cache()
 
 
-def test_get_last_load_error_clears_after_successful_load():
-    from app.stt import local as local_module
+def test_get_local_load_error_returns_none_before_provider_instantiation():
+    from app.stt import clear_cache as clear_stt_cache, get_local_load_error
 
-    local_module._set_last_load_error("boom")
-    assert local_module.get_last_load_error() == "boom"
-    local_module._set_last_load_error(None)
-    assert local_module.get_last_load_error() is None
+    clear_stt_cache()
+    settings = STTSettings()
+    assert get_local_load_error(settings) is None
 
 
 # --- _check_package_installed ---
@@ -163,11 +168,11 @@ def test_detect_gpu_returns_name_when_cuda_available():
     assert name == "RTX 4090"
 
 
-# --- _sse formatting ---
+# --- sse_event formatting ---
 
 
 def test_sse_format_is_event_plus_data():
-    out = _sse("progress", {"status": "downloading"})
+    out = sse_event("progress", {"status": "downloading"})
     assert out.startswith("event: progress\n")
     assert 'data: {"status": "downloading"}' in out
     assert out.endswith("\n\n")
@@ -204,3 +209,17 @@ async def test_install_emits_error_on_failure():
         events = [e async for e in install_local_packages()]
 
     assert any("event: error" in e for e in events)
+
+
+@pytest.mark.asyncio
+async def test_install_concurrent_locked():
+    """When the install lock is already held, a second caller gets an error SSE."""
+    await local_setup._install_lock.acquire()
+    try:
+        events = [e async for e in install_local_packages()]
+    finally:
+        local_setup._install_lock.release()
+
+    assert len(events) == 1
+    assert "event: error" in events[0]
+    assert "already in progress" in events[0]

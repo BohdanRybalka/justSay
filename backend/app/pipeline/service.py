@@ -1,10 +1,8 @@
 """Audio processing pipeline: Audio -> smart-routed STT -> Clipboard.
 
-The LLM step has been removed from the default flow (see
-``docs/hybrid-stt-pipeline.md``). Gemini's ai_prompt style handles both
-transcription and structuring in a single call; short normal-style audio
-goes through Groq Whisper for minimum latency. ``/llm/process`` is still
-available as a standalone endpoint for anyone who wants explicit cleanup.
+Gemini's ai_prompt style handles transcription and structuring in a single call;
+short normal-style audio goes through Groq Whisper for minimum latency.
+``/llm/process`` remains as a standalone endpoint for explicit cleanup.
 """
 
 import logging
@@ -24,15 +22,9 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class ProcessingResult:
-    """Domain model for pipeline output.
+    """Domain model for pipeline output."""
 
-    ``raw_text`` and ``cleaned_text`` are kept as separate fields for
-    backwards compatibility with the API schema; they contain the same
-    value now that the LLM cleanup step is gone.
-    """
-
-    raw_text: str
-    cleaned_text: str
+    text: str
     duration_ms: int
     copied_to_clipboard: bool
     model_name: str = ""               # which provider actually handled the call
@@ -98,8 +90,7 @@ async def process_audio(
 
     try:
         save_entry(
-            raw_text=text,
-            cleaned_text=text,
+            text=text,
             duration_ms=duration_ms,
             language=language,
             style=style,
@@ -112,8 +103,7 @@ async def process_audio(
         log.warning("Failed to save history entry: %s", e)
 
     return ProcessingResult(
-        raw_text=text,
-        cleaned_text=text,
+        text=text,
         duration_ms=duration_ms,
         copied_to_clipboard=copied,
         model_name=stt.model_name,

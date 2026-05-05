@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.core import history
+from app.core.utils import compute_dir_size
 from app.core.user_settings import (
     UserSettings,
     get_user_settings,
@@ -79,14 +80,10 @@ def _mask_home(p: Path) -> str:
 async def get_storage_info():
     s = get_user_settings()
     tmp_dir = SETTINGS_DIR / "tmp"
-    tmp_size = 0
-    if tmp_dir.exists():
-        tmp_size = sum(f.stat().st_size for f in tmp_dir.rglob("*") if f.is_file())
-
     hpath = history.history_path()
     return StorageInfo(
         temp_dir=str(tmp_dir),
-        temp_size_bytes=tmp_size,
+        temp_size_bytes=compute_dir_size(tmp_dir),
         output_dir=s.output_dir,
         history_path=_mask_home(hpath),
         history_entries=history.get_count(),
@@ -96,9 +93,8 @@ async def get_storage_info():
 @router.post("/cleanup", response_model=CleanupResult)
 async def cleanup_temp():
     tmp_dir = SETTINGS_DIR / "tmp"
-    freed = 0
+    freed = compute_dir_size(tmp_dir)
     if tmp_dir.exists():
-        freed = sum(f.stat().st_size for f in tmp_dir.rglob("*") if f.is_file())
         shutil.rmtree(tmp_dir)
         tmp_dir.mkdir(parents=True, exist_ok=True)
     return CleanupResult(freed_bytes=freed)

@@ -87,7 +87,7 @@ export function renderHistory(container: HTMLElement): () => void {
         </div>
         <div class="history-badges">${badges.join("")}</div>
       </div>
-      <div class="history-text">${escapeHtml(entry.cleaned_text)}</div>
+      <div class="history-text">${escapeHtml(entry.text)}</div>
       <div class="history-actions">
         <button class="btn btn-secondary btn-sm" data-action="copy">Copy</button>
         <button class="btn btn-secondary btn-sm" data-action="delete">Delete</button>
@@ -100,7 +100,7 @@ export function renderHistory(container: HTMLElement): () => void {
       if (!action) return;
 
       if (action === "copy") {
-        await navigator.clipboard.writeText(entry.raw_text || entry.cleaned_text);
+        await navigator.clipboard.writeText(entry.text);
         target.textContent = "Copied!";
         setTimeout(() => (target.textContent = "Copy"), 1500);
       } else if (action === "delete") {

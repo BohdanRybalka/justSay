@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import httpx
 
+from app.core.utils import sse_event
 from app.llm.config import LLMSettings
 from app.llm.local_setup import (
     check_status,
@@ -14,7 +15,6 @@ from app.llm.local_setup import (
     _check_loaded,
     _model_matches,
     _is_local_host,
-    _sse,
 )
 
 
@@ -238,11 +238,11 @@ async def test_status_model_not_pulled():
     assert status.model_size_bytes is None
 
 
-# --- _sse helper ---
+# --- sse_event helper ---
 
 
 def test_sse_format():
-    result = _sse("progress", {"status": "pulling", "completed": 100})
+    result = sse_event("progress", {"status": "pulling", "completed": 100})
     assert result.startswith("event: progress\n")
     assert '"status": "pulling"' in result
     assert result.endswith("\n\n")

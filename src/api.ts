@@ -36,8 +36,7 @@ export interface RecordingStatus {
 }
 
 export interface DictateResponse {
-  raw_text: string;
-  cleaned_text: string;
+  text: string;
   duration_ms: number;
   copied_to_clipboard: boolean;
   model_name?: string;
@@ -143,8 +142,7 @@ export interface HistoryEntry {
   timestamp: string;
   language: string;
   style: string;
-  raw_text: string;
-  cleaned_text: string;
+  text: string;
   duration_ms: number;
   model_name: string | null;
   tokens_used: number | null;

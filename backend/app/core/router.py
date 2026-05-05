@@ -9,7 +9,8 @@ from pydantic import BaseModel
 from app import __version__
 from app.core.config import settings
 from app.core.schemas import HealthResponse, ConfigResponse
-from app.stt import get_stt_provider
+from app.core.utils import bytes_to_gb, bytes_to_mb
+from app.stt import get_provider as get_stt_provider
 from app.llm import get_llm_provider
 
 router = APIRouter()
@@ -43,7 +44,7 @@ async def health():
 
 @router.get("/config", response_model=ConfigResponse)
 async def get_config():
-    stt = get_stt_provider(settings.stt)
+    stt = get_stt_provider(settings.stt.mode, settings.stt)
     llm = get_llm_provider(settings.llm)
     return ConfigResponse(
         stt_mode=settings.stt.mode,
@@ -100,14 +101,14 @@ def _collect_resources() -> ResourceInfo:
         cpu_threads=threads,
         cpu_percent_total=psutil.cpu_percent(interval=None),
         cpu_percent_process=round(proc_cpu_normalised, 1),
-        ram_total_mb=vm.total // (1024 * 1024),
-        ram_used_mb=vm.used // (1024 * 1024),
-        ram_available_mb=vm.available // (1024 * 1024),
-        ram_total_gb=round(vm.total / (1024**3), 2),
-        ram_used_gb=round(vm.used / (1024**3), 2),
-        ram_available_gb=round(vm.available / (1024**3), 2),
-        pid_ram_mb=rss_bytes // (1024 * 1024),
-        pid_ram_gb=round(rss_bytes / (1024**3), 2),
+        ram_total_mb=bytes_to_mb(vm.total),
+        ram_used_mb=bytes_to_mb(vm.used),
+        ram_available_mb=bytes_to_mb(vm.available),
+        ram_total_gb=bytes_to_gb(vm.total),
+        ram_used_gb=bytes_to_gb(vm.used),
+        ram_available_gb=bytes_to_gb(vm.available),
+        pid_ram_mb=bytes_to_mb(rss_bytes),
+        pid_ram_gb=bytes_to_gb(rss_bytes),
         gpu=gpu,
     )
 
@@ -127,9 +128,9 @@ def _get_gpu_info() -> GpuInfo | None:
 
         return GpuInfo(
             name=props.name,
-            vram_total_mb=total // (1024 * 1024),
-            vram_used_mb=allocated // (1024 * 1024),
-            vram_free_mb=free // (1024 * 1024),
+            vram_total_mb=bytes_to_mb(total),
+            vram_used_mb=bytes_to_mb(allocated),
+            vram_free_mb=bytes_to_mb(free),
         )
     except (ImportError, Exception):
         return None

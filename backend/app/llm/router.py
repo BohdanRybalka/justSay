@@ -3,7 +3,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
-from app.core.schemas import ProviderModeUpdate
+from app.core.constants import MAX_TEXT_LENGTH
+from app.core.types import ProviderMode
 from app.core.user_settings import update_user_settings
 from app.llm import get_llm_provider, clear_cache
 from app.llm.local_setup import (
@@ -18,9 +19,6 @@ from app.llm.local_setup import (
 router = APIRouter()
 
 
-MAX_TEXT_LENGTH = 100_000  # ~100KB
-
-
 class ProcessRequest(BaseModel):
     text: str = Field(..., max_length=MAX_TEXT_LENGTH)
     system_prompt: str = Field(..., max_length=MAX_TEXT_LENGTH)
@@ -31,11 +29,16 @@ class ProcessResponse(BaseModel):
     model: str
 
 
+class _ModeBody(BaseModel):
+    """Inline body wrapper so the wire format stays ``{"mode": "..."}``."""
+    mode: ProviderMode
+
+
 @router.put("/mode")
-async def set_llm_mode(update: ProviderModeUpdate):
-    settings.llm.mode = update.mode
+async def set_llm_mode(body: _ModeBody):
+    settings.llm.mode = body.mode
     clear_cache()
-    update_user_settings({"llm_mode": update.mode.value})
+    update_user_settings({"llm_mode": body.mode.value})
     provider = get_llm_provider(settings.llm)
     return {"llm_mode": settings.llm.mode, "model": provider.model_name}
 

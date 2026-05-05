@@ -7,9 +7,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.core.schemas import ProviderModeUpdate
+from app.core.constants import ALLOWED_AUDIO_EXTENSIONS, MAX_UPLOAD_SIZE
+from app.core.types import ProviderMode
 from app.core.user_settings import update_user_settings
-from app.stt import get_stt_provider, clear_cache
+from app.core.utils import read_upload_with_limit
+from app.stt import clear_cache, get_provider
 from app.stt.local_setup import (
     LocalSttStatus,
     check_status as check_local_status,
@@ -18,24 +20,23 @@ from app.stt.local_setup import (
 
 router = APIRouter()
 
-MAX_UPLOAD_SIZE = 25 * 1024 * 1024  # 25 MB
-ALLOWED_EXTENSIONS = {
-    ".wav", ".mp3", ".ogg", ".oga", ".webm", ".flac",
-    ".m4a", ".mp4", ".aac", ".opus", ".wma", ".aiff", ".aif",
-}
-
 
 class TranscribeResponse(BaseModel):
     text: str
     model: str
 
 
+class _ModeBody(BaseModel):
+    """Inline body wrapper so the wire format stays ``{"mode": "..."}``."""
+    mode: ProviderMode
+
+
 @router.put("/mode")
-async def set_stt_mode(update: ProviderModeUpdate):
-    settings.stt.mode = update.mode
+async def set_stt_mode(body: _ModeBody):
+    settings.stt.mode = body.mode
     clear_cache()
-    update_user_settings({"stt_mode": update.mode.value})
-    provider = get_stt_provider(settings.stt)
+    update_user_settings({"stt_mode": body.mode.value})
+    provider = get_provider(settings.stt.mode, settings.stt)
     return {"stt_mode": settings.stt.mode, "model": provider.model_name}
 
 
@@ -43,17 +44,17 @@ async def set_stt_mode(update: ProviderModeUpdate):
 async def transcribe_audio(file: UploadFile, language: str = "uk"):
     """Transcribe an uploaded audio file using the current STT provider."""
     ext = Path(file.filename).suffix.lower() if file.filename else ""
-    if ext not in ALLOWED_EXTENSIONS:
+    if ext not in ALLOWED_AUDIO_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported audio format")
 
     temp_path = settings.audio.temp_dir / f"upload_{uuid.uuid4().hex}{ext}"
 
     try:
         settings.audio.temp_dir.mkdir(parents=True, exist_ok=True)
-        content = await _read_with_limit(file, MAX_UPLOAD_SIZE)
+        content = await read_upload_with_limit(file, MAX_UPLOAD_SIZE)
         temp_path.write_bytes(content)
 
-        provider = get_stt_provider(settings.stt)
+        provider = get_provider(settings.stt.mode, settings.stt)
         result = await provider.transcribe(temp_path, language=language)
 
         return TranscribeResponse(text=result.text, model=provider.model_name)
@@ -75,13 +76,11 @@ async def stt_local_status():
 @router.post("/local/load")
 async def stt_local_load():
     """Load whisper model into memory. May take minutes on first run (model download)."""
-    from app.core.types import ProviderMode
-
     if settings.stt.mode != ProviderMode.LOCAL:
         raise HTTPException(status_code=400, detail="STT mode is not local")
 
     try:
-        provider = get_stt_provider(settings.stt)
+        provider = get_provider(settings.stt.mode, settings.stt)
         # _get_model() triggers lazy load — run in thread (blocking, downloads model)
         await asyncio.to_thread(provider._get_model)
         return {"loaded": True, "model": provider.model_name}
@@ -105,18 +104,3 @@ async def stt_local_install():
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-async def _read_with_limit(file: UploadFile, max_size: int) -> bytes:
-    """Read upload file in chunks, enforcing size limit."""
-    chunks = []
-    total = 0
-    while True:
-        chunk = await file.read(64 * 1024)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > max_size:
-            raise HTTPException(status_code=413, detail=f"File too large (max {max_size // 1024 // 1024}MB)")
-        chunks.append(chunk)
-    return b"".join(chunks)

@@ -9,23 +9,17 @@ from pydantic import BaseModel
 
 from app.audio import get_recorder
 from app.core.config import settings
+from app.core.constants import ALLOWED_AUDIO_EXTENSIONS, MAX_UPLOAD_SIZE
+from app.core.utils import read_upload_with_limit
 from app.pipeline.service import process_audio
 
 log = logging.getLogger(__name__)
 router = APIRouter()
 
-MAX_UPLOAD_SIZE = 25 * 1024 * 1024  # 25 MB
-# All popular audio containers users drop in. Routing handles per-provider
-# capability (Groq doesn't take .webm; Gemini takes everything).
-ALLOWED_EXTENSIONS = {
-    ".wav", ".mp3", ".ogg", ".oga", ".webm", ".flac",
-    ".m4a", ".mp4", ".aac", ".opus", ".wma", ".aiff", ".aif",
-}
-
 
 class DictateResponse(BaseModel):
-    raw_text: str
-    cleaned_text: str
+    """Wire shape for /pipeline/dictate and /pipeline/process-file responses."""
+    text: str
     duration_ms: int
     copied_to_clipboard: bool
     model_name: str = ""
@@ -59,14 +53,7 @@ async def dictate(language: str = "uk", style: str = "normal", copy_to_clipboard
             copy_to_clipboard=copy_to_clipboard,
             audio_duration=captured_duration if captured_duration > 0.0 else None,
         )
-        return DictateResponse(
-            raw_text=result.raw_text,
-            cleaned_text=result.cleaned_text,
-            duration_ms=result.duration_ms,
-            copied_to_clipboard=result.copied_to_clipboard,
-            model_name=result.model_name,
-            fallback_reason=result.fallback_reason,
-        )
+        return DictateResponse(**result.__dict__)
     except Exception as e:
         log.exception("Pipeline failure")
         raise HTTPException(
@@ -87,40 +74,20 @@ async def process_file(
 ):
     """Process an uploaded audio file through the full pipeline."""
     ext = Path(file.filename).suffix.lower() if file.filename else ""
-    if ext not in ALLOWED_EXTENSIONS:
+    if ext not in ALLOWED_AUDIO_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported audio format")
 
     temp_path = settings.audio.temp_dir / f"pipeline_{uuid.uuid4().hex}{ext}"
 
     try:
         settings.audio.temp_dir.mkdir(parents=True, exist_ok=True)
-
-        chunks = []
-        total = 0
-        while True:
-            chunk = await file.read(64 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > MAX_UPLOAD_SIZE:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"File too large (max {MAX_UPLOAD_SIZE // 1024 // 1024}MB)",
-                )
-            chunks.append(chunk)
-        temp_path.write_bytes(b"".join(chunks))
+        content = await read_upload_with_limit(file, MAX_UPLOAD_SIZE)
+        temp_path.write_bytes(content)
 
         result = await process_audio(
             temp_path, language=language, style=style, copy_to_clipboard=copy_to_clipboard
         )
-        return DictateResponse(
-            raw_text=result.raw_text,
-            cleaned_text=result.cleaned_text,
-            duration_ms=result.duration_ms,
-            copied_to_clipboard=result.copied_to_clipboard,
-            model_name=result.model_name,
-            fallback_reason=result.fallback_reason,
-        )
+        return DictateResponse(**result.__dict__)
     except HTTPException:
         raise
     except Exception as e:

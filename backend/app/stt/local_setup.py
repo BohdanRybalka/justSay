@@ -1,7 +1,6 @@
 """STT Local mode readiness checks — package detection, GPU, pip install."""
 
 import asyncio
-import json
 import logging
 import subprocess
 import sys
@@ -9,6 +8,7 @@ from collections.abc import AsyncIterator
 
 from pydantic import BaseModel
 
+from app.core.utils import sse_event
 from app.stt.config import STTSettings
 
 log = logging.getLogger(__name__)
@@ -40,8 +40,7 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
     compute_type = "float16" if device == "cuda" else "int8"
 
     # is_model_loaded reads the cached provider; safe even if the package is missing.
-    from app.stt import is_model_loaded
-    from app.stt.local import get_last_load_error
+    from app.stt import get_local_load_error, is_model_loaded
 
     return LocalSttStatus(
         package_installed=installed,
@@ -52,7 +51,7 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
         gpu_name=gpu_name,
         device=device,
         compute_type=compute_type,
-        last_error=get_last_load_error(),
+        last_error=get_local_load_error(stt_settings),
     )
 
 
@@ -90,26 +89,26 @@ async def install_local_packages() -> AsyncIterator[str]:
     Yields SSE-formatted strings.
     """
     if _install_lock.locked():
-        yield _sse("error", {"status": "error", "error": "Installation already in progress"})
+        yield sse_event("error", {"status": "error", "error": "Installation already in progress"})
         return
 
     # Already installed?
     if _check_package_installed():
-        yield _sse("done", {"status": "already_installed"})
+        yield sse_event("done", {"status": "already_installed"})
         return
 
     async with _install_lock:
-        yield _sse("progress", {"status": "Installing local dependencies..."})
+        yield sse_event("progress", {"status": "Installing local dependencies..."})
 
         try:
             exit_code, output = await asyncio.to_thread(_run_pip_install)
             if exit_code == 0:
-                yield _sse("done", {"status": "success"})
+                yield sse_event("done", {"status": "success"})
             else:
-                yield _sse("error", {"status": "error", "error": output[-500:] if output else "pip install failed"})
+                yield sse_event("error", {"status": "error", "error": output[-500:] if output else "pip install failed"})
         except Exception as e:
             log.warning("pip install failed: %s", e)
-            yield _sse("error", {"status": "error", "error": str(e)})
+            yield sse_event("error", {"status": "error", "error": str(e)})
 
 
 def _run_pip_install() -> tuple[int, str]:
@@ -145,11 +144,6 @@ def _get_backend_dir():
 
     # Fallback: assume backend/ is two levels up from app/stt/
     return Path(__file__).resolve().parent.parent.parent
-
-
-def _sse(event: str, data: dict) -> str:
-    """Format a Server-Sent Event string."""
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 def _detect_gpu() -> tuple[bool, str | None]:

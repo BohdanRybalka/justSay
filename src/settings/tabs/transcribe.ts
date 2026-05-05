@@ -268,7 +268,7 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
     setUiState("transcribing", `Transcribing ${filename} (${chosenStyle})...`);
     try {
       const result: DictateResponse = await api.processFile(bytes, filename, chosenLanguage, chosenStyle);
-      const text = result.cleaned_text || result.raw_text || "";
+      const text = result.text || "";
       resultText.textContent = text || "(empty result)";
       const seconds = (result.duration_ms / 1000).toFixed(2);
       const copied = result.copied_to_clipboard ? " · copied to clipboard" : "";

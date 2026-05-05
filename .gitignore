@@ -36,3 +36,4 @@ Thumbs.db
 .pytest_cache/
 /.claude
 /docs
+/_bmad

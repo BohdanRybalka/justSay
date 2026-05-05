@@ -1,8 +1,10 @@
 """Application-level config — composition root.
 
-This module intentionally imports from child modules (stt, llm, audio) to assemble
-their configs into a single AppSettings object. This is the composition root pattern,
-not a circular dependency — child modules never import from core.config.
+Imports child-module configs (stt, llm, audio) and assembles them into a single
+AppSettings object. Each child Settings reads its own env scope via its own
+``env_prefix`` (e.g. ``JUSTSAY_STT_GEMINI_API_KEY`` → ``settings.stt.gemini_api_key``).
+``env_nested_delimiter="__"`` is configured here as a fallback for the double-
+underscore form (``JUSTSAY_STT__GEMINI_API_KEY``).
 """
 
 from pydantic import Field
@@ -18,6 +20,8 @@ class AppSettings(BaseSettings):
     port: int = 9377
     debug: bool = False
 
+    # default_factory ensures each ``AppSettings()`` re-reads env (matters for
+    # tests that ``monkeypatch.setenv`` after module import).
     stt: STTSettings = Field(default_factory=STTSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     audio: AudioSettings = Field(default_factory=AudioSettings)

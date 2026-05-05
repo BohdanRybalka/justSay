@@ -43,6 +43,13 @@ def _insert_entry(words: int, lang: str, model: str, when: datetime) -> None:
         history._stats_cache = None
 
 
+@pytest.fixture(autouse=True)
+def _close_history_conn():
+    yield
+    with history._lock:
+        history._close_conn_locked()
+
+
 def test_compute_stats_buckets_by_language_and_model(tmp_path, monkeypatch):
     """`compute_stats` must total words and split by language + model."""
     monkeypatch.setattr(history, "_output_dir", tmp_path)

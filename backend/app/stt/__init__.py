@@ -3,8 +3,10 @@
 This file is the **routing and cache** layer on top of the provider classes.
 Pipeline code calls :func:`get_routed_provider` with the audio metadata
 (mode, duration, style) and gets back the correct provider to use.
+Other endpoints (status, transcribe, /config) call :func:`get_provider`
+which returns the mode-level provider without engine/duration heuristics.
 
-Routing rules (see ``docs/hybrid-stt-pipeline.md``):
+Routing rules (see ``docs/plans/005-hybrid-stt-pipeline.md``):
 
 ======================  ========================================================
 Mode / conditions        Provider
@@ -26,8 +28,9 @@ from app.stt.config import STTSettings
 __all__ = [
     "STTProvider",
     "STTSettings",
-    "get_stt_provider",
+    "get_provider",
     "get_routed_provider",
+    "get_local_load_error",
     "clear_cache",
     "is_model_loaded",
     "GROQ_SUPPORTED_FORMATS",
@@ -75,6 +78,19 @@ def _get_groq(stt_settings: STTSettings) -> STTProvider:
 def _get_local(stt_settings: STTSettings) -> STTProvider:
     from app.stt.local import LocalSTTProvider
     return _get_or_create(LocalSTTProvider, stt_settings)
+
+
+def get_provider(mode: ProviderMode, stt_settings: STTSettings) -> STTProvider:
+    """Mode-level provider lookup, no routing heuristics.
+
+    For `/stt/transcribe`, `/stt/local/load`, `/config`, status endpoints —
+    callers that don't have audio duration / style context. Cloud mode always
+    returns Gemini (engine pin and duration routing live in
+    :func:`get_routed_provider`).
+    """
+    if mode == ProviderMode.LOCAL:
+        return _get_local(stt_settings)
+    return _get_gemini(stt_settings)
 
 
 def get_routed_provider(
@@ -134,15 +150,19 @@ def get_routed_provider(
     return _get_gemini(stt_settings), None
 
 
-def get_stt_provider(stt_settings: STTSettings) -> STTProvider:
-    """Legacy factory — returns the mode-level provider without routing hints.
+def get_local_load_error(stt_settings: STTSettings) -> str | None:
+    """Return the most recent local-provider load failure, or None.
 
-    Prefer :func:`get_routed_provider` in pipeline code. Kept for backwards
-    compatibility with ``/stt/transcribe``, status endpoints, and tests.
+    Returns None when the LocalSTTProvider hasn't been instantiated yet —
+    that's the same outcome a fresh process would observe before the first
+    transcribe/load call. No error has occurred yet.
     """
-    if stt_settings.mode == ProviderMode.LOCAL:
-        return _get_local(stt_settings)
-    return _get_gemini(stt_settings)
+    from app.stt.local import LocalSTTProvider
+    with _cache_lock:
+        provider = _providers.get(LocalSTTProvider)
+    if provider is None:
+        return None
+    return getattr(provider, "last_load_error", None)
 
 
 def is_model_loaded() -> bool:

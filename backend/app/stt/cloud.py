@@ -149,7 +149,3 @@ class GeminiSTTProvider(STTProvider):
             pass
 
         return text, tokens_used
-
-
-# Backwards-compat alias — external code and tests may still import CloudSTTProvider.
-CloudSTTProvider = GeminiSTTProvider
