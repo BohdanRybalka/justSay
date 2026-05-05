@@ -34,3 +34,4 @@ Thumbs.db
 # Build artifacts
 *.egg-info/
 .pytest_cache/
+/.claude
