@@ -1,0 +1,100 @@
+# Cross-platform release build for JustSay (Plan 008).
+#
+# Triggered on git tag pushes (v*). Builds the PyInstaller sidecar per platform,
+# then runs `tauri build` which embeds it as `bundle.externalBin` and produces
+# the .msi (Windows) and .dmg (macOS arm64) artifacts.
+#
+# Code signing is OPT-IN: the workflow looks for repository secrets
+# (WIN_AZURE_TS_*, MACOS_NOTARIZE_*) and only runs the signing/notarization
+# steps when they exist. Without secrets you still get unsigned installers,
+# fine for local testing.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            sidecar_ext: .exe
+          - platform: macos-14   # arm64 Apple Silicon runner
+            target: aarch64-apple-darwin
+            sidecar_ext: ''
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python deps + PyInstaller
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[cloud,audio]"
+          pip install pyinstaller
+
+      - name: Build PyInstaller sidecar
+        working-directory: backend
+        run: pyinstaller --clean --noconfirm build_sidecar.spec
+
+      - name: Rename sidecar to per-platform target triple
+        shell: bash
+        run: |
+          mkdir -p src-tauri/binaries
+          cp -R backend/dist/justsay-backend src-tauri/binaries/
+          mv "src-tauri/binaries/justsay-backend/justsay-backend${{ matrix.sidecar_ext }}" \
+             "src-tauri/binaries/justsay-backend-${{ matrix.target }}${{ matrix.sidecar_ext }}"
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          # Optional code signing — only used if secrets are present.
+          APPLE_CERTIFICATE: ${{ secrets.MACOS_NOTARIZE_CERT }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_NOTARIZE_CERT_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_NOTARIZE_IDENTITY }}
+          APPLE_ID: ${{ secrets.MACOS_NOTARIZE_APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.MACOS_NOTARIZE_TEAM_ID }}
+          # Windows: see Azure Trusted Signing docs (set up via separate step if needed).
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'JustSay ${{ github.ref_name }}'
+          releaseBody: 'See `docs/release-notes/` for what changed.'
+          releaseDraft: true
+          prerelease: false

@@ -5,6 +5,8 @@ import { renderAudio } from "./tabs/audio";
 import { renderStorage } from "./tabs/storage";
 import { renderHistory } from "./tabs/history";
 import { renderMetrics } from "./tabs/metrics";
+import { renderWords } from "./tabs/words";
+import { renderTranscribe } from "./tabs/transcribe";
 
 // --- State ---
 
@@ -27,6 +29,8 @@ const tabs: Record<string, (container: HTMLElement, settings: UserSettings) => (
   storage: renderStorage,
   history: (container) => renderHistory(container),
   metrics: (container) => renderMetrics(container),
+  words: (container) => renderWords(container),
+  transcribe: renderTranscribe,
 };
 
 function switchTab(tabName: string) {
@@ -60,9 +64,10 @@ export async function loadSettings(): Promise<UserSettings> {
   return settings;
 }
 
-export async function saveSettings(updates: Partial<UserSettings>): Promise<UserSettings> {
-  settings = await api.updateSettings(updates);
-  return settings;
+export async function saveSettings(updates: Partial<UserSettings>): Promise<{ settings: UserSettings; warning: string | null }> {
+  const resp = await api.updateSettings(updates);
+  settings = resp.settings;
+  return { settings: resp.settings, warning: resp.warning };
 }
 
 export function getSettings(): UserSettings | null {

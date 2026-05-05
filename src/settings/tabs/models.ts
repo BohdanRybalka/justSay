@@ -15,6 +15,10 @@ let sttAbort: AbortController | null = null;
 // Prevent concurrent operations.
 let sttBusy = false;
 
+// Sticky load error — set when /stt/local/load returns 500, cleared when status
+// reports model_loaded or last_error becomes null upstream.
+let sttLoadError: string | null = null;
+
 export function renderModels(container: HTMLElement, settings: UserSettings): () => void {
   container.innerHTML = `
     <h2 class="tab-title">Models</h2>
@@ -28,8 +32,18 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
           <button class="toggle-btn ${settings.stt_mode === "local" ? "active" : ""}" id="stt-local">Local</button>
         </div>
       </div>
+      <div class="setting-row" id="stt-engine-row" style="${settings.stt_mode === "cloud" ? "" : "display:none;"}">
+        <span class="label">Cloud engine
+          <span class="info-tip" title="Auto: short clips (≤ 30 s) go to Groq Whisper for speed; long audio and AI Prompt go to Gemini Native Audio. Pin Groq or Gemini to force one provider — pinned-Groq automatically falls back to Gemini for AI Prompt and unsupported formats (.webm).">&#9432;</span>
+        </span>
+        <select id="stt-engine">
+          <option value="auto" ${settings.stt_engine === "auto" ? "selected" : ""}>Auto (recommended)</option>
+          <option value="groq" ${settings.stt_engine === "groq" ? "selected" : ""}>Groq Whisper (fast, short)</option>
+          <option value="gemini" ${settings.stt_engine === "gemini" ? "selected" : ""}>Gemini (long / structured)</option>
+        </select>
+      </div>
       <div class="setting-hint">
-        Cloud short (&le; 30s) → Groq Whisper · Cloud long / AI prompt → Gemini · Local → faster-whisper
+        Cloud short (&le; 30 s) → Groq Whisper · Cloud long / AI Prompt → Gemini · Local → faster-whisper
       </div>
       <div id="stt-panel"></div>
     </div>
@@ -46,6 +60,14 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
   const sttLocal = container.querySelector<HTMLButtonElement>("#stt-local")!;
   const sttPanel = container.querySelector<HTMLElement>("#stt-panel")!;
   const resourcesPanel = container.querySelector<HTMLElement>("#resources-panel")!;
+  const engineRow = container.querySelector<HTMLElement>("#stt-engine-row")!;
+  const engineSelect = container.querySelector<HTMLSelectElement>("#stt-engine")!;
+
+  engineSelect.addEventListener("change", async () => {
+    const value = engineSelect.value as "auto" | "groq" | "gemini";
+    await api.updateSettings({ stt_engine: value });
+    await loadSettings();
+  });
 
   let currentSttMode = settings.stt_mode;
 
@@ -80,12 +102,26 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
       return;
     }
 
+    // Backend's last_error wins; the frontend latch is for in-flight errors
+    // that the polling cycle hasn't picked up yet.
+    const error = s.last_error || sttLoadError;
+    if (s.model_loaded && sttLoadError) {
+      // A successful load wipes the local latch.
+      sttLoadError = null;
+    }
+
     let statusDot: string, statusText: string, actionHtml: string;
     if (sttBusy) {
-      statusDot = "orange"; statusText = "Loading..."; actionHtml = "";
+      statusDot = "orange";
+      statusText = "Loading...";
+      actionHtml = "";
+    } else if (error && !s.model_loaded) {
+      statusDot = "red";
+      statusText = "Failed to load";
+      actionHtml = '<button class="btn btn-primary btn-sm" id="stt-start">Retry</button>';
     } else if (s.model_loaded) {
       statusDot = "green";
-      statusText = `Running${s.model_ram_mb ? ` (${s.model_ram_mb} MB)` : ""}`;
+      statusText = `Loaded${s.model_ram_mb ? ` · ${s.model_ram_mb} MB RSS` : ""} · ${s.device}`;
       actionHtml = '<button class="btn btn-secondary btn-sm" id="stt-stop">Stop</button>';
     } else {
       statusDot = "gray";
@@ -93,6 +129,8 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
       actionHtml = '<button class="btn btn-primary btn-sm" id="stt-start">Start</button>';
     }
 
+    // Dropdowns are gated on model_loaded — changing model while loaded would
+    // invalidate the cache mid-run. Force the user to Stop first.
     const dropdownDisabled = s.model_loaded || sttBusy ? "disabled" : "";
 
     const modelOptions = WHISPER_MODELS.map(m =>
@@ -101,6 +139,10 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
     const deviceOptions = WHISPER_DEVICES.map(d =>
       `<option value="${d}" ${d === s.device ? "selected" : ""}>${d}${d === "auto" ? ` (${s.gpu_available ? "CUDA" : "CPU"})` : ""}</option>`
     ).join("");
+
+    const errorBlock = error
+      ? `<div class="local-status-error"><span class="ls-label">Error</span><span class="ls-error-text">${escapeHtml(error)}</span></div>`
+      : "";
 
     panel.innerHTML = `
       <div class="local-status">
@@ -118,22 +160,27 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
           <select id="stt-device-sel" ${dropdownDisabled}>${deviceOptions}</select>
         </div>
         ${s.gpu_available ? `<div class="local-status-row"><span class="ls-label">GPU</span><span class="ls-value">${s.gpu_name}</span></div>` : ""}
+        ${errorBlock}
       </div>
     `;
 
     panel.querySelector("#stt-start")?.addEventListener("click", async () => {
       sttBusy = true;
-      renderSttPanel(panel, { ...s, model_loaded: false });
+      sttLoadError = null;
+      renderSttPanel(panel, { ...s, model_loaded: false, last_error: null });
       try {
         await api.sttLocalLoad();
-      } catch { /* status poll will show real state */ }
+      } catch (err) {
+        sttLoadError = (err as Error).message || "Unknown error";
+      }
       sttBusy = false;
       await refreshSttStatus();
     });
 
     panel.querySelector("#stt-stop")?.addEventListener("click", async () => {
       sttBusy = true;
-      renderSttPanel(panel, { ...s, model_loaded: false });
+      sttLoadError = null;
+      renderSttPanel(panel, { ...s, model_loaded: false, last_error: null });
       try {
         await api.sttLocalUnload();
       } catch { /* ignore */ }
@@ -142,18 +189,38 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
     });
 
     panel.querySelector("#stt-model-sel")?.addEventListener("change", async (e) => {
-      const value = (e.target as HTMLSelectElement).value;
-      await api.updateSettings({ whisper_model_size: value });
+      const select = e.target as HTMLSelectElement;
+      if (s.model_loaded) {
+        // Defensive: dropdown should already be disabled, but if it isn't,
+        // bail out without touching the cache.
+        select.value = s.model_name;
+        return;
+      }
+      sttLoadError = null;
+      await api.updateSettings({ whisper_model_size: select.value });
       await loadSettings();
       await refreshSttStatus();
     });
 
     panel.querySelector("#stt-device-sel")?.addEventListener("change", async (e) => {
-      const value = (e.target as HTMLSelectElement).value;
-      await api.updateSettings({ whisper_device: value });
+      const select = e.target as HTMLSelectElement;
+      if (s.model_loaded) {
+        select.value = s.device;
+        return;
+      }
+      sttLoadError = null;
+      await api.updateSettings({ whisper_device: select.value });
       await loadSettings();
       await refreshSttStatus();
     });
+  }
+
+  function escapeHtml(value: string): string {
+    return value
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
   }
 
   function renderSttInstall(panel: HTMLElement, _s: LocalSttStatus) {
@@ -192,6 +259,7 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
     currentSttMode = mode;
     sttCloud.classList.toggle("active", mode === "cloud");
     sttLocal.classList.toggle("active", mode === "local");
+    engineRow.style.display = mode === "cloud" ? "" : "none";
     await api.setSttMode(mode);
     await loadSettings();
     renderCurrentStt();
@@ -221,17 +289,68 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
 async function updateResources(panel: HTMLElement): Promise<void> {
   try {
     const r = await api.resources();
-    const gpuHtml = r.gpu ? `
-      <div class="local-status-row"><span class="ls-label">GPU</span><span class="ls-value">${r.gpu.name}</span></div>
-      <div class="local-status-row"><span class="ls-label">VRAM</span><span class="ls-value">${r.gpu.vram_used_mb} / ${r.gpu.vram_total_mb} MB (${r.gpu.vram_free_mb} MB free)</span></div>
-    ` : "";
+
+    const procRamPct = r.ram_total_gb > 0
+      ? Math.min((r.pid_ram_gb / r.ram_total_gb) * 100, 100)
+      : 0;
+    const sysRamPct = r.ram_total_gb > 0
+      ? Math.min((r.ram_used_gb / r.ram_total_gb) * 100, 100)
+      : 0;
+
+    const gpuHtml = r.gpu
+      ? renderResourceBar(
+          "GPU VRAM",
+          r.gpu.name,
+          r.gpu.vram_total_mb > 0
+            ? Math.min((r.gpu.vram_used_mb / r.gpu.vram_total_mb) * 100, 100)
+            : 0,
+          `${(r.gpu.vram_used_mb / 1024).toFixed(1)} / ${(r.gpu.vram_total_mb / 1024).toFixed(1)} GB`,
+        )
+      : "";
+
     panel.innerHTML = `
-      <div class="local-status-row"><span class="ls-label">CPU</span><span class="ls-value">${r.cpu_cores} cores / ${r.cpu_threads} threads</span></div>
-      <div class="local-status-row"><span class="ls-label">RAM</span><span class="ls-value">${r.ram_used_mb} / ${r.ram_total_mb} MB (${r.ram_available_mb} MB free)</span></div>
-      <div class="local-status-row"><span class="ls-label">Backend</span><span class="ls-value">${r.pid_ram_mb} MB</span></div>
+      ${renderResourceBar(
+        "Process CPU",
+        `Backend (${r.cpu_threads} threads)`,
+        r.cpu_percent_process,
+        `${r.cpu_percent_process.toFixed(0)}%`,
+      )}
+      ${renderResourceBar(
+        "Process RAM",
+        "Backend",
+        procRamPct,
+        `${r.pid_ram_gb.toFixed(2)} GB`,
+      )}
+      ${renderResourceBar(
+        "System CPU",
+        `${r.cpu_cores} cores / ${r.cpu_threads} threads`,
+        r.cpu_percent_total,
+        `${r.cpu_percent_total.toFixed(0)}%`,
+      )}
+      ${renderResourceBar(
+        "System RAM",
+        `${r.ram_available_gb.toFixed(1)} GB free`,
+        sysRamPct,
+        `${r.ram_used_gb.toFixed(1)} / ${r.ram_total_gb.toFixed(1)} GB`,
+      )}
       ${gpuHtml}
     `;
   } catch {
-    panel.innerHTML = '<div class="local-status-row"><span class="ls-value" style="color:var(--text-dim)">—</span></div>';
+    panel.innerHTML = '<div class="resource-row"><span class="ls-value" style="color:var(--text-dim)">—</span></div>';
   }
+}
+
+function renderResourceBar(label: string, sub: string, percent: number, valueText: string): string {
+  const safePct = Math.max(0, Math.min(100, percent));
+  const tone = safePct > 85 ? "red" : safePct > 60 ? "orange" : "green";
+  return `
+    <div class="resource-row">
+      <div class="resource-row-head">
+        <span class="resource-label">${label}</span>
+        <span class="resource-value">${valueText}</span>
+      </div>
+      <div class="resource-bar"><div class="resource-bar-fill ${tone}" style="width:${safePct.toFixed(1)}%"></div></div>
+      <div class="resource-sub">${sub}</div>
+    </div>
+  `;
 }

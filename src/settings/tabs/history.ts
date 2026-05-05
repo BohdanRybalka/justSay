@@ -1,5 +1,15 @@
 import { api, type HistoryEntry } from "../../api";
 
+const DATE_FMT = new Intl.DateTimeFormat("uk-UA", {
+  day: "2-digit",
+  month: "short",
+});
+const TIME_FMT = new Intl.DateTimeFormat("uk-UA", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
 export function renderHistory(container: HTMLElement): () => void {
   container.innerHTML = `
     <h2 class="tab-title">History</h2>
@@ -34,7 +44,7 @@ export function renderHistory(container: HTMLElement): () => void {
       }
 
       if (resp.entries.length === 0 && !append) {
-        listEl.innerHTML = `<div style="color: var(--text-muted); padding: 24px; text-align: center;">No transcripts yet</div>`;
+        listEl.innerHTML = `<div style="color: var(--text-muted); padding: 32px; text-align: center;">No transcripts yet</div>`;
       }
 
       for (const entry of resp.entries) {
@@ -55,42 +65,44 @@ export function renderHistory(container: HTMLElement): () => void {
     el.dataset.id = entry.id;
 
     const date = new Date(entry.timestamp);
-    const timeStr = date.toLocaleDateString("uk-UA", {
-      day: "2-digit",
-      month: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
 
-    const styleBadge = entry.style === "ai_prompt" ? "AI" : "";
+    const badges: string[] = [];
+    badges.push(`<span class="history-badge">${(entry.duration_ms / 1000).toFixed(2)} s process</span>`);
+    if (entry.audio_duration_seconds != null) {
+      badges.push(`<span class="history-badge">${entry.audio_duration_seconds.toFixed(1)} s audio</span>`);
+    }
+    if (entry.word_count != null) {
+      badges.push(`<span class="history-badge">${entry.word_count} words</span>`);
+    }
+    badges.push(`<span class="history-badge">${escapeHtml(entry.language)}</span>`);
+    if (entry.style === "ai_prompt") {
+      badges.push(`<span class="history-badge history-badge-ai">AI Prompt</span>`);
+    }
 
     el.innerHTML = `
       <div class="history-entry-header">
-        <span class="history-time">${timeStr}</span>
-        <span class="history-meta">${(entry.duration_ms / 1000).toFixed(1)}s · ${entry.language}${styleBadge ? ` · <span class="status-badge pending">${styleBadge}</span>` : ""}</span>
+        <div class="history-stamp">
+          <span class="history-stamp-date">${DATE_FMT.format(date)}</span>
+          <span class="history-stamp-time">${TIME_FMT.format(date)}</span>
+        </div>
+        <div class="history-badges">${badges.join("")}</div>
       </div>
       <div class="history-text">${escapeHtml(entry.cleaned_text)}</div>
       <div class="history-actions">
         <button class="btn btn-secondary btn-sm" data-action="copy">Copy</button>
-        <button class="btn btn-secondary btn-sm" data-action="copy-raw">Copy raw</button>
         <button class="btn btn-secondary btn-sm" data-action="delete">Delete</button>
       </div>
     `;
 
-    // Actions
     el.addEventListener("click", async (e) => {
       const target = e.target as HTMLElement;
       const action = target.dataset.action;
       if (!action) return;
 
       if (action === "copy") {
-        await navigator.clipboard.writeText(entry.cleaned_text);
+        await navigator.clipboard.writeText(entry.raw_text || entry.cleaned_text);
         target.textContent = "Copied!";
         setTimeout(() => (target.textContent = "Copy"), 1500);
-      } else if (action === "copy-raw") {
-        await navigator.clipboard.writeText(entry.raw_text);
-        target.textContent = "Copied!";
-        setTimeout(() => (target.textContent = "Copy raw"), 1500);
       } else if (action === "delete") {
         try {
           await api.deleteHistoryEntry(entry.id);
@@ -116,7 +128,7 @@ export function renderHistory(container: HTMLElement): () => void {
       await api.clearHistory();
       offset = 0;
       total = 0;
-      listEl.innerHTML = `<div style="color: var(--text-muted); padding: 24px; text-align: center;">No transcripts yet</div>`;
+      listEl.innerHTML = `<div style="color: var(--text-muted); padding: 32px; text-align: center;">No transcripts yet</div>`;
       countEl.textContent = "0 transcripts";
       loadMoreWrap.style.display = "none";
     } catch (e) {

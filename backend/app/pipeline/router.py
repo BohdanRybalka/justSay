@@ -15,7 +15,12 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 MAX_UPLOAD_SIZE = 25 * 1024 * 1024  # 25 MB
-ALLOWED_EXTENSIONS = {".wav", ".mp3", ".ogg", ".webm", ".flac"}
+# All popular audio containers users drop in. Routing handles per-provider
+# capability (Groq doesn't take .webm; Gemini takes everything).
+ALLOWED_EXTENSIONS = {
+    ".wav", ".mp3", ".ogg", ".oga", ".webm", ".flac",
+    ".m4a", ".mp4", ".aac", ".opus", ".wma", ".aiff", ".aif",
+}
 
 
 class DictateResponse(BaseModel):
@@ -23,6 +28,8 @@ class DictateResponse(BaseModel):
     cleaned_text: str
     duration_ms: int
     copied_to_clipboard: bool
+    model_name: str = ""
+    fallback_reason: str | None = None
 
 
 @router.post("/dictate", response_model=DictateResponse)
@@ -57,6 +64,8 @@ async def dictate(language: str = "uk", style: str = "normal", copy_to_clipboard
             cleaned_text=result.cleaned_text,
             duration_ms=result.duration_ms,
             copied_to_clipboard=result.copied_to_clipboard,
+            model_name=result.model_name,
+            fallback_reason=result.fallback_reason,
         )
     except Exception as e:
         log.exception("Pipeline failure")
@@ -109,6 +118,8 @@ async def process_file(
             cleaned_text=result.cleaned_text,
             duration_ms=result.duration_ms,
             copied_to_clipboard=result.copied_to_clipboard,
+            model_name=result.model_name,
+            fallback_reason=result.fallback_reason,
         )
     except HTTPException:
         raise

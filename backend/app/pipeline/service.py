@@ -35,6 +35,8 @@ class ProcessingResult:
     cleaned_text: str
     duration_ms: int
     copied_to_clipboard: bool
+    model_name: str = ""               # which provider actually handled the call
+    fallback_reason: str | None = None  # set when a pinned engine was overridden
 
 
 async def process_audio(
@@ -52,7 +54,7 @@ async def process_audio(
         duration = detect_duration(audio_path)
 
     file_ext = audio_path.suffix.lower() if audio_path.suffix else None
-    stt = get_routed_provider(
+    stt, fallback_reason = get_routed_provider(
         settings.stt,
         audio_duration=duration,
         style=style,
@@ -60,11 +62,12 @@ async def process_audio(
     )
 
     log.info(
-        "Pipeline route: %s, duration=%.2fs, style=%s, ext=%s",
+        "Pipeline route: %s, duration=%.2fs, style=%s, ext=%s, fallback=%s",
         stt.model_name,
         duration if duration is not None else -1.0,
         style,
         file_ext,
+        fallback_reason or "no",
     )
 
     try:
@@ -113,4 +116,6 @@ async def process_audio(
         cleaned_text=text,
         duration_ms=duration_ms,
         copied_to_clipboard=copied,
+        model_name=stt.model_name,
+        fallback_reason=fallback_reason,
     )

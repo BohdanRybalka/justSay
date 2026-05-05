@@ -1,6 +1,15 @@
+from typing import Literal
+
 from app.core.types import ProviderMode
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Cloud STT engine override. ``auto`` keeps the duration+style routing.
+# ``groq`` and ``gemini`` pin a specific provider — useful when the user wants
+# predictable behaviour and is willing to live with the trade-offs (Groq can't
+# structure ``ai_prompt`` so a one-shot Gemini fallback kicks in for that style).
+SttEngine = Literal["auto", "groq", "gemini"]
 
 
 class STTSettings(BaseSettings):
@@ -13,6 +22,9 @@ class STTSettings(BaseSettings):
     # Cloud: Groq Whisper (short audio + normal)
     groq_api_key: str = ""
     groq_whisper_model: str = "whisper-large-v3-turbo"
+
+    # Cloud engine override — see SttEngine docstring above.
+    engine: SttEngine = "auto"
 
     # Smart routing: audio duration (s) at or below which we use Groq Whisper.
     # Above the threshold, or when style == "ai_prompt", we route to Gemini.

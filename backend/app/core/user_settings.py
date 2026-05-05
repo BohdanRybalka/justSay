@@ -4,15 +4,23 @@ This is Layer 2 config (user preferences). Layer 1 (secrets/.env) is read-only.
 """
 
 import json
+import logging
+import sys
 import threading
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.core import history
+
 
 SETTINGS_DIR = Path.home() / ".justsay"
 SETTINGS_PATH = SETTINGS_DIR / "settings.json"
+
+log = logging.getLogger(__name__)
 
 
 class UserSettings(BaseModel):
@@ -20,11 +28,15 @@ class UserSettings(BaseModel):
 
     language: str = "uk"
     shortcut: str = "Ctrl+Alt+KeyV"
-    output_dir: str = Field(default_factory=lambda: str(SETTINGS_DIR / "output"))
+    output_dir: str = Field(default_factory=lambda: str(SETTINGS_DIR))
 
     # Provider modes
     stt_mode: Literal["cloud", "local"] = "cloud"
     llm_mode: Literal["cloud", "local"] = "cloud"
+
+    # Cloud STT engine override — Auto keeps the duration+style routing,
+    # Groq / Gemini pin a single provider.
+    stt_engine: Literal["auto", "groq", "gemini"] = "auto"
 
     # Local STT (faster-whisper)
     whisper_model_size: str = "large-v3-turbo"
@@ -44,6 +56,12 @@ class UserSettings(BaseModel):
     cloud_routing_threshold: float = 30.0
 
 
+@dataclass
+class UpdateOutcome:
+    settings: UserSettings
+    warning: str | None = None
+
+
 _lock = threading.RLock()
 _settings: UserSettings | None = None
 
@@ -58,15 +76,104 @@ def get_user_settings() -> UserSettings:
     return _settings
 
 
-def update_user_settings(updates: dict) -> UserSettings:
-    """Merge partial updates into settings and save to disk."""
+def update_user_settings(updates: dict) -> UpdateOutcome:
+    """Merge partial updates into settings, validate, and save to disk.
+
+    For ``output_dir`` the flow is: validate → relocate history file →
+    only on success persist settings.json. On relocate failure the
+    in-memory + on-disk settings are left unchanged.
+    """
     with _lock:
         current = get_user_settings()
+        warning: str | None = None
+
+        if "output_dir" in updates:
+            new_dir = _validate_output_dir(updates["output_dir"])
+
+            if new_dir != Path(current.output_dir):
+                result, reason = history.relocate(new_dir)
+                if result == history.RelocateResult.FAILED:
+                    raise RuntimeError(reason or "History relocate failed")
+                if result == history.RelocateResult.NEW_ALREADY_HAS_FILE:
+                    warning = (
+                        "Existing history file at the new location was preserved; "
+                        "previous history was not migrated."
+                    )
+
+            updates = {**updates, "output_dir": str(new_dir)}
+
         merged = current.model_copy(update=updates)
         _save(merged)
         global _settings
         _settings = merged
-    return merged
+        return UpdateOutcome(settings=merged, warning=warning)
+
+
+def _validate_output_dir(value: object) -> Path:
+    """Validate a candidate output_dir. Raises ValueError on rejection."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("output_dir must be a non-empty string")
+
+    candidate = Path(value).expanduser()
+
+    if not candidate.is_absolute():
+        raise ValueError("output_dir must be an absolute path")
+
+    candidate = candidate.resolve(strict=False)
+
+    for forbidden in _FORBIDDEN_PARENTS:
+        try:
+            if candidate.is_relative_to(forbidden):
+                raise ValueError(f"output_dir is inside a system directory: {forbidden}")
+        except (ValueError, OSError):
+            continue
+
+    if candidate.exists():
+        if not candidate.is_dir():
+            raise ValueError("output_dir exists but is not a directory")
+    elif not candidate.parent.exists():
+        raise ValueError("output_dir parent directory does not exist")
+    else:
+        try:
+            candidate.mkdir(parents=False, exist_ok=True)
+        except OSError as e:
+            raise ValueError(f"Could not create output_dir: {e}") from e
+
+    probe = candidate / f".justsay-write-probe-{uuid.uuid4().hex[:8]}"
+    try:
+        probe.write_bytes(b"x")
+    except OSError as e:
+        raise ValueError(f"output_dir is not writable: {e}") from e
+    finally:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("Failed to clean up write-probe %s: %s", probe, e)
+
+    return candidate
+
+
+def _forbidden_parents() -> list[Path]:
+    if sys.platform == "win32":
+        return [
+            Path("C:/Windows"),
+            Path("C:/Program Files"),
+            Path("C:/Program Files (x86)"),
+            Path("C:/ProgramData/Microsoft"),
+        ]
+    return [
+        Path("/etc"),
+        Path("/usr"),
+        Path("/sys"),
+        Path("/proc"),
+        Path("/bin"),
+        Path("/sbin"),
+        Path("/boot"),
+        Path("/dev"),
+    ]
+
+
+_FORBIDDEN_PARENTS = _forbidden_parents()
 
 
 def _load() -> UserSettings:
@@ -82,11 +189,7 @@ def _load() -> UserSettings:
 
 
 def sync_to_runtime(us: UserSettings) -> None:
-    """Push user settings into the runtime AppSettings objects.
-
-    This bridges Layer 2 (user prefs) → Layer 1 (runtime config)
-    for fields that users can change at runtime.
-    """
+    """Push user settings into the runtime AppSettings objects."""
     from app.core.config import settings
     from app.core.types import ProviderMode
 
@@ -97,6 +200,7 @@ def sync_to_runtime(us: UserSettings) -> None:
         settings.stt.mode != stt_mode
         or settings.stt.whisper_model_size != us.whisper_model_size
         or settings.stt.whisper_device != us.whisper_device
+        or settings.stt.engine != us.stt_engine
     )
     changed_llm = (
         settings.llm.mode != llm_mode
@@ -104,17 +208,16 @@ def sync_to_runtime(us: UserSettings) -> None:
         or settings.llm.ollama_host != us.ollama_host
     )
 
-    # Sync all mutable fields
     settings.stt.mode = stt_mode
     settings.stt.whisper_model_size = us.whisper_model_size
     settings.stt.whisper_device = us.whisper_device
     settings.stt.cloud_routing_threshold = us.cloud_routing_threshold
+    settings.stt.engine = us.stt_engine
 
     settings.llm.mode = llm_mode
     settings.llm.ollama_model = us.ollama_model
     settings.llm.ollama_host = us.ollama_host
 
-    # Clear provider caches if config changed — forces re-init with new settings
     if changed_stt:
         from app.stt import clear_cache as clear_stt_cache
         clear_stt_cache()

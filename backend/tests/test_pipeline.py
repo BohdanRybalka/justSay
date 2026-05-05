@@ -53,7 +53,7 @@ async def test_pipeline_returns_stt_text_verbatim(
     copy_mock, save_mock = _isolate_side_effects
     stt = _make_stt_mock("Привіт світ")
 
-    with patch("app.pipeline.service.get_routed_provider", return_value=stt):
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         result = await process_audio(sample_wav, language="uk", style="normal")
 
     assert result.raw_text == "Привіт світ"
@@ -80,7 +80,7 @@ async def test_pipeline_does_not_copy_empty_text(
     copy_mock, _ = _isolate_side_effects
     stt = _make_stt_mock("")
 
-    with patch("app.pipeline.service.get_routed_provider", return_value=stt):
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         result = await process_audio(sample_wav, language="uk", style="normal")
 
     assert result.copied_to_clipboard is False
@@ -95,7 +95,7 @@ async def test_pipeline_clipboard_failure_is_graceful(
     copy_mock.side_effect = RuntimeError("no clipboard")
     stt = _make_stt_mock("text")
 
-    with patch("app.pipeline.service.get_routed_provider", return_value=stt):
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         result = await process_audio(sample_wav, language="uk", style="normal")
 
     assert result.cleaned_text == "text"
@@ -108,7 +108,7 @@ async def test_pipeline_passes_style_to_provider(
 ):
     stt = _make_stt_mock("structured output")
 
-    with patch("app.pipeline.service.get_routed_provider", return_value=stt) as routed:
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)) as routed:
         await process_audio(sample_wav, language="uk", style="ai_prompt")
 
     # Provider selected with the right context...
@@ -132,7 +132,7 @@ async def test_pipeline_forwards_tokens_used_to_history(
     stt.transcribe = AsyncMock(return_value=TranscriptionResult(text="hello", tokens_used=1500))
     stt.model_name = "mock/provider"
 
-    with patch("app.pipeline.service.get_routed_provider", return_value=stt):
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         await process_audio(sample_wav, language="uk", style="normal")
 
     assert save_mock.call_args.kwargs["tokens_used"] == 1500
@@ -146,7 +146,7 @@ async def test_pipeline_respects_explicit_audio_duration(
     stt = _make_stt_mock("ok")
 
     with patch("app.pipeline.service.detect_duration") as detect, patch(
-        "app.pipeline.service.get_routed_provider", return_value=stt
+        "app.pipeline.service.get_routed_provider", return_value=(stt, None)
     ) as routed:
         await process_audio(sample_wav, audio_duration=12.5, style="normal")
 

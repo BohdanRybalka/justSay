@@ -14,7 +14,7 @@ export function renderMetrics(container: HTMLElement): () => void {
           <tr>
             <th style="text-align: left; padding: 6px 10px; color: var(--text-dim); font-weight: 500; border-bottom: 1px solid var(--border);">Time</th>
             <th style="text-align: left; padding: 6px 10px; color: var(--text-dim); font-weight: 500; border-bottom: 1px solid var(--border);">Model</th>
-            <th style="text-align: right; padding: 6px 10px; color: var(--text-dim); font-weight: 500; border-bottom: 1px solid var(--border);">Tokens</th>
+            <th style="text-align: right; padding: 6px 10px; color: var(--text-dim); font-weight: 500; border-bottom: 1px solid var(--border);" title="Tokens reported when the provider supplies them. Groq Whisper bills per audio-second instead — see the Audio column.">Usage</th>
             <th style="text-align: right; padding: 6px 10px; color: var(--text-dim); font-weight: 500; border-bottom: 1px solid var(--border);">Process</th>
             <th style="text-align: right; padding: 6px 10px; color: var(--text-dim); font-weight: 500; border-bottom: 1px solid var(--border);">Audio</th>
             <th style="text-align: right; padding: 6px 10px; color: var(--text-dim); font-weight: 500; border-bottom: 1px solid var(--border);">Words</th>

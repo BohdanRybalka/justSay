@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" class="js-logo" aria-hidden="true">
+  <defs>
+    <linearGradient id="js-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7b73ff" />
+      <stop offset="100%" stop-color="#4cc9f0" />
+    </linearGradient>
+    <linearGradient id="js-grad-hot" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff5ea0" />
+      <stop offset="100%" stop-color="#ffae3c" />
+    </linearGradient>
+    <radialGradient id="js-pulse" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#7b73ff" stop-opacity="0.55" />
+      <stop offset="100%" stop-color="#7b73ff" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <!-- Soft halo that flares on recording -->
+  <circle class="js-halo" cx="32" cy="32" r="28" fill="url(#js-pulse)" />
+
+  <!-- Outer orbit (hidden idle, drawn while recording for the "magnetic chain" feel) -->
+  <circle class="js-orbit" cx="32" cy="32" r="26" fill="none"
+          stroke="url(#js-grad)" stroke-width="1" stroke-dasharray="2 6" opacity="0" />
+
+  <!-- Centerpiece group: J and S share the same arc family (anchored at center) -->
+  <g class="js-mark" transform="translate(32 32)">
+    <!-- S — top half (a smooth wave that mirrors the J's hook below) -->
+    <path class="js-stroke js-s"
+          d="M -14 -10 C -8 -16, 8 -16, 14 -10 C 20 -4, -2 0, 14 6 C 20 12, 8 16, -8 12"
+          fill="none" stroke="url(#js-grad)" stroke-width="3.5"
+          stroke-linecap="round" stroke-linejoin="round" />
+
+    <!-- J — vertical stem with a hook (mirror of S's lower curve, sharing visual DNA) -->
+    <path class="js-stroke js-j"
+          d="M 6 -14 L 6 8 C 6 14, -2 16, -8 12"
+          fill="none" stroke="url(#js-grad)" stroke-width="3.5"
+          stroke-linecap="round" stroke-linejoin="round" />
+
+    <!-- Tittle on the J — also serves as a "voice dot" -->
+    <circle class="js-dot" cx="6" cy="-18" r="2.6" fill="url(#js-grad)" />
+  </g>
+
+  <!-- Audio bars — appear while recording -->
+  <g class="js-bars" transform="translate(32 50)" opacity="0">
+    <rect class="js-bar js-bar-1" x="-14" y="-3" width="2.5" height="6" rx="1.25" fill="url(#js-grad-hot)" />
+    <rect class="js-bar js-bar-2" x="-9"  y="-5" width="2.5" height="10" rx="1.25" fill="url(#js-grad-hot)" />
+    <rect class="js-bar js-bar-3" x="-4"  y="-7" width="2.5" height="14" rx="1.25" fill="url(#js-grad-hot)" />
+    <rect class="js-bar js-bar-4" x="1"   y="-5" width="2.5" height="10" rx="1.25" fill="url(#js-grad-hot)" />
+    <rect class="js-bar js-bar-5" x="6"   y="-3" width="2.5" height="6" rx="1.25" fill="url(#js-grad-hot)" />
+    <rect class="js-bar js-bar-6" x="11"  y="-2" width="2.5" height="4" rx="1.25" fill="url(#js-grad-hot)" />
+  </g>
+</svg>

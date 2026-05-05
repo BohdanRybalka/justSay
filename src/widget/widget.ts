@@ -139,12 +139,30 @@ async function stopAndProcess() {
   try {
     const result = await api.dictate(currentLanguage, currentStyle);
     setState("done", result.cleaned_text || "Done");
+    showRouteBadge(result);
   } catch (e) {
     setState("error", "Failed");
     console.error("Pipeline failed:", e);
   } finally {
     isTransitioning = false;
   }
+}
+
+function showRouteBadge(result: { model_name?: string; duration_ms: number; fallback_reason?: string | null }) {
+  const badge = document.getElementById("widget-route");
+  if (!badge) return;
+
+  const model = (result.model_name || "").split("/").pop() || "stt";
+  const seconds = (result.duration_ms / 1000).toFixed(2);
+  const fallback = result.fallback_reason ? " · fallback" : "";
+  badge.textContent = `${model} · ${seconds} s${fallback}`;
+  badge.classList.add("visible");
+  if (result.fallback_reason) {
+    badge.title = result.fallback_reason;
+  } else {
+    badge.removeAttribute("title");
+  }
+  setTimeout(() => badge.classList.remove("visible"), 4000);
 }
 
 async function toggleRecording() {

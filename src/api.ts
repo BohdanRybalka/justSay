@@ -40,6 +40,8 @@ export interface DictateResponse {
   cleaned_text: string;
   duration_ms: number;
   copied_to_clipboard: boolean;
+  model_name?: string;
+  fallback_reason?: string | null;
 }
 
 export interface UserSettings {
@@ -48,6 +50,7 @@ export interface UserSettings {
   output_dir: string;
   stt_mode: "cloud" | "local";
   llm_mode: "cloud" | "local";
+  stt_engine: "auto" | "groq" | "gemini";
   whisper_model_size: string;
   whisper_device: string;
   ollama_host: string;
@@ -65,6 +68,7 @@ export interface LocalSttStatus {
   gpu_name: string | null;
   device: string;
   compute_type: string;
+  last_error: string | null;
 }
 
 export interface OllamaModel {
@@ -94,17 +98,40 @@ export interface GpuInfo {
 export interface ResourceInfo {
   cpu_cores: number;
   cpu_threads: number;
+  cpu_percent_total: number;
+  cpu_percent_process: number;
   ram_total_mb: number;
   ram_used_mb: number;
   ram_available_mb: number;
+  ram_total_gb: number;
+  ram_used_gb: number;
+  ram_available_gb: number;
   pid_ram_mb: number;
+  pid_ram_gb: number;
   gpu: GpuInfo | null;
+}
+
+export interface HistoryStats {
+  total_entries: number;
+  total_words: number;
+  total_audio_seconds: number;
+  today_words: number;
+  week_words: number;
+  by_language: Record<string, number>;
+  by_model: Record<string, number>;
 }
 
 export interface StorageInfo {
   temp_dir: string;
   temp_size_bytes: number;
   output_dir: string;
+  history_path: string;
+  history_entries: number;
+}
+
+export interface SettingsUpdateResponse {
+  settings: UserSettings;
+  warning: string | null;
 }
 
 export interface CleanupResult {
@@ -144,6 +171,25 @@ export const api = {
   dictate: (language = "uk", style = "normal") =>
     request<DictateResponse>("POST", `/pipeline/dictate?language=${language}&style=${style}`),
 
+  /** Upload an audio file to the pipeline. Accepts an ArrayBuffer of file bytes. */
+  processFile: async (
+    fileBytes: ArrayBuffer,
+    filename: string,
+    language = "uk",
+    style = "normal",
+  ): Promise<DictateResponse> => {
+    const form = new FormData();
+    const blob = new Blob([fileBytes], { type: "application/octet-stream" });
+    form.append("file", blob, filename);
+    const url = `${BASE_URL}/pipeline/process-file?language=${language}&style=${style}`;
+    const resp = await fetch(url, { method: "POST", body: form });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+    return resp.json();
+  },
+
   setSttMode: (mode: "cloud" | "local") =>
     request("PUT", "/stt/mode", { mode }),
 
@@ -167,7 +213,7 @@ export const api = {
   getSettings: () => request<UserSettings>("GET", "/settings"),
 
   updateSettings: (updates: Partial<UserSettings>) =>
-    request<UserSettings>("PUT", "/settings", updates),
+    request<SettingsUpdateResponse>("PUT", "/settings", updates),
 
   getStorageInfo: () => request<StorageInfo>("GET", "/settings/storage"),
 
@@ -176,6 +222,8 @@ export const api = {
   // History
   getHistory: (limit = 50, offset = 0) =>
     request<HistoryListResponse>("GET", `/history?limit=${limit}&offset=${offset}`),
+
+  historyStats: () => request<HistoryStats>("GET", "/history/stats"),
 
   deleteHistoryEntry: (id: string) =>
     request<{ deleted: boolean }>("DELETE", `/history/${id}`),

@@ -17,16 +17,35 @@ from app.stt.local_setup import (
 # --- check_status ---
 
 
+def _patches(installed: bool, gpu: tuple[bool, str | None]):
+    """Standard patch set: stub package detection + GPU detection."""
+    return [
+        patch.object(local_setup, "_check_package_installed", return_value=installed),
+        patch.object(local_setup, "_detect_gpu", return_value=gpu),
+    ]
+
+
+def _apply(patches):
+    """Enter a list of patches as a single context using ExitStack."""
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    for p in patches:
+        stack.enter_context(p)
+    return stack
+
+
 def test_check_status_reports_installed_package():
     settings = STTSettings(whisper_model_size="large-v3-turbo", whisper_device="auto")
 
-    with patch.object(local_setup, "_check_package_installed", return_value=True), patch.object(
-        local_setup, "_detect_gpu", return_value=(False, None)
-    ):
+    with _apply(_patches(True, (False, None))):
         status = check_status(settings)
 
     assert isinstance(status, LocalSttStatus)
     assert status.package_installed is True
+    assert status.model_loaded is False  # nothing loaded in tests
+    assert status.last_error is None     # no failure yet
+    assert status.model_ram_mb is None   # not loaded → no RAM
     assert status.model_name == "large-v3-turbo"
     assert status.gpu_available is False
     assert status.gpu_name is None
@@ -37,9 +56,7 @@ def test_check_status_reports_installed_package():
 def test_check_status_uses_cuda_when_gpu_auto():
     settings = STTSettings(whisper_device="auto")
 
-    with patch.object(local_setup, "_check_package_installed", return_value=True), patch.object(
-        local_setup, "_detect_gpu", return_value=(True, "NVIDIA GeForce RTX 3060")
-    ):
+    with _apply(_patches(True, (True, "NVIDIA GeForce RTX 3060"))):
         status = check_status(settings)
 
     assert status.gpu_available is True
@@ -51,9 +68,7 @@ def test_check_status_uses_cuda_when_gpu_auto():
 def test_check_status_respects_explicit_cpu_device():
     settings = STTSettings(whisper_device="cpu")
 
-    with patch.object(local_setup, "_check_package_installed", return_value=True), patch.object(
-        local_setup, "_detect_gpu", return_value=(True, "RTX 3060")
-    ):
+    with _apply(_patches(True, (True, "RTX 3060"))):
         status = check_status(settings)
 
     assert status.device == "cpu"
@@ -63,12 +78,35 @@ def test_check_status_respects_explicit_cpu_device():
 def test_check_status_reports_missing_package():
     settings = STTSettings()
 
-    with patch.object(local_setup, "_check_package_installed", return_value=False), patch.object(
-        local_setup, "_detect_gpu", return_value=(False, None)
-    ):
+    with _apply(_patches(False, (False, None))):
         status = check_status(settings)
 
     assert status.package_installed is False
+    assert status.model_loaded is False  # short-circuited because package missing
+
+
+def test_check_status_surfaces_last_load_error():
+    """When _get_model latched an error, status.last_error must contain it."""
+    from app.stt import local as local_module
+
+    settings = STTSettings()
+    local_module._set_last_load_error("OSError: [WinError 126] DLL not found")
+    try:
+        with _apply(_patches(True, (False, None))):
+            status = check_status(settings)
+        assert status.last_error == "OSError: [WinError 126] DLL not found"
+        assert status.model_loaded is False
+    finally:
+        local_module._set_last_load_error(None)
+
+
+def test_get_last_load_error_clears_after_successful_load():
+    from app.stt import local as local_module
+
+    local_module._set_last_load_error("boom")
+    assert local_module.get_last_load_error() == "boom"
+    local_module._set_last_load_error(None)
+    assert local_module.get_last_load_error() is None
 
 
 # --- _check_package_installed ---

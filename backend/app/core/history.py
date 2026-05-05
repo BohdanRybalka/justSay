@@ -1,17 +1,59 @@
-"""Transcript history — JSON-lines storage at ~/.justsay/history.jsonl."""
+"""Transcript history — SQLite store at ``<output_dir>/history.db``.
+
+Single-table v1 schema (`entries`). The directory is user-configurable via
+``UserSettings.output_dir``. ``history.py`` deliberately does not import
+``user_settings`` — the path is pushed in via ``init_output_dir`` (lifespan)
+or mutated by ``relocate`` (settings change). One-way dependency
+(user_settings → history).
+
+Concurrency model: a single shared sqlite3 connection per DB path, all
+access serialised through the module-level ``_lock``. Per-connection
+PRAGMAs (``foreign_keys=ON``, ``journal_mode=DELETE``, ``synchronous=FULL``)
+are set in the connection factory so they cannot drift. ``journal_mode=DELETE``
+(not WAL) is intentional — Plan 011 lets the user point ``output_dir`` at a
+sync folder (Dropbox/iCloud/OneDrive) where WAL sidecar files would corrupt.
+The trade is write-locks-readers; an in-memory stats cache (TTL 5 s,
+invalidated on every mutation) absorbs the only realistic concurrent read
+pressure (Words tab polling).
+"""
+
+from __future__ import annotations
 
 import json
+import logging
+import shutil
+import sqlite3
 import threading
+import time
 import uuid
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
+from typing import Iterable
+
 from pydantic import BaseModel, ValidationError
 
-HISTORY_DIR = Path.home() / ".justsay"
-HISTORY_PATH = HISTORY_DIR / "history.jsonl"
-MAX_ENTRIES = 500
+log = logging.getLogger(__name__)
+
+LEGACY_DIR = Path.home() / ".justsay"
+LEGACY_PATH = LEGACY_DIR / "history.jsonl"
+HISTORY_FILENAME = "history.db"
+LEGACY_FILENAME = "history.jsonl"
+SCHEMA_VERSION = 1
+STATS_TTL_SECONDS = 5.0
 
 _lock = threading.Lock()
+_output_dir: Path = LEGACY_DIR
+_conn: sqlite3.Connection | None = None
+_stats_cache: tuple[float, "HistoryStats"] | None = None
+
+
+class RelocateResult(str, Enum):
+    MOVED = "moved"
+    NEW_ALREADY_HAS_FILE = "new_already_has_file"
+    NO_OLD_FILE = "no_old_file"
+    FAILED = "failed"
 
 
 class HistoryEntry(BaseModel):
@@ -28,6 +70,342 @@ class HistoryEntry(BaseModel):
     word_count: int | None = None
 
 
+class HistoryStats(BaseModel):
+    total_entries: int
+    total_words: int
+    total_audio_seconds: float
+    today_words: int
+    week_words: int
+    by_language: dict[str, int]
+    by_model: dict[str, int]
+
+
+# --- Connection factory --------------------------------------------------
+
+def _connect(db_path: Path) -> sqlite3.Connection:
+    """Open a connection with the canonical PRAGMAs.
+
+    ``timeout=0.2`` maps to PRAGMA busy_timeout = 200 ms.
+    ``isolation_level=None`` disables Python's autocommit wrapping; every
+    mutating function MUST issue explicit BEGIN/COMMIT.
+    """
+    conn = sqlite3.connect(
+        db_path,
+        timeout=0.2,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    conn.execute("PRAGMA journal_mode = DELETE")
+    conn.execute("PRAGMA synchronous = FULL")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+_DDL = """
+CREATE TABLE IF NOT EXISTS entries (
+  id TEXT PRIMARY KEY,
+  ts INTEGER NOT NULL,
+  language TEXT NOT NULL,
+  style TEXT NOT NULL CHECK (style IN ('normal', 'ai_prompt')),
+  raw_text TEXT NOT NULL,
+  cleaned_text TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+  audio_duration_seconds REAL,
+  word_count INTEGER,
+  model_name TEXT,
+  tokens_used INTEGER
+);
+CREATE INDEX IF NOT EXISTS entries_ts_idx ON entries(ts DESC);
+"""
+
+
+def _init_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(_DDL)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+# --- Public path API -----------------------------------------------------
+
+def history_path() -> Path:
+    """Lock-free read of the current history.db path."""
+    return _output_dir / HISTORY_FILENAME
+
+
+def _legacy_jsonl_path() -> Path:
+    return _output_dir / LEGACY_FILENAME
+
+
+# --- Lifespan / bootstrap ------------------------------------------------
+
+def init_output_dir(target: Path) -> None:
+    """Test/internal helper. Real lifespan callers should use ``bootstrap``."""
+    global _output_dir, _conn, _stats_cache
+    with _lock:
+        _close_conn_locked()
+        _output_dir = target
+        _stats_cache = None
+
+
+def bootstrap(target: Path) -> bool:
+    """Lifespan helper: legacy migration → SQLite migration → open connection.
+
+    Holds ``_lock`` continuously across both migration steps with no
+    intermediate unlock — closes the architect's residual concern about a
+    race between Plan 011's legacy step and Plan 012's SQLite step.
+
+    Returns True if any migration ran (legacy JSONL move OR JSONL→SQLite),
+    False if we just opened an existing DB.
+    """
+    global _output_dir, _conn, _stats_cache
+    with _lock:
+        if sqlite3.sqlite_version_info < (3, 35, 0):
+            log.warning(
+                "SQLite %s is older than 3.35.0; ALTER TABLE evolution may misbehave on later schema bumps.",
+                sqlite3.sqlite_version,
+            )
+
+        _close_conn_locked()
+        _output_dir = target
+        _stats_cache = None
+
+        target.mkdir(parents=True, exist_ok=True)
+
+        legacy_moved = _migrate_legacy_jsonl_into_target_locked(target)
+        sqlite_migrated = _migrate_jsonl_to_sqlite_if_needed_locked(target)
+
+        _conn = _connect(target / HISTORY_FILENAME)
+        _init_schema(_conn)
+
+        return legacy_moved or sqlite_migrated
+
+
+def migrate_legacy_if_needed(target_dir: Path) -> bool:
+    """Public Plan 011 entry point used by tests. Acquires lock and delegates."""
+    with _lock:
+        return _migrate_legacy_jsonl_into_target_locked(target_dir)
+
+
+def _migrate_legacy_jsonl_into_target_locked(target_dir: Path) -> bool:
+    """Plan 011 legacy: move ~/.justsay/history.jsonl into output_dir if needed."""
+    target = target_dir / LEGACY_FILENAME
+    if target.exists():
+        return False
+    if not LEGACY_PATH.exists():
+        return False
+    if target.resolve() == LEGACY_PATH.resolve():
+        return False
+
+    try:
+        shutil.copy2(LEGACY_PATH, target)
+        if not _verify_line_count(LEGACY_PATH, target):
+            target.unlink(missing_ok=True)
+            log.error("Legacy JSONL migration aborted: line count mismatch")
+            return False
+
+        bak = LEGACY_PATH.with_suffix(".jsonl.bak")
+        bak.unlink(missing_ok=True)
+        LEGACY_PATH.rename(bak)
+        log.info("Migrated legacy JSONL %s → %s (legacy renamed to %s)", LEGACY_PATH, target, bak)
+        return True
+    except OSError as e:
+        log.exception("Legacy JSONL migration failed: %s", e)
+        target.unlink(missing_ok=True)
+        return False
+
+
+def _migrate_jsonl_to_sqlite_if_needed_locked(target_dir: Path) -> bool:
+    """Plan 012: if no history.db but history.jsonl exists, migrate.
+
+    Fail-loud: any error raises RuntimeError. Caller (lifespan) lets it
+    propagate so uvicorn refuses to start with a clear message.
+    """
+    db_path = target_dir / HISTORY_FILENAME
+    jsonl_path = target_dir / LEGACY_FILENAME
+
+    if db_path.exists():
+        return False
+    if not jsonl_path.exists():
+        return False
+
+    tmp_path = target_dir / f"history.db.tmp-{uuid.uuid4().hex[:8]}"
+    valid_lines_seen = 0
+    parse_errors = 0
+
+    try:
+        tmp_conn = _connect(tmp_path)
+        try:
+            _init_schema(tmp_conn)
+            tmp_conn.execute("BEGIN")
+
+            for raw in jsonl_path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    entry = HistoryEntry.model_validate_json(line)
+                    ts_ms = _iso_to_epoch_ms(entry.timestamp)
+                except (ValidationError, ValueError, json.JSONDecodeError):
+                    parse_errors += 1
+                    continue
+                tmp_conn.execute(
+                    "INSERT OR IGNORE INTO entries(id, ts, language, style, raw_text, cleaned_text, "
+                    "duration_ms, audio_duration_seconds, word_count, model_name, tokens_used) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        entry.id, ts_ms, entry.language, entry.style,
+                        entry.raw_text, entry.cleaned_text, entry.duration_ms,
+                        entry.audio_duration_seconds, entry.word_count,
+                        entry.model_name, entry.tokens_used,
+                    ),
+                )
+                valid_lines_seen += 1
+
+            tmp_conn.execute("COMMIT")
+            count = tmp_conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+            duplicates_skipped = valid_lines_seen - count
+            if duplicates_skipped < 0:
+                raise RuntimeError(
+                    f"Migration verify failed: COUNT={count} > valid_lines_seen={valid_lines_seen}"
+                )
+            log.info(
+                "JSONL→SQLite migration: %d valid, %d duplicates skipped, %d parse errors",
+                valid_lines_seen, duplicates_skipped, parse_errors,
+            )
+        finally:
+            tmp_conn.close()
+
+        # Atomic replace + fsync parent dir
+        shutil.move(tmp_path, db_path)
+        try:
+            dir_fd = None
+            import os
+            dir_fd = os.open(str(target_dir), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except (OSError, AttributeError):
+            pass  # Windows / non-POSIX
+
+        bak = jsonl_path.with_suffix(".jsonl.bak")
+        bak.unlink(missing_ok=True)
+        jsonl_path.rename(bak)
+        log.info("JSONL→SQLite migration complete: %s → %s (jsonl renamed to %s)", jsonl_path, db_path, bak)
+        return True
+    except Exception as e:
+        # Belt-and-braces cleanup: tmp_path may have been moved into db_path
+        # before the failure (e.g. OSError after a successful shutil.move on
+        # Windows). Wipe both so the next boot doesn't see a half-written DB.
+        for candidate in (tmp_path, db_path):
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise RuntimeError(
+            f"SQLite migration failed: {type(e).__name__}: {e}. "
+            f"Your transcripts are intact at {jsonl_path}. "
+            f"Restore by removing {db_path} and re-running."
+        ) from e
+
+
+def _iso_to_epoch_ms(ts: str) -> int:
+    """Parse ISO 8601 (Python 3.10-safe via Z→+00:00 shim) → unix epoch ms."""
+    return int(round(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000))
+
+
+def _epoch_ms_to_iso(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+
+
+# --- Relocate ------------------------------------------------------------
+
+def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
+    """Move history.db to new_dir. Mutates _output_dir + closes/reopens
+    connection inside the lock so a concurrent save_entry never sees a
+    torn intermediate. Always invalidates _stats_cache.
+    """
+    global _output_dir, _conn, _stats_cache
+    with _lock:
+        old_dir = _output_dir
+        old_path = old_dir / HISTORY_FILENAME
+
+        try:
+            same = old_dir.resolve() == new_dir.resolve()
+        except OSError:
+            same = False
+
+        if same:
+            _stats_cache = None
+            return RelocateResult.NO_OLD_FILE, None
+
+        new_path = new_dir / HISTORY_FILENAME
+
+        try:
+            new_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return RelocateResult.FAILED, f"Could not create target directory: {e}"
+
+        if new_path.exists():
+            _close_conn_locked()
+            _output_dir = new_dir
+            _conn = _connect(new_path)
+            _init_schema(_conn)
+            _stats_cache = None
+            return RelocateResult.NEW_ALREADY_HAS_FILE, None
+
+        if not old_path.exists():
+            _close_conn_locked()
+            _output_dir = new_dir
+            _conn = _connect(new_path)
+            _init_schema(_conn)
+            _stats_cache = None
+            return RelocateResult.NO_OLD_FILE, None
+
+        # Move: close the old conn first so SQLite releases the lock on Windows.
+        _close_conn_locked()
+        new_conn: sqlite3.Connection | None = None
+        try:
+            shutil.copy2(old_path, new_path)
+            if not _verify_db_row_count(old_path, new_path):
+                new_path.unlink(missing_ok=True)
+                _conn = _connect(old_path)
+                _init_schema(_conn)
+                _stats_cache = None
+                return RelocateResult.FAILED, "Verification failed: entry count mismatch"
+
+            # Open and validate the new connection BEFORE deleting the old file.
+            # If _connect raises, we still have old_path intact and rollback safely.
+            new_conn = _connect(new_path)
+            _init_schema(new_conn)
+
+            # Point of no return — only after the new connection is healthy.
+            old_path.unlink()
+            _output_dir = new_dir
+            _conn = new_conn
+            new_conn = None  # ownership transferred
+            _stats_cache = None
+            log.info("Relocated history %s → %s", old_path, new_path)
+            return RelocateResult.MOVED, None
+        except OSError as e:
+            if new_conn is not None:
+                try:
+                    new_conn.close()
+                except sqlite3.Error:
+                    pass
+            new_path.unlink(missing_ok=True)
+            try:
+                _conn = _connect(old_path)
+                _init_schema(_conn)
+            except sqlite3.Error:
+                _conn = None
+            _stats_cache = None
+            log.exception("Relocate failed: %s", e)
+            return RelocateResult.FAILED, f"Move failed: {e}"
+
+
+# --- CRUD ----------------------------------------------------------------
+
 def save_entry(
     raw_text: str,
     cleaned_text: str,
@@ -39,10 +417,12 @@ def save_entry(
     audio_duration_seconds: float | None = None,
     word_count: int | None = None,
 ) -> HistoryEntry:
-    """Append a new entry to history."""
+    """Append a new entry."""
+    global _stats_cache
+    timestamp = datetime.now(timezone.utc).isoformat()
     entry = HistoryEntry(
         id=uuid.uuid4().hex[:12],
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=timestamp,
         language=language,
         style=style,
         raw_text=raw_text,
@@ -53,78 +433,199 @@ def save_entry(
         audio_duration_seconds=audio_duration_seconds,
         word_count=word_count,
     )
+    ts_ms = _iso_to_epoch_ms(timestamp)
 
     with _lock:
-        HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-        with open(HISTORY_PATH, "a", encoding="utf-8") as f:
-            f.write(entry.model_dump_json() + "\n")
-
-        # Truncate if over limit
-        _truncate_if_needed()
+        conn = _ensure_conn_locked()
+        conn.execute("BEGIN")
+        try:
+            conn.execute(
+                "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, "
+                "duration_ms, audio_duration_seconds, word_count, model_name, tokens_used) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entry.id, ts_ms, entry.language, entry.style,
+                    entry.raw_text, entry.cleaned_text, entry.duration_ms,
+                    entry.audio_duration_seconds, entry.word_count,
+                    entry.model_name, entry.tokens_used,
+                ),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        _stats_cache = None
 
     return entry
 
 
 def get_entries(limit: int = 50, offset: int = 0) -> list[HistoryEntry]:
-    """Get history entries, newest first."""
+    """Get history entries newest first. Returns full rows (existing API contract)."""
     with _lock:
-        entries = _read_all()
-    entries.reverse()  # newest first
-    return entries[offset : offset + limit]
+        conn = _ensure_conn_locked()
+        rows = conn.execute(
+            "SELECT id, ts, language, style, raw_text, cleaned_text, duration_ms, "
+            "audio_duration_seconds, word_count, model_name, tokens_used "
+            "FROM entries ORDER BY ts DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    return [_row_to_entry(r) for r in rows]
 
 
 def get_count() -> int:
-    """Get total number of entries."""
     with _lock:
-        return len(_read_all())
+        conn = _ensure_conn_locked()
+        return conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
 
 
 def delete_entry(entry_id: str) -> bool:
-    """Delete a single entry by ID."""
+    global _stats_cache
     with _lock:
-        entries = _read_all()
-        filtered = [e for e in entries if e.id != entry_id]
-        if len(filtered) == len(entries):
-            return False
-        _write_all(filtered)
-        return True
+        conn = _ensure_conn_locked()
+        conn.execute("BEGIN")
+        try:
+            cursor = conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+            deleted = cursor.rowcount > 0
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        if deleted:
+            _stats_cache = None
+        return deleted
 
 
 def clear_all() -> int:
-    """Delete all history. Returns number of deleted entries."""
+    global _stats_cache
     with _lock:
-        count = len(_read_all())
-        if HISTORY_PATH.exists():
-            HISTORY_PATH.unlink()
+        conn = _ensure_conn_locked()
+        count = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+        conn.execute("BEGIN")
+        try:
+            conn.execute("DELETE FROM entries")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        _stats_cache = None
         return count
 
 
-def _read_all() -> list[HistoryEntry]:
-    """Read all entries from disk."""
-    if not HISTORY_PATH.exists():
-        return []
-    entries = []
-    for line in HISTORY_PATH.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
+def compute_stats(now: datetime | None = None) -> HistoryStats:
+    """Aggregate via SQL with a 5 s in-memory cache (invalidated by all mutators)."""
+    global _stats_cache
+    if now is None:
+        now = datetime.now(timezone.utc).astimezone()
+
+    today = now.date()
+    week_cutoff = now - timedelta(days=7)
+    today_start_ms = int(round(datetime(today.year, today.month, today.day, tzinfo=now.tzinfo).timestamp() * 1000))
+    week_cutoff_ms = int(round(week_cutoff.timestamp() * 1000))
+
+    with _lock:
+        cached = _stats_cache
+        if cached is not None and (time.monotonic() - cached[0]) < STATS_TTL_SECONDS:
+            return cached[1]
+
+        conn = _ensure_conn_locked()
+        agg = conn.execute(
+            "SELECT COUNT(*), "
+            "COALESCE(SUM(word_count), 0), "
+            "COALESCE(SUM(audio_duration_seconds), 0.0), "
+            "COALESCE(SUM(CASE WHEN ts >= ? THEN word_count ELSE 0 END), 0), "
+            "COALESCE(SUM(CASE WHEN ts >= ? THEN word_count ELSE 0 END), 0) "
+            "FROM entries",
+            (today_start_ms, week_cutoff_ms),
+        ).fetchone()
+        total_entries, total_words, total_audio, today_words, week_words = agg
+
+        by_language = {
+            row[0]: row[1]
+            for row in conn.execute(
+                "SELECT language, COALESCE(SUM(word_count), 0) FROM entries "
+                "WHERE language IS NOT NULL GROUP BY language"
+            ).fetchall()
+        }
+        by_model = {
+            row[0]: row[1]
+            for row in conn.execute(
+                "SELECT model_name, COALESCE(SUM(word_count), 0) FROM entries "
+                "WHERE model_name IS NOT NULL GROUP BY model_name"
+            ).fetchall()
+        }
+
+        stats = HistoryStats(
+            total_entries=total_entries,
+            total_words=total_words,
+            total_audio_seconds=round(total_audio, 1),
+            today_words=today_words,
+            week_words=week_words,
+            by_language=by_language,
+            by_model=by_model,
+        )
+        _stats_cache = (time.monotonic(), stats)
+        return stats
+
+
+# --- Internals -----------------------------------------------------------
+
+def _row_to_entry(row: sqlite3.Row) -> HistoryEntry:
+    return HistoryEntry(
+        id=row["id"],
+        timestamp=_epoch_ms_to_iso(row["ts"]),
+        language=row["language"],
+        style=row["style"],
+        raw_text=row["raw_text"],
+        cleaned_text=row["cleaned_text"],
+        duration_ms=row["duration_ms"],
+        audio_duration_seconds=row["audio_duration_seconds"],
+        word_count=row["word_count"],
+        model_name=row["model_name"],
+        tokens_used=row["tokens_used"],
+    )
+
+
+def _ensure_conn_locked() -> sqlite3.Connection:
+    """Caller MUST hold ``_lock``. Lazy-opens the connection on demand
+    (covers the case where init_output_dir was called by tests but
+    bootstrap was not)."""
+    global _conn
+    if _conn is None:
+        _conn = _connect(_output_dir / HISTORY_FILENAME)
+        _init_schema(_conn)
+    return _conn
+
+
+def _close_conn_locked() -> None:
+    """Caller MUST hold ``_lock``."""
+    global _conn
+    if _conn is not None:
         try:
-            entries.append(HistoryEntry.model_validate_json(line))
-        except (json.JSONDecodeError, ValueError, ValidationError):
-            continue  # skip corrupt lines
-    return entries
+            _conn.close()
+        except sqlite3.Error:
+            pass
+        _conn = None
 
 
-def _write_all(entries: list[HistoryEntry]) -> None:
-    """Rewrite the entire file."""
-    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-    with open(HISTORY_PATH, "w", encoding="utf-8") as f:
-        for e in entries:
-            f.write(e.model_dump_json() + "\n")
+def _verify_line_count(src: Path, dst: Path) -> bool:
+    def count(p: Path) -> int:
+        with open(p, "rb") as f:
+            return sum(1 for _ in f)
+    try:
+        return count(src) == count(dst)
+    except OSError:
+        return False
 
 
-def _truncate_if_needed() -> None:
-    """Keep only the last MAX_ENTRIES entries."""
-    entries = _read_all()
-    if len(entries) > MAX_ENTRIES:
-        _write_all(entries[-MAX_ENTRIES:])
+def _verify_db_row_count(src_db: Path, dst_db: Path) -> bool:
+    """Compare entries row count between two SQLite files."""
+    def count(p: Path) -> int:
+        c = _connect(p)
+        try:
+            return c.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+        finally:
+            c.close()
+    try:
+        return count(src_db) == count(dst_db)
+    except sqlite3.Error:
+        return False

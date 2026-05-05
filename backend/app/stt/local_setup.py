@@ -18,15 +18,18 @@ _install_lock = asyncio.Lock()
 
 class LocalSttStatus(BaseModel):
     package_installed: bool = False
+    model_loaded: bool = False
     model_name: str = ""
+    model_ram_mb: int | None = None
     gpu_available: bool = False
     gpu_name: str | None = None
     device: str = "cpu"
     compute_type: str = "int8"
+    last_error: str | None = None
 
 
 def check_status(stt_settings: STTSettings) -> LocalSttStatus:
-    """Check local STT readiness: package installed + GPU availability."""
+    """Check local STT readiness: package installed + load state + GPU + last error."""
     installed = _check_package_installed()
     gpu_available, gpu_name = _detect_gpu()
 
@@ -36,14 +39,38 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
 
     compute_type = "float16" if device == "cuda" else "int8"
 
+    # is_model_loaded reads the cached provider; safe even if the package is missing.
+    from app.stt import is_model_loaded
+    from app.stt.local import get_last_load_error
+
     return LocalSttStatus(
         package_installed=installed,
+        model_loaded=is_model_loaded() if installed else False,
         model_name=stt_settings.whisper_model_size,
+        model_ram_mb=_estimate_model_ram_mb() if is_model_loaded() else None,
         gpu_available=gpu_available,
         gpu_name=gpu_name,
         device=device,
         compute_type=compute_type,
+        last_error=get_last_load_error(),
     )
+
+
+def _estimate_model_ram_mb() -> int | None:
+    """Approximate the backend RSS-delta consumed by the loaded whisper model.
+
+    Returns the current process RSS in MB — coarse but informative; the user
+    sees "the backend is holding ~700 MB" rather than no number at all.
+    """
+    try:
+        import os
+
+        import psutil
+
+        rss = psutil.Process(os.getpid()).memory_info().rss
+        return rss // (1024 * 1024)
+    except Exception:  # psutil missing on a stripped install
+        return None
 
 
 def _check_package_installed() -> bool:

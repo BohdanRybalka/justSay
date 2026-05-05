@@ -19,7 +19,10 @@ from app.stt.local_setup import (
 router = APIRouter()
 
 MAX_UPLOAD_SIZE = 25 * 1024 * 1024  # 25 MB
-ALLOWED_EXTENSIONS = {".wav", ".mp3", ".ogg", ".webm"}
+ALLOWED_EXTENSIONS = {
+    ".wav", ".mp3", ".ogg", ".oga", ".webm", ".flac",
+    ".m4a", ".mp4", ".aac", ".opus", ".wma", ".aiff", ".aif",
+}
 
 
 class TranscribeResponse(BaseModel):
@@ -83,7 +86,8 @@ async def stt_local_load():
         await asyncio.to_thread(provider._get_model)
         return {"loaded": True, "model": provider.model_name}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to load model: {e}")
+        # _get_model already latched the error message. Surface it to the user.
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
 @router.post("/local/unload")

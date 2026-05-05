@@ -21,11 +21,19 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from pathlib import Path
+
+    from app.core import history
+    from app.core.user_settings import get_user_settings, sync_to_runtime
+
     log.info("Backend startup: version=%s port=%s", __version__, settings.port)
     settings.audio.temp_dir.mkdir(parents=True, exist_ok=True)
+
+    us = get_user_settings()
+    # Bootstrap history before any worker thread can call save_entry.
+    history.bootstrap(Path(us.output_dir))
     # Sync user settings into runtime config (modes, model choices, etc.)
-    from app.core.user_settings import get_user_settings, sync_to_runtime
-    sync_to_runtime(get_user_settings())
+    sync_to_runtime(us)
     yield
     log.info("Backend shutdown: releasing model caches")
     # Shutdown: release model resources (GPU memory, Ollama model unload)
@@ -61,3 +69,31 @@ app.include_router(stt_router, prefix="/stt", tags=["STT"])
 app.include_router(llm_router, prefix="/llm", tags=["LLM"])
 app.include_router(audio_router, prefix="/audio", tags=["Audio"])
 app.include_router(pipeline_router, prefix="/pipeline", tags=["Pipeline"])
+
+
+def _cli() -> None:
+    """Entrypoint used by the PyInstaller-frozen sidecar.
+
+    Accepts ``--host`` and ``--port`` so the Tauri shell can pin the bind address
+    without depending on the dev-mode `python -m uvicorn` invocation.
+    """
+    import argparse
+
+    import uvicorn
+
+    parser = argparse.ArgumentParser(prog="justsay-backend")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=settings.port)
+    parser.add_argument("--log-level", default="warning")
+    args = parser.parse_args()
+
+    uvicorn.run(
+        "app.main:app",
+        host=args.host,
+        port=args.port,
+        log_level=args.log_level,
+    )
+
+
+if __name__ == "__main__":
+    _cli()

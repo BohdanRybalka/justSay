@@ -41,6 +41,30 @@ fn find_python() -> Result<String, String> {
     Err("Python not found. Install Python 3.10+ and ensure it's in PATH.".to_string())
 }
 
+/// Look for a PyInstaller-frozen sidecar binary next to the Tauri executable.
+///
+/// The CI release workflow (Plan 008) ships a `justsay-backend(.exe)` next to the
+/// app binary. When that binary is present we prefer it — the user does not need
+/// a system Python install. When it is absent we fall back to spawning system
+/// Python (existing dev-mode behaviour).
+fn find_sidecar() -> Option<std::path::PathBuf> {
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let name = if cfg!(windows) {
+        "justsay-backend.exe"
+    } else {
+        "justsay-backend"
+    };
+
+    // Production layout: <bundle>/Resources/justsay-backend (macOS) or alongside
+    // the .exe (Windows MSI/NSIS).
+    let candidates = [
+        exe_dir.join(name),
+        exe_dir.join("justsay-backend").join(name),
+        exe_dir.join("..").join("Resources").join(name),
+    ];
+    candidates.into_iter().find(|p| p.exists())
+}
+
 /// Resolve the backend directory path.
 /// Searches: CWD/backend, CWD/../backend (for src-tauri/), next to exe.
 fn find_backend_dir() -> Result<std::path::PathBuf, String> {
@@ -67,35 +91,52 @@ fn find_backend_dir() -> Result<std::path::PathBuf, String> {
 }
 
 /// Spawn the Python FastAPI backend as a child process.
+///
+/// Preference order:
+///   1. Frozen PyInstaller sidecar next to the Tauri executable (production).
+///   2. System Python + the backend source tree (developer setup).
 pub fn spawn() -> Result<(), String> {
     check_port_available()?;
 
-    let python = find_python()?;
-    let backend_dir = find_backend_dir()?;
-
-    log::info!(
-        "Starting backend: {} -m uvicorn (dir: {:?})",
-        python,
-        backend_dir
-    );
-
-    let child = Command::new(&python)
-        .args([
-            "-m",
-            "uvicorn",
-            "app.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            &PORT.to_string(),
-            "--log-level",
-            "warning",
-        ])
-        .current_dir(&backend_dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Failed to start backend: {}", e))?;
+    let child = if let Some(sidecar) = find_sidecar() {
+        log::info!("Starting backend sidecar: {:?}", sidecar);
+        Command::new(&sidecar)
+            .args([
+                "--host",
+                "127.0.0.1",
+                "--port",
+                &PORT.to_string(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Failed to start backend sidecar: {}", e))?
+    } else {
+        let python = find_python()?;
+        let backend_dir = find_backend_dir()?;
+        log::info!(
+            "Starting backend (dev mode): {} -m uvicorn (dir: {:?})",
+            python,
+            backend_dir
+        );
+        Command::new(&python)
+            .args([
+                "-m",
+                "uvicorn",
+                "app.main:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                &PORT.to_string(),
+                "--log-level",
+                "warning",
+            ])
+            .current_dir(&backend_dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Failed to start backend: {}", e))?
+    };
 
     let mut guard = BACKEND_PROCESS.lock().map_err(|e| e.to_string())?;
     *guard = Some(child);
