@@ -58,8 +58,15 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        # macOS / Linux WebView origin
         "tauri://localhost",
+        # Tauri 1.x Windows / legacy
         "https://tauri.localhost",
+        # Tauri 2.x Windows WebView2 origin — load-bearing.
+        # Without this every widget fetch fails the CORS preflight even
+        # though the backend serves 200, surfacing as "Offline" in the UI.
+        "http://tauri.localhost",
+        # Dev server
         "http://localhost",
         "http://localhost:5173",
         "http://127.0.0.1:5173",

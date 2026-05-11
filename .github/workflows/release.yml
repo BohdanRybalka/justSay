@@ -134,12 +134,18 @@ jobs:
           # "Error: GITHUB_TOKEN is required". GITHUB_TOKEN is provided
           # automatically by Actions — no extra secret needed.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Inject resources only at production build time so that
-          # `tauri dev` works without a pre-built sidecar directory present.
-          # --onedir output lands in src-tauri/resources/justsay-backend/ (CI only).
-          # On Windows NSIS it is installed to $INSTALL_DIR\justsay-backend\.
-          # On macOS it is placed in Contents/Resources/justsay-backend/.
-          TAURI_CONFIG: '{"bundle":{"resources":{"resources/justsay-backend":"justsay-backend"}}}'
+          # bundle.resources lives statically in tauri.conf.json now —
+          # `"resources/justsay-backend": "justsay-backend"` — so both
+          # local `tauri build` and CI produce installers that ship the
+          # sidecar. The previous TAURI_CONFIG runtime injection silently
+          # dropped the directory because Tauri 2.10's bundler did not
+          # recognise the path as a resource without the static config.
+          # The directory form (no `/**/*` glob) is what preserves the
+          # nested `_internal/` structure PyInstaller --onedir needs; a
+          # glob version flattened every file into the destination root
+          # and broke the bootloader.
+          # `tauri dev` ignores bundle.resources, so the missing
+          # `src-tauri/resources/justsay-backend/` dir does not break dev.
           # Apple signing env vars are exported by the previous step when
           # MACOS_NOTARIZE_CERT secret is non-empty. Until Plan 008 Phase B,
           # those secrets are unset → unsigned .app is the expected output.
