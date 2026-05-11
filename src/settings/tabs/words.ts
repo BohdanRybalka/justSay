@@ -1,4 +1,9 @@
-import { api, type HistoryStats } from "../../api";
+import {
+  api,
+  type HistoryStats,
+  type InsightsResponse,
+  type TopWordsResponse,
+} from "../../api";
 
 const LANGUAGE_LABELS: Record<string, string> = {
   uk: "Ukrainian",
@@ -11,6 +16,8 @@ const LANGUAGE_LABELS: Record<string, string> = {
   zh: "Chinese",
 };
 
+type Lang = "all" | "uk" | "en";
+
 export function renderWords(container: HTMLElement): () => void {
   container.innerHTML = `
     <h2 class="tab-title">Words</h2>
@@ -22,19 +29,96 @@ export function renderWords(container: HTMLElement): () => void {
   const body = container.querySelector<HTMLElement>("#words-body")!;
 
   let cancelled = false;
+  let topLang: Lang = "all";
+  // Guard against the 5 s polling firing a new insights LLM call while
+  // the previous one is still in flight. Without this, a slow Ollama
+  // (10–30 s) produces a fetch storm — each in-flight /words/insights
+  // holds history._lock through the top_words SQL, racing dictation
+  // for the same lock. Closes QA exit-gate RED-2.
+  let insightsLoading = false;
+  let insightsLoadedOnce = false;
 
   async function refresh() {
     try {
-      const s = await api.historyStats();
+      const [stats, top] = await Promise.all([
+        api.historyStats(),
+        api.wordsTop(topLang, 30),
+      ]);
       if (cancelled) return;
-      body.innerHTML = renderStats(s);
+      body.innerHTML = renderBody(stats, top, topLang);
+      wireLangToggle();
+      // Insights load lazily after the main paint — they involve an LLM call.
+      // Only kick off a fetch if no other one is in progress and we haven't
+      // already painted insights this refresh cycle.
+      if (!insightsLoading && !insightsLoadedOnce) {
+        loadInsights();
+      } else if (insightsLoadedOnce) {
+        // Re-paint the previous content into the new DOM if we have it.
+        // (Cheap path: just leave the placeholder; the next non-polling
+        // user interaction can request a fresh insights fetch.)
+        const box = body.querySelector<HTMLElement>("#words-insights-box");
+        if (box) {
+          box.innerHTML = `<div class="value" style="color:var(--text-muted)">Insights cached — open this tab again to refresh.</div>`;
+        }
+      }
     } catch (e) {
       if (cancelled) return;
       body.innerHTML = `<div class="value" style="color:var(--red)">Failed to load: ${(e as Error).message}</div>`;
     }
   }
 
+  function wireLangToggle() {
+    const toggle = body.querySelector<HTMLElement>("#words-lang-toggle");
+    if (!toggle) return;
+    toggle.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const next = btn.dataset.lang as Lang | undefined;
+        if (!next || next === topLang) return;
+        topLang = next;
+        try {
+          const top = await api.wordsTop(topLang, 30);
+          if (cancelled) return;
+          const topContainer = body.querySelector<HTMLElement>("#words-top");
+          if (topContainer) topContainer.innerHTML = renderTopWords(top);
+          toggle.querySelectorAll<HTMLButtonElement>("button").forEach((b) => {
+            b.classList.toggle("active", b.dataset.lang === topLang);
+          });
+        } catch (e) {
+          console.error(e);
+        }
+      });
+    });
+  }
+
+  async function loadInsights() {
+    if (insightsLoading) return;
+    const box = body.querySelector<HTMLElement>("#words-insights-box");
+    if (!box) return;
+    insightsLoading = true;
+    box.innerHTML = `<div class="value" style="color:var(--text-muted)">Generating insights...</div>`;
+    try {
+      const insights = await api.wordsInsights();
+      if (cancelled) return;
+      box.innerHTML = renderInsights(insights);
+      insightsLoadedOnce = true;
+    } catch (e) {
+      if (cancelled) return;
+      const msg = (e as Error).message || "Insights unavailable";
+      box.innerHTML = `
+        <div class="value" style="color:var(--text-muted)">
+          Insights unavailable — start Ollama or switch to Cloud mode.
+          <div style="font-size: 11px; opacity: 0.7; margin-top: 4px">${escapeHtml(msg)}</div>
+        </div>`;
+      // Do NOT set insightsLoadedOnce — a failure should be retried by
+      // the next refresh, NOT cached as a permanent error state.
+    } finally {
+      insightsLoading = false;
+    }
+  }
+
   refresh();
+  // History stats poll every 5 s (existing behaviour). Top-words and
+  // insights cache for 1 h on the backend; refresh handles cache hits.
   const poll = setInterval(refresh, 5000);
 
   return () => {
@@ -43,8 +127,8 @@ export function renderWords(container: HTMLElement): () => void {
   };
 }
 
-function renderStats(s: HistoryStats): string {
-  if (s.total_entries === 0) {
+function renderBody(stats: HistoryStats, top: TopWordsResponse, lang: Lang): string {
+  if (stats.total_entries === 0) {
     return `
       <div class="value" style="color:var(--text-muted); padding:32px 0; text-align:center;">
         No transcriptions yet. Dictate something, then come back.
@@ -52,6 +136,16 @@ function renderStats(s: HistoryStats): string {
     `;
   }
 
+  return `
+    ${renderStatsCards(stats)}
+    ${renderTopWordsBlock(top, lang)}
+    ${renderInsightsBlock()}
+    ${renderBucket("By language", stats.by_language, (code) => LANGUAGE_LABELS[code] || code)}
+    ${renderBucket("By model", stats.by_model, (m) => m)}
+  `;
+}
+
+function renderStatsCards(s: HistoryStats): string {
   const cards = `
     <div class="word-cards">
       ${bigCard("Today", s.today_words)}
@@ -71,14 +165,86 @@ function renderStats(s: HistoryStats): string {
     </div>
   `;
 
-  const langBlock = renderBucket("By language", s.by_language, (code) => LANGUAGE_LABELS[code] || code);
-  const modelBlock = renderBucket("By model", s.by_model, (m) => m);
+  return cards + audioBlock;
+}
+
+function renderTopWordsBlock(top: TopWordsResponse, lang: Lang): string {
+  const langButtons = (["all", "uk", "en"] as Lang[])
+    .map(
+      (k) => `
+        <button class="btn btn-secondary btn-sm ${k === lang ? "active" : ""}" data-lang="${k}">
+          ${k === "all" ? "All" : LANGUAGE_LABELS[k] || k}
+        </button>`,
+    )
+    .join("");
 
   return `
-    ${cards}
-    ${audioBlock}
-    ${langBlock}
-    ${modelBlock}
+    <div class="setting-group" style="margin-top:24px;">
+      <div class="setting-label" style="display:flex; justify-content:space-between; align-items:center;">
+        <span>Top words</span>
+        <span id="words-lang-toggle" style="display:flex; gap:6px;">${langButtons}</span>
+      </div>
+      <div id="words-top">${renderTopWords(top)}</div>
+    </div>
+  `;
+}
+
+function renderTopWords(top: TopWordsResponse): string {
+  if (top.items.length === 0) {
+    return `<div class="value" style="color:var(--text-muted); padding:16px 0;">No words yet for this filter.</div>`;
+  }
+  const max = top.items[0].count || 1;
+  const rows = top.items
+    .map((item) => {
+      const pct = (item.count / max) * 100;
+      return `
+        <div class="bucket-row">
+          <span class="bucket-label">${escapeHtml(item.word)}</span>
+          <div class="bucket-bar"><div class="bucket-bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
+          <span class="bucket-value">${item.count.toLocaleString("uk-UA")}</span>
+        </div>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="bucket-list">${rows}</div>
+    <div class="value" style="color:var(--text-muted); font-size:11px; margin-top:6px;">
+      Based on ${top.scanned.toLocaleString("uk-UA")} transcript${top.scanned !== 1 ? "s" : ""}.
+    </div>
+  `;
+}
+
+function renderInsightsBlock(): string {
+  return `
+    <div class="setting-group" style="margin-top:24px;">
+      <div class="setting-label">Insights</div>
+      <div id="words-insights-box">
+        <div class="value" style="color:var(--text-muted)">Loading insights...</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderInsights(payload: InsightsResponse): string {
+  if (payload.insights.length === 0) {
+    return `<div class="value" style="color:var(--text-muted)">No insights yet — dictate a few transcripts and come back.</div>`;
+  }
+  const cards = payload.insights
+    .map(
+      (text) => `
+        <div class="word-card" style="text-align:left; padding:10px 12px;">
+          <div class="word-card-sub" style="font-size:13px; color:var(--text);">
+            ${escapeHtml(text)}
+          </div>
+        </div>`,
+    )
+    .join("");
+  return `
+    <div class="word-cards" style="grid-template-columns: 1fr;">${cards}</div>
+    <div class="value" style="color:var(--text-muted); font-size:11px; margin-top:6px;">
+      Generated by ${escapeHtml(payload.model)}.
+    </div>
   `;
 }
 

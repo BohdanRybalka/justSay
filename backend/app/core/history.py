@@ -38,13 +38,19 @@ from pydantic import BaseModel
 log = logging.getLogger(__name__)
 
 HISTORY_FILENAME = "history.db"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STATS_TTL_SECONDS = 5.0
 
 _lock = threading.Lock()
 _output_dir: Path = Path.home() / ".justsay"
 _conn: sqlite3.Connection | None = None
 _stats_cache: tuple[float, "HistoryStats"] | None = None
+
+# Mutation-listener registry — see register_mutation_listener.
+# Listeners are invoked AFTER the lock is released, never under _lock,
+# so a slow listener cannot block dictation. Direction is words → history;
+# history must never import from words.
+_mutation_listeners: list = []
 
 
 class RelocateResult(str, Enum):
@@ -99,7 +105,7 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-_DDL = """
+_DDL_V1 = """
 CREATE TABLE IF NOT EXISTS entries (
   id TEXT PRIMARY KEY,
   ts INTEGER NOT NULL,
@@ -116,10 +122,79 @@ CREATE TABLE IF NOT EXISTS entries (
 CREATE INDEX IF NOT EXISTS entries_ts_idx ON entries(ts DESC);
 """
 
+# Phase 2 — FTS5 full-text search over cleaned_text.
+# External-content table (content='entries') means FTS doesn't duplicate
+# the data; triggers keep its index in sync. IF NOT EXISTS everywhere so a
+# partial migration (user_version=2 but FTS missing) can self-heal.
+_DDL_V2 = """
+CREATE VIRTUAL TABLE IF NOT EXISTS entry_fts USING fts5(
+  cleaned_text,
+  content='entries', content_rowid='rowid',
+  tokenize='unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
+  INSERT INTO entry_fts(rowid, cleaned_text) VALUES (new.rowid, new.cleaned_text);
+END;
+CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
+  INSERT INTO entry_fts(entry_fts, rowid, cleaned_text) VALUES('delete', old.rowid, old.cleaned_text);
+END;
+CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
+  INSERT INTO entry_fts(entry_fts, rowid, cleaned_text) VALUES('delete', old.rowid, old.cleaned_text);
+  INSERT INTO entry_fts(rowid, cleaned_text) VALUES (new.rowid, new.cleaned_text);
+END;
+"""
+
 
 def _init_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(_DDL)
-    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    """Version-aware migrator. Run on every connection open.
+
+    Branches:
+      - fresh v0 / upgrade from v1 → run v2 DDL, rebuild FTS from rows,
+        write user_version=2 LAST so a crash before the PRAGMA leaves a
+        retry-able v1 (or pre-v1) state.
+      - already at v2 → re-run v2 DDL (IF NOT EXISTS makes this idempotent)
+        and probe FTS integrity; rebuild on OperationalError so a partial
+        migration that left user_version=2 but no FTS table self-heals.
+    """
+    conn.executescript(_DDL_V1)
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if current < SCHEMA_VERSION:
+        conn.executescript(_DDL_V2)
+        conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    else:
+        # Idempotent recovery from a partially-applied v2: if the FTS
+        # table or its triggers were dropped between boots (interrupted
+        # migration, manual edit), the IF NOT EXISTS clauses recreate
+        # them. A row-count probe then detects the empty-index case
+        # (integrity-check trivially passes on an empty FTS) and a
+        # divergence probe catches deeper corruption — either branch
+        # ends in a rebuild.
+        conn.executescript(_DDL_V2)
+        # Probe whether the FTS index is in sync with `entries`.
+        # `count(*)` on the FTS virtual table is forwarded to the
+        # external content table, so we read the FTS-side count from
+        # the shadow `entry_fts_docsize` table. That shadow name is
+        # SQLite-internal; if it is ever missing (interrupted DDL,
+        # SQLite version quirk), fall through to a full rebuild
+        # rather than crashing the migrator.
+        entries_rows = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
+        needs_rebuild = False
+        try:
+            fts_rows = conn.execute("SELECT count(*) FROM entry_fts_docsize").fetchone()[0]
+            needs_rebuild = entries_rows != fts_rows
+        except sqlite3.OperationalError as e:
+            log.warning("FTS shadow probe unavailable (%s) — rebuilding", e)
+            needs_rebuild = True
+        if not needs_rebuild and entries_rows > 0:
+            try:
+                conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('integrity-check')")
+            except sqlite3.OperationalError as e:
+                log.warning("FTS integrity probe failed (%s) — rebuilding", e)
+                needs_rebuild = True
+        if needs_rebuild:
+            conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
 
 
 # --- Public path API -----------------------------------------------------
@@ -127,6 +202,36 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 def history_path() -> Path:
     """Lock-free read of the current history.db path."""
     return _output_dir / HISTORY_FILENAME
+
+
+# --- Mutation-listener registry ------------------------------------------
+
+def register_mutation_listener(listener) -> None:
+    """Register a zero-argument callable invoked after every successful
+    history mutation (save / delete / clear / relocate).
+
+    Contract for listeners:
+      - MUST be cheap. They run inline in the mutator's caller thread.
+      - MUST NOT call any history mutator. Re-entrant calls would deadlock
+        on _lock (listeners run outside _lock, but a mutator call would
+        re-acquire it; correctness is the issue, not deadlock).
+      - MAY raise — failures are caught and logged, the mutator stays
+        successful.
+
+    Used by ``app.core.words`` to invalidate the insights cache without
+    creating a circular import (history exposes the registry; words
+    depends on history, never the reverse).
+    """
+    _mutation_listeners.append(listener)
+
+
+def _fire_mutation_listeners() -> None:
+    """Invoke every registered listener. MUST be called OUTSIDE _lock."""
+    for fn in _mutation_listeners:
+        try:
+            fn()
+        except Exception:  # pragma: no cover — defensive
+            log.exception("Mutation listener raised")
 
 
 # --- Lifespan / bootstrap ------------------------------------------------
@@ -167,84 +272,102 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
     """Move history.db to new_dir. Mutates _output_dir + closes/reopens
     connection inside the lock so a concurrent save_entry never sees a
     torn intermediate. Always invalidates _stats_cache.
+
+    Phase 2: after a successful copy the FTS5 index is always rebuilt on
+    the new connection BEFORE the point-of-no-return (``old_path.unlink``).
+    Copied FTS shadow tables can desync if the copy interleaved with a
+    write or if the source filesystem (Dropbox/iCloud) yielded a partial
+    image. Rebuild is cheap on small DBs and is the integrity contract.
     """
     global _output_dir, _conn, _stats_cache
-    with _lock:
-        old_dir = _output_dir
-        old_path = old_dir / HISTORY_FILENAME
+    fire_listeners = False
+    try:
+        with _lock:
+            old_dir = _output_dir
+            old_path = old_dir / HISTORY_FILENAME
 
-        try:
-            same = old_dir.resolve() == new_dir.resolve()
-        except OSError:
-            same = False
+            try:
+                same = old_dir.resolve() == new_dir.resolve()
+            except OSError:
+                same = False
 
-        if same:
-            _stats_cache = None
-            return RelocateResult.NO_OLD_FILE, None
+            if same:
+                _stats_cache = None
+                return RelocateResult.NO_OLD_FILE, None
 
-        new_path = new_dir / HISTORY_FILENAME
+            new_path = new_dir / HISTORY_FILENAME
 
-        try:
-            new_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            return RelocateResult.FAILED, f"Could not create target directory: {e}"
+            try:
+                new_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                return RelocateResult.FAILED, f"Could not create target directory: {e}"
 
-        if new_path.exists():
-            _close_conn_locked()
-            _output_dir = new_dir
-            _conn = _connect(new_path)
-            _init_schema(_conn)
-            _stats_cache = None
-            return RelocateResult.NEW_ALREADY_HAS_FILE, None
-
-        if not old_path.exists():
-            _close_conn_locked()
-            _output_dir = new_dir
-            _conn = _connect(new_path)
-            _init_schema(_conn)
-            _stats_cache = None
-            return RelocateResult.NO_OLD_FILE, None
-
-        # Move: close the old conn first so SQLite releases the lock on Windows.
-        _close_conn_locked()
-        new_conn: sqlite3.Connection | None = None
-        try:
-            shutil.copy2(old_path, new_path)
-            if not _verify_db_row_count(old_path, new_path):
-                new_path.unlink(missing_ok=True)
-                _conn = _connect(old_path)
+            if new_path.exists():
+                _close_conn_locked()
+                _output_dir = new_dir
+                _conn = _connect(new_path)
                 _init_schema(_conn)
                 _stats_cache = None
-                return RelocateResult.FAILED, "Verification failed: entry count mismatch"
+                fire_listeners = True
+                return RelocateResult.NEW_ALREADY_HAS_FILE, None
 
-            # Open and validate the new connection BEFORE deleting the old file.
-            # If _connect raises, we still have old_path intact and rollback safely.
-            new_conn = _connect(new_path)
-            _init_schema(new_conn)
-
-            # Point of no return — only after the new connection is healthy.
-            old_path.unlink()
-            _output_dir = new_dir
-            _conn = new_conn
-            new_conn = None  # ownership transferred
-            _stats_cache = None
-            log.info("Relocated history %s → %s", old_path, new_path)
-            return RelocateResult.MOVED, None
-        except OSError as e:
-            if new_conn is not None:
-                try:
-                    new_conn.close()
-                except sqlite3.Error:
-                    pass
-            new_path.unlink(missing_ok=True)
-            try:
-                _conn = _connect(old_path)
+            if not old_path.exists():
+                _close_conn_locked()
+                _output_dir = new_dir
+                _conn = _connect(new_path)
                 _init_schema(_conn)
-            except sqlite3.Error:
-                _conn = None
-            _stats_cache = None
-            log.exception("Relocate failed: %s", e)
-            return RelocateResult.FAILED, f"Move failed: {e}"
+                _stats_cache = None
+                fire_listeners = True
+                return RelocateResult.NO_OLD_FILE, None
+
+            # Move: close the old conn first so SQLite releases the lock on Windows.
+            _close_conn_locked()
+            new_conn: sqlite3.Connection | None = None
+            try:
+                shutil.copy2(old_path, new_path)
+                if not _verify_db_row_count(old_path, new_path):
+                    new_path.unlink(missing_ok=True)
+                    _conn = _connect(old_path)
+                    _init_schema(_conn)
+                    _stats_cache = None
+                    return RelocateResult.FAILED, "Verification failed: entry count mismatch"
+
+                # Open and validate the new connection BEFORE deleting the old file.
+                # If _connect raises, we still have old_path intact and rollback safely.
+                new_conn = _connect(new_path)
+                _init_schema(new_conn)
+                # Phase 2: do not trust the copied FTS index — always rebuild
+                # on the new path so search results are consistent with entries
+                # right after the move.
+                new_conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
+
+                # Point of no return — only after the new connection is healthy.
+                old_path.unlink()
+                _output_dir = new_dir
+                _conn = new_conn
+                new_conn = None  # ownership transferred
+                _stats_cache = None
+                log.info("Relocated history %s → %s", old_path, new_path)
+                fire_listeners = True
+                return RelocateResult.MOVED, None
+            except (OSError, sqlite3.Error) as e:
+                if new_conn is not None:
+                    try:
+                        new_conn.close()
+                    except sqlite3.Error:
+                        pass
+                new_path.unlink(missing_ok=True)
+                try:
+                    _conn = _connect(old_path)
+                    _init_schema(_conn)
+                except sqlite3.Error:
+                    _conn = None
+                _stats_cache = None
+                log.exception("Relocate failed: %s", e)
+                return RelocateResult.FAILED, f"Move failed: {e}"
+    finally:
+        if fire_listeners:
+            _fire_mutation_listeners()
 
 
 # --- CRUD ----------------------------------------------------------------
@@ -297,6 +420,7 @@ def save_entry(
             raise
         _stats_cache = None
 
+    _fire_mutation_listeners()
     return entry
 
 
@@ -333,7 +457,10 @@ def delete_entry(entry_id: str) -> bool:
             raise
         if deleted:
             _stats_cache = None
-        return deleted
+
+    if deleted:
+        _fire_mutation_listeners()
+    return deleted
 
 
 def clear_all() -> int:
@@ -349,7 +476,9 @@ def clear_all() -> int:
             conn.execute("ROLLBACK")
             raise
         _stats_cache = None
-        return count
+
+    _fire_mutation_listeners()
+    return count
 
 
 def compute_stats(now: datetime | None = None) -> HistoryStats:

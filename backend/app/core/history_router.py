@@ -2,9 +2,10 @@
 
 import sqlite3
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from app.core import words as words_service
 from app.core.history import (
     HistoryEntry,
     HistoryStats,
@@ -31,6 +32,21 @@ def _busy_to_503(detail: str = "Storage busy"):
     return HTTPException(status_code=503, detail=detail, headers={"Retry-After": "1"})
 
 
+_FTS_QUERY_ERROR_MARKERS = (
+    "fts5",
+    "syntax",
+    "malformed match",
+    "unterminated",
+    "unknown special query",
+    "no such column",
+)
+
+
+def _is_fts_syntax_error(e: sqlite3.OperationalError) -> bool:
+    msg = str(e).lower()
+    return any(marker in msg for marker in _FTS_QUERY_ERROR_MARKERS)
+
+
 @router.get("", response_model=HistoryListResponse)
 async def list_history(limit: int = 50, offset: int = 0):
     try:
@@ -53,6 +69,29 @@ async def history_stats():
         if "locked" in str(e).lower():
             raise _busy_to_503("Stats store busy") from e
         raise
+
+
+@router.get("/search", response_model=HistoryListResponse)
+async def history_search(
+    q: str = Query("", description="FTS5 search query (empty → empty list)"),
+    limit: int = Query(20, ge=1, le=words_service.SEARCH_LIMIT_MAX),
+):
+    """Full-text search across transcripts via SQLite FTS5 / BM25.
+
+    Empty / whitespace ``q`` returns 200 with an empty list — clients
+    fall back to ``/history`` for the newest-first view. Malformed FTS5
+    syntax → 400. Storage lock → 503.
+    """
+    try:
+        entries = words_service.search_history(q, limit=limit)
+    except sqlite3.OperationalError as e:
+        msg = str(e).lower()
+        if "locked" in msg:
+            raise _busy_to_503("History store busy") from e
+        if _is_fts_syntax_error(e):
+            raise HTTPException(status_code=400, detail="Invalid search query") from e
+        raise
+    return HistoryListResponse(entries=entries, total=len(entries))
 
 
 @router.delete("/{entry_id}")

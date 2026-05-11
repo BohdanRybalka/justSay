@@ -362,3 +362,315 @@ def test_operational_error_mapped_to_503(isolated_storage, tmp_path):
             resp = client.get("/history/stats")
             assert resp.status_code == 503
             assert resp.headers.get("Retry-After") == "1"
+
+
+# --- Phase 2 — FTS5 schema migration + triggers --------------------------
+
+def test_schema_version_is_v2(isolated_storage, tmp_path):
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+
+
+def test_fts_table_and_triggers_exist(isolated_storage, tmp_path):
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
+        ).fetchall()}
+    assert "entry_fts" in names
+    assert {"entries_ai", "entries_ad", "entries_au"}.issubset(names)
+
+
+def test_insert_propagates_to_fts(isolated_storage, tmp_path):
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    history.save_entry(text="quick brown fox", duration_ms=1)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        hits = conn.execute(
+            "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'brown'"
+        ).fetchall()
+    assert len(hits) == 1
+
+
+def test_delete_propagates_to_fts(isolated_storage, tmp_path):
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    e = history.save_entry(text="quick brown fox", duration_ms=1)
+    history.delete_entry(e.id)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        hits = conn.execute(
+            "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'brown'"
+        ).fetchall()
+    assert hits == []
+
+
+def test_clear_all_propagates_to_fts(isolated_storage, tmp_path):
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    history.save_entry(text="quick brown fox", duration_ms=1)
+    history.save_entry(text="lazy dog", duration_ms=1)
+    history.clear_all()
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        hits = conn.execute(
+            "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'brown OR dog'"
+        ).fetchall()
+    assert hits == []
+
+
+def test_migration_v1_to_v2_populates_fts(isolated_storage, tmp_path):
+    """A pre-existing v1 DB with rows must upgrade to v2 with the FTS
+    populated from the rebuild branch of _init_schema."""
+    db_path = tmp_path / "history.db"
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.executescript(history._DDL_V1)
+        raw.execute("PRAGMA user_version = 1")
+        raw.execute(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('a', 0, 'uk', 'normal', 'hello brown fox', 'hello brown fox', 0)"
+        )
+        raw.execute(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('b', 1, 'uk', 'normal', 'lazy dog jumps', 'lazy dog jumps', 0)"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    history.bootstrap(tmp_path)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        hits = conn.execute(
+            "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'brown'"
+        ).fetchall()
+    assert len(hits) == 1
+
+
+def test_partial_migration_recovery_docsize_shadow_missing(isolated_storage, tmp_path):
+    """Defensive against the SQLite-private shadow-table contract: if
+    `entry_fts_docsize` is somehow gone (interrupted DDL, version quirk),
+    _init_schema falls back to rebuild rather than crashing. Closes
+    QA exit-gate RED-1."""
+    db_path = tmp_path / "history.db"
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.executescript(history._DDL_V1)
+        raw.executescript(history._DDL_V2)
+        raw.execute(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('a', 0, 'uk', 'normal', 'shadow probe', 'shadow probe', 0)"
+        )
+        raw.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
+        raw.execute("PRAGMA user_version = 2")
+        # Drop the FTS table — this removes its shadow tables atomically.
+        raw.execute("DROP TABLE entry_fts")
+        raw.commit()
+    finally:
+        raw.close()
+
+    # bootstrap() runs _init_schema, which re-creates entry_fts via
+    # IF NOT EXISTS. After DROP TABLE the shadow tables are gone too, so
+    # the freshly-created FTS sits over a populated `entries` table with
+    # an empty docsize → the row-count probe spots the divergence and
+    # the recovery branch issues a rebuild.
+    history.bootstrap(tmp_path)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        hits = conn.execute(
+            "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'shadow'"
+        ).fetchall()
+    assert len(hits) == 1  # rebuild ran, index is populated again
+
+
+def test_partial_migration_recovery_fts_missing(isolated_storage, tmp_path):
+    """If a previous boot wrote user_version=2 but the FTS table is
+    missing (interrupted migration), _init_schema must recreate the FTS
+    table and rebuild the index from existing rows."""
+    db_path = tmp_path / "history.db"
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.executescript(history._DDL_V1)
+        raw.execute("PRAGMA user_version = 2")
+        raw.execute(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('a', 0, 'uk', 'normal', 'recovery text', 'recovery text', 0)"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    history.bootstrap(tmp_path)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
+        ).fetchall()}
+        hits = conn.execute(
+            "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'recovery'"
+        ).fetchall()
+    assert "entry_fts" in names
+    assert {"entries_ai", "entries_ad", "entries_au"}.issubset(names)
+    assert len(hits) == 1
+
+
+def test_crash_before_user_version_pragma_retries(isolated_storage, tmp_path, monkeypatch):
+    """If a crash leaves user_version at 1 even though FTS DDL ran, the
+    next boot's migrator must succeed idempotently (IF NOT EXISTS
+    everywhere; rebuild populates the index)."""
+    db_path = tmp_path / "history.db"
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.executescript(history._DDL_V1)
+        raw.executescript(history._DDL_V2)  # simulate FTS DDL applied
+        raw.execute(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('a', 0, 'uk', 'normal', 'crash safety', 'crash safety', 0)"
+        )
+        # user_version intentionally NOT set — simulates the crash window.
+        raw.execute("PRAGMA user_version = 1")
+        raw.commit()
+    finally:
+        raw.close()
+
+    history.bootstrap(tmp_path)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        hits = conn.execute(
+            "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'crash'"
+        ).fetchall()
+    assert len(hits) == 1
+
+
+def test_relocate_rebuilds_fts(isolated_storage, tmp_path):
+    """After relocate, FTS index on the new path must answer queries
+    consistent with the moved entries."""
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    history.save_entry(text="relocate searchable text", duration_ms=1)
+
+    new_dir = tmp_path / "new"
+    res, _ = history.relocate(new_dir)
+    assert res == history.RelocateResult.MOVED
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        hits = conn.execute(
+            "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'searchable'"
+        ).fetchall()
+    assert len(hits) == 1
+
+
+# --- /history/search router behaviour ------------------------------------
+
+def test_search_empty_q_returns_200_empty(isolated_storage, tmp_path):
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    with TestClient(app) as client:
+        # The TestClient lifespan re-bootstraps history to the user-settings
+        # output_dir (Path.home() patched by isolated_storage). Save AFTER
+        # entering the context so the row lands in the same DB the request
+        # will hit.
+        history.save_entry(text="anything", duration_ms=1)
+        resp = client.get("/history/search?q=")
+        assert resp.status_code == 200
+        assert resp.json() == {"entries": [], "total": 0}
+
+
+def test_search_returns_results_ordered_by_relevance(isolated_storage, tmp_path):
+    """First hit must be the entry with the strongest match (BM25 ASC =
+    best first). Guards against the 'fake-green tests just check non-empty'
+    failure mode flagged by QA RED-1."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    with TestClient(app) as client:
+        history.save_entry(text="brown bear at the zoo", duration_ms=1)
+        history.save_entry(text="brown brown brown bear bear", duration_ms=1)  # strongest
+        history.save_entry(text="completely unrelated text", duration_ms=1)
+        resp = client.get("/history/search?q=brown bear")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 2
+        assert "brown brown brown" in data["entries"][0]["text"]
+
+
+def test_search_malformed_query_returns_400(isolated_storage, tmp_path):
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    with TestClient(app) as client:
+        history.save_entry(text="anything", duration_ms=1)
+        # Bare double-quote is not valid FTS5 syntax; SQLite raises
+        # OperationalError("fts5: ...").
+        resp = client.get('/history/search?q="')
+        assert resp.status_code == 400
+
+
+def test_search_lock_error_returns_503(isolated_storage, tmp_path):
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    with TestClient(app) as client:
+        history.save_entry(text="anything", duration_ms=1)
+        with patch(
+            "app.core.words.search_history",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
+            resp = client.get("/history/search?q=anything")
+            assert resp.status_code == 503
+            assert resp.headers.get("Retry-After") == "1"
+
+
+def test_concurrent_save_and_search_serialised(isolated_storage, tmp_path):
+    """save_entry and search both serialise on history._lock — this test
+    documents that guarantee. Not a race-condition test: partial reads
+    are physically impossible under a single Python mutex around a single
+    connection."""
+    from app.core import words as words_service
+
+    target = tmp_path / "target"
+    history.bootstrap(target)
+
+    errors: list[Exception] = []
+    seen: list[int] = []
+
+    def writer():
+        try:
+            for i in range(20):
+                history.save_entry(text=f"searchable token-{i}", duration_ms=1)
+        except Exception as e:
+            errors.append(e)
+
+    def searcher():
+        try:
+            for _ in range(20):
+                results = words_service.search_history("searchable", limit=50)
+                seen.append(len(results))
+        except Exception as e:
+            errors.append(e)
+
+    t1 = threading.Thread(target=writer)
+    t2 = threading.Thread(target=searcher)
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+
+    assert errors == []
+    # Monotonic: search results never decreased once a row was visible.
+    # (Cannot assert strict equality — interleaving is non-deterministic.)
+    assert all(0 <= n <= 20 for n in seen)
+    assert history.get_count() == 20

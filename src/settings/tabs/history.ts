@@ -10,9 +10,20 @@ const TIME_FMT = new Intl.DateTimeFormat("uk-UA", {
   hour12: false,
 });
 
+const SEARCH_DEBOUNCE_MS = 300;
+
 export function renderHistory(container: HTMLElement): () => void {
   container.innerHTML = `
     <h2 class="tab-title">History</h2>
+    <div style="margin-bottom: 12px;">
+      <input
+        type="search"
+        id="history-search"
+        placeholder="Search transcripts..."
+        style="width: 100%; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text); font-size: 14px;"
+      />
+      <div id="history-search-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; min-height: 14px;"></div>
+    </div>
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
       <span class="value" id="history-count">Loading...</span>
       <button class="btn btn-danger" id="btn-clear-history">Clear All</button>
@@ -23,6 +34,8 @@ export function renderHistory(container: HTMLElement): () => void {
     </div>
   `;
 
+  const searchInput = container.querySelector<HTMLInputElement>("#history-search")!;
+  const searchHint = container.querySelector<HTMLElement>("#history-search-hint")!;
   const countEl = container.querySelector<HTMLElement>("#history-count")!;
   const listEl = container.querySelector<HTMLElement>("#history-list")!;
   const loadMoreWrap = container.querySelector<HTMLElement>("#history-load-more")!;
@@ -32,8 +45,16 @@ export function renderHistory(container: HTMLElement): () => void {
   let offset = 0;
   let total = 0;
   const LIMIT = 30;
+  let inSearchMode = false;
+  let debounceTimer: number | null = null;
+  let searchSeq = 0;
 
   async function loadEntries(append = false) {
+    inSearchMode = false;
+    // Bump the sequence so any still-pending search response is dropped
+    // by the runSearch guard — prevents a stale search result from
+    // overwriting the newest-first list after the user cleared the box.
+    ++searchSeq;
     try {
       const resp = await api.getHistory(LIMIT, offset);
       total = resp.total;
@@ -58,6 +79,51 @@ export function renderHistory(container: HTMLElement): () => void {
       console.error(e);
     }
   }
+
+  async function runSearch(q: string) {
+    inSearchMode = true;
+    const seq = ++searchSeq;
+    searchHint.textContent = "Searching...";
+    try {
+      const resp = await api.searchHistory(q, LIMIT);
+      // Out-of-order responses: a slower previous query must not overwrite
+      // a fresher result.
+      if (seq !== searchSeq) return;
+      listEl.innerHTML = "";
+      countEl.textContent = `${resp.total} match${resp.total !== 1 ? "es" : ""}`;
+      if (resp.entries.length === 0) {
+        listEl.innerHTML = `<div style="color: var(--text-muted); padding: 32px; text-align: center;">No matches</div>`;
+      }
+      for (const entry of resp.entries) {
+        listEl.appendChild(createEntryEl(entry));
+      }
+      loadMoreWrap.style.display = "none";
+      searchHint.textContent = "";
+    } catch (e) {
+      if (seq !== searchSeq) return;
+      const msg = (e as Error).message || "Search failed";
+      searchHint.textContent = msg.toLowerCase().includes("invalid")
+        ? "Invalid search query"
+        : msg;
+    }
+  }
+
+  searchInput.addEventListener("input", () => {
+    if (debounceTimer !== null) {
+      window.clearTimeout(debounceTimer);
+    }
+    const value = searchInput.value.trim();
+    debounceTimer = window.setTimeout(() => {
+      debounceTimer = null;
+      if (!value) {
+        offset = 0;
+        searchHint.textContent = "";
+        loadEntries(false);
+      } else {
+        runSearch(value);
+      }
+    }, SEARCH_DEBOUNCE_MS);
+  });
 
   function createEntryEl(entry: HistoryEntry): HTMLElement {
     const el = document.createElement("div");
@@ -107,8 +173,10 @@ export function renderHistory(container: HTMLElement): () => void {
         try {
           await api.deleteHistoryEntry(entry.id);
           el.remove();
-          total--;
-          countEl.textContent = `${total} transcript${total !== 1 ? "s" : ""}`;
+          if (!inSearchMode) {
+            total--;
+            countEl.textContent = `${total} transcript${total !== 1 ? "s" : ""}`;
+          }
         } catch (err) {
           console.error(err);
         }
@@ -128,6 +196,8 @@ export function renderHistory(container: HTMLElement): () => void {
       await api.clearHistory();
       offset = 0;
       total = 0;
+      searchInput.value = "";
+      inSearchMode = false;
       listEl.innerHTML = `<div style="color: var(--text-muted); padding: 32px; text-align: center;">No transcripts yet</div>`;
       countEl.textContent = "0 transcripts";
       loadMoreWrap.style.display = "none";
@@ -141,7 +211,9 @@ export function renderHistory(container: HTMLElement): () => void {
 
   loadEntries();
 
-  return () => {};
+  return () => {
+    if (debounceTimer !== null) window.clearTimeout(debounceTimer);
+  };
 }
 
 function escapeHtml(str: string): string {

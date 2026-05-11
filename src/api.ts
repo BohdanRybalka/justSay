@@ -172,6 +172,22 @@ export interface HistoryListResponse {
   total: number;
 }
 
+export interface WordCount {
+  word: string;
+  count: number;
+}
+
+export interface TopWordsResponse {
+  items: WordCount[];
+  scanned: number;
+}
+
+export interface InsightsResponse {
+  model: string;
+  insights: string[];
+  scanned_words: number;
+}
+
 // --- API ---
 
 export const api = {
@@ -247,6 +263,18 @@ export const api = {
 
   clearHistory: () =>
     request<{ deleted: number }>("DELETE", "/history"),
+
+  searchHistory: (q: string, limit = 30) =>
+    request<HistoryListResponse>(
+      "GET",
+      `/history/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+    ),
+
+  // Words (Phase 1 — Plan 013)
+  wordsTop: (lang: "all" | "uk" | "en" = "all", limit = 50) =>
+    request<TopWordsResponse>("GET", `/words/top?lang=${lang}&limit=${limit}`),
+
+  wordsInsights: () => request<InsightsResponse>("GET", "/words/insights"),
 };
 
 // --- SSE helpers for model download/pull ---

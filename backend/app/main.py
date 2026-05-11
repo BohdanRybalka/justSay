@@ -16,6 +16,7 @@ try:
     from app.core.router import router as core_router
     from app.core.settings_router import router as settings_router
     from app.core.history_router import router as history_router
+    from app.core.words_router import router as words_router
     from app.stt.router import router as stt_router
     from app.llm.router import router as llm_router
     from app.audio.router import router as audio_router
@@ -78,6 +79,7 @@ app.add_middleware(
 app.include_router(core_router)
 app.include_router(settings_router)
 app.include_router(history_router)
+app.include_router(words_router)
 app.include_router(stt_router, prefix="/stt", tags=["STT"])
 app.include_router(llm_router, prefix="/llm", tags=["LLM"])
 app.include_router(audio_router, prefix="/audio", tags=["Audio"])
