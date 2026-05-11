@@ -7,16 +7,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import __version__
 from app.core.config import settings
 from app.core.logging_config import setup_logging
-from app.core.router import router as core_router
-from app.core.settings_router import router as settings_router
-from app.core.history_router import router as history_router
-from app.stt.router import router as stt_router
-from app.llm.router import router as llm_router
-from app.audio.router import router as audio_router
-from app.pipeline.router import router as pipeline_router
 
+# Set up logging before any router imports so startup crashes are captured in the log file.
 setup_logging()
 log = logging.getLogger(__name__)
+
+try:
+    from app.core.router import router as core_router
+    from app.core.settings_router import router as settings_router
+    from app.core.history_router import router as history_router
+    from app.stt.router import router as stt_router
+    from app.llm.router import router as llm_router
+    from app.audio.router import router as audio_router
+    from app.pipeline.router import router as pipeline_router
+except Exception as e:
+    log.critical("Router import failed — sidecar will exit: %s", e, exc_info=True)
+    raise
 
 
 @asynccontextmanager
