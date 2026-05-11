@@ -36,7 +36,7 @@ class GroqWhisperSTTProvider(STTProvider):
         if self._client is None:
             if not self._settings.groq_api_key:
                 raise RuntimeError(
-                    "JUSTSAY_STT_GROQ_API_KEY is required for Groq Whisper STT"
+                    "Groq API key is missing. Go to Settings → Keys and add your key."
                 )
             from groq import Groq
 

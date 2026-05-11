@@ -19,6 +19,17 @@ from app.core.user_settings import (
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
+_KEY_FIELDS = {"gemini_api_key", "groq_api_key"}
+_MASKED_PLACEHOLDER = "***"
+
+
+def _mask_keys(s: UserSettings) -> UserSettings:
+    """Return a copy of s with key fields replaced by the masked placeholder or empty string."""
+    return s.model_copy(update={
+        f: (_MASKED_PLACEHOLDER if getattr(s, f) else "")
+        for f in _KEY_FIELDS
+    })
+
 
 class StorageInfo(BaseModel):
     temp_dir: str
@@ -39,13 +50,18 @@ class SettingsUpdateResponse(BaseModel):
 
 @router.get("", response_model=UserSettings)
 async def get_settings():
-    return get_user_settings()
+    return _mask_keys(get_user_settings())
 
 
 @router.put("", response_model=SettingsUpdateResponse)
 async def put_settings(updates: dict):
     allowed_fields = set(UserSettings.model_fields.keys())
-    filtered = {k: v for k, v in updates.items() if k in allowed_fields}
+    # Strip the masked placeholder — sending "***" back must not overwrite a stored key.
+    filtered = {
+        k: v for k, v in updates.items()
+        if k in allowed_fields
+        and not (k in _KEY_FIELDS and v == _MASKED_PLACEHOLDER)
+    }
     try:
         outcome = update_user_settings(filtered)
     except ValueError as e:
@@ -53,7 +69,26 @@ async def put_settings(updates: dict):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     sync_to_runtime(outcome.settings)
-    return SettingsUpdateResponse(settings=outcome.settings, warning=outcome.warning)
+    return SettingsUpdateResponse(settings=_mask_keys(outcome.settings), warning=outcome.warning)
+
+
+class CloudKeyStatus(BaseModel):
+    gemini_key_set: bool
+    groq_key_set: bool
+
+
+@router.get("/cloud-status", response_model=CloudKeyStatus)
+async def cloud_key_status():
+    """Whether each Cloud API key is currently active in the runtime config.
+
+    Checks the runtime AppSettings (not UserSettings) so that keys provided
+    via .env are correctly reflected even if the user has never opened Settings → Keys.
+    """
+    from app.core.config import settings as runtime_settings
+    return CloudKeyStatus(
+        gemini_key_set=bool(runtime_settings.stt.gemini_api_key),
+        groq_key_set=bool(runtime_settings.stt.groq_api_key or runtime_settings.llm.groq_api_key),
+    )
 
 
 def _mask_home(p: Path) -> str:

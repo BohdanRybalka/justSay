@@ -80,8 +80,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p src-tauri/binaries
-          cp -R backend/dist/justsay-backend src-tauri/binaries/
-          mv "src-tauri/binaries/justsay-backend/justsay-backend${{ matrix.sidecar_ext }}" \
+          cp "backend/dist/justsay-backend${{ matrix.sidecar_ext }}" \
              "src-tauri/binaries/justsay-backend-${{ matrix.target }}${{ matrix.sidecar_ext }}"
 
       - name: Install npm deps

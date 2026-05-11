@@ -19,7 +19,7 @@ pub const PORT: u16 = 9377;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(300);
-const HEALTH_POLL_MAX_ATTEMPTS: u32 = 30; // 9 seconds total
+const HEALTH_POLL_MAX_ATTEMPTS: u32 = 100; // 30 seconds — covers --onefile extraction overhead
 
 static BACKEND_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
@@ -65,11 +65,11 @@ fn find_sidecar() -> Option<std::path::PathBuf> {
         "justsay-backend"
     };
 
-    // Production layout: <bundle>/Resources/justsay-backend (macOS) or alongside
-    // the .exe (Windows MSI/NSIS).
+    // Tauri externalBin places the sidecar alongside the main exe on both platforms:
+    // Windows: <install_dir>/justsay-backend.exe
+    // macOS:   JustSay.app/Contents/MacOS/justsay-backend
     let candidates = [
         exe_dir.join(name),
-        exe_dir.join("justsay-backend").join(name),
         exe_dir.join("..").join("Resources").join(name),
     ];
     candidates.into_iter().find(|p| p.exists())
@@ -170,8 +170,8 @@ fn is_process_alive() -> bool {
                     return false;
                 }
                 Err(e) => {
-                    log::error!("Failed to check backend process: {}", e);
-                    return false;
+                    log::warn!("try_wait error (assuming alive): {}", e);
+                    return true;
                 }
             }
         }
@@ -181,8 +181,10 @@ fn is_process_alive() -> bool {
 
 /// Poll /health until the backend responds or timeout.
 pub async fn wait_for_ready() -> Result<(), String> {
+    // Short per-request timeout so Connection-refused returns immediately;
+    // the 30-second budget (100 × 300ms) stays accurate.
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(Duration::from_millis(500))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -206,7 +208,7 @@ pub async fn wait_for_ready() -> Result<(), String> {
     }
 
     Err(
-        "Backend failed to start within 9 seconds. Check Python installation and dependencies."
+        "Backend failed to start within 30 seconds. Check Python installation and dependencies."
             .to_string(),
     )
 }

@@ -60,7 +60,7 @@ def test_cloud_stt_model_name():
 def test_cloud_stt_requires_api_key():
     settings = STTSettings(mode=ProviderMode.CLOUD, gemini_api_key="")
     provider = GeminiSTTProvider(settings)
-    with pytest.raises(RuntimeError, match="JUSTSAY_STT_GEMINI_API_KEY"):
+    with pytest.raises(RuntimeError, match="missing"):
         provider._get_client()
 
 

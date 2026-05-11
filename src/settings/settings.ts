@@ -7,6 +7,7 @@ import { renderHistory } from "./tabs/history";
 import { renderMetrics } from "./tabs/metrics";
 import { renderWords } from "./tabs/words";
 import { renderTranscribe } from "./tabs/transcribe";
+import { renderKeys } from "./tabs/keys";
 
 // --- State ---
 
@@ -26,11 +27,12 @@ const tabs: Record<string, (container: HTMLElement, settings: UserSettings) => (
   general: renderGeneral,
   models: renderModels,
   audio: renderAudio,
+  transcribe: renderTranscribe,
+  keys: renderKeys,
   storage: renderStorage,
   history: (container) => renderHistory(container),
   metrics: (container) => renderMetrics(container),
   words: (container) => renderWords(container),
-  transcribe: renderTranscribe,
 };
 
 function switchTab(tabName: string) {

@@ -29,7 +29,7 @@ def test_model_name_uses_configured_model():
 
 def test_missing_api_key_raises():
     provider = GroqWhisperSTTProvider(_settings(groq_api_key=""))
-    with pytest.raises(RuntimeError, match="JUSTSAY_STT_GROQ_API_KEY"):
+    with pytest.raises(RuntimeError, match="missing"):
         provider._get_client()
 
 

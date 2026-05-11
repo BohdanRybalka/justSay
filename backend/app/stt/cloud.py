@@ -48,7 +48,7 @@ class GeminiSTTProvider(STTProvider):
         if self._client is None:
             if not self._settings.gemini_api_key:
                 raise RuntimeError(
-                    "JUSTSAY_STT_GEMINI_API_KEY is required for Cloud STT mode"
+                    "Gemini API key is missing. Go to Settings → Keys and add your key."
                 )
             from google import genai
 

@@ -1,4 +1,4 @@
-# PyInstaller spec for the JustSay backend sidecar.
+# PyInstaller spec for the JustSay backend sidecar (--onefile mode).
 #
 # Build with:
 #   cd backend
@@ -6,13 +6,16 @@
 #   pyinstaller --clean --noconfirm build_sidecar.spec
 #
 # Output:
-#   backend/dist/justsay-backend-<TARGET_TRIPLE>/   (--onedir tree)
-#   backend/dist/justsay-backend-<TARGET_TRIPLE>(.exe)
+#   backend/dist/justsay-backend(.exe)   — single self-contained binary
 #
-# Tauri's `bundle.externalBin` will pick the right per-platform binary based on
-# the host triple (e.g. `justsay-backend-x86_64-pc-windows-msvc.exe`,
-# `justsay-backend-aarch64-apple-darwin`). Wrap this spec in a build script
-# that renames the output to the target triple before `tauri build`.
+# The CI release workflow copies this file to
+#   src-tauri/binaries/justsay-backend-<TARGET_TRIPLE>(.exe)
+# before `tauri build`. Tauri's `bundle.externalBin` then embeds it in the
+# installer and places it alongside the main executable at install time.
+#
+# Trade-off: --onefile extracts all dependencies to %TEMP%\MEI<hash> on each
+# launch (~5-10 s on a cold run). This is acceptable for a long-running sidecar
+# spawned once per app session; health-poll timeout in backend.rs is set to 30 s.
 
 # ruff: noqa
 from pathlib import Path
@@ -90,15 +93,17 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     [],
-    exclude_binaries=True,
     name="justsay-backend",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,            # UPX trips Windows Defender / macOS Gatekeeper
     # CONSOLE subsystem so a direct command-line launch
-    #   > dist/justsay-backend/justsay-backend.exe --host 127.0.0.1 --port 9377
+    #   > dist/justsay-backend.exe --host 127.0.0.1 --port 9377
     # shows uvicorn/FastAPI output for smoke tests + post-mortem diagnostics.
     # The Tauri Rust spawn path on Windows passes CREATE_NO_WINDOW *and*
     # stdout/stderr=Stdio::null, so end users never see a console window AND
@@ -109,15 +114,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,  # signing happens in the CI release workflow
     entitlements_file=None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name="justsay-backend",
+    runtime_tmpdir=None,
 )

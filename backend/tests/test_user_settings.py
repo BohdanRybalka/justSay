@@ -116,9 +116,12 @@ def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
     runtime_settings.stt.engine = "auto"
     runtime_settings.stt.whisper_model_size = "large-v3-turbo"
     runtime_settings.stt.whisper_device = "auto"
+    runtime_settings.stt.gemini_api_key = ""
+    runtime_settings.stt.groq_api_key = ""
     runtime_settings.llm.mode = ProviderMode.CLOUD
     runtime_settings.llm.ollama_host = "http://localhost:11434"
     runtime_settings.llm.ollama_model = "qwen3:1.7b"
+    runtime_settings.llm.groq_api_key = ""
 
     cleared: list[str] = []
     monkeypatch.setattr(
@@ -151,9 +154,12 @@ def test_sync_to_runtime_propagates_initial_prompt_and_invalidates_cache(monkeyp
     runtime_settings.stt.whisper_model_size = "large-v3-turbo"
     runtime_settings.stt.whisper_device = "auto"
     runtime_settings.stt.initial_prompt = ""
+    runtime_settings.stt.gemini_api_key = ""
+    runtime_settings.stt.groq_api_key = ""
     runtime_settings.llm.mode = ProviderMode.CLOUD
     runtime_settings.llm.ollama_host = "http://localhost:11434"
     runtime_settings.llm.ollama_model = "qwen3:1.7b"
+    runtime_settings.llm.groq_api_key = ""
 
     cleared: list[str] = []
     monkeypatch.setattr("app.stt.clear_cache", lambda: cleared.append("stt"))
@@ -187,3 +193,52 @@ def test_env_nested_stt_key_override(monkeypatch):
     monkeypatch.setenv("JUSTSAY_STT_GEMINI_API_KEY", "env-injected-key")
     fresh = AppSettings()
     assert fresh.stt.gemini_api_key == "env-injected-key"
+
+
+# --- API key fields in UserSettings ----------------------------------------
+
+def test_api_keys_round_trip(tmp_path):
+    """gemini_api_key and groq_api_key persist through update_user_settings."""
+    user_settings.update_user_settings({"gemini_api_key": "AIza-test", "groq_api_key": "gsk-test"})
+    loaded = user_settings.get_user_settings()
+    assert loaded.gemini_api_key == "AIza-test"
+    assert loaded.groq_api_key == "gsk-test"
+
+
+def test_sync_to_runtime_propagates_keys(monkeypatch):
+    """sync_to_runtime pushes non-empty keys into runtime STT and LLM configs."""
+    from app.core.config import settings as runtime_settings
+
+    runtime_settings.stt.gemini_api_key = ""
+    runtime_settings.stt.groq_api_key = ""
+    runtime_settings.llm.groq_api_key = ""
+
+    cleared: list[str] = []
+    monkeypatch.setattr("app.stt.clear_cache", lambda: cleared.append("stt"))
+    monkeypatch.setattr("app.llm.clear_cache", lambda: cleared.append("llm"))
+
+    us = user_settings.UserSettings(gemini_api_key="AIza-new", groq_api_key="gsk-new")
+    user_settings.sync_to_runtime(us)
+
+    assert runtime_settings.stt.gemini_api_key == "AIza-new"
+    assert runtime_settings.stt.groq_api_key == "gsk-new"
+    assert runtime_settings.llm.groq_api_key == "gsk-new"
+    assert "stt" in cleared
+    assert "llm" in cleared
+
+
+def test_sync_to_runtime_preserves_env_key_when_user_key_empty(monkeypatch):
+    """Empty UserSettings key must NOT overwrite a key already in the runtime (from .env)."""
+    from app.core.config import settings as runtime_settings
+
+    runtime_settings.stt.gemini_api_key = "env-key"
+    runtime_settings.llm.groq_api_key = "env-groq"
+
+    monkeypatch.setattr("app.stt.clear_cache", lambda: None)
+    monkeypatch.setattr("app.llm.clear_cache", lambda: None)
+
+    us = user_settings.UserSettings(gemini_api_key="", groq_api_key="")
+    user_settings.sync_to_runtime(us)
+
+    assert runtime_settings.stt.gemini_api_key == "env-key"
+    assert runtime_settings.llm.groq_api_key == "env-groq"

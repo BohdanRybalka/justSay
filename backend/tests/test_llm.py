@@ -48,7 +48,7 @@ def test_cloud_llm_model_name():
 def test_cloud_llm_requires_api_key():
     settings = LLMSettings(mode=ProviderMode.CLOUD, groq_api_key="")
     provider = CloudLLMProvider(settings)
-    with pytest.raises(RuntimeError, match="JUSTSAY_LLM_GROQ_API_KEY"):
+    with pytest.raises(RuntimeError, match="missing"):
         provider._get_client()
 
 

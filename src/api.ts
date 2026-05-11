@@ -64,6 +64,15 @@ export interface UserSettings {
    *  Python `STTSettings.initial_prompt` docstring for per-provider semantics.
    *  Backend enforces a 500-char ceiling. */
   initial_prompt: string;
+  /** Cloud API keys. Always returned as `"***"` (set) or `""` (not set) by GET/PUT.
+   *  Send the real key to set it; sending `"***"` is a no-op (backend ignores it). */
+  gemini_api_key: string;
+  groq_api_key: string;
+}
+
+export interface CloudKeyStatus {
+  gemini_key_set: boolean;
+  groq_key_set: boolean;
 }
 
 export interface LocalSttStatus {
@@ -224,6 +233,8 @@ export const api = {
   getStorageInfo: () => request<StorageInfo>("GET", "/settings/storage"),
 
   cleanupTemp: () => request<CleanupResult>("POST", "/settings/cleanup"),
+
+  cloudKeyStatus: () => request<CloudKeyStatus>("GET", "/settings/cloud-status"),
 
   // History
   getHistory: (limit = 50, offset = 0) =>

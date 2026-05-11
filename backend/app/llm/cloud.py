@@ -25,7 +25,7 @@ class CloudLLMProvider(LLMProvider):
         if self._client is None:
             if not self._settings.groq_api_key:
                 raise RuntimeError(
-                    "JUSTSAY_LLM_GROQ_API_KEY is required for Cloud LLM mode"
+                    "Groq API key is missing. Go to Settings → Keys and add your key."
                 )
             from groq import Groq
 

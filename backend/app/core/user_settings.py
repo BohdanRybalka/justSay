@@ -61,6 +61,13 @@ class UserSettings(BaseModel):
     # Cyrillic input.
     initial_prompt: str = Field(default="", max_length=500)
 
+    # Cloud API keys (Layer 2 — user preference, stored plaintext in ~/.justsay/settings.json).
+    # Empty string means "not set via UI — fall back to .env / AppSettings default".
+    # sync_to_runtime only pushes non-empty values so .env keys remain active if the
+    # user has never visited Settings → Keys.
+    gemini_api_key: str = ""
+    groq_api_key: str = ""
+
 
 @dataclass
 class UpdateOutcome:
@@ -211,11 +218,14 @@ def sync_to_runtime(us: UserSettings) -> None:
         or settings.stt.whisper_device != us.whisper_device
         or settings.stt.engine != us.stt_engine
         or settings.stt.initial_prompt != us.initial_prompt
+        or (us.gemini_api_key and settings.stt.gemini_api_key != us.gemini_api_key)
+        or (us.groq_api_key and settings.stt.groq_api_key != us.groq_api_key)
     )
     changed_llm = (
         settings.llm.mode != llm_mode
         or settings.llm.ollama_model != us.ollama_model
         or settings.llm.ollama_host != us.ollama_host
+        or (us.groq_api_key and settings.llm.groq_api_key != us.groq_api_key)
     )
 
     settings.stt.mode = stt_mode
@@ -224,6 +234,12 @@ def sync_to_runtime(us: UserSettings) -> None:
     settings.stt.cloud_routing_threshold = us.cloud_routing_threshold
     settings.stt.engine = us.stt_engine
     settings.stt.initial_prompt = us.initial_prompt
+    # Only overwrite if non-empty: preserves .env fallback when user hasn't set a key via UI.
+    if us.gemini_api_key:
+        settings.stt.gemini_api_key = us.gemini_api_key
+    if us.groq_api_key:
+        settings.stt.groq_api_key = us.groq_api_key
+        settings.llm.groq_api_key = us.groq_api_key
 
     settings.llm.mode = llm_mode
     settings.llm.ollama_model = us.ollama_model

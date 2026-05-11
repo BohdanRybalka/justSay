@@ -186,7 +186,9 @@ async function stopAndProcess() {
     setState("done", result.text || "Done");
     showRouteBadge(result);
   } catch (e) {
-    setState("error", "Failed");
+    const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
+    const errorLabel = msg.includes("missing") ? "Add key in Settings" : "Failed";
+    setState("error", errorLabel);
     console.error("Pipeline failed:", e);
   } finally {
     isTransitioning = false;
