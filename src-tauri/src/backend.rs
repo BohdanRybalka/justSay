@@ -72,12 +72,12 @@ fn sidecar_stderr() -> Stdio {
     Stdio::null()
 }
 
-/// Look for a PyInstaller-frozen sidecar binary next to the Tauri executable.
+/// Look for the PyInstaller-frozen sidecar binary shipped with the installer.
 ///
-/// The CI release workflow (Plan 008) ships a `justsay-backend(.exe)` next to the
-/// app binary. When that binary is present we prefer it — the user does not need
-/// a system Python install. When it is absent we fall back to spawning system
-/// Python (existing dev-mode behaviour).
+/// The CI release workflow builds in --onedir mode and bundles the entire
+/// `justsay-backend/` directory via Tauri resources. When found we prefer it —
+/// the user does not need a system Python install. When absent (dev mode) we
+/// fall back to spawning system Python.
 fn find_sidecar() -> Option<std::path::PathBuf> {
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     let name = if cfg!(windows) {
@@ -86,12 +86,14 @@ fn find_sidecar() -> Option<std::path::PathBuf> {
         "justsay-backend"
     };
 
-    // Tauri externalBin places the sidecar alongside the main exe on both platforms:
-    // Windows: <install_dir>/justsay-backend.exe
-    // macOS:   JustSay.app/Contents/MacOS/justsay-backend
+    // --onedir layout (production): Tauri resources bundle places the sidecar
+    // directory alongside the main exe (Windows) or in Contents/Resources/ (macOS).
+    //   Windows NSIS: <install_dir>\justsay-backend\justsay-backend.exe
+    //   macOS bundle: Contents/Resources/justsay-backend/justsay-backend
+    let subdir = std::path::Path::new("justsay-backend").join(name);
     let candidates = [
-        exe_dir.join(name),
-        exe_dir.join("..").join("Resources").join(name),
+        exe_dir.join(&subdir),
+        exe_dir.join("..").join("Resources").join(&subdir),
     ];
     candidates.into_iter().find(|p| p.exists())
 }
