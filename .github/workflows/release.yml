@@ -35,6 +35,12 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
 
+    # Job-level env so `if:` on individual steps can read it.
+    # `secrets` context is NOT available inside step-level `if:` reliably, and
+    # a step's own `env:` block is invisible to its own `if:` (eval order).
+    env:
+      HAS_APPLE_CERT: ${{ secrets.MACOS_NOTARIZE_CERT != '' }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -81,17 +87,60 @@ jobs:
       - name: Install npm deps
         run: npm ci
 
+      # Export Apple signing env ONLY when the cert secret is non-empty.
+      # Previously these were set unconditionally; an empty `APPLE_CERTIFICATE`
+      # made `security import` fail with "One or more parameters... were not valid".
+      # When the secret is missing tauri-action now sees no APPLE_* env at all
+      # and gracefully skips signing — producing an unsigned .app, which is
+      # what we want until Plan 008 Phase B (paid Apple Developer onboarding).
+      #
+      # Multi-line secret values (base64 .p12 certs commonly have newlines every
+      # 76 chars) require the heredoc form for $GITHUB_ENV — a plain
+      # `echo "KEY=VALUE"` truncates at the first newline and treats the rest
+      # as separate shell commands. The `EOF<n>` per-key delimiter pattern
+      # below is the GitHub-documented multi-line-safe idiom.
+      - name: Export Apple signing env (if cert secret is set)
+        if: runner.os == 'macOS' && env.HAS_APPLE_CERT == 'true'
+        shell: bash
+        env:
+          MACOS_NOTARIZE_CERT: ${{ secrets.MACOS_NOTARIZE_CERT }}
+          MACOS_NOTARIZE_CERT_PASSWORD: ${{ secrets.MACOS_NOTARIZE_CERT_PASSWORD }}
+          MACOS_NOTARIZE_IDENTITY: ${{ secrets.MACOS_NOTARIZE_IDENTITY }}
+          MACOS_NOTARIZE_APPLE_ID: ${{ secrets.MACOS_NOTARIZE_APPLE_ID }}
+          MACOS_NOTARIZE_APP_PASSWORD: ${{ secrets.MACOS_NOTARIZE_APP_PASSWORD }}
+          MACOS_NOTARIZE_TEAM_ID: ${{ secrets.MACOS_NOTARIZE_TEAM_ID }}
+        run: |
+          write_kv () {
+            local key="$1"
+            local value="$2"
+            local delim
+            delim="EOF_$(uuidgen | tr -d '-')"
+            {
+              echo "${key}<<${delim}"
+              printf '%s\n' "${value}"
+              echo "${delim}"
+            } >> "$GITHUB_ENV"
+          }
+          write_kv APPLE_CERTIFICATE          "$MACOS_NOTARIZE_CERT"
+          write_kv APPLE_CERTIFICATE_PASSWORD "$MACOS_NOTARIZE_CERT_PASSWORD"
+          write_kv APPLE_SIGNING_IDENTITY     "$MACOS_NOTARIZE_IDENTITY"
+          write_kv APPLE_ID                   "$MACOS_NOTARIZE_APPLE_ID"
+          write_kv APPLE_PASSWORD             "$MACOS_NOTARIZE_APP_PASSWORD"
+          write_kv APPLE_TEAM_ID              "$MACOS_NOTARIZE_TEAM_ID"
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
-          # Optional code signing — only used if secrets are present.
-          APPLE_CERTIFICATE: ${{ secrets.MACOS_NOTARIZE_CERT }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_NOTARIZE_CERT_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_NOTARIZE_IDENTITY }}
-          APPLE_ID: ${{ secrets.MACOS_NOTARIZE_APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZE_APP_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.MACOS_NOTARIZE_TEAM_ID }}
-          # Windows: see Azure Trusted Signing docs (set up via separate step if needed).
+          # Required by tauri-action to create / upload the draft release.
+          # Without it the build succeeds but the publish step fails with
+          # "Error: GITHUB_TOKEN is required". GITHUB_TOKEN is provided
+          # automatically by Actions — no extra secret needed.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Apple signing env vars are exported by the previous step when
+          # MACOS_NOTARIZE_CERT secret is non-empty. Until Plan 008 Phase B,
+          # those secrets are unset → unsigned .app is the expected output.
+          # Windows: Azure Trusted Signing wires in as a separate step
+          # (Plan 008 Phase B, $10/mo onboarding).
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'JustSay ${{ github.ref_name }}'

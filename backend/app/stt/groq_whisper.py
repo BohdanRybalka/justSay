@@ -47,14 +47,24 @@ class GroqWhisperSTTProvider(STTProvider):
         """Send audio file to Groq Whisper API. ``style`` kwarg is ignored (Groq can't structure)."""
         client = self._get_client()
         size_kb = audio_path.stat().st_size / 1024
+        # Groq rejects ``prompt=""`` with 400, so coerce empty/whitespace to None.
+        # Never log the glossary content itself — only length — to avoid leaking
+        # whatever the user happened to paste.
+        prompt = self._settings.initial_prompt.strip() or None
         log.info(
-            "Groq Whisper: POST transcriptions model=%s file=%s size=%.1fKB lang=%s",
+            "Groq Whisper: POST transcriptions model=%s file=%s size=%.1fKB lang=%s glossary=%s",
             self._settings.groq_whisper_model, audio_path.name, size_kb, language,
+            f"{len(prompt)}chars" if prompt else "none",
         )
 
         try:
             text = await asyncio.to_thread(
-                self._call_groq, client, self._settings.groq_whisper_model, audio_path, language
+                self._call_groq,
+                client,
+                self._settings.groq_whisper_model,
+                audio_path,
+                language,
+                prompt,
             )
         except Exception:
             log.exception("Groq Whisper call failed")
@@ -66,16 +76,25 @@ class GroqWhisperSTTProvider(STTProvider):
         self._client = None
 
     @staticmethod
-    def _call_groq(client, model: str, audio_path: Path, language: str) -> str:
+    def _call_groq(
+        client,
+        model: str,
+        audio_path: Path,
+        language: str,
+        prompt: str | None,
+    ) -> str:
         """Isolated SDK call — mockable in tests without installing groq."""
         try:
             with audio_path.open("rb") as fh:
-                response = client.audio.transcriptions.create(
-                    file=(audio_path.name, fh.read()),
-                    model=model,
-                    language=language,
-                    response_format="text",
-                )
+                kwargs: dict = {
+                    "file": (audio_path.name, fh.read()),
+                    "model": model,
+                    "language": language,
+                    "response_format": "text",
+                }
+                if prompt:
+                    kwargs["prompt"] = prompt
+                response = client.audio.transcriptions.create(**kwargs)
         except Exception as e:
             # HTTP 429 (rate limit) bubbles up with a clearer message.
             msg = str(e)

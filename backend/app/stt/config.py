@@ -34,4 +34,15 @@ class STTSettings(BaseSettings):
     whisper_model_size: str = "large-v3-turbo"
     whisper_device: str = "auto"  # auto | cpu | cuda
 
+    # User-tunable glossary / vocabulary hint. Threaded into every STT
+    # provider with provider-specific semantics:
+    #   - faster-whisper: passed as ``initial_prompt`` (decoder conditioning,
+    #     hard-truncated to ~224 Whisper tokens — keep short!)
+    #   - Groq Whisper: passed as the ``prompt`` parameter (text prefix)
+    #   - Gemini: appended to the system prompt inside <glossary>...</glossary>
+    #     markers so the model treats it as data, not instructions
+    # 500 chars is a conservative ceiling that stays inside Whisper's token
+    # budget even for Cyrillic input (~180 tokens at 3 chars/token).
+    initial_prompt: str = Field(default="", max_length=500)
+
     model_config = SettingsConfigDict(env_prefix="JUSTSAY_STT_", env_file=".env", extra="ignore")

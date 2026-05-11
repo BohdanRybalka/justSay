@@ -9,46 +9,87 @@
 </head>
 <body>
   <div id="widget" class="widget idle">
-    <svg class="widget-logo" viewBox="0 0 64 64" width="28" height="28" aria-hidden="true">
-      <defs>
-        <linearGradient id="w-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#7b73ff" />
-          <stop offset="100%" stop-color="#4cc9f0" />
-        </linearGradient>
-        <linearGradient id="w-grad-hot" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#ff5ea0" />
-          <stop offset="100%" stop-color="#ffae3c" />
-        </linearGradient>
-        <radialGradient id="w-halo" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stop-color="#7b73ff" stop-opacity="0.55" />
-          <stop offset="100%" stop-color="#7b73ff" stop-opacity="0" />
-        </radialGradient>
-      </defs>
-      <circle class="js-halo" cx="32" cy="32" r="28" fill="url(#w-halo)" />
-      <circle class="js-orbit" cx="32" cy="32" r="26" fill="none"
-              stroke="url(#w-grad)" stroke-width="1" stroke-dasharray="2 6" />
-      <g transform="translate(32 32)">
-        <g class="js-mark">
-          <path class="js-stroke js-s"
-                d="M -14 -10 C -8 -16, 8 -16, 14 -10 C 20 -4, -2 0, 14 6 C 20 12, 8 16, -8 12"
-                fill="none" stroke="url(#w-grad)" stroke-width="3.5"
-                stroke-linecap="round" stroke-linejoin="round" />
-          <path class="js-stroke js-j"
-                d="M 6 -14 L 6 8 C 6 14, -2 16, -8 12"
-                fill="none" stroke="url(#w-grad)" stroke-width="3.5"
-                stroke-linecap="round" stroke-linejoin="round" />
-          <circle class="js-dot" cx="6" cy="-18" r="2.6" fill="url(#w-grad)" />
+    <div class="widget-icon js-widget js-widget--idle" id="widget-icon" role="img" aria-label="JustSay">
+      <svg viewBox="0 0 160 160" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <defs>
+          <linearGradient id="js-grad-brand" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"  stop-color="#7b73ff" />
+            <stop offset="100%" stop-color="#4cc9f0" />
+          </linearGradient>
+          <linearGradient id="js-grad-hot" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"  stop-color="#ff5ea0" />
+            <stop offset="100%" stop-color="#ffae3c" />
+          </linearGradient>
+          <clipPath id="js-capsule-clip">
+            <rect x="64" y="44" width="32" height="48" rx="16" />
+          </clipPath>
+        </defs>
+
+        <circle class="js-spinner-track" cx="80" cy="82" r="54"
+                fill="none" stroke="currentColor" stroke-width="3" />
+        <circle class="js-spinner" cx="80" cy="82" r="54"
+                fill="none" stroke="url(#js-grad-brand)" stroke-width="3"
+                stroke-linecap="round" stroke-dasharray="85 255" />
+
+        <g class="js-arc js-arc--1">
+          <path d="M30 82 Q 22 70, 30 58" fill="none" stroke="currentColor" stroke-width="1.5" />
+          <path d="M130 82 Q 138 70, 130 58" fill="none" stroke="currentColor" stroke-width="1.5" />
         </g>
-      </g>
-      <g class="js-bars" transform="translate(32 50)">
-        <rect class="js-bar js-bar-1" x="-14" y="-3" width="2.5" height="6" rx="1.25" fill="url(#w-grad-hot)" />
-        <rect class="js-bar js-bar-2" x="-9"  y="-5" width="2.5" height="10" rx="1.25" fill="url(#w-grad-hot)" />
-        <rect class="js-bar js-bar-3" x="-4"  y="-7" width="2.5" height="14" rx="1.25" fill="url(#w-grad-hot)" />
-        <rect class="js-bar js-bar-4" x="1"   y="-5" width="2.5" height="10" rx="1.25" fill="url(#w-grad-hot)" />
-        <rect class="js-bar js-bar-5" x="6"   y="-3" width="2.5" height="6" rx="1.25" fill="url(#w-grad-hot)" />
-        <rect class="js-bar js-bar-6" x="11"  y="-2" width="2.5" height="4" rx="1.25" fill="url(#w-grad-hot)" />
-      </g>
-    </svg>
+        <g class="js-arc js-arc--2">
+          <path d="M22 90 Q 10 72, 22 50" fill="none" stroke="currentColor" stroke-width="1.5" />
+          <path d="M138 90 Q 150 72, 138 50" fill="none" stroke="currentColor" stroke-width="1.5" />
+        </g>
+
+        <g class="js-liquid" clip-path="url(#js-capsule-clip)">
+          <path class="js-liquid-wave js-liquid-wave--1"
+                d="M-32 70 Q -16 50, 0 70 T 32 70 T 64 70 T 96 70 T 128 70 T 160 70 T 192 70 V 112 H -32 Z"
+                fill="url(#js-grad-brand)" opacity="0.9" />
+          <path class="js-liquid-wave js-liquid-wave--2"
+                d="M-32 76 Q -16 58, 0 76 T 32 76 T 64 76 T 96 76 T 128 76 T 160 76 T 192 76 V 112 H -32 Z"
+                fill="url(#js-grad-brand)" opacity="0.5" />
+        </g>
+
+        <g class="js-mark">
+          <rect class="js-capsule" x="64" y="44" width="32" height="48" rx="16"
+                fill="none" stroke="currentColor" stroke-width="2.5" />
+          <g clip-path="url(#js-capsule-clip)">
+            <rect class="js-fill" x="64" y="44" width="32" height="48"
+                  fill="url(#js-grad-brand)" />
+          </g>
+          <line class="js-stroke js-stroke--soft" x1="70" y1="56" x2="70" y2="80"
+                stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.6" />
+          <line class="js-stroke js-stroke--soft" x1="80" y1="54" x2="80" y2="82"
+                stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.6" />
+          <line class="js-stroke js-stroke--soft" x1="90" y1="56" x2="90" y2="80"
+                stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.6" />
+          <path class="js-stroke" d="M50 86 Q 50 110, 80 110 Q 110 110, 110 86"
+                fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+          <line class="js-stroke" x1="80" y1="110" x2="80" y2="124"
+                stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+          <line class="js-stroke" x1="64" y1="124" x2="96" y2="124"
+                stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+        </g>
+
+        <circle class="js-rec-dot" cx="80" cy="32" r="4" fill="#7b73ff" />
+
+        <circle class="js-ring" cx="80" cy="82" r="42"
+                fill="none" stroke="#4cc9f0" stroke-width="2.5" />
+        <circle class="js-ring js-ring--2" cx="80" cy="82" r="42"
+                fill="none" stroke="#4cc9f0" stroke-width="1.5" opacity="0.6" />
+        <path class="js-check" d="M58 82 L 74 100 L 106 64"
+              fill="none" stroke="#4cc9f0" stroke-width="4"
+              stroke-linecap="round" stroke-linejoin="round" />
+
+        <g class="js-error">
+          <circle class="js-error-halo" cx="80" cy="82" r="46"
+                  fill="none" stroke="#e57373" stroke-width="1.2"
+                  stroke-dasharray="1 5" opacity="0.55" />
+          <line class="js-error-bang" x1="80" y1="54" x2="80" y2="76"
+                stroke="#e57373" stroke-width="3.5" stroke-linecap="round" />
+          <circle class="js-error-bang" cx="80" cy="84" r="2.4" fill="#e57373" />
+        </g>
+      </svg>
+    </div>
     <div class="widget-content">
       <span class="widget-text" id="widget-text">JustSay</span>
       <span class="widget-duration" id="widget-duration"></span>

@@ -63,7 +63,12 @@ async def process_audio(
     )
 
     try:
-        result = await stt.transcribe(audio_path, language=language, style=style)
+        result = await stt.transcribe(
+            audio_path,
+            language=language,
+            style=style,
+            audio_duration=duration,
+        )
     except Exception:
         log.exception("STT transcribe failed (%s)", stt.model_name)
         raise

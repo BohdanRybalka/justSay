@@ -55,6 +55,12 @@ class UserSettings(BaseModel):
     # Smart routing threshold — audio <= this goes to Groq Whisper, above to Gemini.
     cloud_routing_threshold: float = 30.0
 
+    # Custom vocabulary / glossary plumbed into every STT provider. See
+    # ``app.stt.config.STTSettings.initial_prompt`` for per-provider semantics.
+    # 500 char ceiling stays inside Whisper's ~224-token prompt budget for
+    # Cyrillic input.
+    initial_prompt: str = Field(default="", max_length=500)
+
 
 @dataclass
 class UpdateOutcome:
@@ -204,6 +210,7 @@ def sync_to_runtime(us: UserSettings) -> None:
         or settings.stt.whisper_model_size != us.whisper_model_size
         or settings.stt.whisper_device != us.whisper_device
         or settings.stt.engine != us.stt_engine
+        or settings.stt.initial_prompt != us.initial_prompt
     )
     changed_llm = (
         settings.llm.mode != llm_mode
@@ -216,6 +223,7 @@ def sync_to_runtime(us: UserSettings) -> None:
     settings.stt.whisper_device = us.whisper_device
     settings.stt.cloud_routing_threshold = us.cloud_routing_threshold
     settings.stt.engine = us.stt_engine
+    settings.stt.initial_prompt = us.initial_prompt
 
     settings.llm.mode = llm_mode
     settings.llm.ollama_model = us.ollama_model

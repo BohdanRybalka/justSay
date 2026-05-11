@@ -28,6 +28,9 @@ class STTProvider(ABC):
                 - ``style`` ("normal" | "ai_prompt"): Gemini uses it to select
                   between a faithful transcription prompt and a structuring prompt.
                   Groq / local providers ignore it.
+                - ``audio_duration`` (float, seconds): when known, the local
+                  provider uses it to pick a latency-vs-accuracy beam_size
+                  (1 for short clips, 5 for long). Cloud providers ignore it.
 
         Returns:
             TranscriptionResult with text and optional token count.

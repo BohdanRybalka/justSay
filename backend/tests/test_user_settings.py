@@ -139,6 +139,43 @@ def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
     assert cleared == ["stt"]
 
 
+def test_sync_to_runtime_propagates_initial_prompt_and_invalidates_cache(monkeypatch):
+    """Changing the glossary mid-session must drop cached providers so the next
+    transcribe call picks up the new value (cached providers freeze settings
+    at construction time)."""
+    from app.core.config import settings as runtime_settings
+    from app.core.types import ProviderMode
+
+    runtime_settings.stt.mode = ProviderMode.CLOUD
+    runtime_settings.stt.engine = "auto"
+    runtime_settings.stt.whisper_model_size = "large-v3-turbo"
+    runtime_settings.stt.whisper_device = "auto"
+    runtime_settings.stt.initial_prompt = ""
+    runtime_settings.llm.mode = ProviderMode.CLOUD
+    runtime_settings.llm.ollama_host = "http://localhost:11434"
+    runtime_settings.llm.ollama_model = "qwen3:1.7b"
+
+    cleared: list[str] = []
+    monkeypatch.setattr("app.stt.clear_cache", lambda: cleared.append("stt"))
+    monkeypatch.setattr("app.llm.clear_cache", lambda: cleared.append("llm"))
+
+    us = user_settings.UserSettings(initial_prompt="Tauri Pydantic")
+    user_settings.sync_to_runtime(us)
+
+    assert runtime_settings.stt.initial_prompt == "Tauri Pydantic"
+    assert cleared == ["stt"]
+
+
+def test_initial_prompt_max_length_validation():
+    """The 500-char ceiling is enforced at Pydantic validation time."""
+    too_long = "a" * 501
+    with pytest.raises(ValueError):
+        user_settings.UserSettings(initial_prompt=too_long)
+
+    # 500 chars exactly is fine.
+    user_settings.UserSettings(initial_prompt="a" * 500)
+
+
 # --- ENV nested override after Phase 1.4 default refactor ----------------
 
 def test_env_nested_stt_key_override(monkeypatch):

@@ -15,6 +15,9 @@ yarn-error.log*
 
 # Build
 /dist
+/backend/dist
+/backend/build
+/backend/*.spec.bak
 
 # Environment
 .env
@@ -25,6 +28,7 @@ yarn-error.log*
 __pycache__/
 *.py[cod]
 .venv/
+.venv-*/
 venv/
 
 # OS

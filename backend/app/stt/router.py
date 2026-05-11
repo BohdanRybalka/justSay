@@ -6,8 +6,9 @@ from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.core.audio_validation import validate_audio_upload
 from app.core.config import settings
-from app.core.constants import ALLOWED_AUDIO_EXTENSIONS, MAX_UPLOAD_SIZE
+from app.core.constants import MAX_UPLOAD_SIZE
 from app.core.types import ProviderMode
 from app.core.user_settings import update_user_settings
 from app.core.utils import read_upload_with_limit
@@ -44,14 +45,15 @@ async def set_stt_mode(body: _ModeBody):
 async def transcribe_audio(file: UploadFile, language: str = "uk"):
     """Transcribe an uploaded audio file using the current STT provider."""
     ext = Path(file.filename).suffix.lower() if file.filename else ""
-    if ext not in ALLOWED_AUDIO_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Unsupported audio format")
+    # Read first so we can validate magic bytes, not just the filename.
+    content = await read_upload_with_limit(file, MAX_UPLOAD_SIZE)
+    # Raises HTTPException(400) on bad extension / bad magic / mismatch.
+    validate_audio_upload(content, file.filename)
 
     temp_path = settings.audio.temp_dir / f"upload_{uuid.uuid4().hex}{ext}"
 
     try:
         settings.audio.temp_dir.mkdir(parents=True, exist_ok=True)
-        content = await read_upload_with_limit(file, MAX_UPLOAD_SIZE)
         temp_path.write_bytes(content)
 
         provider = get_provider(settings.stt.mode, settings.stt)

@@ -62,8 +62,17 @@ def _mask_home(p: Path) -> str:
     Tries ``relative_to`` first (handles canonical paths). Falls back to a
     case-insensitive prefix match so Windows paths like ``c:\\users\\admin``
     vs ``C:\\Users\\Admin`` still get masked.
+
+    Paths OUTSIDE the home tree (network drives, /Volumes, custom data
+    folders) are returned as-is — this masking is a privacy-hygiene measure
+    for the common case, not a security boundary. If `Path.home()` itself
+    fails (e.g. missing `HOME`/`USERPROFILE` in a sandbox), we degrade to
+    returning the raw path rather than 500-ing the endpoint.
     """
-    home = Path.home()
+    try:
+        home = Path.home()
+    except (RuntimeError, OSError):
+        return str(p)
     try:
         rel = p.relative_to(home)
         return "~/" + str(rel).replace("\\", "/")
@@ -81,10 +90,19 @@ async def get_storage_info():
     s = get_user_settings()
     tmp_dir = SETTINGS_DIR / "tmp"
     hpath = history.history_path()
+    # All three paths are passed through `_mask_home`. `temp_dir` and the
+    # default `history_path` always live under `~/.justsay`, so masking is
+    # effectively unconditional there. `output_dir` may be relocated outside
+    # the home tree (network drives, external SSDs, custom data folders);
+    # in that case `_mask_home` returns the raw path unchanged — privacy
+    # hygiene is best-effort, not a hard boundary. `GET /settings` (the
+    # canonical settings endpoint that the PUT round-trip reads back from)
+    # is intentionally UNCHANGED so the frontend's revert logic in
+    # `src/settings/tabs/storage.ts` keeps working with real paths.
     return StorageInfo(
-        temp_dir=str(tmp_dir),
+        temp_dir=_mask_home(tmp_dir),
         temp_size_bytes=compute_dir_size(tmp_dir),
-        output_dir=s.output_dir,
+        output_dir=_mask_home(Path(s.output_dir)),
         history_path=_mask_home(hpath),
         history_entries=history.get_count(),
     )

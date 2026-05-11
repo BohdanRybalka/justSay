@@ -3,11 +3,23 @@ import { api } from "../api";
 // --- State ---
 
 type WidgetState = "idle" | "recording" | "processing" | "done" | "error";
+type IconState = "idle" | "hover" | "recording" | "processing" | "done" | "error";
+
+const ICON_STATE_MODIFIERS: ReadonlySet<IconState> = new Set<IconState>([
+  "idle",
+  "hover",
+  "recording",
+  "processing",
+  "done",
+  "error",
+]);
 
 let state: WidgetState = "idle";
 let isTransitioning = false;
+let isHovered = false;
 let durationInterval: ReturnType<typeof setInterval> | null = null;
 let marqueeTimeout: ReturnType<typeof setTimeout> | null = null;
+let iconFlashTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Settings (loaded from backend)
 let currentShortcut = "Ctrl+Alt+KeyV";
@@ -19,11 +31,30 @@ const MAX_MARQUEE_SECONDS = 20;
 // --- DOM ---
 
 const widget = document.getElementById("widget")!;
+const iconEl = document.getElementById("widget-icon")!;
 const content = document.querySelector(".widget-content")! as HTMLElement;
 const text = document.getElementById("widget-text")!;
 const durationEl = document.getElementById("widget-duration")!;
 const marquee = document.getElementById("widget-marquee")!;
 const marqueeInner = document.getElementById("marquee-inner")!;
+
+// --- Icon helpers ---
+
+function updateIcon(next: IconState) {
+  const keep = [...iconEl.classList].filter(
+    (c) =>
+      c.startsWith("js-widget--") &&
+      !ICON_STATE_MODIFIERS.has(c.slice("js-widget--".length) as IconState),
+  );
+  iconEl.className = ["widget-icon", "js-widget", ...keep, `js-widget--${next}`].join(" ");
+}
+
+// "Interactive window" — when hover should respond. Idle is the obvious case;
+// the calm tail of `done` (after the 700 ms one-shot, while marquee still
+// scrolls) is also interactive, so the icon doesn't get stuck on `hover`.
+function isInteractive(): boolean {
+  return state === "idle" || (state === "done" && iconFlashTimer === null);
+}
 
 // --- State management ---
 
@@ -41,6 +72,11 @@ function setState(newState: WidgetState, message?: string) {
     marqueeTimeout = null;
   }
 
+  if (iconFlashTimer) {
+    clearTimeout(iconFlashTimer);
+    iconFlashTimer = null;
+  }
+
   marquee.classList.remove("active");
   content.style.display = "flex";
 
@@ -48,21 +84,30 @@ function setState(newState: WidgetState, message?: string) {
     case "idle":
       text.textContent = "JustSay";
       durationEl.textContent = "";
+      updateIcon(isHovered ? "hover" : "idle");
       break;
     case "recording":
       text.textContent = "Recording";
       startDurationTimer();
+      updateIcon("recording");
       break;
     case "processing":
       text.textContent = "Processing";
       durationEl.textContent = "";
+      updateIcon("processing");
       break;
     case "done":
+      updateIcon("done");
+      iconFlashTimer = setTimeout(() => {
+        iconFlashTimer = null;
+        if (state === "done") updateIcon(isHovered ? "hover" : "idle");
+      }, 700);
       showMarquee(message || "Done");
       break;
     case "error":
       text.textContent = message || "Error";
       durationEl.textContent = "";
+      updateIcon("error");
       setTimeout(() => {
         if (state === "error") setState("idle");
       }, 3000);
@@ -179,6 +224,18 @@ async function toggleRecording() {
 
 widget.addEventListener("click", () => {
   toggleRecording();
+});
+
+// --- Hover (icon-only — only flips when the widget is in an interactive state) ---
+
+widget.addEventListener("mouseenter", () => {
+  isHovered = true;
+  if (isInteractive()) updateIcon("hover");
+});
+
+widget.addEventListener("mouseleave", () => {
+  isHovered = false;
+  if (isInteractive()) updateIcon("idle");
 });
 
 // --- Global shortcut ---

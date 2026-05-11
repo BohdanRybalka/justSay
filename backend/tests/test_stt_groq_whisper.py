@@ -65,7 +65,7 @@ def test_rate_limit_raises_clearer_runtime_error(tmp_path):
     )
 
     with pytest.raises(RuntimeError, match="Groq rate limit"):
-        provider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "uk")
+        provider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None)
 
 
 def test_other_errors_bubble_up_unchanged(tmp_path):
@@ -75,7 +75,7 @@ def test_other_errors_bubble_up_unchanged(tmp_path):
     client.audio.transcriptions.create.side_effect = ValueError("invalid audio")
 
     with pytest.raises(ValueError, match="invalid audio"):
-        provider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "uk")
+        provider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None)
 
 
 def test_cleanup_resets_client():
@@ -83,3 +83,63 @@ def test_cleanup_resets_client():
     provider._client = MagicMock()
     provider.cleanup()
     assert provider._client is None
+
+
+# --- STT quality wins: initial_prompt threading ---
+
+
+@pytest.mark.asyncio
+async def test_groq_threads_initial_prompt_when_set(tmp_path):
+    """Non-empty glossary lands in the SDK call as `prompt=...`."""
+    provider = GroqWhisperSTTProvider(_settings(initial_prompt="Tauri FastAPI"))
+    provider._client = MagicMock()
+    captured: dict = {}
+
+    def _spy(client, model, audio_path, language, prompt):
+        captured["prompt"] = prompt
+        return "ok"
+
+    with patch.object(GroqWhisperSTTProvider, "_call_groq", side_effect=_spy):
+        await provider.transcribe(_wav(tmp_path), language="uk")
+
+    assert captured["prompt"] == "Tauri FastAPI"
+
+
+@pytest.mark.asyncio
+async def test_groq_omits_empty_prompt_to_avoid_400(tmp_path):
+    """Empty/whitespace glossary must NOT become `prompt=""` — Groq rejects that with 400."""
+    provider = GroqWhisperSTTProvider(_settings(initial_prompt="   "))
+    provider._client = MagicMock()
+    captured: dict = {}
+
+    def _spy(client, model, audio_path, language, prompt):
+        captured["prompt"] = prompt
+        return "ok"
+
+    with patch.object(GroqWhisperSTTProvider, "_call_groq", side_effect=_spy):
+        await provider.transcribe(_wav(tmp_path), language="uk")
+
+    assert captured["prompt"] is None
+
+
+def test_groq_sdk_payload_skips_prompt_key_when_none(tmp_path):
+    """The Groq SDK call must NOT include a `prompt` key at all when none is set."""
+    provider = GroqWhisperSTTProvider(_settings())
+    client = MagicMock()
+    client.audio.transcriptions.create.return_value = "ok"
+
+    provider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None)
+
+    call_kwargs = client.audio.transcriptions.create.call_args.kwargs
+    assert "prompt" not in call_kwargs
+
+
+def test_groq_sdk_payload_includes_prompt_when_set(tmp_path):
+    provider = GroqWhisperSTTProvider(_settings())
+    client = MagicMock()
+    client.audio.transcriptions.create.return_value = "ok"
+
+    provider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", "glossary text")
+
+    call_kwargs = client.audio.transcriptions.create.call_args.kwargs
+    assert call_kwargs["prompt"] == "glossary text"

@@ -57,6 +57,114 @@ async def test_switch_stt_mode_invalid(client):
     assert resp.status_code == 422
 
 
+# --- /settings/storage path masking (Tech Debt batch v0.8.2) -------
+
+def test_mask_home_masks_paths_under_home(tmp_path, monkeypatch):
+    """Unit test for the `_mask_home` function — paths under `Path.home()`
+    come back as `~/...`."""
+    from pathlib import Path
+
+    from app.core.settings_router import _mask_home
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    masked = _mask_home(fake_home / ".justsay" / "history.db")
+    assert masked.startswith("~/"), masked
+    assert "history.db" in masked
+
+
+def test_mask_home_passes_through_paths_outside_home(tmp_path, monkeypatch):
+    """Network drives / external SSDs are returned as-is.
+
+    Documents the privacy hygiene's boundary — see release notes v0.8.2.
+    If users point `output_dir` at a Dropbox share or NAS, we'd rather show
+    the real path than lie with `~/...`.
+    """
+    from pathlib import Path
+
+    from app.core.settings_router import _mask_home
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    external = tmp_path / "external" / "data"
+    external.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    assert _mask_home(external) == str(external)
+
+
+def test_mask_home_degrades_gracefully_when_home_unavailable(tmp_path, monkeypatch):
+    """`Path.home()` can raise `RuntimeError` in sandboxes / containers
+    without `HOME`/`USERPROFILE` — endpoint must not 500."""
+    from pathlib import Path
+
+    from app.core.settings_router import _mask_home
+
+    def _raise(cls):
+        raise RuntimeError("no home")
+
+    monkeypatch.setattr(Path, "home", classmethod(_raise))
+    assert _mask_home(tmp_path / "foo") == str(tmp_path / "foo")
+
+
+@pytest.mark.asyncio
+async def test_storage_info_routes_output_dir_through_mask(client, tmp_path, monkeypatch):
+    """The router actually calls `_mask_home` for `output_dir`.
+
+    Sets `output_dir` under a fake home so we can assert the round-trip
+    masking without depending on the dev machine's real `~/.justsay`
+    contents. The unit tests above cover the masking logic itself.
+    """
+    from pathlib import Path
+
+    from app.core import user_settings as us
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    fake_output = fake_home / "JustSayData"
+    fake_output.mkdir()
+    cached = us.UserSettings(output_dir=str(fake_output))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    monkeypatch.setattr(us, "_settings", cached)
+
+    resp = await client.get("/settings/storage")
+    assert resp.status_code == 200
+    data = resp.json()
+    # The headline assertion: output_dir is masked → renderer never sees
+    # the absolute home path on this code path.
+    assert data["output_dir"].startswith("~"), data["output_dir"]
+    assert "JustSayData" in data["output_dir"]
+    # Raw home prefix MUST NOT appear in the output_dir string.
+    assert str(fake_home).replace("\\", "/") not in data["output_dir"]
+
+
+# --- /stt/transcribe content validation -----------------------------
+
+@pytest.mark.asyncio
+async def test_transcribe_rejects_extension_content_mismatch(client):
+    """`.wav` filename with non-WAV bytes is rejected at the validator boundary,
+    not handed off to the STT provider where it would 500 deep inside soundfile."""
+    fake_payload = b"MZ" + (b"\x00" * 64)  # DOS / PE prefix
+    resp = await client.post(
+        "/stt/transcribe",
+        files={"file": ("evil.wav", fake_payload, "audio/wav")},
+    )
+    assert resp.status_code == 400
+    assert "does not match" in resp.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_transcribe_rejects_empty_file(client):
+    resp = await client.post(
+        "/stt/transcribe",
+        files={"file": ("speech.wav", b"", "audio/wav")},
+    )
+    assert resp.status_code == 400
+    assert "too small" in resp.json()["detail"].lower()
+
+
 @pytest.mark.asyncio
 async def test_switch_llm_mode_invalid(client):
     resp = await client.put("/llm/mode", json={"mode": "quantum"})

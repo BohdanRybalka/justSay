@@ -223,3 +223,19 @@ async def test_install_concurrent_locked():
     assert len(events) == 1
     assert "event: error" in events[0]
     assert "already in progress" in events[0]
+
+
+@pytest.mark.asyncio
+async def test_install_refused_in_frozen_binary(monkeypatch):
+    """In a PyInstaller-frozen sidecar `sys.frozen=True` and pip install is meaningless.
+
+    The endpoint must surface a clear error SSE rather than running pip from
+    the random `_MEIPASS` cwd that `Path(__file__).resolve()` produces.
+    """
+    monkeypatch.setattr(local_setup.sys, "frozen", True, raising=False)
+
+    events = [e async for e in install_local_packages()]
+
+    assert len(events) == 1
+    assert "event: error" in events[0]
+    assert "not supported in the packaged build" in events[0]

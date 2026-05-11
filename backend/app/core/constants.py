@@ -15,4 +15,25 @@ ALLOWED_AUDIO_EXTENSIONS: frozenset[str] = frozenset({
     ".m4a", ".mp4", ".aac", ".opus", ".wma", ".aiff", ".aif",
 })
 
+# Extension → MIME map sent to providers that need an explicit Content-Type
+# (Gemini accepts `audio/wav`, `audio/mpeg`, etc.). Hardcoding `audio/wav`
+# for everything silently produced wrong-but-tolerable Gemini results — see
+# `docs/release-notes/v0.8.2.md`. Every key MUST also live in
+# ``ALLOWED_AUDIO_EXTENSIONS`` — enforced by a unit test.
+MIME_BY_AUDIO_EXTENSION: dict[str, str] = {
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".mp4": "audio/mp4",
+    ".aac": "audio/aac",
+    ".ogg": "audio/ogg",
+    ".oga": "audio/ogg",
+    ".opus": "audio/ogg",   # Opus payload typically rides inside an OggS container
+    ".webm": "audio/webm",
+    ".flac": "audio/flac",
+    ".aiff": "audio/aiff",
+    ".aif": "audio/aiff",
+    ".wma": "audio/x-ms-wma",
+}
+
 GROQ_TIMEOUT_SECONDS: float = 10.0

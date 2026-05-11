@@ -74,19 +74,49 @@ class LocalSTTProvider(STTProvider):
         return "cpu"
 
     async def transcribe(self, audio_path: Path, language: str = "uk", **kwargs) -> TranscriptionResult:
-        """Transcribe locally. ``style`` kwarg is accepted for interface parity but ignored."""
+        """Transcribe locally. ``style`` kwarg is accepted for interface parity but ignored.
+
+        ``audio_duration`` (kwarg, seconds) — when provided, drives a
+        latency-vs-accuracy decision: short clips get ``beam_size=1`` and
+        ``condition_on_previous_text=False`` (kills silence-hallucination
+        cascade); long clips keep ``beam_size=5`` and cross-segment context.
+        """
         model = self._get_model()
+        audio_duration = kwargs.get("audio_duration")
+
+        # Reuse the cloud routing threshold so "short" means the same thing
+        # everywhere in the pipeline. Drift between two magic-30.0 constants
+        # was caught by entry-gate /architect.
+        threshold = self._settings.cloud_routing_threshold
+        is_short = audio_duration is not None and audio_duration <= threshold
+
+        beam_size = 1 if is_short else 5
+        # Cross-segment context helps long meetings stay coherent but caused
+        # silence-hallucination cascades on short dictation (research:
+        # docs/research/whisper-llm-need.md). Only disable for short clips.
+        condition_on_previous_text = not is_short
+        glossary = self._settings.initial_prompt.strip() or None
+
         log.info(
-            "faster-whisper: transcribe model=%s file=%s lang=%s",
+            "faster-whisper: transcribe model=%s file=%s lang=%s "
+            "duration=%s beam_size=%d cond_prev=%s glossary=%s",
             self._settings.whisper_model_size, audio_path.name, language,
+            f"{audio_duration:.1f}s" if audio_duration is not None else "?",
+            beam_size, condition_on_previous_text,
+            # Never log glossary content — could leak PII / a stray API key
+            # the user pasted by mistake. Only the bool/length is observable.
+            f"{len(glossary)}chars" if glossary else "none",
         )
 
         def _transcribe():
             segments, _info = model.transcribe(
                 str(audio_path),
                 language=language,
-                beam_size=5,
+                beam_size=beam_size,
                 vad_filter=True,
+                condition_on_previous_text=condition_on_previous_text,
+                no_repeat_ngram_size=3,
+                initial_prompt=glossary,
             )
             return " ".join(segment.text.strip() for segment in segments)
 

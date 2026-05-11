@@ -5,6 +5,16 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// Windows CREATE_NO_WINDOW flag (0x08000000) — suppresses the console window
+/// that would otherwise flash when spawning a CONSOLE-subsystem binary.
+/// The frozen sidecar keeps its console handle so manual launches show stdout,
+/// but Tauri must not surface that window to end users.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 pub const PORT: u16 = 9377;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -100,16 +110,18 @@ pub fn spawn() -> Result<(), String> {
 
     let child = if let Some(sidecar) = find_sidecar() {
         log::info!("Starting backend sidecar: {:?}", sidecar);
-        Command::new(&sidecar)
-            .args([
-                "--host",
-                "127.0.0.1",
-                "--port",
-                &PORT.to_string(),
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+        let mut cmd = Command::new(&sidecar);
+        cmd.args([
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &PORT.to_string(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.spawn()
             .map_err(|e| format!("Failed to start backend sidecar: {}", e))?
     } else {
         let python = find_python()?;
@@ -119,22 +131,24 @@ pub fn spawn() -> Result<(), String> {
             python,
             backend_dir
         );
-        Command::new(&python)
-            .args([
-                "-m",
-                "uvicorn",
-                "app.main:app",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                &PORT.to_string(),
-                "--log-level",
-                "warning",
-            ])
-            .current_dir(&backend_dir)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+        let mut cmd = Command::new(&python);
+        cmd.args([
+            "-m",
+            "uvicorn",
+            "app.main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &PORT.to_string(),
+            "--log-level",
+            "warning",
+        ])
+        .current_dir(&backend_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.spawn()
             .map_err(|e| format!("Failed to start backend: {}", e))?
     };
 

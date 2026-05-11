@@ -56,6 +56,14 @@ export interface UserSettings {
   ollama_model: string;
   max_recording_seconds: number;
   transcription_style: "normal" | "ai_prompt";
+  /** Audio duration (seconds) at or below which the pipeline picks Groq Whisper
+   *  in CLOUD mode. Above the threshold (or for `ai_prompt` style) it routes
+   *  to Gemini. */
+  cloud_routing_threshold: number;
+  /** Custom vocabulary / glossary. Plumbed into every STT provider — see the
+   *  Python `STTSettings.initial_prompt` docstring for per-provider semantics.
+   *  Backend enforces a 500-char ceiling. */
+  initial_prompt: string;
 }
 
 export interface LocalSttStatus {

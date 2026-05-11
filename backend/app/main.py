@@ -87,8 +87,13 @@ def _cli() -> None:
     parser.add_argument("--log-level", default="warning")
     args = parser.parse_args()
 
+    # Pass the app object directly (not the import string "app.main:app").
+    # The string form forces uvicorn to call `importlib.import_module("app.main")`
+    # at runtime, which is brittle inside a PyInstaller-frozen binary where
+    # sys.path is reshaped. The object form is the documented pattern for
+    # frozen apps and skips the re-import entirely.
     uvicorn.run(
-        "app.main:app",
+        app,
         host=args.host,
         port=args.port,
         log_level=args.log_level,

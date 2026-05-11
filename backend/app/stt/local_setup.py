@@ -92,6 +92,20 @@ async def install_local_packages() -> AsyncIterator[str]:
         yield sse_event("error", {"status": "error", "error": "Installation already in progress"})
         return
 
+    # pip install is impossible from a PyInstaller-frozen sidecar: there's no
+    # pyproject.toml, no editable source tree, and sys.executable points at
+    # the frozen interpreter itself. Surface a clear error instead of running
+    # pip from `_MEIPASS` with surprising side effects.
+    if getattr(sys, "frozen", False):
+        yield sse_event("error", {
+            "status": "error",
+            "error": (
+                "Local STT install is not supported in the packaged build. "
+                "Install JustSay from source if you need Local mode on this OS."
+            ),
+        })
+        return
+
     # Already installed?
     if _check_package_installed():
         yield sse_event("done", {"status": "already_installed"})

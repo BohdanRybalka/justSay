@@ -8,8 +8,9 @@ from fastapi import APIRouter, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.audio import get_recorder
+from app.core.audio_validation import validate_audio_upload
 from app.core.config import settings
-from app.core.constants import ALLOWED_AUDIO_EXTENSIONS, MAX_UPLOAD_SIZE
+from app.core.constants import MAX_UPLOAD_SIZE
 from app.core.utils import read_upload_with_limit
 from app.pipeline.service import process_audio
 
@@ -74,14 +75,13 @@ async def process_file(
 ):
     """Process an uploaded audio file through the full pipeline."""
     ext = Path(file.filename).suffix.lower() if file.filename else ""
-    if ext not in ALLOWED_AUDIO_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Unsupported audio format")
+    content = await read_upload_with_limit(file, MAX_UPLOAD_SIZE)
+    validate_audio_upload(content, file.filename)
 
     temp_path = settings.audio.temp_dir / f"pipeline_{uuid.uuid4().hex}{ext}"
 
     try:
         settings.audio.temp_dir.mkdir(parents=True, exist_ok=True)
-        content = await read_upload_with_limit(file, MAX_UPLOAD_SIZE)
         temp_path.write_bytes(content)
 
         result = await process_audio(
