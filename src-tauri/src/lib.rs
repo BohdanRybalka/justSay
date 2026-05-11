@@ -107,6 +107,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -116,8 +118,8 @@ pub fn run() {
                 )?;
             }
 
-            // Spawn Python backend
-            if let Err(e) = backend::spawn() {
+            // Spawn Python backend (production = shell-plugin spawn, dev = system Python)
+            if let Err(e) = backend::spawn(app.handle().clone()) {
                 log::error!("Backend spawn failed: {}", e);
             }
 

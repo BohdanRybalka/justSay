@@ -1,17 +1,37 @@
 //! Python backend lifecycle: spawn, health check, shutdown, HTTP client.
+//!
+//! Production sidecar spawn flows through the Tauri shell plugin
+//! (`app.shell().command(...)`), which validates the path + args against
+//! the named-binary capability scope in `capabilities/default.json`. The
+//! shell plugin's `CommandChild` does not expose `try_wait()`, so liveness
+//! is tracked via a background task that drains `Receiver<CommandEvent>`
+//! and flips an `AtomicBool` on `Terminated` (see `BackendProcess`).
+//!
+//! Dev mode (no frozen sidecar at the resolved `resource_dir()` path)
+//! falls back to `std::process::Command` spawning the system Python
+//! interpreter against `backend/app.main:app`. This branch is intentionally
+//! NOT routed through the shell plugin — it has no fixed scope path and
+//! is debug-only.
 
-use std::net::TcpListener;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-/// Windows CREATE_NO_WINDOW flag (0x08000000) — suppresses the console window
-/// that would otherwise flash when spawning a CONSOLE-subsystem binary.
-/// The frozen sidecar keeps its console handle so manual launches show stdout,
-/// but Tauri must not surface that window to end users.
+use tauri::{AppHandle, Manager};
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
+use tauri_plugin_shell::ShellExt;
+
+/// Windows CREATE_NO_WINDOW flag (0x08000000) — used only by the dev-mode
+/// fallback (std::process::Command). The shell plugin's `Command` builder
+/// does NOT expose `creation_flags`; for the frozen-sidecar production
+/// path the console window is suppressed by building the sidecar with
+/// `console=False` (see `backend/build_sidecar.spec`) plus the Python
+/// entrypoint redirecting stdout/stderr to `~/.justsay/logs/sidecar.log`.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -19,22 +39,53 @@ pub const PORT: u16 = 9377;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(300);
-const HEALTH_POLL_MAX_ATTEMPTS: u32 = 100; // 30 seconds — covers --onefile extraction overhead
+const HEALTH_POLL_MAX_ATTEMPTS: u32 = 100; // 30 seconds
 
-static BACKEND_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
+/// Production sidecar handle: shell-plugin child + liveness flag updated
+/// by a background event-drain task. `try_wait()` is not available on
+/// `CommandChild`, so this struct is the substitute.
+struct ShellBackend {
+    child: CommandChild,
+    alive: Arc<AtomicBool>,
+}
 
-/// Check if the port is available before spawning.
-fn check_port_available() -> Result<(), String> {
-    match TcpListener::bind(format!("127.0.0.1:{}", PORT)) {
-        Ok(_listener) => Ok(()), // port is free, listener drops and releases it
-        Err(_) => Err(format!(
-            "Port {} is already in use. Another JustSay instance may be running.",
-            PORT
-        )),
+/// Either the shell-plugin-spawned sidecar (production) or a raw child
+/// process from `std::process::Command` (dev mode). Stored in a `Mutex`
+/// so spawn/shutdown can mutate it from different threads safely.
+enum BackendProcess {
+    Sidecar(ShellBackend),
+    Dev(Child),
+}
+
+static BACKEND_PROCESS: Mutex<Option<BackendProcess>> = Mutex::new(None);
+
+/// Append a stderr line from the production sidecar to
+/// `~/.justsay/logs/sidecar.log`. Failure to open the log file is silent
+/// to avoid spamming on shutdown when the FS is racing.
+fn append_sidecar_log(line: &[u8]) {
+    let home = match std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let log_dir = PathBuf::from(home).join(".justsay").join("logs");
+    if std::fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("sidecar.log"))
+    {
+        use std::io::Write;
+        let _ = file.write_all(line);
+        if !line.ends_with(b"\n") {
+            let _ = file.write_all(b"\n");
+        }
     }
 }
 
-/// Find Python executable on the system.
+/// Find Python executable on the system. Kept for the dev-mode fallback;
+/// the production path resolves the sidecar via `app.path().resource_dir()`.
 fn find_python() -> Result<String, String> {
     for candidate in ["python", "python3"] {
         let result = Command::new(candidate)
@@ -51,62 +102,11 @@ fn find_python() -> Result<String, String> {
     Err("Python not found. Install Python 3.10+ and ensure it's in PATH.".to_string())
 }
 
-/// Open (or create+append) `~/.justsay/logs/sidecar.log` for redirecting the
-/// sidecar's stderr. Falls back to null if the directory can't be created.
-fn sidecar_stderr() -> Stdio {
-    let log_dir = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .map(|h| std::path::PathBuf::from(h).join(".justsay").join("logs"));
-
-    if let Ok(dir) = log_dir {
-        if std::fs::create_dir_all(&dir).is_ok() {
-            if let Ok(file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(dir.join("sidecar.log"))
-            {
-                return Stdio::from(file);
-            }
-        }
-    }
-    Stdio::null()
-}
-
-/// Look for the PyInstaller-frozen sidecar binary shipped with the installer.
-///
-/// The CI release workflow builds in --onedir mode and bundles the entire
-/// `justsay-backend/` directory via Tauri resources. When found we prefer it —
-/// the user does not need a system Python install. When absent (dev mode) we
-/// fall back to spawning system Python.
-fn find_sidecar() -> Option<std::path::PathBuf> {
-    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    let name = if cfg!(windows) {
-        "justsay-backend.exe"
-    } else {
-        "justsay-backend"
-    };
-
-    // --onedir layout (production): Tauri resources bundle places the sidecar
-    // directory alongside the main exe (Windows) or in Contents/Resources/ (macOS).
-    //   Windows NSIS: <install_dir>\justsay-backend\justsay-backend.exe
-    //   macOS bundle: Contents/Resources/justsay-backend/justsay-backend
-    let subdir = std::path::Path::new("justsay-backend").join(name);
-    let candidates = [
-        exe_dir.join(&subdir),
-        exe_dir.join("..").join("Resources").join(&subdir),
-    ];
-    candidates.into_iter().find(|p| p.exists())
-}
-
-/// Resolve the backend directory path.
-/// Searches: CWD/backend, CWD/../backend (for src-tauri/), next to exe.
-fn find_backend_dir() -> Result<std::path::PathBuf, String> {
-    let candidates: Vec<std::path::PathBuf> = vec![
-        // CWD/backend (running from project root)
+/// Resolve the backend directory path (dev mode only).
+fn find_backend_dir() -> Result<PathBuf, String> {
+    let candidates: Vec<PathBuf> = vec![
         std::env::current_dir().map(|p| p.join("backend")).unwrap_or_default(),
-        // CWD/../backend (running from src-tauri/ during cargo run)
         std::env::current_dir().map(|p| p.join("..").join("backend")).unwrap_or_default(),
-        // Next to executable (production)
         std::env::current_exe()
             .ok()
             .and_then(|e| e.parent().map(|p| p.join("backend")))
@@ -115,7 +115,6 @@ fn find_backend_dir() -> Result<std::path::PathBuf, String> {
 
     for candidate in &candidates {
         if candidate.join("app").join("main.py").exists() {
-            // Canonicalize to resolve ".." in path
             return candidate.canonicalize().map_err(|e| e.to_string());
         }
     }
@@ -123,29 +122,92 @@ fn find_backend_dir() -> Result<std::path::PathBuf, String> {
     Err("Backend directory not found. Expected 'backend/app/main.py'.".to_string())
 }
 
+/// Resolve the production sidecar path inside the installed resource dir.
+/// Returns `None` if no frozen sidecar is present (developer setup).
+///
+/// The resolved path is the same one the capability scope's `$RESOURCE`
+/// token expands to: on Windows NSIS it is `<install>/resources/`, on
+/// macOS bundles it is `Contents/Resources/`. Tauri's path resolver is the
+/// single source of truth for both production runtime and capability
+/// scope, so they agree by construction.
+fn resolve_sidecar(app: &AppHandle) -> Option<PathBuf> {
+    let resource_dir = app.path().resource_dir().ok()?;
+    let name = if cfg!(windows) {
+        "justsay-backend.exe"
+    } else {
+        "justsay-backend"
+    };
+    let candidate = resource_dir.join("justsay-backend").join(name);
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// Check if the port is available before spawning.
+fn check_port_available() -> Result<(), String> {
+    match std::net::TcpListener::bind(format!("127.0.0.1:{}", PORT)) {
+        Ok(_listener) => Ok(()),
+        Err(_) => Err(format!(
+            "Port {} is already in use. Another JustSay instance may be running.",
+            PORT
+        )),
+    }
+}
+
 /// Spawn the Python FastAPI backend as a child process.
 ///
 /// Preference order:
-///   1. Frozen PyInstaller sidecar next to the Tauri executable (production).
+///   1. Production sidecar via shell plugin (capability-scoped).
 ///   2. System Python + the backend source tree (developer setup).
-pub fn spawn() -> Result<(), String> {
+pub fn spawn(app: AppHandle) -> Result<(), String> {
     check_port_available()?;
 
-    let child = if let Some(sidecar) = find_sidecar() {
-        log::info!("Starting backend sidecar: {:?}", sidecar);
-        let mut cmd = Command::new(&sidecar);
-        cmd.args([
-            "--host",
-            "127.0.0.1",
-            "--port",
-            &PORT.to_string(),
-        ])
-        .stdout(Stdio::null())
-        .stderr(sidecar_stderr());
-        #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        cmd.spawn()
-            .map_err(|e| format!("Failed to start backend sidecar: {}", e))?
+    let backend = if let Some(sidecar) = resolve_sidecar(&app) {
+        log::info!("Starting backend sidecar via shell plugin: {:?}", sidecar);
+        let sidecar_str = sidecar.to_string_lossy().to_string();
+        let port_str = PORT.to_string();
+        let (mut rx, child) = app
+            .shell()
+            .command(sidecar_str)
+            .args(["--host", "127.0.0.1", "--port", &port_str])
+            .spawn()
+            .map_err(|e| format!("Failed to start backend sidecar: {}", e))?;
+
+        let alive = Arc::new(AtomicBool::new(true));
+        let alive_clone = alive.clone();
+
+        // Drain the event stream: forward stderr to the log file and flip
+        // `alive` to false when the process terminates (or the channel
+        // closes, which means the same thing in practice).
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    CommandEvent::Stderr(bytes) => append_sidecar_log(&bytes),
+                    CommandEvent::Stdout(bytes) => append_sidecar_log(&bytes),
+                    CommandEvent::Error(msg) => {
+                        append_sidecar_log(format!("[shell error] {}", msg).as_bytes());
+                        alive_clone.store(false, Ordering::Release);
+                        break;
+                    }
+                    CommandEvent::Terminated(payload) => {
+                        let line = format!(
+                            "[terminated] code={:?} signal={:?}",
+                            payload.code, payload.signal
+                        );
+                        append_sidecar_log(line.as_bytes());
+                        alive_clone.store(false, Ordering::Release);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            // Channel closed without explicit Terminated — treat as dead.
+            alive_clone.store(false, Ordering::Release);
+        });
+
+        BackendProcess::Sidecar(ShellBackend { child, alive })
     } else {
         let python = find_python()?;
         let backend_dir = find_backend_dir()?;
@@ -171,41 +233,43 @@ pub fn spawn() -> Result<(), String> {
         .stderr(Stdio::null());
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
-        cmd.spawn()
-            .map_err(|e| format!("Failed to start backend: {}", e))?
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to start backend: {}", e))?;
+        BackendProcess::Dev(child)
     };
 
     let mut guard = BACKEND_PROCESS.lock().map_err(|e| e.to_string())?;
-    *guard = Some(child);
+    *guard = Some(backend);
 
     Ok(())
 }
 
 /// Check if the child process has exited unexpectedly.
 fn is_process_alive() -> bool {
-    if let Ok(mut guard) = BACKEND_PROCESS.lock() {
-        if let Some(ref mut child) = *guard {
-            // try_wait returns Ok(Some(status)) if exited, Ok(None) if still running
-            match child.try_wait() {
-                Ok(None) => return true,  // still running
-                Ok(Some(status)) => {
-                    log::error!("Backend process exited with: {}", status);
-                    return false;
-                }
-                Err(e) => {
-                    log::warn!("try_wait error (assuming alive): {}", e);
-                    return true;
-                }
+    let mut guard = match BACKEND_PROCESS.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    match guard.as_mut() {
+        Some(BackendProcess::Sidecar(s)) => s.alive.load(Ordering::Acquire),
+        Some(BackendProcess::Dev(child)) => match child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(status)) => {
+                log::error!("Backend (dev) exited with: {}", status);
+                false
             }
-        }
+            Err(e) => {
+                log::warn!("try_wait error (assuming alive): {}", e);
+                true
+            }
+        },
+        None => false,
     }
-    false
 }
 
 /// Poll /health until the backend responds or timeout.
 pub async fn wait_for_ready() -> Result<(), String> {
-    // Short per-request timeout so Connection-refused returns immediately;
-    // the 30-second budget (100 × 300ms) stays accurate.
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(500))
         .build()
@@ -214,9 +278,10 @@ pub async fn wait_for_ready() -> Result<(), String> {
     let url = format!("http://127.0.0.1:{}/health", PORT);
 
     for attempt in 1..=HEALTH_POLL_MAX_ATTEMPTS {
-        // Check if process died before polling
         if !is_process_alive() {
-            return Err("Backend process exited unexpectedly. Check Python dependencies.".to_string());
+            return Err(
+                "Backend process exited unexpectedly. Check Python dependencies.".to_string(),
+            );
         }
 
         match client.get(&url).send().await {
@@ -236,31 +301,43 @@ pub async fn wait_for_ready() -> Result<(), String> {
     )
 }
 
-/// Kill the backend process tree on shutdown.
+/// Kill the backend process on shutdown.
 pub fn shutdown() {
-    if let Ok(mut guard) = BACKEND_PROCESS.lock() {
-        if let Some(ref mut child) = *guard {
-            let pid = child.id();
-            log::info!("Shutting down backend (PID: {})", pid);
+    let mut guard = match BACKEND_PROCESS.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
 
-            // On Windows, kill the entire process tree to avoid orphan uvicorn workers
-            #[cfg(target_os = "windows")]
-            {
-                let _ = Command::new("taskkill")
-                    .args(["/T", "/F", "/PID", &pid.to_string()])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+    if let Some(backend) = guard.take() {
+        match backend {
+            BackendProcess::Sidecar(s) => {
+                let pid = s.child.pid();
+                log::info!("Shutting down backend sidecar (PID: {})", pid);
+                // CommandChild::kill() consumes self; the event-drain
+                // task will see the channel close and flip `alive`.
+                let _ = s.child.kill();
             }
+            BackendProcess::Dev(mut child) => {
+                let pid = child.id();
+                log::info!("Shutting down backend (dev, PID: {})", pid);
 
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = child.kill();
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = Command::new("taskkill")
+                        .args(["/T", "/F", "/PID", &pid.to_string()])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
+
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = child.kill();
+                }
+
+                let _ = child.wait();
             }
-
-            let _ = child.wait();
         }
-        *guard = None;
     }
 }
 

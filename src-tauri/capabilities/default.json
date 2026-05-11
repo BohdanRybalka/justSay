@@ -13,6 +13,8 @@
     "notification:default",
     "dialog:default",
     "fs:allow-read-file",
+    "updater:default",
+    "shell:default",
     {
       "identifier": "fs:scope",
       "allow": [
@@ -23,6 +25,33 @@
         { "path": "$VIDEO/**" },
         { "path": "$AUDIO/**" },
         { "path": "$TEMP/**" }
+      ]
+    },
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "justsay-backend-win",
+          "cmd": "$RESOURCE/justsay-backend/justsay-backend.exe",
+          "args": [
+            { "validator": "--host" },
+            { "validator": "127\\.0\\.0\\.1" },
+            { "validator": "--port" },
+            { "validator": "\\d+" }
+          ],
+          "sidecar": false
+        },
+        {
+          "name": "justsay-backend-unix",
+          "cmd": "$RESOURCE/justsay-backend/justsay-backend",
+          "args": [
+            { "validator": "--host" },
+            { "validator": "127\\.0\\.0\\.1" },
+            { "validator": "--port" },
+            { "validator": "\\d+" }
+          ],
+          "sidecar": false
+        }
       ]
     }
   ]

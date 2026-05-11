@@ -50,6 +50,19 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
       </div>
       <div class="value" id="shortcut-hint" style="padding: 4px 16px; font-size: 11px; color: var(--text-muted);">Click to change. Press new key combination, then release.</div>
     </div>
+
+    <div class="setting-group">
+      <div class="setting-label">About</div>
+      <div class="setting-row">
+        <span class="label">Version</span>
+        <span class="value" id="app-version">…</span>
+      </div>
+      <div class="setting-row">
+        <span class="label">Updates</span>
+        <button class="btn btn-secondary" id="check-updates-btn">Check for updates</button>
+      </div>
+      <div class="value" id="updates-status" style="padding: 4px 16px; font-size: 11px; color: var(--text-muted);">Last checked: never.</div>
+    </div>
   `;
 
   // Language
@@ -79,6 +92,68 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   const shortcutBtn = container.querySelector<HTMLButtonElement>("#shortcut-btn")!;
   const shortcutHint = container.querySelector<HTMLElement>("#shortcut-hint")!;
   let recording = false;
+
+  // About / Updates
+  const versionEl = container.querySelector<HTMLElement>("#app-version")!;
+  const updatesBtn = container.querySelector<HTMLButtonElement>("#check-updates-btn")!;
+  const updatesStatus = container.querySelector<HTMLElement>("#updates-status")!;
+
+  void (async () => {
+    try {
+      const { getVersion } = await import("@tauri-apps/api/app");
+      versionEl.textContent = await getVersion();
+    } catch {
+      versionEl.textContent = "unknown";
+    }
+  })();
+
+  let updatesBusy = false;
+  updatesBtn.addEventListener("click", async () => {
+    if (updatesBusy) return;
+    updatesBusy = true;
+    updatesBtn.disabled = true;
+    updatesBtn.textContent = "Checking…";
+    updatesStatus.textContent = "Contacting update server…";
+
+    try {
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const update = await check();
+      if (!update) {
+        updatesStatus.textContent = "You are up to date.";
+        updatesBtn.textContent = "Check for updates";
+        return;
+      }
+      updatesStatus.textContent = `Update available: ${update.version} (current ${update.currentVersion}).`;
+      updatesBtn.textContent = "Install & Restart";
+      updatesBtn.disabled = false;
+      updatesBtn.onclick = async () => {
+        updatesBtn.disabled = true;
+        updatesBtn.textContent = "Installing…";
+        updatesStatus.textContent = "Downloading and installing update…";
+        try {
+          await update.downloadAndInstall();
+          const { relaunch } = await import("@tauri-apps/plugin-process");
+          await relaunch();
+        } catch (err) {
+          updatesStatus.textContent = `Install failed: ${(err as Error).message ?? err}`;
+          updatesBtn.textContent = "Retry install";
+          updatesBtn.disabled = false;
+          // Release the busy flag so a subsequent click on the same
+          // (renamed) button doesn't get swallowed by the outer guard.
+          updatesBusy = false;
+        }
+      };
+    } catch (err) {
+      updatesStatus.textContent = `Check failed: ${(err as Error).message ?? err}`;
+      updatesBtn.textContent = "Check for updates";
+    } finally {
+      updatesBusy = false;
+      if (updatesBtn.textContent === "Checking…") {
+        updatesBtn.disabled = false;
+        updatesBtn.textContent = "Check for updates";
+      }
+    }
+  });
 
   shortcutBtn.addEventListener("click", () => {
     if (recording) return;

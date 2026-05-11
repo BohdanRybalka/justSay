@@ -76,6 +76,14 @@ jobs:
         working-directory: backend
         run: pyinstaller --clean --noconfirm build_sidecar.spec
 
+      # Mirrors the v0.8.0 local-3.10 smoke matrix against the CI-built
+      # 3.12 artifact: bind-test port 9377, launch the frozen sidecar,
+      # poll /health for {"status":"ok"}, then assert 200 on /resources,
+      # /settings, /settings/cloud-status, /audio/status. Stdlib-only —
+      # runs before any test extra is installed.
+      - name: Smoke test sidecar
+        run: python backend/scripts/smoke_sidecar.py --host 127.0.0.1 --port 9377
+
       - name: Copy onedir bundle to Tauri resources
         shell: bash
         run: |
@@ -127,13 +135,29 @@ jobs:
           write_kv APPLE_TEAM_ID              "$MACOS_NOTARIZE_TEAM_ID"
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        # Pinned to a specific SHA (resolved from the `v0` tag on 2026-05-11)
+        # rather than the floating tag. The `latest.json` updater manifest
+        # schema is sensitive to tauri-action's output format; a silent
+        # bump would break in-app updates for every existing install.
+        # When updating, regenerate via
+        #   gh api repos/tauri-apps/tauri-action/git/refs/tags/v0 --jq '.object.sha'
+        # and verify the updater manifest shape against
+        # https://v2.tauri.app/plugin/updater/ before merging.
+        uses: tauri-apps/tauri-action@fce9c6108b31ea247710505d3aaaa893ee6768d4
         env:
           # Required by tauri-action to create / upload the draft release.
           # Without it the build succeeds but the publish step fails with
           # "Error: GITHUB_TOKEN is required". GITHUB_TOKEN is provided
           # automatically by Actions — no extra secret needed.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Tauri auto-update signing (Ed25519, NOT a code-signing cert).
+          # Without these set, tauri-action skips writing the .sig files
+          # alongside the installers and the updater plugin in the app
+          # will reject every check() call as "no signature found".
+          # Generate locally with: npx tauri signer generate -w ~/.tauri/justsay.key
+          # then upload private key + password as the two secrets below.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # bundle.resources lives statically in tauri.conf.json now —
           # `"resources/justsay-backend": "justsay-backend"` — so both
           # local `tauri build` and CI produce installers that ship the
@@ -157,4 +181,10 @@ jobs:
           releaseBody: "See `docs/release-notes/` for what changed."
           releaseDraft: true
           prerelease: false
+          # Publish the Tauri 2.x updater manifest (latest.json) next to
+          # the installer artifacts. The NSIS variant is what the Windows
+          # build uploads; macOS .app.tar.gz signing also goes through
+          # this path. Without this, tauri-action only writes the .sig
+          # files and the updater plugin has no manifest URL to fetch.
+          updaterJsonPreferNsis: true
 
