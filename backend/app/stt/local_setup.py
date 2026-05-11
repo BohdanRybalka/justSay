@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from app.core.utils import sse_event
 from app.stt.config import STTSettings
+from app.stt.local_factory import is_macos_arm64
 
 log = logging.getLogger(__name__)
 
@@ -33,11 +34,17 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
     installed = _check_package_installed()
     gpu_available, gpu_name = _detect_gpu()
 
-    device = stt_settings.whisper_device
-    if device == "auto":
-        device = "cuda" if gpu_available else "cpu"
-
-    compute_type = "float16" if device == "cuda" else "int8"
+    if is_macos_arm64():
+        device = "mlx"
+        # Informational label — actual dtype is controlled inside mlx-whisper.
+        # Accurate for the project default large-v3-turbo and other large
+        # variants; smaller MLX checkpoints ship as float16.
+        compute_type = "bfloat16"
+    else:
+        device = stt_settings.whisper_device
+        if device == "auto":
+            device = "cuda" if gpu_available else "cpu"
+        compute_type = "float16" if device == "cuda" else "int8"
 
     # is_model_loaded reads the cached provider; safe even if the package is missing.
     from app.stt import get_local_load_error, is_model_loaded
@@ -72,10 +79,18 @@ def _estimate_model_ram_mb() -> int | None:
         return None
 
 
+def _local_extras() -> str:
+    """Return the `pip install .[<extra>]` extras name for the current platform."""
+    return "local-mac" if is_macos_arm64() else "local"
+
+
 def _check_package_installed() -> bool:
-    """Check if faster-whisper is importable."""
+    """Check if the platform-appropriate local STT package is importable."""
     try:
-        import faster_whisper  # noqa: F401
+        if is_macos_arm64():
+            import mlx_whisper  # noqa: F401
+        else:
+            import faster_whisper  # noqa: F401
 
         return True
     except ImportError:
@@ -126,11 +141,12 @@ async def install_local_packages() -> AsyncIterator[str]:
 
 
 def _run_pip_install() -> tuple[int, str]:
-    """Run pip install .[local] synchronously. Returns (exit_code, output)."""
+    """Run pip install .[<extras>] synchronously. Returns (exit_code, output)."""
     backend_dir = _get_backend_dir()
+    extras = _local_extras()
 
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--no-input", ".[local]"],
+        [sys.executable, "-m", "pip", "install", "--no-input", f".[{extras}]"],
         cwd=str(backend_dir),
         capture_output=True,
         text=True,
@@ -161,10 +177,17 @@ def _get_backend_dir():
 
 
 def _detect_gpu() -> tuple[bool, str | None]:
-    """Detect CUDA GPU availability and name.
+    """Detect GPU availability and a human-readable device name.
+
+    On macOS arm64 returns the Apple-Silicon/Metal label without importing
+    torch — the MLX path is the accelerator and torch is irrelevant here.
+    Everywhere else, falls back to CUDA detection via torch.
 
     Returns (available, device_name_or_none).
     """
+    if is_macos_arm64():
+        return True, "Apple Silicon (MLX/Metal)"
+
     try:
         import torch
 

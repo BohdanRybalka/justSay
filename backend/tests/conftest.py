@@ -25,3 +25,23 @@ def _reset_settings():
     settings.llm.mode = original_llm_mode
     clear_stt_cache()
     clear_llm_cache()
+
+
+@pytest.fixture(autouse=True)
+def _force_faster_whisper_for_local(monkeypatch, request):
+    """Pin the local STT provider class to `LocalSTTProvider` for tests that
+    are not specifically exercising the MLX path.
+
+    On macOS Apple Silicon `get_local_provider_class()` returns
+    `MLXWhisperSTTProvider`, which would break `isinstance(p, LocalSTTProvider)`
+    assertions in `test_stt.py`, `test_stt_routing.py`, and `test_factories.py`.
+    Patching the factory keeps those tests platform-agnostic. Tests that need
+    the MLX path opt out via `@pytest.mark.mlx`.
+    """
+    if request.node.get_closest_marker("mlx"):
+        return
+    from app.stt import local
+    monkeypatch.setattr(
+        "app.stt.local_factory.get_local_provider_class",
+        lambda: local.LocalSTTProvider,
+    )

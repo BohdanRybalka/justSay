@@ -11,7 +11,10 @@ Routing rules (see ``docs/plans/005-hybrid-stt-pipeline.md``):
 ======================  ========================================================
 Mode / conditions        Provider
 ======================  ========================================================
-LOCAL                    :class:`~app.stt.local.LocalSTTProvider`
+LOCAL                    Platform-selected via
+                         :func:`app.stt.local_factory.get_local_provider_class`:
+                         :class:`~app.stt.local_mlx.MLXWhisperSTTProvider` on
+                         macOS arm64, else :class:`~app.stt.local.LocalSTTProvider`
 CLOUD + style=ai_prompt  :class:`~app.stt.cloud.GeminiSTTProvider`
 CLOUD + long audio       :class:`~app.stt.cloud.GeminiSTTProvider`
 CLOUD + short + normal   :class:`~app.stt.groq_whisper.GroqWhisperSTTProvider`
@@ -76,8 +79,12 @@ def _get_groq(stt_settings: STTSettings) -> STTProvider:
 
 
 def _get_local(stt_settings: STTSettings) -> STTProvider:
-    from app.stt.local import LocalSTTProvider
-    return _get_or_create(LocalSTTProvider, stt_settings)
+    # Lazy import inside the function so the autouse conftest fixture can
+    # monkeypatch `app.stt.local_factory.get_local_provider_class` without
+    # an already-bound module-level reference defeating it.
+    from app.stt.local_factory import get_local_provider_class
+    cls = get_local_provider_class()
+    return _get_or_create(cls, stt_settings)
 
 
 def get_provider(mode: ProviderMode, stt_settings: STTSettings) -> STTProvider:
@@ -153,13 +160,14 @@ def get_routed_provider(
 def get_local_load_error(stt_settings: STTSettings) -> str | None:
     """Return the most recent local-provider load failure, or None.
 
-    Returns None when the LocalSTTProvider hasn't been instantiated yet —
-    that's the same outcome a fresh process would observe before the first
+    Returns None when the local provider hasn't been instantiated yet — that's
+    the same outcome a fresh process would observe before the first
     transcribe/load call. No error has occurred yet.
     """
-    from app.stt.local import LocalSTTProvider
+    from app.stt.local_factory import get_local_provider_class
+    cls = get_local_provider_class()
     with _cache_lock:
-        provider = _providers.get(LocalSTTProvider)
+        provider = _providers.get(cls)
     if provider is None:
         return None
     return getattr(provider, "last_load_error", None)
@@ -167,13 +175,13 @@ def get_local_load_error(stt_settings: STTSettings) -> str | None:
 
 def is_model_loaded() -> bool:
     """Check if the local whisper model is currently loaded in memory."""
-    from app.stt.local import LocalSTTProvider
-
+    from app.stt.local_factory import get_local_provider_class
+    cls = get_local_provider_class()
     with _cache_lock:
-        provider = _providers.get(LocalSTTProvider)
+        provider = _providers.get(cls)
     if provider is None:
         return False
-    return getattr(provider, "_model", None) is not None
+    return getattr(provider, "is_loaded", False)
 
 
 def clear_cache() -> None:
