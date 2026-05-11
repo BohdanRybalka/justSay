@@ -76,12 +76,11 @@ jobs:
         working-directory: backend
         run: pyinstaller --clean --noconfirm build_sidecar.spec
 
-      - name: Rename sidecar to per-platform target triple
+      - name: Copy onedir bundle to Tauri resources
         shell: bash
         run: |
-          mkdir -p src-tauri/binaries
-          cp "backend/dist/justsay-backend${{ matrix.sidecar_ext }}" \
-             "src-tauri/binaries/justsay-backend-${{ matrix.target }}${{ matrix.sidecar_ext }}"
+          mkdir -p src-tauri/resources
+          cp -r "backend/dist/justsay-backend" "src-tauri/resources/"
 
       - name: Install npm deps
         run: npm ci
@@ -135,9 +134,12 @@ jobs:
           # "Error: GITHUB_TOKEN is required". GITHUB_TOKEN is provided
           # automatically by Actions — no extra secret needed.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Inject externalBin only at production build time so that
-          # `tauri dev` works without a pre-built sidecar binary present.
-          TAURI_CONFIG: '{"bundle":{"externalBin":["binaries/justsay-backend"]}}'
+          # Inject resources only at production build time so that
+          # `tauri dev` works without a pre-built sidecar directory present.
+          # --onedir output lands in src-tauri/resources/justsay-backend/ (CI only).
+          # On Windows NSIS it is installed to $INSTALL_DIR\justsay-backend\.
+          # On macOS it is placed in Contents/Resources/justsay-backend/.
+          TAURI_CONFIG: '{"bundle":{"resources":{"resources/justsay-backend":"justsay-backend"}}}'
           # Apple signing env vars are exported by the previous step when
           # MACOS_NOTARIZE_CERT secret is non-empty. Until Plan 008 Phase B,
           # those secrets are unset → unsigned .app is the expected output.
