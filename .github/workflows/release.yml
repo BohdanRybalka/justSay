@@ -135,6 +135,9 @@ jobs:
           # "Error: GITHUB_TOKEN is required". GITHUB_TOKEN is provided
           # automatically by Actions — no extra secret needed.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Inject externalBin only at production build time so that
+          # `tauri dev` works without a pre-built sidecar binary present.
+          TAURI_CONFIG: '{"bundle":{"externalBin":["binaries/justsay-backend"]}}'
           # Apple signing env vars are exported by the previous step when
           # MACOS_NOTARIZE_CERT secret is non-empty. Until Plan 008 Phase B,
           # those secrets are unset → unsigned .app is the expected output.

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "JustSay",
-  "version": "0.9.0",
+  "version": "0.10.1",
   "identifier": "com.justsay.app",
   "build": {
     "frontendDist": "../dist",
@@ -36,8 +36,7 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ],
-    "externalBin": ["binaries/justsay-backend"]
+    ]
   },
   "plugins": {}
 }
