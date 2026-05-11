@@ -36,9 +36,10 @@ datas = (
     + collect_data_files("groq")
 )
 
-# soundfile bundles libsndfile as a runtime DLL/dylib that PyInstaller misses
-# via static analysis. Without this, every Audio code path that opens a WAV
-# raises OSError("sndfile library not found") inside the frozen binary.
+# soundfile is used lazily (pipeline/utils.py duration detection) with a try-except
+# fallback, so a missing DLL degrades gracefully. collect_dynamic_libs returns []
+# on Windows because soundfile installs as a single .py file (not a package).
+# We try anyway; if empty, pipeline falls back to Gemini for unknown-length audio.
 binaries = collect_dynamic_libs("soundfile")
 
 hiddenimports = [

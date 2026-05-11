@@ -51,6 +51,27 @@ fn find_python() -> Result<String, String> {
     Err("Python not found. Install Python 3.10+ and ensure it's in PATH.".to_string())
 }
 
+/// Open (or create+append) `~/.justsay/logs/sidecar.log` for redirecting the
+/// sidecar's stderr. Falls back to null if the directory can't be created.
+fn sidecar_stderr() -> Stdio {
+    let log_dir = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(|h| std::path::PathBuf::from(h).join(".justsay").join("logs"));
+
+    if let Ok(dir) = log_dir {
+        if std::fs::create_dir_all(&dir).is_ok() {
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("sidecar.log"))
+            {
+                return Stdio::from(file);
+            }
+        }
+    }
+    Stdio::null()
+}
+
 /// Look for a PyInstaller-frozen sidecar binary next to the Tauri executable.
 ///
 /// The CI release workflow (Plan 008) ships a `justsay-backend(.exe)` next to the
@@ -118,7 +139,7 @@ pub fn spawn() -> Result<(), String> {
             &PORT.to_string(),
         ])
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(sidecar_stderr());
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
         cmd.spawn()

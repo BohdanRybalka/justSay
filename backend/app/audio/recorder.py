@@ -3,11 +3,11 @@
 import threading
 import time
 import uuid
+import wave
 from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
-import soundfile as sf
 
 from app.audio.base import AudioRecorder
 from app.audio.config import AudioSettings
@@ -82,7 +82,13 @@ class MicrophoneRecorder(AudioRecorder):
         audio_data = np.concatenate(frames, axis=0)
         filename = f"rec_{uuid.uuid4().hex[:12]}.wav"
         output_path = self._settings.temp_dir / filename
-        sf.write(str(output_path), audio_data, self._settings.sample_rate)
+
+        audio_16bit = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16)
+        with wave.open(str(output_path), "wb") as wf:
+            wf.setnchannels(self._settings.channels)
+            wf.setsampwidth(2)
+            wf.setframerate(self._settings.sample_rate)
+            wf.writeframes(audio_16bit.tobytes())
 
         return output_path
 
