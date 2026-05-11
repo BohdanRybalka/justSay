@@ -146,14 +146,71 @@ fn resolve_sidecar(app: &AppHandle) -> Option<PathBuf> {
 }
 
 /// Check if the port is available before spawning.
+///
+/// On Windows, the previous `tauri dev` / installed-app session may have
+/// orphaned its sidecar — `tauri-plugin-shell` does not create a Job
+/// Object, so a parent crash or a failed in-process `CommandChild::kill()`
+/// can leave `justsay-backend.exe` running and squatting on 9377. If we
+/// detect an orphan that's clearly ours, reap it and retry instead of
+/// punishing the user with a startup error.
 fn check_port_available() -> Result<(), String> {
-    match std::net::TcpListener::bind(format!("127.0.0.1:{}", PORT)) {
-        Ok(_listener) => Ok(()),
-        Err(_) => Err(format!(
-            "Port {} is already in use. Another JustSay instance may be running.",
-            PORT
-        )),
+    if try_bind_port() {
+        return Ok(());
     }
+
+    #[cfg(target_os = "windows")]
+    {
+        if reap_orphan_sidecar() {
+            // Windows takes a moment to release a closed socket; poll
+            // briefly rather than rely on a fixed sleep.
+            for _ in 0..20 {
+                std::thread::sleep(Duration::from_millis(100));
+                if try_bind_port() {
+                    log::info!("Reaped orphan sidecar; port {} freed", PORT);
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "Port {} is already in use. Another JustSay instance may be running.",
+        PORT
+    ))
+}
+
+fn try_bind_port() -> bool {
+    std::net::TcpListener::bind(format!("127.0.0.1:{}", PORT)).is_ok()
+}
+
+/// On Windows: if `justsay-backend.exe` (our PyInstaller sidecar) is
+/// running, kill it with `taskkill /F /T`. Returns true when at least one
+/// such process was found and asked to terminate. Conservative — only
+/// matches by the exact image name we ship, never anything else.
+#[cfg(target_os = "windows")]
+fn reap_orphan_sidecar() -> bool {
+    use std::os::windows::process::CommandExt;
+    let listing = Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq justsay-backend.exe", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let stdout = match listing {
+        Ok(o) => o.stdout,
+        Err(_) => return false,
+    };
+    // `tasklist` with no match prints a localised "INFO:" line on stderr
+    // and an empty (or "No tasks") stdout — checking for our image name
+    // in stdout is the only locale-independent signal.
+    let listed = String::from_utf8_lossy(&stdout);
+    if !listed.to_lowercase().contains("justsay-backend.exe") {
+        return false;
+    }
+    log::warn!("Found orphan justsay-backend.exe — reaping before spawn");
+    let _ = Command::new("taskkill")
+        .args(["/F", "/T", "/IM", "justsay-backend.exe"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+    true
 }
 
 /// Spawn the Python FastAPI backend as a child process.
@@ -161,10 +218,25 @@ fn check_port_available() -> Result<(), String> {
 /// Preference order:
 ///   1. Production sidecar via shell plugin (capability-scoped).
 ///   2. System Python + the backend source tree (developer setup).
+///
+/// Debug builds (`tauri dev`) skip the frozen sidecar entirely so the
+/// developer always sees their current Python source — no PyInstaller
+/// rebuild needed between edits. To force the frozen path in dev (e.g.,
+/// to smoke-test the bundled binary end-to-end), set
+/// `JUSTSAY_USE_FROZEN_SIDECAR=1` before launching.
 pub fn spawn(app: AppHandle) -> Result<(), String> {
     check_port_available()?;
 
-    let backend = if let Some(sidecar) = resolve_sidecar(&app) {
+    let prefer_python_source =
+        cfg!(debug_assertions) && std::env::var("JUSTSAY_USE_FROZEN_SIDECAR").is_err();
+
+    let resolved_sidecar = if prefer_python_source {
+        None
+    } else {
+        resolve_sidecar(&app)
+    };
+
+    let backend = if let Some(sidecar) = resolved_sidecar {
         log::info!("Starting backend sidecar via shell plugin: {:?}", sidecar);
         let sidecar_str = sidecar.to_string_lossy().to_string();
         let port_str = PORT.to_string();
@@ -313,9 +385,44 @@ pub fn shutdown() {
             BackendProcess::Sidecar(s) => {
                 let pid = s.child.pid();
                 log::info!("Shutting down backend sidecar (PID: {})", pid);
-                // CommandChild::kill() consumes self; the event-drain
-                // task will see the channel close and flip `alive`.
-                let _ = s.child.kill();
+                // Windows: tree-kill via taskkill. `CommandChild::kill()`
+                // only sends `TerminateProcess` to the direct child, so a
+                // sidecar that spawned subprocesses (e.g. FFmpeg) would
+                // orphan them. `/T` walks the descendant tree, `/F`
+                // forces termination — same path the dev branch uses.
+                #[cfg(target_os = "windows")]
+                {
+                    use std::os::windows::process::CommandExt;
+                    let taskkill_status = Command::new("taskkill")
+                        .args(["/T", "/F", "/PID", &pid.to_string()])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .status();
+                    let taskkilled =
+                        matches!(&taskkill_status, Ok(st) if st.success());
+                    if taskkilled {
+                        log::info!("Sidecar PID {} terminated via taskkill", pid);
+                    } else {
+                        log::warn!(
+                            "taskkill failed for PID {} (status: {:?}); \
+                             falling back to CommandChild::kill()",
+                            pid,
+                            taskkill_status
+                        );
+                        if let Err(e) = s.child.kill() {
+                            log::warn!("Fallback kill also failed: {}", e);
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    if let Err(e) = s.child.kill() {
+                        log::warn!("Sidecar kill failed for PID {}: {}", pid, e);
+                    } else {
+                        log::info!("Sidecar PID {} terminated", pid);
+                    }
+                }
             }
             BackendProcess::Dev(mut child) => {
                 let pid = child.id();

@@ -102,9 +102,24 @@ export function renderHistory(container: HTMLElement): () => void {
     } catch (e) {
       if (seq !== searchSeq) return;
       const msg = (e as Error).message || "Search failed";
-      searchHint.textContent = msg.toLowerCase().includes("invalid")
-        ? "Invalid search query"
-        : msg;
+      const lower = msg.toLowerCase();
+      // 405 happens because a pre-Plan-013 sidecar exposes only
+      // `DELETE /history/{entry_id}`; a GET to /history/search slots into
+      // that route with entry_id="search" and FastAPI rejects the verb.
+      // Treat it the same as 404 — the sidecar simply doesn't know the
+      // route yet.
+      const sidecarTooOld =
+        lower.includes("not found") ||
+        lower.includes("http 404") ||
+        lower.includes("method not allowed") ||
+        lower.includes("http 405");
+      if (sidecarTooOld) {
+        searchHint.textContent = "Search needs the latest backend — please update JustSay.";
+      } else {
+        searchHint.textContent = lower.includes("invalid")
+          ? "Invalid search query"
+          : msg;
+      }
     }
   }
 

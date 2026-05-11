@@ -144,7 +144,27 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
         }
       };
     } catch (err) {
-      updatesStatus.textContent = `Check failed: ${(err as Error).message ?? err}`;
+      const raw = (err as Error).message ?? String(err);
+      const lower = raw.toLowerCase();
+      // The Tauri updater reports two common operational failures with
+      // cryptic strings that scared the user. Translate them to actionable
+      // hints. Anything else falls through to the raw text so we don't
+      // mask unexpected bugs.
+      let friendly = `Check failed: ${raw}`;
+      if (
+        lower.includes("did not respond with a successful status code") ||
+        lower.includes("couldn't fetch a valid release json") ||
+        lower.includes("couldnt fetch a valid release json")
+      ) {
+        friendly =
+          "Check failed: the release manifest is not published yet. " +
+          "Make sure the latest GitHub release is no longer marked as Draft.";
+      } else if (lower.includes("signature") || lower.includes("pubkey")) {
+        friendly =
+          "Check failed: the release manifest is not signed with the key this " +
+          "build trusts. Re-run the release workflow with TAURI_SIGNING_PRIVATE_KEY set.";
+      }
+      updatesStatus.textContent = friendly;
       updatesBtn.textContent = "Check for updates";
     } finally {
       updatesBusy = false;

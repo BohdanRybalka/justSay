@@ -9,6 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
+    "tauri:dev:frozen": "npm run sidecar:build && cross-env JUSTSAY_USE_FROZEN_SIDECAR=1 tauri dev",
+    "sidecar:build": "cd backend && pyinstaller build_sidecar.spec --noconfirm --distpath ../src-tauri/resources",
     "backend": "cd backend && python -m uvicorn app.main:app --host 127.0.0.1 --port 9377 --reload",
     "backend:install": "cd backend && pip install -e \".[dev,audio,cloud]\"",
     "setup": "npm install && npm run backend:install",
@@ -27,6 +29,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
+    "cross-env": "^7.0.3",
     "typescript": "^5.5.3",
     "vite": "^6.0.0"
   }

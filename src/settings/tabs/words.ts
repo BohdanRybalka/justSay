@@ -37,25 +37,43 @@ export function renderWords(container: HTMLElement): () => void {
   // for the same lock. Closes QA exit-gate RED-2.
   let insightsLoading = false;
   let insightsLoadedOnce = false;
+  // The /words/top + /words/insights endpoints are post-v0.10.4. Older
+  // frozen sidecars return 404; remember that so we stop probing on every
+  // 5 s poll and degrade gracefully to the legacy stats-only view.
+  let topUnsupported = false;
+  let insightsUnsupported = false;
 
   async function refresh() {
     try {
-      const [stats, top] = await Promise.all([
-        api.historyStats(),
-        api.wordsTop(topLang, 30),
-      ]);
+      const stats = await api.historyStats();
       if (cancelled) return;
-      body.innerHTML = renderBody(stats, top, topLang);
-      wireLangToggle();
+
+      let top: TopWordsResponse | null = null;
+      if (!topUnsupported) {
+        try {
+          top = await api.wordsTop(topLang, 30);
+        } catch (e) {
+          if (isNotFound(e)) {
+            topUnsupported = true;
+          } else {
+            console.error("wordsTop failed:", e);
+          }
+        }
+      }
+      if (cancelled) return;
+
+      body.innerHTML = renderBody(stats, top, topLang, topUnsupported || insightsUnsupported);
+      if (top) wireLangToggle();
+
       // Insights load lazily after the main paint — they involve an LLM call.
-      // Only kick off a fetch if no other one is in progress and we haven't
-      // already painted insights this refresh cycle.
-      if (!insightsLoading && !insightsLoadedOnce) {
+      // Only kick off a fetch if the endpoint is reachable, no other call is
+      // in flight, and we haven't already painted insights this tab open.
+      if (insightsUnsupported) {
+        const box = body.querySelector<HTMLElement>("#words-insights-box");
+        if (box) box.remove();
+      } else if (!insightsLoading && !insightsLoadedOnce) {
         loadInsights();
       } else if (insightsLoadedOnce) {
-        // Re-paint the previous content into the new DOM if we have it.
-        // (Cheap path: just leave the placeholder; the next non-polling
-        // user interaction can request a fresh insights fetch.)
         const box = body.querySelector<HTMLElement>("#words-insights-box");
         if (box) {
           box.innerHTML = `<div class="value" style="color:var(--text-muted)">Insights cached — open this tab again to refresh.</div>`;
@@ -65,6 +83,20 @@ export function renderWords(container: HTMLElement): () => void {
       if (cancelled) return;
       body.innerHTML = `<div class="value" style="color:var(--red)">Failed to load: ${(e as Error).message}</div>`;
     }
+  }
+
+  function isNotFound(e: unknown): boolean {
+    const msg = (e as Error).message?.toLowerCase() ?? "";
+    // 404 (route missing) or 405 (FastAPI matches an existing path with a
+    // different verb — happens because the old sidecar exposed only
+    // DELETE /history/{entry_id}, so any GET to a new sibling path gets
+    // method-not-allowed). Both mean: "sidecar is too old, hide the block."
+    return (
+      msg.includes("not found") ||
+      msg.includes("http 404") ||
+      msg.includes("method not allowed") ||
+      msg.includes("http 405")
+    );
   }
 
   function wireLangToggle() {
@@ -103,6 +135,13 @@ export function renderWords(container: HTMLElement): () => void {
       insightsLoadedOnce = true;
     } catch (e) {
       if (cancelled) return;
+      if (isNotFound(e)) {
+        // Older sidecar — feature not available. Drop the block silently
+        // and stop probing on subsequent polls.
+        insightsUnsupported = true;
+        box.remove();
+        return;
+      }
       const msg = (e as Error).message || "Insights unavailable";
       box.innerHTML = `
         <div class="value" style="color:var(--text-muted)">
@@ -127,7 +166,12 @@ export function renderWords(container: HTMLElement): () => void {
   };
 }
 
-function renderBody(stats: HistoryStats, top: TopWordsResponse, lang: Lang): string {
+function renderBody(
+  stats: HistoryStats,
+  top: TopWordsResponse | null,
+  lang: Lang,
+  _legacyOnly: boolean,
+): string {
   if (stats.total_entries === 0) {
     return `
       <div class="value" style="color:var(--text-muted); padding:32px 0; text-align:center;">
@@ -138,8 +182,8 @@ function renderBody(stats: HistoryStats, top: TopWordsResponse, lang: Lang): str
 
   return `
     ${renderStatsCards(stats)}
-    ${renderTopWordsBlock(top, lang)}
-    ${renderInsightsBlock()}
+    ${top ? renderTopWordsBlock(top, lang) : ""}
+    ${top ? renderInsightsBlock() : ""}
     ${renderBucket("By language", stats.by_language, (code) => LANGUAGE_LABELS[code] || code)}
     ${renderBucket("By model", stats.by_model, (m) => m)}
   `;
