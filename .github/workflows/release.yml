@@ -14,7 +14,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -29,9 +29,9 @@ jobs:
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             sidecar_ext: .exe
-          - platform: macos-14   # arm64 Apple Silicon runner
+          - platform: macos-14 # arm64 Apple Silicon runner
             target: aarch64-apple-darwin
-            sidecar_ext: ''
+            sidecar_ext: ""
 
     runs-on: ${{ matrix.platform }}
 
@@ -57,13 +57,13 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: "24"
+          cache: "npm"
 
       - name: Install Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install Python deps + PyInstaller
         working-directory: backend
@@ -145,7 +145,8 @@ jobs:
           # (Plan 008 Phase B, $10/mo onboarding).
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'JustSay ${{ github.ref_name }}'
-          releaseBody: 'See `docs/release-notes/` for what changed.'
+          releaseName: "JustSay ${{ github.ref_name }}"
+          releaseBody: "See `docs/release-notes/` for what changed."
           releaseDraft: true
           prerelease: false
+

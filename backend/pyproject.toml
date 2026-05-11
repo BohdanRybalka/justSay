@@ -31,6 +31,12 @@ cloud = [
 local = [
     "faster-whisper>=1.1.0",
 ]
+local-mac = [
+    # macOS Apple Silicon (M1+): MLX/Metal-accelerated Whisper. Pulls torch
+    # (~2 GB) transitively for spectrogram preprocessing. <1.0 upper bound
+    # guards against private-API drift in mlx_whisper.transcribe.ModelHolder.
+    "mlx-whisper>=0.4.0,<1.0",
+]
 local-llm = [
     # Optional: only needed for the standalone /llm/process endpoint in local mode.
     # The default audio pipeline no longer runs an LLM cleanup step.
@@ -52,3 +58,6 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "mlx: tests for MLXWhisperSTTProvider (opt out of the autouse fixture that forces the LocalSTTProvider path)",
+]

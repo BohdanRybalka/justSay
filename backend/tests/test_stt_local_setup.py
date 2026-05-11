@@ -9,6 +9,7 @@ from app.stt.local_setup import (
     LocalSttStatus,
     _check_package_installed,
     _detect_gpu,
+    _local_extras,
     check_status,
     install_local_packages,
 )
@@ -239,3 +240,89 @@ async def test_install_refused_in_frozen_binary(monkeypatch):
     assert len(events) == 1
     assert "event: error" in events[0]
     assert "not supported in the packaged build" in events[0]
+
+
+# --- macOS arm64 platform path (Plan 019) ---
+
+
+def test_local_extras_returns_local_on_non_mac():
+    with patch("app.stt.local_setup.is_macos_arm64", return_value=False):
+        assert _local_extras() == "local"
+
+
+def test_local_extras_returns_local_mac_on_macos_arm64():
+    with patch("app.stt.local_setup.is_macos_arm64", return_value=True):
+        assert _local_extras() == "local-mac"
+
+
+def test_run_pip_install_uses_local_mac_extras_on_macos_arm64(monkeypatch):
+    """Pip command must include `.[local-mac]` (not `.[local]`) on M1+."""
+    monkeypatch.setattr("app.stt.local_setup.is_macos_arm64", lambda: True)
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return MagicMock(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(local_setup.subprocess, "run", _fake_run)
+    code, _ = local_setup._run_pip_install()
+    assert code == 0
+    assert ".[local-mac]" in captured["cmd"]
+
+
+def test_check_package_installed_imports_mlx_whisper_on_macos_arm64(monkeypatch):
+    fake_module = MagicMock()
+    monkeypatch.setattr("app.stt.local_setup.is_macos_arm64", lambda: True)
+    with patch.dict("sys.modules", {"mlx_whisper": fake_module}):
+        assert _check_package_installed() is True
+
+
+def test_check_package_installed_false_when_mlx_whisper_missing_on_macos_arm64(monkeypatch):
+    import builtins
+
+    monkeypatch.setattr("app.stt.local_setup.is_macos_arm64", lambda: True)
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "mlx_whisper":
+            raise ImportError("not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert _check_package_installed() is False
+
+
+def test_detect_gpu_reports_apple_silicon_on_macos_arm64(monkeypatch):
+    """On M1+ we must return the MLX/Metal label without importing torch.
+
+    Side-bonus: confirms _detect_gpu's macOS branch runs **before** any
+    `import torch` call.
+    """
+    monkeypatch.setattr("app.stt.local_setup.is_macos_arm64", lambda: True)
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "torch":
+            raise AssertionError("torch must not be imported on macOS arm64 path")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    available, name = _detect_gpu()
+    assert available is True
+    assert name == "Apple Silicon (MLX/Metal)"
+
+
+def test_check_status_macos_arm64_reports_mlx_device_and_bfloat16(monkeypatch):
+    """On macOS arm64 `check_status` must return device='mlx', compute_type='bfloat16'."""
+    settings = STTSettings(whisper_model_size="large-v3-turbo")
+    monkeypatch.setattr("app.stt.local_setup.is_macos_arm64", lambda: True)
+
+    with _apply(_patches(True, (True, "Apple Silicon (MLX/Metal)"))):
+        status = check_status(settings)
+
+    assert status.device == "mlx"
+    assert status.compute_type == "bfloat16"
+    assert status.gpu_available is True
+    assert status.gpu_name == "Apple Silicon (MLX/Metal)"

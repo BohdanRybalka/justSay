@@ -1,4 +1,9 @@
-"""Local STT provider — Faster-Whisper Large-v3."""
+"""Local STT provider — Faster-Whisper Large-v3.
+
+Selected by `app.stt.local_factory.get_local_provider_class()` on
+Windows / Linux / macOS-Intel. On macOS Apple Silicon the factory returns
+`MLXWhisperSTTProvider` instead, which is Metal-accelerated via mlx-whisper.
+"""
 
 import asyncio
 import gc
@@ -27,6 +32,10 @@ class LocalSTTProvider(STTProvider):
     @property
     def model_name(self) -> str:
         return f"whisper/{self._settings.whisper_model_size}"
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
 
     @property
     def last_load_error(self) -> str | None:
