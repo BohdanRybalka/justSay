@@ -19,6 +19,7 @@ Phase 1 of Plan 013. Architectural rules:
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 import threading
@@ -204,28 +205,173 @@ async def get_insights() -> InsightsResponse:
 
 # --- Search --------------------------------------------------------------
 
-def search_history(q: str, limit: int = 20) -> list[history.HistoryEntry]:
-    """FTS5 BM25 search over cleaned_text. Empty / whitespace ``q`` short-
-    circuits to an empty list — callers (the router) decide whether to
-    fall back to the newest-first list.
+class HistorySearchHit(history.HistoryEntry):
+    highlighted_text: str = ""
 
-    BM25 returns negative scores; smaller = more relevant; so
-    ``ORDER BY rank ASC`` is "best first".
+
+# Whitelist: Unicode letters/digits, straight + curly apostrophes, whitespace.
+# Everything else (`-`, `/`, `:`, `^`, `*`, `"`, `(`, `)`, etc.) is stripped
+# before the prefix rewrite — closes every FTS5 special-character surface in
+# one shot.
+_SANITIZE_KEEP_RE = re.compile(r"[^\w\s'’‘]", re.UNICODE)
+
+
+def _sanitize_fts_query(q: str) -> tuple[str, list[str]]:
+    """Whitelist-sanitize ``q`` and return ``(fts_expression, tokens)``.
+
+    Returns ``("", [])`` when the sanitised query is empty.
+
+    Tokens are lowercased so the FTS5 operator keywords ``NOT``/``AND``/
+    ``OR``/``NEAR`` cease to be operators (uppercase ``NOT*`` raises
+    ``OperationalError: fts5: syntax error near "NOT"``; lowercase ``not*``
+    is a plain prefix term).
+    """
+    if not q:
+        return "", []
+    cleaned = _SANITIZE_KEEP_RE.sub(" ", q)
+    tokens = [t.lower() for t in cleaned.split() if t]
+    if not tokens:
+        return "", []
+    return " ".join(f"{t}*" for t in tokens), tokens
+
+
+def _build_highlight(text: str | None, tokens: list[str]) -> str:
+    """HTML-escape ``text`` and wrap occurrences of any ``tokens`` (case-
+    insensitive) in ``<mark>…</mark>``.
+
+    Single-pass design: offsets are found on the RAW (un-escaped) text, the
+    spans are merged so overlapping/adjacent ranges produce one ``<mark>``,
+    and ``html.escape`` is applied only on the segments BETWEEN spans (and
+    on the content inside each ``<mark>``). This avoids three classes of
+    bug from the iterative-``re.sub`` approach:
+      - matches inside HTML entities (e.g. ``amp`` in ``&amp;``)
+      - overlapping tokens producing nested/broken ``<mark>`` tags
+      - XSS via raw ``<script>`` in the transcript content
+    """
+    if not text:
+        return ""
+    if not tokens:
+        return html.escape(text)
+
+    # Collect spans across all tokens, dropping zero-width matches.
+    spans: list[tuple[int, int]] = []
+    for tok in tokens:
+        if not tok:
+            continue
+        for m in re.finditer(re.escape(tok), text, flags=re.IGNORECASE):
+            if m.end() > m.start():
+                spans.append((m.start(), m.end()))
+
+    if not spans:
+        return html.escape(text)
+
+    # Merge overlapping/adjacent spans.
+    spans.sort()
+    merged: list[list[int]] = [[spans[0][0], spans[0][1]]]
+    for start, end in spans[1:]:
+        if start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+
+    out: list[str] = []
+    cursor = 0
+    for start, end in merged:
+        if start > cursor:
+            out.append(html.escape(text[cursor:start]))
+        out.append("<mark>")
+        out.append(html.escape(text[start:end]))
+        out.append("</mark>")
+        cursor = end
+    if cursor < len(text):
+        out.append(html.escape(text[cursor:]))
+    return "".join(out)
+
+
+def _hit_from_row(row, tokens: list[str]) -> HistorySearchHit:
+    """Build a search hit from a row that includes ``cleaned_text``."""
+    base = history._row_to_entry(row)
+    highlighted = _build_highlight(row["cleaned_text"], tokens)
+    return HistorySearchHit(
+        **base.model_dump(),
+        highlighted_text=highlighted,
+    )
+
+
+def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
+    """Two-lane search: FTS5 BM25 prefix-match (primary) + LIKE substring
+    fallback (secondary).
+
+    The FTS5 lane uses the sanitized prefix query (``прав*``-style) on
+    ``entry_fts`` and orders by BM25 ascending (best first). The LIKE
+    fallback runs only when the FTS5 lane returns fewer rows than
+    ``clamped_limit``, catches mid-word substrings the prefix path misses
+    (e.g. ``"кадабр"`` inside ``"абракадабра"``), and is de-duplicated at
+    SQL level via ``id NOT IN (...)``.
+
+    Match highlights are computed by ``_build_highlight`` on the raw
+    ``cleaned_text`` joined in from ``entries`` — FTS5's own ``highlight()``
+    aux function is NOT used because it does not HTML-escape the content
+    text (verified at entry-gate iter 1) and would open a stored-XSS vector
+    in the Tauri WebView.
+
+    Logs only ``len(q)`` (NEVER ``q`` itself, NEVER ``len(sanitized)``).
     """
     clamped_limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
-    if not q or not q.strip():
+    log.debug("search len=%d", len(q or ""))
+
+    fts_expr, tokens = _sanitize_fts_query(q or "")
+    if not tokens:
         return []
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        rows = conn.execute(
+        fts_rows = conn.execute(
             "SELECT e.id, e.ts, e.language, e.style, e.raw_text, "
-            "e.duration_ms, e.audio_duration_seconds, e.word_count, "
-            "e.model_name, e.tokens_used, bm25(entry_fts) AS rank "
+            "e.cleaned_text, e.duration_ms, e.audio_duration_seconds, "
+            "e.word_count, e.model_name, e.tokens_used, "
+            "bm25(entry_fts) AS rank "
             "FROM entry_fts JOIN entries e ON e.rowid = entry_fts.rowid "
             "WHERE entry_fts MATCH ? "
             "ORDER BY rank ASC LIMIT ?",
-            (q, clamped_limit),
+            (fts_expr, clamped_limit),
         ).fetchall()
 
-    return [history._row_to_entry(r) for r in rows]
+        hits = [_hit_from_row(r, tokens) for r in fts_rows]
+
+        # LIKE-fallback lane: only when the FTS5 lane left room.
+        residual = clamped_limit - len(hits)
+        if residual > 0:
+            like_clauses = " AND ".join(["cleaned_text LIKE ? ESCAPE '\\'"] * len(tokens))
+            # Escape LIKE wildcards (`%`, `_`) and the backslash itself so a
+            # token containing them only matches the literal characters in
+            # transcript content (exit-gate YELLOW-1).
+            def _escape_like(t: str) -> str:
+                return t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            like_params: list = [f"%{_escape_like(t)}%" for t in tokens]
+
+            existing_ids = [h.id for h in hits]
+            if existing_ids:
+                placeholders = ",".join("?" * len(existing_ids))
+                not_in_clause = f" AND id NOT IN ({placeholders})"
+                params = (*like_params, *existing_ids, residual)
+            else:
+                # Empty set — skip the NOT IN clause entirely; emitting
+                # ``id NOT IN ()`` would be an SQLite syntax error.
+                not_in_clause = ""
+                params = (*like_params, residual)
+
+            like_rows = conn.execute(
+                "SELECT id, ts, language, style, raw_text, cleaned_text, "
+                "duration_ms, audio_duration_seconds, word_count, "
+                "model_name, tokens_used "
+                f"FROM entries WHERE {like_clauses}{not_in_clause} "
+                "ORDER BY ts DESC LIMIT ?",
+                params,
+            ).fetchall()
+
+            hits.extend(_hit_from_row(r, tokens) for r in like_rows)
+
+    # Defensive: enforce the overall cap (the SQL residual LIMIT should
+    # already make this a no-op).
+    return hits[:clamped_limit]

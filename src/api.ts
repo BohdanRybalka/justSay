@@ -165,6 +165,10 @@ export interface HistoryEntry {
   tokens_used: number | null;
   audio_duration_seconds: number | null;
   word_count: number | null;
+  /** Populated only by /history/search responses. Already HTML-escaped on
+   *  the backend with `<mark>…</mark>` wrappers around matched spans —
+   *  assign directly to `innerHTML`, do NOT re-escape. */
+  highlighted_text?: string;
 }
 
 export interface HistoryListResponse {

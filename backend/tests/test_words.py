@@ -303,3 +303,207 @@ async def test_words_insights_503_when_llm_fails(client):
 
     assert resp.status_code == 503
     assert "Insights unavailable" in resp.json()["detail"]
+
+
+# --- Plan 021: search sanitization + highlight ---------------------------
+
+import logging
+from html.parser import HTMLParser
+
+
+def test_sanitize_lowercases_and_appends_star():
+    expr, tokens = words._sanitize_fts_query("Я прав")
+    assert expr == "я* прав*"
+    assert tokens == ["я", "прав"]
+
+
+def test_sanitize_lowercases_fts5_operator_keywords():
+    """``NOT*``/``AND*``/``OR*`` raise FTS5 syntax errors when uppercase.
+    The sanitizer must lowercase them so they become literal prefix terms."""
+    expr, tokens = words._sanitize_fts_query("NOT AND OR meeting")
+    assert expr == "not* and* or* meeting*"
+    # Regression: the rewritten expression must not raise FTS5 syntax error.
+    history.save_entry(text="meeting brief", duration_ms=1)
+    # Direct conn check to prove the expression itself is FTS5-valid.
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        # Run a MATCH with the expression — should not OperationalError.
+        conn.execute(
+            "SELECT count(*) FROM entry_fts WHERE entry_fts MATCH ?", (expr,)
+        ).fetchone()
+
+
+def test_sanitize_strips_fts5_specials_and_dash_slash():
+    """`-` is FTS5 NOT, `/` is part of `NEAR/n`. Both must be stripped.
+    The trailing ``*`` per token is the prefix syntax we deliberately
+    add, so we only check that NO ``*`` appears inside a token."""
+    expr, _tokens = words._sanitize_fts_query('"(bad:chars)*')
+    # Specials stripped — only sanitized tokens with trailing `*` survive.
+    assert expr == "bad* chars*"
+    for bad in '"():':
+        assert bad not in expr
+
+    expr, tokens = words._sanitize_fts_query("-правив")
+    assert expr == "правив*"
+    assert tokens == ["правив"]
+
+    expr, _tokens = words._sanitize_fts_query("NEAR/3 word")
+    assert "/" not in expr
+    # 'NEAR' is no longer an operator after lowercase, and '/' is stripped.
+    assert "near*" in expr and "3*" in expr and "word*" in expr
+
+
+def test_sanitize_whitespace_and_empty():
+    assert words._sanitize_fts_query("") == ("", [])
+    assert words._sanitize_fts_query("   ") == ("", [])
+    assert words._sanitize_fts_query("\t\n") == ("", [])
+
+
+def test_build_highlight_basic_match():
+    out = words._build_highlight("правив у файлі", ["прав"])
+    assert "<mark>прав</mark>ив у файлі" in out
+
+
+def test_build_highlight_case_insensitive_cyrillic():
+    out = words._build_highlight("Прав і прав", ["прав"])
+    assert "<mark>Прав</mark>" in out
+    assert "<mark>прав</mark>" in out
+
+
+def test_build_highlight_escapes_xss_content():
+    """Regression for entry-gate iter 1 RED-1 (FTS5 highlight() did not
+    escape). Our Python helper MUST escape the raw text and only insert
+    literal ``<mark>`` markup. No raw ``<script>`` may leak."""
+    out = words._build_highlight("<script>alert(1)</script>", ["alert"])
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+    assert "<mark>alert</mark>" in out
+
+
+def test_build_highlight_does_not_match_inside_entity():
+    """Regression for entry-gate iter 1 RED-4: matching 'amp' inside the
+    escaped '&amp;' would corrupt the entity. Our offsets are found on the
+    raw text BEFORE escaping, so 'amp' never matches inside an entity."""
+    out = words._build_highlight("AT&T", ["amp"])
+    assert out == "AT&amp;T"
+    assert "<mark>" not in out
+
+
+def test_build_highlight_overlapping_tokens_produce_valid_html():
+    """Regression for entry-gate iter 1 RED-3: iterative re.sub built
+    broken nested tags. Single-pass span-merge must produce well-formed
+    HTML."""
+    out = words._build_highlight("mark spot", ["mark", "ar"])
+
+    # Round-trip through the HTML parser to assert well-formedness.
+    class Validator(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.stack: list[str] = []
+            self.ok = True
+
+        def handle_starttag(self, tag, attrs):
+            self.stack.append(tag)
+
+        def handle_endtag(self, tag):
+            if not self.stack or self.stack[-1] != tag:
+                self.ok = False
+            else:
+                self.stack.pop()
+
+    v = Validator()
+    v.feed(out)
+    assert v.ok and not v.stack, f"Malformed HTML: {out!r}"
+
+
+def test_build_highlight_empty_text_guard():
+    """Iter-2 RED-4: NULL/empty cleaned_text must not crash."""
+    assert words._build_highlight("", ["x"]) == ""
+    assert words._build_highlight(None, ["x"]) == ""
+
+
+def test_build_highlight_token_longer_than_text():
+    assert words._build_highlight("ab", ["abcdef"]) == "ab"
+
+
+def test_build_highlight_empty_tokens_returns_escaped_text():
+    """No tokens → no marks, but content is still HTML-escaped."""
+    assert words._build_highlight("AT&T", []) == "AT&amp;T"
+    assert words._build_highlight("anything", []) == "anything"
+
+
+def test_search_history_prefix_match_returns_highlight():
+    history.save_entry(text="правив у файлі", duration_ms=1, language="uk")
+    hits = words.search_history("прав", limit=5)
+    assert len(hits) == 1
+    assert isinstance(hits[0], words.HistorySearchHit)
+    assert "<mark>прав</mark>ив" in hits[0].highlighted_text
+
+
+def test_search_history_no_results_no_crash():
+    history.save_entry(text="anything", duration_ms=1)
+    assert words.search_history("nonexistent_token_xyz", limit=5) == []
+
+
+def test_search_history_like_fallback_catches_substring():
+    """FTS5 prefix matching cannot find ``кадабр`` inside ``абракадабра``.
+    The LIKE-fallback lane catches it."""
+    history.save_entry(text="абракадабра", duration_ms=1)
+    hits = words.search_history("кадабр", limit=5)
+    assert len(hits) == 1
+    assert "абракадабра" in hits[0].text
+    assert "<mark>кадабр</mark>" in hits[0].highlighted_text
+
+
+def test_search_history_dedup_when_both_lanes_match():
+    """Row that matches both FTS5 (prefix) and LIKE (substring) appears
+    exactly once."""
+    history.save_entry(text="правда буде завжди прав", duration_ms=1)
+    hits = words.search_history("прав", limit=5)
+    assert len(hits) == 1
+
+
+def test_search_history_combined_cap_enforced():
+    """Iter-2 YELLOW-1: even with both lanes hitting the same row set,
+    the final list length must respect ``limit``."""
+    for i in range(5):
+        history.save_entry(text=f"правда{i} буде", duration_ms=1)
+    hits = words.search_history("прав", limit=3)
+    assert len(hits) == 3
+
+
+def test_search_history_empty_fts5_then_like_only_no_sql_error():
+    """Iter-2 RED-3: ``id NOT IN ()`` would be a SQL syntax error if the
+    LIKE-fallback lane ran without any FTS5 results. The guard must skip
+    the NOT IN clause when ``fts_rows`` is empty."""
+    # Substring 'кадабр' does NOT prefix-match any token; FTS5 returns 0.
+    history.save_entry(text="абракадабра", duration_ms=1)
+    # Should not raise OperationalError("near ')': syntax error").
+    hits = words.search_history("кадабр", limit=5)
+    assert len(hits) == 1
+
+
+def test_search_history_does_not_log_query(caplog):
+    """Privacy: only ``len(q)`` may appear in logs — never ``q`` and never
+    ``len(sanitized_q)``."""
+    history.save_entry(text="something", duration_ms=1)
+    with caplog.at_level(logging.DEBUG, logger="app.core.words"):
+        words.search_history("secretpassword12345", limit=5)
+    joined = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "secretpassword" not in joined
+    assert "12345" not in joined
+    assert "len=19" in joined
+
+
+@pytest.mark.asyncio
+async def test_search_endpoint_returns_highlighted_text_field(client):
+    """Iter-2 BLOCK-1: the ``response_model`` MUST be ``HistorySearchResponse``
+    so FastAPI serializes ``highlighted_text``. With the old
+    ``HistoryListResponse`` model the field would be silently dropped."""
+    history.save_entry(text="правив у файлі", duration_ms=1, language="uk")
+    resp = await client.get("/history/search?q=прав")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["entries"]) == 1
+    assert "highlighted_text" in data["entries"][0]
+    assert "<mark>прав</mark>" in data["entries"][0]["highlighted_text"]

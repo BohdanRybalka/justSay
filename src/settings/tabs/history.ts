@@ -160,6 +160,13 @@ export function renderHistory(container: HTMLElement): () => void {
       badges.push(`<span class="history-badge history-badge-ai">AI Prompt</span>`);
     }
 
+    // Plan 021: search responses carry pre-escaped `<mark>…</mark>` HTML
+    // in `highlighted_text`. Outside search mode we fall back to the
+    // plain-text path.
+    const textHtml = entry.highlighted_text
+      ? entry.highlighted_text
+      : escapeHtml(entry.text);
+
     el.innerHTML = `
       <div class="history-entry-header">
         <div class="history-stamp">
@@ -168,7 +175,7 @@ export function renderHistory(container: HTMLElement): () => void {
         </div>
         <div class="history-badges">${badges.join("")}</div>
       </div>
-      <div class="history-text">${escapeHtml(entry.text)}</div>
+      <div class="history-text">${textHtml}</div>
       <div class="history-actions">
         <button class="btn btn-secondary btn-sm" data-action="copy">Copy</button>
         <button class="btn btn-secondary btn-sm" data-action="delete">Delete</button>

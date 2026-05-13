@@ -609,16 +609,30 @@ def test_search_returns_results_ordered_by_relevance(isolated_storage, tmp_path)
         assert "brown brown brown" in data["entries"][0]["text"]
 
 
-def test_search_malformed_query_returns_400(isolated_storage, tmp_path):
+def test_search_sanitized_to_empty_returns_200_empty(isolated_storage, tmp_path):
+    """Plan 021: the whitelist sanitizer strips bare punctuation. A query
+    like ``"`` now sanitizes to an empty string and the endpoint returns
+    200 with an empty list (was 400 pre-Plan-021)."""
     from fastapi.testclient import TestClient
     from app.main import app
 
     with TestClient(app) as client:
         history.save_entry(text="anything", duration_ms=1)
-        # Bare double-quote is not valid FTS5 syntax; SQLite raises
-        # OperationalError("fts5: ...").
         resp = client.get('/history/search?q="')
-        assert resp.status_code == 400
+        assert resp.status_code == 200
+        assert resp.json() == {"entries": [], "total": 0}
+
+
+def test_search_query_too_long_returns_422(isolated_storage, tmp_path):
+    """Plan 021: ``q`` has ``max_length=500`` at the router; FastAPI emits
+    422 for over-long inputs."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    with TestClient(app) as client:
+        history.save_entry(text="anything", duration_ms=1)
+        resp = client.get(f"/history/search?q={'a' * 501}")
+        assert resp.status_code == 422
 
 
 def test_search_lock_error_returns_503(isolated_storage, tmp_path):

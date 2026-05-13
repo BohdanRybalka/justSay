@@ -274,7 +274,7 @@ html, body {
 
 /* --- Inputs --- */
 
-select, input[type="text"], input[type="number"] {
+select, input[type="text"], input[type="number"], input[type="password"] {
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -284,6 +284,28 @@ select, input[type="text"], input[type="number"] {
   font-family: inherit;
   outline: none;
   transition: border-color 0.15s;
+}
+
+.key-input-row input[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Plan 022 — Keys tab actions row wraps when the panel is narrow. */
+.key-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.key-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.key-input-row input {
+  flex: 1;
+  min-width: 0;
 }
 
 select:focus, input:focus {
@@ -367,6 +389,12 @@ select {
 
 .btn-danger:hover {
   background: rgba(244, 67, 54, 0.25);
+}
+
+.btn:disabled,
+.btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* --- Model info card --- */
@@ -509,6 +537,15 @@ select {
   user-select: text;
   scrollbar-width: thin;
   scrollbar-color: rgba(108, 99, 255, 0.4) transparent;
+}
+
+/* Plan 021 — match highlight in /history/search responses. */
+.history-text mark {
+  background: rgba(240, 192, 64, 0.35);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+  font-weight: 600;
 }
 
 .history-actions {

@@ -15,12 +15,18 @@ from app.core.history import (
     delete_entry,
     clear_all,
 )
+from app.core.words import HistorySearchHit
 
 router = APIRouter(prefix="/history", tags=["History"])
 
 
 class HistoryListResponse(BaseModel):
     entries: list[HistoryEntry]
+    total: int
+
+
+class HistorySearchResponse(BaseModel):
+    entries: list[HistorySearchHit]
     total: int
 
 
@@ -71,16 +77,23 @@ async def history_stats():
         raise
 
 
-@router.get("/search", response_model=HistoryListResponse)
+@router.get("/search", response_model=HistorySearchResponse)
 async def history_search(
-    q: str = Query("", description="FTS5 search query (empty → empty list)"),
+    q: str = Query(
+        "",
+        description="Search query (empty or sanitized-to-empty → empty list)",
+        max_length=500,
+    ),
     limit: int = Query(20, ge=1, le=words_service.SEARCH_LIMIT_MAX),
 ):
-    """Full-text search across transcripts via SQLite FTS5 / BM25.
+    """Full-text search across transcripts via SQLite FTS5 / BM25 plus a
+    substring LIKE fallback for mid-word matches.
 
-    Empty / whitespace ``q`` returns 200 with an empty list — clients
-    fall back to ``/history`` for the newest-first view. Malformed FTS5
-    syntax → 400. Storage lock → 503.
+    Empty / whitespace / fully-sanitized-out ``q`` returns 200 with an
+    empty list — clients fall back to ``/history`` for the newest-first
+    view. The 400 path is kept as defense-in-depth; with the whitelist
+    sanitizer it should be unreachable from sanitized input. Storage
+    lock → 503.
     """
     try:
         entries = words_service.search_history(q, limit=limit)
@@ -91,7 +104,7 @@ async def history_search(
         if _is_fts_syntax_error(e):
             raise HTTPException(status_code=400, detail="Invalid search query") from e
         raise
-    return HistoryListResponse(entries=entries, total=len(entries))
+    return HistorySearchResponse(entries=entries, total=len(entries))
 
 
 @router.delete("/{entry_id}")

@@ -1,3 +1,4 @@
+import { getVersion } from "@tauri-apps/api/app";
 import { api, type UserSettings } from "../api";
 import { renderGeneral } from "./tabs/general";
 import { renderModels } from "./tabs/models";
@@ -80,12 +81,24 @@ export function getSettings(): UserSettings | null {
 
 async function checkBackend() {
   try {
-    const health = await api.health();
-    backendStatus.textContent = `Backend: ${health.version}`;
+    await api.health();
+    backendStatus.textContent = "Backend";
     backendStatus.className = "status-indicator online";
   } catch {
-    backendStatus.textContent = "Backend: Offline";
+    backendStatus.textContent = "Backend offline";
     backendStatus.className = "status-indicator offline";
+  }
+}
+
+async function initAppVersion() {
+  const el = document.getElementById("sidebar-version");
+  if (!el) return;
+  try {
+    const v = await getVersion();
+    el.textContent = `v${v}`;
+  } catch {
+    // Plain-browser dev open — Tauri IPC bridge is absent. Leave the
+    // placeholder in place rather than blanking the footer.
   }
 }
 
@@ -103,6 +116,7 @@ navButtons.forEach((btn) => {
 // --- Init ---
 
 async function init() {
+  void initAppVersion();
   await checkBackend();
   setInterval(checkBackend, 5000);
 

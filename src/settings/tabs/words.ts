@@ -17,6 +17,7 @@ const LANGUAGE_LABELS: Record<string, string> = {
 };
 
 type Lang = "all" | "uk" | "en";
+const TOP_LIMIT = 10;
 
 export function renderWords(container: HTMLElement): () => void {
   container.innerHTML = `
@@ -30,73 +31,119 @@ export function renderWords(container: HTMLElement): () => void {
 
   let cancelled = false;
   let topLang: Lang = "all";
-  // Guard against the 5 s polling firing a new insights LLM call while
-  // the previous one is still in flight. Without this, a slow Ollama
-  // (10–30 s) produces a fetch storm — each in-flight /words/insights
-  // holds history._lock through the top_words SQL, racing dictation
-  // for the same lock. Closes QA exit-gate RED-2.
+  // Concurrent-call guard: only one /words/insights at a time.
   let insightsLoading = false;
   let insightsLoadedOnce = false;
-  // The /words/top + /words/insights endpoints are post-v0.10.4. Older
-  // frozen sidecars return 404; remember that so we stop probing on every
-  // 5 s poll and degrade gracefully to the legacy stats-only view.
+  // /words/top + /words/insights are post-v0.10.4 — older frozen sidecars
+  // return 404; remember that so we degrade gracefully.
   let topUnsupported = false;
   let insightsUnsupported = false;
-
-  async function refresh() {
-    try {
-      const stats = await api.historyStats();
-      if (cancelled) return;
-
-      let top: TopWordsResponse | null = null;
-      if (!topUnsupported) {
-        try {
-          top = await api.wordsTop(topLang, 30);
-        } catch (e) {
-          if (isNotFound(e)) {
-            topUnsupported = true;
-          } else {
-            console.error("wordsTop failed:", e);
-          }
-        }
-      }
-      if (cancelled) return;
-
-      body.innerHTML = renderBody(stats, top, topLang, topUnsupported || insightsUnsupported);
-      if (top) wireLangToggle();
-
-      // Insights load lazily after the main paint — they involve an LLM call.
-      // Only kick off a fetch if the endpoint is reachable, no other call is
-      // in flight, and we haven't already painted insights this tab open.
-      if (insightsUnsupported) {
-        const box = body.querySelector<HTMLElement>("#words-insights-box");
-        if (box) box.remove();
-      } else if (!insightsLoading && !insightsLoadedOnce) {
-        loadInsights();
-      } else if (insightsLoadedOnce) {
-        const box = body.querySelector<HTMLElement>("#words-insights-box");
-        if (box) {
-          box.innerHTML = `<div class="value" style="color:var(--text-muted)">Insights cached — open this tab again to refresh.</div>`;
-        }
-      }
-    } catch (e) {
-      if (cancelled) return;
-      body.innerHTML = `<div class="value" style="color:var(--red)">Failed to load: ${(e as Error).message}</div>`;
-    }
-  }
+  // True once renderPage has assigned the full body markup; refreshStats
+  // can skip its work while we're still in the zero-state placeholder.
+  let pageRendered = false;
+  let lastTotalEntries = -1;
 
   function isNotFound(e: unknown): boolean {
     const msg = (e as Error).message?.toLowerCase() ?? "";
-    // 404 (route missing) or 405 (FastAPI matches an existing path with a
-    // different verb — happens because the old sidecar exposed only
-    // DELETE /history/{entry_id}, so any GET to a new sibling path gets
-    // method-not-allowed). Both mean: "sidecar is too old, hide the block."
     return (
       msg.includes("not found") ||
       msg.includes("http 404") ||
       msg.includes("method not allowed") ||
       msg.includes("http 405")
     );
+  }
+
+  async function fetchTop(): Promise<TopWordsResponse | null> {
+    if (topUnsupported) return null;
+    try {
+      return await api.wordsTop(topLang, TOP_LIMIT);
+    } catch (e) {
+      if (isNotFound(e)) {
+        topUnsupported = true;
+      } else {
+        console.error("wordsTop failed:", e);
+      }
+      return null;
+    }
+  }
+
+  async function renderPage() {
+    try {
+      const stats = await api.historyStats();
+      if (cancelled) return;
+      const top = await fetchTop();
+      if (cancelled) return;
+      lastTotalEntries = stats.total_entries;
+
+      body.innerHTML = renderBody(stats, top, topLang);
+      pageRendered = stats.total_entries > 0;
+
+      if (pageRendered) {
+        if (top) wireLangToggle();
+        if (top && !insightsUnsupported && !insightsLoading && !insightsLoadedOnce) {
+          loadInsights(false);
+        }
+      }
+    } catch (e) {
+      if (cancelled) return;
+      body.innerHTML = `<div class="value" style="color:var(--red)">Failed to load: ${(e as Error).message}</div>`;
+      pageRendered = false;
+    }
+  }
+
+  async function refreshStats() {
+    try {
+      const stats = await api.historyStats();
+      if (cancelled) return;
+
+      // First tick before the initial renderPage finished — skip without
+      // synthesising a fake "zero → non-zero" transition that would race
+      // an in-flight renderPage(), produce a detached insights box, and
+      // strand it on "Loading insights…".
+      if (lastTotalEntries < 0) return;
+
+      // Zero ↔ non-zero transition triggers a full re-paint instead of
+      // mutating absent nodes.
+      const wasEmpty = lastTotalEntries === 0;
+      const isEmpty = stats.total_entries === 0;
+      lastTotalEntries = stats.total_entries;
+      if (wasEmpty !== isEmpty) {
+        await renderPage();
+        return;
+      }
+      if (isEmpty || !pageRendered) return;
+
+      const top = await fetchTop();
+      if (cancelled) return;
+
+      setText("words-stat-today", stats.today_words.toLocaleString("uk-UA"));
+      setText("words-stat-week", stats.week_words.toLocaleString("uk-UA"));
+      setText("words-stat-lifetime", stats.total_words.toLocaleString("uk-UA"));
+      setText("words-stat-audio", formatDuration(stats.total_audio_seconds));
+      setText("words-stat-entries", stats.total_entries.toLocaleString("uk-UA"));
+
+      if (top) {
+        const topEl = document.getElementById("words-top");
+        if (topEl) topEl.innerHTML = renderTopWords(top);
+      }
+
+      const langEl = document.getElementById("words-by-lang");
+      if (langEl) {
+        langEl.innerHTML = renderBucketRows(stats.by_language, (code) => LANGUAGE_LABELS[code] || code);
+      }
+      const modelEl = document.getElementById("words-by-model");
+      if (modelEl) {
+        modelEl.innerHTML = renderBucketRows(stats.by_model, (m) => m);
+      }
+    } catch (e) {
+      if (cancelled) return;
+      console.error("refreshStats failed:", e);
+    }
+  }
+
+  function setText(id: string, value: string) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
   }
 
   function wireLangToggle() {
@@ -108,13 +155,21 @@ export function renderWords(container: HTMLElement): () => void {
         if (!next || next === topLang) return;
         topLang = next;
         try {
-          const top = await api.wordsTop(topLang, 30);
+          const top = await api.wordsTop(topLang, TOP_LIMIT);
           if (cancelled) return;
           const topContainer = body.querySelector<HTMLElement>("#words-top");
           if (topContainer) topContainer.innerHTML = renderTopWords(top);
           toggle.querySelectorAll<HTMLButtonElement>("button").forEach((b) => {
             b.classList.toggle("active", b.dataset.lang === topLang);
           });
+          // Auto-refresh insights to keep the two sections in sync. Only
+          // fires after the top-words update succeeded — if wordsTop failed
+          // we keep both sections on their previous content. Fire-and-forget;
+          // the `insightsLoading` guard inside loadInsights() blocks
+          // overlapping requests when the user spams the toggle.
+          if (!insightsUnsupported) {
+            void loadInsights(true);
+          }
         } catch (e) {
           console.error(e);
         }
@@ -122,8 +177,10 @@ export function renderWords(container: HTMLElement): () => void {
     });
   }
 
-  async function loadInsights() {
+  async function loadInsights(force: boolean) {
+    // Race-condition guard — stays active regardless of `force`.
     if (insightsLoading) return;
+    if (!force && insightsLoadedOnce) return;
     const box = body.querySelector<HTMLElement>("#words-insights-box");
     if (!box) return;
     insightsLoading = true;
@@ -136,10 +193,10 @@ export function renderWords(container: HTMLElement): () => void {
     } catch (e) {
       if (cancelled) return;
       if (isNotFound(e)) {
-        // Older sidecar — feature not available. Drop the block silently
-        // and stop probing on subsequent polls.
         insightsUnsupported = true;
-        box.remove();
+        // Drop the whole insights block silently — older sidecar.
+        const wrap = body.querySelector<HTMLElement>("#words-insights-wrap");
+        if (wrap) wrap.remove();
         return;
       }
       const msg = (e as Error).message || "Insights unavailable";
@@ -148,17 +205,15 @@ export function renderWords(container: HTMLElement): () => void {
           Insights unavailable — start Ollama or switch to Cloud mode.
           <div style="font-size: 11px; opacity: 0.7; margin-top: 4px">${escapeHtml(msg)}</div>
         </div>`;
-      // Do NOT set insightsLoadedOnce — a failure should be retried by
-      // the next refresh, NOT cached as a permanent error state.
+      // Do NOT set insightsLoadedOnce — error states are retryable on the
+      // next language-toggle click (which calls loadInsights(true)).
     } finally {
       insightsLoading = false;
     }
   }
 
-  refresh();
-  // History stats poll every 5 s (existing behaviour). Top-words and
-  // insights cache for 1 h on the backend; refresh handles cache hits.
-  const poll = setInterval(refresh, 5000);
+  renderPage();
+  const poll = setInterval(refreshStats, 5000);
 
   return () => {
     cancelled = true;
@@ -170,7 +225,6 @@ function renderBody(
   stats: HistoryStats,
   top: TopWordsResponse | null,
   lang: Lang,
-  _legacyOnly: boolean,
 ): string {
   if (stats.total_entries === 0) {
     return `
@@ -184,28 +238,28 @@ function renderBody(
     ${renderStatsCards(stats)}
     ${top ? renderTopWordsBlock(top, lang) : ""}
     ${top ? renderInsightsBlock() : ""}
-    ${renderBucket("By language", stats.by_language, (code) => LANGUAGE_LABELS[code] || code)}
-    ${renderBucket("By model", stats.by_model, (m) => m)}
+    ${renderBucket("By language", "words-by-lang", stats.by_language, (code) => LANGUAGE_LABELS[code] || code)}
+    ${renderBucket("By model", "words-by-model", stats.by_model, (m) => m)}
   `;
 }
 
 function renderStatsCards(s: HistoryStats): string {
   const cards = `
     <div class="word-cards">
-      ${bigCard("Today", s.today_words)}
-      ${bigCard("This week", s.week_words)}
-      ${bigCard("Lifetime", s.total_words)}
+      ${bigCard("Today", "words-stat-today", s.today_words)}
+      ${bigCard("This week", "words-stat-week", s.week_words)}
+      ${bigCard("Lifetime", "words-stat-lifetime", s.total_words)}
     </div>
   `;
 
   const audioBlock = `
     <div class="setting-row" style="margin-top:16px;">
       <span class="label">Total audio time</span>
-      <span class="value">${formatDuration(s.total_audio_seconds)}</span>
+      <span class="value" id="words-stat-audio">${formatDuration(s.total_audio_seconds)}</span>
     </div>
     <div class="setting-row">
       <span class="label">Transcriptions</span>
-      <span class="value">${s.total_entries.toLocaleString("uk-UA")}</span>
+      <span class="value" id="words-stat-entries">${s.total_entries.toLocaleString("uk-UA")}</span>
     </div>
   `;
 
@@ -261,7 +315,7 @@ function renderTopWords(top: TopWordsResponse): string {
 
 function renderInsightsBlock(): string {
   return `
-    <div class="setting-group" style="margin-top:24px;">
+    <div class="setting-group" id="words-insights-wrap" style="margin-top:24px;">
       <div class="setting-label">Insights</div>
       <div id="words-insights-box">
         <div class="value" style="color:var(--text-muted)">Loading insights...</div>
@@ -292,36 +346,49 @@ function renderInsights(payload: InsightsResponse): string {
   `;
 }
 
-function bigCard(label: string, count: number): string {
+function bigCard(label: string, valueId: string, count: number): string {
   return `
     <div class="word-card">
       <div class="word-card-label">${label}</div>
-      <div class="word-card-value">${count.toLocaleString("uk-UA")}</div>
+      <div class="word-card-value" id="${valueId}">${count.toLocaleString("uk-UA")}</div>
       <div class="word-card-sub">words</div>
     </div>
   `;
 }
 
-function renderBucket(title: string, bucket: Record<string, number>, labelFn: (k: string) => string): string {
+function renderBucketRows(
+  bucket: Record<string, number>,
+  labelFn: (k: string) => string,
+): string {
   const entries = Object.entries(bucket).sort((a, b) => b[1] - a[1]);
   if (entries.length === 0) return "";
   const max = entries[0][1] || 1;
+  return entries
+    .map(([key, value]) => {
+      const pct = (value / max) * 100;
+      return `
+        <div class="bucket-row">
+          <span class="bucket-label">${escapeHtml(labelFn(key))}</span>
+          <div class="bucket-bar"><div class="bucket-bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
+          <span class="bucket-value">${value.toLocaleString("uk-UA")}</span>
+        </div>
+      `;
+    })
+    .join("");
+}
 
-  const rows = entries.map(([key, value]) => {
-    const pct = (value / max) * 100;
-    return `
-      <div class="bucket-row">
-        <span class="bucket-label">${escapeHtml(labelFn(key))}</span>
-        <div class="bucket-bar"><div class="bucket-bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
-        <span class="bucket-value">${value.toLocaleString("uk-UA")}</span>
-      </div>
-    `;
-  }).join("");
-
+function renderBucket(
+  title: string,
+  id: string,
+  bucket: Record<string, number>,
+  labelFn: (k: string) => string,
+): string {
+  // Always emit the container even when empty so refreshStats() can rely
+  // on the IDs being present from first mount.
   return `
     <div class="setting-group" style="margin-top:20px;">
       <div class="setting-label">${title}</div>
-      <div class="bucket-list">${rows}</div>
+      <div class="bucket-list" id="${id}">${renderBucketRows(bucket, labelFn)}</div>
     </div>
   `;
 }
