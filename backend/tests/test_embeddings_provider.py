@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.core.types import ProviderMode
-from app.embeddings import clear_cache, resolve_embedding_provider
+from app.embeddings import LOCAL_MISSING_MODEL_REASON, clear_cache, resolve_embedding_provider
 from app.embeddings.cloud import CloudEmbeddingProvider
 from app.embeddings.config import EmbeddingSettings
 from app.embeddings.local import LocalEmbeddingProvider
@@ -145,6 +145,56 @@ async def test_clear_cache_forces_reresolve():
         clear_cache()
         await resolve_embedding_provider(stt, llm, emb)
     assert ctor.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_unavailable_cache_reprobes_and_flips_available():
+    """A cached (LOCAL, LOCAL) negative result caused by a missing model
+    must not be served verbatim forever — it must re-probe Ollama on every
+    call until the model appears, then cache the resulting provider
+    normally, without an intervening clear_cache()."""
+    stt, llm, emb = _settings(ProviderMode.LOCAL, ProviderMode.LOCAL)
+    fake_local = MagicMock(name="LocalEmbeddingProvider-instance")
+
+    with (
+        patch("app.embeddings.local.LocalEmbeddingProvider", return_value=fake_local),
+        patch(
+            "app.embeddings.local.is_model_available",
+            new=AsyncMock(side_effect=[False, True]),
+        ) as avail,
+    ):
+        provider1, reason1 = await resolve_embedding_provider(stt, llm, emb)
+        provider2, reason2 = await resolve_embedding_provider(stt, llm, emb)
+
+    assert (provider1, reason1) == (None, LOCAL_MISSING_MODEL_REASON)
+    assert provider2 is fake_local
+    assert reason2 is None
+    assert avail.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_available_cache_does_not_reprobe_on_later_negative_check():
+    """Once a positive Local resolution is cached, it must not be
+    revalidated on subsequent calls — only the negative branch re-probes.
+    Widening this to positive results is explicitly out of scope."""
+    stt, llm, emb = _settings(ProviderMode.LOCAL, ProviderMode.LOCAL)
+    fake_local = MagicMock(name="LocalEmbeddingProvider-instance")
+
+    with (
+        patch("app.embeddings.local.LocalEmbeddingProvider", return_value=fake_local),
+        patch(
+            "app.embeddings.local.is_model_available", new=AsyncMock(return_value=True)
+        ) as avail,
+    ):
+        provider1, _ = await resolve_embedding_provider(stt, llm, emb)
+        assert avail.call_count == 1
+
+        avail.return_value = False
+        provider2, reason2 = await resolve_embedding_provider(stt, llm, emb)
+
+    assert provider2 is provider1 is fake_local
+    assert reason2 is None
+    assert avail.call_count == 1
 
 
 # --- "Disabled means disabled" — closes the silent-fallback failure mode --

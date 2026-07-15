@@ -72,12 +72,20 @@ async def resolve_embedding_provider(
     ``async`` (unlike the LLM/STT factories) because the Local-mode branch
     must probe Ollama's tag list over HTTP to check for ``nomic-embed-text``
     before deciding eligibility.
+
+    A cached negative result caused by a missing local model
+    (``LOCAL_MISSING_MODEL_REASON``) is re-probed on every call instead of
+    being served from cache; positive and mixed-mode results are cached as
+    before.
     """
     global _cached_provider, _cached_reason, _cached_key
 
     key = (stt.mode, llm.mode)
     with _cache_lock:
-        if _cached_key == key:
+        is_stale_negative = (
+            _cached_provider is None and _cached_reason == LOCAL_MISSING_MODEL_REASON
+        )
+        if _cached_key == key and not is_stale_negative:
             return _cached_provider, _cached_reason
 
     provider: EmbeddingProvider | None
