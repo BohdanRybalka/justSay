@@ -610,7 +610,8 @@ def test_v1_to_v3_migration_lands_at_v3(isolated_storage, tmp_path):
         names = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
         ).fetchall()}
-    assert {"entry_fts", "embeddings_meta", "entry_embeddings", "entry_embeddings_dim_guard"}.issubset(names)
+    expected = {"entry_fts", "embeddings_meta", "entry_embeddings", "entry_embeddings_dim_guard"}
+    assert expected.issubset(names)
 
 
 def test_v2_to_v3_migration_lands_at_v3(isolated_storage, tmp_path):
@@ -817,7 +818,9 @@ def test_search_lock_error_returns_503(isolated_storage, tmp_path):
 # directly-bootstrapped `history` state instead.
 
 @pytest.mark.asyncio
-async def test_search_semantic_503_when_vec_extension_unavailable(isolated_storage, tmp_path, client):
+async def test_search_semantic_503_when_vec_extension_unavailable(
+    isolated_storage, tmp_path, client
+):
     history.bootstrap(tmp_path)
     history.save_entry(text="anything", duration_ms=1)
     with patch.object(history, "_vec_available", False):
@@ -827,12 +830,15 @@ async def test_search_semantic_503_when_vec_extension_unavailable(isolated_stora
 
 
 @pytest.mark.asyncio
-async def test_search_semantic_503_when_disabled_by_mode_eligibility(isolated_storage, tmp_path, client):
+async def test_search_semantic_503_when_disabled_by_mode_eligibility(
+    isolated_storage, tmp_path, client
+):
     history.bootstrap(tmp_path)
     history.save_entry(text="anything", duration_ms=1)
+    disabled_detail = "Local embeddings need Ollama with nomic-embed-text pulled"
     with patch(
         "app.embeddings.resolve_embedding_provider",
-        new=AsyncMock(return_value=(None, "Local embeddings need Ollama with nomic-embed-text pulled")),
+        new=AsyncMock(return_value=(None, disabled_detail)),
     ):
         resp = await client.get("/history/search?q=anything&mode=semantic")
     assert resp.status_code == 503
@@ -924,7 +930,9 @@ async def test_search_semantic_empty_query_returns_empty_without_calling_provide
 
 
 @pytest.mark.asyncio
-async def test_search_semantic_returns_ranked_results_with_plain_highlight(isolated_storage, tmp_path, client):
+async def test_search_semantic_returns_ranked_results_with_plain_highlight(
+    isolated_storage, tmp_path, client
+):
     """mode=semantic returns entries ranked by vector distance; unlike
     mode=fts, highlighted_text carries no <mark> spans — relevance here
     isn't token-based."""

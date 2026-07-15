@@ -195,7 +195,8 @@ def test_dim_guard_trigger_rejects_mismatched_dim():
         vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
-                "INSERT INTO entry_embeddings(entry_id, model, dim, created_ts) VALUES (?, ?, ?, ?)",
+                "INSERT INTO entry_embeddings(entry_id, model, dim, created_ts) "
+                "VALUES (?, ?, ?, ?)",
                 (e.id, "text-embedding-004", 5, 1),
             )
 
@@ -217,8 +218,11 @@ def test_ensure_vec_table_idempotent_when_unchanged():
     with history._lock:
         conn = history._ensure_conn_locked()
         vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
-        vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)  # must not raise
-        meta = conn.execute("SELECT provider, model, dim FROM embeddings_meta WHERE id=1").fetchone()
+        # must not raise
+        vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
+        meta = conn.execute(
+            "SELECT provider, model, dim FROM embeddings_meta WHERE id=1"
+        ).fetchone()
     assert tuple(meta) == ("cloud", "text-embedding-004", 3)
 
 
@@ -237,7 +241,9 @@ def test_ensure_vec_table_wipes_on_model_switch():
         conn = history._ensure_conn_locked()
         vector_store.ensure_vec_table_locked(conn, "local", "nomic-embed-text", 5)
         count_after = conn.execute("SELECT COUNT(*) FROM entry_embeddings").fetchone()[0]
-        meta = conn.execute("SELECT provider, model, dim FROM embeddings_meta WHERE id=1").fetchone()
+        meta = conn.execute(
+            "SELECT provider, model, dim FROM embeddings_meta WHERE id=1"
+        ).fetchone()
     assert count_after == 0
     assert tuple(meta) == ("local", "nomic-embed-text", 5)
 
@@ -257,26 +263,36 @@ async def test_provider_switch_via_embed_background_wipes_old_embeddings():
     provider_a = _FakeProvider("gemini/text-embedding-004", vector=[1.0, 2.0, 3.0])
     with (
         patch.object(settings.stt, "mode", ProviderMode.CLOUD),
-        patch("app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(provider_a, None))),
+        patch(
+            "app.embeddings.resolve_embedding_provider",
+            new=AsyncMock(return_value=(provider_a, None)),
+        ),
     ):
         await vector_store.embed_entry_background(e.id, "alpha searchable text")
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        meta_before = conn.execute("SELECT provider, model, dim FROM embeddings_meta WHERE id=1").fetchone()
+        meta_before = conn.execute(
+            "SELECT provider, model, dim FROM embeddings_meta WHERE id=1"
+        ).fetchone()
     assert tuple(meta_before) == ("cloud", "gemini/text-embedding-004", 3)
 
     provider_b = _FakeProvider("ollama/nomic-embed-text", vector=[1.0, 2.0, 3.0, 4.0, 5.0])
     with (
         patch.object(settings.stt, "mode", ProviderMode.LOCAL),
-        patch("app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(provider_b, None))),
+        patch(
+            "app.embeddings.resolve_embedding_provider",
+            new=AsyncMock(return_value=(provider_b, None)),
+        ),
     ):
         await vector_store.embed_entry_background(e.id, "alpha searchable text")
 
     with history._lock:
         conn = history._ensure_conn_locked()
         count_after = conn.execute("SELECT COUNT(*) FROM entry_embeddings").fetchone()[0]
-        meta_after = conn.execute("SELECT provider, model, dim FROM embeddings_meta WHERE id=1").fetchone()
+        meta_after = conn.execute(
+            "SELECT provider, model, dim FROM embeddings_meta WHERE id=1"
+        ).fetchone()
     # Wiped-then-reinserted: exactly the current entry, embedded under the new model.
     assert count_after == 1
     assert tuple(meta_after) == ("local", "ollama/nomic-embed-text", 5)
@@ -327,7 +343,9 @@ def test_delete_entry_removes_vec_entries_row_via_trigger():
         conn = history._ensure_conn_locked()
         rowid = _rowid(conn, e.id)
         vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
-        vector_store.insert_embedding(conn, e.id, rowid, [1.0, 2.0, 3.0], "cloud", "text-embedding-004")
+        vector_store.insert_embedding(
+            conn, e.id, rowid, [1.0, 2.0, 3.0], "cloud", "text-embedding-004"
+        )
 
     history.delete_entry(e.id)
 
@@ -372,7 +390,9 @@ async def test_backfill_resumable_across_two_calls():
         history.save_entry(text=f"resume entry {i}", duration_ms=1)
     fake = _FakeProvider("gemini/text-embedding-004", vector=[1.0, 2.0, 3.0])
 
-    with patch("app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))):
+    with patch(
+        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+    ):
         first = await vector_store.backfill_batch(2)
         assert first.processed == 2
         assert first.remaining == 3
@@ -403,7 +423,9 @@ async def test_backfill_batch_size_clamped_to_200():
         history.save_entry(text=f"entry-{i}", duration_ms=1)
     fake = _FakeProvider("gemini/text-embedding-004", vector=[1.0, 2.0, 3.0])
 
-    with patch("app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))):
+    with patch(
+        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+    ):
         result = await vector_store.backfill_batch(99999)
 
     assert result.processed == 200
@@ -414,7 +436,9 @@ async def test_backfill_batch_size_clamped_to_200():
 @pytest.mark.asyncio
 async def test_backfill_noop_when_disabled():
     history.save_entry(text="x", duration_ms=1)
-    with patch("app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(None, "disabled"))):
+    with patch(
+        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(None, "disabled"))
+    ):
         result = await vector_store.backfill_batch(50)
     assert result.processed == 0
     assert result.remaining == 1
@@ -434,7 +458,9 @@ async def test_embeddings_status_reports_counts_and_provider():
         )
 
     fake = _FakeProvider("gemini/text-embedding-004")
-    with patch("app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))):
+    with patch(
+        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+    ):
         status = await vector_store.embeddings_status()
 
     assert status.available is True
@@ -457,7 +483,9 @@ async def test_embeddings_status_unavailable_when_vec_not_loaded():
 async def test_embed_entry_background_never_raises_on_provider_failure():
     e = history.save_entry(text="will fail", duration_ms=1)
     failing = _FakeProvider("gemini/text-embedding-004", fail=True)
-    with patch("app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(failing, None))):
+    with patch(
+        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(failing, None))
+    ):
         await vector_store.embed_entry_background(e.id, "will fail")  # must not raise
 
     with history._lock:
@@ -471,7 +499,9 @@ async def test_embed_entry_background_skips_deleted_entry():
     """If the entry was deleted before the background task ran, insert is
     skipped instead of raising (rowid lookup returns None)."""
     fake = _FakeProvider("gemini/text-embedding-004")
-    with patch("app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))):
+    with patch(
+        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+    ):
         await vector_store.embed_entry_background("does-not-exist", "text")  # must not raise
 
 

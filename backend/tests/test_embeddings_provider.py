@@ -138,7 +138,9 @@ async def test_factory_caches_provider_by_mode_pair():
 @pytest.mark.asyncio
 async def test_clear_cache_forces_reresolve():
     stt, llm, emb = _settings(ProviderMode.CLOUD, ProviderMode.CLOUD)
-    with patch("app.embeddings.cloud.CloudEmbeddingProvider", side_effect=lambda **_: MagicMock()) as ctor:
+    with patch(
+        "app.embeddings.cloud.CloudEmbeddingProvider", side_effect=lambda **_: MagicMock()
+    ) as ctor:
         await resolve_embedding_provider(stt, llm, emb)
         clear_cache()
         await resolve_embedding_provider(stt, llm, emb)
@@ -157,7 +159,10 @@ async def test_embed_entry_background_noop_when_disabled():
 
     with (
         patch.object(history, "_vec_available", True),
-        patch("app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(None, "disabled"))),
+        patch(
+            "app.embeddings.resolve_embedding_provider",
+            new=AsyncMock(return_value=(None, "disabled")),
+        ),
         patch("app.embeddings.cloud.CloudEmbeddingProvider") as cloud_ctor,
     ):
         await vector_store.embed_entry_background("entry-id", "some text")
@@ -234,7 +239,9 @@ def test_cloud_embedding_cleanup_is_noop():
 
 
 def test_local_embedding_model_name():
-    provider = LocalEmbeddingProvider(ollama_host="http://localhost:11434", model="nomic-embed-text")
+    provider = LocalEmbeddingProvider(
+        ollama_host="http://localhost:11434", model="nomic-embed-text"
+    )
     assert provider.model_name == "ollama/nomic-embed-text"
 
 
@@ -242,7 +249,9 @@ def test_local_embedding_model_name():
 async def test_local_embedding_embed_parses_response():
     """Exercises the real `_call_embed` parsing logic
     (`response["embedding"]`), not a mocked-away static method."""
-    provider = LocalEmbeddingProvider(ollama_host="http://localhost:11434", model="nomic-embed-text")
+    provider = LocalEmbeddingProvider(
+        ollama_host="http://localhost:11434", model="nomic-embed-text"
+    )
 
     fake_client = MagicMock()
     fake_client.embeddings.return_value = {"embedding": [0.4, 0.5, 0.6]}
@@ -258,7 +267,9 @@ def test_local_embedding_cleanup_unloads_model_and_clears_client():
     """Mirrors LocalLLMProvider.cleanup(): unloads via keep_alive=0 and
     drops the client reference — the resource-hygiene measure that matters
     on the project's stated 8 GB unified-memory Local-mode target."""
-    provider = LocalEmbeddingProvider(ollama_host="http://localhost:11434", model="nomic-embed-text")
+    provider = LocalEmbeddingProvider(
+        ollama_host="http://localhost:11434", model="nomic-embed-text"
+    )
     fake_client = MagicMock()
     provider._client = fake_client
 
@@ -274,7 +285,9 @@ def test_local_embedding_cleanup_swallows_errors():
     """A failed unload call (Ollama already stopped, connection refused)
     must not raise — cleanup is best-effort, same contract as
     LocalLLMProvider.cleanup()."""
-    provider = LocalEmbeddingProvider(ollama_host="http://localhost:11434", model="nomic-embed-text")
+    provider = LocalEmbeddingProvider(
+        ollama_host="http://localhost:11434", model="nomic-embed-text"
+    )
     fake_client = MagicMock()
     fake_client.embeddings.side_effect = RuntimeError("connection refused")
     provider._client = fake_client
