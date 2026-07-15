@@ -60,10 +60,7 @@ class MicrophoneRecorder(AudioRecorder):
         with self._lock:
             if not self._recording or self._stream is None:
                 raise RuntimeError("Not recording")
-            self._final_duration = min(
-                time.monotonic() - self._start_time,
-                float(self._settings.max_duration_seconds),
-            )
+            self._final_duration = time.monotonic() - self._start_time
             self._recording = False
 
         try:
@@ -100,10 +97,7 @@ class MicrophoneRecorder(AudioRecorder):
     def duration_seconds(self) -> float:
         if not self._recording:
             return 0.0
-        elapsed = time.monotonic() - self._start_time
-        if elapsed >= self._settings.max_duration_seconds:
-            return self._settings.max_duration_seconds
-        return elapsed
+        return time.monotonic() - self._start_time
 
     @property
     def level_db(self) -> float:
@@ -114,9 +108,3 @@ class MicrophoneRecorder(AudioRecorder):
     def last_duration_seconds(self) -> float:
         """Duration of the most recently completed recording, or 0.0 if never stopped."""
         return self._final_duration
-
-    @property
-    def max_duration_exceeded(self) -> bool:
-        if not self._recording:
-            return False
-        return (time.monotonic() - self._start_time) >= self._settings.max_duration_seconds

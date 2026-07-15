@@ -141,7 +141,7 @@ async def test_last_duration_persists_after_stop(audio_settings, mock_stream):
     # duration_seconds returns 0 after stop (by contract), but last_duration_seconds
     # holds the captured span.
     assert recorder.duration_seconds == 0.0
-    assert 7.0 < recorder.last_duration_seconds <= audio_settings.max_duration_seconds
+    assert recorder.last_duration_seconds > 7.0
 
 
 # --- Config validation ---
@@ -155,8 +155,3 @@ def test_config_rejects_negative_sample_rate():
 def test_config_rejects_zero_channels():
     with pytest.raises(ValidationError):
         AudioSettings(sample_rate=16000, channels=0)
-
-
-def test_config_default_max_duration():
-    s = AudioSettings()
-    assert s.max_duration_seconds == 300.0

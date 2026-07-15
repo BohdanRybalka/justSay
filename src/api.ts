@@ -54,8 +54,6 @@ export interface UserSettings {
   whisper_device: string;
   ollama_host: string;
   ollama_model: string;
-  max_recording_seconds: number;
-  transcription_style: "normal" | "ai_prompt";
   /** Audio duration (seconds) at or below which the pipeline picks Groq Whisper
    *  in CLOUD mode. Above the threshold (or for `ai_prompt` style) it routes
    *  to Gemini. */
@@ -203,20 +201,19 @@ export const api = {
 
   audioStatus: () => request<RecordingStatus>("GET", "/audio/status"),
 
-  dictate: (language = "uk", style = "normal") =>
-    request<DictateResponse>("POST", `/pipeline/dictate?language=${language}&style=${style}`),
+  dictate: (language = "uk") =>
+    request<DictateResponse>("POST", `/pipeline/dictate?language=${language}`),
 
   /** Upload an audio file to the pipeline. Accepts an ArrayBuffer of file bytes. */
   processFile: async (
     fileBytes: ArrayBuffer,
     filename: string,
     language = "uk",
-    style = "normal",
   ): Promise<DictateResponse> => {
     const form = new FormData();
     const blob = new Blob([fileBytes], { type: "application/octet-stream" });
     form.append("file", blob, filename);
-    const url = `${BASE_URL}/pipeline/process-file?language=${language}&style=${style}`;
+    const url = `${BASE_URL}/pipeline/process-file?language=${language}`;
     const resp = await fetch(url, { method: "POST", body: form });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ detail: resp.statusText }));

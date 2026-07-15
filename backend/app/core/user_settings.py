@@ -46,12 +46,6 @@ class UserSettings(BaseModel):
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "qwen3:1.7b"
 
-    # Audio
-    max_recording_seconds: int = 300
-
-    # Transcription
-    transcription_style: Literal["normal", "ai_prompt"] = "normal"
-
     # Smart routing threshold — audio <= this goes to Groq Whisper, above to Gemini.
     cloud_routing_threshold: float = 30.0
 
