@@ -4,6 +4,7 @@ import {
   type InsightsResponse,
   type TopWordsResponse,
 } from "../../api";
+import { escapeHtml } from "../html";
 
 const LANGUAGE_LABELS: Record<string, string> = {
   uk: "Ukrainian",
@@ -403,10 +404,3 @@ function formatDuration(seconds: number): string {
   return `${s} s`;
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}

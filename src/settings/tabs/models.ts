@@ -5,6 +5,7 @@ import {
   type LocalSttStatus,
 } from "../../api";
 import { loadSettings } from "../settings";
+import { escapeHtml } from "../html";
 
 const WHISPER_MODELS = ["large-v3-turbo", "large-v3", "large-v2", "medium", "small", "base", "tiny"];
 const WHISPER_DEVICES = ["auto", "cpu", "cuda"];
@@ -213,14 +214,6 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
       await loadSettings();
       await refreshSttStatus();
     });
-  }
-
-  function escapeHtml(value: string): string {
-    return value
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
   }
 
   function renderSttInstall(panel: HTMLElement, _s: LocalSttStatus) {

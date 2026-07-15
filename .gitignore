@@ -43,6 +43,7 @@ Thumbs.db
 .pytest_cache/
 /.claude
 /docs
+/specs
 /_bmad
 
 # Local-only working documents
