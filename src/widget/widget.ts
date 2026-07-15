@@ -1,4 +1,5 @@
 import { api } from "../api";
+import { notifyError, onConnectivityChange } from "../notify";
 
 // --- State ---
 
@@ -20,6 +21,8 @@ let isHovered = false;
 let durationInterval: ReturnType<typeof setInterval> | null = null;
 let marqueeTimeout: ReturnType<typeof setTimeout> | null = null;
 let iconFlashTimer: ReturnType<typeof setTimeout> | null = null;
+let backendOffline = false;
+let firstCheckDone = false;
 
 // Settings (loaded from backend)
 let currentShortcut = "Ctrl+Alt+KeyV";
@@ -168,6 +171,7 @@ async function startRecording() {
     await api.audioStart();
   } catch (e) {
     setState("error", "Start failed");
+    notifyError("Couldn't start recording — try again.");
     console.error("Start recording failed:", e);
   } finally {
     isTransitioning = false;
@@ -188,6 +192,11 @@ async function stopAndProcess() {
     const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
     const errorLabel = msg.includes("missing") ? "Add key in Settings" : "Failed";
     setState("error", errorLabel);
+    notifyError(
+      msg.includes("missing")
+        ? "No API key set — add one in Settings."
+        : "Dictation failed — try again.",
+    );
     console.error("Pipeline failed:", e);
   } finally {
     isTransitioning = false;
@@ -305,10 +314,16 @@ async function checkConnection() {
     if (state === "idle" && text.textContent === "Offline") {
       text.textContent = "JustSay";
     }
+    backendOffline = onConnectivityChange(backendOffline, false).offline;
   } catch {
     if (state === "idle") {
       text.textContent = "Offline";
     }
+    const { offline, shouldNotify } = onConnectivityChange(backendOffline, true);
+    backendOffline = offline;
+    if (shouldNotify && firstCheckDone) notifyError("JustSay backend is unreachable.");
+  } finally {
+    firstCheckDone = true;
   }
 }
 
