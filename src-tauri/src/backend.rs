@@ -35,6 +35,24 @@ use tauri_plugin_shell::ShellExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Windows CREATE_NEW_PROCESS_GROUP flag (0x00000200) — dev-mode only.
+/// Required so a later `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)`
+/// targets only the child's own process group, not the calling Tauri
+/// process's group (which would also receive the event and tear itself
+/// down). The shell plugin's `Command` builder exposes no way to set this
+/// flag, so the production `Sidecar` path cannot use it — see
+/// `docs/adr/004-windows-graceful-backend-stop.md`.
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+#[cfg(windows)]
+const CTRL_BREAK_EVENT: u32 = 1;
+
+#[cfg(windows)]
+extern "system" {
+    fn GenerateConsoleCtrlEvent(dwCtrlEvent: u32, dwProcessGroupId: u32) -> i32;
+}
+
 pub const PORT: u16 = 9377;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -369,8 +387,10 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         .current_dir(&backend_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+        // CREATE_NEW_PROCESS_GROUP lets terminate_gracefully() later target
+        // this child alone with CTRL_BREAK_EVENT (see the constant's doc).
         #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
         let child = cmd
             .spawn()
             .map_err(|e| format!("Failed to start backend: {}", e))?;
@@ -444,15 +464,25 @@ pub async fn wait_for_ready() -> Result<(), String> {
 ///
 /// Non-Windows: sends `SIGTERM` via the `kill` command, then polls
 /// `is_alive` every 100ms for up to 3s; if the process is still alive after
-/// that window, calls `force_kill`. Windows has no POSIX `SIGTERM`, and the
-/// sidecar/dev child here is a console-subsystem background process — a
-/// non-forced `taskkill` is documented to fail outright for exactly this
-/// process type ("This process can only be forced to close"), so attempting
-/// a graceful step first would only add latency for a call expected to fail
-/// every time, not a real grace period. Windows therefore force-kills
-/// immediately, unchanged from before this helper existed.
-#[cfg_attr(target_os = "windows", allow(unused_variables, unused_mut))]
-fn terminate_gracefully(pid: u32, mut is_alive: impl FnMut() -> bool, force_kill: impl FnOnce()) {
+/// that window, calls `force_kill`.
+///
+/// Windows has no POSIX `SIGTERM`. When `windows_ctrl_break` is `true` (the
+/// `Dev` call site only — the child must have been spawned with
+/// `CREATE_NEW_PROCESS_GROUP` for this to target only itself), this sends
+/// `CTRL_BREAK_EVENT` and polls the same way as the non-Windows branch
+/// before falling back to a forced kill. When `windows_ctrl_break` is
+/// `false` (the production `Sidecar` call site), behavior is unchanged from
+/// before this parameter existed: an immediate forced `taskkill` — the
+/// shell plugin's `Command` builder exposes no way to add
+/// `CREATE_NEW_PROCESS_GROUP`, so `CTRL_BREAK_EVENT` cannot safely target
+/// only that child (see `docs/adr/004-windows-graceful-backend-stop.md`).
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+fn terminate_gracefully(
+    pid: u32,
+    mut is_alive: impl FnMut() -> bool,
+    force_kill: impl FnOnce(),
+    windows_ctrl_break: bool,
+) {
     #[cfg(not(target_os = "windows"))]
     {
         let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
@@ -464,6 +494,26 @@ fn terminate_gracefully(pid: u32, mut is_alive: impl FnMut() -> bool, force_kill
             std::thread::sleep(Duration::from_millis(100));
         }
         log::warn!("PID {} still alive 3s after SIGTERM grace period; force-killing", pid);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if windows_ctrl_break {
+            // SAFETY: pid is the still-running child's own process group id —
+            // only true when it was spawned with CREATE_NEW_PROCESS_GROUP (Dev only).
+            let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } != 0;
+            if sent {
+                for _ in 0..30 {
+                    if !is_alive() {
+                        log::info!("PID {} exited gracefully after CTRL_BREAK_EVENT", pid);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                log::warn!("PID {} still alive 3s after CTRL_BREAK_EVENT; force-killing", pid);
+            } else {
+                log::warn!("GenerateConsoleCtrlEvent failed for PID {}; force-killing", pid);
+            }
+        }
     }
     force_kill();
 }
@@ -524,6 +574,10 @@ pub fn shutdown() {
                             }
                         }
                     },
+                    // The shell plugin's Command builder never sets
+                    // CREATE_NEW_PROCESS_GROUP, so CTRL_BREAK_EVENT could not
+                    // safely target only this child — unchanged forced kill.
+                    false,
                 );
             }
             BackendProcess::Dev(child) => {
@@ -557,6 +611,9 @@ pub fn shutdown() {
                             let _ = child_cell.borrow_mut().kill();
                         }
                     },
+                    // Dev's child is spawned with CREATE_NEW_PROCESS_GROUP
+                    // (see spawn()), so CTRL_BREAK_EVENT can safely target it.
+                    true,
                 );
 
                 let _ = child_cell.borrow_mut().wait();
