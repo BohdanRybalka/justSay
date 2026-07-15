@@ -470,7 +470,7 @@ fn terminate_gracefully(pid: u32, mut is_alive: impl FnMut() -> bool, force_kill
 
 /// Kill the backend process on shutdown.
 pub fn shutdown() {
-    let mut guard = match BACKEND_PROCESS.lock() {
+    let mut guard = match BACKEND_PROCESS.try_lock() {
         Ok(g) => g,
         Err(_) => return,
     };
