@@ -35,6 +35,12 @@ block_cipher = None
 datas = (
     collect_data_files("google.genai")
     + collect_data_files("groq")
+    # sqlite-vec ships its compiled vec0 extension (vec0.dll / vec0.so /
+    # vec0.dylib) as package data next to __init__.py, loaded at runtime via
+    # sqlite_vec.load() -> conn.load_extension(loadable_path()). Without
+    # this the frozen sidecar's history.py._connect() would fail to load
+    # the extension (see ADR 001 / spec 003 --selftest-sqlite-vec CI gate).
+    + collect_data_files("sqlite_vec")
 )
 
 # soundfile is used lazily (pipeline/utils.py duration detection) with a try-except
@@ -59,6 +65,8 @@ hiddenimports = [
     # Cloud SDKs
     "groq",
     "google.genai",
+    # sqlite-vec — loadable SQLite extension for semantic search (spec 003)
+    "sqlite_vec",
     # System monitoring
     "psutil",
 ]

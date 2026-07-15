@@ -375,3 +375,76 @@ def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
     # Defensive: enforce the overall cap (the SQL residual LIMIT should
     # already make this a no-op).
     return hits[:clamped_limit]
+
+
+# --- Semantic search (Phase 3 — spec 003) ---------------------------------
+
+async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearchHit]:
+    """Embed ``q`` with the currently-resolved embedding provider and rank
+    entries by vector distance via ``vec_entries``.
+
+    Empty/whitespace ``q`` returns ``[]`` immediately (200, mirroring
+    ``mode=fts``) — never reaches the availability checks below and never
+    spends an embedding API call.
+
+    Raises ``vector_store.SemanticSearchUnavailableError`` (mapped to 503 by the
+    router) for every disabled/unready state, each with its own detail
+    string: sqlite-vec failed to load, embeddings disabled by the
+    Cloud/Local eligibility rule, zero entries embedded yet, or any other
+    runtime failure from ``provider.embed()`` itself (auth error, network
+    failure, malformed SDK response) — never a raw 500. The zero-entries
+    check happens BEFORE the (network) embed call so an empty index fails
+    fast without spending an API call.
+
+    ``highlighted_text`` is plain HTML-escaped text with no ``<mark>``
+    spans — relevance here isn't token-based, so there's no single matched
+    span to highlight.
+    """
+    # Late imports: same lazy-import discipline used elsewhere in this
+    # module (get_llm_provider) — keeps embeddings/vector_store optional
+    # from words.py's own import-time perspective.
+    from app.core import vector_store
+    from app.core.config import settings
+    from app.embeddings import resolve_embedding_provider
+
+    clamped_limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
+
+    # Mirrors mode=fts's empty-query short-circuit: an empty/whitespace `q`
+    # returns 200 with an empty list and never reaches the availability
+    # checks below or spends a cloud embedding API call.
+    if not q or not q.strip():
+        return []
+
+    if not history._vec_available:
+        raise vector_store.SemanticSearchUnavailableError(
+            vector_store.VEC_EXTENSION_UNAVAILABLE_DETAIL
+        )
+
+    provider, reason = await resolve_embedding_provider(
+        settings.stt, settings.llm, settings.embeddings
+    )
+    if provider is None:
+        raise vector_store.SemanticSearchUnavailableError(reason or "Semantic search is disabled")
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        indexed = conn.execute("SELECT COUNT(*) FROM entry_embeddings").fetchone()[0]
+    if indexed == 0:
+        raise vector_store.SemanticSearchUnavailableError(vector_store.NO_ENTRIES_EMBEDDED_DETAIL)
+
+    # Any embedding-provider runtime failure (auth error, network failure,
+    # malformed SDK response) maps to the same SemanticSearchUnavailableError
+    # -> 503 path the router already has, instead of leaking a raw 500 —
+    # follows the catch-all convention in words_router.words_insights.
+    try:
+        query_vector = await provider.embed(q)
+    except Exception as e:
+        raise vector_store.SemanticSearchUnavailableError(
+            f"Semantic search embedding failed: {type(e).__name__}"
+        ) from e
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        rows = vector_store.query_similar(conn, query_vector, clamped_limit)
+
+    return [_hit_from_row(r, []) for r in rows]

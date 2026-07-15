@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pyperclip
+from fastapi import BackgroundTasks
 
 from app.core.config import settings
 from app.core.history import save_entry
@@ -37,8 +38,15 @@ async def process_audio(
     style: str = "normal",
     copy_to_clipboard: bool = True,
     audio_duration: float | None = None,
+    background_tasks: BackgroundTasks | None = None,
 ) -> ProcessingResult:
-    """Full pipeline: route STT by duration+style -> transcribe -> clipboard."""
+    """Full pipeline: route STT by duration+style -> transcribe -> clipboard.
+
+    ``background_tasks``, when provided, schedules embedding generation via
+    ``BackgroundTasks.add_task`` — FastAPI guarantees these run AFTER the
+    response is sent, which is the actual mechanism that keeps embedding
+    latency off the Instant Prompt budget. Never awaited synchronously here.
+    """
     start = time.perf_counter()
 
     duration = audio_duration
@@ -94,7 +102,7 @@ async def process_audio(
     word_count = len(text.split()) if text else 0
 
     try:
-        save_entry(
+        entry = save_entry(
             text=text,
             duration_ms=duration_ms,
             language=language,
@@ -104,6 +112,10 @@ async def process_audio(
             audio_duration_seconds=duration,
             word_count=word_count,
         )
+        if background_tasks is not None and text:
+            from app.core import vector_store
+
+            background_tasks.add_task(vector_store.embed_entry_background, entry.id, text)
     except Exception as e:
         log.warning("Failed to save history entry: %s", e)
 
