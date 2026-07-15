@@ -1,4 +1,5 @@
 import { api, type HistoryEntry } from "../../api";
+import { escapeHtml } from "../html";
 
 const DATE_FMT = new Intl.DateTimeFormat("uk-UA", {
   day: "2-digit",
@@ -165,7 +166,7 @@ export function renderHistory(container: HTMLElement): () => void {
     // plain-text path.
     const textHtml = entry.highlighted_text
       ? entry.highlighted_text
-      : escapeHtml(entry.text);
+      : escapeHtml(entry.text).replace(/\n/g, "<br>");
 
     el.innerHTML = `
       <div class="history-entry-header">
@@ -238,10 +239,3 @@ export function renderHistory(container: HTMLElement): () => void {
   };
 }
 
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\n/g, "<br>");
-}

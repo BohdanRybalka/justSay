@@ -1,5 +1,6 @@
 import { api, type UserSettings } from "../../api";
 import { saveSettings } from "../settings";
+import { escapeHtml } from "../html";
 
 const LANGUAGES = [
   { code: "uk", label: "Ukrainian" },
@@ -121,7 +122,8 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
 
   let lastOutputDir = settings.output_dir;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  loadFilesInfo(tempSize);
+  let destroyed = false;
+  loadFilesInfo(tempSize, () => destroyed);
 
   function showStatus(text: string, kind: "warning" | "error" | "ok") {
     outputStatus.style.display = "block";
@@ -140,14 +142,16 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   async function persistOutputDir(value: string) {
     try {
       const { warning } = await saveSettings({ output_dir: value });
+      if (destroyed) return;
       lastOutputDir = value;
       if (warning) {
         showStatus(warning, "warning");
       } else {
         clearStatus();
       }
-      loadFilesInfo(tempSize);
+      loadFilesInfo(tempSize, () => destroyed);
     } catch (e) {
+      if (destroyed) return;
       const msg = e instanceof Error ? e.message : String(e);
       showStatus(msg, "error");
       // Revert input to last known good value so the field reflects backend state.
@@ -179,14 +183,20 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     btnCleanup.textContent = "Cleaning...";
     try {
       const result = await api.cleanupTemp();
+      if (destroyed) return;
       tempSize.textContent = `Freed ${formatBytes(result.freed_bytes)}`;
-      setTimeout(() => loadFilesInfo(tempSize), 500);
+      setTimeout(() => {
+        if (!destroyed) loadFilesInfo(tempSize, () => destroyed);
+      }, 500);
     } catch (e) {
+      if (destroyed) return;
       tempSize.textContent = "Failed";
       console.error(e);
     } finally {
-      btnCleanup.disabled = false;
-      btnCleanup.textContent = "Clear Temp Files";
+      if (!destroyed) {
+        btnCleanup.disabled = false;
+        btnCleanup.textContent = "Clear Temp Files";
+      }
     }
   });
 
@@ -318,16 +328,18 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
 
   return () => {
     recording = false;
+    destroyed = true;
     if (debounceTimer) clearTimeout(debounceTimer);
   };
 }
 
-async function loadFilesInfo(tempSize: HTMLElement) {
+async function loadFilesInfo(tempSize: HTMLElement, isDestroyed: () => boolean) {
   try {
     const info = await api.getStorageInfo();
+    if (isDestroyed()) return;
     tempSize.textContent = formatBytes(info.temp_size_bytes);
   } catch {
-    tempSize.textContent = "Unknown";
+    if (!isDestroyed()) tempSize.textContent = "Unknown";
   }
 }
 
@@ -336,10 +348,6 @@ function formatBytes(bytes: number): string {
   const units = ["B", "KB", "MB", "GB"];
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
-}
-
-function escapeHtml(str: string): string {
-  return str.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function styleDescription(style: string): string {
