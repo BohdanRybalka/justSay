@@ -8,6 +8,13 @@ use tauri::{
 
 mod backend;
 
+/// Kill the backend child process if one is running. Safe to call even if
+/// nothing is running (no-op). Exposed narrowly for `main.rs`'s panic hook —
+/// see docs/adr/002-backend-process-panic-safe-shutdown.md.
+pub fn shutdown_backend() {
+    backend::shutdown();
+}
+
 #[tauri::command]
 async fn backend_request(
     method: String,

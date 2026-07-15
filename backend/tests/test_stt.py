@@ -1,3 +1,5 @@
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -180,6 +182,30 @@ def test_local_stt_last_load_error_starts_none():
     settings = STTSettings(mode=ProviderMode.LOCAL)
     provider = LocalSTTProvider(settings)
     assert provider.last_load_error is None
+
+
+def test_load_lock_serialises_concurrent_get_model(monkeypatch):
+    """Two near-simultaneous `_get_model` calls must funnel through the same
+    sync lock; WhisperModel is invoked exactly once."""
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+    provider = LocalSTTProvider(settings)
+
+    call_count = {"n": 0}
+
+    class _FakeWhisperModel:
+        def __init__(self, *args, **kwargs):
+            call_count["n"] += 1
+            time.sleep(0.05)  # force overlap window
+
+    monkeypatch.setattr("faster_whisper.WhisperModel", _FakeWhisperModel)
+
+    threads = [threading.Thread(target=provider._get_model) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert call_count["n"] == 1
 
 
 # --- STT quality wins: faster-whisper kwargs ---

@@ -8,6 +8,7 @@ Windows / Linux / macOS-Intel. On macOS Apple Silicon the factory returns
 import asyncio
 import gc
 import logging
+import threading
 from pathlib import Path
 
 from app.stt.base import STTProvider, TranscriptionResult
@@ -28,6 +29,11 @@ class LocalSTTProvider(STTProvider):
         self._settings = settings
         self._model = None
         self._last_load_error: str | None = None
+        # Sync primitive — `_get_model` is called both directly on the event
+        # loop thread (from `transcribe`) and via `asyncio.to_thread` (from
+        # `router.py`'s `/stt/local/load`), so a genuine OS-thread race is
+        # possible; `asyncio.Lock` would not serialise the latter call path.
+        self._load_lock: threading.Lock = threading.Lock()
 
     @property
     def model_name(self) -> str:
@@ -42,33 +48,34 @@ class LocalSTTProvider(STTProvider):
         return self._last_load_error
 
     def _get_model(self):
-        if self._model is None:
-            try:
-                from faster_whisper import WhisperModel
+        with self._load_lock:
+            if self._model is None:
+                try:
+                    from faster_whisper import WhisperModel
 
-                device = self._settings.whisper_device
-                if device == "auto":
-                    device = self._detect_device()
+                    device = self._settings.whisper_device
+                    if device == "auto":
+                        device = self._detect_device()
 
-                compute_type = "float16" if device == "cuda" else "int8"
+                    compute_type = "float16" if device == "cuda" else "int8"
 
-                log.info(
-                    "Loading whisper: model=%s device=%s compute=%s",
-                    self._settings.whisper_model_size, device, compute_type,
-                )
-                self._model = WhisperModel(
-                    self._settings.whisper_model_size,
-                    device=device,
-                    compute_type=compute_type,
-                )
-                self._last_load_error = None
-                log.info("Whisper loaded successfully")
-            except Exception as e:
-                # Format with type so the UI shows e.g. "OSError: [WinError 126] ..."
-                msg = f"{type(e).__name__}: {e}"
-                self._last_load_error = msg
-                log.exception("Whisper load failed: %s", msg)
-                raise
+                    log.info(
+                        "Loading whisper: model=%s device=%s compute=%s",
+                        self._settings.whisper_model_size, device, compute_type,
+                    )
+                    self._model = WhisperModel(
+                        self._settings.whisper_model_size,
+                        device=device,
+                        compute_type=compute_type,
+                    )
+                    self._last_load_error = None
+                    log.info("Whisper loaded successfully")
+                except Exception as e:
+                    # Format with type so the UI shows e.g. "OSError: [WinError 126] ..."
+                    msg = f"{type(e).__name__}: {e}"
+                    self._last_load_error = msg
+                    log.exception("Whisper load failed: %s", msg)
+                    raise
         return self._model
 
     @staticmethod
