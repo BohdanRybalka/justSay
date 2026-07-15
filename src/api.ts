@@ -55,8 +55,7 @@ export interface UserSettings {
   ollama_host: string;
   ollama_model: string;
   /** Audio duration (seconds) at or below which the pipeline picks Groq Whisper
-   *  in CLOUD mode. Above the threshold (or for `ai_prompt` style) it routes
-   *  to Gemini. */
+   *  in CLOUD mode; longer clips route to Gemini. */
   cloud_routing_threshold: number;
   /** Custom vocabulary / glossary. Plumbed into every STT provider — see the
    *  Python `STTSettings.initial_prompt` docstring for per-provider semantics.
@@ -137,7 +136,6 @@ export interface HistoryStats {
 
 export interface StorageInfo {
   temp_size_bytes: number;
-  output_dir: string;
 }
 
 export interface SettingsUpdateResponse {

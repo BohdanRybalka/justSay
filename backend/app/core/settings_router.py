@@ -1,7 +1,6 @@
 """Settings endpoints — CRUD for user preferences."""
 
 import shutil
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -32,7 +31,6 @@ def _mask_keys(s: UserSettings) -> UserSettings:
 
 class StorageInfo(BaseModel):
     temp_size_bytes: int
-    output_dir: str
 
 
 class CleanupResult(BaseModel):
@@ -87,52 +85,15 @@ async def cloud_key_status():
     )
 
 
-def _mask_home(p: Path) -> str:
-    """Replace user's home prefix with ~ so API responses don't leak it.
-
-    Tries ``relative_to`` first (handles canonical paths). Falls back to a
-    case-insensitive prefix match so Windows paths like ``c:\\users\\admin``
-    vs ``C:\\Users\\Admin`` still get masked.
-
-    Paths OUTSIDE the home tree (network drives, /Volumes, custom data
-    folders) are returned as-is — this masking is a privacy-hygiene measure
-    for the common case, not a security boundary. If `Path.home()` itself
-    fails (e.g. missing `HOME`/`USERPROFILE` in a sandbox), we degrade to
-    returning the raw path rather than 500-ing the endpoint.
-    """
-    try:
-        home = Path.home()
-    except (RuntimeError, OSError):
-        return str(p)
-    try:
-        rel = p.relative_to(home)
-        return "~/" + str(rel).replace("\\", "/")
-    except ValueError:
-        pass
-    s = str(p)
-    h = str(home)
-    if s.lower().startswith(h.lower()):
-        return "~" + s[len(h):].replace("\\", "/")
-    return s
-
-
 @router.get("/storage", response_model=StorageInfo)
 async def get_storage_info():
-    s = get_user_settings()
     tmp_dir = SETTINGS_DIR / "tmp"
-    # `output_dir` is passed through `_mask_home`; it may be relocated
-    # outside the home tree (network drives, external SSDs, custom data
-    # folders), in which case `_mask_home` returns the raw path unchanged —
-    # privacy hygiene is best-effort, not a hard boundary. `temp_dir` itself
-    # is only used internally (via `compute_dir_size`) and never returned.
-    # `GET /settings` (the canonical settings endpoint that the PUT
-    # round-trip reads back from) is intentionally UNCHANGED so the
-    # frontend's revert logic (`lastOutputDir` in
-    # `src/settings/tabs/general.ts`) keeps working with real paths.
-    return StorageInfo(
-        temp_size_bytes=compute_dir_size(tmp_dir),
-        output_dir=_mask_home(Path(s.output_dir)),
-    )
+    # `temp_size_bytes` is the only field: `temp_dir` itself is only used
+    # internally (via `compute_dir_size`) and never returned. `output_dir`
+    # used to be returned here too (masked via a now-deleted `_mask_home`
+    # helper), but its only reader (`general.ts`'s `loadFilesInfo()`) never
+    # read it — `GET /settings` is the canonical source for `output_dir`.
+    return StorageInfo(temp_size_bytes=compute_dir_size(tmp_dir))
 
 
 @router.post("/cleanup", response_model=CleanupResult)

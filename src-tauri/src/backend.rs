@@ -440,9 +440,37 @@ pub async fn wait_for_ready() -> Result<(), String> {
     )
 }
 
+/// Attempt a graceful stop before falling back to a forced kill.
+///
+/// Non-Windows: sends `SIGTERM` via the `kill` command, then polls
+/// `is_alive` every 100ms for up to 3s; if the process is still alive after
+/// that window, calls `force_kill`. Windows has no POSIX `SIGTERM`, and the
+/// sidecar/dev child here is a console-subsystem background process — a
+/// non-forced `taskkill` is documented to fail outright for exactly this
+/// process type ("This process can only be forced to close"), so attempting
+/// a graceful step first would only add latency for a call expected to fail
+/// every time, not a real grace period. Windows therefore force-kills
+/// immediately, unchanged from before this helper existed.
+#[cfg_attr(target_os = "windows", allow(unused_variables, unused_mut))]
+fn terminate_gracefully(pid: u32, mut is_alive: impl FnMut() -> bool, force_kill: impl FnOnce()) {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+        for _ in 0..30 {
+            if !is_alive() {
+                log::info!("PID {} exited gracefully after SIGTERM", pid);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        log::warn!("PID {} still alive 3s after SIGTERM grace period; force-killing", pid);
+    }
+    force_kill();
+}
+
 /// Kill the backend process on shutdown.
 pub fn shutdown() {
-    let mut guard = match BACKEND_PROCESS.lock() {
+    let mut guard = match BACKEND_PROCESS.try_lock() {
         Ok(g) => g,
         Err(_) => return,
     };
@@ -452,64 +480,86 @@ pub fn shutdown() {
             BackendProcess::Sidecar(s) => {
                 let pid = s.child.pid();
                 log::info!("Shutting down backend sidecar (PID: {})", pid);
-                // Windows: tree-kill via taskkill. `CommandChild::kill()`
-                // only sends `TerminateProcess` to the direct child, so a
-                // sidecar that spawned subprocesses (e.g. FFmpeg) would
-                // orphan them. `/T` walks the descendant tree, `/F`
-                // forces termination — same path the dev branch uses.
-                #[cfg(target_os = "windows")]
-                {
-                    use std::os::windows::process::CommandExt;
-                    let taskkill_status = Command::new("taskkill")
-                        .args(["/T", "/F", "/PID", &pid.to_string()])
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .status();
-                    let taskkilled =
-                        matches!(&taskkill_status, Ok(st) if st.success());
-                    if taskkilled {
-                        log::info!("Sidecar PID {} terminated via taskkill", pid);
-                    } else {
-                        log::warn!(
-                            "taskkill failed for PID {} (status: {:?}); \
-                             falling back to CommandChild::kill()",
-                            pid,
-                            taskkill_status
-                        );
-                        if let Err(e) = s.child.kill() {
-                            log::warn!("Fallback kill also failed: {}", e);
+                let alive = s.alive.clone();
+                terminate_gracefully(
+                    pid,
+                    move || alive.load(Ordering::Acquire),
+                    move || {
+                        // Windows: tree-kill via taskkill. `CommandChild::kill()`
+                        // only sends `TerminateProcess` to the direct child, so a
+                        // sidecar that spawned subprocesses (e.g. FFmpeg) would
+                        // orphan them. `/T` walks the descendant tree, `/F`
+                        // forces termination — same path the dev branch uses.
+                        #[cfg(target_os = "windows")]
+                        {
+                            use std::os::windows::process::CommandExt;
+                            let taskkill_status = Command::new("taskkill")
+                                .args(["/T", "/F", "/PID", &pid.to_string()])
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .creation_flags(CREATE_NO_WINDOW)
+                                .status();
+                            let taskkilled =
+                                matches!(&taskkill_status, Ok(st) if st.success());
+                            if taskkilled {
+                                log::info!("Sidecar PID {} terminated via taskkill", pid);
+                            } else {
+                                log::warn!(
+                                    "taskkill failed for PID {} (status: {:?}); \
+                                     falling back to CommandChild::kill()",
+                                    pid,
+                                    taskkill_status
+                                );
+                                if let Err(e) = s.child.kill() {
+                                    log::warn!("Fallback kill also failed: {}", e);
+                                }
+                            }
                         }
-                    }
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    if let Err(e) = s.child.kill() {
-                        log::warn!("Sidecar kill failed for PID {}: {}", pid, e);
-                    } else {
-                        log::info!("Sidecar PID {} terminated", pid);
-                    }
-                }
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            if let Err(e) = s.child.kill() {
+                                log::warn!("Sidecar kill failed for PID {}: {}", pid, e);
+                            } else {
+                                log::info!("Sidecar PID {} terminated", pid);
+                            }
+                        }
+                    },
+                );
             }
-            BackendProcess::Dev(mut child) => {
+            BackendProcess::Dev(child) => {
                 let pid = child.id();
                 log::info!("Shutting down backend (dev, PID: {})", pid);
+                // RefCell so both the `is_alive` poll closure and the
+                // `force_kill` closure can independently borrow `&mut Child`
+                // (try_wait/kill both need `&mut self`) without the borrow
+                // checker treating them as overlapping mutable captures.
+                let child_cell = std::cell::RefCell::new(child);
+                terminate_gracefully(
+                    pid,
+                    || {
+                        child_cell
+                            .borrow_mut()
+                            .try_wait()
+                            .map(|s| s.is_none())
+                            .unwrap_or(true)
+                    },
+                    || {
+                        #[cfg(target_os = "windows")]
+                        {
+                            let _ = Command::new("taskkill")
+                                .args(["/T", "/F", "/PID", &pid.to_string()])
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status();
+                        }
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            let _ = child_cell.borrow_mut().kill();
+                        }
+                    },
+                );
 
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = Command::new("taskkill")
-                        .args(["/T", "/F", "/PID", &pid.to_string()])
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
-                }
-
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = child.kill();
-                }
-
-                let _ = child.wait();
+                let _ = child_cell.borrow_mut().wait();
             }
         }
     }
