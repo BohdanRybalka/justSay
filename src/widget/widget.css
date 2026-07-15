@@ -5,7 +5,10 @@
 }
 
 html, body {
-  background: #141423;
+  /* Transparent window: the visible surface is the rounded .widget pill.
+     The area outside the pill's border-radius stays see-through on both
+     macOS and Windows. */
+  background: transparent;
   overflow: hidden;
   height: 100%;
   user-select: none;
@@ -17,8 +20,12 @@ html, body {
   align-items: center;
   gap: 10px;
   padding: 8px 16px;
-  background: #141423;
-  border: none;
+  /* Rounded pill drawn in CSS — the same on every platform. Translucency
+     comes from the rgba background, replacing the old Windows-only
+     layered-window alpha. */
+  background: rgba(20, 20, 35, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
   width: 100%;
   height: 100%;
   cursor: pointer;
@@ -32,20 +39,20 @@ html, body {
 /* --- Strip tints per widget state — icon carries the rest visually. --- */
 
 .widget.recording {
-  background: #280f0f;
+  background: rgba(40, 15, 15, 0.82);
 }
 
 .widget.processing {
-  background: #1e190a;
+  background: rgba(30, 25, 10, 0.82);
   cursor: wait;
 }
 
 .widget.done {
-  background: #0f1e0f;
+  background: rgba(15, 30, 15, 0.82);
 }
 
 .widget.error {
-  background: #1e0f0f;
+  background: rgba(30, 15, 15, 0.82);
 }
 
 /* --- Icon slot — hosts the 6-state mic SVG --- */
