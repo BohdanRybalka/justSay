@@ -3,7 +3,6 @@ import { api, type UserSettings } from "../api";
 import { renderGeneral } from "./tabs/general";
 import { renderModels } from "./tabs/models";
 import { renderAudio } from "./tabs/audio";
-import { renderStorage } from "./tabs/storage";
 import { renderHistory } from "./tabs/history";
 import { renderMetrics } from "./tabs/metrics";
 import { renderWords } from "./tabs/words";
@@ -30,7 +29,6 @@ const tabs: Record<string, (container: HTMLElement, settings: UserSettings) => (
   audio: renderAudio,
   transcribe: renderTranscribe,
   keys: renderKeys,
-  storage: renderStorage,
   history: (container) => renderHistory(container),
   metrics: (container) => renderMetrics(container),
   words: (container) => renderWords(container),

@@ -1,4 +1,4 @@
-import type { UserSettings } from "../../api";
+import { api, type UserSettings } from "../../api";
 import { saveSettings } from "../settings";
 
 const LANGUAGES = [
@@ -52,6 +52,25 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     </div>
 
     <div class="setting-group">
+      <div class="setting-label">Files</div>
+      <div class="setting-row">
+        <span class="label" style="flex: 1;">
+          <input type="text" id="output-dir" value="${escapeHtml(settings.output_dir)}" style="width: 100%;" />
+        </span>
+        <button class="btn btn-secondary" id="btn-browse" style="margin-left: 8px;">Browse</button>
+      </div>
+      <div class="setting-hint">If you point this at a sync folder (Dropbox / iCloud / OneDrive), large history moves may take a while.</div>
+      <div id="output-dir-status" class="setting-hint" style="display: none;"></div>
+      <div class="setting-row">
+        <div>
+          <span class="label">Size</span>
+          <span class="value" id="temp-size" style="margin-left: 8px;">...</span>
+        </div>
+        <button class="btn btn-danger" id="btn-cleanup">Clear Temp Files</button>
+      </div>
+    </div>
+
+    <div class="setting-group">
       <div class="setting-label">About</div>
       <div class="setting-row">
         <span class="label">Version</span>
@@ -92,6 +111,84 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   const shortcutBtn = container.querySelector<HTMLButtonElement>("#shortcut-btn")!;
   const shortcutHint = container.querySelector<HTMLElement>("#shortcut-hint")!;
   let recording = false;
+
+  // Files: output directory + temp file cleanup
+  const outputDir = container.querySelector<HTMLInputElement>("#output-dir")!;
+  const outputStatus = container.querySelector<HTMLElement>("#output-dir-status")!;
+  const btnBrowse = container.querySelector<HTMLButtonElement>("#btn-browse")!;
+  const tempSize = container.querySelector<HTMLElement>("#temp-size")!;
+  const btnCleanup = container.querySelector<HTMLButtonElement>("#btn-cleanup")!;
+
+  let lastOutputDir = settings.output_dir;
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  loadFilesInfo(tempSize);
+
+  function showStatus(text: string, kind: "warning" | "error" | "ok") {
+    outputStatus.style.display = "block";
+    outputStatus.textContent = text;
+    outputStatus.style.color =
+      kind === "error" ? "var(--red)"
+      : kind === "warning" ? "var(--orange)"
+      : "var(--green)";
+  }
+
+  function clearStatus() {
+    outputStatus.style.display = "none";
+    outputStatus.textContent = "";
+  }
+
+  async function persistOutputDir(value: string) {
+    try {
+      const { warning } = await saveSettings({ output_dir: value });
+      lastOutputDir = value;
+      if (warning) {
+        showStatus(warning, "warning");
+      } else {
+        clearStatus();
+      }
+      loadFilesInfo(tempSize);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      showStatus(msg, "error");
+      // Revert input to last known good value so the field reflects backend state.
+      outputDir.value = lastOutputDir;
+    }
+  }
+
+  outputDir.addEventListener("input", () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => persistOutputDir(outputDir.value), 600);
+  });
+
+  btnBrowse.addEventListener("click", async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({ directory: true, title: "Select output directory" });
+      if (selected) {
+        outputDir.value = selected as string;
+        persistOutputDir(selected as string);
+      }
+    } catch {
+      outputDir.focus();
+      outputDir.select();
+    }
+  });
+
+  btnCleanup.addEventListener("click", async () => {
+    btnCleanup.disabled = true;
+    btnCleanup.textContent = "Cleaning...";
+    try {
+      const result = await api.cleanupTemp();
+      tempSize.textContent = `Freed ${formatBytes(result.freed_bytes)}`;
+      setTimeout(() => loadFilesInfo(tempSize), 500);
+    } catch (e) {
+      tempSize.textContent = "Failed";
+      console.error(e);
+    } finally {
+      btnCleanup.disabled = false;
+      btnCleanup.textContent = "Clear Temp Files";
+    }
+  });
 
   // About / Updates
   const versionEl = container.querySelector<HTMLElement>("#app-version")!;
@@ -221,7 +318,28 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
 
   return () => {
     recording = false;
+    if (debounceTimer) clearTimeout(debounceTimer);
   };
+}
+
+async function loadFilesInfo(tempSize: HTMLElement) {
+  try {
+    const info = await api.getStorageInfo();
+    tempSize.textContent = formatBytes(info.temp_size_bytes);
+  } catch {
+    tempSize.textContent = "Unknown";
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+}
+
+function escapeHtml(str: string): string {
+  return str.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function styleDescription(style: string): string {
