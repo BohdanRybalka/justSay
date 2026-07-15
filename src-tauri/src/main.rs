@@ -18,5 +18,11 @@ fn main() {
     default_hook(info);
   }));
 
+  // Windows only: a raw Ctrl+C / console close needs its own cleanup path —
+  // see docs/adr/004-windows-graceful-backend-stop.md and
+  // app_lib::install_console_ctrl_handler's doc for why.
+  #[cfg(windows)]
+  app_lib::install_console_ctrl_handler();
+
   app_lib::run();
 }

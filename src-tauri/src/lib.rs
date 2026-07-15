@@ -15,6 +15,17 @@ pub fn shutdown_backend() {
     backend::shutdown();
 }
 
+/// Install a Windows console-control handler so a raw Ctrl+C or console
+/// close in the dev terminal still shuts the backend down gracefully
+/// instead of orphaning it — see docs/adr/004-windows-graceful-backend-stop.md
+/// and `backend::console_ctrl_handler`'s doc for why this is needed only on
+/// Windows (`CREATE_NEW_PROCESS_GROUP` on the Dev child, added by this same
+/// spec, isolates it from the parent's console broadcast Ctrl+C).
+#[cfg(windows)]
+pub fn install_console_ctrl_handler() {
+    backend::install_ctrl_handler();
+}
+
 #[tauri::command]
 async fn backend_request(
     method: String,

@@ -48,9 +48,62 @@ const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 #[cfg(windows)]
 const CTRL_BREAK_EVENT: u32 = 1;
 
+/// Console control event codes delivered to `SetConsoleCtrlHandler` callbacks
+/// for a raw Ctrl+C keypress and a console-window close, respectively — the
+/// two events `install_ctrl_handler()` intercepts below.
+#[cfg(windows)]
+const CTRL_C_EVENT: u32 = 0;
+#[cfg(windows)]
+const CTRL_CLOSE_EVENT: u32 = 2;
+
 #[cfg(windows)]
 extern "system" {
     fn GenerateConsoleCtrlEvent(dwCtrlEvent: u32, dwProcessGroupId: u32) -> i32;
+    fn SetConsoleCtrlHandler(
+        handler_routine: Option<unsafe extern "system" fn(u32) -> i32>,
+        add: i32,
+    ) -> i32;
+}
+
+/// Console control handler registered on the Tauri parent process.
+///
+/// `spawn()`'s Dev branch sets `CREATE_NEW_PROCESS_GROUP` on the child so
+/// `terminate_gracefully()` can target it alone with `CTRL_BREAK_EVENT` (see
+/// that constant's doc). A side effect of that flag: the child no longer
+/// receives a broadcast `CTRL_C_EVENT` from the parent's console the way it
+/// did before this existed — a raw Ctrl+C in the dev terminal only reaches
+/// the parent. The OS's *default* handling of an unhandled `CTRL_C_EVENT` /
+/// `CTRL_CLOSE_EVENT` is to terminate the parent immediately, which does
+/// NOT emit Tauri's `RunEvent::Exit` (that's a normal-exit path, not a
+/// console-event path) and does NOT trigger the panic hook (no Rust panic
+/// occurred) — so without this handler, the backend child would be orphaned
+/// instead of cleaned up.
+///
+/// Registered unconditionally (both Dev and release builds): `shutdown()`
+/// is already idempotent and branch-agnostic (it no-ops if nothing is
+/// running, and handles both `Dev` and `Sidecar` correctly), so calling it
+/// here is never wrong — on a release build with no attached console (the
+/// common case, since `windows_subsystem = "windows"` suppresses one), the
+/// registration succeeds but the events are simply never generated.
+#[cfg(windows)]
+unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
+    if ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_CLOSE_EVENT {
+        shutdown();
+        std::process::exit(0);
+    }
+    0 // Not handled — fall through to the next handler / default action.
+}
+
+/// Install the console control handler (see `console_ctrl_handler`'s doc).
+/// Call once, early in `main()`, before the backend is spawned.
+#[cfg(windows)]
+pub fn install_ctrl_handler() {
+    // SAFETY: `console_ctrl_handler` matches `PHANDLER_ROUTINE`'s required
+    // signature (`extern "system" fn(u32) -> i32`) exactly; `add = 1` adds
+    // it rather than removing a previously-registered handler.
+    unsafe {
+        SetConsoleCtrlHandler(Some(console_ctrl_handler), 1);
+    }
 }
 
 pub const PORT: u16 = 9377;
