@@ -46,8 +46,10 @@ async def lifespan(app: FastAPI):
     # Shutdown: release model resources (GPU memory, Ollama model unload)
     from app.stt import clear_cache as clear_stt
     from app.llm import clear_cache as clear_llm
+    from app.embeddings import clear_cache as clear_embeddings
     clear_stt()
     clear_llm()
+    clear_embeddings()
 
 
 app = FastAPI(
@@ -93,6 +95,7 @@ def _cli() -> None:
     without depending on the dev-mode `python -m uvicorn` invocation.
     """
     import argparse
+    import sys
 
     import uvicorn
 
@@ -100,7 +103,26 @@ def _cli() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=settings.port)
     parser.add_argument("--log-level", default="warning")
+    parser.add_argument(
+        "--selftest-sqlite-vec",
+        action="store_true",
+        help=(
+            "Verify the sqlite-vec extension loads and a KNN query works "
+            "against the actual frozen sidecar binary, then exit. Used by "
+            "release.yml as a permanent CI gate — see ADR 001."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.selftest_sqlite_vec:
+        from app.core import vector_store
+
+        ok, msg = vector_store.selftest()
+        if ok:
+            print("OK")
+            sys.exit(0)
+        print(f"FAIL: {msg}")
+        sys.exit(1)
 
     # Pass the app object directly (not the import string "app.main:app").
     # The string form forces uvicorn to call `importlib.import_module("app.main")`

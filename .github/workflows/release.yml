@@ -84,6 +84,23 @@ jobs:
       - name: Smoke test sidecar
         run: python backend/scripts/smoke_sidecar.py --host 127.0.0.1 --port 9377
 
+      # Permanent CI assertion that sqlite-vec loads inside the actual
+      # frozen sidecar binary on this platform — closes the macOS
+      # `enable_load_extension` question ADR 001 / spec 003 opened
+      # (Windows was verified manually in an earlier session; this makes
+      # both platforms verified on every release, not just once). Runs the
+      # real shipped artifact, not the CI runner's own Python. A failure
+      # here stops the release build before any installer is produced.
+      - name: Verify sqlite-vec loads in frozen sidecar
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN="backend/dist/justsay-backend/justsay-backend.exe"
+          else
+            BIN="backend/dist/justsay-backend/justsay-backend"
+          fi
+          "$BIN" --selftest-sqlite-vec
+
       - name: Copy onedir bundle to Tauri resources
         shell: bash
         run: |

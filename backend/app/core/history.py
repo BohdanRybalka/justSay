@@ -33,18 +33,26 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 
+import sqlite_vec
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
 
 HISTORY_FILENAME = "history.db"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 STATS_TTL_SECONDS = 5.0
 
 _lock = threading.Lock()
 _output_dir: Path = Path.home() / ".justsay"
 _conn: sqlite3.Connection | None = None
 _stats_cache: tuple[float, "HistoryStats"] | None = None
+
+# Phase 3 (sqlite-vec) — set on every _connect() call. Semantic search is
+# gated on this flag; a platform where the extension fails to load
+# (enable_load_extension compiled out — see ADR 001) degrades to "semantic
+# search unavailable" rather than crashing the sidecar.
+_vec_available: bool = False
+_vec_load_warned = False  # log the load failure once per process, not per connect
 
 # Mutation-listener registry — see register_mutation_listener.
 # Listeners are invoked AFTER the lock is released, never under _lock,
@@ -102,6 +110,19 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous = FULL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
+
+    global _vec_available, _vec_load_warned
+    try:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _vec_available = True
+    except Exception as e:
+        _vec_available = False
+        if not _vec_load_warned:
+            log.warning("sqlite-vec extension failed to load — semantic search disabled: %s", e)
+            _vec_load_warned = True
+
     return conn
 
 
@@ -150,18 +171,28 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     """Version-aware migrator. Run on every connection open.
 
     Branches:
-      - fresh v0 / upgrade from v1 → run v2 DDL, rebuild FTS from rows,
-        write user_version=2 LAST so a crash before the PRAGMA leaves a
-        retry-able v1 (or pre-v1) state.
-      - already at v2 → re-run v2 DDL (IF NOT EXISTS makes this idempotent)
+      - fresh v0 / upgrade from v1 or v2 → run v2 DDL, rebuild FTS from
+        rows, run v3 DDL (embeddings_meta + entry_embeddings — both start
+        empty, no rows to replay), write user_version=3 LAST so a crash
+        before the PRAGMA leaves a retry-able prior-version state.
+      - already at v3 → re-run v2 DDL (IF NOT EXISTS makes this idempotent)
         and probe FTS integrity; rebuild on OperationalError so a partial
-        migration that left user_version=2 but no FTS table self-heals.
+        migration that left user_version=3 but no FTS table self-heals.
+        Also re-run v3 DDL (IF NOT EXISTS) so a partial migration that left
+        user_version=3 but the embeddings tables missing self-heals too.
     """
+    # Lazy import: vector_store imports `history` at module level (it needs
+    # `_lock`/`_ensure_conn_locked`), so importing it back at history.py's
+    # own module top would be circular. A local import inside this function
+    # body runs after both modules have finished loading — no cycle.
+    from app.core import vector_store
+
     conn.executescript(_DDL_V1)
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     if current < SCHEMA_VERSION:
         conn.executescript(_DDL_V2)
         conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
+        conn.executescript(vector_store._DDL_V3)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     else:
         # Idempotent recovery from a partially-applied v2: if the FTS
@@ -195,6 +226,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                 needs_rebuild = True
         if needs_rebuild:
             conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
+
+        # v3 recovery: IF NOT EXISTS everywhere in _DDL_V3 makes this a
+        # no-op when the tables are already present, and self-heals a
+        # partial migration that left user_version=3 but the embeddings
+        # tables missing (interrupted DDL, manual edit). No data-replay
+        # step is needed — unlike FTS, these tables start empty.
+        conn.executescript(vector_store._DDL_V3)
 
 
 # --- Public path API -----------------------------------------------------
@@ -278,6 +316,14 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
     Copied FTS shadow tables can desync if the copy interleaved with a
     write or if the source filesystem (Dropbox/iCloud) yielded a partial
     image. Rebuild is cheap on small DBs and is the integrity contract.
+
+    Phase 3 (sqlite-vec): no new rebuild step is needed here. Unlike FTS5's
+    external-content table, ``vec0`` has no rebuild/integrity command, and
+    ``shutil.copy2`` is a raw byte-level file copy that preserves
+    ``entries.rowid`` (and therefore every rowid-keyed ``vec_entries`` row)
+    exactly. The ``_init_schema(new_conn)`` call below already re-attaches
+    the v3 tables via ``IF NOT EXISTS`` — a no-op on a file that already
+    has them.
     """
     global _output_dir, _conn, _stats_cache
     fire_listeners = False

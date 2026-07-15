@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 import soundfile as sf
+from fastapi import BackgroundTasks
 
 from app.core.config import settings
 from app.core.types import ProviderMode
@@ -221,3 +222,93 @@ async def test_pipeline_concurrent_invocations_save_independently(
     texts = sorted(r.text for r in results)
     assert texts == [f"text-{i}" for i in range(5)]
     assert save_mock.call_count == 5
+
+
+# --- Latency isolation (spec 003) -------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pipeline_schedules_embedding_via_background_tasks_not_awaited(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """The call site MUST be background_tasks.add_task(
+    vector_store.embed_entry_background, entry.id, text), never a direct
+    `await embed_entry_background(...)` inside process_audio — this is the
+    structural guarantee that embedding latency cannot land inside the
+    request/response cycle."""
+    _, save_mock = _isolate_side_effects
+    fake_entry = MagicMock()
+    fake_entry.id = "entry-123"
+    save_mock.return_value = fake_entry
+    stt = _make_stt_mock("hello world")
+
+    bt = BackgroundTasks()
+    with (
+        patch.object(bt, "add_task") as add_task_mock,
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+    ):
+        result = await process_audio(sample_wav, style="normal", background_tasks=bt)
+
+    assert result.text == "hello world"
+    add_task_mock.assert_called_once()
+
+    from app.core import vector_store
+
+    args = add_task_mock.call_args.args
+    assert args[0] is vector_store.embed_entry_background
+    assert args[1] == "entry-123"
+    assert args[2] == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_omits_background_task_when_none_provided(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """background_tasks=None (the default) must not attempt to schedule
+    anything — covers callers that don't pass BackgroundTasks at all."""
+    stt = _make_stt_mock("hello world")
+
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
+        result = await process_audio(sample_wav, style="normal")  # no background_tasks
+
+    assert result.text == "hello world"  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_pipeline_survives_embedding_provider_outage(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """A failure inside the scheduled background embed task must not
+    affect process_audio's return value or the saved HistoryEntry —
+    dictation succeeds regardless of embedding failure. process_audio
+    returns BEFORE the background task ever runs; this test then runs the
+    queued task the way Starlette's response middleware would (after the
+    response is sent) and asserts it does not raise and does not retroactively
+    change anything process_audio already returned."""
+    _, save_mock = _isolate_side_effects
+    fake_entry = MagicMock()
+    fake_entry.id = "entry-456"
+    save_mock.return_value = fake_entry
+    stt = _make_stt_mock("hello world")
+
+    bt = BackgroundTasks()
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
+        result = await process_audio(sample_wav, style="normal", background_tasks=bt)
+
+    # process_audio already returned successfully; the background task has
+    # not run yet at this point.
+    assert result.text == "hello world"
+    assert result.copied_to_clipboard is True
+    assert save_mock.call_count == 1
+
+    with (
+        patch(
+            "app.embeddings.resolve_embedding_provider",
+            new=AsyncMock(side_effect=RuntimeError("embedding provider outage")),
+        ),
+        patch("app.core.history._vec_available", True),
+    ):
+        await bt()  # must not raise — embed_entry_background swallows it
+
+    # process_audio's earlier return value / saved entry are unaffected.
+    assert result.text == "hello world"
+    assert save_mock.call_args.kwargs["text"] == "hello world"

@@ -242,9 +242,13 @@ def sync_to_runtime(us: UserSettings) -> None:
     if changed_stt:
         from app.stt import clear_cache as clear_stt_cache
         clear_stt_cache()
+        from app.embeddings import clear_cache as clear_embeddings_cache
+        clear_embeddings_cache()
     if changed_llm:
         from app.llm import clear_cache as clear_llm_cache
         clear_llm_cache()
+        from app.embeddings import clear_cache as clear_embeddings_cache
+        clear_embeddings_cache()
 
 
 def _save(s: UserSettings) -> None:

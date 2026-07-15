@@ -4,7 +4,7 @@ import logging
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.audio import get_recorder
@@ -28,7 +28,12 @@ class DictateResponse(BaseModel):
 
 
 @router.post("/dictate", response_model=DictateResponse)
-async def dictate(language: str = "uk", style: str = "normal", copy_to_clipboard: bool = True):
+async def dictate(
+    background_tasks: BackgroundTasks,
+    language: str = "uk",
+    style: str = "normal",
+    copy_to_clipboard: bool = True,
+):
     """One-shot: stop recording -> transcribe -> clipboard.
 
     Call POST /audio/start first, then call this endpoint when done speaking.
@@ -53,6 +58,7 @@ async def dictate(language: str = "uk", style: str = "normal", copy_to_clipboard
             style=style,
             copy_to_clipboard=copy_to_clipboard,
             audio_duration=captured_duration if captured_duration > 0.0 else None,
+            background_tasks=background_tasks,
         )
         return DictateResponse(**result.__dict__)
     except Exception as e:
@@ -69,6 +75,7 @@ async def dictate(language: str = "uk", style: str = "normal", copy_to_clipboard
 @router.post("/process-file", response_model=DictateResponse)
 async def process_file(
     file: UploadFile,
+    background_tasks: BackgroundTasks,
     language: str = "uk",
     style: str = "normal",
     copy_to_clipboard: bool = True,
@@ -85,7 +92,11 @@ async def process_file(
         temp_path.write_bytes(content)
 
         result = await process_audio(
-            temp_path, language=language, style=style, copy_to_clipboard=copy_to_clipboard
+            temp_path,
+            language=language,
+            style=style,
+            copy_to_clipboard=copy_to_clipboard,
+            background_tasks=background_tasks,
         )
         return DictateResponse(**result.__dict__)
     except HTTPException:

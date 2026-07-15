@@ -11,11 +11,11 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.core import history
+from app.core import history, vector_store
 
 
 @pytest.fixture(autouse=True)
@@ -366,12 +366,13 @@ def test_operational_error_mapped_to_503(isolated_storage, tmp_path):
 
 # --- Phase 2 — FTS5 schema migration + triggers --------------------------
 
-def test_schema_version_is_v2(isolated_storage, tmp_path):
+def test_schema_version_is_v3(isolated_storage, tmp_path):
+    """Bumped to 3 by Phase 3 (sqlite-vec) — see the Phase 3 section below."""
     target = tmp_path / "target"
     history.bootstrap(target)
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_fts_table_and_triggers_exist(isolated_storage, tmp_path):
@@ -449,7 +450,9 @@ def test_migration_v1_to_v2_populates_fts(isolated_storage, tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        # bootstrap() always migrates through to the current SCHEMA_VERSION
+        # (3, post-Phase-3) in one boot — there is no "stop at v2" state.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         hits = conn.execute(
             "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'brown'"
         ).fetchall()
@@ -548,7 +551,9 @@ def test_crash_before_user_version_pragma_retries(isolated_storage, tmp_path, mo
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        # bootstrap() always migrates through to the current SCHEMA_VERSION
+        # (3, post-Phase-3) in one boot — there is no "stop at v2" state.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         hits = conn.execute(
             "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'crash'"
         ).fetchall()
@@ -572,6 +577,149 @@ def test_relocate_rebuilds_fts(isolated_storage, tmp_path):
             "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'searchable'"
         ).fetchall()
     assert len(hits) == 1
+
+
+# --- Phase 3 — sqlite-vec schema migration (spec 003) ---------------------
+#
+# Mirrors the exact crash-safety/idempotency pattern the v1->v2 migration
+# tests above already establish: DDL is executed manually against a raw
+# connection to simulate an out-of-band prior version, then history.bootstrap
+# is called and the migrator's self-healing behaviour is asserted.
+
+def test_v1_to_v3_migration_lands_at_v3(isolated_storage, tmp_path):
+    """A pre-existing v1 DB (only `entries`, no FTS, no embeddings tables)
+    upgrades straight to v3 in one boot."""
+    db_path = tmp_path / "history.db"
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.executescript(history._DDL_V1)
+        raw.execute("PRAGMA user_version = 1")
+        raw.execute(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('a', 0, 'uk', 'normal', 'hello brown fox', 'hello brown fox', 0)"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    history.bootstrap(tmp_path)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
+        ).fetchall()}
+    assert {"entry_fts", "embeddings_meta", "entry_embeddings", "entry_embeddings_dim_guard"}.issubset(names)
+
+
+def test_v2_to_v3_migration_lands_at_v3(isolated_storage, tmp_path):
+    """A pre-existing v2 DB (FTS already migrated, no embeddings tables)
+    upgrades to v3 without disturbing the FTS index."""
+    db_path = tmp_path / "history.db"
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.executescript(history._DDL_V1)
+        raw.executescript(history._DDL_V2)
+        raw.execute(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('a', 0, 'uk', 'normal', 'v2 already migrated', 'v2 already migrated', 0)"
+        )
+        raw.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
+        raw.execute("PRAGMA user_version = 2")
+        raw.commit()
+    finally:
+        raw.close()
+
+    history.bootstrap(tmp_path)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
+        ).fetchall()}
+        fts_hits = conn.execute(
+            "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'migrated'"
+        ).fetchall()
+    assert {"embeddings_meta", "entry_embeddings", "entry_embeddings_dim_guard"}.issubset(names)
+    assert len(fts_hits) == 1  # v2 data untouched by the v3 upgrade
+
+
+def test_crash_before_v3_user_version_pragma_retries(isolated_storage, tmp_path):
+    """If a crash leaves user_version at 2 even though the v3 DDL already
+    ran (embeddings tables exist), the next boot's migrator must succeed
+    idempotently — mirrors test_crash_before_user_version_pragma_retries
+    for v1->v2 above."""
+    from app.core import vector_store
+
+    db_path = tmp_path / "history.db"
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.executescript(history._DDL_V1)
+        raw.executescript(history._DDL_V2)
+        raw.executescript(vector_store._DDL_V3)  # simulate v3 DDL already applied
+        raw.execute(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('a', 0, 'uk', 'normal', 'crash safety v3', 'crash safety v3', 0)"
+        )
+        # user_version intentionally left at 2 — simulates the crash window
+        # between the v3 DDL running and the PRAGMA write.
+        raw.execute("PRAGMA user_version = 2")
+        raw.commit()
+    finally:
+        raw.close()
+
+    history.bootstrap(tmp_path)  # must not raise, must retry idempotently
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
+        ).fetchall()}
+    assert {"embeddings_meta", "entry_embeddings", "entry_embeddings_dim_guard"}.issubset(names)
+
+
+def test_partial_v3_migration_recovery_tables_missing(isolated_storage, tmp_path):
+    """If a previous boot wrote user_version=3 but the embeddings tables
+    are missing (interrupted migration, manual edit), _init_schema must
+    recreate them via IF NOT EXISTS rather than crashing — mirrors
+    test_partial_migration_recovery_fts_missing for v2 above."""
+    db_path = tmp_path / "history.db"
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.executescript(history._DDL_V1)
+        raw.executescript(history._DDL_V2)
+        raw.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
+        raw.execute("PRAGMA user_version = 3")  # embeddings tables never actually created
+        raw.commit()
+    finally:
+        raw.close()
+
+    history.bootstrap(tmp_path)  # must not raise
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
+        ).fetchall()}
+    assert {"embeddings_meta", "entry_embeddings", "entry_embeddings_dim_guard"}.issubset(names)
+
+
+def test_fresh_db_has_v3_embeddings_tables_but_not_vec_entries(isolated_storage, tmp_path):
+    """A brand-new DB lands at v3 with embeddings_meta/entry_embeddings
+    present, but vec_entries is NOT created — it is lazy, created on first
+    successful embed (its dimension depends on the active provider)."""
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
+        ).fetchall()}
+    assert {"embeddings_meta", "entry_embeddings", "entry_embeddings_dim_guard"}.issubset(names)
+    assert "vec_entries" not in names
 
 
 # --- /history/search router behaviour ------------------------------------
@@ -648,6 +796,181 @@ def test_search_lock_error_returns_503(isolated_storage, tmp_path):
             resp = client.get("/history/search?q=anything")
             assert resp.status_code == 503
             assert resp.headers.get("Retry-After") == "1"
+
+
+# --- mode=semantic 503 detail strings (spec 003) --------------------------
+#
+# Each disabled/unready state has its own specific, UI-displayable `detail`
+# string — asserted individually per the plan's Search endpoint AC.
+#
+# Uses the async ``client`` fixture (conftest.py, ASGITransport — no
+# lifespan) rather than ``TestClient(app)``: TestClient's context manager
+# runs the FastAPI lifespan, which re-bootstraps history at whatever
+# `user_settings.get_user_settings().output_dir` resolves to. Within a
+# single test *file* that value is cached at first use and NOT reset by
+# this file's `isolated_storage` fixture (only test_user_settings.py /
+# test_settings_router.py reset that cache), so successive TestClient-based
+# tests in this file silently share one growing DB. The other pre-existing
+# TestClient-based tests above tolerate this (`>=`, or an empty-query
+# short-circuit); these new tests assert exact counts, so they use the
+# lifespan-free `client` fixture over `isolated_storage`'s own
+# directly-bootstrapped `history` state instead.
+
+@pytest.mark.asyncio
+async def test_search_semantic_503_when_vec_extension_unavailable(isolated_storage, tmp_path, client):
+    history.bootstrap(tmp_path)
+    history.save_entry(text="anything", duration_ms=1)
+    with patch.object(history, "_vec_available", False):
+        resp = await client.get("/history/search?q=anything&mode=semantic")
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == vector_store.VEC_EXTENSION_UNAVAILABLE_DETAIL
+
+
+@pytest.mark.asyncio
+async def test_search_semantic_503_when_disabled_by_mode_eligibility(isolated_storage, tmp_path, client):
+    history.bootstrap(tmp_path)
+    history.save_entry(text="anything", duration_ms=1)
+    with patch(
+        "app.embeddings.resolve_embedding_provider",
+        new=AsyncMock(return_value=(None, "Local embeddings need Ollama with nomic-embed-text pulled")),
+    ):
+        resp = await client.get("/history/search?q=anything&mode=semantic")
+    assert resp.status_code == 503
+    assert "nomic-embed-text" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_search_semantic_503_when_zero_entries_embedded(isolated_storage, tmp_path, client):
+    """Provider resolves fine, but nothing has been embedded yet — fails
+    fast BEFORE spending an embed API call on the query."""
+    from unittest.mock import MagicMock
+
+    fake = MagicMock()
+    fake.model_name = "gemini/text-embedding-004"
+    fake.embed = AsyncMock(side_effect=AssertionError("must not embed when index is empty"))
+
+    history.bootstrap(tmp_path)
+    history.save_entry(text="never embedded", duration_ms=1)
+    with patch(
+        "app.embeddings.resolve_embedding_provider",
+        new=AsyncMock(return_value=(fake, None)),
+    ):
+        resp = await client.get("/history/search?q=anything&mode=semantic")
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == vector_store.NO_ENTRIES_EMBEDDED_DETAIL
+
+
+@pytest.mark.asyncio
+async def test_search_semantic_503_when_embed_call_raises(isolated_storage, tmp_path, client):
+    """Any exception from provider.embed() (auth error, network failure,
+    malformed SDK response) must map to a 503, never a raw 500 — the RED
+    finding from Stage 3 review iteration 1."""
+    from unittest.mock import MagicMock
+
+    fake = MagicMock()
+    fake.model_name = "gemini/text-embedding-004"
+    fake.embed = AsyncMock(side_effect=RuntimeError("upstream auth failed"))
+
+    history.bootstrap(tmp_path)
+    e1 = history.save_entry(text="already embedded", duration_ms=1)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
+        rowid = conn.execute("SELECT rowid FROM entries WHERE id = ?", (e1.id,)).fetchone()[0]
+        vector_store.insert_embedding(
+            conn, e1.id, rowid, [1.0, 0.0, 0.0], "cloud", "text-embedding-004"
+        )
+
+    with patch(
+        "app.embeddings.resolve_embedding_provider",
+        new=AsyncMock(return_value=(fake, None)),
+    ):
+        resp = await client.get("/history/search?q=anything&mode=semantic")
+    assert resp.status_code == 503
+    assert resp.status_code != 500
+    assert "RuntimeError" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_search_semantic_empty_query_returns_empty_without_calling_provider(
+    isolated_storage, tmp_path, client
+):
+    """Empty/whitespace `q` short-circuits to 200 + [] before ever touching
+    availability checks or the embedding provider — mirrors mode=fts."""
+    from unittest.mock import MagicMock
+
+    fake = MagicMock()
+    fake.model_name = "gemini/text-embedding-004"
+    fake.embed = AsyncMock(side_effect=AssertionError("must not embed an empty query"))
+
+    history.bootstrap(tmp_path)
+    history.save_entry(text="anything", duration_ms=1)
+
+    with (
+        patch.object(history, "_vec_available", False),  # would 503 if reached
+        patch(
+            "app.embeddings.resolve_embedding_provider",
+            new=AsyncMock(return_value=(fake, None)),
+        ) as resolve_mock,
+    ):
+        resp = await client.get("/history/search?q=%20%20&mode=semantic")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["entries"] == []
+    assert data["total"] == 0
+    resolve_mock.assert_not_called()
+    fake.embed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_search_semantic_returns_ranked_results_with_plain_highlight(isolated_storage, tmp_path, client):
+    """mode=semantic returns entries ranked by vector distance; unlike
+    mode=fts, highlighted_text carries no <mark> spans — relevance here
+    isn't token-based."""
+    from unittest.mock import MagicMock
+
+    history.bootstrap(tmp_path)
+    e1 = history.save_entry(text="close match alpha", duration_ms=1)
+    history.save_entry(text="far away beta", duration_ms=1)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
+        rowid = conn.execute("SELECT rowid FROM entries WHERE id = ?", (e1.id,)).fetchone()[0]
+        vector_store.insert_embedding(
+            conn, e1.id, rowid, [1.0, 0.0, 0.0], "cloud", "text-embedding-004"
+        )
+
+    fake = MagicMock()
+    fake.model_name = "gemini/text-embedding-004"
+    fake.embed = AsyncMock(return_value=[1.0, 0.0, 0.0])
+
+    with patch(
+        "app.embeddings.resolve_embedding_provider",
+        new=AsyncMock(return_value=(fake, None)),
+    ):
+        resp = await client.get("/history/search?q=alpha&mode=semantic&limit=5")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["entries"]) == 1
+    assert data["entries"][0]["id"] == e1.id
+    assert "<mark>" not in data["entries"][0]["highlighted_text"]
+
+
+@pytest.mark.asyncio
+async def test_search_fts_mode_unaffected_by_mode_param_default(isolated_storage, tmp_path, client):
+    """mode=fts (the default) behaviour is byte-for-byte unchanged from
+    before `mode` existed — a plain /history/search?q=... call with no
+    mode param must still take the FTS path."""
+    history.bootstrap(tmp_path)
+    history.save_entry(text="правив у файлі", duration_ms=1, language="uk")
+    resp = await client.get("/history/search?q=прав")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["entries"]) == 1
+    assert "<mark>прав</mark>" in data["entries"][0]["highlighted_text"]
 
 
 def test_concurrent_save_and_search_serialised(isolated_storage, tmp_path):
