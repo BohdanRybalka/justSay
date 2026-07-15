@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 #[cfg(windows)]
@@ -59,6 +59,40 @@ enum BackendProcess {
 
 static BACKEND_PROCESS: Mutex<Option<BackendProcess>> = Mutex::new(None);
 
+/// Shared `reqwest::Client` for all backend HTTP calls (IPC-triggered
+/// requests + the startup readiness poll). A `Client` owns a connection
+/// pool; building a fresh one per call (the previous behavior) discarded
+/// that pool on every single frontend→backend round trip.
+///
+/// Stores the build `Result` itself (rather than the `Client` directly)
+/// because `OnceLock::get_or_try_init` is not stable at this crate's MSRV
+/// (`rust-version = "1.77.2"` in Cargo.toml) — it is still gated behind the
+/// nightly-only `once_cell_try` feature. This gives the same "build once,
+/// cache the outcome" behavior via the stable `get_or_init`.
+static HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+
+/// Lazily build (once) and return the shared HTTP client, using
+/// `REQUEST_TIMEOUT` as its default per-request timeout. Callers that need
+/// a different timeout (e.g. `wait_for_ready()`'s faster health poll)
+/// override it per-request via `RequestBuilder::timeout(...)` rather than
+/// building a second client.
+///
+/// Returns `Err` instead of panicking if the client fails to build (e.g. a
+/// broken TLS backend) — matches the pre-refactor behavior where `request()`
+/// and `wait_for_ready()` each built their own `Client` and propagated
+/// build failure as a normal `Result` error.
+fn http_client() -> Result<&'static reqwest::Client, String> {
+    HTTP_CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .map_err(|e| format!("failed to build shared reqwest client: {}", e))
+        })
+        .as_ref()
+        .map_err(|e| e.clone())
+}
+
 /// Append a stderr line from the production sidecar to
 /// `~/.justsay/logs/sidecar.log`. Failure to open the log file is silent
 /// to avoid spamming on shutdown when the FS is racing.
@@ -84,21 +118,53 @@ fn append_sidecar_log(line: &[u8]) {
     }
 }
 
-/// Find Python executable on the system. Kept for the dev-mode fallback;
-/// the production path resolves the sidecar via `app.path().resource_dir()`.
+/// Parse `python --version` stdout (e.g. `"Python 3.11.4\n"`) into
+/// `(major, minor)`. Returns `None` for non-standard output (some Windows
+/// Store aliases, custom builds) rather than panicking — callers treat
+/// that the same as "candidate not usable".
+fn parse_python_version(output: &str) -> Option<(u32, u32)> {
+    let rest = output.trim().strip_prefix("Python ")?;
+    let mut parts = rest.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// Find a Python executable on the system that satisfies JustSay's minimum
+/// supported version (3.10+). Kept for the dev-mode fallback; the
+/// production path resolves the sidecar via `app.path().resource_dir()`.
 fn find_python() -> Result<String, String> {
+    let mut too_old: Option<(String, u32, u32)> = None;
+
     for candidate in ["python", "python3"] {
-        let result = Command::new(candidate)
-            .args(["--version"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if let Ok(status) = result {
-            if status.success() {
-                return Ok(candidate.to_string());
+        let mut cmd = Command::new(candidate);
+        cmd.args(["--version"]).stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let result = cmd.output();
+
+        if let Ok(output) = result {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Some((major, minor)) = parse_python_version(&stdout) {
+                    if (major, minor) >= (3, 10) {
+                        return Ok(candidate.to_string());
+                    }
+                    if too_old.is_none() {
+                        too_old = Some((candidate.to_string(), major, minor));
+                    }
+                }
             }
         }
     }
+
+    if let Some((candidate, major, minor)) = too_old {
+        return Err(format!(
+            "Found {} {}.{}, but JustSay requires Python 3.10+. Install a newer Python and ensure it's first in PATH.",
+            candidate, major, minor
+        ));
+    }
+
     Err("Python not found. Install Python 3.10+ and ensure it's in PATH.".to_string())
 }
 
@@ -342,12 +408,8 @@ fn is_process_alive() -> bool {
 
 /// Poll /health until the backend responds or timeout.
 pub async fn wait_for_ready() -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(500))
-        .build()
-        .map_err(|e| e.to_string())?;
-
     let url = format!("http://127.0.0.1:{}/health", PORT);
+    let client = http_client()?;
 
     for attempt in 1..=HEALTH_POLL_MAX_ATTEMPTS {
         if !is_process_alive() {
@@ -356,7 +418,12 @@ pub async fn wait_for_ready() -> Result<(), String> {
             );
         }
 
-        match client.get(&url).send().await {
+        match client
+            .get(&url)
+            .timeout(Duration::from_millis(500))
+            .send()
+            .await
+        {
             Ok(resp) if resp.status().is_success() => {
                 log::info!("Backend ready (attempt {})", attempt);
                 return Ok(());
@@ -456,9 +523,7 @@ pub async fn request(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let url = format!("http://127.0.0.1:{}{}", PORT, path);
 
-    let client = reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()?;
+    let client = http_client()?;
 
     let response = match method.to_uppercase().as_str() {
         "GET" => client.get(&url).send().await?,

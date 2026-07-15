@@ -95,7 +95,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
 
   // API Keys (ported from keys.ts — rendered as an embedded subsection)
   const keysSection = container.querySelector<HTMLElement>("#api-keys-section")!;
-  renderKeys(keysSection, settings);
+  const destroyKeys = renderKeys(keysSection, settings);
 
   // Microphone test
   const btnTest = container.querySelector<HTMLButtonElement>("#btn-test-mic")!;
@@ -383,6 +383,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     if (isRecording) {
       api.audioStop().catch(() => {});
     }
+    destroyKeys();
   };
 }
 
