@@ -1,6 +1,6 @@
 {
   "name": "justsay",
-  "version": "0.1.0",
+  "version": "0.11.1",
   "description": "Personal voice-processing OS with hybrid Cloud/Local AI architecture",
   "private": true,
   "scripts": {
