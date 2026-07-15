@@ -88,10 +88,53 @@ extern "system" {
 #[cfg(windows)]
 unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
     if ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_CLOSE_EVENT {
-        shutdown();
-        std::process::exit(0);
+        wait_for_inflight_shutdown_then_exit();
     }
     0 // Not handled — fall through to the next handler / default action.
+}
+
+/// Bounded wait for any already-in-progress `shutdown()` call (e.g.
+/// `RunEvent::Exit`'s `terminate_gracefully()`, mid-poll on the main thread
+/// for up to ~3s while holding `BACKEND_PROCESS`) to finish, before running
+/// our own (by then idempotent, likely-no-op) `shutdown()` and exiting.
+///
+/// `shutdown()`'s `try_lock()` was only ever designed to make *same-thread*
+/// reentrancy (this handler's own thread, or the panic hook, calling
+/// `shutdown()` while already inside it) a safe no-op — it has no way to
+/// tell "a *different* thread already holds the lock and is mid-cleanup"
+/// from "nothing to clean up." The original console handler called
+/// `shutdown()` then unconditionally `process::exit(0)`; if a Ctrl+C landed
+/// while another thread already held `BACKEND_PROCESS`, `shutdown()` would
+/// silently no-op on contention and the immediate `exit(0)` would kill the
+/// whole process out from under that other thread's in-flight graceful
+/// sequence — potentially before it reached `force_kill()` — re-orphaning
+/// the child via a narrower trigger (Ctrl+C during an already-in-progress
+/// shutdown) than the one this handler originally fixed.
+///
+/// Polling for the lock to free up first closes that window: this handler
+/// runs on its own dedicated OS thread (never the main thread or the
+/// panic-hook's thread — see `install_ctrl_handler`'s doc), so waiting here
+/// cannot reintroduce the same-thread reentrancy deadlock ADR 002 fixed.
+/// The wait is bounded (not indefinite) purely as a fail-safe in case the
+/// in-flight shutdown somehow runs long — same 100ms-poll shape already
+/// used by `terminate_gracefully()` above.
+#[cfg(windows)]
+fn wait_for_inflight_shutdown_then_exit() -> ! {
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+    // 6s: comfortably covers terminate_gracefully()'s own 3s grace poll plus
+    // force_kill() overhead (taskkill/CommandChild::kill), so the common
+    // "another shutdown is genuinely finishing" case waits it out rather
+    // than racing it.
+    const MAX_ATTEMPTS: u32 = 60;
+
+    for _ in 0..MAX_ATTEMPTS {
+        if BACKEND_PROCESS.try_lock().is_ok() {
+            break;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    shutdown();
+    std::process::exit(0);
 }
 
 /// Install the console control handler (see `console_ctrl_handler`'s doc).
