@@ -136,11 +136,8 @@ export interface HistoryStats {
 }
 
 export interface StorageInfo {
-  temp_dir: string;
   temp_size_bytes: number;
   output_dir: string;
-  history_path: string;
-  history_entries: number;
 }
 
 export interface SettingsUpdateResponse {

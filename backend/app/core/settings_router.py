@@ -6,7 +6,6 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.core import history
 from app.core.utils import compute_dir_size
 from app.core.user_settings import (
     UserSettings,
@@ -32,11 +31,8 @@ def _mask_keys(s: UserSettings) -> UserSettings:
 
 
 class StorageInfo(BaseModel):
-    temp_dir: str
     temp_size_bytes: int
     output_dir: str
-    history_path: str
-    history_entries: int
 
 
 class CleanupResult(BaseModel):
@@ -124,22 +120,18 @@ def _mask_home(p: Path) -> str:
 async def get_storage_info():
     s = get_user_settings()
     tmp_dir = SETTINGS_DIR / "tmp"
-    hpath = history.history_path()
-    # All three paths are passed through `_mask_home`. `temp_dir` and the
-    # default `history_path` always live under `~/.justsay`, so masking is
-    # effectively unconditional there. `output_dir` may be relocated outside
-    # the home tree (network drives, external SSDs, custom data folders);
-    # in that case `_mask_home` returns the raw path unchanged — privacy
-    # hygiene is best-effort, not a hard boundary. `GET /settings` (the
-    # canonical settings endpoint that the PUT round-trip reads back from)
-    # is intentionally UNCHANGED so the frontend's revert logic in
-    # `src/settings/tabs/storage.ts` keeps working with real paths.
+    # `output_dir` is passed through `_mask_home`; it may be relocated
+    # outside the home tree (network drives, external SSDs, custom data
+    # folders), in which case `_mask_home` returns the raw path unchanged —
+    # privacy hygiene is best-effort, not a hard boundary. `temp_dir` itself
+    # is only used internally (via `compute_dir_size`) and never returned.
+    # `GET /settings` (the canonical settings endpoint that the PUT
+    # round-trip reads back from) is intentionally UNCHANGED so the
+    # frontend's revert logic (`lastOutputDir` in
+    # `src/settings/tabs/general.ts`) keeps working with real paths.
     return StorageInfo(
-        temp_dir=_mask_home(tmp_dir),
         temp_size_bytes=compute_dir_size(tmp_dir),
         output_dir=_mask_home(Path(s.output_dir)),
-        history_path=_mask_home(hpath),
-        history_entries=history.get_count(),
     )
 
 
