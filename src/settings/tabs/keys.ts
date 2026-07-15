@@ -102,7 +102,6 @@ export function renderKeys(
   };
 
   container.innerHTML = `
-    <h2 class="tab-title">API Keys</h2>
     <div class="setting-hint" style="margin-bottom: 12px;">
       Keys are stored in <code>~/.justsay/settings.json</code>. They are never sent back in API responses.
     </div>

@@ -2,12 +2,10 @@ import { getVersion } from "@tauri-apps/api/app";
 import { api, type UserSettings } from "../api";
 import { renderGeneral } from "./tabs/general";
 import { renderModels } from "./tabs/models";
-import { renderAudio } from "./tabs/audio";
 import { renderHistory } from "./tabs/history";
 import { renderMetrics } from "./tabs/metrics";
 import { renderWords } from "./tabs/words";
 import { renderTranscribe } from "./tabs/transcribe";
-import { renderKeys } from "./tabs/keys";
 
 // --- State ---
 
@@ -26,9 +24,7 @@ const backendStatus = document.getElementById("backend-status")!;
 const tabs: Record<string, (container: HTMLElement, settings: UserSettings) => (() => void) | void> = {
   general: renderGeneral,
   models: renderModels,
-  audio: renderAudio,
   transcribe: renderTranscribe,
-  keys: renderKeys,
   history: (container) => renderHistory(container),
   metrics: (container) => renderMetrics(container),
   words: (container) => renderWords(container),

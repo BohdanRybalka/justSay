@@ -42,13 +42,6 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
           ).join("")}
         </select>
       </div>
-      <div class="setting-row">
-        <span class="label">Style</span>
-        <div class="toggle-group">
-          <button class="toggle-btn ${settings.transcription_style === "normal" ? "active" : ""}" data-style="normal">Normal</button>
-          <button class="toggle-btn ${settings.transcription_style === "ai_prompt" ? "active" : ""}" data-style="ai_prompt">AI Prompt</button>
-        </div>
-      </div>
     </div>
 
     <div class="setting-group" id="result-group" style="display:none;">
@@ -68,7 +61,6 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
   const fileInput = container.querySelector<HTMLInputElement>("#file-input")!;
   const pickBtn = container.querySelector<HTMLButtonElement>("#pick-btn")!;
   const langSelect = container.querySelector<HTMLSelectElement>("#tx-lang")!;
-  const styleToggleBtns = Array.from(container.querySelectorAll<HTMLButtonElement>("[data-style]"));
   const resultGroup = container.querySelector<HTMLElement>("#result-group")!;
   const resultStatus = container.querySelector<HTMLElement>("#result-status")!;
   const resultText = container.querySelector<HTMLElement>("#result-text")!;
@@ -76,18 +68,10 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
   const resetBtn = container.querySelector<HTMLButtonElement>("#reset-btn")!;
 
   let chosenLanguage = settings.language;
-  let chosenStyle: "normal" | "ai_prompt" = settings.transcription_style;
   let busy = false;
 
   langSelect.addEventListener("change", () => {
     chosenLanguage = langSelect.value;
-  });
-
-  styleToggleBtns.forEach((btn) => {
-    btn.addEventListener("click", () => {
-      chosenStyle = btn.dataset.style as "normal" | "ai_prompt";
-      styleToggleBtns.forEach((b) => b.classList.toggle("active", b === btn));
-    });
   });
 
   // --- File picker ---
@@ -265,9 +249,9 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
   }
 
   async function transcribe(bytes: ArrayBuffer, filename: string) {
-    setUiState("transcribing", `Transcribing ${filename} (${chosenStyle})...`);
+    setUiState("transcribing", `Transcribing ${filename}...`);
     try {
-      const result: DictateResponse = await api.processFile(bytes, filename, chosenLanguage, chosenStyle);
+      const result: DictateResponse = await api.processFile(bytes, filename, chosenLanguage);
       const text = result.text || "";
       resultText.textContent = text || "(empty result)";
       const seconds = (result.duration_ms / 1000).toFixed(2);

@@ -24,7 +24,6 @@ let iconFlashTimer: ReturnType<typeof setTimeout> | null = null;
 // Settings (loaded from backend)
 let currentShortcut = "Ctrl+Alt+KeyV";
 let currentLanguage = "uk";
-let currentStyle = "normal";
 
 const MAX_MARQUEE_SECONDS = 20;
 
@@ -182,7 +181,7 @@ async function stopAndProcess() {
   setState("processing");
 
   try {
-    const result = await api.dictate(currentLanguage, currentStyle);
+    const result = await api.dictate(currentLanguage);
     setState("done", result.text || "Done");
     showRouteBadge(result);
   } catch (e) {
@@ -276,7 +275,6 @@ async function loadSettings() {
   try {
     const settings = await api.getSettings();
     currentLanguage = settings.language;
-    currentStyle = settings.transcription_style;
     if (settings.shortcut !== currentShortcut) {
       currentShortcut = settings.shortcut;
       await setupGlobalShortcut(currentShortcut);

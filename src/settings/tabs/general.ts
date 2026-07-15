@@ -1,6 +1,7 @@
 import { api, type UserSettings } from "../../api";
 import { saveSettings } from "../settings";
 import { escapeHtml } from "../html";
+import { renderKeys } from "./keys";
 
 const LANGUAGES = [
   { code: "uk", label: "Ukrainian" },
@@ -30,26 +31,27 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     </div>
 
     <div class="setting-group">
-      <div class="setting-label">Transcription Style</div>
-      <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 8px;">
-        <div style="display: flex; align-items: center; justify-content: space-between;">
-          <span class="label">Output format</span>
-          <div class="toggle-group">
-            <button class="toggle-btn ${settings.transcription_style === "normal" ? "active" : ""}" id="style-normal">Normal</button>
-            <button class="toggle-btn ${settings.transcription_style === "ai_prompt" ? "active" : ""}" id="style-prompt">AI Prompt</button>
-          </div>
-        </div>
-        <div class="value" id="style-desc">${styleDescription(settings.transcription_style)}</div>
-      </div>
-    </div>
-
-    <div class="setting-group">
       <div class="setting-label">Global Shortcut</div>
       <div class="setting-row">
         <span class="label">Push-to-talk</span>
         <button class="btn btn-secondary" id="shortcut-btn">${formatShortcut(settings.shortcut)}</button>
       </div>
       <div class="value" id="shortcut-hint" style="padding: 4px 16px; font-size: 11px; color: var(--text-muted);">Click to change. Press new key combination, then release.</div>
+    </div>
+
+    <div id="api-keys-section"></div>
+
+    <div class="setting-group">
+      <div class="setting-label">Microphone Test</div>
+      <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
+        <div style="display: flex; align-items: center; justify-content: space-between;">
+          <span class="label" id="rec-label">Click to test microphone</span>
+          <button class="btn btn-primary" id="btn-test-mic">Record</button>
+        </div>
+        <div class="level-meter">
+          <div class="level-meter-fill" id="level-fill"></div>
+        </div>
+      </div>
     </div>
 
     <div class="setting-group">
@@ -91,22 +93,69 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     saveSettings({ language: langSelect.value });
   });
 
-  // Transcription style
-  const styleNormal = container.querySelector<HTMLButtonElement>("#style-normal")!;
-  const stylePrompt = container.querySelector<HTMLButtonElement>("#style-prompt")!;
-  const styleDesc = container.querySelector<HTMLElement>("#style-desc")!;
+  // API Keys (ported from keys.ts — rendered as an embedded subsection)
+  const keysSection = container.querySelector<HTMLElement>("#api-keys-section")!;
+  renderKeys(keysSection, settings);
 
-  function setStyle(style: "normal" | "ai_prompt") {
-    styleNormal.classList.toggle("active", style === "normal");
-    stylePrompt.classList.toggle("active", style === "ai_prompt");
-    styleDesc.textContent = styleDescription(style);
-    saveSettings({ transcription_style: style });
-    // Emit event for widget to pick up
-    emitSettingsChanged();
+  // Microphone test
+  const btnTest = container.querySelector<HTMLButtonElement>("#btn-test-mic")!;
+  const recLabel = container.querySelector<HTMLElement>("#rec-label")!;
+  const levelFill = container.querySelector<HTMLElement>("#level-fill")!;
+
+  let isRecording = false;
+  let levelInterval: ReturnType<typeof setInterval> | null = null;
+
+  function startLevelPolling(fill: HTMLElement) {
+    stopLevelPolling();
+    levelInterval = setInterval(async () => {
+      try {
+        const status = await api.audioStatus();
+        // dBFS range: -60 (silent) to 0 (max). Map to 0-100%.
+        const pct = Math.max(0, Math.min(100, ((status.level_db + 60) / 60) * 100));
+        fill.style.width = `${pct}%`;
+      } catch { /* ignore */ }
+    }, 100);
   }
 
-  styleNormal.addEventListener("click", () => setStyle("normal"));
-  stylePrompt.addEventListener("click", () => setStyle("ai_prompt"));
+  function stopLevelPolling() {
+    if (levelInterval) {
+      clearInterval(levelInterval);
+      levelInterval = null;
+    }
+  }
+
+  btnTest.addEventListener("click", async () => {
+    if (isRecording) {
+      try {
+        await api.audioStop();
+      } catch { /* ignore */ }
+      isRecording = false;
+      btnTest.textContent = "Record";
+      recLabel.textContent = "Click to test microphone";
+      stopLevelPolling();
+      levelFill.style.width = "0%";
+    } else {
+      // Check if already recording (widget might be using it)
+      try {
+        const status = await api.audioStatus();
+        if (status.is_recording) {
+          recLabel.textContent = "Microphone busy (widget recording)";
+          return;
+        }
+      } catch { /* ignore */ }
+
+      try {
+        await api.audioStart();
+        isRecording = true;
+        btnTest.textContent = "Stop";
+        recLabel.textContent = "Recording...";
+        startLevelPolling(levelFill);
+      } catch (e) {
+        recLabel.textContent = "Failed to start";
+        console.error(e);
+      }
+    }
+  });
 
   // Shortcut recorder
   const shortcutBtn = container.querySelector<HTMLButtonElement>("#shortcut-btn")!;
@@ -330,6 +379,10 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     recording = false;
     destroyed = true;
     if (debounceTimer) clearTimeout(debounceTimer);
+    stopLevelPolling();
+    if (isRecording) {
+      api.audioStop().catch(() => {});
+    }
   };
 }
 
@@ -348,13 +401,6 @@ function formatBytes(bytes: number): string {
   const units = ["B", "KB", "MB", "GB"];
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
-}
-
-function styleDescription(style: string): string {
-  if (style === "ai_prompt") {
-    return "Structures speech as a clear task/prompt for an AI assistant";
-  }
-  return "Cleans grammar and removes filler words, preserves original meaning";
 }
 
 function formatShortcut(shortcut: string): string {
