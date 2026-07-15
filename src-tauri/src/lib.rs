@@ -8,54 +8,6 @@ use tauri::{
 
 mod backend;
 
-/// Clip the widget window to a pill shape.
-#[cfg(target_os = "windows")]
-fn apply_pill_region(widget: &tauri::WebviewWindow) {
-    use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
-
-    let (hwnd, size) = match (widget.hwnd(), widget.inner_size()) {
-        (Ok(h), Ok(s)) => (h, s),
-        _ => return,
-    };
-
-    unsafe {
-        let w = size.width as i32;
-        let h = size.height as i32;
-        let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, h, h);
-        if !rgn.is_invalid() {
-            let _ = SetWindowRgn(hwnd, Some(rgn), true);
-        }
-    }
-}
-
-/// Apply uniform transparency to the widget (call AFTER show).
-#[cfg(target_os = "windows")]
-fn apply_widget_alpha(widget: &tauri::WebviewWindow, alpha: u8) {
-    use windows::Win32::UI::WindowsAndMessaging::*;
-
-    let hwnd = match widget.hwnd() {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-
-    unsafe {
-        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_LAYERED.0 as i32);
-        let _ = SetLayeredWindowAttributes(
-            hwnd,
-            windows::Win32::Foundation::COLORREF(0),
-            alpha,
-            LWA_ALPHA,
-        );
-        log::info!("Widget alpha set to {}", alpha);
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn apply_pill_region(_widget: &tauri::WebviewWindow) {}
-#[cfg(not(target_os = "windows"))]
-fn apply_widget_alpha(_widget: &tauri::WebviewWindow, _alpha: u8) {}
-
 #[tauri::command]
 async fn backend_request(
     method: String,
@@ -76,9 +28,6 @@ fn get_backend_url() -> String {
 #[tauri::command]
 fn widget_ready(app: AppHandle) {
     if let Some(widget) = app.get_webview_window("widget") {
-        // Pill shape BEFORE show
-        apply_pill_region(&widget);
-
         // Position at bottom-center of screen
         if let Ok(Some(monitor)) = widget.current_monitor() {
             let screen = monitor.size();
@@ -93,10 +42,9 @@ fn widget_ready(app: AppHandle) {
             ));
         }
 
+        // Pill shape and translucency are handled uniformly in CSS on a
+        // transparent window, so no platform-specific window shaping here.
         let _ = widget.show();
-
-        // Alpha AFTER show (WS_EX_LAYERED must be set on visible window)
-        apply_widget_alpha(&widget, 160); // ~63% opacity
     }
 }
 
@@ -123,7 +71,8 @@ pub fn run() {
                 log::error!("Backend spawn failed: {}", e);
             }
 
-            // Create widget window — shaped as pill via SetWindowRgn, no transparency needed
+            // Create widget window — transparent so the CSS-drawn rounded pill
+            // renders identically on macOS and Windows (corners stay see-through).
             let _widget = WebviewWindowBuilder::new(
                 app,
                 "widget",
@@ -134,6 +83,7 @@ pub fn run() {
             .resizable(false)
             .visible(false)
             .decorations(false)
+            .transparent(true)
             .always_on_top(true)
             .skip_taskbar(true)
             .shadow(false)

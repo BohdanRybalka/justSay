@@ -93,7 +93,6 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-updater",
  "tokio",
- "windows",
 ]
 
 [[package]]
