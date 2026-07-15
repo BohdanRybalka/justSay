@@ -1,5 +1,5 @@
 import { api } from "../api";
-import { notifyError, onConnectivityChange } from "../notify";
+import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
 
 // --- State ---
 
@@ -21,8 +21,7 @@ let isHovered = false;
 let durationInterval: ReturnType<typeof setInterval> | null = null;
 let marqueeTimeout: ReturnType<typeof setTimeout> | null = null;
 let iconFlashTimer: ReturnType<typeof setTimeout> | null = null;
-let backendOffline = false;
-let firstCheckDone = false;
+let connectionState: ConnectionCheckState = { offline: false, firstCheckDone: false };
 
 // Settings (loaded from backend)
 let currentShortcut = "Ctrl+Alt+KeyV";
@@ -309,21 +308,20 @@ async function listenForSettingsChanges() {
 // --- Health check ---
 
 async function checkConnection() {
+  let healthOk = true;
   try {
     await api.health();
-    if (state === "idle" && text.textContent === "Offline") {
-      text.textContent = "JustSay";
-    }
-    backendOffline = onConnectivityChange(backendOffline, false).offline;
   } catch {
-    if (state === "idle") {
-      text.textContent = "Offline";
-    }
-    const { offline, shouldNotify } = onConnectivityChange(backendOffline, true);
-    backendOffline = offline;
-    if (shouldNotify && firstCheckDone) notifyError("JustSay backend is unreachable.");
-  } finally {
-    firstCheckDone = true;
+    healthOk = false;
+  }
+  const result = nextConnectionCheckState(connectionState, healthOk);
+  connectionState = { offline: result.offline, firstCheckDone: result.firstCheckDone };
+
+  if (healthOk) {
+    if (state === "idle" && text.textContent === "Offline") text.textContent = "JustSay";
+  } else {
+    if (state === "idle") text.textContent = "Offline";
+    if (result.shouldNotify) notifyError("JustSay backend is unreachable.");
   }
 }
 

@@ -73,20 +73,27 @@ async def resolve_embedding_provider(
     must probe Ollama's tag list over HTTP to check for ``nomic-embed-text``
     before deciding eligibility.
 
-    A cached negative result caused by a missing local model
-    (``LOCAL_MISSING_MODEL_REASON``) is re-probed on every call instead of
-    being served from cache; positive and mixed-mode results are cached as
-    before.
+    A ``(LOCAL, LOCAL)`` cache entry is re-probed against Ollama's tag list
+    on *every* call, in both directions: a cached negative result caused by
+    a missing local model (``LOCAL_MISSING_MODEL_REASON``) re-checks in
+    case the model has since appeared, and a cached positive result
+    (a working ``LocalEmbeddingProvider``) re-checks in case the model has
+    since disappeared (e.g. ``ollama rm nomic-embed-text``) — the stale
+    provider's ``cleanup()`` is called before it's dropped from cache. While
+    the model remains available across consecutive calls, the same
+    ``LocalEmbeddingProvider`` instance is reused rather than reconstructed.
+    Cloud and mixed-mode results are cached as before — neither key ever
+    enters this re-probe branch.
     """
     global _cached_provider, _cached_reason, _cached_key
 
     key = (stt.mode, llm.mode)
+    is_local_key = key == (ProviderMode.LOCAL, ProviderMode.LOCAL)
     with _cache_lock:
-        is_stale_negative = (
-            _cached_provider is None and _cached_reason == LOCAL_MISSING_MODEL_REASON
-        )
-        if _cached_key == key and not is_stale_negative:
+        cache_hit = _cached_key == key
+        if cache_hit and not is_local_key:
             return _cached_provider, _cached_reason
+        stale_local_provider = _cached_provider if (cache_hit and is_local_key) else None
 
     provider: EmbeddingProvider | None
     reason: str | None
@@ -96,13 +103,20 @@ async def resolve_embedding_provider(
 
         provider = CloudEmbeddingProvider(gemini_api_key=stt.gemini_api_key, model=emb.cloud_model)
         reason = None
-    elif stt.mode == ProviderMode.LOCAL and llm.mode == ProviderMode.LOCAL:
+    elif is_local_key:
         from app.embeddings.local import LocalEmbeddingProvider, is_model_available
 
         if await is_model_available(llm, emb.local_model):
-            provider = LocalEmbeddingProvider(ollama_host=llm.ollama_host, model=emb.local_model)
+            provider = stale_local_provider or LocalEmbeddingProvider(
+                ollama_host=llm.ollama_host, model=emb.local_model
+            )
             reason = None
         else:
+            if stale_local_provider is not None:
+                try:
+                    stale_local_provider.cleanup()
+                except Exception:
+                    pass
             provider = None
             reason = LOCAL_MISSING_MODEL_REASON
     else:
