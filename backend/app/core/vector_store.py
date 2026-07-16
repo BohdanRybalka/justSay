@@ -15,6 +15,7 @@ always lazy-imported here, same discipline ``words.py`` uses for
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 import time
@@ -55,28 +56,27 @@ BEGIN
 END;
 """
 
-# 503 detail strings surfaced verbatim by `GET /history/search?mode=semantic`.
-# Kept as module constants so router + tests reference the exact same text.
+# Detail strings for SemanticSearchUnavailableError, consumed internally by
+# words._semantic_lane (spec 017 / ADR 010) to decide how to log a degraded
+# lane -- never surfaced to an HTTP client, since /history/search always
+# returns 200 now. Kept as module constants so tests reference the exact
+# same text.
 VEC_EXTENSION_UNAVAILABLE_DETAIL = (
     "sqlite-vec extension failed to load on this platform — semantic search unavailable"
 )
-NO_ENTRIES_EMBEDDED_DETAIL = "No entries have been embedded yet — run Backfill first"
+NO_ENTRIES_EMBEDDED_DETAIL = (
+    "No entries have been embedded yet — background indexing has not caught up"
+)
 
 
 class SemanticSearchUnavailableError(Exception):
-    """Raised by ``words.search_history_semantic``; the router maps this to 503."""
+    """Raised by ``words.search_history_semantic``. Caught and silenced by
+    ``words._semantic_lane`` (spec 017 / ADR 010) -- never reaches the
+    router or an HTTP response; only logged at ``debug`` level."""
 
     def __init__(self, detail: str):
         super().__init__(detail)
         self.detail = detail
-
-
-class EmbeddingsStatus(BaseModel):
-    available: bool
-    reason: str | None
-    indexed: int
-    total: int
-    provider: str | None
 
 
 class BackfillResult(BaseModel):
@@ -264,29 +264,44 @@ async def backfill_batch(batch_size: int) -> BackfillResult:
     return BackfillResult(processed=processed, remaining=remaining)
 
 
-async def embeddings_status() -> EmbeddingsStatus:
-    from app.core.config import settings
-    from app.embeddings import resolve_embedding_provider
+# --- Automatic background indexing (spec 017 / ADR 010) --------------------
 
+_INDEXER_BATCH_SIZE = 20       # gentler than the old manual button's 50 — this now runs
+_INDEXER_PACING_SECONDS = 1.5  # unattended, possibly stacked behind live dictation traffic
+                                # competing for the same cloud/Ollama rate limits
+_indexer_lock = asyncio.Lock()
+
+
+async def run_background_indexer() -> None:
+    """Silently drains the not-yet-embedded backlog. Nudged once at app
+    startup and once per completed dictation (see ADR 010) -- never awaited
+    by its callers, never blocks a request/response cycle. Serialized via
+    _indexer_lock so overlapping nudges collapse into at most one active
+    sweep; a nudge that arrives mid-sweep becomes a fast no-op once it
+    acquires the lock and finds remaining == 0.
+
+    Must never raise -- same "never raise" contract embed_entry_background
+    already documents, for the same reason: both are BackgroundTasks/
+    asyncio.create_task entrypoints with no caller able to observe or react
+    to an exception raised here.
+    """
     if not history._vec_available:
-        provider, reason = None, VEC_EXTENSION_UNAVAILABLE_DETAIL
-    else:
-        provider, reason = await resolve_embedding_provider(
-            settings.stt, settings.llm, settings.embeddings
-        )
-
-    with history._lock:
-        conn = history._ensure_conn_locked()
-        indexed = conn.execute("SELECT COUNT(*) FROM entry_embeddings").fetchone()[0]
-        total = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
-
-    return EmbeddingsStatus(
-        available=provider is not None,
-        reason=reason,
-        indexed=indexed,
-        total=total,
-        provider=provider.model_name if provider is not None else None,
-    )
+        return
+    try:
+        async with _indexer_lock:
+            while True:
+                result = await backfill_batch(_INDEXER_BATCH_SIZE)
+                if result.remaining == 0:
+                    return
+                if result.processed == 0:
+                    log.debug(
+                        "Background indexer stalled: %d entries remain unembedded, "
+                        "provider unavailable or erroring", result.remaining,
+                    )
+                    return
+                await asyncio.sleep(_INDEXER_PACING_SECONDS)
+    except Exception:
+        log.warning("Background indexer sweep failed unexpectedly", exc_info=True)
 
 
 def selftest() -> tuple[bool, str]:

@@ -116,6 +116,7 @@ async def process_audio(
             from app.core import vector_store
 
             background_tasks.add_task(vector_store.embed_entry_background, entry.id, text)
+            background_tasks.add_task(vector_store.run_background_indexer)
     except Exception as e:
         log.warning("Failed to save history entry: %s", e)
 

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.core import history, words
+from app.core import history, vector_store, words
 from app.core.stopwords_en import STOPWORDS_EN
 from app.core.stopwords_uk import STOPWORDS_UK
 
@@ -509,3 +511,181 @@ async def test_search_endpoint_returns_highlighted_text_field(client):
     assert len(data["entries"]) == 1
     assert "highlighted_text" in data["entries"][0]
     assert "<mark>прав</mark>" in data["entries"][0]["highlighted_text"]
+
+
+# --- search_history_semantic lane coverage (spec 017 review triage, YELLOW #2) ---
+
+@pytest.mark.asyncio
+async def test_search_history_semantic_ranks_by_distance_with_plain_highlight():
+    """Direct lane-level coverage of search_history_semantic's own
+    ranking/highlight contract. The router-level `mode=semantic` HTTP tests
+    that used to exercise this were legitimately removed by this spec (the
+    `mode` param no longer exists); this restores the one piece of coverage
+    that was genuinely lane-specific rather than router-specific: real
+    distance-ranked ordering and the plain (non-`<mark>`) highlight shape.
+
+    Seeds three entries with hand-placed vectors so the nearest-to-farthest
+    order is unambiguous, mocking only `resolve_embedding_provider` (same
+    pattern as test_vector_store.py's `test_backfill_*`/
+    `test_relocate_preserves_embeddings_and_semantic_search` tests) so the
+    query embed call returns a fixed vector instead of hitting a real
+    provider.
+    """
+    near = history.save_entry(text="close match alpha", duration_ms=1)
+    mid = history.save_entry(text="somewhat similar beta", duration_ms=1)
+    far = history.save_entry(text="totally different gamma", duration_ms=1)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
+        for entry, vec in (
+            (near, [1.0, 0.0, 0.0]),
+            (mid, [0.9, 0.1, 0.0]),
+            (far, [0.0, 1.0, 0.0]),
+        ):
+            rowid = conn.execute(
+                "SELECT rowid FROM entries WHERE id = ?", (entry.id,)
+            ).fetchone()[0]
+            vector_store.insert_embedding(
+                conn, entry.id, rowid, vec, "cloud", "text-embedding-004"
+            )
+
+    fake_provider = AsyncMock()
+    fake_provider.model_name = "text-embedding-004"
+    fake_provider.embed = AsyncMock(return_value=[1.0, 0.0, 0.0])  # exact match to `near`
+
+    with patch(
+        "app.embeddings.resolve_embedding_provider",
+        new=AsyncMock(return_value=(fake_provider, None)),
+    ):
+        hits = await words.search_history_semantic("anything", limit=10)
+
+    assert [h.id for h in hits] == [near.id, mid.id, far.id]
+    assert all("<mark>" not in h.highlighted_text for h in hits)
+
+
+# --- Hybrid RRF search (spec 017 / ADR 010) -------------------------------
+
+def _make_hit(entry_id: str, highlighted_text: str = "") -> words.HistorySearchHit:
+    return words.HistorySearchHit(
+        id=entry_id,
+        timestamp="2024-01-01T00:00:00Z",
+        language="en",
+        style="normal",
+        text=entry_id,
+        duration_ms=1,
+        highlighted_text=highlighted_text,
+    )
+
+
+def test_rrf_fuse_tie_scoring_is_symmetric_and_deterministic():
+    """Entry A ranked #1 in FTS / #3 in semantic and entry B ranked #3 in
+    FTS / #1 in semantic must fuse to exactly equal scores
+    (``1/(60+1) + 1/(60+3)`` for both), and the deterministic tiebreak (A,
+    folded into the result map first via the FTS lane) sorts A before B."""
+    a = _make_hit("A")
+    b = _make_hit("B")
+    filler_fts = _make_hit("filler_fts")
+    filler_semantic = _make_hit("filler_semantic")
+
+    fts_hits = [a, filler_fts, b]              # A rank 1, B rank 3
+    semantic_hits = [b, filler_semantic, a]     # B rank 1, A rank 3
+
+    fused = words._rrf_fuse(fts_hits, semantic_hits, limit=10)
+
+    expected_score = 1.0 / (words.RRF_K + 1) + 1.0 / (words.RRF_K + 3)
+    scores: dict[str, float] = {}
+    for rank, hit in enumerate(fts_hits, start=1):
+        scores[hit.id] = scores.get(hit.id, 0.0) + 1.0 / (words.RRF_K + rank)
+    for rank, hit in enumerate(semantic_hits, start=1):
+        scores[hit.id] = scores.get(hit.id, 0.0) + 1.0 / (words.RRF_K + rank)
+
+    assert scores["A"] == pytest.approx(expected_score)
+    assert scores["B"] == pytest.approx(expected_score)
+    assert scores["A"] == scores["B"]
+
+    ids = [h.id for h in fused]
+    assert ids.index("A") < ids.index("B")
+
+
+def test_rrf_fuse_dedup_combined_score_and_highlight_precedence():
+    """An entry present in both lanes must contribute both lanes' RRF terms
+    to ONE combined score (not double-counted as two rows, not silently
+    overwritten by whichever lane ran second), and its ``highlighted_text``
+    must be the FTS lane's ``<mark>``-tagged version, never the semantic
+    lane's plain-escaped one."""
+    fts_hit = _make_hit("shared", highlighted_text="<mark>alpha</mark> text")
+    semantic_hit = _make_hit("shared", highlighted_text="alpha text")  # plain, no marks
+    solo_fts_hit = _make_hit("solo")  # FTS-only, also rank 1 in its lane
+
+    # Dedup: exactly one row for "shared", not two.
+    fused = words._rrf_fuse([fts_hit], [semantic_hit], limit=10)
+    assert [h.id for h in fused] == ["shared"]
+    assert fused[0].highlighted_text == "<mark>alpha</mark> text"
+
+    # Combined scoring: "shared" (rank 1 in BOTH lanes) must outrank "solo"
+    # (rank 1 in the FTS lane only) — proving both lanes' terms were summed
+    # rather than one lane's contribution being discarded.
+    fused_vs_solo = words._rrf_fuse([fts_hit, solo_fts_hit], [semantic_hit], limit=10)
+    assert [h.id for h in fused_vs_solo] == ["shared", "solo"]
+
+
+@pytest.mark.asyncio
+async def test_search_history_hybrid_runs_lanes_concurrently():
+    """Proves the two lanes actually run concurrently via asyncio.gather,
+    not sequential awaits: the FTS lane (patched to a real thread-sleep, run
+    through asyncio.to_thread) and the semantic lane (patched to an
+    asyncio.sleep) each take measurable, deliberately different time. A
+    sequential implementation's wall-clock time would be close to the SUM
+    of both delays; a concurrent one is close to the LARGER delay alone.
+    """
+    fts_delay = 0.25
+    semantic_delay = 0.5
+
+    def slow_search_history(q, limit):
+        time.sleep(fts_delay)
+        return []
+
+    async def slow_semantic_lane(q, limit):
+        await asyncio.sleep(semantic_delay)
+        return []
+
+    with (
+        patch("app.core.words.search_history", side_effect=slow_search_history),
+        patch("app.core.words._semantic_lane", side_effect=slow_semantic_lane),
+    ):
+        start = time.monotonic()
+        await words.search_history_hybrid("anything", limit=10)
+        elapsed = time.monotonic() - start
+
+    assert elapsed >= semantic_delay - 0.05  # at least the larger delay
+    assert elapsed < fts_delay + semantic_delay - 0.1  # well below the sequential sum (0.75s)
+
+
+@pytest.mark.asyncio
+async def test_search_history_hybrid_empty_query_returns_empty_without_calling_either_lane():
+    """Restores the coverage the deleted router-level
+    `test_search_semantic_empty_query_returns_empty_without_calling_provider`
+    used to provide (spec 003) -- now at the hybrid/lane level. `words.py`'s
+    `if not q or not q.strip(): return []` short-circuit (present in both
+    `search_history_hybrid` and `search_history_semantic`) must fire before
+    either lane runs, so an empty or whitespace-only query must never reach
+    `search_history` (the FTS lane) nor the embedding provider (the semantic
+    lane's `resolve_embedding_provider`/`.embed()`) -- proven here by
+    patching both to raise if invoked."""
+    with (
+        patch(
+            "app.core.words.search_history",
+            side_effect=AssertionError("search_history must not be called for an empty query"),
+        ),
+        patch(
+            "app.embeddings.resolve_embedding_provider",
+            new=AsyncMock(
+                side_effect=AssertionError(
+                    "resolve_embedding_provider must not be called for an empty query"
+                )
+            ),
+        ),
+    ):
+        assert await words.search_history_hybrid("", limit=10) == []
+        assert await words.search_history_hybrid("   ", limit=10) == []
