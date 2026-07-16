@@ -1,3 +1,4 @@
+import asyncio
 import threading
 import time
 from pathlib import Path
@@ -212,10 +213,96 @@ async def test_local_stt_transcribe(sample_wav):
     mock_model.transcribe.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_transcribe_does_not_block_event_loop_during_slow_get_model(sample_wav, monkeypatch):
+    """`transcribe()` must offload `_get_model()` onto a thread (spec 015,
+    RED-2), mirroring `/stt/local/load`'s existing pattern — a dictation
+    request that races an in-flight, not-yet-started, or failed pre-warm
+    must not block the entire FastAPI event loop for the duration of a cold
+    model load. An independent `asyncio.sleep(0)`-based ticker coroutine must
+    keep making progress while the (real, `time.sleep`-based) "load" is in
+    flight."""
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+    provider = LocalSTTProvider(settings)
+
+    seg = MagicMock()
+    seg.text = "hi"
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = ([seg], MagicMock())
+
+    def _slow_get_model():
+        time.sleep(0.2)  # stand-in for a cold model load
+        return mock_model
+
+    monkeypatch.setattr(provider, "_get_model", _slow_get_model)
+
+    done = asyncio.Event()
+    ticks = {"n": 0}
+
+    async def _ticker():
+        while not done.is_set():
+            await asyncio.sleep(0)
+            ticks["n"] += 1
+
+    async def _run_transcribe():
+        try:
+            await provider.transcribe(sample_wav, language="uk")
+        finally:
+            done.set()
+
+    await asyncio.gather(_run_transcribe(), _ticker())
+
+    assert ticks["n"] > 1, "event loop was blocked during _get_model()"
+
+
 def test_local_stt_last_load_error_starts_none():
     settings = STTSettings(mode=ProviderMode.LOCAL)
     provider = LocalSTTProvider(settings)
     assert provider.last_load_error is None
+
+
+def test_cleanup_returns_promptly_without_deadlock_when_load_lock_held(monkeypatch):
+    """`cleanup()` must not block when `_load_lock` is already held by an
+    in-flight `_get_model()` call on another thread — critical because
+    `cleanup()` runs synchronously on the FastAPI event-loop thread via
+    `clear_cache()` (spec 015)."""
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+    provider = LocalSTTProvider(settings)
+    provider._model = "sentinel-model"
+
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+
+    def _hold_lock():
+        with provider._load_lock:
+            lock_acquired.set()
+            release_lock.wait(timeout=2)
+
+    holder = threading.Thread(target=_hold_lock)
+    holder.start()
+    assert lock_acquired.wait(timeout=2), "holder thread never acquired the lock"
+
+    start = time.monotonic()
+    provider.cleanup()
+    elapsed = time.monotonic() - start
+
+    release_lock.set()
+    holder.join(timeout=2)
+
+    assert elapsed < 1.0, f"cleanup() blocked for {elapsed:.2f}s while the lock was held"
+    assert provider._model == "sentinel-model"  # untouched — cleanup bailed out
+
+
+def test_cleanup_frees_model_when_lock_is_free():
+    """Pre-existing behavior is unchanged when `_load_lock` isn't contended:
+    frees `self._model` and calls `gc.collect()`/`torch.cuda.empty_cache()`."""
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+    provider = LocalSTTProvider(settings)
+    provider._model = MagicMock()
+
+    provider.cleanup()
+
+    assert provider._model is None
 
 
 def test_load_lock_serialises_concurrent_get_model(monkeypatch):

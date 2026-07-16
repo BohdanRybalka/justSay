@@ -257,6 +257,9 @@ export const api = {
   sttLocalStatus: () => request<LocalSttStatus>("GET", "/stt/local/status"),
   sttLocalLoad: () => request<{ loaded: boolean; model?: string }>("POST", "/stt/local/load"),
   sttLocalUnload: () => request<{ unloaded: boolean }>("POST", "/stt/local/unload"),
+  /** Retry affordance for the Local STT status indicator's error state —
+   *  fire-and-forget on the backend, returns before the model finishes loading. */
+  sttLocalPrewarm: () => request<{ started: boolean }>("POST", "/stt/local/prewarm"),
 
   llmLocalStatus: () => request<LocalLlmStatus>("GET", "/llm/local/status"),
   llmLocalLoad: () => request<{ loaded: boolean; error: string | null }>("POST", "/llm/local/load"),

@@ -227,23 +227,42 @@ class MLXWhisperSTTProvider(STTProvider):
             return TranscriptionResult(text=text, tokens_used=None)
 
     def cleanup(self) -> None:
-        """Release MLX model and Metal memory."""
-        self._loaded = False
-        try:
-            from mlx_whisper.transcribe import ModelHolder
+        """Release MLX model and Metal memory.
 
-            ModelHolder.model = None
-            ModelHolder.model_path = None
-        except ImportError:
-            pass
-        gc.collect()
+        Mirrors LocalSTTProvider.cleanup()'s non-blocking-lock guard (spec 015,
+        RED-3 — iteration 2 triage): `cleanup()` is reachable synchronously from
+        `PUT /stt/mode`'s `clear_cache()` on the FastAPI event-loop thread, so it
+        must never block on `_load_lock` for a multi-minute first-run download —
+        nor race `_get_model()`'s own writes to `ModelHolder.model`/
+        `ModelHolder.model_path` (process-wide global state owned by the
+        `mlx_whisper` package). If the lock is busy, log and return without
+        touching `ModelHolder`, `self._loaded`, `gc.collect()`, or the Metal
+        cache — the load's own caller (`ensure_local_ready()`'s post-load
+        identity recheck) is responsible for cleaning up an orphaned load
+        afterwards.
+        """
+        if not self._load_lock.acquire(blocking=False):
+            log.info("cleanup() skipped: a model load is in flight (lock busy)")
+            return
         try:
-            import mlx.core as mx
+            self._loaded = False
+            try:
+                from mlx_whisper.transcribe import ModelHolder
 
-            metal = getattr(mx, "metal", None)
-            clear = getattr(metal, "clear_cache", None) if metal else None
-            if callable(clear):
-                clear()
-                log.info("MLX Metal cache cleared")
-        except ImportError:
-            pass
+                ModelHolder.model = None
+                ModelHolder.model_path = None
+            except ImportError:
+                pass
+            gc.collect()
+            try:
+                import mlx.core as mx
+
+                metal = getattr(mx, "metal", None)
+                clear = getattr(metal, "clear_cache", None) if metal else None
+                if callable(clear):
+                    clear()
+                    log.info("MLX Metal cache cleared")
+            except ImportError:
+                pass
+        finally:
+            self._load_lock.release()

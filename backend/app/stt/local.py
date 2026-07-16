@@ -109,7 +109,11 @@ class LocalSTTProvider(STTProvider):
         ``condition_on_previous_text=False`` (kills silence-hallucination
         cascade); long clips keep ``beam_size=5`` and cross-segment context.
         """
-        model = self._get_model()
+        # Offloaded to a thread (mirrors /stt/local/load's existing pattern)
+        # so a dictation request that races an in-flight, not-yet-started, or
+        # failed pre-warm doesn't block the entire FastAPI event loop for the
+        # duration of a cold model load (spec 015, RED-2).
+        model = await asyncio.to_thread(self._get_model)
         audio_duration = kwargs.get("audio_duration")
 
         # Reuse the cloud routing threshold so "short" means the same thing
@@ -152,17 +156,34 @@ class LocalSTTProvider(STTProvider):
         return TranscriptionResult(text=text, tokens_used=None)
 
     def cleanup(self) -> None:
-        """Release whisper model and GPU memory."""
-        if self._model is not None:
-            log.info("Releasing whisper model from memory")
-            del self._model
-            self._model = None
-            gc.collect()
-            try:
-                import torch
+        """Release whisper model and GPU memory.
 
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    log.info("CUDA cache cleared")
-            except ImportError:
-                pass
+        `cleanup()` is reachable synchronously from `PUT /stt/mode`'s
+        `clear_cache()` on the FastAPI event-loop thread, so it must never
+        block on `_load_lock` for the length of a multi-minute first-run
+        model download — that would stall the entire event loop. A
+        non-blocking acquire lets an in-flight `_get_model()` call win: if
+        the lock is busy, log and return without touching `self._model`,
+        `gc.collect()`, or `torch.cuda` (the load's own caller is
+        responsible for cleaning up an orphaned load after the fact, e.g.
+        `ensure_local_ready()`'s post-load mode recheck).
+        """
+        if not self._load_lock.acquire(blocking=False):
+            log.info("cleanup() skipped: a model load is in flight (lock busy)")
+            return
+        try:
+            if self._model is not None:
+                log.info("Releasing whisper model from memory")
+                del self._model
+                self._model = None
+                gc.collect()
+                try:
+                    import torch
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        log.info("CUDA cache cleared")
+                except ImportError:
+                    pass
+        finally:
+            self._load_lock.release()

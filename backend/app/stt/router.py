@@ -38,6 +38,15 @@ async def set_stt_mode(body: _ModeBody):
     clear_cache()
     update_user_settings({"stt_mode": body.mode.value})
     provider = get_provider(settings.stt.mode, settings.stt)
+    # Lazy import (not a module-level from-import) so the autouse conftest
+    # fixture — and tests that monkeypatch app.stt.local_setup directly —
+    # can intercept this call; same pattern as app.stt._get_local's factory
+    # patch comment.
+    from app.stt.local_setup import maybe_prewarm_local
+
+    # Fire-and-forget: no-op for Cloud, kicks off an eager pre-warm task for
+    # Local without making this response wait on the model load.
+    maybe_prewarm_local(settings.stt)
     return {"stt_mode": settings.stt.mode, "model": provider.model_name}
 
 
@@ -96,6 +105,21 @@ async def stt_local_unload():
     """Unload whisper model from memory, free GPU/RAM."""
     clear_cache()
     return {"unloaded": True}
+
+
+@router.post("/local/prewarm")
+async def stt_local_prewarm():
+    """Retry affordance for the Local STT status indicator's error state.
+
+    Fire-and-forget, same as the automatic pre-warm triggers — returns
+    immediately, does not await the install/load itself.
+    """
+    if settings.stt.mode != ProviderMode.LOCAL:
+        raise HTTPException(status_code=400, detail="STT mode is not local")
+    from app.stt.local_setup import maybe_prewarm_local
+
+    maybe_prewarm_local(settings.stt)
+    return {"started": True}
 
 
 @router.post("/local/install")

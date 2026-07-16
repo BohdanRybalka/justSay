@@ -65,4 +65,5 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "mlx: tests for MLXWhisperSTTProvider (opt out of the autouse fixture that forces the LocalSTTProvider path)",
+    "prewarm: tests for maybe_prewarm_local/ensure_local_ready dispatch (opt out of the autouse fixture that no-ops maybe_prewarm_local)",
 ]

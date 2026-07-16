@@ -5,6 +5,7 @@ import shutil
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from app.core.config import settings as runtime_settings
 from app.core.utils import compute_dir_size
 from app.core.user_settings import (
     UserSettings,
@@ -63,6 +64,16 @@ async def put_settings(updates: dict):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     sync_to_runtime(outcome.settings)
+    # Lazy import (not a module-level from-import) so tests can monkeypatch
+    # app.stt.local_setup.maybe_prewarm_local directly; same pattern as
+    # app.stt._get_local's factory patch comment. Covers the case where an
+    # unrelated settings change (glossary edit, API key update) incidentally
+    # clears the STT cache via sync_to_runtime's changed_stt check while
+    # Local stays the active mode — without this, that edit would silently
+    # re-introduce a cold lazy-load on next dictation.
+    from app.stt.local_setup import maybe_prewarm_local
+
+    maybe_prewarm_local(runtime_settings.stt)
     return SettingsUpdateResponse(settings=_mask_keys(outcome.settings), warning=outcome.warning)
 
 
@@ -78,7 +89,6 @@ async def cloud_key_status():
     Checks the runtime AppSettings (not UserSettings) so that keys provided
     via .env are correctly reflected even if the user has never opened Settings → Keys.
     """
-    from app.core.config import settings as runtime_settings
     return CloudKeyStatus(
         gemini_key_set=bool(runtime_settings.stt.gemini_api_key),
         groq_key_set=bool(runtime_settings.stt.groq_api_key or runtime_settings.llm.groq_api_key),
