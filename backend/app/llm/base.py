@@ -10,13 +10,14 @@ class LLMProvider(ABC):
         """Human-readable name of the current model."""
 
     @abstractmethod
-    async def process(self, text: str, system_prompt: str, temperature: float = 0.1) -> str:
+    async def process(self, text: str, system_prompt: str, task: str = "dictation_cleanup") -> str:
         """Process text with a system prompt.
 
         Args:
             text: Raw transcribed text.
             system_prompt: Instructions for text processing.
-            temperature: Sampling temperature (0.0-1.0).
+            task: Task name resolved to a generation profile
+                (temperature/top_p/max_tokens) via `app.llm.tasks.get_task_profile`.
 
         Returns:
             Processed text.

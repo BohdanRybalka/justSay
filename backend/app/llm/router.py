@@ -22,6 +22,7 @@ router = APIRouter()
 class ProcessRequest(BaseModel):
     text: str = Field(..., max_length=MAX_TEXT_LENGTH)
     system_prompt: str = Field(..., max_length=MAX_TEXT_LENGTH)
+    style: str = "normal"
 
 
 class ProcessResponse(BaseModel):
@@ -51,7 +52,10 @@ async def process_text(req: ProcessRequest):
 
     try:
         provider = get_llm_provider(settings.llm)
-        result = await provider.process(req.text, req.system_prompt)
+        task = {"normal": "dictation_cleanup", "ai_prompt": "ai_prompt_structuring"}.get(
+            req.style, "dictation_cleanup"
+        )
+        result = await provider.process(req.text, req.system_prompt, task=task)
         return ProcessResponse(result=result, model=provider.model_name)
     except Exception as e:
         raise HTTPException(

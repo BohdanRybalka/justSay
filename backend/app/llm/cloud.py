@@ -4,6 +4,7 @@ import asyncio
 
 from app.llm.base import LLMProvider
 from app.llm.config import LLMSettings
+from app.llm.tasks import get_task_profile
 
 
 class CloudLLMProvider(LLMProvider):
@@ -32,17 +33,28 @@ class CloudLLMProvider(LLMProvider):
             self._client = Groq(api_key=self._settings.groq_api_key)
         return self._client
 
-    async def process(self, text: str, system_prompt: str, temperature: float = 0.1) -> str:
+    async def process(self, text: str, system_prompt: str, task: str = "dictation_cleanup") -> str:
         client = self._get_client()
+        profile = get_task_profile(task)
 
         result = await asyncio.to_thread(
-            self._call_groq, client, self._settings.groq_model, text, system_prompt, temperature
+            self._call_groq,
+            client,
+            self._settings.groq_model,
+            text,
+            system_prompt,
+            temperature=profile.temperature,
+            top_p=profile.top_p,
+            max_tokens=profile.max_tokens,
         )
 
         return result.strip() if result else ""
 
     @staticmethod
-    def _call_groq(client, model: str, text: str, system_prompt: str, temperature: float) -> str:
+    def _call_groq(
+        client, model: str, text: str, system_prompt: str,
+        temperature: float, top_p: float, max_tokens: int,
+    ) -> str:
         """Isolated SDK call — mockable in tests without installing groq."""
         response = client.chat.completions.create(
             model=model,
@@ -51,6 +63,7 @@ class CloudLLMProvider(LLMProvider):
                 {"role": "user", "content": text},
             ],
             temperature=temperature,
-            max_tokens=4096,
+            top_p=top_p,
+            max_tokens=max_tokens,
         )
         return response.choices[0].message.content

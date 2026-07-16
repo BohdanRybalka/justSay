@@ -267,6 +267,8 @@ async def test_insights_privacy_uses_active_provider_factory():
 
     factory.assert_called_once()  # words.py uses the factory, no SDK bypass
     assert result.model == "ollama/gemma3:4b"
+    fake_local.process.assert_awaited_once()
+    assert fake_local.process.call_args.kwargs["task"] == "insights"
 
 
 # --- Router smoke tests --------------------------------------------------
