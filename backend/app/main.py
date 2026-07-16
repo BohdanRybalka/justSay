@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -46,6 +47,11 @@ async def lifespan(app: FastAPI):
     # for the first dictation request to trigger a cold lazy load.
     from app.stt.local_setup import maybe_prewarm_local
     maybe_prewarm_local(settings.stt)
+    # Fire-and-forget sweep at every launch, catching any backlog left over
+    # from a crash, a provider outage in the previous session, or an
+    # upgrade from a pre-017 version. Startup does not block on it.
+    from app.core import vector_store
+    asyncio.create_task(vector_store.run_background_indexer())
     from app.audio import MicrophoneRecorder
     app.state.recorder = MicrophoneRecorder(settings.audio)
     yield

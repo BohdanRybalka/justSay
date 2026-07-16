@@ -1,8 +1,5 @@
-import { api, type EmbeddingsStatus, type HistoryEntry } from "../../api";
+import { api, type HistoryEntry } from "../../api";
 import { escapeHtml } from "../html";
-
-const BACKFILL_BATCH_SIZE = 50;
-const BACKFILL_PACING_MS = 500;
 
 const DATE_FMT = new Intl.DateTimeFormat("uk-UA", {
   day: "2-digit",
@@ -28,14 +25,6 @@ export function renderHistory(container: HTMLElement): () => void {
       />
       <div id="history-search-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; min-height: 14px;"></div>
     </div>
-    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap;">
-      <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted);">
-        <input type="checkbox" id="semantic-toggle" />
-        Semantic search
-      </label>
-      <button class="btn btn-secondary btn-sm" id="btn-backfill" style="margin-left: auto;">Backfill embeddings</button>
-      <span id="backfill-progress" style="font-size: 11px; color: var(--text-muted);"></span>
-    </div>
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
       <span class="value" id="history-count">Loading...</span>
       <button class="btn btn-danger" id="btn-clear-history">Clear All</button>
@@ -53,9 +42,6 @@ export function renderHistory(container: HTMLElement): () => void {
   const loadMoreWrap = container.querySelector<HTMLElement>("#history-load-more")!;
   const btnLoadMore = container.querySelector<HTMLButtonElement>("#btn-load-more")!;
   const btnClear = container.querySelector<HTMLButtonElement>("#btn-clear-history")!;
-  const semanticToggle = container.querySelector<HTMLInputElement>("#semantic-toggle")!;
-  const btnBackfill = container.querySelector<HTMLButtonElement>("#btn-backfill")!;
-  const backfillProgress = container.querySelector<HTMLElement>("#backfill-progress")!;
 
   let offset = 0;
   let total = 0;
@@ -64,8 +50,6 @@ export function renderHistory(container: HTMLElement): () => void {
   let debounceTimer: number | null = null;
   let searchSeq = 0;
   let destroyed = false;
-  let embeddingsStatus: EmbeddingsStatus | null = null;
-  let backfillRunning = false;
 
   async function loadEntries(append = false) {
     inSearchMode = false;
@@ -98,12 +82,12 @@ export function renderHistory(container: HTMLElement): () => void {
     }
   }
 
-  async function runSearch(q: string, mode: "fts" | "semantic" = "fts") {
+  async function runSearch(q: string) {
     inSearchMode = true;
     const seq = ++searchSeq;
     searchHint.textContent = "Searching...";
     try {
-      const resp = await api.searchHistory(q, LIMIT, mode);
+      const resp = await api.searchHistory(q, LIMIT);
       // Out-of-order responses: a slower previous query must not overwrite
       // a fresher result.
       if (seq !== searchSeq) return;
@@ -153,16 +137,9 @@ export function renderHistory(container: HTMLElement): () => void {
         searchHint.textContent = "";
         loadEntries(false);
       } else {
-        runSearch(value, semanticToggle.checked ? "semantic" : "fts");
+        runSearch(value);
       }
     }, SEARCH_DEBOUNCE_MS);
-  });
-
-  semanticToggle.addEventListener("change", () => {
-    const value = searchInput.value.trim();
-    if (value) {
-      runSearch(value, semanticToggle.checked ? "semantic" : "fts");
-    }
   });
 
   function createEntryEl(entry: HistoryEntry): HTMLElement {
@@ -256,74 +233,7 @@ export function renderHistory(container: HTMLElement): () => void {
     }
   });
 
-  async function loadEmbeddingsStatus() {
-    try {
-      const status = await api.historyEmbeddingsStatus();
-      if (destroyed) return;
-      embeddingsStatus = status;
-      applyEmbeddingsStatus();
-    } catch (e) {
-      if (destroyed) return;
-      semanticToggle.disabled = true;
-      semanticToggle.title = "Semantic search status unavailable";
-      console.error(e);
-    }
-  }
-
-  function applyEmbeddingsStatus() {
-    if (!embeddingsStatus) return;
-    semanticToggle.disabled = !embeddingsStatus.available;
-    semanticToggle.title = embeddingsStatus.available
-      ? ""
-      : embeddingsStatus.reason || "Semantic search unavailable";
-    backfillProgress.textContent = `${embeddingsStatus.indexed} / ${embeddingsStatus.total} indexed`;
-    if (!backfillRunning) {
-      btnBackfill.disabled = !embeddingsStatus.available;
-    }
-  }
-
-  btnBackfill.addEventListener("click", async () => {
-    if (backfillRunning) return;
-    backfillRunning = true;
-    btnBackfill.disabled = true;
-    btnBackfill.textContent = "Backfilling...";
-    try {
-      let remaining = 1;
-      while (remaining > 0) {
-        const result = await api.historyBackfillEmbeddings(BACKFILL_BATCH_SIZE);
-        if (destroyed) return;
-        // A batch that embeds nothing while entries are still left means
-        // the provider is failing/stalled (Ollama down, bad API key) —
-        // looping every 500ms forever would hammer it indefinitely.
-        if (result.processed === 0 && result.remaining > 0) {
-          backfillProgress.textContent =
-            "Backfill stalled — check your embedding provider (Ollama/API key) and try again.";
-          return;
-        }
-        remaining = result.remaining;
-        backfillProgress.textContent =
-          remaining > 0 ? `Indexing... ${remaining} left` : "Indexing... done";
-        if (remaining > 0) {
-          await new Promise((resolve) => setTimeout(resolve, BACKFILL_PACING_MS));
-          if (destroyed) return;
-        }
-      }
-      await loadEmbeddingsStatus();
-    } catch (e) {
-      if (destroyed) return;
-      backfillProgress.textContent = "Backfill failed";
-      console.error(e);
-    } finally {
-      if (!destroyed) {
-        backfillRunning = false;
-        btnBackfill.disabled = !(embeddingsStatus?.available ?? false);
-        btnBackfill.textContent = "Backfill embeddings";
-      }
-    }
-  });
-
   loadEntries();
-  loadEmbeddingsStatus();
 
   return () => {
     destroyed = true;

@@ -7,10 +7,33 @@ import pytest
 import soundfile as sf
 from fastapi import BackgroundTasks
 
+from app.core import history
 from app.core.config import settings
 from app.core.types import ProviderMode
 from app.pipeline.service import process_audio
 from app.stt.base import TranscriptionResult
+
+
+@pytest.fixture(autouse=True)
+def _isolated_history(tmp_path, monkeypatch):
+    """spec 017: process_audio now also schedules
+    ``vector_store.run_background_indexer`` in the background, which — once
+    a test actually invokes the scheduled ``BackgroundTasks`` queue (see
+    ``test_pipeline_survives_embedding_provider_outage``) — queries the real
+    ``history`` module's connection. Without this isolation those queries
+    would hit whatever real ``history.db`` / ``_output_dir`` happens to be
+    live on the machine running the suite, matching the ``isolated_storage``
+    convention already used by test_history_sqlite.py / test_vector_store.py
+    / test_words.py."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(history, "_output_dir", tmp_path)
+    monkeypatch.setattr(history, "_conn", None)
+    history.bootstrap(tmp_path)
+    yield
+    with history._lock:
+        history._close_conn_locked()
 
 
 @pytest.fixture
@@ -234,7 +257,9 @@ async def test_pipeline_schedules_embedding_via_background_tasks_not_awaited(
     vector_store.embed_entry_background, entry.id, text), never a direct
     `await embed_entry_background(...)` inside process_audio — this is the
     structural guarantee that embedding latency cannot land inside the
-    request/response cycle."""
+    request/response cycle. spec 017: a second task,
+    `vector_store.run_background_indexer` (no args), must also be
+    scheduled alongside it, for every dictation that produces text."""
     _, save_mock = _isolate_side_effects
     fake_entry = MagicMock()
     fake_entry.id = "entry-123"
@@ -249,14 +274,18 @@ async def test_pipeline_schedules_embedding_via_background_tasks_not_awaited(
         result = await process_audio(sample_wav, style="normal", background_tasks=bt)
 
     assert result.text == "hello world"
-    add_task_mock.assert_called_once()
+    assert add_task_mock.call_count == 2
 
     from app.core import vector_store
 
-    args = add_task_mock.call_args.args
-    assert args[0] is vector_store.embed_entry_background
-    assert args[1] == "entry-123"
-    assert args[2] == "hello world"
+    embed_call, indexer_call = add_task_mock.call_args_list
+
+    assert embed_call.args[0] is vector_store.embed_entry_background
+    assert embed_call.args[1] == "entry-123"
+    assert embed_call.args[2] == "hello world"
+
+    assert indexer_call.args[0] is vector_store.run_background_indexer
+    assert indexer_call.args[1:] == ()
 
 
 @pytest.mark.asyncio
@@ -273,6 +302,7 @@ async def test_pipeline_omits_background_task_when_none_provided(
     assert result.text == "hello world"  # must not raise
 
 
+@pytest.mark.background_indexer
 @pytest.mark.asyncio
 async def test_pipeline_survives_embedding_provider_outage(
     sample_wav, cloud_mode, _isolate_side_effects
@@ -283,7 +313,19 @@ async def test_pipeline_survives_embedding_provider_outage(
     returns BEFORE the background task ever runs; this test then runs the
     queued task the way Starlette's response middleware would (after the
     response is sent) and asserts it does not raise and does not retroactively
-    change anything process_audio already returned."""
+    change anything process_audio already returned.
+
+    Marked @pytest.mark.background_indexer (spec 017 review triage, closes
+    RED #1): this test invokes the scheduled BackgroundTasks queue for real
+    via `await bt()`, which also runs the real `run_background_indexer`
+    task scheduled alongside `embed_entry_background` — without this
+    marker, the new conftest.py autouse fixture would silently replace it
+    with a no-op, and this test would stop covering what it invokes. The
+    `_isolated_history` fixture (this file's own module-level autouse
+    fixture, added as Deviation 2) still protects the real DB access this
+    causes: `save_entry` is mocked via `_isolate_side_effects` so no entry
+    actually lands in the isolated `entries` table, and
+    `run_background_indexer` finds an empty backlog and returns immediately."""
     _, save_mock = _isolate_side_effects
     fake_entry = MagicMock()
     fake_entry.id = "entry-456"

@@ -47,9 +47,11 @@ class EmbeddingProvider(Protocol):
         """
 
 
-# Reason strings are part of the public contract: history_router surfaces
-# them verbatim as the 503 `detail` for `mode=semantic`, and
-# /history/embeddings-status surfaces them as `reason`.
+# Reason strings are consumed internally by words._semantic_lane (spec 017
+# / ADR 010), which logs them at `debug` and degrades to an empty semantic
+# lane -- neither surface that used to re-expose them verbatim
+# (`mode=semantic`'s 503 `detail`, `/history/embeddings-status`'s `reason`
+# field) exists anymore.
 MIXED_MODE_REASON = (
     "Semantic search needs matching Cloud/Local mode on both Speech-to-Text "
     "and AI Processing"

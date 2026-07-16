@@ -7,6 +7,7 @@ relocate branches, concurrent saves.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -799,14 +800,40 @@ def test_search_lock_error_returns_503(isolated_storage, tmp_path):
             assert resp.headers.get("Retry-After") == "1"
 
 
-# --- mode=semantic 503 detail strings (spec 003) --------------------------
+# --- Background indexer opt-in guard (spec 017 / ADR 010) ----------------
+
+def test_testclient_lifespan_does_not_invoke_real_background_indexer(isolated_storage, tmp_path):
+    """Regression test for the Acceptance Criteria's "Automatic background
+    indexing" clause. `TestClient(app)`'s context manager runs the real
+    FastAPI `lifespan()`, which fires `vector_store.run_background_indexer()`
+    at startup (main.py), and a normal request through `process_audio` would
+    schedule it again per dictation (pipeline/service.py). Absent
+    `@pytest.mark.background_indexer`, conftest.py's autouse
+    `_no_background_indexer_by_default` fixture must have already replaced
+    `vector_store.run_background_indexer` with a no-op before this
+    `TestClient(app)` block triggers lifespan — proven here by patching a
+    sentinel on `backfill_batch` (the function the real
+    `run_background_indexer` loops on internally) and asserting it is never
+    reached."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    with patch.object(vector_store, "backfill_batch", new=AsyncMock()) as sentinel:
+        with TestClient(app) as client:
+            history.save_entry(text="anything", duration_ms=1)
+            resp = client.get("/history/search?q=anything")
+            assert resp.status_code == 200
+
+        sentinel.assert_not_called()
+
+
+# --- Hybrid search endpoint (spec 017 / ADR 010) --------------------------
 #
-# Each disabled/unready state has its own specific, UI-displayable `detail`
-# string — asserted individually per the plan's Search endpoint AC.
-#
-# Uses the async ``client`` fixture (conftest.py, ASGITransport — no
-# lifespan) rather than ``TestClient(app)``: TestClient's context manager
-# runs the FastAPI lifespan, which re-bootstraps history at whatever
+# `mode` is gone: /history/search always runs the hybrid FTS+semantic path
+# and degrades silently to FTS-only on any semantic-lane failure. Uses the
+# async ``client`` fixture (conftest.py, ASGITransport — no lifespan) rather
+# than ``TestClient(app)``: TestClient's context manager runs the FastAPI
+# lifespan, which re-bootstraps history at whatever
 # `user_settings.get_user_settings().output_dir` resolves to. Within a
 # single test *file* that value is cached at first use and NOT reset by
 # this file's `isolated_storage` fixture (only test_user_settings.py /
@@ -817,168 +844,120 @@ def test_search_lock_error_returns_503(isolated_storage, tmp_path):
 # lifespan-free `client` fixture over `isolated_storage`'s own
 # directly-bootstrapped `history` state instead.
 
+@pytest.mark.parametrize(
+    "unavailable_state",
+    [
+        "vec_extension_unavailable",
+        "disabled_by_eligibility",
+        "zero_entries_embedded",
+        "embed_call_raises",
+    ],
+)
 @pytest.mark.asyncio
-async def test_search_semantic_503_when_vec_extension_unavailable(
-    isolated_storage, tmp_path, client
+async def test_search_degrades_to_200_fts_only_for_every_semantic_unavailable_state(
+    isolated_storage, tmp_path, client, unavailable_state
 ):
-    history.bootstrap(tmp_path)
-    history.save_entry(text="anything", duration_ms=1)
-    with patch.object(history, "_vec_available", False):
-        resp = await client.get("/history/search?q=anything&mode=semantic")
-    assert resp.status_code == 503
-    assert resp.json()["detail"] == vector_store.VEC_EXTENSION_UNAVAILABLE_DETAIL
-
-
-@pytest.mark.asyncio
-async def test_search_semantic_503_when_disabled_by_mode_eligibility(
-    isolated_storage, tmp_path, client
-):
-    history.bootstrap(tmp_path)
-    history.save_entry(text="anything", duration_ms=1)
-    disabled_detail = "Local embeddings need Ollama with nomic-embed-text pulled"
-    with patch(
-        "app.embeddings.resolve_embedding_provider",
-        new=AsyncMock(return_value=(None, disabled_detail)),
-    ):
-        resp = await client.get("/history/search?q=anything&mode=semantic")
-    assert resp.status_code == 503
-    assert "nomic-embed-text" in resp.json()["detail"]
-
-
-@pytest.mark.asyncio
-async def test_search_semantic_503_when_zero_entries_embedded(isolated_storage, tmp_path, client):
-    """Provider resolves fine, but nothing has been embedded yet — fails
-    fast BEFORE spending an embed API call on the query."""
+    """The concrete regression test for the exception-leak bug (ADR 010 /
+    Context-Why): every one of the four semantic-lane-unavailable states
+    must yield a 200 FTS-only response, never a 503 and never a raw
+    exception class name anywhere in the body."""
     from unittest.mock import MagicMock
 
-    fake = MagicMock()
-    fake.model_name = "gemini/text-embedding-004"
-    fake.embed = AsyncMock(side_effect=AssertionError("must not embed when index is empty"))
-
     history.bootstrap(tmp_path)
-    history.save_entry(text="never embedded", duration_ms=1)
-    with patch(
-        "app.embeddings.resolve_embedding_provider",
-        new=AsyncMock(return_value=(fake, None)),
-    ):
-        resp = await client.get("/history/search?q=anything&mode=semantic")
-    assert resp.status_code == 503
-    assert resp.json()["detail"] == vector_store.NO_ENTRIES_EMBEDDED_DETAIL
+    history.save_entry(text="findable brown bear", duration_ms=1)
 
-
-@pytest.mark.asyncio
-async def test_search_semantic_503_when_embed_call_raises(isolated_storage, tmp_path, client):
-    """Any exception from provider.embed() (auth error, network failure,
-    malformed SDK response) must map to a 503, never a raw 500 — the RED
-    finding from Stage 3 review iteration 1."""
-    from unittest.mock import MagicMock
-
-    fake = MagicMock()
-    fake.model_name = "gemini/text-embedding-004"
-    fake.embed = AsyncMock(side_effect=RuntimeError("upstream auth failed"))
-
-    history.bootstrap(tmp_path)
-    e1 = history.save_entry(text="already embedded", duration_ms=1)
-    with history._lock:
-        conn = history._ensure_conn_locked()
-        vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
-        rowid = conn.execute("SELECT rowid FROM entries WHERE id = ?", (e1.id,)).fetchone()[0]
-        vector_store.insert_embedding(
-            conn, e1.id, rowid, [1.0, 0.0, 0.0], "cloud", "text-embedding-004"
+    ctx = []
+    if unavailable_state == "vec_extension_unavailable":
+        ctx.append(patch.object(history, "_vec_available", False))
+    elif unavailable_state == "disabled_by_eligibility":
+        ctx.append(
+            patch(
+                "app.embeddings.resolve_embedding_provider",
+                new=AsyncMock(return_value=(None, "Local embeddings need Ollama")),
+            )
         )
+    elif unavailable_state == "zero_entries_embedded":
+        fake = MagicMock()
+        fake.model_name = "gemini/text-embedding-004"
+        fake.embed = AsyncMock(side_effect=AssertionError("must not embed when index is empty"))
+        ctx.append(
+            patch(
+                "app.embeddings.resolve_embedding_provider",
+                new=AsyncMock(return_value=(fake, None)),
+            )
+        )
+    else:  # embed_call_raises
+        fake = MagicMock()
+        fake.model_name = "gemini/text-embedding-004"
+        fake.embed = AsyncMock(side_effect=RuntimeError("upstream auth failed"))
+        ctx.append(
+            patch(
+                "app.embeddings.resolve_embedding_provider",
+                new=AsyncMock(return_value=(fake, None)),
+            )
+        )
+        # Seed one embedded entry so the zero-entries-embedded short-circuit
+        # is bypassed and the embed call itself actually runs and raises.
+        e1 = history.save_entry(text="already embedded", duration_ms=1)
+        with history._lock:
+            conn = history._ensure_conn_locked()
+            vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
+            rowid = conn.execute("SELECT rowid FROM entries WHERE id = ?", (e1.id,)).fetchone()[0]
+            vector_store.insert_embedding(
+                conn, e1.id, rowid, [1.0, 0.0, 0.0], "cloud", "text-embedding-004"
+            )
 
-    with patch(
-        "app.embeddings.resolve_embedding_provider",
-        new=AsyncMock(return_value=(fake, None)),
-    ):
-        resp = await client.get("/history/search?q=anything&mode=semantic")
-    assert resp.status_code == 503
-    assert resp.status_code != 500
-    assert "RuntimeError" in resp.json()["detail"]
-
-
-@pytest.mark.asyncio
-async def test_search_semantic_empty_query_returns_empty_without_calling_provider(
-    isolated_storage, tmp_path, client
-):
-    """Empty/whitespace `q` short-circuits to 200 + [] before ever touching
-    availability checks or the embedding provider — mirrors mode=fts."""
-    from unittest.mock import MagicMock
-
-    fake = MagicMock()
-    fake.model_name = "gemini/text-embedding-004"
-    fake.embed = AsyncMock(side_effect=AssertionError("must not embed an empty query"))
-
-    history.bootstrap(tmp_path)
-    history.save_entry(text="anything", duration_ms=1)
-
-    with (
-        patch.object(history, "_vec_available", False),  # would 503 if reached
-        patch(
-            "app.embeddings.resolve_embedding_provider",
-            new=AsyncMock(return_value=(fake, None)),
-        ) as resolve_mock,
-    ):
-        resp = await client.get("/history/search?q=%20%20&mode=semantic")
+    with contextlib.ExitStack() as stack:
+        for c in ctx:
+            stack.enter_context(c)
+        resp = await client.get("/history/search?q=brown")
 
     assert resp.status_code == 200
+    body_text = resp.text
+    assert "RuntimeError" not in body_text
+    assert "AssertionError" not in body_text
     data = resp.json()
-    assert data["entries"] == []
-    assert data["total"] == 0
-    resolve_mock.assert_not_called()
-    fake.embed.assert_not_called()
+    assert isinstance(data["entries"], list)
+    assert isinstance(data["total"], int)
+    # FTS-only degradation: the seeded FTS-matchable entry is still found.
+    assert any("brown bear" in e["text"] for e in data["entries"])
 
 
 @pytest.mark.asyncio
-async def test_search_semantic_returns_ranked_results_with_plain_highlight(
-    isolated_storage, tmp_path, client
-):
-    """mode=semantic returns entries ranked by vector distance; unlike
-    mode=fts, highlighted_text carries no <mark> spans — relevance here
-    isn't token-based."""
-    from unittest.mock import MagicMock
-
-    history.bootstrap(tmp_path)
-    e1 = history.save_entry(text="close match alpha", duration_ms=1)
-    history.save_entry(text="far away beta", duration_ms=1)
-
-    with history._lock:
-        conn = history._ensure_conn_locked()
-        vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
-        rowid = conn.execute("SELECT rowid FROM entries WHERE id = ?", (e1.id,)).fetchone()[0]
-        vector_store.insert_embedding(
-            conn, e1.id, rowid, [1.0, 0.0, 0.0], "cloud", "text-embedding-004"
-        )
-
-    fake = MagicMock()
-    fake.model_name = "gemini/text-embedding-004"
-    fake.embed = AsyncMock(return_value=[1.0, 0.0, 0.0])
-
-    with patch(
-        "app.embeddings.resolve_embedding_provider",
-        new=AsyncMock(return_value=(fake, None)),
-    ):
-        resp = await client.get("/history/search?q=alpha&mode=semantic&limit=5")
-
-    assert resp.status_code == 200
-    data = resp.json()
-    assert len(data["entries"]) == 1
-    assert data["entries"][0]["id"] == e1.id
-    assert "<mark>" not in data["entries"][0]["highlighted_text"]
-
-
-@pytest.mark.asyncio
-async def test_search_fts_mode_unaffected_by_mode_param_default(isolated_storage, tmp_path, client):
-    """mode=fts (the default) behaviour is byte-for-byte unchanged from
-    before `mode` existed — a plain /history/search?q=... call with no
-    mode param must still take the FTS path."""
+async def test_search_no_longer_accepts_mode_param(isolated_storage, tmp_path, client):
+    """A stray `mode=semantic` query string is simply ignored by FastAPI
+    (undeclared query params are dropped) — not an error, and the hybrid
+    path runs regardless of what `mode` says."""
     history.bootstrap(tmp_path)
     history.save_entry(text="правив у файлі", duration_ms=1, language="uk")
-    resp = await client.get("/history/search?q=прав")
+    resp = await client.get("/history/search?q=прав&mode=semantic")
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["entries"]) == 1
     assert "<mark>прав</mark>" in data["entries"][0]["highlighted_text"]
+
+
+@pytest.mark.asyncio
+async def test_embeddings_status_route_removed(client):
+    """The route is gone from history_router.py entirely. Per this
+    router's existing, documented shape (see the identical `mode=search`
+    405-vs-404 comment this spec's frontend code carried before removal),
+    a GET here structurally collides with the still-registered
+    `DELETE /history/{entry_id}` path template with entry_id=
+    "embeddings-status" — Starlette reports a path-template match with an
+    unsupported verb as 405, not 404. Either way, the route no longer
+    resolves to a working endpoint."""
+    resp = await client.get("/history/embeddings-status")
+    assert resp.status_code == 405
+
+
+@pytest.mark.asyncio
+async def test_backfill_embeddings_route_removed(client):
+    """Same 405-not-404 reasoning as the sibling embeddings-status test
+    above: POST /history/backfill-embeddings structurally collides with
+    `DELETE /history/{entry_id}`."""
+    resp = await client.post("/history/backfill-embeddings", json={"batch_size": 10})
+    assert resp.status_code == 405
 
 
 def test_concurrent_save_and_search_serialised(isolated_storage, tmp_path):

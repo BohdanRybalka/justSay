@@ -1,9 +1,11 @@
 """Vector store — v3 DDL/migration, dim-guard trigger, model-switch wipe,
 cascade-delete, relocate integrity, backfill resumability + clamping,
-selftest (spec 003)."""
+selftest (spec 003), automatic background indexing (spec 017 / ADR 010)."""
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -444,37 +446,135 @@ async def test_backfill_noop_when_disabled():
     assert result.remaining == 1
 
 
-# --- embeddings_status -------------------------------------------------------
+# --- run_background_indexer (spec 017 / ADR 010) -----------------------------
 
+@pytest.mark.background_indexer
 @pytest.mark.asyncio
-async def test_embeddings_status_reports_counts_and_provider():
-    history.save_entry(text="a", duration_ms=1)
-    e2 = history.save_entry(text="b", duration_ms=1)
+async def test_run_background_indexer_drains_backlog():
+    """Seeds more not-yet-embedded entries than one batch (forcing several
+    ``backfill_batch`` loop iterations) with a working mock provider, and
+    asserts the backlog reaches 0 after the call."""
+    entry_count = vector_store._INDEXER_BATCH_SIZE * 2 + 5
+    for i in range(entry_count):
+        history.save_entry(text=f"drain entry {i}", duration_ms=1)
+    fake = _FakeProvider("gemini/text-embedding-004", vector=[1.0, 2.0, 3.0])
+
+    with (
+        patch(
+            "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+        ),
+        patch.object(vector_store, "_INDEXER_PACING_SECONDS", 0),
+    ):
+        await vector_store.run_background_indexer()
+
     with history._lock:
         conn = history._ensure_conn_locked()
-        vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
-        vector_store.insert_embedding(
-            conn, e2.id, _rowid(conn, e2.id), [1.0, 2.0, 3.0], "cloud", "text-embedding-004"
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM entries WHERE id NOT IN (SELECT entry_id FROM entry_embeddings)"
+        ).fetchone()[0]
+    assert remaining == 0
+
+
+@pytest.mark.background_indexer
+@pytest.mark.asyncio
+async def test_run_background_indexer_stops_after_one_stalled_batch():
+    """A never-succeeding mock provider must not spin forever — the
+    function returns after exactly one stalled batch (processed == 0 while
+    remaining > 0), not an infinite loop."""
+    for i in range(3):
+        history.save_entry(text=f"stalled entry {i}", duration_ms=1)
+    failing = _FakeProvider("gemini/text-embedding-004", fail=True)
+
+    with (
+        patch(
+            "app.embeddings.resolve_embedding_provider",
+            new=AsyncMock(return_value=(failing, None)),
+        ),
+        patch.object(vector_store, "backfill_batch", wraps=vector_store.backfill_batch) as spy,
+    ):
+        await vector_store.run_background_indexer()  # must return, not hang
+
+    assert spy.await_count == 1
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM entries WHERE id NOT IN (SELECT entry_id FROM entry_embeddings)"
+        ).fetchone()[0]
+    assert remaining == 3
+
+
+@pytest.mark.background_indexer
+@pytest.mark.asyncio
+async def test_run_background_indexer_noop_when_vec_unavailable():
+    history.save_entry(text="x", duration_ms=1)
+    with (
+        patch.object(history, "_vec_available", False),
+        patch.object(vector_store, "backfill_batch") as batch_mock,
+    ):
+        await vector_store.run_background_indexer()
+    batch_mock.assert_not_called()
+
+
+@pytest.mark.background_indexer
+@pytest.mark.asyncio
+async def test_run_background_indexer_serializes_concurrent_calls():
+    """Two concurrent calls (simulating two dictations completing back-to-
+    back) must never execute their backfill_batch loop bodies concurrently
+    — serialized through _indexer_lock, mirroring spec 013's
+    _local_reprobe_lock concurrency-safety bar."""
+    for i in range(4):
+        history.save_entry(text=f"concurrent entry {i}", duration_ms=1)
+    fake = _FakeProvider("gemini/text-embedding-004", vector=[1.0, 2.0, 3.0])
+
+    active = 0
+    max_active = 0
+
+    real_backfill_batch = vector_store.backfill_batch
+
+    async def tracked_backfill_batch(batch_size):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            await asyncio.sleep(0.05)  # widen the window a concurrent bug would land in
+            return await real_backfill_batch(batch_size)
+        finally:
+            active -= 1
+
+    with (
+        patch(
+            "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+        ),
+        patch.object(vector_store, "backfill_batch", side_effect=tracked_backfill_batch),
+        patch.object(vector_store, "_INDEXER_PACING_SECONDS", 0),
+    ):
+        await asyncio.gather(
+            vector_store.run_background_indexer(),
+            vector_store.run_background_indexer(),
         )
 
-    fake = _FakeProvider("gemini/text-embedding-004")
-    with patch(
-        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
-    ):
-        status = await vector_store.embeddings_status()
-
-    assert status.available is True
-    assert status.indexed == 1
-    assert status.total == 2
-    assert status.provider == "gemini/text-embedding-004"
+    assert max_active == 1
 
 
+@pytest.mark.background_indexer
 @pytest.mark.asyncio
-async def test_embeddings_status_unavailable_when_vec_not_loaded():
-    with patch.object(history, "_vec_available", False):
-        status = await vector_store.embeddings_status()
-    assert status.available is False
-    assert status.reason == vector_store.VEC_EXTENSION_UNAVAILABLE_DETAIL
+async def test_run_background_indexer_swallows_backfill_exception(caplog):
+    """Same "must never raise" contract as embed_entry_background: an
+    exception raised inside backfill_batch (e.g. sqlite3.OperationalError
+    from cross-thread history._lock contention — see this spec's Risks
+    section) must be caught and logged at warning, never propagated through
+    the BackgroundTasks/asyncio.create_task entrypoint."""
+    history.save_entry(text="x", duration_ms=1)
+    with (
+        patch.object(vector_store, "backfill_batch", side_effect=RuntimeError("boom")),
+        caplog.at_level(logging.WARNING, logger="app.core.vector_store"),
+    ):
+        await vector_store.run_background_indexer()  # must not raise
+
+    assert any(
+        "Background indexer sweep failed" in rec.getMessage() for rec in caplog.records
+    )
 
 
 # --- embed_entry_background: best-effort contract ---------------------------

@@ -197,21 +197,6 @@ export interface InsightsResponse {
   scanned_words: number;
 }
 
-// Semantic search (Phase 3 — spec 003)
-
-export interface EmbeddingsStatus {
-  available: boolean;
-  reason: string | null;
-  indexed: number;
-  total: number;
-  provider: string | null;
-}
-
-export interface BackfillEmbeddingsResult {
-  processed: number;
-  remaining: number;
-}
-
 // --- API ---
 
 export const api = {
@@ -290,19 +275,11 @@ export const api = {
   clearHistory: () =>
     request<{ deleted: number }>("DELETE", "/history"),
 
-  searchHistory: (q: string, limit = 30, mode: "fts" | "semantic" = "fts") =>
+  searchHistory: (q: string, limit = 30) =>
     request<HistoryListResponse>(
       "GET",
-      `/history/search?q=${encodeURIComponent(q)}&limit=${limit}&mode=${mode}`,
+      `/history/search?q=${encodeURIComponent(q)}&limit=${limit}`,
     ),
-
-  historyEmbeddingsStatus: () =>
-    request<EmbeddingsStatus>("GET", "/history/embeddings-status"),
-
-  historyBackfillEmbeddings: (batchSize = 50) =>
-    request<BackfillEmbeddingsResult>("POST", "/history/backfill-embeddings", {
-      batch_size: batchSize,
-    }),
 
   // Words (Phase 1 — Plan 013)
   wordsTop: (lang: "all" | "uk" | "en" = "all", limit = 50) =>

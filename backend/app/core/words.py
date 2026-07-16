@@ -19,6 +19,7 @@ Phase 1 of Plan 013. Architectural rules:
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
@@ -39,6 +40,7 @@ INSIGHTS_TTL_SECONDS = 3600.0
 INSIGHTS_MAX_WORDS_IN_PROMPT = 30
 TOP_LIMIT_MAX = 500
 SEARCH_LIMIT_MAX = 100
+RRF_K = 60  # Cormack et al. 2009; same value used by sqlite-vec's own hybrid-search writeup
 
 # Merged filter — applied for every language including lang=all. Allows
 # Cyrillic stop-words to be filtered out of an "en" entry that happens to
@@ -383,18 +385,20 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
     """Embed ``q`` with the currently-resolved embedding provider and rank
     entries by vector distance via ``vec_entries``.
 
-    Empty/whitespace ``q`` returns ``[]`` immediately (200, mirroring
-    ``mode=fts``) — never reaches the availability checks below and never
-    spends an embedding API call.
+    Empty/whitespace ``q`` returns ``[]`` immediately, mirroring
+    ``search_history``'s own empty-query short-circuit — never reaches the
+    availability checks below and never spends an embedding API call.
 
-    Raises ``vector_store.SemanticSearchUnavailableError`` (mapped to 503 by the
-    router) for every disabled/unready state, each with its own detail
-    string: sqlite-vec failed to load, embeddings disabled by the
-    Cloud/Local eligibility rule, zero entries embedded yet, or any other
-    runtime failure from ``provider.embed()`` itself (auth error, network
-    failure, malformed SDK response) — never a raw 500. The zero-entries
-    check happens BEFORE the (network) embed call so an empty index fails
-    fast without spending an API call.
+    Raises ``vector_store.SemanticSearchUnavailableError`` for every
+    disabled/unready state, each with its own detail string: sqlite-vec
+    failed to load, embeddings disabled by the Cloud/Local eligibility
+    rule, zero entries embedded yet, or any other runtime failure from
+    ``provider.embed()`` itself (auth error, network failure, malformed SDK
+    response). Since spec 017, the only caller is ``_semantic_lane``, which
+    catches this exception and degrades to an empty lane silently (see ADR
+    010) — there is no HTTP-level 503 surfaced for any of these states
+    anymore. The zero-entries check happens BEFORE the (network) embed call
+    so an empty index fails fast without spending an API call.
 
     ``highlighted_text`` is plain HTML-escaped text with no ``<mark>``
     spans — relevance here isn't token-based, so there's no single matched
@@ -409,9 +413,9 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
 
     clamped_limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
 
-    # Mirrors mode=fts's empty-query short-circuit: an empty/whitespace `q`
-    # returns 200 with an empty list and never reaches the availability
-    # checks below or spends a cloud embedding API call.
+    # Mirrors search_history's own empty-query short-circuit: an empty/
+    # whitespace `q` returns an empty list immediately and never reaches
+    # the availability checks below or spends a cloud embedding API call.
     if not q or not q.strip():
         return []
 
@@ -434,8 +438,9 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
 
     # Any embedding-provider runtime failure (auth error, network failure,
     # malformed SDK response) maps to the same SemanticSearchUnavailableError
-    # -> 503 path the router already has, instead of leaking a raw 500 —
-    # follows the catch-all convention in words_router.words_insights.
+    # _semantic_lane already catches and swallows -- since spec 017, no
+    # caller of this function ever lets the raw exception type reach an
+    # HTTP response.
     try:
         query_vector = await provider.embed(q)
     except Exception as e:
@@ -448,3 +453,68 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
         rows = vector_store.query_similar(conn, query_vector, clamped_limit)
 
     return [_hit_from_row(r, []) for r in rows]
+
+
+# --- Hybrid RRF search (spec 017 / ADR 010) --------------------------------
+
+async def _semantic_lane(q: str, limit: int) -> list[HistorySearchHit]:
+    """Wraps ``search_history_semantic`` so every failure mode degrades to an
+    empty lane instead of propagating — see ADR 010. This is what
+    structurally closes the exception-leak bug: there is no response path
+    left that can carry an embedding-provider error string to the client.
+    """
+    from app.core import vector_store
+
+    try:
+        return await search_history_semantic(q, limit=limit)
+    except vector_store.SemanticSearchUnavailableError as e:
+        log.debug("Semantic lane unavailable, FTS-only: %s", e.detail)
+        return []
+    except Exception:
+        log.warning("Semantic lane failed unexpectedly, falling back to FTS-only", exc_info=True)
+        return []
+
+
+def _rrf_fuse(
+    fts_hits: list[HistorySearchHit],
+    semantic_hits: list[HistorySearchHit],
+    limit: int,
+) -> list[HistorySearchHit]:
+    """Reciprocal Rank Fusion: ``score(entry) = sum over lanes of
+    1 / (RRF_K + rank_in_lane)``. The FTS lane is folded in first, so
+    ``by_id.setdefault`` keeps its ``<mark>``-tagged ``highlighted_text``
+    for any entry present in both lanes — the semantic lane's plain-escaped
+    text never overwrites it.
+    """
+    scores: dict[str, float] = {}
+    by_id: dict[str, HistorySearchHit] = {}
+    for rank, hit in enumerate(fts_hits, start=1):
+        scores[hit.id] = scores.get(hit.id, 0.0) + 1.0 / (RRF_K + rank)
+        by_id.setdefault(hit.id, hit)  # FTS's <mark>-tagged text wins ties
+    for rank, hit in enumerate(semantic_hits, start=1):
+        scores[hit.id] = scores.get(hit.id, 0.0) + 1.0 / (RRF_K + rank)
+        by_id.setdefault(hit.id, hit)
+    ranked = sorted(scores, key=lambda eid: scores[eid], reverse=True)
+    return [by_id[eid] for eid in ranked[:limit]]
+
+
+async def search_history_hybrid(q: str, limit: int = 20) -> list[HistorySearchHit]:
+    """Always-on hybrid search: runs the FTS5/BM25+LIKE lane and the
+    semantic (vector-distance) lane concurrently via ``asyncio.gather`` and
+    fuses them with RRF. Both lanes fetch a fixed ``SEARCH_LIMIT_MAX``-row
+    candidate pool regardless of the caller's ``limit`` so ranking has full
+    context before truncation.
+
+    ``search_history`` is synchronous/blocking (a real SQLite query under
+    ``history._lock``), so it runs via ``asyncio.to_thread`` — that's what
+    lets it genuinely overlap the semantic lane's own ``await`` in wall-clock
+    time instead of the two lanes running sequentially.
+    """
+    clamped_limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
+    if not q or not q.strip():
+        return []
+    fts_hits, semantic_hits = await asyncio.gather(
+        asyncio.to_thread(search_history, q, SEARCH_LIMIT_MAX),
+        _semantic_lane(q, SEARCH_LIMIT_MAX),
+    )
+    return _rrf_fuse(fts_hits, semantic_hits, clamped_limit)

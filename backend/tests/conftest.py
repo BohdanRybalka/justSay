@@ -72,3 +72,23 @@ def _no_prewarm_by_default(monkeypatch, request):
         monkeypatch.setattr(local_setup, "maybe_prewarm_local", lambda stt_settings: None)
     yield
     local_setup._prewarm_error = None
+
+
+@pytest.fixture(autouse=True)
+def _no_background_indexer_by_default(monkeypatch, request):
+    """No-op `vector_store.run_background_indexer` for every test except
+    those marked `@pytest.mark.background_indexer` -- same opt-out shape as
+    `_no_prewarm_by_default`.
+
+    Without this, any test using `TestClient(app)` (whose context manager
+    runs the real FastAPI `lifespan()`) schedules a real background-indexing
+    sweep against whatever `~/.justsay/history.db` and API keys exist on the
+    machine running the suite -- see ADR 010 / spec 017 review RED #1.
+    """
+    from app.core import vector_store
+
+    async def _noop() -> None:
+        return None
+
+    if not request.node.get_closest_marker("background_indexer"):
+        monkeypatch.setattr(vector_store, "run_background_indexer", _noop)
