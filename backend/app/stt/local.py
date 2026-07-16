@@ -80,13 +80,25 @@ class LocalSTTProvider(STTProvider):
 
     @staticmethod
     def _detect_device() -> str:
-        try:
-            import torch
+        """Resolve to "cuda"/"cpu" — faster-whisper (CTranslate2) has no
+        third device string, so AMD/Intel still fall back to CPU even though
+        `gpu_probe` now identifies them by name instead of staying silent.
+        """
+        from app.core.gpu_probe import GpuVendor, probe_gpu
 
-            if torch.cuda.is_available():
-                return "cuda"
-        except ImportError:
-            pass
+        result = probe_gpu()
+        if result.vendor == GpuVendor.NVIDIA:
+            log.info("GPU probe: NVIDIA detected (%s) — using cuda", result.name or "unknown")
+            return "cuda"
+        if result.vendor in (GpuVendor.AMD, GpuVendor.INTEL):
+            log.info(
+                "GPU probe: %s GPU detected (%s) but faster-whisper has no %s "
+                "backend — falling back to CPU",
+                result.vendor.value.upper(), result.name or "unknown device",
+                result.vendor.value.upper(),
+            )
+        else:
+            log.info("GPU probe: no GPU detected — using cpu")
         return "cpu"
 
     async def transcribe(self, audio_path: Path, language: str = "uk", **kwargs) -> TranscriptionResult:

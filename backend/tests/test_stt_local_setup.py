@@ -18,8 +18,11 @@ from app.stt.local_setup import (
 # --- check_status ---
 
 
-def _patches(installed: bool, gpu: tuple[bool, str | None]):
-    """Standard patch set: stub package detection + GPU detection."""
+def _patches(installed: bool, gpu: tuple[bool, str | None, str]):
+    """Standard patch set: stub package detection + GPU detection.
+
+    `gpu` is `(available, name, vendor)` — the `_detect_gpu()` 3-tuple.
+    """
     return [
         patch.object(local_setup, "_check_package_installed", return_value=installed),
         patch.object(local_setup, "_detect_gpu", return_value=gpu),
@@ -39,7 +42,7 @@ def _apply(patches):
 def test_check_status_reports_installed_package():
     settings = STTSettings(whisper_model_size="large-v3-turbo", whisper_device="auto")
 
-    with _apply(_patches(True, (False, None))):
+    with _apply(_patches(True, (False, None, "none"))):
         status = check_status(settings)
 
     assert isinstance(status, LocalSttStatus)
@@ -50,6 +53,7 @@ def test_check_status_reports_installed_package():
     assert status.model_name == "large-v3-turbo"
     assert status.gpu_available is False
     assert status.gpu_name is None
+    assert status.gpu_vendor == "none"
     assert status.device == "cpu"
     assert status.compute_type == "int8"
 
@@ -57,11 +61,12 @@ def test_check_status_reports_installed_package():
 def test_check_status_uses_cuda_when_gpu_auto():
     settings = STTSettings(whisper_device="auto")
 
-    with _apply(_patches(True, (True, "NVIDIA GeForce RTX 3060"))):
+    with _apply(_patches(True, (True, "NVIDIA GeForce RTX 3060", "nvidia"))):
         status = check_status(settings)
 
     assert status.gpu_available is True
     assert status.gpu_name == "NVIDIA GeForce RTX 3060"
+    assert status.gpu_vendor == "nvidia"
     assert status.device == "cuda"
     assert status.compute_type == "float16"
 
@@ -69,7 +74,7 @@ def test_check_status_uses_cuda_when_gpu_auto():
 def test_check_status_respects_explicit_cpu_device():
     settings = STTSettings(whisper_device="cpu")
 
-    with _apply(_patches(True, (True, "RTX 3060"))):
+    with _apply(_patches(True, (True, "RTX 3060", "nvidia"))):
         status = check_status(settings)
 
     assert status.device == "cpu"
@@ -79,11 +84,25 @@ def test_check_status_respects_explicit_cpu_device():
 def test_check_status_reports_missing_package():
     settings = STTSettings()
 
-    with _apply(_patches(False, (False, None))):
+    with _apply(_patches(False, (False, None, "none"))):
         status = check_status(settings)
 
     assert status.package_installed is False
     assert status.model_loaded is False  # short-circuited because package missing
+
+
+def test_check_status_reports_amd_gpu_name_and_vendor_but_not_available():
+    """AMD is detected (name + vendor populated) but gpu_available stays False
+    — faster-whisper has no AMD backend (spec 014)."""
+    settings = STTSettings(whisper_device="auto")
+
+    with _apply(_patches(True, (False, "AMD Radeon RX 5700 XT", "amd"))):
+        status = check_status(settings)
+
+    assert status.gpu_available is False
+    assert status.gpu_vendor == "amd"
+    assert status.gpu_name == "AMD Radeon RX 5700 XT"
+    assert status.device == "cpu"  # auto + not available -> cpu
 
 
 def test_check_status_surfaces_last_load_error():
@@ -99,7 +118,7 @@ def test_check_status_surfaces_last_load_error():
     provider = _get_local(settings)
     provider._last_load_error = "OSError: [WinError 126] DLL not found"
     try:
-        with _apply(_patches(True, (False, None))):
+        with _apply(_patches(True, (False, None, "none"))):
             status = check_status(settings)
         assert status.last_error == "OSError: [WinError 126] DLL not found"
         assert status.model_loaded is False
@@ -141,32 +160,49 @@ def test_check_package_installed_false(monkeypatch):
 # --- _detect_gpu ---
 
 
-def test_detect_gpu_returns_false_when_torch_missing(monkeypatch):
-    import builtins
+def test_detect_gpu_returns_false_when_probe_reports_none(monkeypatch):
+    """`_detect_gpu` delegates to `gpu_probe.probe_gpu()` (spec 014); when the
+    probe finds nothing, availability/name/vendor are all "empty"."""
+    from app.core.gpu_probe import GpuProbeResult, GpuVendor
 
-    real_import = builtins.__import__
-
-    def fake_import(name, *args, **kwargs):
-        if name == "torch":
-            raise ImportError("no torch")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-    available, name = _detect_gpu()
+    monkeypatch.setattr(
+        "app.core.gpu_probe.probe_gpu",
+        lambda: GpuProbeResult(vendor=GpuVendor.NONE),
+    )
+    available, name, vendor = _detect_gpu()
     assert available is False
     assert name is None
+    assert vendor == "none"
 
 
-def test_detect_gpu_returns_name_when_cuda_available():
-    fake_torch = MagicMock()
-    fake_torch.cuda.is_available.return_value = True
-    fake_torch.cuda.get_device_name.return_value = "RTX 4090"
+def test_detect_gpu_returns_name_when_cuda_available(monkeypatch):
+    from app.core.gpu_probe import GpuProbeResult, GpuVendor
 
-    with patch.dict("sys.modules", {"torch": fake_torch}):
-        available, name = _detect_gpu()
+    monkeypatch.setattr(
+        "app.core.gpu_probe.probe_gpu",
+        lambda: GpuProbeResult(vendor=GpuVendor.NVIDIA, name="RTX 4090"),
+    )
+    available, name, vendor = _detect_gpu()
 
     assert available is True
     assert name == "RTX 4090"
+    assert vendor == "nvidia"
+
+
+def test_detect_gpu_reports_amd_name_and_vendor_but_not_available(monkeypatch):
+    """AMD is detected (name + vendor populated) but `available` stays False —
+    faster-whisper (CTranslate2) has no AMD backend (spec 014)."""
+    from app.core.gpu_probe import GpuProbeResult, GpuVendor
+
+    monkeypatch.setattr(
+        "app.core.gpu_probe.probe_gpu",
+        lambda: GpuProbeResult(vendor=GpuVendor.AMD, name="AMD Radeon RX 5700 XT"),
+    )
+    available, name, vendor = _detect_gpu()
+
+    assert available is False
+    assert name == "AMD Radeon RX 5700 XT"
+    assert vendor == "amd"
 
 
 # --- sse_event formatting ---
@@ -309,9 +345,10 @@ def test_detect_gpu_reports_apple_silicon_on_macos_arm64(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    available, name = _detect_gpu()
+    available, name, vendor = _detect_gpu()
     assert available is True
     assert name == "Apple Silicon (MLX/Metal)"
+    assert vendor == "apple"
 
 
 def test_check_status_macos_arm64_reports_mlx_device_and_bfloat16(monkeypatch):
@@ -319,10 +356,11 @@ def test_check_status_macos_arm64_reports_mlx_device_and_bfloat16(monkeypatch):
     settings = STTSettings(whisper_model_size="large-v3-turbo")
     monkeypatch.setattr("app.stt.local_setup.is_macos_arm64", lambda: True)
 
-    with _apply(_patches(True, (True, "Apple Silicon (MLX/Metal)"))):
+    with _apply(_patches(True, (True, "Apple Silicon (MLX/Metal)", "apple"))):
         status = check_status(settings)
 
     assert status.device == "mlx"
     assert status.compute_type == "bfloat16"
     assert status.gpu_available is True
     assert status.gpu_name == "Apple Silicon (MLX/Metal)"
+    assert status.gpu_vendor == "apple"

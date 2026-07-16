@@ -24,6 +24,10 @@ class LocalSttStatus(BaseModel):
     model_ram_mb: int | None = None
     gpu_available: bool = False
     gpu_name: str | None = None
+    # "apple" on macOS arm64, else the app.core.gpu_probe vendor value
+    # ("nvidia"/"amd"/"intel"/"none"). Populated even when gpu_available is
+    # False — AMD/Intel are detected but not yet STT-accelerated.
+    gpu_vendor: str = "none"
     device: str = "cpu"
     compute_type: str = "int8"
     last_error: str | None = None
@@ -32,7 +36,7 @@ class LocalSttStatus(BaseModel):
 def check_status(stt_settings: STTSettings) -> LocalSttStatus:
     """Check local STT readiness: package installed + load state + GPU + last error."""
     installed = _check_package_installed()
-    gpu_available, gpu_name = _detect_gpu()
+    gpu_available, gpu_name, gpu_vendor = _detect_gpu()
 
     if is_macos_arm64():
         device = "mlx"
@@ -56,6 +60,7 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
         model_ram_mb=_estimate_model_ram_mb() if is_model_loaded() else None,
         gpu_available=gpu_available,
         gpu_name=gpu_name,
+        gpu_vendor=gpu_vendor,
         device=device,
         compute_type=compute_type,
         last_error=get_local_load_error(stt_settings),
@@ -176,27 +181,24 @@ def _get_backend_dir():
     return Path(__file__).resolve().parent.parent.parent
 
 
-def _detect_gpu() -> tuple[bool, str | None]:
-    """Detect GPU availability and a human-readable device name.
+def _detect_gpu() -> tuple[bool, str | None, str]:
+    """Detect GPU availability, a human-readable device name, and vendor.
 
     On macOS arm64 returns the Apple-Silicon/Metal label without importing
-    torch — the MLX path is the accelerator and torch is irrelevant here.
-    Everywhere else, falls back to CUDA detection via torch.
+    torch or probing hardware — the MLX path is the accelerator here.
+    Everywhere else, delegates to `app.core.gpu_probe.probe_gpu()`.
+    `gpu_available` stays true only for the actually-accelerated path
+    (faster-whisper has no AMD/Intel backend), but `gpu_name`/vendor are
+    populated for AMD/Intel too so the UI can show "GPU detected, not yet
+    accelerated" instead of nothing.
 
-    Returns (available, device_name_or_none).
+    Returns (available, device_name_or_none, vendor).
     """
     if is_macos_arm64():
-        return True, "Apple Silicon (MLX/Metal)"
+        return True, "Apple Silicon (MLX/Metal)", "apple"
 
-    try:
-        import torch
+    from app.core.gpu_probe import GpuVendor, probe_gpu
 
-        if torch.cuda.is_available():
-            name = torch.cuda.get_device_name(0)
-            return True, name
-    except ImportError:
-        pass
-    except Exception as e:
-        log.warning("GPU detection failed: %s", e)
-
-    return False, None
+    result = probe_gpu()
+    available = result.vendor == GpuVendor.NVIDIA
+    return available, result.name, result.vendor.value
