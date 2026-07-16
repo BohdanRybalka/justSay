@@ -41,6 +41,11 @@ async def lifespan(app: FastAPI):
     history.bootstrap(Path(us.output_dir))
     # Sync user settings into runtime config (modes, model choices, etc.)
     sync_to_runtime(us)
+    # A fresh launch or a Spec 011 watchdog respawn that comes back up with
+    # Local already persisted starts warming immediately instead of waiting
+    # for the first dictation request to trigger a cold lazy load.
+    from app.stt.local_setup import maybe_prewarm_local
+    maybe_prewarm_local(settings.stt)
     from app.audio import MicrophoneRecorder
     app.state.recorder = MicrophoneRecorder(settings.audio)
     yield

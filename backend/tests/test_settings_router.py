@@ -129,3 +129,59 @@ async def test_cloud_status_groq_only(client):
     resp = await client.get("/settings/cloud-status")
     assert resp.status_code == 200
     assert resp.json() == {"gemini_key_set": False, "groq_key_set": True}
+
+
+# --- PUT /settings triggers maybe_prewarm_local (spec 015) -----------------
+
+
+def _counting_spy(counter: dict):
+    """monkeypatch-able stand-in for maybe_prewarm_local that just counts calls."""
+    def _spy(stt_settings):
+        counter["n"] += 1
+    return _spy
+
+
+@pytest.mark.prewarm
+@pytest.mark.anyio
+async def test_put_settings_triggers_prewarm_when_switching_to_local(client, monkeypatch):
+    """`put_settings()` calls `maybe_prewarm_local(runtime_settings.stt)`
+    after `sync_to_runtime(...)`. Marked `@pytest.mark.prewarm` so
+    conftest's autouse no-op fixture doesn't mask this — `maybe_prewarm_local`
+    is patched to a counting spy so the real pip-install/model-load path
+    never runs."""
+    import app.stt.local_setup as local_setup_module
+
+    call_count = {"n": 0}
+    monkeypatch.setattr(local_setup_module, "maybe_prewarm_local", _counting_spy(call_count))
+
+    resp = await client.put("/settings", json={"stt_mode": "local"})
+    assert resp.status_code == 200
+    assert call_count["n"] == 1
+
+
+@pytest.mark.prewarm
+@pytest.mark.anyio
+async def test_put_settings_triggers_prewarm_on_incidental_cache_clear(client, monkeypatch):
+    """An unrelated settings change (e.g. a glossary edit) that incidentally
+    clears the STT cache via `sync_to_runtime`'s `changed_stt` check must
+    still re-trigger `maybe_prewarm_local` while Local stays the active mode
+    — otherwise that edit would silently reintroduce a cold lazy-load."""
+    import app.stt.local_setup as local_setup_module
+
+    # Snapshot + auto-restore: unlike `mode` (already reset by conftest's
+    # autouse `_reset_settings`), `initial_prompt` on the shared runtime
+    # singleton has no such reset — leaking it here would break the *next*
+    # test that assumes a pristine default (test_user_settings.py's
+    # sync_to_runtime tests).
+    monkeypatch.setattr(runtime_settings.stt, "initial_prompt", runtime_settings.stt.initial_prompt)
+
+    call_count = {"n": 0}
+    monkeypatch.setattr(local_setup_module, "maybe_prewarm_local", _counting_spy(call_count))
+
+    resp = await client.put("/settings", json={"stt_mode": "local"})
+    assert resp.status_code == 200
+    assert call_count["n"] == 1
+
+    resp = await client.put("/settings", json={"initial_prompt": "Tauri FastAPI Pydantic"})
+    assert resp.status_code == 200
+    assert call_count["n"] == 2

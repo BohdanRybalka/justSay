@@ -1,36 +1,20 @@
 import {
   api,
-  sseStream,
   type UserSettings,
   type LocalSttStatus,
 } from "../../api";
 import { loadSettings } from "../settings";
-import { escapeHtml } from "../html";
+import { notifyError } from "../../notify";
+import {
+  computeIndicatorState,
+  onIndicatorStateChange,
+  renderIndicator,
+} from "../../status-indicator";
 
-const WHISPER_MODELS = ["large-v3-turbo", "large-v3", "large-v2", "medium", "small", "base", "tiny"];
-const WHISPER_DEVICES = ["auto", "cpu", "cuda"];
-
-/** Label for the "auto" device option — vendor-derived, not a hardcoded "CUDA".
- *  NVIDIA and Apple Silicon are the only vendors that make gpu_available true
- *  for STT today (faster-whisper has no AMD/Intel backend; macOS arm64 uses
- *  MLX/Metal instead of faster-whisper's device string), but deriving from
- *  gpu_vendor keeps this honest if that ever changes. */
-function autoDeviceLabel(s: LocalSttStatus): string {
-  if (!s.gpu_available) return "CPU";
-  if (s.gpu_vendor === "nvidia") return "CUDA";
-  if (s.gpu_vendor === "apple") return "Metal";
-  return "CPU";
-}
-
-// SSE abort controller for STT install stream.
-let sttAbort: AbortController | null = null;
-
-// Prevent concurrent operations.
-let sttBusy = false;
-
-// Sticky load error — set when /stt/local/load returns 500, cleared when status
-// reports model_loaded or last_error becomes null upstream.
-let sttLoadError: string | null = null;
+// Edge-triggered latch for the Local STT indicator's last-seen error — drives
+// onIndicatorStateChange() so notifyError() fires once per new error, not
+// once per 3-second poll while the same error persists.
+let prevLastError: string | null = null;
 
 export function renderModels(container: HTMLElement, settings: UserSettings): () => void {
   container.innerHTML = `
@@ -42,7 +26,7 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
         <span class="label">Mode</span>
         <div class="toggle-group">
           <button class="toggle-btn ${settings.stt_mode === "cloud" ? "active" : ""}" id="stt-cloud">Cloud</button>
-          <button class="toggle-btn ${settings.stt_mode === "local" ? "active" : ""}" id="stt-local">Local</button>
+          <button class="toggle-btn ${settings.stt_mode === "local" ? "active" : ""}" id="stt-local">Local<span id="stt-local-indicator" class="status-indicator-badge"></span></button>
         </div>
       </div>
       <div class="setting-row" id="stt-engine-row" style="${settings.stt_mode === "cloud" ? "" : "display:none;"}">
@@ -71,6 +55,7 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
 
   const sttCloud = container.querySelector<HTMLButtonElement>("#stt-cloud")!;
   const sttLocal = container.querySelector<HTMLButtonElement>("#stt-local")!;
+  const sttLocalIndicator = container.querySelector<HTMLElement>("#stt-local-indicator")!;
   const sttPanel = container.querySelector<HTMLElement>("#stt-panel")!;
   const resourcesPanel = container.querySelector<HTMLElement>("#resources-panel")!;
   const engineRow = container.querySelector<HTMLElement>("#stt-engine-row")!;
@@ -87,188 +72,65 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
   // --- Render panels based on current mode ---
   function renderCurrentStt() {
     if (currentSttMode === "cloud") {
+      renderIndicator(sttLocalIndicator, "idle");
       sttPanel.innerHTML = `
         <div class="model-info">
           <div class="model-name">gemini-2.5-flash &nbsp;+&nbsp; whisper-large-v3-turbo (Groq)</div>
           <div class="model-detail">Smart-routed: short audio &rarr; Groq · long / structured &rarr; Gemini</div>
         </div>`;
     } else {
-      sttPanel.innerHTML = '<div class="local-status"><div class="local-status-row"><span class="ls-label">Loading...</span></div></div>';
+      sttPanel.innerHTML = '<div class="setting-hint" id="stt-local-caption"></div>';
       refreshSttStatus();
     }
+  }
+
+  // --- STT indicator + caption update, shared by the success/failure paths ---
+  function applyLocalIndicator(error: string | null, ready: boolean, captionText: string) {
+    const state = computeIndicatorState({ active: currentSttMode === "local", ready, error });
+    renderIndicator(sttLocalIndicator, state, { title: error ?? "" });
+    const caption = sttPanel.querySelector<HTMLElement>("#stt-local-caption");
+    if (caption) caption.textContent = captionText;
+    if (onIndicatorStateChange(prevLastError, error)) {
+      notifyError(error!);
+    }
+    prevLastError = error;
   }
 
   // --- STT Status refresh ---
   async function refreshSttStatus() {
     if (currentSttMode !== "local") return;
     try {
-      const s = await api.sttLocalStatus();
-      renderSttPanel(sttPanel, s);
+      const s: LocalSttStatus = await api.sttLocalStatus();
+      // Re-check after the await: the user may have switched to Cloud while
+      // this request was in flight (e.g. a slow first-run pip-install poll
+      // tick). A stale response must not touch the badge/caption/latch or
+      // fire notifyError() — Cloud mode must never surface a Local STT toast.
+      if (currentSttMode !== "local") return;
+      applyLocalIndicator(s.last_error, s.model_loaded, `${s.model_name} · ${s.device}`);
     } catch {
-      sttPanel.innerHTML = '<div class="local-status"><div class="local-status-row"><span class="ls-value" style="color:var(--red)">Backend not responding</span></div></div>';
+      if (currentSttMode !== "local") return;
+      applyLocalIndicator("Backend not responding", false, "Backend not responding");
     }
   }
 
-  function renderSttPanel(panel: HTMLElement, s: LocalSttStatus) {
-    if (!s.package_installed) {
-      renderSttInstall(panel, s);
-      return;
-    }
-
-    // Backend's last_error wins; the frontend latch is for in-flight errors
-    // that the polling cycle hasn't picked up yet.
-    const error = s.last_error || sttLoadError;
-    if (s.model_loaded && sttLoadError) {
-      // A successful load wipes the local latch.
-      sttLoadError = null;
-    }
-
-    let statusDot: string, statusText: string, actionHtml: string;
-    if (sttBusy) {
-      statusDot = "orange";
-      statusText = "Loading...";
-      actionHtml = "";
-    } else if (error && !s.model_loaded) {
-      statusDot = "red";
-      statusText = "Failed to load";
-      actionHtml = '<button class="btn btn-primary btn-sm" id="stt-start">Retry</button>';
-    } else if (s.model_loaded) {
-      statusDot = "green";
-      statusText = `Loaded${s.model_ram_mb ? ` · ${s.model_ram_mb} MB RSS` : ""} · ${s.device}`;
-      actionHtml = '<button class="btn btn-secondary btn-sm" id="stt-stop">Stop</button>';
-    } else {
-      statusDot = "gray";
-      statusText = "Stopped";
-      actionHtml = '<button class="btn btn-primary btn-sm" id="stt-start">Start</button>';
-    }
-
-    // Dropdowns are gated on model_loaded — changing model while loaded would
-    // invalidate the cache mid-run. Force the user to Stop first.
-    const dropdownDisabled = s.model_loaded || sttBusy ? "disabled" : "";
-
-    const modelOptions = WHISPER_MODELS.map(m =>
-      `<option value="${m}" ${m === s.model_name ? "selected" : ""}>${m}</option>`
-    ).join("");
-    const deviceOptions = WHISPER_DEVICES.map(d =>
-      `<option value="${d}" ${d === s.device ? "selected" : ""}>${d}${d === "auto" ? ` (${autoDeviceLabel(s)})` : ""}</option>`
-    ).join("");
-
-    const errorBlock = error
-      ? `<div class="local-status-error"><span class="ls-label">Error</span><span class="ls-error-text">${escapeHtml(error)}</span></div>`
-      : "";
-
-    // Distinct from the accelerated-GPU row below: AMD/Intel are detected
-    // (name + vendor known) but faster-whisper has no non-NVIDIA backend, so
-    // STT stays CPU-bound for them today.
-    const detectedNotAcceleratedRow = !s.gpu_available && (s.gpu_vendor === "amd" || s.gpu_vendor === "intel")
-      ? `<div class="local-status-row"><span class="ls-label">GPU</span><span class="ls-value">${escapeHtml(s.gpu_name ?? s.gpu_vendor)} <span style="color:var(--text-dim)">(detected, not yet accelerated for STT)</span></span></div>`
-      : "";
-
-    panel.innerHTML = `
-      <div class="local-status">
-        <div class="local-status-row">
-          <span class="ls-label">Status</span>
-          <span class="ls-value"><span class="dot ${statusDot}"></span>${statusText}</span>
-          ${actionHtml ? `<span>${actionHtml}</span>` : ""}
-        </div>
-        <div class="local-status-row">
-          <span class="ls-label">Model</span>
-          <select id="stt-model-sel" ${dropdownDisabled}>${modelOptions}</select>
-        </div>
-        <div class="local-status-row">
-          <span class="ls-label">Device</span>
-          <select id="stt-device-sel" ${dropdownDisabled}>${deviceOptions}</select>
-        </div>
-        ${s.gpu_available ? `<div class="local-status-row"><span class="ls-label">GPU</span><span class="ls-value">${s.gpu_name}</span></div>` : ""}
-        ${detectedNotAcceleratedRow}
-        ${errorBlock}
-      </div>
-    `;
-
-    panel.querySelector("#stt-start")?.addEventListener("click", async () => {
-      sttBusy = true;
-      sttLoadError = null;
-      renderSttPanel(panel, { ...s, model_loaded: false, last_error: null });
+  // --- Retry-on-click when the indicator shows an error ---
+  sttLocalIndicator.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!sttLocalIndicator.classList.contains("status-indicator-badge--error")) return;
+    (async () => {
       try {
-        await api.sttLocalLoad();
-      } catch (err) {
-        sttLoadError = (err as Error).message || "Unknown error";
-      }
-      sttBusy = false;
+        await api.sttLocalPrewarm();
+      } catch { /* surfaced via the next status poll */ }
       await refreshSttStatus();
-    });
-
-    panel.querySelector("#stt-stop")?.addEventListener("click", async () => {
-      sttBusy = true;
-      sttLoadError = null;
-      renderSttPanel(panel, { ...s, model_loaded: false, last_error: null });
-      try {
-        await api.sttLocalUnload();
-      } catch { /* ignore */ }
-      sttBusy = false;
-      await refreshSttStatus();
-    });
-
-    panel.querySelector("#stt-model-sel")?.addEventListener("change", async (e) => {
-      const select = e.target as HTMLSelectElement;
-      if (s.model_loaded) {
-        // Defensive: dropdown should already be disabled, but if it isn't,
-        // bail out without touching the cache.
-        select.value = s.model_name;
-        return;
-      }
-      sttLoadError = null;
-      await api.updateSettings({ whisper_model_size: select.value });
-      await loadSettings();
-      await refreshSttStatus();
-    });
-
-    panel.querySelector("#stt-device-sel")?.addEventListener("change", async (e) => {
-      const select = e.target as HTMLSelectElement;
-      if (s.model_loaded) {
-        select.value = s.device;
-        return;
-      }
-      sttLoadError = null;
-      await api.updateSettings({ whisper_device: select.value });
-      await loadSettings();
-      await refreshSttStatus();
-    });
-  }
-
-  function renderSttInstall(panel: HTMLElement, _s: LocalSttStatus) {
-    panel.innerHTML = `
-      <div class="local-status">
-        <div class="local-status-row">
-          <span class="ls-label">Status</span>
-          <span class="ls-value"><span class="dot red"></span>Package not installed</span>
-          <span><button class="btn btn-primary btn-sm" id="stt-install-btn">Install</button></span>
-        </div>
-        <div id="stt-progress"></div>
-        <div id="stt-error" style="font-size:11px;color:var(--red);margin-top:6px"></div>
-      </div>
-    `;
-
-    panel.querySelector("#stt-install-btn")!.addEventListener("click", () => {
-      const btn = panel.querySelector<HTMLButtonElement>("#stt-install-btn")!;
-      btn.disabled = true; btn.textContent = "Installing...";
-      const progressEl = panel.querySelector<HTMLElement>("#stt-progress")!;
-      progressEl.innerHTML = '<div class="progress-text"><span id="stt-progress-status">Installing...</span></div>';
-
-      sttAbort = sseStream("/stt/local/install",
-        (d) => { const el = panel.querySelector("#stt-progress-status"); if (el) el.textContent = d.status || "Installing..."; },
-        () => { sttAbort = null; refreshSttStatus(); },
-        (err) => { sttAbort = null; btn.disabled = false; btn.textContent = "Retry"; panel.querySelector<HTMLElement>("#stt-error")!.textContent = err; },
-      );
-    });
-  }
+    })();
+  });
 
   // --- Mode toggle handler ---
   async function switchStt(mode: "cloud" | "local") {
     if (currentSttMode === mode) return;
-    if (currentSttMode === "local") {
-      try { await api.sttLocalUnload(); } catch { /* ignore */ }
-    }
+    // No explicit unload here: PUT /stt/mode's clear_cache() already tears
+    // down the Local provider unconditionally on every mode change, so a
+    // frontend pre-emptive unload was always redundant.
     currentSttMode = mode;
     sttCloud.classList.toggle("active", mode === "cloud");
     sttLocal.classList.toggle("active", mode === "local");
@@ -287,13 +149,12 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
 
   // --- Polling ---
   const pollInterval = setInterval(() => {
-    if (currentSttMode === "local" && !sttBusy) refreshSttStatus();
+    if (currentSttMode === "local") refreshSttStatus();
     updateResources(resourcesPanel);
   }, 3000);
 
   return () => {
     clearInterval(pollInterval);
-    if (sttAbort) { sttAbort.abort(); sttAbort = null; }
   };
 }
 

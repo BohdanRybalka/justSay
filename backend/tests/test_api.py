@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -88,6 +89,89 @@ async def test_transcribe_rejects_empty_file(client):
 async def test_switch_llm_mode_invalid(client):
     resp = await client.put("/llm/mode", json={"mode": "quantum"})
     assert resp.status_code == 422
+
+
+# --- Eager pre-warm dispatch (spec 015) ---
+
+
+@pytest.mark.prewarm
+@pytest.mark.asyncio
+async def test_set_stt_mode_triggers_prewarm_without_awaiting_it(client, monkeypatch):
+    """`PUT /stt/mode` must call `maybe_prewarm_local` exactly once when
+    switching to "local", and the response must return before a
+    deliberately slow monkeypatched `maybe_prewarm_local` completes —
+    confirming the trigger is genuinely fire-and-forget, not awaited inline.
+
+    Marked `@pytest.mark.prewarm` so backend/tests/conftest.py's autouse
+    no-op fixture doesn't mask this call — this test patches
+    `maybe_prewarm_local` itself before any request is made, so the real
+    `ensure_local_ready` (which could attempt a real pip install) never runs.
+    """
+    import app.stt.local_setup as local_setup_module
+
+    call_count = {"n": 0}
+    never_set = asyncio.Event()
+    background: dict = {}
+
+    def _slow_spy(stt_settings):
+        call_count["n"] += 1
+
+        async def _block_forever():
+            await never_set.wait()
+
+        background["task"] = asyncio.create_task(_block_forever())
+
+    monkeypatch.setattr(local_setup_module, "maybe_prewarm_local", _slow_spy)
+
+    resp = await client.put("/stt/mode", json={"mode": "local"})
+
+    assert resp.status_code == 200
+    assert call_count["n"] == 1
+    # The response came back even though the background task the spy kicked
+    # off is still pending — an inline `await maybe_prewarm_local(...)` would
+    # have hung this request on `never_set`, which this test never sets.
+    assert not background["task"].done()
+
+    never_set.set()
+    await background["task"]  # avoid a "task was never awaited" warning
+
+
+@pytest.mark.asyncio
+async def test_stt_local_prewarm_rejects_when_not_local_mode(client):
+    """Default STT mode is Cloud (reset by conftest's `_reset_settings`
+    fixture) — the endpoint must 400 without ever touching `maybe_prewarm_local`."""
+    resp = await client.post("/stt/local/prewarm")
+    assert resp.status_code == 400
+    assert "not local" in resp.json()["detail"].lower()
+
+
+@pytest.mark.prewarm
+@pytest.mark.asyncio
+async def test_stt_local_prewarm_dispatches_and_returns_started(client, monkeypatch):
+    """`POST /stt/local/prewarm` dispatches `maybe_prewarm_local` and returns
+    `{"started": true}` without awaiting completion.
+
+    Marked `@pytest.mark.prewarm`; `maybe_prewarm_local` is patched to a
+    counting spy *before* the mode switch, so the real function (and any
+    real pip install it could trigger) never runs at any point in this test.
+    """
+    import app.stt.local_setup as local_setup_module
+
+    call_count = {"n": 0}
+
+    def _spy(stt_settings):
+        call_count["n"] += 1
+
+    monkeypatch.setattr(local_setup_module, "maybe_prewarm_local", _spy)
+
+    resp = await client.put("/stt/mode", json={"mode": "local"})
+    assert resp.status_code == 200
+    assert call_count["n"] == 1  # from the mode switch itself
+
+    resp = await client.post("/stt/local/prewarm")
+    assert resp.status_code == 200
+    assert resp.json() == {"started": True}
+    assert call_count["n"] == 2
 
 
 def _make_recorder_mock(duration: float, audio_path: Path) -> MagicMock:

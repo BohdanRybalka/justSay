@@ -34,6 +34,7 @@ __all__ = [
     "get_provider",
     "get_routed_provider",
     "get_local_load_error",
+    "peek_local_provider",
     "clear_cache",
     "is_model_loaded",
     "GROQ_SUPPORTED_FORMATS",
@@ -171,6 +172,24 @@ def get_local_load_error(stt_settings: STTSettings) -> str | None:
     if provider is None:
         return None
     return getattr(provider, "last_load_error", None)
+
+
+def peek_local_provider() -> STTProvider | None:
+    """Read-only peek at whichever provider is currently cached for the Local
+    provider class, or None. Never creates an instance — unlike
+    :func:`get_provider`/:func:`_get_local`.
+
+    Used by :func:`app.stt.local_setup.ensure_local_ready` to check whether
+    the provider it captured at the top of a prewarm attempt is still the
+    one anyone would look up (a cache-identity check), independent of
+    whatever ``stt_settings.mode`` currently reports — ``clear_cache()`` can
+    evict a provider from the cache without the mode itself ever changing
+    (spec 015, RED-1).
+    """
+    from app.stt.local_factory import get_local_provider_class
+    cls = get_local_provider_class()
+    with _cache_lock:
+        return _providers.get(cls)
 
 
 def is_model_loaded() -> bool:

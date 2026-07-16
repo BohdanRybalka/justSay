@@ -383,6 +383,44 @@ def test_cleanup_resets_model_holder_and_clears_metal_cache(monkeypatch):
     sys.modules["mlx.core.metal"].clear_cache.assert_called_once()
 
 
+def test_cleanup_returns_promptly_without_deadlock_when_load_lock_held(monkeypatch):
+    """`cleanup()` must not block when `_load_lock` is already held by an
+    in-flight `_get_model()` call on another thread — critical because
+    `cleanup()` runs synchronously on the FastAPI event-loop thread via
+    `clear_cache()` (spec 015, RED-3, iteration 2 triage)."""
+    _install_mlx_whisper_stub(monkeypatch)
+    _FakeModelHolder.model = object()
+    _FakeModelHolder.model_path = "mlx-community/whisper-large-v3-turbo"
+
+    from app.stt.local_mlx import MLXWhisperSTTProvider
+
+    provider = MLXWhisperSTTProvider(_settings())
+    provider._loaded = True
+
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+
+    def _hold_lock():
+        with provider._load_lock:
+            lock_acquired.set()
+            release_lock.wait(timeout=2)
+
+    holder = threading.Thread(target=_hold_lock)
+    holder.start()
+    assert lock_acquired.wait(timeout=2), "holder thread never acquired the lock"
+
+    start = time.monotonic()
+    provider.cleanup()
+    elapsed = time.monotonic() - start
+
+    release_lock.set()
+    holder.join(timeout=2)
+
+    assert elapsed < 1.0, f"cleanup() blocked for {elapsed:.2f}s while the lock was held"
+    assert _FakeModelHolder.model is not None  # untouched — cleanup bailed out
+    assert provider.is_loaded is True  # untouched — cleanup bailed out
+
+
 # --------------------------------------------------------------------------- #
 # transcribe kwargs                                                            #
 # --------------------------------------------------------------------------- #
