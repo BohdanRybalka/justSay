@@ -28,6 +28,14 @@ def _reset_settings():
 
 
 @pytest.fixture(autouse=True)
+def _clear_dependency_overrides():
+    """Clear app.dependency_overrides after every test so an override set in
+    one test can never leak into the next."""
+    yield
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
 def _force_faster_whisper_for_local(monkeypatch, request):
     """Pin the local STT provider class to `LocalSTTProvider` for tests that
     are not specifically exercising the MLX path.

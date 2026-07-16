@@ -1,7 +1,7 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.audio import get_recorder
+from app.audio import MicrophoneRecorder, get_recorder
 
 
 router = APIRouter()
@@ -19,8 +19,7 @@ class StopResponse(BaseModel):
 
 
 @router.post("/start", response_model=RecordingStatus)
-async def start_recording():
-    recorder = get_recorder()
+async def start_recording(recorder: MicrophoneRecorder = Depends(get_recorder)):
     if recorder.is_recording:
         raise HTTPException(status_code=409, detail="Already recording")
     await recorder.start()
@@ -32,8 +31,7 @@ async def start_recording():
 
 
 @router.post("/stop", response_model=StopResponse)
-async def stop_recording():
-    recorder = get_recorder()
+async def stop_recording(recorder: MicrophoneRecorder = Depends(get_recorder)):
     if not recorder.is_recording:
         raise HTTPException(status_code=409, detail="Not recording")
     duration = recorder.duration_seconds
@@ -45,8 +43,7 @@ async def stop_recording():
 
 
 @router.get("/status", response_model=RecordingStatus)
-async def recording_status():
-    recorder = get_recorder()
+async def recording_status(recorder: MicrophoneRecorder = Depends(get_recorder)):
     return RecordingStatus(
         is_recording=recorder.is_recording,
         duration_seconds=recorder.duration_seconds,

@@ -144,6 +144,31 @@ async def test_last_duration_persists_after_stop(audio_settings, mock_stream):
     assert recorder.last_duration_seconds > 7.0
 
 
+# --- cleanup() ---
+
+
+@pytest.mark.asyncio
+async def test_cleanup_stops_and_closes_open_stream(audio_settings, mock_stream):
+    _, stream_instance = mock_stream
+    recorder = MicrophoneRecorder(audio_settings)
+
+    await recorder.start()
+    _simulate_audio_callback(recorder, num_blocks=3)
+    recorder.cleanup()
+
+    stream_instance.stop.assert_called_once()
+    stream_instance.close.assert_called_once()
+    assert recorder.is_recording is False
+
+
+def test_cleanup_noop_when_never_started(audio_settings):
+    recorder = MicrophoneRecorder(audio_settings)
+
+    recorder.cleanup()  # must not raise
+
+    assert recorder.is_recording is False
+
+
 # --- Config validation ---
 
 

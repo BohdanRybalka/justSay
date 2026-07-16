@@ -108,3 +108,19 @@ class MicrophoneRecorder(AudioRecorder):
     def last_duration_seconds(self) -> float:
         """Duration of the most recently completed recording, or 0.0 if never stopped."""
         return self._final_duration
+
+    def cleanup(self) -> None:
+        """Release the audio stream if one is open. Safe to call any time,
+        including when never started. Discards buffered frames without writing
+        a WAV — call on app shutdown, not as a substitute for stop()."""
+        with self._lock:
+            stream = self._stream
+            self._stream = None
+            self._recording = False
+            self._frames = []
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
