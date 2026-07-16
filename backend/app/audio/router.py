@@ -1,7 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+import asyncio
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.audio import MicrophoneRecorder, get_recorder
+from app.core.utils import sse_event
 
 
 router = APIRouter()
@@ -48,4 +52,24 @@ async def recording_status(recorder: MicrophoneRecorder = Depends(get_recorder))
         is_recording=recorder.is_recording,
         duration_seconds=recorder.duration_seconds,
         level_db=recorder.level_db,
+    )
+
+
+async def _level_stream(request: Request, recorder: MicrophoneRecorder):
+    while True:
+        if await request.is_disconnected():
+            return
+        if not recorder.is_recording:
+            yield sse_event("done", {"is_recording": False})
+            return
+        yield sse_event("level", {"level_db": recorder.level_db, "is_recording": True})
+        await asyncio.sleep(0.1)
+
+
+@router.get("/level-stream")
+async def level_stream(request: Request, recorder: MicrophoneRecorder = Depends(get_recorder)):
+    return StreamingResponse(
+        _level_stream(request, recorder),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

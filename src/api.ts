@@ -364,3 +364,66 @@ export function sseStream(
 
   return controller;
 }
+
+// --- SSE helper for the live microphone level meter ---
+
+export interface LevelStreamEvent {
+  level_db: number;
+  is_recording: boolean;
+}
+
+export function levelStream(
+  onLevel: (data: LevelStreamEvent) => void,
+  onDone: () => void,
+  onError: (error: string) => void,
+): AbortController {
+  const controller = new AbortController();
+
+  fetch(`${BASE_URL}/audio/level-stream`, {
+    method: "GET",
+    signal: controller.signal,
+  })
+    .then(async (resp) => {
+      if (!resp.ok || !resp.body) {
+        onError(`HTTP ${resp.status}`);
+        return;
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        let currentEvent = "";
+        for (const line of lines) {
+          if (line.startsWith("event: ")) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith("data: ")) {
+            try {
+              const data: LevelStreamEvent = JSON.parse(line.slice(6));
+              if (currentEvent === "done") {
+                onDone();
+              } else {
+                onLevel(data);
+              }
+            } catch {
+              // skip malformed JSON
+            }
+          }
+        }
+      }
+    })
+    .catch((err) => {
+      if (err.name !== "AbortError") {
+        onError(String(err));
+      }
+    });
+
+  return controller;
+}

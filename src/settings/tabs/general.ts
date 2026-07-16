@@ -1,4 +1,4 @@
-import { api, type UserSettings } from "../../api";
+import { api, levelStream, type UserSettings } from "../../api";
 import { saveSettings } from "../settings";
 import { escapeHtml } from "../html";
 import { renderKeys } from "./keys";
@@ -103,24 +103,26 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   const levelFill = container.querySelector<HTMLElement>("#level-fill")!;
 
   let isRecording = false;
-  let levelInterval: ReturnType<typeof setInterval> | null = null;
+  let levelStreamAbort: AbortController | null = null;
 
-  function startLevelPolling(fill: HTMLElement) {
-    stopLevelPolling();
-    levelInterval = setInterval(async () => {
-      try {
-        const status = await api.audioStatus();
+  function startLevelStream(fill: HTMLElement) {
+    stopLevelStream();
+    levelStreamAbort = levelStream(
+      (data) => {
         // dBFS range: -60 (silent) to 0 (max). Map to 0-100%.
-        const pct = Math.max(0, Math.min(100, ((status.level_db + 60) / 60) * 100));
+        const pct = Math.max(0, Math.min(100, ((data.level_db + 60) / 60) * 100));
         fill.style.width = `${pct}%`;
-      } catch { /* ignore */ }
-    }, 100);
+      },
+      () => { /* server closed the stream because recording stopped; the
+                 "Stop" click branch already resets the fill explicitly */ },
+      () => { /* ignore transport errors, mirrors the old catch-all */ },
+    );
   }
 
-  function stopLevelPolling() {
-    if (levelInterval) {
-      clearInterval(levelInterval);
-      levelInterval = null;
+  function stopLevelStream() {
+    if (levelStreamAbort) {
+      levelStreamAbort.abort();
+      levelStreamAbort = null;
     }
   }
 
@@ -132,7 +134,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
       isRecording = false;
       btnTest.textContent = "Record";
       recLabel.textContent = "Click to test microphone";
-      stopLevelPolling();
+      stopLevelStream();
       levelFill.style.width = "0%";
     } else {
       // Check if already recording (widget might be using it)
@@ -149,7 +151,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
         isRecording = true;
         btnTest.textContent = "Stop";
         recLabel.textContent = "Recording...";
-        startLevelPolling(levelFill);
+        startLevelStream(levelFill);
       } catch (e) {
         recLabel.textContent = "Failed to start";
         console.error(e);
@@ -379,7 +381,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     recording = false;
     destroyed = true;
     if (debounceTimer) clearTimeout(debounceTimer);
-    stopLevelPolling();
+    stopLevelStream();
     if (isRecording) {
       api.audioStop().catch(() => {});
     }
