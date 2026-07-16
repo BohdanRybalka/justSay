@@ -16,6 +16,7 @@ full reasoning.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from typing import Protocol
 
@@ -59,6 +60,16 @@ LOCAL_MISSING_MODEL_REASON = (
 )
 
 _cache_lock = threading.Lock()
+# Serializes the entire (LOCAL, LOCAL) probe -> decide -> cleanup-or-reuse ->
+# cache-write sequence end to end, so at most one such resolution is ever
+# in flight. Must be an asyncio.Lock, not threading.Lock: the critical
+# section spans a genuine `await` (the Ollama HTTP probe), and a
+# threading.Lock held across an await would block the whole event-loop
+# thread instead of suspending the waiting coroutine. The Cloud/mixed-mode
+# branch below never awaits while holding a stale-instance reference and
+# never reuses-or-cleans-up across an await, so it has no equivalent race
+# and keeps using only the lightweight _cache_lock.
+_local_reprobe_lock = asyncio.Lock()
 _cached_provider: EmbeddingProvider | None = None
 _cached_reason: str | None = None
 _cached_key: tuple[ProviderMode, ProviderMode] | None = None
@@ -84,41 +95,57 @@ async def resolve_embedding_provider(
     ``LocalEmbeddingProvider`` instance is reused rather than reconstructed.
     Cloud and mixed-mode results are cached as before — neither key ever
     enters this re-probe branch.
+
+    Concurrent ``(LOCAL, LOCAL)`` callers queue behind ``_local_reprobe_lock``
+    and run their entire probe/decide/cleanup-or-reuse/cache-write sequence
+    strictly one at a time, so a later call always observes the prior call's
+    fully-committed result before making its own cleanup-or-reuse decision.
+    This does not change the no-coalescing design above: each queued call
+    still independently re-probes Ollama (N concurrent callers still make N
+    sequential HTTP round-trips, just serialized rather than racing).
+    Cloud/mixed-mode resolution is unaffected and keeps using only
+    ``_cache_lock``.
     """
     global _cached_provider, _cached_reason, _cached_key
 
     key = (stt.mode, llm.mode)
-    is_local_key = key == (ProviderMode.LOCAL, ProviderMode.LOCAL)
-    with _cache_lock:
-        cache_hit = _cached_key == key
-        if cache_hit and not is_local_key:
-            return _cached_provider, _cached_reason
-        stale_local_provider = _cached_provider if (cache_hit and is_local_key) else None
 
-    provider: EmbeddingProvider | None
-    reason: str | None
+    if key == (ProviderMode.LOCAL, ProviderMode.LOCAL):
+        from app.embeddings.local import LocalEmbeddingProvider, is_model_available
+
+        async with _local_reprobe_lock:
+            with _cache_lock:
+                stale_local_provider = _cached_provider if _cached_key == key else None
+
+            if await is_model_available(llm, emb.local_model):
+                provider: EmbeddingProvider | None = stale_local_provider or LocalEmbeddingProvider(
+                    ollama_host=llm.ollama_host, model=emb.local_model
+                )
+                reason: str | None = None
+            else:
+                if stale_local_provider is not None:
+                    try:
+                        stale_local_provider.cleanup()
+                    except Exception:
+                        pass
+                provider = None
+                reason = LOCAL_MISSING_MODEL_REASON
+
+            with _cache_lock:
+                _cached_provider = provider
+                _cached_reason = reason
+                _cached_key = key
+        return provider, reason
+
+    with _cache_lock:
+        if _cached_key == key:
+            return _cached_provider, _cached_reason
 
     if stt.mode == ProviderMode.CLOUD and llm.mode == ProviderMode.CLOUD:
         from app.embeddings.cloud import CloudEmbeddingProvider  # lazy: imports google-genai
 
         provider = CloudEmbeddingProvider(gemini_api_key=stt.gemini_api_key, model=emb.cloud_model)
         reason = None
-    elif is_local_key:
-        from app.embeddings.local import LocalEmbeddingProvider, is_model_available
-
-        if await is_model_available(llm, emb.local_model):
-            provider = stale_local_provider or LocalEmbeddingProvider(
-                ollama_host=llm.ollama_host, model=emb.local_model
-            )
-            reason = None
-        else:
-            if stale_local_provider is not None:
-                try:
-                    stale_local_provider.cleanup()
-                except Exception:
-                    pass
-            provider = None
-            reason = LOCAL_MISSING_MODEL_REASON
     else:
         provider = None
         reason = MIXED_MODE_REASON

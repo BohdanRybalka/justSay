@@ -9,6 +9,7 @@ bypass cannot pass.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -226,6 +227,84 @@ async def test_available_cache_reuses_instance_while_still_available():
     local_ctor.assert_called_once()
     assert avail.call_count == 2
     fake_local.cleanup.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_local_calls_serialize_and_stay_consistent():
+    """Two concurrent (LOCAL, LOCAL) calls must never interleave their
+    probe/decide/cleanup-or-reuse/cache-write sequence. A hand-written
+    async probe (not a plain AsyncMock) tracks how many calls are
+    mid-probe at once via a shared counter incremented on entry and
+    decremented on exit, with a real `await asyncio.sleep(0)` yield point
+    in between — if `_local_reprobe_lock`'s scope were wrong, both
+    coroutines could be mid-probe simultaneously and the counter would
+    observe 2. The two calls' probes return different results (True then
+    False, by call order), which under correct serialization means the
+    first call resolves to a fresh provider and the second — observing
+    that committed result — flips it to unavailable and cleans it up
+    exactly once."""
+    stt, llm, emb = _settings(ProviderMode.LOCAL, ProviderMode.LOCAL)
+    fake_local = MagicMock(name="LocalEmbeddingProvider-instance")
+
+    in_flight = 0
+    max_in_flight = 0
+    call_count = 0
+    results = [True, False]
+
+    async def instrumented_is_model_available(*args, **kwargs):
+        nonlocal in_flight, max_in_flight, call_count
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        await asyncio.sleep(0)
+        assert in_flight == 1, "a second probe started while one was still mid-flight"
+        result = results[call_count]
+        call_count += 1
+        in_flight -= 1
+        return result
+
+    with (
+        patch("app.embeddings.local.LocalEmbeddingProvider", return_value=fake_local),
+        patch(
+            "app.embeddings.local.is_model_available",
+            new=instrumented_is_model_available,
+        ),
+    ):
+        result1, result2 = await asyncio.gather(
+            resolve_embedding_provider(stt, llm, emb),
+            resolve_embedding_provider(stt, llm, emb),
+        )
+
+    assert max_in_flight == 1
+    assert {result1, result2} == {(fake_local, None), (None, LOCAL_MISSING_MODEL_REASON)}
+    fake_local.cleanup.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_local_calls_each_reprobe_no_coalescing():
+    """Serializing (LOCAL, LOCAL) resolutions behind `_local_reprobe_lock`
+    must not accidentally coalesce concurrent callers into a single probe:
+    3 concurrent calls still make 3 independent `is_model_available()`
+    round-trips (Spec 006/008's no-coalescing design, unchanged), while
+    still reusing the same LocalEmbeddingProvider instance across all of
+    them, now proven under real concurrency rather than just sequentially."""
+    stt, llm, emb = _settings(ProviderMode.LOCAL, ProviderMode.LOCAL)
+    fake_local = MagicMock(name="LocalEmbeddingProvider-instance")
+
+    with (
+        patch("app.embeddings.local.LocalEmbeddingProvider", return_value=fake_local),
+        patch(
+            "app.embeddings.local.is_model_available", new=AsyncMock(return_value=True)
+        ) as avail,
+    ):
+        results = await asyncio.gather(
+            resolve_embedding_provider(stt, llm, emb),
+            resolve_embedding_provider(stt, llm, emb),
+            resolve_embedding_provider(stt, llm, emb),
+        )
+
+    assert avail.call_count == 3
+    assert all(provider is fake_local for provider, _ in results)
+    assert all(reason is None for _, reason in results)
 
 
 # --- "Disabled means disabled" — closes the silent-fallback failure mode --
