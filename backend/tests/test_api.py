@@ -44,6 +44,35 @@ async def test_set_stt_mode_accepts_json_object(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "style, expected_task",
+    [
+        ("normal", "dictation_cleanup"),
+        ("ai_prompt", "ai_prompt_structuring"),
+        ("unknown_style", "dictation_cleanup"),
+    ],
+)
+async def test_llm_process_maps_style_to_task(client, style, expected_task):
+    """`POST /llm/process`'s `style` field must map to the right generation
+    task before reaching the provider — this is the task-identifying
+    mechanism spec 016 designed for the only HTTP entry point."""
+    fake_provider = AsyncMock()
+    fake_provider.model_name = "groq/test"
+    fake_provider.process = AsyncMock(return_value="processed")
+
+    with patch("app.llm.router.get_llm_provider", return_value=fake_provider):
+        resp = await client.post(
+            "/llm/process",
+            json={"text": "raw text", "system_prompt": "clean it", "style": style},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["result"] == "processed"
+    fake_provider.process.assert_awaited_once()
+    assert fake_provider.process.call_args.kwargs["task"] == expected_task
+
+
+@pytest.mark.asyncio
 async def test_set_llm_mode_accepts_json_object(client):
     resp = await client.put("/llm/mode", json={"mode": "local"})
     assert resp.status_code == 200

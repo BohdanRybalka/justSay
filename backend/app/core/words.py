@@ -181,7 +181,7 @@ async def compute_insights() -> InsightsResponse:
     provider = get_llm_provider(settings.llm)
     word_block = "\n".join(f"{w.word}: {w.count}" for w in top.items)
     user_msg = f"Top words from my recent dictations:\n{word_block}"
-    raw = await provider.process(user_msg, _INSIGHTS_SYSTEM_PROMPT, temperature=0.4)
+    raw = await provider.process(user_msg, _INSIGHTS_SYSTEM_PROMPT, task="insights")
 
     lines = [ln.strip().lstrip("-•* \t") for ln in raw.splitlines()]
     insights = [ln for ln in lines if ln][:4]
