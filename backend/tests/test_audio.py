@@ -169,6 +169,24 @@ def test_cleanup_noop_when_never_started(audio_settings):
     assert recorder.is_recording is False
 
 
+@pytest.mark.asyncio
+async def test_cleanup_twice_is_noop_on_second_call(audio_settings, mock_stream):
+    """cleanup() must be safe to call repeatedly. The second call on an
+    already-cleaned-up recorder must not raise and must not re-invoke
+    stream.stop()/close() a second time."""
+    _, stream_instance = mock_stream
+    recorder = MicrophoneRecorder(audio_settings)
+
+    await recorder.start()
+    _simulate_audio_callback(recorder, num_blocks=3)
+    recorder.cleanup()
+    recorder.cleanup()  # second call — must be a genuine no-op
+
+    stream_instance.stop.assert_called_once()
+    stream_instance.close.assert_called_once()
+    assert recorder.is_recording is False
+
+
 # --- Config validation ---
 
 

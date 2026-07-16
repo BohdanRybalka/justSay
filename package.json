@@ -15,7 +15,8 @@
     "backend:install": "cd backend && pip install -e \".[dev,audio,cloud]\"",
     "setup": "npm install && npm run backend:install",
     "test": "cd backend && python -m pytest tests/ -v",
-    "test:frontend": "vitest run"
+    "test:frontend": "vitest run",
+    "test:rust": "cd src-tauri && cargo test"
   },
   "dependencies": {
     "@tauri-apps/api": "~2.10.0",
