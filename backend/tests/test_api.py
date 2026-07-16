@@ -3,6 +3,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.audio import get_recorder
+from app.main import app
 from app.pipeline.service import ProcessingResult
 
 
@@ -110,7 +112,8 @@ async def test_dictate_zero_duration_passes_none_to_pipeline(client, tmp_path):
 
     recorder = _make_recorder_mock(duration=0.0, audio_path=audio_file)
 
-    with patch("app.pipeline.router.get_recorder", return_value=recorder), patch(
+    app.dependency_overrides[get_recorder] = lambda: recorder
+    with patch(
         "app.pipeline.router.process_audio", new_callable=AsyncMock
     ) as mock_process:
         mock_process.return_value = _make_pipeline_result()
@@ -127,7 +130,8 @@ async def test_dictate_positive_duration_forwarded_to_pipeline(client, tmp_path)
 
     recorder = _make_recorder_mock(duration=7.5, audio_path=audio_file)
 
-    with patch("app.pipeline.router.get_recorder", return_value=recorder), patch(
+    app.dependency_overrides[get_recorder] = lambda: recorder
+    with patch(
         "app.pipeline.router.process_audio", new_callable=AsyncMock
     ) as mock_process:
         mock_process.return_value = _make_pipeline_result()

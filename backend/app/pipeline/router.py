@@ -4,10 +4,10 @@ import logging
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from app.audio import get_recorder
+from app.audio import MicrophoneRecorder, get_recorder
 from app.core.audio_validation import validate_audio_upload
 from app.core.config import settings
 from app.core.constants import MAX_UPLOAD_SIZE
@@ -33,6 +33,7 @@ async def dictate(
     language: str = "uk",
     style: str = "normal",
     copy_to_clipboard: bool = True,
+    recorder: MicrophoneRecorder = Depends(get_recorder),
 ):
     """One-shot: stop recording -> transcribe -> clipboard.
 
@@ -40,7 +41,6 @@ async def dictate(
     The recorder reports the captured duration via ``last_duration_seconds`` so
     the pipeline can route short audio to Groq without re-reading the WAV.
     """
-    recorder = get_recorder()
     if not recorder.is_recording:
         raise HTTPException(status_code=409, detail="Not recording. Call POST /audio/start first")
 
