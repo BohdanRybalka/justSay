@@ -138,3 +138,52 @@ async def test_dictate_positive_duration_forwarded_to_pipeline(client, tmp_path)
         await client.post("/pipeline/dictate")
 
     assert mock_process.call_args.kwargs["audio_duration"] == 7.5
+
+
+# --- /audio/level-stream --------------------------------------------
+
+class _FakeStreamingRecorder:
+    """Fake recorder whose is_recording flips False after N reads — the
+    stream's termination is deterministic on the fake's own read-count
+    exhaustion, not on request.is_disconnected()."""
+
+    def __init__(self, recording_reads: int, level_db: float = -12.3):
+        self._remaining = recording_reads
+        self.level_db = level_db
+
+    @property
+    def is_recording(self) -> bool:
+        if self._remaining > 0:
+            self._remaining -= 1
+            return True
+        return False
+
+
+@pytest.mark.asyncio
+async def test_level_stream_emits_level_frames_then_done(client):
+    app.dependency_overrides[get_recorder] = lambda: _FakeStreamingRecorder(
+        recording_reads=2
+    )
+    async with client.stream("GET", "/audio/level-stream") as resp:
+        assert resp.status_code == 200
+        body = b""
+        async for chunk in resp.aiter_bytes():
+            body += chunk
+
+    assert body.count(b"event: level") == 2
+    assert body.count(b"event: done") == 1
+
+
+@pytest.mark.asyncio
+async def test_level_stream_not_recording_emits_only_done(client):
+    app.dependency_overrides[get_recorder] = lambda: _FakeStreamingRecorder(
+        recording_reads=0
+    )
+    async with client.stream("GET", "/audio/level-stream") as resp:
+        assert resp.status_code == 200
+        body = b""
+        async for chunk in resp.aiter_bytes():
+            body += chunk
+
+    assert b"event: level" not in body
+    assert body.count(b"event: done") == 1
