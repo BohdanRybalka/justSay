@@ -56,9 +56,12 @@ async def get_config():
 
 class GpuInfo(BaseModel):
     name: str
+    vendor: str
     vram_total_mb: int
-    vram_used_mb: int
-    vram_free_mb: int
+    # Only the torch.cuda probe source has a live used/free split — the
+    # Windows-registry AMD/Intel source only ever has a VRAM total.
+    vram_used_mb: int | None
+    vram_free_mb: int | None
 
 
 class ResourceInfo(BaseModel):
@@ -114,23 +117,21 @@ def _collect_resources() -> ResourceInfo:
 
 
 def _get_gpu_info() -> GpuInfo | None:
-    try:
-        import torch
+    """Populate the Resources tab's GPU row for any detected vendor, not just NVIDIA.
 
-        if not torch.cuda.is_available():
-            return None
+    `vram_used_mb`/`vram_free_mb` stay `None` for the AMD/Intel registry
+    source, which has no live-usage reading (see `app.core.gpu_probe`).
+    """
+    from app.core.gpu_probe import GpuVendor, probe_gpu
 
-        props = torch.cuda.get_device_properties(0)
-        total = props.total_mem
-        reserved = torch.cuda.memory_reserved(0)
-        allocated = torch.cuda.memory_allocated(0)
-        free = total - reserved
-
-        return GpuInfo(
-            name=props.name,
-            vram_total_mb=bytes_to_mb(total),
-            vram_used_mb=bytes_to_mb(allocated),
-            vram_free_mb=bytes_to_mb(free),
-        )
-    except (ImportError, Exception):
+    result = probe_gpu()
+    if result.vendor == GpuVendor.NONE:
         return None
+
+    return GpuInfo(
+        name=result.name or "Unknown GPU",
+        vendor=result.vendor.value,
+        vram_total_mb=result.vram_total_mb or 0,
+        vram_used_mb=result.vram_used_mb,
+        vram_free_mb=result.vram_free_mb,
+    )

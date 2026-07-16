@@ -79,6 +79,10 @@ export interface LocalSttStatus {
   model_ram_mb: number | null;
   gpu_available: boolean;
   gpu_name: string | null;
+  /** "apple" on macOS arm64, else the detected vendor ("nvidia"/"amd"/"intel"/"none").
+   *  Populated even when gpu_available is false — AMD/Intel are detected but
+   *  not yet STT-accelerated (faster-whisper has no non-NVIDIA GPU backend). */
+  gpu_vendor: string;
   device: string;
   compute_type: string;
   last_error: string | null;
@@ -99,13 +103,21 @@ export interface LocalLlmStatus {
   model_loaded: boolean;
   vram_used_bytes: number | null;
   available_models: OllamaModel[];
+  /** Best-effort AMD/Intel guidance (e.g. nudging toward OLLAMA_VULKAN=1, or
+   *  confirming acceleration appears active). Null for NVIDIA/no-GPU, and for
+   *  AMD/Intel when there's nothing actionable to say yet. Not a claim about
+   *  which backend Ollama actually picked — its API doesn't report that. */
+  gpu_hint: string | null;
 }
 
 export interface GpuInfo {
   name: string;
+  vendor: string;
   vram_total_mb: number;
-  vram_used_mb: number;
-  vram_free_mb: number;
+  /** Only populated via the torch.cuda detection source — null for the
+   *  Windows-registry AMD/Intel source, which has no live-usage reading. */
+  vram_used_mb: number | null;
+  vram_free_mb: number | null;
 }
 
 export interface ResourceInfo {

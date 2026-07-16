@@ -10,6 +10,18 @@ import { escapeHtml } from "../html";
 const WHISPER_MODELS = ["large-v3-turbo", "large-v3", "large-v2", "medium", "small", "base", "tiny"];
 const WHISPER_DEVICES = ["auto", "cpu", "cuda"];
 
+/** Label for the "auto" device option — vendor-derived, not a hardcoded "CUDA".
+ *  NVIDIA and Apple Silicon are the only vendors that make gpu_available true
+ *  for STT today (faster-whisper has no AMD/Intel backend; macOS arm64 uses
+ *  MLX/Metal instead of faster-whisper's device string), but deriving from
+ *  gpu_vendor keeps this honest if that ever changes. */
+function autoDeviceLabel(s: LocalSttStatus): string {
+  if (!s.gpu_available) return "CPU";
+  if (s.gpu_vendor === "nvidia") return "CUDA";
+  if (s.gpu_vendor === "apple") return "Metal";
+  return "CPU";
+}
+
 // SSE abort controller for STT install stream.
 let sttAbort: AbortController | null = null;
 
@@ -138,11 +150,18 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
       `<option value="${m}" ${m === s.model_name ? "selected" : ""}>${m}</option>`
     ).join("");
     const deviceOptions = WHISPER_DEVICES.map(d =>
-      `<option value="${d}" ${d === s.device ? "selected" : ""}>${d}${d === "auto" ? ` (${s.gpu_available ? "CUDA" : "CPU"})` : ""}</option>`
+      `<option value="${d}" ${d === s.device ? "selected" : ""}>${d}${d === "auto" ? ` (${autoDeviceLabel(s)})` : ""}</option>`
     ).join("");
 
     const errorBlock = error
       ? `<div class="local-status-error"><span class="ls-label">Error</span><span class="ls-error-text">${escapeHtml(error)}</span></div>`
+      : "";
+
+    // Distinct from the accelerated-GPU row below: AMD/Intel are detected
+    // (name + vendor known) but faster-whisper has no non-NVIDIA backend, so
+    // STT stays CPU-bound for them today.
+    const detectedNotAcceleratedRow = !s.gpu_available && (s.gpu_vendor === "amd" || s.gpu_vendor === "intel")
+      ? `<div class="local-status-row"><span class="ls-label">GPU</span><span class="ls-value">${escapeHtml(s.gpu_name ?? s.gpu_vendor)} <span style="color:var(--text-dim)">(detected, not yet accelerated for STT)</span></span></div>`
       : "";
 
     panel.innerHTML = `
@@ -161,6 +180,7 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
           <select id="stt-device-sel" ${dropdownDisabled}>${deviceOptions}</select>
         </div>
         ${s.gpu_available ? `<div class="local-status-row"><span class="ls-label">GPU</span><span class="ls-value">${s.gpu_name}</span></div>` : ""}
+        ${detectedNotAcceleratedRow}
         ${errorBlock}
       </div>
     `;
@@ -290,15 +310,23 @@ async function updateResources(panel: HTMLElement): Promise<void> {
       ? Math.min((r.ram_used_gb / r.ram_total_gb) * 100, 100)
       : 0;
 
+    // vram_used_mb is null for the Windows-registry AMD/Intel source (no
+    // live-usage reading) — show the total only, no usage bar/percent.
     const gpuHtml = r.gpu
-      ? renderResourceBar(
-          "GPU VRAM",
-          r.gpu.name,
-          r.gpu.vram_total_mb > 0
-            ? Math.min((r.gpu.vram_used_mb / r.gpu.vram_total_mb) * 100, 100)
-            : 0,
-          `${(r.gpu.vram_used_mb / 1024).toFixed(1)} / ${(r.gpu.vram_total_mb / 1024).toFixed(1)} GB`,
-        )
+      ? r.gpu.vram_used_mb !== null
+        ? renderResourceBar(
+            "GPU VRAM",
+            r.gpu.name,
+            r.gpu.vram_total_mb > 0
+              ? Math.min((r.gpu.vram_used_mb / r.gpu.vram_total_mb) * 100, 100)
+              : 0,
+            `${(r.gpu.vram_used_mb / 1024).toFixed(1)} / ${(r.gpu.vram_total_mb / 1024).toFixed(1)} GB`,
+          )
+        : renderResourceRowNoBar(
+            "GPU VRAM",
+            r.gpu.name,
+            `${(r.gpu.vram_total_mb / 1024).toFixed(1)} GB total`,
+          )
       : "";
 
     panel.innerHTML = `
@@ -343,6 +371,20 @@ function renderResourceBar(label: string, sub: string, percent: number, valueTex
         <span class="resource-value">${valueText}</span>
       </div>
       <div class="resource-bar"><div class="resource-bar-fill ${tone}" style="width:${safePct.toFixed(1)}%"></div></div>
+      <div class="resource-sub">${sub}</div>
+    </div>
+  `;
+}
+
+/** Same row layout as `renderResourceBar` but without the fill bar — used
+ *  when only a total is known (no live usage reading to compute a percent). */
+function renderResourceRowNoBar(label: string, sub: string, valueText: string): string {
+  return `
+    <div class="resource-row">
+      <div class="resource-row-head">
+        <span class="resource-label">${label}</span>
+        <span class="resource-value">${valueText}</span>
+      </div>
       <div class="resource-sub">${sub}</div>
     </div>
   `;

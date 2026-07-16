@@ -153,9 +153,43 @@ def test_local_stt_model_name():
     assert provider.model_name == "whisper/large-v3"
 
 
-def test_local_stt_device_detection_no_torch():
+def test_local_stt_device_detection_no_torch(monkeypatch):
+    """`_detect_device()` delegates to `gpu_probe.probe_gpu()`, so torch
+    absence alone no longer forces a deterministic result — `probe_gpu()`'s
+    unmocked nvidia-smi/Windows-registry fallback sources would execute for
+    real and could return "cuda" on a machine with an actual NVIDIA GPU.
+    Mock `probe_gpu()` directly so this test's outcome is independent of the
+    running machine's real hardware (spec 014, round 2)."""
+    from app.core.gpu_probe import GpuProbeResult, GpuVendor
+
+    monkeypatch.setattr(
+        "app.core.gpu_probe.probe_gpu",
+        lambda: GpuProbeResult(vendor=GpuVendor.NONE),
+    )
     with patch.dict("sys.modules", {"torch": None}):
         assert LocalSTTProvider._detect_device() == "cpu"
+
+
+def test_local_stt_device_detection_returns_cpu_for_amd_and_logs_vendor(monkeypatch, caplog):
+    """AMD/Intel GPUs are detected but faster-whisper (CTranslate2) has no
+    non-NVIDIA backend — `_detect_device` still returns "cpu" but now logs
+    the vendor explicitly instead of staying silent (spec 014)."""
+    import logging
+
+    from app.core.gpu_probe import GpuProbeResult, GpuVendor
+
+    monkeypatch.setattr(
+        "app.core.gpu_probe.probe_gpu",
+        lambda: GpuProbeResult(vendor=GpuVendor.AMD, name="AMD Radeon RX 5700 XT"),
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.stt.local"):
+        device = LocalSTTProvider._detect_device()
+
+    assert device == "cpu"
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "AMD" in full_log
+    assert "AMD Radeon RX 5700 XT" in full_log
 
 
 @pytest.mark.asyncio

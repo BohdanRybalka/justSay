@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import httpx
 
+from app.core.gpu_probe import GpuProbeResult, GpuVendor
 from app.core.utils import sse_event
 from app.llm.config import LLMSettings
 from app.llm.local_setup import (
@@ -13,6 +14,7 @@ from app.llm.local_setup import (
     _get_version,
     _list_models,
     _check_loaded,
+    _compute_gpu_hint,
     _model_matches,
     _is_local_host,
 )
@@ -210,6 +212,10 @@ async def test_status_all_ready():
         patch("app.llm.local_setup._get_version", return_value="0.9.2"),
         patch("app.llm.local_setup._list_models", return_value=([], True, 3_341_680_640)),
         patch("app.llm.local_setup._check_loaded", return_value=(True, 1_800_000_000)),
+        patch(
+            "app.core.gpu_probe.probe_gpu",
+            return_value=GpuProbeResult(vendor=GpuVendor.NONE),
+        ),
     ):
         status = await check_status(settings)
 
@@ -230,12 +236,129 @@ async def test_status_model_not_pulled():
         patch("app.llm.local_setup._get_version", return_value="0.9.2"),
         patch("app.llm.local_setup._list_models", return_value=([], False, None)),
         patch("app.llm.local_setup._check_loaded", return_value=(False, None)),
+        patch(
+            "app.core.gpu_probe.probe_gpu",
+            return_value=GpuProbeResult(vendor=GpuVendor.NONE),
+        ),
     ):
         status = await check_status(settings)
 
     assert status.ollama_running is True
     assert status.model_downloaded is False
     assert status.model_size_bytes is None
+
+
+# --- _compute_gpu_hint (spec 014) ---
+
+
+def test_gpu_hint_none_for_nvidia():
+    """NVIDIA already has a real acceleration signal elsewhere — no hint needed."""
+    hint = _compute_gpu_hint(GpuVendor.NVIDIA.value, model_loaded=True, vram_used_bytes=None)
+    assert hint is None
+
+
+def test_gpu_hint_none_for_no_gpu():
+    hint = _compute_gpu_hint(GpuVendor.NONE.value, model_loaded=True, vram_used_bytes=1_000_000)
+    assert hint is None
+
+
+def test_gpu_hint_nudges_toward_vulkan_when_loaded_with_no_vram_usage():
+    """AMD/Intel + model loaded + no VRAM usage -> nudge toward OLLAMA_VULKAN=1."""
+    hint = _compute_gpu_hint(GpuVendor.AMD.value, model_loaded=True, vram_used_bytes=None)
+    assert hint is not None
+    assert "OLLAMA_VULKAN" in hint
+
+
+def test_gpu_hint_confirms_acceleration_when_vram_used():
+    """AMD/Intel + nonzero VRAM usage -> confirmation, not the Vulkan nudge."""
+    hint = _compute_gpu_hint(GpuVendor.INTEL.value, model_loaded=True, vram_used_bytes=512_000_000)
+    assert hint is not None
+    assert "OLLAMA_VULKAN" not in hint
+
+
+def test_gpu_hint_none_when_nothing_loaded_yet():
+    """AMD/Intel + nothing loaded yet -> nothing actionable to say yet."""
+    assert _compute_gpu_hint(GpuVendor.AMD.value, model_loaded=False, vram_used_bytes=None) is None
+
+
+@pytest.mark.asyncio
+async def test_check_status_populates_gpu_hint_for_amd():
+    """End-to-end wiring: check_status() must call probe_gpu() and set gpu_hint."""
+    settings = LLMSettings(ollama_host="http://localhost:11434", ollama_model="gemma3:4b")
+
+    with (
+        patch("app.llm.local_setup._check_health", return_value=True),
+        patch("app.llm.local_setup._get_version", return_value="0.9.2"),
+        patch("app.llm.local_setup._list_models", return_value=([], True, 3_341_680_640)),
+        patch("app.llm.local_setup._check_loaded", return_value=(True, None)),
+        patch(
+            "app.core.gpu_probe.probe_gpu",
+            return_value=GpuProbeResult(vendor=GpuVendor.AMD, name="AMD Radeon RX 5700 XT"),
+        ),
+    ):
+        status = await check_status(settings)
+
+    assert status.gpu_hint is not None
+    assert "OLLAMA_VULKAN" in status.gpu_hint
+
+
+@pytest.mark.asyncio
+async def test_check_status_gpu_hint_none_for_nvidia():
+    settings = LLMSettings(ollama_host="http://localhost:11434", ollama_model="gemma3:4b")
+
+    with (
+        patch("app.llm.local_setup._check_health", return_value=True),
+        patch("app.llm.local_setup._get_version", return_value="0.9.2"),
+        patch("app.llm.local_setup._list_models", return_value=([], True, 3_341_680_640)),
+        patch("app.llm.local_setup._check_loaded", return_value=(True, 1_800_000_000)),
+        patch(
+            "app.core.gpu_probe.probe_gpu",
+            return_value=GpuProbeResult(vendor=GpuVendor.NVIDIA, name="RTX 4090"),
+        ),
+    ):
+        status = await check_status(settings)
+
+    assert status.gpu_hint is None
+
+
+@pytest.mark.asyncio
+async def test_check_status_offloads_probe_gpu_via_asyncio_to_thread():
+    """Regression (spec 014, round 2): `check_status()` is `async def` and is
+    awaited directly from `llm/router.py`'s `GET /local/status` with no
+    thread offload at the router level — unlike the STT/Resources status
+    endpoints, whose plain-`def` functions the *router* wraps in
+    `asyncio.to_thread`. Its own `probe_gpu()` call — which chains into a
+    blocking `nvidia-smi` subprocess and a first-time `import torch` — must
+    therefore be wrapped in `await asyncio.to_thread(probe_gpu)` itself,
+    never called synchronously inline on the event loop.
+    """
+    settings = LLMSettings(ollama_host="http://localhost:11434", ollama_model="gemma3:4b")
+
+    calls: list = []
+
+    def fake_to_thread(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    with (
+        patch("app.llm.local_setup._check_health", return_value=True),
+        patch("app.llm.local_setup._get_version", return_value="0.9.2"),
+        patch("app.llm.local_setup._list_models", return_value=([], True, 3_341_680_640)),
+        patch("app.llm.local_setup._check_loaded", return_value=(True, None)),
+        patch(
+            "app.core.gpu_probe.probe_gpu",
+            return_value=GpuProbeResult(vendor=GpuVendor.AMD, name="AMD Radeon RX 5700 XT"),
+        ) as mock_probe,
+        patch(
+            "app.llm.local_setup.asyncio.to_thread", side_effect=fake_to_thread
+        ) as mock_to_thread,
+    ):
+        status = await check_status(settings)
+
+    mock_to_thread.assert_called_once()
+    assert calls == [mock_probe]
+    assert status.gpu_hint is not None
+    assert "OLLAMA_VULKAN" in status.gpu_hint
 
 
 # --- sse_event helper ---

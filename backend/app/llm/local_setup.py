@@ -39,6 +39,9 @@ class LocalLlmStatus(BaseModel):
     model_loaded: bool = False
     vram_used_bytes: int | None = None
     available_models: list[OllamaModel] = []
+    # Best-effort AMD/Intel guidance only — see `_compute_gpu_hint`. None for
+    # NVIDIA/NONE (nothing actionable) and for AMD/Intel with nothing to say yet.
+    gpu_hint: str | None = None
 
 
 async def check_status(llm_settings: LLMSettings) -> LocalLlmStatus:
@@ -63,7 +66,57 @@ async def check_status(llm_settings: LLMSettings) -> LocalLlmStatus:
             status.model_loaded = loaded
             status.vram_used_bytes = vram
 
+    # check_status() is `async def`, awaited directly with no thread offload
+    # at the router level (llm/router.py's GET /local/status), unlike the STT
+    # and Resources status endpoints. probe_gpu()'s chain includes a blocking
+    # nvidia-smi subprocess and a first-time `import torch` — call it via
+    # asyncio.to_thread so it can't stall the event loop for every concurrent
+    # request while running on this coroutine.
+    from app.core.gpu_probe import probe_gpu
+
+    probe_result = await asyncio.to_thread(probe_gpu)
+    status.gpu_hint = _compute_gpu_hint(
+        probe_result.vendor.value, status.model_loaded, status.vram_used_bytes
+    )
+
     return status
+
+
+def _compute_gpu_hint(
+    vendor: str, model_loaded: bool, vram_used_bytes: int | None
+) -> str | None:
+    """Best-effort AMD/Intel guidance — never a definitive backend report.
+
+    Ollama's REST API (`/api/ps`, `/api/tags`, `/api/version`, all read in
+    this file) exposes no field for which compute backend (ROCm/Vulkan/CPU)
+    it actually picked. This infers from `vram_used_bytes` (from `/api/ps`)
+    crossed with our own vendor probe — nothing more definitive is available.
+    `NVIDIA`/`NONE` get no hint: NVIDIA already has a real acceleration
+    signal elsewhere, and `NONE` has no GPU to talk about.
+
+    `vendor` is a plain `GpuVendor.value` string ("amd"/"intel"/...), not the
+    enum itself — `GpuVendor` is a str subclass so this compares identically,
+    and it lets this function (and its call site) avoid importing `GpuVendor`
+    at all, keeping the only `app.core.gpu_probe` import in this file the
+    lazy, point-of-use one for `probe_gpu` above.
+    """
+    if vendor not in ("amd", "intel"):
+        return None
+
+    if vram_used_bytes:
+        return (
+            "GPU acceleration appears active for this model (Ollama reports "
+            "non-zero VRAM usage)."
+        )
+
+    if model_loaded:
+        return (
+            "Model loaded but Ollama reports no VRAM usage for this GPU — it "
+            "may be running on CPU. Try OLLAMA_VULKAN=1 (or verify ROCm "
+            "support) to enable GPU acceleration."
+        )
+
+    return None
 
 
 async def _check_health(client: httpx.AsyncClient) -> bool:
