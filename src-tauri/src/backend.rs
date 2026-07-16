@@ -1,4 +1,5 @@
-//! Python backend lifecycle: spawn, health check, shutdown, HTTP client.
+//! Python backend lifecycle: spawn, health check, shutdown, HTTP client,
+//! crash-respawn watchdog.
 //!
 //! Production sidecar spawn flows through the Tauri shell plugin
 //! (`app.shell().command(...)`), which validates the path + args against
@@ -12,6 +13,11 @@
 //! interpreter against `backend/app.main:app`. This branch is intentionally
 //! NOT routed through the shell plugin — it has no fixed scope path and
 //! is debug-only.
+//!
+//! `spawn_watchdog()` polls `is_process_alive()` and respawns the backend
+//! on an unexpected crash, bounded by `MAX_RESPAWN_ATTEMPTS` with
+//! exponential backoff — see `docs/adr/006-backend-watchdog-respawn-on-crash.md`
+//! for the `SHUTDOWN_REQUESTED` race-closure rationale.
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -172,6 +178,26 @@ enum BackendProcess {
 }
 
 static BACKEND_PROCESS: Mutex<Option<BackendProcess>> = Mutex::new(None);
+
+/// Set by `shutdown()` as its literal first statement, before anything else
+/// runs. Polled by `spawn()`'s post-store recheck and by `spawn_watchdog()`'s
+/// loop to distinguish an intentional stop from a crash — see
+/// `docs/adr/006-backend-watchdog-respawn-on-crash.md` for the race this
+/// closes.
+///
+/// **One-way latch: never reset back to `false`.** Correctness depends on
+/// every `shutdown()` call site leading to the whole process exiting shortly
+/// after — true today for all of them (`RunEvent::Exit`, the main-thread
+/// panic hook, the Windows console Ctrl+C/close handler). A future
+/// `shutdown()` call site that does NOT lead to process exit would
+/// permanently and silently disable the watchdog for the rest of the
+/// session, since `is_shutdown_requested()` would never report `false`
+/// again.
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+fn is_shutdown_requested() -> bool {
+    SHUTDOWN_REQUESTED.load(Ordering::Acquire)
+}
 
 /// Shared `reqwest::Client` for all backend HTTP calls (IPC-triggered
 /// requests + the startup readiness poll). A `Client` owns a connection
@@ -493,8 +519,20 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         BackendProcess::Dev(child)
     };
 
-    let mut guard = BACKEND_PROCESS.lock().map_err(|e| e.to_string())?;
-    *guard = Some(backend);
+    {
+        let mut guard = BACKEND_PROCESS.lock().map_err(|e| e.to_string())?;
+        *guard = Some(backend);
+    }
+
+    // A shutdown() call may have landed while the child was still launching
+    // (real OS calls above take real wall-clock time, outside any lock) and
+    // lost the BACKEND_PROCESS lock race or found nothing to clean up yet.
+    // Rechecking here after releasing the lock closes both orphan-leak
+    // windows a second spawn() call opens — see
+    // docs/adr/006-backend-watchdog-respawn-on-crash.md.
+    if is_shutdown_requested() {
+        shutdown();
+    }
 
     Ok(())
 }
@@ -616,6 +654,22 @@ fn terminate_gracefully(
 
 /// Kill the backend process on shutdown.
 pub fn shutdown() {
+    SHUTDOWN_REQUESTED.store(true, Ordering::Release);
+    kill_current_process();
+}
+
+/// Terminate whatever process `BACKEND_PROCESS` currently tracks, if any —
+/// extracted verbatim from `shutdown()`'s former body, no behavioral change.
+///
+/// Deliberately NOT folded into `shutdown()` as a single function: the
+/// watchdog (`spawn_watchdog()`) needs this exact termination mechanics to
+/// kill a hung-but-never-confirmed-ready previous instance before a retry,
+/// without going through `shutdown()` itself — `shutdown()` also flips
+/// `SHUTDOWN_REQUESTED`, which is a one-way latch that is never reset back
+/// to `false` (see that static's doc comment). Calling `shutdown()` from a
+/// watchdog retry would permanently poison `is_shutdown_requested()` after
+/// the very first retry, defeating the watchdog for the rest of the session.
+fn kill_current_process() {
     let mut guard = match BACKEND_PROCESS.try_lock() {
         Ok(g) => g,
         Err(_) => return,
@@ -759,4 +813,126 @@ pub async fn request(
     }
 
     Ok(text)
+}
+
+const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const MAX_RESPAWN_ATTEMPTS: u32 = 3;
+
+fn respawn_backoff(attempt: u32) -> Duration {
+    Duration::from_secs(2u64.pow(attempt + 1)) // attempt 0/1/2 -> 2s/4s/8s
+}
+
+/// Background task: detect an unexpected backend crash (or hang) and
+/// respawn, bounded by `MAX_RESPAWN_ATTEMPTS` consecutive failures with
+/// exponential backoff. Started once from `lib.rs`'s `setup()` right after
+/// the initial `backend::spawn()` call — see
+/// `docs/adr/006-backend-watchdog-respawn-on-crash.md` for the full
+/// race-closure rationale behind the `SHUTDOWN_REQUESTED` checks below,
+/// which are a noise/latency optimization only; `spawn()`'s own post-store
+/// recheck is what actually guarantees correctness.
+///
+/// Health is tracked via a local `confirmed_healthy` flag, set only by
+/// `wait_for_ready()` succeeding — never by `is_process_alive()` alone. A
+/// hung child (e.g. OOM mid model-load, corrupted local model cache) stays
+/// "alive" per `is_process_alive()` forever without ever answering
+/// `/health`; conflating the two previously caused a hung respawn to
+/// silently reset the retry counter every poll tick, so the watchdog never
+/// gave up and never logged anything. Before each retry's `spawn()` call, a
+/// still-alive-but-never-confirmed instance is killed via
+/// `kill_current_process()` so the fresh spawn doesn't collide with it on
+/// the port.
+pub fn spawn_watchdog(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut attempt: u32 = 0;
+        // Confirmed via wait_for_ready(), NOT inferred from
+        // is_process_alive() alone. This call also subsumes the initial-
+        // readiness log that used to live as a separate fire-and-forget
+        // task in lib.rs's setup() (removed — see Files to modify).
+        let mut confirmed_healthy = match wait_for_ready().await {
+            Ok(()) => true,
+            Err(e) => {
+                log::error!("Backend watchdog: initial backend not ready: {}", e);
+                false
+            }
+        };
+
+        loop {
+            tokio::time::sleep(WATCHDOG_POLL_INTERVAL).await;
+            if is_shutdown_requested() {
+                return;
+            }
+
+            if confirmed_healthy {
+                if is_process_alive() {
+                    continue; // steady state: last-known-good, still running
+                }
+                // A confirmed-healthy process just died -- new episode.
+                confirmed_healthy = false;
+                attempt = 0;
+            }
+
+            if attempt >= MAX_RESPAWN_ATTEMPTS {
+                log::error!(
+                    "Backend watchdog: giving up after {} consecutive failed respawns",
+                    MAX_RESPAWN_ATTEMPTS
+                );
+                return;
+            }
+
+            let backoff = respawn_backoff(attempt);
+            log::warn!(
+                "Backend watchdog: respawning in {:?} (attempt {}/{})",
+                backoff,
+                attempt + 1,
+                MAX_RESPAWN_ATTEMPTS
+            );
+            tokio::time::sleep(backoff).await;
+            if is_shutdown_requested() {
+                return;
+            }
+
+            // The previous candidate may still be alive but was never
+            // confirmed ready (hung, not exited) -- kill it before a fresh
+            // spawn(), otherwise the new spawn's check_port_available()
+            // could collide with it on the port. A no-op (already gone) is
+            // safe and cheap if it already exited on its own during the
+            // backoff sleep.
+            if is_process_alive() {
+                log::warn!(
+                    "Backend watchdog: previous backend never became ready; terminating before respawn"
+                );
+                kill_current_process();
+            }
+
+            match spawn(app.clone()) {
+                Ok(()) => match wait_for_ready().await {
+                    Ok(()) => {
+                        log::info!("Backend watchdog: respawn succeeded");
+                        confirmed_healthy = true;
+                        attempt = 0;
+                    }
+                    Err(e) => {
+                        log::error!("Backend watchdog: respawn did not become ready: {}", e);
+                        attempt += 1;
+                    }
+                },
+                Err(e) => {
+                    log::error!("Backend watchdog: respawn failed: {}", e);
+                    attempt += 1;
+                }
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn respawn_backoff_follows_2_4_8_second_sequence() {
+        assert_eq!(respawn_backoff(0), Duration::from_secs(2));
+        assert_eq!(respawn_backoff(1), Duration::from_secs(4));
+        assert_eq!(respawn_backoff(2), Duration::from_secs(8));
+    }
 }

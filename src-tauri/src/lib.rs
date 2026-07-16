@@ -89,6 +89,12 @@ pub fn run() {
                 log::error!("Backend spawn failed: {}", e);
             }
 
+            // Watchdog: detect a crashed/never-came-up backend and respawn
+            // it (bounded retries with backoff) — same retry path handles
+            // both cases, deliberately not distinguished. See
+            // docs/adr/006-backend-watchdog-respawn-on-crash.md.
+            backend::spawn_watchdog(app.handle().clone());
+
             // Create widget window — transparent so the CSS-drawn rounded pill
             // renders identically on macOS and Windows (corners stay see-through).
             let _widget = WebviewWindowBuilder::new(
@@ -146,14 +152,6 @@ pub fn run() {
                     }
                 });
             }
-
-            // Wait for backend readiness
-            tauri::async_runtime::spawn(async move {
-                match backend::wait_for_ready().await {
-                    Ok(()) => log::info!("Backend is ready"),
-                    Err(e) => log::error!("Backend not ready: {}", e),
-                }
-            });
 
             Ok(())
         })
