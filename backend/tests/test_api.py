@@ -138,3 +138,15 @@ async def test_dictate_positive_duration_forwarded_to_pipeline(client, tmp_path)
         await client.post("/pipeline/dictate")
 
     assert mock_process.call_args.kwargs["audio_duration"] == 7.5
+
+
+@pytest.mark.asyncio
+async def test_get_recorder_raises_when_app_state_unset(client):
+    """get_recorder()'s RuntimeError guard (Spec 009's core migration
+    guarantee: no fallback-constructed recorder, ever) fires when no
+    dependency_overrides is set and app.state.recorder was never populated —
+    the `client` fixture's ASGITransport does not run the app's lifespan
+    context, so this is the default state of every test in this suite that
+    doesn't explicitly override get_recorder."""
+    with pytest.raises(RuntimeError, match="app.state.recorder is not set"):
+        await client.get("/audio/status")
