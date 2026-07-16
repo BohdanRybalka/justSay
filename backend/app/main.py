@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI):
     history.bootstrap(Path(us.output_dir))
     # Sync user settings into runtime config (modes, model choices, etc.)
     sync_to_runtime(us)
-    from app.audio.recorder import MicrophoneRecorder
+    from app.audio import MicrophoneRecorder
     app.state.recorder = MicrophoneRecorder(settings.audio)
     yield
     log.info("Backend shutdown: releasing model caches")
