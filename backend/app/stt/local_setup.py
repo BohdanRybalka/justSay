@@ -1,10 +1,12 @@
 """STT Local mode readiness checks — package detection, GPU, pip install."""
 
 import asyncio
+import json
 import logging
 import subprocess
 import sys
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from pydantic import BaseModel
 
@@ -117,13 +119,99 @@ def maybe_prewarm_local(stt_settings: STTSettings) -> None:
     """Fire-and-forget. No-op unless ``stt_settings.mode`` is LOCAL.
 
     Called from every place the active STT mode can change or need
-    re-warming: ``set_stt_mode()``, ``put_settings()``, and ``lifespan()`` —
-    not just the literal toggle click, so Local mode is always warm by the
-    time the first dictation request needs it.
+    re-warming: ``set_stt_mode()``, ``put_settings()``, and the manual
+    ``POST /stt/local/prewarm`` retry — not just the literal toggle click, so
+    Local mode is always warm by the time the first dictation request needs
+    it. NOT called from ``lifespan()`` — the automatic every-process-start
+    trigger goes through ``maybe_prewarm_local_at_startup()`` instead, which
+    adds crash-loop protection this function deliberately does not have (see
+    that function's docstring).
+
+    [Spec 023] Resets the startup crash-loop guard's on-disk counter to 0
+    on every explicit trigger (mode switch, a settings edit, or the manual
+    POST /stt/local/prewarm retry) -- a deliberate, user-initiated attempt
+    is a fresh start, decoupled from the automatic every-restart streak
+    maybe_prewarm_local_at_startup() tracks.
     """
     if stt_settings.mode != ProviderMode.LOCAL:
         return
+    _write_consecutive_incomplete_prewarms(0)
     asyncio.create_task(ensure_local_ready(stt_settings))
+
+
+MAX_CONSECUTIVE_INCOMPLETE_PREWARMS = 2
+_CRASH_GUARD_FILENAME = "prewarm_crash_guard.json"
+
+
+def _crash_guard_path() -> Path:
+    from app.core.app_paths import resolve_app_data_root
+
+    return resolve_app_data_root() / _CRASH_GUARD_FILENAME
+
+
+def _read_consecutive_incomplete_prewarms() -> int:
+    """Fail-open: a missing or corrupt marker reads as 0 -- never let a
+    corrupted file permanently block a legitimate prewarm attempt."""
+    try:
+        data = json.loads(_crash_guard_path().read_text())
+        return int(data.get("consecutive_incomplete_prewarms", 0))
+    except (OSError, ValueError, TypeError):
+        return 0
+
+
+def _write_consecutive_incomplete_prewarms(n: int) -> None:
+    path = _crash_guard_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"consecutive_incomplete_prewarms": n}))
+    except OSError:
+        log.warning("Could not persist prewarm crash-guard state at %s", path, exc_info=True)
+
+
+def should_skip_prewarm(consecutive_incomplete_starts: int) -> bool:
+    """Pure decision function -- unit tested directly, no filesystem
+    involved."""
+    return consecutive_incomplete_starts >= MAX_CONSECUTIVE_INCOMPLETE_PREWARMS
+
+
+def maybe_prewarm_local_at_startup(stt_settings: STTSettings) -> None:
+    """Startup-only entry point, called once from app.main.lifespan().
+
+    Guards against a crash loop: if the model load itself crashes the
+    process, an unconditional prewarm on every Spec 011 watchdog respawn
+    would re-attempt the same doomed load. Not used by set_stt_mode()/
+    put_settings()/the manual POST /stt/local/prewarm retry -- all three
+    call maybe_prewarm_local() directly and require an already-running,
+    already-healthy backend to receive the request, so none of them is part
+    of the automatic every-process-start loop this guards against.
+    """
+    if stt_settings.mode != ProviderMode.LOCAL:
+        return
+
+    consecutive = _read_consecutive_incomplete_prewarms()
+    if should_skip_prewarm(consecutive):
+        log.warning(
+            "Local STT prewarm skipped at startup: %d consecutive prewarm "
+            "attempts did not complete before the process restarted (the "
+            "backend likely crashed or hung during model load, e.g. "
+            "out-of-memory). Falling back to the existing on-demand load on "
+            "the first dictation request. Call POST /stt/local/prewarm "
+            "after addressing the underlying issue (free RAM, a smaller "
+            "model) to retry -- any explicit prewarm trigger resets this "
+            "counter.",
+            consecutive,
+        )
+        return
+
+    _write_consecutive_incomplete_prewarms(consecutive + 1)
+    asyncio.create_task(_prewarm_then_clear_crash_guard(stt_settings))
+
+
+async def _prewarm_then_clear_crash_guard(stt_settings: STTSettings) -> None:
+    try:
+        await ensure_local_ready(stt_settings)
+    finally:
+        _write_consecutive_incomplete_prewarms(0)
 
 
 async def ensure_local_ready(stt_settings: STTSettings) -> None:

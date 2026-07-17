@@ -93,19 +93,28 @@ def _force_faster_whisper_for_local(monkeypatch, request):
 
 @pytest.fixture(autouse=True)
 def _no_prewarm_by_default(monkeypatch, request):
-    """No-op `maybe_prewarm_local` for every test except those marked
-    `@pytest.mark.prewarm` — same opt-out shape as `_force_faster_whisper_for_local`.
+    """No-op `maybe_prewarm_local`/`maybe_prewarm_local_at_startup` for every
+    test except those marked `@pytest.mark.prewarm` — same opt-out shape as
+    `_force_faster_whisper_for_local`.
 
     Without this, any test that flips STT mode to "local" (e.g. the
     pre-existing `test_set_stt_mode_accepts_json_object`) would spawn a real
     background pip-install/model-download task during the suite. Also resets
     the module-level `_prewarm_error` latch after every test so a failure
     injected by one test can't leak into the next.
+
+    `maybe_prewarm_local_at_startup` (Spec 023) is no-op'd too so a future
+    test exercising `TestClient(app)`'s real `lifespan()` with Local mode
+    already active at boot can't accidentally read/write the real on-disk
+    crash-guard marker or spawn a real background load during the suite.
     """
     from app.stt import local_setup
 
     if not request.node.get_closest_marker("prewarm"):
         monkeypatch.setattr(local_setup, "maybe_prewarm_local", lambda stt_settings: None)
+        monkeypatch.setattr(
+            local_setup, "maybe_prewarm_local_at_startup", lambda stt_settings: None
+        )
     yield
     local_setup._prewarm_error = None
 

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from unittest.mock import MagicMock, patch
 
@@ -910,3 +911,145 @@ async def test_ensure_local_ready_cleans_up_orphan_when_cache_cleared_without_a_
     assert provider_b.get_model_calls == 1
     assert provider_b.cleanup_calls == 0  # provider B is the one left cached
     assert cache["current"] is provider_b
+
+
+# --- crash-loop guard for the startup prewarm (spec 023) ---
+
+
+@pytest.fixture
+def _isolated_crash_guard_root(tmp_path, monkeypatch):
+    """Points `_crash_guard_path()` at a per-test `tmp_path` instead of the
+    real `~/.justsay-dev`, mirroring test_app_paths.py's existing isolation
+    pattern. Patched on the source (`app.core.app_paths.resolve_app_data_root`)
+    since `_crash_guard_path()` imports it lazily on every call."""
+    monkeypatch.setattr("app.core.app_paths.resolve_app_data_root", lambda: tmp_path)
+    return tmp_path
+
+
+def test_should_skip_prewarm_pure_function():
+    """Pure decision function -- no filesystem access or mocks involved."""
+    assert local_setup.should_skip_prewarm(0) is False
+    assert local_setup.should_skip_prewarm(1) is False
+    assert local_setup.should_skip_prewarm(2) is True
+    assert local_setup.should_skip_prewarm(3) is True
+
+
+def test_read_consecutive_incomplete_prewarms_fails_open_on_corrupt_file(
+    _isolated_crash_guard_root,
+):
+    guard_path = _isolated_crash_guard_root / local_setup._CRASH_GUARD_FILENAME
+    guard_path.write_bytes(b"not json {{{")
+
+    assert local_setup._read_consecutive_incomplete_prewarms() == 0
+
+
+@pytest.mark.prewarm
+def test_maybe_prewarm_local_at_startup_noop_for_cloud_mode(
+    _isolated_crash_guard_root, monkeypatch
+):
+    """No-ops immediately for CLOUD mode without touching the filesystem at
+    all -- no guard file is created under the monkeypatched, empty tmp_path
+    data root.
+
+    Marked `@pytest.mark.prewarm`: without it, backend/tests/conftest.py's
+    autouse fixture would replace `maybe_prewarm_local_at_startup` itself
+    with a no-op, making this test pass vacuously instead of exercising the
+    real function (same reasoning as the existing
+    `test_maybe_prewarm_local_is_noop_for_cloud_mode` above).
+    """
+    called = {"n": 0}
+
+    async def _spy(stt_settings):
+        called["n"] += 1
+
+    monkeypatch.setattr(local_setup, "ensure_local_ready", _spy)
+    settings = STTSettings(mode=ProviderMode.CLOUD)
+    local_setup.maybe_prewarm_local_at_startup(settings)  # must not raise (no event loop here)
+
+    assert called["n"] == 0
+    assert list(_isolated_crash_guard_root.iterdir()) == []
+
+
+@pytest.mark.prewarm
+@pytest.mark.asyncio
+async def test_maybe_prewarm_local_at_startup_marks_dirty_then_clears_on_completion(
+    _isolated_crash_guard_root, monkeypatch
+):
+    """The on-disk counter reads 1 immediately after
+    `maybe_prewarm_local_at_startup()` returns (written synchronously, before
+    the background task is scheduled) and 0 again once the wrapped
+    `ensure_local_ready()` call completes, by any path."""
+    gate = asyncio.Event()
+
+    async def _blocking_ensure_local_ready(stt_settings):
+        await gate.wait()
+
+    monkeypatch.setattr(local_setup, "ensure_local_ready", _blocking_ensure_local_ready)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    local_setup.maybe_prewarm_local_at_startup(settings)
+
+    assert local_setup._read_consecutive_incomplete_prewarms() == 1
+
+    gate.set()
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    await asyncio.gather(*pending)
+
+    assert local_setup._read_consecutive_incomplete_prewarms() == 0
+
+
+@pytest.mark.prewarm
+def test_maybe_prewarm_local_at_startup_skips_after_max_consecutive_crashes(
+    _isolated_crash_guard_root, monkeypatch, caplog
+):
+    """Once the on-disk counter reaches MAX_CONSECUTIVE_INCOMPLETE_PREWARMS,
+    ensure_local_ready() is never scheduled, the counter is left unchanged,
+    and one log.warning(...) line names the count and the fallback/retry
+    path."""
+    local_setup._write_consecutive_incomplete_prewarms(
+        local_setup.MAX_CONSECUTIVE_INCOMPLETE_PREWARMS
+    )
+
+    def _boom(stt_settings):
+        raise AssertionError(
+            "ensure_local_ready must not be scheduled once the crash-loop guard trips"
+        )
+
+    monkeypatch.setattr(local_setup, "ensure_local_ready", _boom)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    with caplog.at_level(logging.WARNING, logger="app.stt.local_setup"):
+        local_setup.maybe_prewarm_local_at_startup(settings)  # must not raise (no event loop here)
+
+    assert (
+        local_setup._read_consecutive_incomplete_prewarms()
+        == local_setup.MAX_CONSECUTIVE_INCOMPLETE_PREWARMS
+    )
+    assert "prewarm skipped at startup" in caplog.text.lower()
+    assert str(local_setup.MAX_CONSECUTIVE_INCOMPLETE_PREWARMS) in caplog.text
+
+
+@pytest.mark.prewarm
+@pytest.mark.asyncio
+async def test_maybe_prewarm_local_resets_crash_guard_counter_on_explicit_trigger(
+    _isolated_crash_guard_root, monkeypatch
+):
+    """A deliberate, user-initiated prewarm trigger (mode switch, settings
+    edit, manual retry endpoint -- all routed through maybe_prewarm_local())
+    resets the on-disk counter synchronously, before the dispatched task even
+    has a chance to run -- decoupled from the automatic startup streak
+    maybe_prewarm_local_at_startup() tracks."""
+    local_setup._write_consecutive_incomplete_prewarms(1)
+
+    async def _spy(stt_settings):
+        pass
+
+    monkeypatch.setattr(local_setup, "ensure_local_ready", _spy)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    local_setup.maybe_prewarm_local(settings)
+
+    assert local_setup._read_consecutive_incomplete_prewarms() == 0
+
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    await asyncio.gather(*pending)
