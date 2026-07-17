@@ -2,6 +2,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.core.config import settings
+from app.core.gpu_probe import clear_cache as clear_gpu_probe_cache
 from app.main import app
 from app.stt import clear_cache as clear_stt_cache
 from app.llm import clear_cache as clear_llm_cache
@@ -17,7 +18,14 @@ async def client():
 
 @pytest.fixture(autouse=True)
 def _reset_settings():
-    """Reset settings and provider caches to defaults after each test."""
+    """Reset settings and provider caches to defaults after each test.
+
+    Also busts `gpu_probe`'s process-lifetime cache (added as part of the
+    Spec 018 GitHub-review follow-up fix) so a test that exercises the real,
+    unmocked `probe_gpu()` (e.g. `test_gpu_probe.py`, or a test that
+    deliberately restores the real `get_local_provider_kind()` path) never
+    leaks a cached result into the next test.
+    """
     original_stt_mode = settings.stt.mode
     original_llm_mode = settings.llm.mode
     yield
@@ -25,6 +33,7 @@ def _reset_settings():
     settings.llm.mode = original_llm_mode
     clear_stt_cache()
     clear_llm_cache()
+    clear_gpu_probe_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -45,13 +54,40 @@ def _force_faster_whisper_for_local(monkeypatch, request):
     assertions in `test_stt.py`, `test_stt_routing.py`, and `test_factories.py`.
     Patching the factory keeps those tests platform-agnostic. Tests that need
     the MLX path opt out via `@pytest.mark.mlx`.
+
+    Also pins `get_local_provider_kind()` (spec 018) to `FASTER_WHISPER`:
+    `local_setup.py`'s readiness-check functions (`_check_package_installed`,
+    `ensure_local_ready`, `check_status`, `_estimate_model_ram_mb`) now call
+    it directly, not only through `get_local_provider_class()`. This
+    project's own dev machine has a real AMD GPU (spec 018) — the unpatched
+    function would route those calls to `WHISPER_CPP_VULKAN` on THIS
+    machine specifically, breaking the platform-agnostic guarantee this
+    fixture already exists to provide. The stub accepts (and ignores) an
+    optional positional `vendor` arg — `check_status()` (GitHub review on PR
+    #21, iteration 1, issue #2) now calls the real function with an
+    already-resolved vendor to avoid double-probing the GPU, and this stub
+    must accept that same call shape.
+
+    Patched on `app.stt.local_setup`'s own already-bound name (mirroring
+    `is_macos_arm64`'s existing import style), NOT on `app.stt.local_factory`
+    directly — `test_stt_local_factory.py`'s
+    `test_factory_module_imports_no_third_party_at_module_level` deletes and
+    re-imports `app.stt.local_factory` from `sys.modules`, which would
+    silently split the patched module object from the one `local_setup.py`
+    already imported its name from, un-patching this fixture for every test
+    that runs after that one in the same session.
     """
     if request.node.get_closest_marker("mlx"):
         return
     from app.stt import local
+    from app.stt.local_factory import LocalProviderKind
     monkeypatch.setattr(
         "app.stt.local_factory.get_local_provider_class",
         lambda: local.LocalSTTProvider,
+    )
+    monkeypatch.setattr(
+        "app.stt.local_setup.get_local_provider_kind",
+        lambda *args, **kwargs: LocalProviderKind.FASTER_WHISPER,
     )
 
 

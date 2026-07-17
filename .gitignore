@@ -18,6 +18,10 @@ yarn-error.log*
 /backend/dist
 /backend/build
 /backend/*.spec.bak
+# Locally-built whisper.cpp-Vulkan binary output (backend/scripts/
+# build_whisper_cpp_vulkan.ps1) -- reproduced from a pinned upstream tag,
+# never committed, mirrors the dist/build entries above.
+/backend/vendor
 # PyInstaller --onedir output copied here before `tauri build` (~80 MB).
 # Reproduced on every release build from `backend/dist/`, never edited by hand.
 /src-tauri/resources

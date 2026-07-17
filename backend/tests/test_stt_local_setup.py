@@ -17,6 +17,18 @@ from app.stt.local_setup import (
     install_local_packages,
 )
 
+# Captured at module-collection time, before any test's autouse fixture has
+# had a chance to monkeypatch `app.stt.local_factory.get_local_provider_class`
+# / `app.stt.local_setup.get_local_provider_kind` -- the only reliable way to
+# get "the real, unpatched function" back inside a test that needs to
+# deliberately undo the `_force_faster_whisper_for_local` autouse fixture
+# (see `test_check_status_probes_gpu_at_most_once_through_the_real_unmocked_provider_class_path`
+# below). A fresh `from app.stt.local_factory import ...` done inside a test
+# body would just re-read whatever the fixture already patched the module
+# attribute to.
+from app.stt.local_factory import get_local_provider_class as _real_get_local_provider_class
+from app.stt.local_factory import get_local_provider_kind as _real_get_local_provider_kind
+
 
 # --- check_status ---
 
@@ -367,6 +379,193 @@ def test_check_status_macos_arm64_reports_mlx_device_and_bfloat16(monkeypatch):
     assert status.gpu_available is True
     assert status.gpu_name == "Apple Silicon (MLX/Metal)"
     assert status.gpu_vendor == "apple"
+
+
+# --- WHISPER_CPP_VULKAN kind (spec 018) ---
+
+
+def _stub_vulkan_kind(monkeypatch) -> None:
+    from app.stt.local_factory import LocalProviderKind
+
+    # Accepts (and ignores) an optional positional `vendor` arg -- since the
+    # GitHub review fix (PR #21, iteration 1, issue #2), check_status() calls
+    # the real get_local_provider_kind() with an already-resolved vendor.
+    monkeypatch.setattr(
+        local_setup,
+        "get_local_provider_kind",
+        lambda *args, **kwargs: LocalProviderKind.WHISPER_CPP_VULKAN,
+    )
+
+
+def test_check_status_vulkan_kind_reports_device_and_compute_type(monkeypatch):
+    _stub_vulkan_kind(monkeypatch)
+    settings = STTSettings(whisper_model_size="large-v3-turbo")
+
+    with _apply(_patches(True, (False, "AMD Radeon RX 5700 XT", "amd"))):
+        status = check_status(settings)
+
+    assert status.device == "vulkan"
+    assert status.compute_type == "float16"
+
+
+def test_check_status_vulkan_kind_reports_gpu_available_true(monkeypatch):
+    """Regression for Stage 3 review issue #2: a Vulkan-accelerated
+    AMD/Intel session must not report the contradictory
+    device: "vulkan" + gpu_available: false pair. `_detect_gpu()` itself
+    still returns its NVIDIA-only `available` bool (False for AMD) — the
+    status object's `gpu_available` is derived from the final `device`
+    instead."""
+    _stub_vulkan_kind(monkeypatch)
+    settings = STTSettings(whisper_model_size="large-v3-turbo")
+
+    with _apply(_patches(True, (False, "AMD Radeon RX 5700 XT", "amd"))):
+        status = check_status(settings)
+
+    assert status.device == "vulkan"
+    assert status.gpu_available is True
+    assert status.gpu_vendor == "amd"
+
+
+def test_check_status_probes_gpu_at_most_once_through_the_real_unmocked_provider_class_path(
+    monkeypatch,
+):
+    """Regression for the GitHub review on PR #21, iteration 2: the
+    iteration-1 fix (an optional `vendor` param threaded through
+    `check_status()`'s own `get_local_provider_kind()` call) only closed ONE
+    of several call sites that independently reach `get_local_provider_kind()`
+    with no vendor -- `get_local_provider_class()` (`local_factory.py:87`),
+    reached via `_check_package_installed()`'s own WHISPER_CPP_VULKAN branch
+    check, `is_model_loaded()` (called *twice* inside `check_status()`: once
+    for `model_loaded=`, once more inside the `model_ram_mb=... if
+    is_model_loaded() else None` ternary), and `get_local_load_error()`.
+
+    The prior version of this test (before this fix) only proved the
+    call-count reduction held for `_detect_gpu()`'s single direct call,
+    because it (a) stubbed `_check_package_installed()` out entirely --
+    bypassing its own internal `get_local_provider_kind()` call site -- and
+    (b) never touched `local_factory.get_local_provider_class`, which the
+    autouse `_force_faster_whisper_for_local` fixture patches to a lambda
+    that never calls `get_local_provider_kind()` at all. That made the old
+    test pass for a reason that had nothing to do with the fix: on GitHub
+    review, PR #21 iteration 2, confirmed those other call sites still ran
+    the real, uncached `probe_gpu()` ~5 times per `check_status()` tick in
+    production.
+
+    Fixed at the source instead of threading `vendor` through every call
+    site: `app.core.gpu_probe.probe_gpu()` now caches its result for the
+    process lifetime, so it no longer matters how many independent,
+    uncoordinated call sites reach it -- the underlying detection source
+    only ever runs once. This test restores BOTH
+    `local_factory.get_local_provider_class` and
+    `local_setup.get_local_provider_kind` to their real, unpatched
+    implementations (undoing the autouse fixture for this one test) and
+    counts calls to the underlying probe *source*
+    (`gpu_probe._probe_env_override`), not to `probe_gpu()` itself -- so the
+    assertion holds regardless of which higher-level function reaches it,
+    proving the property against the real call graph rather than a mock
+    that would trivially always read 1. `JUSTSAY_GPU_VENDOR=amd` makes the
+    routing outcome deterministic on any machine (real hardware is not
+    involved), matching this module's own documented test-seam intent.
+    """
+    from pathlib import Path
+
+    from app.core import gpu_probe
+
+    gpu_probe.clear_cache()
+    monkeypatch.setenv("JUSTSAY_GPU_VENDOR", "amd")
+
+    from app.stt import local_factory
+
+    monkeypatch.setattr(local_factory, "get_local_provider_class", _real_get_local_provider_class)
+    monkeypatch.setattr(local_setup, "get_local_provider_kind", _real_get_local_provider_kind)
+    monkeypatch.setattr(local_setup, "is_macos_arm64", lambda: False)
+    monkeypatch.setattr("os.name", "nt")
+    monkeypatch.setattr(
+        "app.stt.local_vulkan_cmd.resolve_binary_path", lambda: Path("whisper-server.exe")
+    )
+
+    probe_source_calls = {"n": 0}
+    real_env_override = gpu_probe._probe_env_override
+
+    def _counting_env_override():
+        probe_source_calls["n"] += 1
+        return real_env_override()
+
+    monkeypatch.setattr(gpu_probe, "_probe_env_override", _counting_env_override)
+
+    settings = STTSettings(whisper_model_size="large-v3-turbo")
+    status = check_status(settings)
+
+    assert probe_source_calls["n"] == 1
+    assert status.device == "vulkan"
+    assert status.gpu_available is True
+    assert status.gpu_vendor == "amd"
+
+
+def test_check_package_installed_vulkan_kind_true_when_binary_resolves(monkeypatch):
+    _stub_vulkan_kind(monkeypatch)
+    from pathlib import Path
+
+    monkeypatch.setattr(
+        "app.stt.local_vulkan_cmd.resolve_binary_path", lambda: Path("whisper-server.exe")
+    )
+    assert _check_package_installed() is True
+
+
+def test_check_package_installed_vulkan_kind_false_when_binary_missing(monkeypatch):
+    _stub_vulkan_kind(monkeypatch)
+    monkeypatch.setattr("app.stt.local_vulkan_cmd.resolve_binary_path", lambda: None)
+    assert _check_package_installed() is False
+
+
+def test_estimate_model_ram_mb_returns_none_for_vulkan_kind(monkeypatch):
+    """The model lives in the separate whisper-server child process's own
+    address space — reporting this (FastAPI backend) process's RSS would be
+    actively misleading, not just imprecise."""
+    _stub_vulkan_kind(monkeypatch)
+    assert local_setup._estimate_model_ram_mb() is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_ready_vulkan_kind_skips_pip_install_when_binary_present(monkeypatch):
+    _stub_vulkan_kind(monkeypatch)
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+
+    def _boom():
+        raise AssertionError("_run_pip_install must not be called for the Vulkan kind")
+
+    monkeypatch.setattr(local_setup, "_run_pip_install", _boom)
+
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+    await local_setup.ensure_local_ready(settings)
+
+    assert provider.get_model_calls == 1
+    assert local_setup._prewarm_error is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_ready_vulkan_kind_sets_actionable_error_when_binary_missing(
+    monkeypatch,
+):
+    _stub_vulkan_kind(monkeypatch)
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+
+    def _boom():
+        raise AssertionError("_run_pip_install must not be called for the Vulkan kind")
+
+    monkeypatch.setattr(local_setup, "_run_pip_install", _boom)
+
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+    await local_setup.ensure_local_ready(settings)
+
+    assert provider.get_model_calls == 0
+    assert local_setup._prewarm_error is not None
+    assert "whisper-server binary not found" in local_setup._prewarm_error
 
 
 # --- check_status merges _prewarm_error (spec 015) ---

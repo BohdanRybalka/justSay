@@ -80,8 +80,9 @@ export interface LocalSttStatus {
   gpu_available: boolean;
   gpu_name: string | null;
   /** "apple" on macOS arm64, else the detected vendor ("nvidia"/"amd"/"intel"/"none").
-   *  Populated even when gpu_available is false — AMD/Intel are detected but
-   *  not yet STT-accelerated (faster-whisper has no non-NVIDIA GPU backend). */
+   *  Populated even when gpu_available is false (e.g. an explicit CPU device
+   *  override) — AMD/Intel Windows is Vulkan-accelerated (whisper.cpp),
+   *  NVIDIA/Apple Silicon use their own dedicated providers. */
   gpu_vendor: string;
   device: string;
   compute_type: string;

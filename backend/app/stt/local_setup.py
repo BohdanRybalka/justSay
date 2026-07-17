@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
 from app.stt.config import STTSettings
-from app.stt.local_factory import is_macos_arm64
+from app.stt.local_factory import LocalProviderKind, get_local_provider_kind, is_macos_arm64
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +41,8 @@ class LocalSttStatus(BaseModel):
     gpu_name: str | None = None
     # "apple" on macOS arm64, else the app.core.gpu_probe vendor value
     # ("nvidia"/"amd"/"intel"/"none"). Populated even when gpu_available is
-    # False — AMD/Intel are detected but not yet STT-accelerated.
+    # False (e.g. an explicit whisper_device="cpu" override) — AMD/Intel
+    # Windows is Vulkan-accelerated (see WHISPER_CPP_VULKAN in local_factory.py).
     gpu_vendor: str = "none"
     device: str = "cpu"
     compute_type: str = "int8"
@@ -51,7 +52,11 @@ class LocalSttStatus(BaseModel):
 def check_status(stt_settings: STTSettings) -> LocalSttStatus:
     """Check local STT readiness: package installed + load state + GPU + last error."""
     installed = _check_package_installed()
-    gpu_available, gpu_name, gpu_vendor = _detect_gpu()
+    # `cuda_probe_available` feeds only the "auto" -> cuda/cpu decision below
+    # (faster-whisper/CTranslate2 has no AMD/Intel backend, so that decision
+    # stays NVIDIA-only) — the status object's own `gpu_available` field is
+    # computed separately, from the final resolved `device`, further down.
+    cuda_probe_available, gpu_name, gpu_vendor = _detect_gpu()
 
     if is_macos_arm64():
         device = "mlx"
@@ -60,10 +65,31 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
         # variants; smaller MLX checkpoints ship as float16.
         compute_type = "bfloat16"
     else:
-        device = stt_settings.whisper_device
-        if device == "auto":
-            device = "cuda" if gpu_available else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
+        # Pass the vendor _detect_gpu() already resolved straight through to
+        # get_local_provider_kind() instead of letting it call probe_gpu() a
+        # second time — probe_gpu() has no caching (docs/TODO.md → Tech
+        # Debt), and check_status() is polled every 3s by the Settings tab.
+        # gpu_vendor is always "nvidia"/"amd"/"intel"/"none" here (the
+        # "apple" value only comes back from the is_macos_arm64() branch of
+        # _detect_gpu(), which can't be true in this else branch since it's
+        # the same is_macos_arm64() check).
+        from app.core.gpu_probe import GpuVendor
+
+        kind = get_local_provider_kind(GpuVendor(gpu_vendor))
+        if kind == LocalProviderKind.WHISPER_CPP_VULKAN:
+            device = "vulkan"
+            compute_type = "float16"
+        else:
+            device = stt_settings.whisper_device
+            if device == "auto":
+                device = "cuda" if cuda_probe_available else "cpu"
+            compute_type = "float16" if device == "cuda" else "int8"
+
+    # True whenever the *final resolved* device indicates real GPU
+    # acceleration — not just NVIDIA — so a Vulkan-accelerated AMD/Intel
+    # session never reports the contradictory device: "vulkan" +
+    # gpu_available: false pair (Stage 3 review, iteration 1, issue #2).
+    gpu_available = device in ("cuda", "vulkan", "mlx")
 
     # is_model_loaded reads the cached provider; safe even if the package is missing.
     from app.stt import get_local_load_error, is_model_loaded
@@ -131,6 +157,14 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
             return  # already warm — the common case after the first prewarm
 
         if not _check_package_installed():
+            if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_VULKAN:
+                # Nothing to `pip install` for this kind — the whisper-server
+                # binary is either bundled/dev-vendored or it isn't.
+                _prewarm_error = (
+                    "whisper-server binary not found. Set JUSTSAY_WHISPER_CPP_BIN, "
+                    "or run backend/scripts/build_whisper_cpp_vulkan.ps1 for local dev."
+                )
+                return
             _prewarm_error = None
             exit_code, output = await asyncio.to_thread(_run_pip_install)
             if exit_code != 0:
@@ -156,7 +190,14 @@ def _estimate_model_ram_mb() -> int | None:
 
     Returns the current process RSS in MB — coarse but informative; the user
     sees "the backend is holding ~700 MB" rather than no number at all.
+
+    Returns `None` for the Vulkan kind: the actual model memory lives in the
+    separate `whisper-server` child process's own address space, not this
+    (the FastAPI backend's) process's RSS — reporting the wrong process's
+    RSS would be actively misleading rather than merely imprecise.
     """
+    if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_VULKAN:
+        return None
     try:
         import os
 
@@ -174,12 +215,30 @@ def _local_extras() -> str:
 
 
 def _check_package_installed() -> bool:
-    """Check if the platform-appropriate local STT package is importable."""
-    try:
-        if is_macos_arm64():
+    """Check if the platform/kind-appropriate local STT dependency is present.
+
+    macOS arm64 checks for the importable `mlx_whisper` package. Windows
+    AMD/Intel checks whether the whisper.cpp `whisper-server` binary can be
+    resolved (bundled resource dir, dev-vendor dir, or env override) —
+    there's nothing to `pip install` for that kind, the binary is either
+    bundled or it isn't. Everywhere else checks for the importable
+    `faster_whisper` package.
+    """
+    if is_macos_arm64():
+        try:
             import mlx_whisper  # noqa: F401
-        else:
-            import faster_whisper  # noqa: F401
+
+            return True
+        except ImportError:
+            return False
+
+    if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_VULKAN:
+        from app.stt import local_vulkan_cmd
+
+        return local_vulkan_cmd.resolve_binary_path() is not None
+
+    try:
+        import faster_whisper  # noqa: F401
 
         return True
     except ImportError:
@@ -270,11 +329,15 @@ def _detect_gpu() -> tuple[bool, str | None, str]:
 
     On macOS arm64 returns the Apple-Silicon/Metal label without importing
     torch or probing hardware — the MLX path is the accelerator here.
-    Everywhere else, delegates to `app.core.gpu_probe.probe_gpu()`.
-    `gpu_available` stays true only for the actually-accelerated path
-    (faster-whisper has no AMD/Intel backend), but `gpu_name`/vendor are
-    populated for AMD/Intel too so the UI can show "GPU detected, not yet
-    accelerated" instead of nothing.
+    Everywhere else, delegates to `app.core.gpu_probe.probe_gpu()`. The
+    returned `available` bool stays NVIDIA/CUDA-only (faster-whisper/
+    CTranslate2 has no AMD/Intel backend) — it feeds only `check_status()`'s
+    "auto" -> cuda/cpu decision for that provider, not the status object's
+    own `gpu_available` field, which is computed separately in
+    `check_status()` from the final resolved `device` and also covers the
+    Vulkan-accelerated AMD/Intel path. `gpu_name`/vendor are always
+    populated when a GPU is detected, regardless of which provider ends up
+    accelerated.
 
     Returns (available, device_name_or_none, vendor).
     """
