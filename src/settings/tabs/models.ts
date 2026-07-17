@@ -40,7 +40,7 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
         </select>
       </div>
       <div class="setting-hint">
-        Cloud short (&le; 30 s) → Groq Whisper · Cloud long / AI Prompt → Gemini · Local → faster-whisper
+        Cloud short (&le; 30 s) → Groq Whisper · Cloud long / AI Prompt → Gemini · Local → faster-whisper (NVIDIA/CPU) or whisper.cpp+Vulkan (Windows AMD/Intel)
       </div>
       <div id="stt-panel"></div>
     </div>

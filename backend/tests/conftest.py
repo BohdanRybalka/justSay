@@ -45,13 +45,36 @@ def _force_faster_whisper_for_local(monkeypatch, request):
     assertions in `test_stt.py`, `test_stt_routing.py`, and `test_factories.py`.
     Patching the factory keeps those tests platform-agnostic. Tests that need
     the MLX path opt out via `@pytest.mark.mlx`.
+
+    Also pins `get_local_provider_kind()` (spec 018) to `FASTER_WHISPER`:
+    `local_setup.py`'s readiness-check functions (`_check_package_installed`,
+    `ensure_local_ready`, `check_status`, `_estimate_model_ram_mb`) now call
+    it directly, not only through `get_local_provider_class()`. This
+    project's own dev machine has a real AMD GPU (spec 018) — the unpatched
+    function would route those calls to `WHISPER_CPP_VULKAN` on THIS
+    machine specifically, breaking the platform-agnostic guarantee this
+    fixture already exists to provide.
+
+    Patched on `app.stt.local_setup`'s own already-bound name (mirroring
+    `is_macos_arm64`'s existing import style), NOT on `app.stt.local_factory`
+    directly — `test_stt_local_factory.py`'s
+    `test_factory_module_imports_no_third_party_at_module_level` deletes and
+    re-imports `app.stt.local_factory` from `sys.modules`, which would
+    silently split the patched module object from the one `local_setup.py`
+    already imported its name from, un-patching this fixture for every test
+    that runs after that one in the same session.
     """
     if request.node.get_closest_marker("mlx"):
         return
     from app.stt import local
+    from app.stt.local_factory import LocalProviderKind
     monkeypatch.setattr(
         "app.stt.local_factory.get_local_provider_class",
         lambda: local.LocalSTTProvider,
+    )
+    monkeypatch.setattr(
+        "app.stt.local_setup.get_local_provider_kind",
+        lambda: LocalProviderKind.FASTER_WHISPER,
     )
 
 

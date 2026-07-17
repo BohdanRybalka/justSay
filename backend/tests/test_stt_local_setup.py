@@ -369,6 +369,112 @@ def test_check_status_macos_arm64_reports_mlx_device_and_bfloat16(monkeypatch):
     assert status.gpu_vendor == "apple"
 
 
+# --- WHISPER_CPP_VULKAN kind (spec 018) ---
+
+
+def _stub_vulkan_kind(monkeypatch) -> None:
+    from app.stt.local_factory import LocalProviderKind
+
+    monkeypatch.setattr(
+        local_setup, "get_local_provider_kind", lambda: LocalProviderKind.WHISPER_CPP_VULKAN
+    )
+
+
+def test_check_status_vulkan_kind_reports_device_and_compute_type(monkeypatch):
+    _stub_vulkan_kind(monkeypatch)
+    settings = STTSettings(whisper_model_size="large-v3-turbo")
+
+    with _apply(_patches(True, (False, "AMD Radeon RX 5700 XT", "amd"))):
+        status = check_status(settings)
+
+    assert status.device == "vulkan"
+    assert status.compute_type == "float16"
+
+
+def test_check_status_vulkan_kind_reports_gpu_available_true(monkeypatch):
+    """Regression for Stage 3 review issue #2: a Vulkan-accelerated
+    AMD/Intel session must not report the contradictory
+    device: "vulkan" + gpu_available: false pair. `_detect_gpu()` itself
+    still returns its NVIDIA-only `available` bool (False for AMD) — the
+    status object's `gpu_available` is derived from the final `device`
+    instead."""
+    _stub_vulkan_kind(monkeypatch)
+    settings = STTSettings(whisper_model_size="large-v3-turbo")
+
+    with _apply(_patches(True, (False, "AMD Radeon RX 5700 XT", "amd"))):
+        status = check_status(settings)
+
+    assert status.device == "vulkan"
+    assert status.gpu_available is True
+    assert status.gpu_vendor == "amd"
+
+
+def test_check_package_installed_vulkan_kind_true_when_binary_resolves(monkeypatch):
+    _stub_vulkan_kind(monkeypatch)
+    from pathlib import Path
+
+    monkeypatch.setattr(
+        "app.stt.local_vulkan_cmd.resolve_binary_path", lambda: Path("whisper-server.exe")
+    )
+    assert _check_package_installed() is True
+
+
+def test_check_package_installed_vulkan_kind_false_when_binary_missing(monkeypatch):
+    _stub_vulkan_kind(monkeypatch)
+    monkeypatch.setattr("app.stt.local_vulkan_cmd.resolve_binary_path", lambda: None)
+    assert _check_package_installed() is False
+
+
+def test_estimate_model_ram_mb_returns_none_for_vulkan_kind(monkeypatch):
+    """The model lives in the separate whisper-server child process's own
+    address space — reporting this (FastAPI backend) process's RSS would be
+    actively misleading, not just imprecise."""
+    _stub_vulkan_kind(monkeypatch)
+    assert local_setup._estimate_model_ram_mb() is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_ready_vulkan_kind_skips_pip_install_when_binary_present(monkeypatch):
+    _stub_vulkan_kind(monkeypatch)
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+
+    def _boom():
+        raise AssertionError("_run_pip_install must not be called for the Vulkan kind")
+
+    monkeypatch.setattr(local_setup, "_run_pip_install", _boom)
+
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+    await local_setup.ensure_local_ready(settings)
+
+    assert provider.get_model_calls == 1
+    assert local_setup._prewarm_error is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_ready_vulkan_kind_sets_actionable_error_when_binary_missing(
+    monkeypatch,
+):
+    _stub_vulkan_kind(monkeypatch)
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+
+    def _boom():
+        raise AssertionError("_run_pip_install must not be called for the Vulkan kind")
+
+    monkeypatch.setattr(local_setup, "_run_pip_install", _boom)
+
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+    await local_setup.ensure_local_ready(settings)
+
+    assert provider.get_model_calls == 0
+    assert local_setup._prewarm_error is not None
+    assert "whisper-server binary not found" in local_setup._prewarm_error
+
+
 # --- check_status merges _prewarm_error (spec 015) ---
 
 

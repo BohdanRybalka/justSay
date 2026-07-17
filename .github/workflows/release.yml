@@ -107,6 +107,42 @@ jobs:
           mkdir -p src-tauri/resources
           cp -r "backend/dist/justsay-backend" "src-tauri/resources/"
 
+      # --- whisper.cpp + Vulkan (spec 018) — Windows AMD/Intel STT accel ---
+      # Windows-only: macOS Apple Silicon uses MLX/Metal, no Vulkan involved
+      # (this leg's steps below all carry `if: runner.os == 'Windows'`).
+      # Same pinned tag/-DGGML_VULKAN=ON recipe as
+      # backend/scripts/build_whisper_cpp_vulkan.ps1's local dev build, so
+      # CI and local verification never drift onto different whisper.cpp
+      # versions — see docs/adr/011-whisper-cpp-vulkan-stt-provider.md.
+      - name: Install Vulkan SDK
+        if: runner.os == 'Windows'
+        uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa # v1.6.0
+        with:
+          # No vulkan_version pin -- Vulkan's API/ABI is stable across SDK
+          # releases (unlike whisper.cpp's own git tag, this doesn't need
+          # lockstep reproducibility); the action's SHA pin above is what
+          # matters for supply-chain reproducibility.
+          install_runtime: true
+          cache: true
+          stripdown: true
+
+      # No separate "set up MSVC env" action needed here: the script below
+      # locates vswhere.exe / vcvars64.bat / cmake / ninja itself (same
+      # self-contained detection used for local dev) rather than depending
+      # on an ambient Developer Command Prompt shell.
+      - name: Build whisper.cpp with Vulkan backend
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\backend\scripts\build_whisper_cpp_vulkan.ps1
+
+      - name: Copy whisper.cpp-Vulkan binary to Tauri resources
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p src-tauri/resources/whisper-cpp-vulkan
+          cp backend/vendor/whisper-cpp-vulkan/* src-tauri/resources/whisper-cpp-vulkan/
+
       - name: Install npm deps
         run: npm ci
 
