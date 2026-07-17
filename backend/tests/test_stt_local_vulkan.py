@@ -405,6 +405,31 @@ async def test_transcribe_sends_language_and_response_format(monkeypatch, tmp_pa
     assert "file" in captured["files"]
 
 
+@pytest.mark.asyncio
+async def test_transcribe_sends_auto_language_unchanged(monkeypatch, tmp_path):
+    """Regression for spec 019: whisper.cpp's core library treats the literal
+    string "auto" as its own native auto-detect sentinel, so unlike
+    LocalSTTProvider/MLXWhisperSTTProvider this provider must NOT translate
+    it to None -- whisper-server's multipart form parsing would likely turn
+    a None into a broken empty-string field, not a no-op."""
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+
+    captured = {}
+
+    def _post_impl(url, data, files):
+        captured["data"] = data
+        return _FakeResponse(200, {"text": "ok"})
+
+    _install_fake_httpx(monkeypatch, post_impl=_post_impl)
+    _install_fake_popen(monkeypatch)
+
+    await provider.transcribe(audio_path, language="auto")
+
+    assert captured["data"]["language"] == "auto"
+
+
 # --------------------------------------------------------------------------- #
 # cleanup()                                                                   #
 # --------------------------------------------------------------------------- #

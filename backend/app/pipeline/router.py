@@ -76,7 +76,7 @@ async def dictate(
 async def process_file(
     file: UploadFile,
     background_tasks: BackgroundTasks,
-    language: str = "uk",
+    language: str = "auto",
     style: str = "normal",
     copy_to_clipboard: bool = True,
 ):

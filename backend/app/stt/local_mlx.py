@@ -174,6 +174,11 @@ class MLXWhisperSTTProvider(STTProvider):
         beam_size = 1 if is_short else 5
         condition_on_previous_text = not is_short
         glossary = self._settings.initial_prompt.strip() or None
+        # mlx-whisper's own auto-detect sentinel is `language=None` (same
+        # convention as faster-whisper — mlx-whisper is a port of OpenAI's
+        # reference whisper implementation) — translate here, but keep the
+        # original "auto" string in the log line below for observability.
+        whisper_language = None if language == "auto" else language
 
         log.info(
             "mlx-whisper: transcribe model=%s file=%s lang=%s "
@@ -201,7 +206,7 @@ class MLXWhisperSTTProvider(STTProvider):
 
                 kwargs_mlx: dict = {
                     "path_or_hf_repo": repo_id,
-                    "language": language,
+                    "language": whisper_language,
                     "beam_size": beam_size,
                     "condition_on_previous_text": condition_on_previous_text,
                     "initial_prompt": glossary,

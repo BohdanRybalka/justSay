@@ -462,6 +462,70 @@ def test_gemini_glossary_strips_tag_breakout_attempts():
     assert "</glossary>" not in inside
 
 
+# --- STT auto-detect (spec 019) ---
+
+
+def test_gemini_prompt_auto_detect_normal_style_instructs_detection_and_does_not_leak_sentinel():
+    prompt = GeminiSTTProvider._build_prompt(language="auto", style="normal", glossary=None)
+    assert "Automatically detect the spoken language" in prompt
+    assert "is auto" not in prompt.lower()
+
+
+def test_gemini_prompt_auto_detect_ai_prompt_style_instructs_detection_and_does_not_leak_sentinel():
+    prompt = GeminiSTTProvider._build_prompt(language="auto", style="ai_prompt", glossary=None)
+    assert "Automatically detect the spoken language" in prompt
+    assert "is auto" not in prompt.lower()
+
+
+def test_gemini_prompt_explicit_language_unaffected_by_auto_branch():
+    """Regression: explicit-language prompts must still read exactly as before."""
+    prompt = GeminiSTTProvider._build_prompt(language="uk", style="normal", glossary=None)
+    assert "The primary language is Ukrainian." in prompt
+
+
+@pytest.mark.asyncio
+async def test_local_stt_explicit_language_passed_through_unchanged(sample_wav):
+    """Regression: an explicit BCP-47 code must still reach faster-whisper as-is."""
+    settings = STTSettings(mode=ProviderMode.LOCAL, cloud_routing_threshold=30.0)
+    provider = LocalSTTProvider(settings)
+    model = _mock_local_model(provider)
+
+    await provider.transcribe(sample_wav, language="uk", audio_duration=5.0)
+
+    assert model.transcribe.call_args.kwargs["language"] == "uk"
+
+
+@pytest.mark.asyncio
+async def test_local_stt_auto_language_translates_to_none(sample_wav):
+    """language="auto" must become language=None -- faster-whisper's own
+    native auto-detect sentinel, not the literal string "auto" (which it
+    would treat as an invalid two-letter code)."""
+    settings = STTSettings(mode=ProviderMode.LOCAL, cloud_routing_threshold=30.0)
+    provider = LocalSTTProvider(settings)
+    model = _mock_local_model(provider)
+
+    await provider.transcribe(sample_wav, language="auto", audio_duration=5.0)
+
+    assert model.transcribe.call_args.kwargs["language"] is None
+
+
+@pytest.mark.asyncio
+async def test_local_stt_auto_language_logs_auto_not_none(sample_wav, caplog):
+    """The log line must keep the original "auto" string for observability,
+    not the translated None sentinel actually sent to faster-whisper."""
+    import logging
+
+    settings = STTSettings(mode=ProviderMode.LOCAL, cloud_routing_threshold=30.0)
+    provider = LocalSTTProvider(settings)
+    _mock_local_model(provider)
+
+    with caplog.at_level(logging.INFO, logger="app.stt.local"):
+        await provider.transcribe(sample_wav, language="auto", audio_duration=5.0)
+
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "lang=auto" in full_log
+
+
 @pytest.mark.asyncio
 async def test_local_unknown_duration_falls_back_to_long_path(sample_wav):
     """When duration isn't known (detect_duration returned None), default to accuracy-tuned beam=5."""

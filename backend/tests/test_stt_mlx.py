@@ -528,6 +528,65 @@ def test_transcribe_lock_serialises_concurrent_calls(monkeypatch, tmp_path):
     assert active["max"] == 1  # asyncio.Lock kept us serial
 
 
+# --------------------------------------------------------------------------- #
+# STT auto-detect (spec 019)                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_explicit_language_passed_through_unchanged(monkeypatch, tmp_path):
+    """Regression: an explicit BCP-47 code must still reach mlx_whisper.transcribe as-is."""
+    _clean_env(monkeypatch)
+    captured_kwargs: dict = {}
+
+    def _transcribe(audio_path, **kwargs):
+        captured_kwargs.update(kwargs)
+        return {"text": "ok", "segments": []}
+
+    _install_mlx_whisper_stub(monkeypatch, transcribe=_transcribe)
+    monkeypatch.setattr(
+        "app.stt.local_mlx.scan_cache_dir",
+        MagicMock(return_value=MagicMock(repos=[])),
+    )
+
+    from app.stt.local_mlx import MLXWhisperSTTProvider
+
+    provider = MLXWhisperSTTProvider(_settings())
+    audio = tmp_path / "x.wav"
+    audio.write_bytes(b"RIFF....WAVEfake")
+
+    asyncio.run(provider.transcribe(audio, language="uk", audio_duration=5.0))
+
+    assert captured_kwargs["language"] == "uk"
+
+
+def test_auto_language_translates_to_none(monkeypatch, tmp_path):
+    """language="auto" must become language=None -- mlx-whisper's own native
+    auto-detect sentinel (same convention as faster-whisper), not the literal
+    string "auto"."""
+    _clean_env(monkeypatch)
+    captured_kwargs: dict = {}
+
+    def _transcribe(audio_path, **kwargs):
+        captured_kwargs.update(kwargs)
+        return {"text": "ok", "segments": []}
+
+    _install_mlx_whisper_stub(monkeypatch, transcribe=_transcribe)
+    monkeypatch.setattr(
+        "app.stt.local_mlx.scan_cache_dir",
+        MagicMock(return_value=MagicMock(repos=[])),
+    )
+
+    from app.stt.local_mlx import MLXWhisperSTTProvider
+
+    provider = MLXWhisperSTTProvider(_settings())
+    audio = tmp_path / "x.wav"
+    audio.write_bytes(b"RIFF....WAVEfake")
+
+    asyncio.run(provider.transcribe(audio, language="auto", audio_duration=5.0))
+
+    assert captured_kwargs["language"] is None
+
+
 def test_event_loop_not_blocked_during_get_model(monkeypatch, tmp_path):
     """`_run_mlx` sleeping in a worker thread must NOT freeze the event loop.
 

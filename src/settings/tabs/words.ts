@@ -15,6 +15,7 @@ const LANGUAGE_LABELS: Record<string, string> = {
   pl: "Polish",
   ja: "Japanese",
   zh: "Chinese",
+  auto: "Auto-detected",
 };
 
 type Lang = "all" | "uk" | "en";

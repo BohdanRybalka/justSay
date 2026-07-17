@@ -23,7 +23,22 @@ class STTProvider(ABC):
 
         Args:
             audio_path: Path to audio file (WAV, 16kHz, mono).
-            language: BCP-47 language code.
+            language: BCP-47 language code, or the sentinel ``"auto"`` to
+                request the provider's own native auto-detect mechanism
+                instead of assuming a language. Each concrete provider
+                translates ``"auto"`` differently:
+                - ``GroqWhisperSTTProvider``: omits the ``language`` kwarg
+                  entirely from the Groq SDK call (mirrors the SDK's own
+                  ``Omit`` default).
+                - ``GeminiSTTProvider``: swaps the prompt's language clause
+                  for an instruction to detect the spoken language itself.
+                - ``LocalSTTProvider`` / ``MLXWhisperSTTProvider``: translate
+                  ``"auto"`` to ``language=None``, both providers' own native
+                  auto-detect sentinel (faster-whisper / mlx-whisper).
+                - ``WhisperCppVulkanSTTProvider``: forwards the literal string
+                  ``"auto"`` unchanged — whisper.cpp's core library treats it
+                  as its own native auto-detect sentinel, so no translation
+                  is needed.
             **kwargs: Provider-specific extensions. Currently recognised:
                 - ``style`` ("normal" | "ai_prompt"): Gemini uses it to select
                   between a faithful transcription prompt and a structuring prompt.
