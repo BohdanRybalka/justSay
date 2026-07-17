@@ -196,6 +196,10 @@ async def test_put_settings_does_not_prewarm_on_non_stt_field_change(client, mon
     `sync_to_runtime`'s own `changed_stt` return value instead."""
     import app.stt.local_setup as local_setup_module
 
+    # Snapshot + auto-restore: see the identical line in
+    # test_put_settings_triggers_prewarm_on_incidental_cache_clear above for
+    # the full rationale (leaking `initial_prompt` on the shared runtime
+    # singleton would break a later test that assumes a pristine default).
     monkeypatch.setattr(runtime_settings.stt, "initial_prompt", runtime_settings.stt.initial_prompt)
 
     call_count = {"n": 0}
