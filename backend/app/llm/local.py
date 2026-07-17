@@ -5,7 +5,7 @@ import logging
 
 from app.llm.base import LLMProvider
 from app.llm.config import LLMSettings
-from app.llm.tasks import get_task_profile
+from app.llm.tasks import DEFAULT_TASK, get_task_profile
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ class LocalLLMProvider(LLMProvider):
             self._client = Client(host=self._settings.ollama_host)
         return self._client
 
-    async def process(self, text: str, system_prompt: str, task: str = "dictation_cleanup") -> str:
+    async def process(self, text: str, system_prompt: str, task: str = DEFAULT_TASK) -> str:
         client = self._get_client()
         profile = get_task_profile(task)
 

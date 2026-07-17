@@ -15,8 +15,26 @@ from app.llm.local_setup import (
     start_ollama,
     unload_ollama_model,
 )
+from app.llm.tasks import DEFAULT_TASK, TASK_PROFILES
 
 router = APIRouter()
+
+# Business-facing `style` vocabulary -> internal task name (an `app.llm.tasks
+# .TASK_PROFILES` key). TASK_PROFILES is the single source of truth for valid task
+# names; the values below are checked against it immediately so a future
+# TASK_PROFILES key rename that isn't mirrored here fails at import time instead of
+# this map silently falling back to DEFAULT_TASK on every affected request.
+STYLE_TASK_MAP: dict[str, str] = {
+    "normal": DEFAULT_TASK,
+    "ai_prompt": "ai_prompt_structuring",
+}
+
+_unmapped_tasks = set(STYLE_TASK_MAP.values()) - set(TASK_PROFILES)
+if _unmapped_tasks:
+    raise RuntimeError(
+        f"STYLE_TASK_MAP references task(s) not present in TASK_PROFILES: "
+        f"{sorted(_unmapped_tasks)}"
+    )
 
 
 class ProcessRequest(BaseModel):
@@ -52,9 +70,7 @@ async def process_text(req: ProcessRequest):
 
     try:
         provider = get_llm_provider(settings.llm)
-        task = {"normal": "dictation_cleanup", "ai_prompt": "ai_prompt_structuring"}.get(
-            req.style, "dictation_cleanup"
-        )
+        task = STYLE_TASK_MAP.get(req.style, DEFAULT_TASK)
         result = await provider.process(req.text, req.system_prompt, task=task)
         return ProcessResponse(result=result, model=provider.model_name)
     except Exception as e:

@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
 
+from app.llm.tasks import DEFAULT_TASK
+
 
 class LLMProvider(ABC):
     """Contract: Raw text in -> processed text out."""
@@ -10,7 +12,7 @@ class LLMProvider(ABC):
         """Human-readable name of the current model."""
 
     @abstractmethod
-    async def process(self, text: str, system_prompt: str, task: str = "dictation_cleanup") -> str:
+    async def process(self, text: str, system_prompt: str, task: str = DEFAULT_TASK) -> str:
         """Process text with a system prompt.
 
         Args:

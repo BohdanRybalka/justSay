@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.audio import get_recorder
+from app.llm.router import STYLE_TASK_MAP
+from app.llm.tasks import TASK_PROFILES
 from app.main import app
 from app.pipeline.service import ProcessingResult
 
@@ -70,6 +72,13 @@ async def test_llm_process_maps_style_to_task(client, style, expected_task):
     assert resp.json()["result"] == "processed"
     fake_provider.process.assert_awaited_once()
     assert fake_provider.process.call_args.kwargs["task"] == expected_task
+
+
+def test_style_task_map_values_match_task_profiles():
+    """Every `STYLE_TASK_MAP` value must be a valid `TASK_PROFILES` key — a
+    future `TASK_PROFILES` rename that isn't mirrored here must fail this
+    test instead of silently degrading `/llm/process`'s style routing."""
+    assert set(STYLE_TASK_MAP.values()) <= set(TASK_PROFILES)
 
 
 @pytest.mark.asyncio
