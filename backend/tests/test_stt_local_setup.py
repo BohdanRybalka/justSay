@@ -17,6 +17,18 @@ from app.stt.local_setup import (
     install_local_packages,
 )
 
+# Captured at module-collection time, before any test's autouse fixture has
+# had a chance to monkeypatch `app.stt.local_factory.get_local_provider_class`
+# / `app.stt.local_setup.get_local_provider_kind` -- the only reliable way to
+# get "the real, unpatched function" back inside a test that needs to
+# deliberately undo the `_force_faster_whisper_for_local` autouse fixture
+# (see `test_check_status_probes_gpu_at_most_once_through_the_real_unmocked_provider_class_path`
+# below). A fresh `from app.stt.local_factory import ...` done inside a test
+# body would just re-read whatever the fixture already patched the module
+# attribute to.
+from app.stt.local_factory import get_local_provider_class as _real_get_local_provider_class
+from app.stt.local_factory import get_local_provider_kind as _real_get_local_provider_kind
+
 
 # --- check_status ---
 
@@ -414,41 +426,77 @@ def test_check_status_vulkan_kind_reports_gpu_available_true(monkeypatch):
     assert status.gpu_vendor == "amd"
 
 
-def test_check_status_probes_gpu_at_most_once_on_windows_amd_or_intel(monkeypatch):
-    """Regression for the GitHub review on PR #21, iteration 1, issue #2:
-    check_status() must not call the uncached, already-expensive
-    `probe_gpu()` twice per invocation (once via `_detect_gpu()`, once more
-    via `get_local_provider_kind()`'s own `WHISPER_CPP_VULKAN` branch check)
-    -- doubling cost on every 3s Settings-tab poll tick.
+def test_check_status_probes_gpu_at_most_once_through_the_real_unmocked_provider_class_path(
+    monkeypatch,
+):
+    """Regression for the GitHub review on PR #21, iteration 2: the
+    iteration-1 fix (an optional `vendor` param threaded through
+    `check_status()`'s own `get_local_provider_kind()` call) only closed ONE
+    of several call sites that independently reach `get_local_provider_kind()`
+    with no vendor -- `get_local_provider_class()` (`local_factory.py:87`),
+    reached via `_check_package_installed()`'s own WHISPER_CPP_VULKAN branch
+    check, `is_model_loaded()` (called *twice* inside `check_status()`: once
+    for `model_loaded=`, once more inside the `model_ram_mb=... if
+    is_model_loaded() else None` ternary), and `get_local_load_error()`.
 
-    `_check_package_installed()` is stubbed out here (same convention as
-    `_patches()`) since its own internal `get_local_provider_kind()` call is
-    a separate, pre-existing call site this fix doesn't target. The autouse
-    `_force_faster_whisper_for_local` fixture's stub is overridden with the
-    real `get_local_provider_kind()` so this test genuinely exercises the
-    fix's call-count reduction rather than a fixture that never probes at
-    all.
+    The prior version of this test (before this fix) only proved the
+    call-count reduction held for `_detect_gpu()`'s single direct call,
+    because it (a) stubbed `_check_package_installed()` out entirely --
+    bypassing its own internal `get_local_provider_kind()` call site -- and
+    (b) never touched `local_factory.get_local_provider_class`, which the
+    autouse `_force_faster_whisper_for_local` fixture patches to a lambda
+    that never calls `get_local_provider_kind()` at all. That made the old
+    test pass for a reason that had nothing to do with the fix: on GitHub
+    review, PR #21 iteration 2, confirmed those other call sites still ran
+    the real, uncached `probe_gpu()` ~5 times per `check_status()` tick in
+    production.
+
+    Fixed at the source instead of threading `vendor` through every call
+    site: `app.core.gpu_probe.probe_gpu()` now caches its result for the
+    process lifetime, so it no longer matters how many independent,
+    uncoordinated call sites reach it -- the underlying detection source
+    only ever runs once. This test restores BOTH
+    `local_factory.get_local_provider_class` and
+    `local_setup.get_local_provider_kind` to their real, unpatched
+    implementations (undoing the autouse fixture for this one test) and
+    counts calls to the underlying probe *source*
+    (`gpu_probe._probe_env_override`), not to `probe_gpu()` itself -- so the
+    assertion holds regardless of which higher-level function reaches it,
+    proving the property against the real call graph rather than a mock
+    that would trivially always read 1. `JUSTSAY_GPU_VENDOR=amd` makes the
+    routing outcome deterministic on any machine (real hardware is not
+    involved), matching this module's own documented test-seam intent.
     """
-    from app.core.gpu_probe import GpuProbeResult, GpuVendor
-    from app.stt.local_factory import get_local_provider_kind as real_get_local_provider_kind
+    from pathlib import Path
 
-    monkeypatch.setattr(local_setup, "get_local_provider_kind", real_get_local_provider_kind)
-    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+    from app.core import gpu_probe
+
+    gpu_probe.clear_cache()
+    monkeypatch.setenv("JUSTSAY_GPU_VENDOR", "amd")
+
+    from app.stt import local_factory
+
+    monkeypatch.setattr(local_factory, "get_local_provider_class", _real_get_local_provider_class)
+    monkeypatch.setattr(local_setup, "get_local_provider_kind", _real_get_local_provider_kind)
     monkeypatch.setattr(local_setup, "is_macos_arm64", lambda: False)
     monkeypatch.setattr("os.name", "nt")
+    monkeypatch.setattr(
+        "app.stt.local_vulkan_cmd.resolve_binary_path", lambda: Path("whisper-server.exe")
+    )
 
-    probe_calls = {"n": 0}
+    probe_source_calls = {"n": 0}
+    real_env_override = gpu_probe._probe_env_override
 
-    def _fake_probe_gpu():
-        probe_calls["n"] += 1
-        return GpuProbeResult(vendor=GpuVendor.AMD, name="AMD Radeon RX 5700 XT")
+    def _counting_env_override():
+        probe_source_calls["n"] += 1
+        return real_env_override()
 
-    monkeypatch.setattr("app.core.gpu_probe.probe_gpu", _fake_probe_gpu)
+    monkeypatch.setattr(gpu_probe, "_probe_env_override", _counting_env_override)
 
     settings = STTSettings(whisper_model_size="large-v3-turbo")
     status = check_status(settings)
 
-    assert probe_calls["n"] == 1
+    assert probe_source_calls["n"] == 1
     assert status.device == "vulkan"
     assert status.gpu_available is True
     assert status.gpu_vendor == "amd"

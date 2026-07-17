@@ -14,6 +14,7 @@ mirroring the existing convention in `app.stt.local_factory`.
 import logging
 import os
 import subprocess
+import threading
 from dataclasses import dataclass
 from enum import Enum
 
@@ -45,6 +46,19 @@ class GpuProbeResult:
     vram_free_mb: int | None = None
 
 
+# Process-lifetime cache: GPU hardware presence isn't expected to change
+# while the app is running (no hot-plug scenario this app needs to handle),
+# and `probe_gpu()` has several independent, uncoordinated call sites per
+# `check_status()`/`get_local_provider_kind()` invocation (docs/TODO.md ->
+# Tech Debt; sharpened by Spec 018's GitHub review, PR #21 iteration 2, which
+# found ~5 uncached calls per check_status() tick even after threading a
+# pre-fetched vendor through the one call site that was fixed). Caching here,
+# at the source, closes the whole class of problem regardless of how many
+# call sites reach it -- cheaper and safer than chasing each one individually.
+_cache_lock = threading.Lock()
+_cached_result: GpuProbeResult | None = None
+
+
 def probe_gpu() -> GpuProbeResult:
     """Detect the GPU vendor/name/VRAM via a priority-ordered, degrade-only chain.
 
@@ -53,7 +67,20 @@ def probe_gpu() -> GpuProbeResult:
     catches its own failures and returns `None` on any problem; this function
     also wraps each call so a source that raises anyway (rather than
     returning `None`) still can't crash the caller.
+
+    Cached for the lifetime of the process after the first call -- see
+    `clear_cache()` to force a fresh probe (production code never needs
+    this; it's a test seam for exercising more than one probe outcome, e.g.
+    a changed `JUSTSAY_GPU_VENDOR`, within the same process).
     """
+    global _cached_result
+    with _cache_lock:
+        if _cached_result is None:
+            _cached_result = _probe_gpu_uncached()
+        return _cached_result
+
+
+def _probe_gpu_uncached() -> GpuProbeResult:
     for source in (
         _probe_env_override,
         _probe_torch_cuda,
@@ -69,6 +96,17 @@ def probe_gpu() -> GpuProbeResult:
             return result
 
     return GpuProbeResult(vendor=GpuVendor.NONE)
+
+
+def clear_cache() -> None:
+    """Force the next `probe_gpu()` call to re-run the full detection chain.
+
+    Mirrors the `clear_cache()` convention already used by
+    `app.llm`/`app.embeddings`/`app.stt` for their own provider caches.
+    """
+    global _cached_result
+    with _cache_lock:
+        _cached_result = None
 
 
 def _probe_env_override() -> GpuProbeResult | None:

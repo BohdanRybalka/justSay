@@ -2,6 +2,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.core.config import settings
+from app.core.gpu_probe import clear_cache as clear_gpu_probe_cache
 from app.main import app
 from app.stt import clear_cache as clear_stt_cache
 from app.llm import clear_cache as clear_llm_cache
@@ -17,7 +18,14 @@ async def client():
 
 @pytest.fixture(autouse=True)
 def _reset_settings():
-    """Reset settings and provider caches to defaults after each test."""
+    """Reset settings and provider caches to defaults after each test.
+
+    Also busts `gpu_probe`'s process-lifetime cache (added as part of the
+    Spec 018 GitHub-review follow-up fix) so a test that exercises the real,
+    unmocked `probe_gpu()` (e.g. `test_gpu_probe.py`, or a test that
+    deliberately restores the real `get_local_provider_kind()` path) never
+    leaks a cached result into the next test.
+    """
     original_stt_mode = settings.stt.mode
     original_llm_mode = settings.llm.mode
     yield
@@ -25,6 +33,7 @@ def _reset_settings():
     settings.llm.mode = original_llm_mode
     clear_stt_cache()
     clear_llm_cache()
+    clear_gpu_probe_cache()
 
 
 @pytest.fixture(autouse=True)

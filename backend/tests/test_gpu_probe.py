@@ -345,3 +345,55 @@ def test_classify_provider_name_unknown_returns_none():
 
 def test_classify_provider_name_non_string_returns_none():
     assert gpu_probe._classify_provider_name(None) is None
+
+
+# --- Process-lifetime cache (Spec 018 GitHub review, PR #21 iteration 2) ---
+
+
+def test_probe_gpu_caches_result_across_multiple_calls(monkeypatch):
+    """The underlying detection chain must run at most once per process,
+    regardless of how many times/call sites invoke `probe_gpu()` -- closes
+    the class of problem PR #21 iteration 2 found (~5 uncached calls per
+    `check_status()` tick from independent call sites)."""
+    gpu_probe.clear_cache()
+    call_count = 0
+
+    def _counting_registry_probe():
+        nonlocal call_count
+        call_count += 1
+        return GpuProbeResult(vendor=GpuVendor.AMD, name="fake amd")
+
+    monkeypatch.setattr(gpu_probe, "_probe_torch_cuda", lambda: None)
+    monkeypatch.setattr(gpu_probe, "_probe_nvidia_smi", lambda: None)
+    monkeypatch.setattr(gpu_probe, "_probe_windows_registry", _counting_registry_probe)
+
+    first = gpu_probe.probe_gpu()
+    second = gpu_probe.probe_gpu()
+    third = gpu_probe.probe_gpu()
+
+    assert call_count == 1
+    assert first is second is third  # literally the same cached object
+    assert first.vendor == GpuVendor.AMD
+
+
+def test_clear_cache_forces_a_fresh_probe_on_next_call(monkeypatch):
+    """The test/dev seam: `clear_cache()` must genuinely bust the cache, not
+    just be a no-op -- otherwise flipping `JUSTSAY_GPU_VENDOR` (or a mocked
+    source) mid-process would never be observed."""
+    gpu_probe.clear_cache()
+    results = iter(
+        [
+            GpuProbeResult(vendor=GpuVendor.AMD, name="first"),
+            GpuProbeResult(vendor=GpuVendor.INTEL, name="second"),
+        ]
+    )
+    monkeypatch.setattr(gpu_probe, "_probe_torch_cuda", lambda: None)
+    monkeypatch.setattr(gpu_probe, "_probe_nvidia_smi", lambda: None)
+    monkeypatch.setattr(gpu_probe, "_probe_windows_registry", lambda: next(results))
+
+    first = gpu_probe.probe_gpu()
+    gpu_probe.clear_cache()
+    second = gpu_probe.probe_gpu()
+
+    assert first.vendor == GpuVendor.AMD
+    assert second.vendor == GpuVendor.INTEL
