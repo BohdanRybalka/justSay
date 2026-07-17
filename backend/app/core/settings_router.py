@@ -62,17 +62,22 @@ async def put_settings(updates: dict):
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
-    sync_to_runtime(outcome.settings)
-    # Lazy import (not a module-level from-import) so tests can monkeypatch
-    # app.stt.local_setup.maybe_prewarm_local directly; same pattern as
-    # app.stt._get_local's factory patch comment. Covers the case where an
-    # unrelated settings change (glossary edit, API key update) incidentally
-    # clears the STT cache via sync_to_runtime's changed_stt check while
-    # Local stays the active mode — without this, that edit would silently
-    # re-introduce a cold lazy-load on next dictation.
-    from app.stt.local_setup import maybe_prewarm_local
+    changed_stt = sync_to_runtime(outcome.settings)
+    # Only re-trigger a Local prewarm when an STT-relevant field actually
+    # changed (the same changed_stt check sync_to_runtime uses for its own
+    # cache invalidation) -- calling maybe_prewarm_local() on every
+    # unrelated edit (shortcut, output_dir, llm_mode, ...) needlessly reset
+    # Spec 023's crash-loop guard counter for edits that have nothing to do
+    # with STT, which could zero it out from under a startup prewarm still
+    # in flight (Spec 023's Review, iteration 1, YELLOW; corroborated by
+    # that spec's GitHub review).
+    if changed_stt:
+        # Lazy import (not a module-level from-import) so tests can
+        # monkeypatch app.stt.local_setup.maybe_prewarm_local directly;
+        # same pattern as app.stt._get_local's factory patch comment.
+        from app.stt.local_setup import maybe_prewarm_local
 
-    maybe_prewarm_local(runtime_settings.stt)
+        maybe_prewarm_local(runtime_settings.stt)
     return SettingsUpdateResponse(settings=_mask_keys(outcome.settings), warning=outcome.warning)
 
 

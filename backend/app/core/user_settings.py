@@ -201,8 +201,14 @@ def _load() -> UserSettings:
     return UserSettings()
 
 
-def sync_to_runtime(us: UserSettings) -> None:
-    """Push user settings into the runtime AppSettings objects."""
+def sync_to_runtime(us: UserSettings) -> bool:
+    """Push user settings into the runtime AppSettings objects.
+
+    Returns whether an STT-relevant field changed (the same `changed_stt`
+    check that already gates this function's own cache invalidation below),
+    so callers that need to react specifically to an STT-relevant change
+    (put_settings()'s prewarm gate) don't have to re-derive it themselves.
+    """
     from app.core.config import settings
     from app.core.types import ProviderMode
 
@@ -252,6 +258,12 @@ def sync_to_runtime(us: UserSettings) -> None:
         clear_llm_cache()
         from app.embeddings import clear_cache as clear_embeddings_cache
         clear_embeddings_cache()
+
+    # changed_stt is built from `or`/`and` chains, so on an all-falsy path it
+    # can end up as "" (the last short-circuited operand from the
+    # gemini/groq key checks) rather than the literal `False` its `-> bool`
+    # signature promises -- coerce explicitly so callers get a real bool.
+    return bool(changed_stt)
 
 
 def _save(s: UserSettings) -> None:

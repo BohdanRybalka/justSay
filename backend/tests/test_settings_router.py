@@ -187,6 +187,33 @@ async def test_put_settings_triggers_prewarm_on_incidental_cache_clear(client, m
     assert call_count["n"] == 2
 
 
+@pytest.mark.prewarm
+@pytest.mark.anyio
+async def test_put_settings_does_not_prewarm_on_non_stt_field_change(client, monkeypatch):
+    """A settings edit that has nothing to do with STT (e.g. `shortcut`) must
+    not call `maybe_prewarm_local` at all while Local is active -- spec 024's
+    fix for the previously-unconditional call gating it on
+    `sync_to_runtime`'s own `changed_stt` return value instead."""
+    import app.stt.local_setup as local_setup_module
+
+    monkeypatch.setattr(runtime_settings.stt, "initial_prompt", runtime_settings.stt.initial_prompt)
+
+    call_count = {"n": 0}
+    monkeypatch.setattr(local_setup_module, "maybe_prewarm_local", _counting_spy(call_count))
+
+    resp = await client.put("/settings", json={"stt_mode": "local"})
+    assert resp.status_code == 200
+    assert call_count["n"] == 1
+
+    resp = await client.put("/settings", json={"shortcut": "Ctrl+Alt+KeyB"})
+    assert resp.status_code == 200
+    assert call_count["n"] == 1
+
+    resp = await client.put("/settings", json={"initial_prompt": "Tauri FastAPI Pydantic"})
+    assert resp.status_code == 200
+    assert call_count["n"] == 2
+
+
 # --- GET /settings/storage and POST /settings/cleanup (spec 020) ------------
 #
 # Both endpoints must read runtime_settings.audio.temp_dir directly rather
