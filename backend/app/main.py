@@ -47,9 +47,12 @@ async def lifespan(app: FastAPI):
     sync_to_runtime(us)
     # A fresh launch or a Spec 011 watchdog respawn that comes back up with
     # Local already persisted starts warming immediately instead of waiting
-    # for the first dictation request to trigger a cold lazy load.
-    from app.stt.local_setup import maybe_prewarm_local
-    maybe_prewarm_local(settings.stt)
+    # for the first dictation request to trigger a cold lazy load. Uses the
+    # crash-loop-guarded startup entry point (Spec 023), not maybe_prewarm_local()
+    # directly, so a model load that crashes the process doesn't get re-attempted
+    # on every watchdog respawn.
+    from app.stt.local_setup import maybe_prewarm_local_at_startup
+    maybe_prewarm_local_at_startup(settings.stt)
     # Fire-and-forget sweep at every launch, catching any backlog left over
     # from a crash, a provider outage in the previous session, or an
     # upgrade from a pre-017 version. Startup does not block on it.
