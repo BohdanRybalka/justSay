@@ -1,5 +1,6 @@
 import { api } from "../api";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
+import { computeDoneStatus } from "./done-status";
 
 // --- State ---
 
@@ -19,7 +20,6 @@ let state: WidgetState = "idle";
 let isTransitioning = false;
 let isHovered = false;
 let durationInterval: ReturnType<typeof setInterval> | null = null;
-let marqueeTimeout: ReturnType<typeof setTimeout> | null = null;
 let iconFlashTimer: ReturnType<typeof setTimeout> | null = null;
 let connectionState: ConnectionCheckState = { offline: false, firstCheckDone: false };
 
@@ -27,17 +27,14 @@ let connectionState: ConnectionCheckState = { offline: false, firstCheckDone: fa
 let currentShortcut = "Ctrl+Alt+KeyV";
 let currentLanguage = "uk";
 
-const MAX_MARQUEE_SECONDS = 20;
+const AUTO_REVERT_MS = 3000;
 
 // --- DOM ---
 
 const widget = document.getElementById("widget")!;
 const iconEl = document.getElementById("widget-icon")!;
-const content = document.querySelector(".widget-content")! as HTMLElement;
 const text = document.getElementById("widget-text")!;
 const durationEl = document.getElementById("widget-duration")!;
-const marquee = document.getElementById("widget-marquee")!;
-const marqueeInner = document.getElementById("marquee-inner")!;
 
 // --- Icon helpers ---
 
@@ -51,15 +48,15 @@ function updateIcon(next: IconState) {
 }
 
 // "Interactive window" — when hover should respond. Idle is the obvious case;
-// the calm tail of `done` (after the 700 ms one-shot, while marquee still
-// scrolls) is also interactive, so the icon doesn't get stuck on `hover`.
+// the calm tail of `done` (after the 700 ms one-shot, while the compact status
+// is still showing) is also interactive, so the icon doesn't get stuck on `hover`.
 function isInteractive(): boolean {
   return state === "idle" || (state === "done" && iconFlashTimer === null);
 }
 
 // --- State management ---
 
-function setState(newState: WidgetState, message?: string) {
+function setState(newState: WidgetState, message?: string, durationLabel?: string) {
   state = newState;
   widget.className = `widget ${state}`;
 
@@ -68,18 +65,10 @@ function setState(newState: WidgetState, message?: string) {
     durationInterval = null;
   }
 
-  if (marqueeTimeout) {
-    clearTimeout(marqueeTimeout);
-    marqueeTimeout = null;
-  }
-
   if (iconFlashTimer) {
     clearTimeout(iconFlashTimer);
     iconFlashTimer = null;
   }
-
-  marquee.classList.remove("active");
-  content.style.display = "flex";
 
   switch (state) {
     case "idle":
@@ -98,12 +87,16 @@ function setState(newState: WidgetState, message?: string) {
       updateIcon("processing");
       break;
     case "done":
+      text.textContent = message || "Done";
+      durationEl.textContent = durationLabel || "";
       updateIcon("done");
       iconFlashTimer = setTimeout(() => {
         iconFlashTimer = null;
         if (state === "done") updateIcon(isHovered ? "hover" : "idle");
       }, 700);
-      showMarquee(message || "Done");
+      setTimeout(() => {
+        if (state === "done") setState("idle");
+      }, AUTO_REVERT_MS);
       break;
     case "error":
       text.textContent = message || "Error";
@@ -111,33 +104,9 @@ function setState(newState: WidgetState, message?: string) {
       updateIcon("error");
       setTimeout(() => {
         if (state === "error") setState("idle");
-      }, 3000);
+      }, AUTO_REVERT_MS);
       break;
   }
-}
-
-function showMarquee(resultText: string) {
-  if (!resultText.trim()) {
-    setState("idle");
-    return;
-  }
-
-  content.style.display = "none";
-  marqueeInner.textContent = resultText;
-
-  const textWidth = marqueeInner.scrollWidth || resultText.length * 8;
-  const containerWidth = marquee.offsetWidth || 250;
-  const totalDistance = textWidth + containerWidth;
-  const speed = 50;
-  const rawDuration = totalDistance / speed;
-  const duration = Math.min(rawDuration, MAX_MARQUEE_SECONDS);
-
-  marquee.style.setProperty("--marquee-duration", `${duration}s`);
-  marquee.classList.add("active");
-
-  marqueeTimeout = setTimeout(() => {
-    if (state === "done") setState("idle");
-  }, duration * 1000 + 500);
 }
 
 function startDurationTimer() {
@@ -185,8 +154,13 @@ async function stopAndProcess() {
 
   try {
     const result = await api.dictate(currentLanguage);
-    setState("done", result.text || "Done");
-    showRouteBadge(result);
+    const outcome = computeDoneStatus(result);
+    if (outcome) {
+      setState("done", outcome.label, formatDuration(outcome.elapsedSeconds));
+      showRouteBadge(result);
+    } else {
+      setState("idle");
+    }
   } catch (e) {
     const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
     const errorLabel = msg.includes("missing") ? "Add key in Settings" : "Failed";
