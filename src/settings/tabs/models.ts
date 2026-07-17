@@ -9,6 +9,7 @@ import {
   computeIndicatorState,
   onIndicatorStateChange,
   renderIndicator,
+  bindIndicatorActivation,
 } from "../../status-indicator";
 
 // Edge-triggered latch for the Local STT indicator's last-seen error — drives
@@ -26,7 +27,8 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
         <span class="label">Mode</span>
         <div class="toggle-group">
           <button class="toggle-btn ${settings.stt_mode === "cloud" ? "active" : ""}" id="stt-cloud">Cloud</button>
-          <button class="toggle-btn ${settings.stt_mode === "local" ? "active" : ""}" id="stt-local">Local<span id="stt-local-indicator" class="status-indicator-badge"></span></button>
+          <button class="toggle-btn ${settings.stt_mode === "local" ? "active" : ""}" id="stt-local">Local</button>
+          <span id="stt-local-indicator" class="status-indicator-badge"></span>
         </div>
       </div>
       <div class="setting-row" id="stt-engine-row" style="${settings.stt_mode === "cloud" ? "" : "display:none;"}">
@@ -75,7 +77,13 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
   // --- STT indicator + caption update, shared by the success/failure paths ---
   function applyLocalIndicator(error: string | null, ready: boolean, captionText: string) {
     const state = computeIndicatorState({ active: currentSttMode === "local", ready, error });
-    renderIndicator(sttLocalIndicator, state, { title: error ?? "" });
+    renderIndicator(sttLocalIndicator, state, {
+      title: error ?? "",
+      interactive: state === "error",
+      ariaLabel: error
+        ? `Local speech-to-text error: ${error}. Press Enter or Space to retry.`
+        : undefined,
+    });
     const caption = sttPanel.querySelector<HTMLElement>("#stt-local-caption");
     if (caption) caption.textContent = captionText;
     if (onIndicatorStateChange(prevLastError, error)) {
@@ -101,10 +109,8 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
     }
   }
 
-  // --- Retry-on-click when the indicator shows an error ---
-  sttLocalIndicator.addEventListener("click", (e) => {
-    e.stopPropagation();
-    if (!sttLocalIndicator.classList.contains("status-indicator-badge--error")) return;
+  // --- Retry on click or Enter/Space when the indicator shows an error ---
+  bindIndicatorActivation(sttLocalIndicator, () => {
     (async () => {
       try {
         await api.sttLocalPrewarm();

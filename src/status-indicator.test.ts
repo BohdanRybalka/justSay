@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeIndicatorState, onIndicatorStateChange } from "./status-indicator";
+import { computeIndicatorState, isActivationKey, onIndicatorStateChange } from "./status-indicator";
 
 describe("computeIndicatorState", () => {
   it("active: false yields idle regardless of ready/error", () => {
@@ -42,5 +42,18 @@ describe("onIndicatorStateChange", () => {
 
   it("recovery (error -> null): no change", () => {
     expect(onIndicatorStateChange("boom", null)).toBe(false);
+  });
+});
+
+describe("isActivationKey", () => {
+  it("Enter and Space are activation keys", () => {
+    expect(isActivationKey("Enter")).toBe(true);
+    expect(isActivationKey(" ")).toBe(true);
+  });
+
+  it("other keys are not activation keys", () => {
+    expect(isActivationKey("Escape")).toBe(false);
+    expect(isActivationKey("Tab")).toBe(false);
+    expect(isActivationKey("a")).toBe(false);
   });
 });
