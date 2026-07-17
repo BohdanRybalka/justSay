@@ -40,6 +40,9 @@ async def lifespan(app: FastAPI):
     us = get_user_settings()
     # Bootstrap history before any worker thread can call save_entry.
     history.bootstrap(Path(us.output_dir))
+    # Cheap visibility: lets a developer immediately tell, from backend.log
+    # or console output, whether ~/.justsay or ~/.justsay-dev is active.
+    log.info("Data root: %s", history.history_path().parent)
     # Sync user settings into runtime config (modes, model choices, etc.)
     sync_to_runtime(us)
     # A fresh launch or a Spec 011 watchdog respawn that comes back up with

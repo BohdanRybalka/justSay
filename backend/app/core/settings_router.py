@@ -12,7 +12,6 @@ from app.core.user_settings import (
     get_user_settings,
     update_user_settings,
     sync_to_runtime,
-    SETTINGS_DIR,
 )
 
 
@@ -97,7 +96,10 @@ async def cloud_key_status():
 
 @router.get("/storage", response_model=StorageInfo)
 async def get_storage_info():
-    tmp_dir = SETTINGS_DIR / "tmp"
+    # Read directly off AudioSettings rather than re-deriving SETTINGS_DIR / "tmp"
+    # -- the two used to coincide only because both hardcoded the same literal;
+    # see docs/adr/012-dev-mode-data-directory-isolation.md.
+    tmp_dir = runtime_settings.audio.temp_dir
     # `temp_size_bytes` is the only field: `temp_dir` itself is only used
     # internally (via `compute_dir_size`) and never returned. `output_dir`
     # used to be returned here too (masked via a now-deleted `_mask_home`
@@ -108,7 +110,7 @@ async def get_storage_info():
 
 @router.post("/cleanup", response_model=CleanupResult)
 async def cleanup_temp():
-    tmp_dir = SETTINGS_DIR / "tmp"
+    tmp_dir = runtime_settings.audio.temp_dir
     freed = compute_dir_size(tmp_dir)
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)

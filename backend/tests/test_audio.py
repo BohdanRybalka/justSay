@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -198,3 +199,43 @@ def test_config_rejects_negative_sample_rate():
 def test_config_rejects_zero_channels():
     with pytest.raises(ValidationError):
         AudioSettings(sample_rate=16000, channels=0)
+
+
+# --- temp_dir default_factory resolution (spec 020) --------------------------
+#
+# AudioSettings.temp_dir's default_factory delegates to
+# app.core.app_paths.resolve_app_data_root() -- mirrors test_app_paths.py's
+# isolation fixture and sys.frozen monkeypatch conventions.
+
+
+@pytest.fixture
+def _isolated_home_and_env(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("JUSTSAY_DATA_DIR", raising=False)
+    monkeypatch.delenv("JUSTSAY_FORCE_DEV_DATA_DIR", raising=False)
+    monkeypatch.delenv("JUSTSAY_AUDIO_TEMP_DIR", raising=False)
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    return home
+
+
+def test_temp_dir_defaults_to_dev_data_root_when_not_frozen(_isolated_home_and_env):
+    home = _isolated_home_and_env
+    assert AudioSettings().temp_dir == home / ".justsay-dev" / "tmp"
+
+
+def test_temp_dir_resolves_to_prod_data_root_when_frozen(_isolated_home_and_env, monkeypatch):
+    home = _isolated_home_and_env
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    assert AudioSettings().temp_dir == home / ".justsay" / "tmp"
+
+
+def test_temp_dir_env_override_wins_over_default_factory(
+    _isolated_home_and_env, monkeypatch, tmp_path
+):
+    override = tmp_path / "custom-audio-tmp"
+    monkeypatch.setenv("JUSTSAY_AUDIO_TEMP_DIR", str(override))
+
+    assert AudioSettings().temp_dir == override

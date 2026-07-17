@@ -37,7 +37,10 @@ use tauri_plugin_shell::ShellExt;
 /// does NOT expose `creation_flags`; for the frozen-sidecar production
 /// path the console window is suppressed by building the sidecar with
 /// `console=False` (see `backend/build_sidecar.spec`) plus the Python
-/// entrypoint redirecting stdout/stderr to `~/.justsay/logs/sidecar.log`.
+/// entrypoint redirecting stdout/stderr to `~/<data_dir_name>/logs/sidecar.log`,
+/// where `data_dir_name` is `.justsay` or `.justsay-dev` depending on
+/// `spawn()`'s `force_dev_data_dir` flag — see `append_sidecar_log()` below
+/// and `docs/adr/012-dev-mode-data-directory-isolation.md`.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -234,14 +237,19 @@ fn http_client() -> Result<&'static reqwest::Client, String> {
 }
 
 /// Append a stderr line from the production sidecar to
-/// `~/.justsay/logs/sidecar.log`. Failure to open the log file is silent
-/// to avoid spamming on shutdown when the FS is racing.
-fn append_sidecar_log(line: &[u8]) {
+/// `~/<data_dir_name>/logs/sidecar.log`. `data_dir_name` is `.justsay` or
+/// `.justsay-dev`, matching `spawn()`'s `force_dev_data_dir` flag — see
+/// `docs/adr/012-dev-mode-data-directory-isolation.md` — so a
+/// `tauri:dev:frozen` smoke-test run's captured sidecar output lands under
+/// the same dev directory as the sidecar's own history.db/settings.json.
+/// Failure to open the log file is silent to avoid spamming on shutdown
+/// when the FS is racing.
+fn append_sidecar_log(line: &[u8], data_dir_name: &str) {
     let home = match std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
         Ok(h) => h,
         Err(_) => return,
     };
-    let log_dir = PathBuf::from(home).join(".justsay").join("logs");
+    let log_dir = PathBuf::from(home).join(data_dir_name).join("logs");
     if std::fs::create_dir_all(&log_dir).is_err() {
         return;
     }
@@ -436,6 +444,16 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
     let prefer_python_source =
         cfg!(debug_assertions) && std::env::var("JUSTSAY_USE_FROZEN_SIDECAR").is_err();
 
+    // See docs/adr/012-dev-mode-data-directory-isolation.md: sys.frozen alone
+    // cannot distinguish a real end-user install from a debug build
+    // smoke-testing the actual frozen sidecar binary (tauri:dev:frozen,
+    // JUSTSAY_USE_FROZEN_SIDECAR=1) -- that launch has sys.frozen == True but
+    // is still a dev/test context. Set unconditionally on both spawn
+    // branches below: one unambiguous statement of intent from the one
+    // place that actually knows whether this is a debug build.
+    let force_dev_data_dir = cfg!(debug_assertions);
+    let data_dir_name: &'static str = if force_dev_data_dir { ".justsay-dev" } else { ".justsay" };
+
     let resolved_sidecar = if prefer_python_source {
         None
     } else {
@@ -446,10 +464,14 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         log::info!("Starting backend sidecar via shell plugin: {:?}", sidecar);
         let sidecar_str = sidecar.to_string_lossy().to_string();
         let port_str = PORT.to_string();
-        let (mut rx, child) = app
+        let mut shell_cmd = app
             .shell()
             .command(sidecar_str)
-            .args(["--host", "127.0.0.1", "--port", &port_str])
+            .args(["--host", "127.0.0.1", "--port", &port_str]);
+        if force_dev_data_dir {
+            shell_cmd = shell_cmd.env("JUSTSAY_FORCE_DEV_DATA_DIR", "1");
+        }
+        let (mut rx, child) = shell_cmd
             .spawn()
             .map_err(|e| format!("Failed to start backend sidecar: {}", e))?;
 
@@ -462,10 +484,10 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         tauri::async_runtime::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
-                    CommandEvent::Stderr(bytes) => append_sidecar_log(&bytes),
-                    CommandEvent::Stdout(bytes) => append_sidecar_log(&bytes),
+                    CommandEvent::Stderr(bytes) => append_sidecar_log(&bytes, data_dir_name),
+                    CommandEvent::Stdout(bytes) => append_sidecar_log(&bytes, data_dir_name),
                     CommandEvent::Error(msg) => {
-                        append_sidecar_log(format!("[shell error] {}", msg).as_bytes());
+                        append_sidecar_log(format!("[shell error] {}", msg).as_bytes(), data_dir_name);
                         alive_clone.store(false, Ordering::Release);
                         break;
                     }
@@ -474,7 +496,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
                             "[terminated] code={:?} signal={:?}",
                             payload.code, payload.signal
                         );
-                        append_sidecar_log(line.as_bytes());
+                        append_sidecar_log(line.as_bytes(), data_dir_name);
                         alive_clone.store(false, Ordering::Release);
                         break;
                     }
@@ -509,6 +531,9 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         .current_dir(&backend_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+        if force_dev_data_dir {
+            cmd.env("JUSTSAY_FORCE_DEV_DATA_DIR", "1");
+        }
         // CREATE_NEW_PROCESS_GROUP lets terminate_gracefully() later target
         // this child alone with CTRL_BREAK_EVENT (see the constant's doc).
         #[cfg(windows)]
