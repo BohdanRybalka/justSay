@@ -664,3 +664,110 @@ def test_port_lock_blocks_second_providers_spawn_until_first_providers_terminate
     assert len(popen_calls) == 1
     assert provider2.is_loaded is True
     assert old_process.terminate_calls == 1
+
+
+# --------------------------------------------------------------------------- #
+# _download_lock cross-instance race (GitHub review, PR #21, iteration 1,     #
+# issue #1)                                                                    #
+# --------------------------------------------------------------------------- #
+
+
+class _BlockingStreamCtx:
+    """A `_FakeStreamCtx` whose `iter_bytes()` blocks on a `threading.Event`
+    before yielding -- lets a test hold `_download_model()` inside its
+    `_download_lock`-guarded section for as long as the test needs, mirroring
+    `_BlockingTerminateProcess`'s Event-based approach for `_port_lock`
+    above."""
+
+    def __init__(self, chunks, started_event: threading.Event, release_event: threading.Event):
+        self._chunks = chunks
+        self._started_event = started_event
+        self._release_event = release_event
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def raise_for_status(self):
+        pass
+
+    def iter_bytes(self, size):
+        self._started_event.set()
+        self._release_event.wait(timeout=2)
+        yield from self._chunks
+
+
+def test_download_lock_serializes_concurrent_downloads_and_second_skips_redownload(
+    monkeypatch, tmp_path
+):
+    """Regression for the exact reported race: Spec 015's eager pre-warm
+    starts a multi-GB download on a Local-mode switch; if the user switches
+    away and back to Local within that window, `clear_cache()` hands out a
+    second, independent `WhisperCppVulkanSTTProvider` instance whose own
+    `_get_model()` sees the same model file missing and calls
+    `_download_model()` too. `_download_lock` must serialize the two calls so
+    neither writes to the shared `.part` file while the other is mid-stream,
+    and the loser must skip the redundant download entirely once its
+    post-lock `model_path.is_file()` recheck sees the winner already
+    finished."""
+    binary_path = tmp_path / "whisper-server.exe"
+    binary_path.write_bytes(b"")
+    model_path = tmp_path / "ggml-large-v3-turbo.bin"
+    part_path = model_path.with_name(model_path.name + ".part")
+
+    monkeypatch.setattr(local_vulkan_module, "resolve_binary_path", lambda: binary_path)
+    monkeypatch.setattr(local_vulkan_module, "resolve_model_path", lambda size: model_path)
+
+    settings = STTSettings(whisper_model_size="large-v3-turbo")
+    provider1 = WhisperCppVulkanSTTProvider(settings)
+    provider2 = WhisperCppVulkanSTTProvider(settings)
+
+    download_started = threading.Event()
+    release_download = threading.Event()
+    stream_calls = {"n": 0}
+
+    def _stream_impl(method, url):
+        stream_calls["n"] += 1
+        if stream_calls["n"] > 1:
+            raise AssertionError(
+                "a second _download_model() call started a redundant "
+                "download instead of skipping it after the post-lock recheck"
+            )
+        return _BlockingStreamCtx(
+            [b"fake", b"-ggml-", b"weights"], download_started, release_download
+        )
+
+    _install_fake_httpx(monkeypatch, stream_impl=_stream_impl)
+
+    thread1 = threading.Thread(target=provider1._download_model, args=(model_path,))
+    thread1.start()
+    assert download_started.wait(timeout=2), "first download never started"
+    # _download_lock is now held by provider1's in-flight download (the fake
+    # stream is blocked mid-iter_bytes, inside the lock's `with` body).
+
+    thread2 = threading.Thread(target=provider2._download_model, args=(model_path,))
+    thread2.start()
+
+    # Give the second call every real chance to race ahead if _download_lock
+    # weren't actually serializing the two -- it must still be blocked, and
+    # the model must not exist yet (the first download hasn't completed).
+    time.sleep(0.2)
+    assert thread2.is_alive(), (
+        "second _download_model() call proceeded before the first released "
+        "_download_lock"
+    )
+    assert not model_path.is_file()
+
+    release_download.set()  # let the first download finish and release the lock
+    thread1.join(timeout=2)
+    assert not thread1.is_alive()
+
+    thread2.join(timeout=2)
+    assert not thread2.is_alive()
+
+    assert model_path.is_file()
+    assert model_path.read_bytes() == b"fake-ggml-weights"
+    assert not part_path.exists()  # renamed on success, no leftover partial file
+    assert stream_calls["n"] == 1  # second call skipped the redundant download

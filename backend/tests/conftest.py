@@ -53,7 +53,11 @@ def _force_faster_whisper_for_local(monkeypatch, request):
     project's own dev machine has a real AMD GPU (spec 018) — the unpatched
     function would route those calls to `WHISPER_CPP_VULKAN` on THIS
     machine specifically, breaking the platform-agnostic guarantee this
-    fixture already exists to provide.
+    fixture already exists to provide. The stub accepts (and ignores) an
+    optional positional `vendor` arg — `check_status()` (GitHub review on PR
+    #21, iteration 1, issue #2) now calls the real function with an
+    already-resolved vendor to avoid double-probing the GPU, and this stub
+    must accept that same call shape.
 
     Patched on `app.stt.local_setup`'s own already-bound name (mirroring
     `is_macos_arm64`'s existing import style), NOT on `app.stt.local_factory`
@@ -74,7 +78,7 @@ def _force_faster_whisper_for_local(monkeypatch, request):
     )
     monkeypatch.setattr(
         "app.stt.local_setup.get_local_provider_kind",
-        lambda: LocalProviderKind.FASTER_WHISPER,
+        lambda *args, **kwargs: LocalProviderKind.FASTER_WHISPER,
     )
 
 

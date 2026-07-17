@@ -64,14 +64,26 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
         # Accurate for the project default large-v3-turbo and other large
         # variants; smaller MLX checkpoints ship as float16.
         compute_type = "bfloat16"
-    elif get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_VULKAN:
-        device = "vulkan"
-        compute_type = "float16"
     else:
-        device = stt_settings.whisper_device
-        if device == "auto":
-            device = "cuda" if cuda_probe_available else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
+        # Pass the vendor _detect_gpu() already resolved straight through to
+        # get_local_provider_kind() instead of letting it call probe_gpu() a
+        # second time — probe_gpu() has no caching (docs/TODO.md → Tech
+        # Debt), and check_status() is polled every 3s by the Settings tab.
+        # gpu_vendor is always "nvidia"/"amd"/"intel"/"none" here (the
+        # "apple" value only comes back from the is_macos_arm64() branch of
+        # _detect_gpu(), which can't be true in this else branch since it's
+        # the same is_macos_arm64() check).
+        from app.core.gpu_probe import GpuVendor
+
+        kind = get_local_provider_kind(GpuVendor(gpu_vendor))
+        if kind == LocalProviderKind.WHISPER_CPP_VULKAN:
+            device = "vulkan"
+            compute_type = "float16"
+        else:
+            device = stt_settings.whisper_device
+            if device == "auto":
+                device = "cuda" if cuda_probe_available else "cpu"
+            compute_type = "float16" if device == "cuda" else "int8"
 
     # True whenever the *final resolved* device indicates real GPU
     # acceleration — not just NVIDIA — so a Vulkan-accelerated AMD/Intel

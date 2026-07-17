@@ -375,8 +375,13 @@ def test_check_status_macos_arm64_reports_mlx_device_and_bfloat16(monkeypatch):
 def _stub_vulkan_kind(monkeypatch) -> None:
     from app.stt.local_factory import LocalProviderKind
 
+    # Accepts (and ignores) an optional positional `vendor` arg -- since the
+    # GitHub review fix (PR #21, iteration 1, issue #2), check_status() calls
+    # the real get_local_provider_kind() with an already-resolved vendor.
     monkeypatch.setattr(
-        local_setup, "get_local_provider_kind", lambda: LocalProviderKind.WHISPER_CPP_VULKAN
+        local_setup,
+        "get_local_provider_kind",
+        lambda *args, **kwargs: LocalProviderKind.WHISPER_CPP_VULKAN,
     )
 
 
@@ -404,6 +409,46 @@ def test_check_status_vulkan_kind_reports_gpu_available_true(monkeypatch):
     with _apply(_patches(True, (False, "AMD Radeon RX 5700 XT", "amd"))):
         status = check_status(settings)
 
+    assert status.device == "vulkan"
+    assert status.gpu_available is True
+    assert status.gpu_vendor == "amd"
+
+
+def test_check_status_probes_gpu_at_most_once_on_windows_amd_or_intel(monkeypatch):
+    """Regression for the GitHub review on PR #21, iteration 1, issue #2:
+    check_status() must not call the uncached, already-expensive
+    `probe_gpu()` twice per invocation (once via `_detect_gpu()`, once more
+    via `get_local_provider_kind()`'s own `WHISPER_CPP_VULKAN` branch check)
+    -- doubling cost on every 3s Settings-tab poll tick.
+
+    `_check_package_installed()` is stubbed out here (same convention as
+    `_patches()`) since its own internal `get_local_provider_kind()` call is
+    a separate, pre-existing call site this fix doesn't target. The autouse
+    `_force_faster_whisper_for_local` fixture's stub is overridden with the
+    real `get_local_provider_kind()` so this test genuinely exercises the
+    fix's call-count reduction rather than a fixture that never probes at
+    all.
+    """
+    from app.core.gpu_probe import GpuProbeResult, GpuVendor
+    from app.stt.local_factory import get_local_provider_kind as real_get_local_provider_kind
+
+    monkeypatch.setattr(local_setup, "get_local_provider_kind", real_get_local_provider_kind)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+    monkeypatch.setattr(local_setup, "is_macos_arm64", lambda: False)
+    monkeypatch.setattr("os.name", "nt")
+
+    probe_calls = {"n": 0}
+
+    def _fake_probe_gpu():
+        probe_calls["n"] += 1
+        return GpuProbeResult(vendor=GpuVendor.AMD, name="AMD Radeon RX 5700 XT")
+
+    monkeypatch.setattr("app.core.gpu_probe.probe_gpu", _fake_probe_gpu)
+
+    settings = STTSettings(whisper_model_size="large-v3-turbo")
+    status = check_status(settings)
+
+    assert probe_calls["n"] == 1
     assert status.device == "vulkan"
     assert status.gpu_available is True
     assert status.gpu_vendor == "amd"

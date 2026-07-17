@@ -67,6 +67,19 @@ _GRACE_POLL_MAX_ATTEMPTS = 30  # 3s, mirrors backend.rs's terminate_gracefully()
 # RED-1.
 _port_lock = threading.Lock()
 
+# Serializes "someone is streaming the GGML model to model_path.part" against
+# a second, independent WhisperCppVulkanSTTProvider instance doing the exact
+# same thing -- module-level for the same reason _port_lock is: clear_cache()
+# always replaces the cached provider with a brand-new instance on every
+# Local<->Cloud switch, so an old instance's in-flight download (e.g. Spec
+# 015's eager pre-warm) and a new instance's own _get_model() call share no
+# instance state to synchronize on directly. A single lock covering the whole
+# download step (not one keyed per model_size) is simplest and sufficient --
+# single-user local desktop app, same rationale as _port_lock's own choice of
+# a single module-level lock over per-resource locking. See GitHub review on
+# PR #21, iteration 1, issue #1.
+_download_lock = threading.Lock()
+
 # ggerganov/whisper.cpp's own Hugging Face model repo -- GGML format,
 # distinct from the CTranslate2 format faster-whisper auto-downloads for
 # LocalSTTProvider (a real, permanent second-model-file cost, see plan 018's
@@ -172,20 +185,39 @@ class WhisperCppVulkanSTTProvider(STTProvider):
         fully-successful download -- a partial download from an interrupted
         first run must never be mistaken for a complete model on the next
         launch.
-        """
-        url = _HF_MODEL_URL_TEMPLATE.format(size=self._settings.whisper_model_size)
-        model_path.parent.mkdir(parents=True, exist_ok=True)
-        part_path = model_path.with_name(model_path.name + ".part")
 
-        log.info("Downloading GGML model: %s -> %s", url, model_path)
-        with httpx.Client(follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT) as client:
-            with client.stream("GET", url) as resp:
-                resp.raise_for_status()
-                with open(part_path, "wb") as f:
-                    for chunk in resp.iter_bytes(_DOWNLOAD_CHUNK_SIZE):
-                        f.write(chunk)
-        part_path.replace(model_path)
-        log.info("GGML model download complete: %s", model_path)
+        Holds `_download_lock` for the entire body: `_get_model()`'s own
+        `model_path.is_file()` check happens *before* this method is called,
+        so two independent provider instances (e.g. an old instance's Spec
+        015 eager pre-warm still downloading, racing a new instance created
+        by a rapid Local->Cloud->Local switch) can both decide the model is
+        missing and both call in here. Re-checks `model_path.is_file()` right
+        after acquiring the lock so whichever instance loses the race skips
+        the redundant multi-GB re-download entirely once it sees the winner
+        already finished, instead of interleaving writes into the same
+        `.part` file.
+        """
+        with _download_lock:
+            if model_path.is_file():
+                log.info(
+                    "GGML model already downloaded by a concurrent instance -- "
+                    "skipping redundant download: %s", model_path,
+                )
+                return
+
+            url = _HF_MODEL_URL_TEMPLATE.format(size=self._settings.whisper_model_size)
+            model_path.parent.mkdir(parents=True, exist_ok=True)
+            part_path = model_path.with_name(model_path.name + ".part")
+
+            log.info("Downloading GGML model: %s -> %s", url, model_path)
+            with httpx.Client(follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT) as client:
+                with client.stream("GET", url) as resp:
+                    resp.raise_for_status()
+                    with open(part_path, "wb") as f:
+                        for chunk in resp.iter_bytes(_DOWNLOAD_CHUNK_SIZE):
+                            f.write(chunk)
+            part_path.replace(model_path)
+            log.info("GGML model download complete: %s", model_path)
 
     def _spawn_server(self, binary_path: Path, model_path: Path) -> None:
         argv = build_server_argv(binary_path, model_path, _HOST, _PORT)
