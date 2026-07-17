@@ -212,11 +212,14 @@ export const api = {
   dictate: (language = "uk") =>
     request<DictateResponse>("POST", `/pipeline/dictate?language=${language}`),
 
-  /** Upload an audio file to the pipeline. Accepts an ArrayBuffer of file bytes. */
+  /** Upload an audio file to the pipeline. Accepts an ArrayBuffer of file bytes.
+   *  `language` defaults to `"auto"` — every STT provider maps that sentinel
+   *  onto its own native auto-detect mechanism (see `STTProvider.transcribe`'s
+   *  docstring in the backend for the per-provider translation). */
   processFile: async (
     fileBytes: ArrayBuffer,
     filename: string,
-    language = "uk",
+    language = "auto",
   ): Promise<DictateResponse> => {
     const form = new FormData();
     const blob = new Blob([fileBytes], { type: "application/octet-stream" });

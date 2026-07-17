@@ -32,18 +32,6 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
       </div>
     </div>
 
-    <div class="setting-group">
-      <div class="setting-label">Options</div>
-      <div class="setting-row">
-        <span class="label">Language</span>
-        <select id="tx-lang">
-          ${["uk","en","de","fr","es","pl","ja","zh"].map(c =>
-            `<option value="${c}" ${c === settings.language ? "selected" : ""}>${c.toUpperCase()}</option>`,
-          ).join("")}
-        </select>
-      </div>
-    </div>
-
     <div class="setting-group" id="result-group" style="display:none;">
       <div class="setting-label">Result</div>
       <div class="transcribe-result" id="result-card">
@@ -60,19 +48,13 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
   const dropzone = container.querySelector<HTMLDivElement>("#dropzone")!;
   const fileInput = container.querySelector<HTMLInputElement>("#file-input")!;
   const pickBtn = container.querySelector<HTMLButtonElement>("#pick-btn")!;
-  const langSelect = container.querySelector<HTMLSelectElement>("#tx-lang")!;
   const resultGroup = container.querySelector<HTMLElement>("#result-group")!;
   const resultStatus = container.querySelector<HTMLElement>("#result-status")!;
   const resultText = container.querySelector<HTMLElement>("#result-text")!;
   const copyBtn = container.querySelector<HTMLButtonElement>("#copy-btn")!;
   const resetBtn = container.querySelector<HTMLButtonElement>("#reset-btn")!;
 
-  let chosenLanguage = settings.language;
   let busy = false;
-
-  langSelect.addEventListener("change", () => {
-    chosenLanguage = langSelect.value;
-  });
 
   // --- File picker ---
   pickBtn.addEventListener("click", (e) => {
@@ -251,7 +233,7 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
   async function transcribe(bytes: ArrayBuffer, filename: string) {
     setUiState("transcribing", `Transcribing ${filename}...`);
     try {
-      const result: DictateResponse = await api.processFile(bytes, filename, chosenLanguage);
+      const result: DictateResponse = await api.processFile(bytes, filename);
       const text = result.text || "";
       resultText.textContent = text || "(empty result)";
       const seconds = (result.duration_ms / 1000).toFixed(2);

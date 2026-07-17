@@ -89,9 +89,14 @@ class GroqWhisperSTTProvider(STTProvider):
                 kwargs: dict = {
                     "file": (audio_path.name, fh.read()),
                     "model": model,
-                    "language": language,
                     "response_format": "text",
                 }
+                # Omit "language" entirely for "auto" — mirrors the Groq SDK's
+                # own `Omit` default, which is the documented auto-detect path
+                # (Groq's inference server is closed-source, so the literal
+                # string "auto" is not verified to mean anything to it).
+                if language and language != "auto":
+                    kwargs["language"] = language
                 if prompt:
                     kwargs["prompt"] = prompt
                 response = client.audio.transcriptions.create(**kwargs)

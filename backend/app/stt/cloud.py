@@ -95,17 +95,24 @@ class GeminiSTTProvider(STTProvider):
     @staticmethod
     def _build_prompt(language: str, style: str, glossary: str | None = None) -> str:
         from app.pipeline.prompts import LANGUAGE_NAMES
-        lang_name = LANGUAGE_NAMES.get(language, language)
+
+        if language == "auto":
+            lang_clause = "Automatically detect the spoken language from the audio."
+            lang_ref = "the detected language"
+        else:
+            lang_name = LANGUAGE_NAMES.get(language, language)
+            lang_clause = f"The primary language is {lang_name}."
+            lang_ref = lang_name
 
         if style == "ai_prompt":
             base = (
                 f"Transcribe this audio and structure the output as a professional document. "
-                f"The primary language is {lang_name}. "
+                f"{lang_clause} "
                 f"The speaker may use words from other languages — write them in their original form.\n\n"
                 "Instructions:\n"
                 "1. Transcribe faithfully, removing speech disfluencies (hesitation, filler words, "
                 "repeated words).\n"
-                f"2. Fix grammar, spelling, punctuation appropriate for {lang_name}.\n"
+                f"2. Fix grammar, spelling, punctuation appropriate for {lang_ref}.\n"
                 "3. Analyse the speaker's intent and structure appropriately:\n"
                 "   - Task or request -> action items with context\n"
                 "   - Idea or concept -> key points\n"
@@ -119,7 +126,7 @@ class GeminiSTTProvider(STTProvider):
         else:
             base = (
                 f"Transcribe this audio faithfully. "
-                f"The primary language is {lang_name}. "
+                f"{lang_clause} "
                 f"The speaker may use words from other languages — write them in their original form. "
                 f"Include natural punctuation (periods, commas, question marks) based on speech intonation. "
                 f"Output ONLY the transcription text, nothing else."

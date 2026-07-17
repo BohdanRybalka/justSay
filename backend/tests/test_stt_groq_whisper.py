@@ -143,3 +143,33 @@ def test_groq_sdk_payload_includes_prompt_when_set(tmp_path):
 
     call_kwargs = client.audio.transcriptions.create.call_args.kwargs
     assert call_kwargs["prompt"] == "glossary text"
+
+
+# --- STT auto-detect (spec 019) ---
+
+
+def test_groq_sdk_payload_includes_language_when_explicit_code(tmp_path):
+    """Regression: an explicit BCP-47 code must still reach the Groq SDK as-is."""
+    provider = GroqWhisperSTTProvider(_settings())
+    client = MagicMock()
+    client.audio.transcriptions.create.return_value = "ok"
+
+    provider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None)
+
+    call_kwargs = client.audio.transcriptions.create.call_args.kwargs
+    assert call_kwargs["language"] == "uk"
+
+
+def test_groq_sdk_payload_omits_language_key_for_auto(tmp_path):
+    """language="auto" must NOT be forwarded to the Groq SDK at all — omission
+    is the documented auto-detect path (mirrors the SDK's own `Omit` default),
+    never the literal string "auto" (unverified against Groq's closed-source
+    server)."""
+    provider = GroqWhisperSTTProvider(_settings())
+    client = MagicMock()
+    client.audio.transcriptions.create.return_value = "ok"
+
+    provider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "auto", None)
+
+    call_kwargs = client.audio.transcriptions.create.call_args.kwargs
+    assert "language" not in call_kwargs

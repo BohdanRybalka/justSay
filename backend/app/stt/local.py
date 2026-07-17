@@ -128,6 +128,11 @@ class LocalSTTProvider(STTProvider):
         # docs/research/whisper-llm-need.md). Only disable for short clips.
         condition_on_previous_text = not is_short
         glossary = self._settings.initial_prompt.strip() or None
+        # faster-whisper's own auto-detect sentinel is `language=None`, not the
+        # literal string "auto" (which it would treat as an invalid two-letter
+        # code) — translate here, but keep the original "auto" string in the
+        # log line below for observability.
+        whisper_language = None if language == "auto" else language
 
         log.info(
             "faster-whisper: transcribe model=%s file=%s lang=%s "
@@ -143,7 +148,7 @@ class LocalSTTProvider(STTProvider):
         def _transcribe():
             segments, _info = model.transcribe(
                 str(audio_path),
-                language=language,
+                language=whisper_language,
                 beam_size=beam_size,
                 vad_filter=True,
                 condition_on_previous_text=condition_on_previous_text,
