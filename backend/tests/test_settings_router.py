@@ -185,3 +185,40 @@ async def test_put_settings_triggers_prewarm_on_incidental_cache_clear(client, m
     resp = await client.put("/settings", json={"initial_prompt": "Tauri FastAPI Pydantic"})
     assert resp.status_code == 200
     assert call_count["n"] == 2
+
+
+# --- GET /settings/storage and POST /settings/cleanup (spec 020) ------------
+#
+# Both endpoints must read runtime_settings.audio.temp_dir directly rather
+# than reconstructing SETTINGS_DIR / "tmp" -- see
+# docs/adr/012-dev-mode-data-directory-isolation.md. No coverage existed for
+# this endpoint pair before spec 020.
+
+
+@pytest.fixture
+def _isolated_temp_dir(tmp_path, monkeypatch):
+    temp_dir = tmp_path / "audio-tmp"
+    temp_dir.mkdir()
+    monkeypatch.setattr(runtime_settings.audio, "temp_dir", temp_dir)
+    return temp_dir
+
+
+@pytest.mark.anyio
+async def test_storage_reports_size_of_configured_temp_dir(client, _isolated_temp_dir):
+    (_isolated_temp_dir / "recording.wav").write_bytes(b"x" * 1234)
+
+    resp = await client.get("/settings/storage")
+    assert resp.status_code == 200
+    assert resp.json()["temp_size_bytes"] == 1234
+
+
+@pytest.mark.anyio
+async def test_cleanup_removes_files_from_configured_temp_dir(client, _isolated_temp_dir):
+    (_isolated_temp_dir / "recording.wav").write_bytes(b"x" * 1234)
+
+    resp = await client.post("/settings/cleanup")
+    assert resp.status_code == 200
+    assert resp.json()["freed_bytes"] == 1234
+
+    assert _isolated_temp_dir.exists()
+    assert list(_isolated_temp_dir.iterdir()) == []

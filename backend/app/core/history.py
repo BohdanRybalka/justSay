@@ -36,6 +36,8 @@ from pathlib import Path
 import sqlite_vec
 from pydantic import BaseModel
 
+from app.core.app_paths import resolve_app_data_root
+
 log = logging.getLogger(__name__)
 
 HISTORY_FILENAME = "history.db"
@@ -43,7 +45,10 @@ SCHEMA_VERSION = 3
 STATS_TTL_SECONDS = 5.0
 
 _lock = threading.Lock()
-_output_dir: Path = Path.home() / ".justsay"
+# Pre-bootstrap() fallback -- see docs/adr/012-dev-mode-data-directory-isolation.md.
+# app_paths.py is a leaf module with no dependency on user_settings, preserving
+# the one-way dependency (user_settings -> history) documented above.
+_output_dir: Path = resolve_app_data_root()
 _conn: sqlite3.Connection | None = None
 _stats_cache: tuple[float, "HistoryStats"] | None = None
 

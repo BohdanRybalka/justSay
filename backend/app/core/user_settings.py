@@ -15,9 +15,12 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.core import history
+from app.core.app_paths import resolve_app_data_root
 
 
-SETTINGS_DIR = Path.home() / ".justsay"
+# See docs/adr/012-dev-mode-data-directory-isolation.md -- resolves to
+# ~/.justsay-dev for any from-source run, ~/.justsay only for the packaged app.
+SETTINGS_DIR = resolve_app_data_root()
 SETTINGS_PATH = SETTINGS_DIR / "settings.json"
 
 log = logging.getLogger(__name__)
