@@ -128,10 +128,10 @@ def maybe_prewarm_local(stt_settings: STTSettings) -> None:
     that function's docstring).
 
     [Spec 023] Resets the startup crash-loop guard's on-disk counter to 0
-    on every explicit trigger (mode switch, a settings edit, or the manual
-    POST /stt/local/prewarm retry) -- a deliberate, user-initiated attempt
-    is a fresh start, decoupled from the automatic every-restart streak
-    maybe_prewarm_local_at_startup() tracks.
+    on every explicit trigger (mode switch, an STT-relevant settings edit,
+    or the manual POST /stt/local/prewarm retry) -- a deliberate,
+    user-initiated attempt is a fresh start, decoupled from the automatic
+    every-restart streak maybe_prewarm_local_at_startup() tracks.
     """
     if stt_settings.mode != ProviderMode.LOCAL:
         return

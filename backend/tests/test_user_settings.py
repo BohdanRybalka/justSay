@@ -133,12 +133,12 @@ def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
 
     # No diffs → no clear.
     us = user_settings.UserSettings(stt_mode="cloud", llm_mode="cloud")
-    user_settings.sync_to_runtime(us)
+    assert user_settings.sync_to_runtime(us) is False
     assert cleared == []
 
     # STT mode change → STT clear fires.
     us2 = user_settings.UserSettings(stt_mode="local", llm_mode="cloud")
-    user_settings.sync_to_runtime(us2)
+    assert user_settings.sync_to_runtime(us2) is True
     assert cleared == ["stt"]
 
 

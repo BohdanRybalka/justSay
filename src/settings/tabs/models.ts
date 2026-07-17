@@ -17,6 +17,16 @@ import {
 // once per 3-second poll while the same error persists.
 let prevLastError: string | null = null;
 
+// Pure request-ordering guard (docs/TODO.md's poll-vs-retry race item).
+// A response is stale exactly when a newer request has been issued by the
+// time it resolves -- independent of which request actually finishes first.
+// Extracted as a standalone function so the ordering decision itself is
+// unit-testable without jsdom (no DOM-testing infra exists yet, see
+// docs/TODO.md).
+export function isStaleStatusResponse(requestToken: number, latestIssuedToken: number): boolean {
+  return requestToken !== latestIssuedToken;
+}
+
 export function renderModels(container: HTMLElement, settings: UserSettings): () => void {
   container.innerHTML = `
     <h2 class="tab-title">Models</h2>
@@ -62,6 +72,7 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
   });
 
   let currentSttMode = settings.stt_mode;
+  let latestSttStatusToken = 0;
 
   // --- Render panels based on current mode ---
   function renderCurrentStt() {
@@ -95,16 +106,19 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
   // --- STT Status refresh ---
   async function refreshSttStatus() {
     if (currentSttMode !== "local") return;
+    const token = ++latestSttStatusToken;
     try {
       const s: LocalSttStatus = await api.sttLocalStatus();
       // Re-check after the await: the user may have switched to Cloud while
       // this request was in flight (e.g. a slow first-run pip-install poll
       // tick). A stale response must not touch the badge/caption/latch or
       // fire notifyError() — Cloud mode must never surface a Local STT toast.
-      if (currentSttMode !== "local") return;
+      // The token check guards a different race: two same-mode requests
+      // (poll tick vs. retry click) resolving out of order.
+      if (isStaleStatusResponse(token, latestSttStatusToken) || currentSttMode !== "local") return;
       applyLocalIndicator(s.last_error, s.model_loaded, `${s.model_name} · ${s.device}`);
     } catch {
-      if (currentSttMode !== "local") return;
+      if (isStaleStatusResponse(token, latestSttStatusToken) || currentSttMode !== "local") return;
       applyLocalIndicator("Backend not responding", false, "Backend not responding");
     }
   }
