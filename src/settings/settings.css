@@ -397,27 +397,6 @@ select {
   cursor: not-allowed;
 }
 
-/* --- Model info card --- */
-
-.model-info {
-  padding: 12px 16px;
-  background: var(--bg-card);
-  border-radius: var(--radius);
-  margin-top: 8px;
-}
-
-.model-info .model-name {
-  font-family: "Geist Mono", "SF Mono", "Cascadia Code", "Consolas", monospace;
-  font-size: 12px;
-  color: var(--accent);
-}
-
-.model-info .model-detail {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 4px;
-}
-
 /* --- Level meter --- */
 
 .level-meter {
@@ -559,41 +538,6 @@ select {
   font-size: 12px;
 }
 
-/* --- Local status panel --- */
-
-.local-status {
-  padding: 12px 16px;
-  background: var(--bg-card);
-  border-radius: var(--radius);
-  margin-top: 8px;
-}
-
-.local-status-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 0;
-}
-
-.local-status-row:not(:last-child) {
-  border-bottom: 1px solid var(--border);
-}
-
-.local-status-row .ls-label {
-  font-size: 12px;
-  color: var(--text-dim);
-  min-width: 70px;
-}
-
-.local-status-row .ls-value {
-  font-size: 12px;
-  color: var(--text);
-  font-family: "Geist Mono", "SF Mono", "Cascadia Code", "Consolas", monospace;
-  flex: 1;
-  text-align: right;
-  margin: 0 8px;
-}
-
 /* --- Universal status indicator (ADR 009) ---
  * Generic loading/ready/error badge — first consumer is the Local STT
  * toggle (#stt-local-indicator, spec 015); designed to be reused by a
@@ -647,59 +591,6 @@ select {
 
 @keyframes status-indicator-spin {
   to { transform: rotate(360deg); }
-}
-
-/* --- Resource bars --- */
-
-.resource-row {
-  padding: 10px 0;
-}
-
-.resource-row + .resource-row {
-  border-top: 1px solid var(--border);
-}
-
-.resource-row-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 6px;
-}
-
-.resource-label {
-  font-size: 12px;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.resource-value {
-  font-family: "Geist Mono", "SF Mono", "Cascadia Code", "Consolas", monospace;
-  font-size: 12px;
-  color: var(--text);
-}
-
-.resource-bar {
-  height: 6px;
-  background: var(--bg-input);
-  border-radius: 3px;
-  overflow: hidden;
-}
-
-.resource-bar-fill {
-  height: 100%;
-  border-radius: 3px;
-  transition: width 0.4s ease, background 0.2s ease;
-}
-
-.resource-bar-fill.green { background: var(--green); }
-.resource-bar-fill.orange { background: var(--orange); }
-.resource-bar-fill.red { background: var(--red); }
-
-.resource-sub {
-  margin-top: 4px;
-  font-size: 11px;
-  color: var(--text-muted);
 }
 
 /* --- Words tab --- */
