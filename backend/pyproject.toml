@@ -28,7 +28,7 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "httpx>=0.27.0",
     "ruff>=0.8.0",
-    "vulture>=2.13",
+    "vulture==2.16",
 ]
 cloud = [
     "google-genai>=1.0.0",
@@ -70,3 +70,8 @@ markers = [
     "background_indexer: tests for vector_store.run_background_indexer itself (opt out of the autouse fixture that no-ops it)",
     "no_factory_stub: tests asserting on the cost of calling app.stt.local_factory (opt out of the autouse fixture that stubs get_local_provider_class/get_local_provider_kind)",
 ]
+
+[tool.vulture]
+paths = ["app"]
+min_confidence = 100
+ignore_names = ["time_info"]
