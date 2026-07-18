@@ -1,5 +1,5 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { api, type UserSettings } from "../api";
+import { api, type CloudKeyStatus, type UserSettings } from "../api";
 import { renderGeneral } from "./tabs/general";
 import { renderModels } from "./tabs/models";
 import { renderHistory } from "./tabs/history";
@@ -11,6 +11,7 @@ import { renderTranscribe } from "./tabs/transcribe";
 
 let currentTab = "general";
 let settings: UserSettings | null = null;
+let cloudStatus: CloudKeyStatus | null = null;
 let destroyFn: (() => void) | null = null;
 
 // --- DOM ---
@@ -57,18 +58,54 @@ function switchTab(tabName: string) {
 // --- Settings helpers ---
 
 export async function loadSettings(): Promise<UserSettings> {
-  settings = await api.getSettings();
+  // getSettings() keeps its fail-hard semantics — init() already catches a
+  // rejection and shows the "Cannot load settings" panel. cloud-status is
+  // explicitly non-fatal: a failed fetch there must not block Settings from
+  // opening. On first load cloudStatus is still null (its initial value),
+  // so leaving it untouched is equivalent to nulling it. But loadSettings()
+  // is also re-called later in the session (e.g. models.ts's STT-engine
+  // change) when cloudStatus may already hold a good cached value — a
+  // transient refetch failure there must retain that value rather than
+  // wipe it (Stage 3 review fix, spec 027 — same bug class as
+  // saveSettings()'s cloud-status refetch below).
+  const [loaded] = await Promise.all([
+    api.getSettings(),
+    api.cloudKeyStatus().then(
+      (status) => { cloudStatus = status; },
+      () => { /* retain previous cloudStatus */ },
+    ),
+  ]);
+  settings = loaded;
   return settings;
 }
+
+const KEY_FIELDS = new Set(["gemini_api_key", "groq_api_key"]);
 
 export async function saveSettings(updates: Partial<UserSettings>): Promise<{ settings: UserSettings; warning: string | null }> {
   const resp = await api.updateSettings(updates);
   settings = resp.settings;
+  if (Object.keys(updates).some((k) => KEY_FIELDS.has(k))) {
+    try {
+      cloudStatus = await api.cloudKeyStatus();
+    } catch {
+      // Retain the previous cloudStatus on a failed refetch rather than
+      // nulling it — nulling here would immediately mislabel an untouched
+      // env-sourced row (e.g. Groq, when only Gemini was just saved) as
+      // "No key set" for the rest of this render pass. The row for the key
+      // that WAS just saved already renders from resp.settings (the "***"
+      // stored state), not from this cache, so a stale cloudStatus can only
+      // ever be wrong about a row nothing here changed.
+    }
+  }
   return { settings: resp.settings, warning: resp.warning };
 }
 
 export function getSettings(): UserSettings | null {
   return settings;
+}
+
+export function getCloudKeyStatus(): CloudKeyStatus | null {
+  return cloudStatus;
 }
 
 // --- Health check ---
