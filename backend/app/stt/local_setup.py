@@ -33,6 +33,21 @@ _prewarm_lock = asyncio.Lock()
 # attempt.
 _prewarm_error: str | None = None
 
+# (provider, Task) for whichever _get_model() attempt is currently in
+# flight, if any -- tracked independently of _prewarm_lock (Stage 5 GitHub
+# review on PR #34, finding 1). `asyncio.wait_for`'s timeout cancels the
+# *waiting coroutine*, not the worker thread `_get_model()` actually runs
+# on -- a thread cannot be cancelled. Without this, a caller whose own wait
+# times out releases `_prewarm_lock` while its `_get_model()` call keeps
+# running unobserved; the NEXT caller then sees `is_loaded=False` (the
+# orphaned load hasn't finished), passes every check, and starts a
+# genuinely SECOND `_get_model()` call. Storing the in-flight (provider,
+# Task) here lets a later caller find and re-join the SAME attempt via
+# `asyncio.shield()` in `ensure_local_ready()` instead of starting a
+# redundant one -- `asyncio.shield()` is what lets a caller's own timeout
+# detach it from *observing* the task without cancelling the task itself.
+_active_load: tuple[object, asyncio.Task] | None = None
+
 # Generous enough to cover a genuinely cold first run -- pip install (up to
 # 300s per _run_pip_install's own subprocess timeout) plus the model load
 # itself -- so this bound only ever trips on a load that is truly stuck
@@ -229,6 +244,27 @@ async def _prewarm_then_clear_crash_guard(stt_settings: STTSettings) -> None:
         _write_consecutive_incomplete_prewarms(0)
 
 
+async def _run_get_model(provider) -> None:
+    """The actual ``_get_model()`` attempt, run as an independent
+    ``asyncio.Task`` (created in ``ensure_local_ready`` below) rather than
+    awaited directly inline. That is what makes ``_active_load`` meaningful:
+    a Task keeps running to completion even if every caller currently
+    watching it (via ``asyncio.shield()``) gets cancelled -- unlike a plain
+    coroutine awaited in place, which a cancellation unwinds immediately.
+    Same swallow-and-latch / orphan-cleanup contract ``ensure_local_ready``
+    always had.
+    """
+    try:
+        await asyncio.to_thread(provider._get_model)
+    except Exception:
+        pass  # provider._last_load_error is already latched
+    finally:
+        from app.stt import peek_local_provider
+
+        if peek_local_provider() is not provider:
+            provider.cleanup()  # orphaned — cache moved on mid-load
+
+
 async def ensure_local_ready(stt_settings: STTSettings) -> None:
     """Install (if needed) and load the Local STT model, serialized through
     ``_prewarm_lock`` so overlapping calls collapse into one real attempt.
@@ -247,8 +283,29 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
     mode check would miss entirely. If the cache moved on, the now-orphaned
     provider is cleaned up once the load settles (success or failure) —
     regardless of what ``stt_settings.mode`` currently says.
+
+    The actual ``_get_model()`` call runs as an ``asyncio.Task``
+    (``_active_load``), awaited here via ``asyncio.shield()`` rather than
+    directly (Stage 5 GitHub review on PR #34, finding 1). If THIS caller
+    is itself cancelled (e.g. by ``await_local_ready()``'s own
+    ``wait_for`` timing out), ``shield()`` detaches only this caller's
+    *observation* of the task -- the task, and the worker thread
+    ``_get_model()`` runs on (which cannot be cancelled once started),
+    keep going. A later caller that reaches this same function while that
+    task is still running finds it in ``_active_load`` and re-joins it
+    instead of starting a genuinely second ``_get_model()`` call.
+
+    ``asyncio.shield()`` is called from *inside* the ``_prewarm_lock``
+    block, matching the lock's original scope, deliberately: moving it
+    outside would let a second caller's own ``get_provider()`` lookup run
+    concurrently with the first attempt's in-flight ``_get_model()`` side
+    effects (e.g. a settings change clearing the provider cache mid-load),
+    which changes the ordering spec 015's RED-1 orphan-cleanup regression
+    test depends on. Keeping the lock's scope unchanged means the only
+    behavioural difference from before is exactly the one this fix targets:
+    what survives a caller's own cancellation.
     """
-    global _prewarm_error
+    global _prewarm_error, _active_load
     async with _prewarm_lock:
         if stt_settings.mode != ProviderMode.LOCAL:
             return  # superseded before this attempt even started
@@ -279,13 +336,15 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
         if peek_local_provider() is not provider:
             return  # cache moved on before we even started the model load
 
-        try:
-            await asyncio.to_thread(provider._get_model)
-        except Exception:
-            pass  # provider._last_load_error is already latched
-        finally:
-            if peek_local_provider() is not provider:
-                provider.cleanup()  # orphaned — cache moved on mid-load
+        if (
+            _active_load is None
+            or _active_load[0] is not provider
+            or _active_load[1].done()
+        ):
+            _active_load = (provider, asyncio.create_task(_run_get_model(provider)))
+        load_task = _active_load[1]
+
+        await asyncio.shield(load_task)
 
 
 async def await_local_ready(
@@ -312,10 +371,22 @@ async def await_local_ready(
     failures: the caller must not treat a plain ``False`` as fatal, only a
     raised ``LocalReadinessTimeout``. `LocalSTTProvider.transcribe()` (and its
     Vulkan/MLX siblings) retain their own lazy ``_get_model()`` fallback, so a
-    request that would have succeeded before this barrier existed must still
-    succeed after it -- the barrier only turns an already-doomed wait into a
-    bounded, clearly-labeled one; it must never turn a working request into a
-    failing one.
+    plain ``False`` return here is never fatal to the caller.
+
+    This is a trade, not a guarantee that nothing changes (Stage 5 GitHub
+    review on PR #34, finding 2 -- a prior version of this docstring claimed
+    "never turn a working request into a failing one", which does not hold
+    and should not have been written that way). A load that finishes within
+    ``timeout`` behaves exactly as it did before this barrier existed. A
+    load that would have EVENTUALLY succeeded but takes LONGER than
+    ``timeout`` -- a genuinely slow but working cold start: a large model on
+    a slow disk, a throttled first-time download -- is deliberately
+    converted into an explicit ``LocalReadinessTimeout`` (surfaced by
+    ``process_audio`` as a clear error) rather than the unbounded hang it
+    used to be. That trade is intentional -- an indefinite hang is worse
+    than a clear, actionable error -- but it does mean a request that would
+    previously have succeeded, given enough time, can now fail instead.
+    Choose ``timeout`` (or override it per call) with that trade in mind.
 
     ``timeout=None`` (the default) reads the module-level ``_READY_TIMEOUT``
     at call time rather than binding it as a default-argument value at

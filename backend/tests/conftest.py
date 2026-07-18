@@ -355,6 +355,13 @@ def _no_prewarm_by_default(monkeypatch, request):
     test exercising `TestClient(app)`'s real `lifespan()` with Local mode
     already active at boot can't accidentally read/write the real on-disk
     crash-guard marker or spawn a real background load during the suite.
+
+    Also resets `_active_load` (Stage 5 GitHub review, PR #34, finding 1)
+    after every test, suite-wide -- not just within test_stt_local_setup.py,
+    since `test_pipeline.py`'s readiness-barrier tests exercise the real
+    `ensure_local_ready`/`await_local_ready` too. It holds an `asyncio.Task`
+    bound to the test's own event loop; left stale, a later test could try
+    to `asyncio.shield()` a task from an already-closed loop.
     """
     from app.stt import local_setup
 
@@ -365,6 +372,7 @@ def _no_prewarm_by_default(monkeypatch, request):
         )
     yield
     local_setup._prewarm_error = None
+    local_setup._active_load = None
 
 
 @pytest.fixture(autouse=True)

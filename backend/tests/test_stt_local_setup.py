@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -669,9 +670,14 @@ def _reset_prewarm_state():
     forever, and the next test that also contends the same lock in its own
     (different) loop blows up with "bound to a different event loop". A
     fresh Lock per test sidesteps that entirely.
+
+    `_active_load` (Stage 5 GitHub review, PR #34, finding 1) holds an
+    `asyncio.Task` -- the same closed-event-loop hazard applies, so it is
+    reset to `None` here too, before each test.
     """
     local_setup._prewarm_error = None
     local_setup._prewarm_lock = asyncio.Lock()
+    local_setup._active_load = None
     yield
     local_setup._prewarm_error = None
 
@@ -1234,3 +1240,71 @@ async def test_await_local_ready_returns_false_not_raises_when_cache_moves_on_mi
     assert result is False  # peek_local_provider() now resolves to None
     assert provider.get_model_calls == 1
     assert provider.cleanup_calls == 1
+
+
+# --- double-load window on timeout (Stage 5 GitHub review, PR #34, finding 1) --
+
+
+@pytest.mark.asyncio
+async def test_timeout_then_retry_joins_in_flight_load_instead_of_starting_a_second_one(
+    monkeypatch,
+):
+    """Reproduces the exact bug: asyncio.wait_for's timeout cancels the
+    WAITING coroutine, not the worker thread _get_model() actually runs on
+    (a thread cannot be cancelled). Without tracking the in-flight load
+    separately from _prewarm_lock, the lock frees up while the first
+    _get_model() call keeps running, and a retry that arrives while it is
+    still in flight would start a genuinely SECOND _get_model() call --
+    "Two heavy loads of the same provider running concurrently."
+
+    Uses a real threading.Event (not a mock) so the fake _get_model()
+    genuinely blocks its OWN worker thread, exactly like the real
+    WhisperModel(...)/whisper-server load this simulates -- a mocked sleep
+    would return before wait_for's timeout could ever race it.
+    """
+    call_count = {"n": 0}
+    started = threading.Event()
+    release = threading.Event()
+
+    class _SlowProvider:
+        def __init__(self):
+            self.is_loaded = False
+
+        def _get_model(self):
+            call_count["n"] += 1
+            started.set()
+            release.wait(timeout=5)
+            self.is_loaded = True
+
+        def cleanup(self):
+            pass
+
+    provider = _SlowProvider()
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    # First call: its own timeout fires long before the load actually
+    # finishes (release is not set yet) -- the load is genuinely still
+    # running in its worker thread when this raises.
+    with pytest.raises(local_setup.LocalReadinessTimeout):
+        await local_setup.await_local_ready(settings, timeout=0.05)
+
+    assert await asyncio.to_thread(started.wait, 2), "the worker thread never started"
+    assert call_count["n"] == 1
+
+    # Second call (the user's retry): the original attempt's thread is
+    # STILL blocked on `release`. Release it shortly after this call starts
+    # waiting, so a correct implementation joins the SAME in-flight attempt
+    # and succeeds well within its own generous timeout.
+    async def _release_soon():
+        await asyncio.sleep(0.1)
+        release.set()
+
+    asyncio.create_task(_release_soon())
+    result = await local_setup.await_local_ready(settings, timeout=5.0)
+
+    assert call_count["n"] == 1, "a second _get_model() call was started while the first was still in flight"
+    assert result is True
