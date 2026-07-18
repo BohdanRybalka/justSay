@@ -16,7 +16,7 @@ from fastapi import BackgroundTasks
 from app.core.config import settings
 from app.core.history import save_entry
 from app.pipeline.utils import detect_duration
-from app.stt import get_routed_provider
+from app.stt import get_routed_provider, is_local_provider
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +69,21 @@ async def process_audio(
         file_ext,
         fallback_reason or "no",
     )
+
+    # Spec 028 Item 2: wait for the local model to be ready before the
+    # transcribe call instead of racing it. Skipped entirely for cloud
+    # providers. See app.stt.local_setup.await_local_ready's docstring for
+    # why a plain "not ready" (False) is NOT treated as fatal here -- only a
+    # genuine LocalReadinessTimeout is; transcribe() keeps its own lazy
+    # _get_model() fallback either way.
+    if is_local_provider(stt):
+        from app.stt.local_setup import LocalReadinessTimeout, await_local_ready
+
+        try:
+            await await_local_ready(settings.stt)
+        except LocalReadinessTimeout as e:
+            log.error("Local STT readiness wait failed: %s", e)
+            raise RuntimeError(str(e)) from e
 
     try:
         result = await stt.transcribe(

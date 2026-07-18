@@ -16,11 +16,14 @@ replaces). `transcribe()` talks to the already-running server over
 """
 
 import asyncio
+import atexit
+import ctypes
 import logging
 import subprocess
 import sys
 import threading
 import time
+from ctypes import wintypes
 from pathlib import Path
 
 import httpx
@@ -88,6 +91,205 @@ _HF_MODEL_URL_TEMPLATE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/m
 _DOWNLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MiB
 
 
+# --- Spec 028 Item 3: orphan reaping ----------------------------------------
+#
+# Two independent layers (a deliberate scope trim -- the plan's third layer,
+# a psutil-based process-tree kill, was dropped: whisper-server spawns no
+# grandchildren today, so tree-kill would guard a hypothetical):
+#
+# 1. Registry + atexit (this section). Covers a clean interpreter exit or an
+#    unhandled exception where cleanup()/clear_cache() was simply never
+#    called -- atexit handlers DO run in both of those cases.
+# 2. Windows Job Object (_assign_to_job_object, called from _spawn_server).
+#    atexit does NOT run on TerminateProcess, which is the actual ungraceful
+#    crash shape a Tauri-side `taskkill /T` or a hard process kill produces.
+#    This is the real guarantee for that case; layer 1 is the portable floor
+#    for everything else.
+
+_live_children_lock = threading.Lock()
+_live_children: dict[int, subprocess.Popen] = {}
+
+
+def _register_child(process: subprocess.Popen) -> None:
+    with _live_children_lock:
+        _live_children[process.pid] = process
+
+
+def _deregister_child(process: subprocess.Popen) -> None:
+    with _live_children_lock:
+        _live_children.pop(process.pid, None)
+
+
+def _reap_orphans() -> None:
+    """atexit hook: terminate any whisper-server child still registered when
+    the interpreter exits -- i.e. one `_terminate_process()` (called from
+    either `cleanup()` or `_get_model()`'s own except-branch orphan cleanup)
+    never ran for it. A single `.terminate()` is deliberately simpler than
+    `_terminate_process()`'s full terminate -> grace-poll -> kill sequence:
+    this is the portable floor, not the real guarantee (the Windows Job
+    Object is) -- see the module-level comment above.
+    """
+    with _live_children_lock:
+        orphans = list(_live_children.values())
+        _live_children.clear()
+    for process in orphans:
+        try:
+            if process.poll() is None:
+                log.warning(
+                    "Reaping orphaned whisper-server (pid=%s) at interpreter "
+                    "exit -- cleanup() was never called for it.", process.pid,
+                )
+                process.terminate()
+        except Exception:
+            log.exception(
+                "Failed to reap orphaned whisper-server (pid=%s) at exit",
+                getattr(process, "pid", "?"),
+            )
+
+
+atexit.register(_reap_orphans)
+
+
+# --- Spec 028 Item 3: Windows Job Object (KILL_ON_JOB_CLOSE) ----------------
+
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+
+
+class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _IO_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
+
+
+class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+        ("IoInfo", _IO_COUNTERS),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+_job_object_lock = threading.Lock()
+_job_object_handle: int | None = None
+_job_object_init_failed = False
+_kernel32_dll = None  # cached WinDLL handle, prototypes configured once
+
+
+def _kernel32():
+    """Lazily load `kernel32` and declare explicit `restype`/`argtypes` on
+    every Job Object call before first use (spec 028 iteration-2 review, AC
+    16a). Without them, ctypes marshals return/argument values as 32-bit
+    `c_int` by default, which silently truncates a real 64-bit `HANDLE` --
+    it happens to work today only because handle values for a young process
+    are small (observed 368/372 in review), which is luck, not a contract.
+    """
+    global _kernel32_dll
+    if _kernel32_dll is None:
+        dll = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        dll.CreateJobObjectW.restype = wintypes.HANDLE
+        dll.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+
+        dll.SetInformationJobObject.restype = wintypes.BOOL
+        dll.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+
+        dll.AssignProcessToJobObject.restype = wintypes.BOOL
+        dll.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+
+        _kernel32_dll = dll
+    return _kernel32_dll
+
+
+def _get_or_create_job_object() -> int | None:
+    """Lazily create (once) a Windows Job Object configured with
+    KILL_ON_JOB_CLOSE. Returns None (and never raises) if creation fails --
+    callers degrade to the atexit registry as their only protection, which
+    is layer 1's whole purpose."""
+    global _job_object_handle, _job_object_init_failed
+    with _job_object_lock:
+        if _job_object_handle is not None or _job_object_init_failed:
+            return _job_object_handle
+        try:
+            kernel32 = _kernel32()
+            handle = kernel32.CreateJobObjectW(None, None)
+            if not handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+
+            info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+            info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            ok = kernel32.SetInformationJobObject(
+                handle,
+                _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+            )
+            if not ok:
+                raise ctypes.WinError(ctypes.get_last_error())
+            _job_object_handle = handle
+        except Exception:
+            log.warning(
+                "Failed to create Windows Job Object for whisper-server "
+                "crash-safety -- falling back to atexit-only orphan reaping.",
+                exc_info=True,
+            )
+            _job_object_init_failed = True
+            return None
+    return _job_object_handle
+
+
+def _assign_to_job_object(process: subprocess.Popen) -> None:
+    """Assign `process` to the shared Job Object so an ungraceful death of
+    THIS Python process (including TerminateProcess, which runs no atexit
+    handler) takes the child down with it. Windows-only; a no-op elsewhere.
+    Never raises -- a failure here must degrade to the atexit registry, not
+    break STT."""
+    if sys.platform != "win32":
+        return
+    job = _get_or_create_job_object()
+    if job is None:
+        return
+    try:
+        kernel32 = _kernel32()
+        proc_handle = int(process._handle)  # type: ignore[attr-defined]
+        ok = kernel32.AssignProcessToJobObject(job, proc_handle)
+        if not ok:
+            raise ctypes.WinError(ctypes.get_last_error())
+    except Exception:
+        log.warning(
+            "Failed to assign whisper-server (pid=%s) to the Windows Job "
+            "Object -- falling back to atexit-only orphan reaping.",
+            getattr(process, "pid", "?"), exc_info=True,
+        )
+
+
 class WhisperCppVulkanSTTProvider(STTProvider):
     """whisper.cpp + Vulkan -- Windows AMD/Intel local privacy-first STT provider.
 
@@ -97,6 +299,8 @@ class WhisperCppVulkanSTTProvider(STTProvider):
     resolved from a local dev-vendor directory -- see
     ``local_vulkan_cmd.resolve_binary_path()``.
     """
+
+    is_local = True  # ADR 018 — declared, not derived from the platform
 
     def __init__(self, settings: STTSettings):
         self._settings = settings
@@ -235,6 +439,11 @@ class WhisperCppVulkanSTTProvider(STTProvider):
             stdin=subprocess.DEVNULL,
             creationflags=creationflags,
         )
+        # Spec 028 Item 3: register for atexit reaping and put the child in a
+        # Windows Job Object so an ungraceful death of this process can't
+        # strand it holding VRAM -- see the module-level comment above.
+        _register_child(self._process)
+        _assign_to_job_object(self._process)
 
     def _terminate_process(self, process: subprocess.Popen | None) -> None:
         """`.terminate()` -> grace-poll -> `.kill()` fallback for one process.
@@ -262,6 +471,13 @@ class WhisperCppVulkanSTTProvider(STTProvider):
         """
         if process is None:
             return
+        # Deregister up front, regardless of outcome below: this call is the
+        # designated teardown path (from cleanup() or _get_model()'s own
+        # except-branch orphan cleanup), so the atexit reaper must not also
+        # try to terminate a process this method already took responsibility
+        # for -- it should only ever see pids where this method was never
+        # called at all (spec 028 Item 3).
+        _deregister_child(process)
         with _port_lock:
             if process.poll() is not None:
                 return

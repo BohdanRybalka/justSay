@@ -33,6 +33,21 @@ _prewarm_lock = asyncio.Lock()
 # attempt.
 _prewarm_error: str | None = None
 
+# Generous enough to cover a genuinely cold first run -- pip install (up to
+# 300s per _run_pip_install's own subprocess timeout) plus the model load
+# itself -- so this bound only ever trips on a load that is truly stuck
+# (broken GPU driver, dead network mid-download), not on an ordinary slow
+# first-time setup. See await_local_ready().
+_READY_TIMEOUT = 300.0
+
+
+class LocalReadinessTimeout(Exception):
+    """Raised by await_local_ready() when the bounded wait genuinely times
+    out -- i.e. ensure_local_ready() itself did not return within the
+    budget, as opposed to returning promptly via one of its own early-return
+    guards (see await_local_ready()'s docstring for why that distinction
+    matters)."""
+
 
 class LocalSttStatus(BaseModel):
     package_installed: bool = False
@@ -271,6 +286,57 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
         finally:
             if peek_local_provider() is not provider:
                 provider.cleanup()  # orphaned — cache moved on mid-load
+
+
+async def await_local_ready(
+    stt_settings: STTSettings, timeout: float | None = None
+) -> bool:
+    """Await the local STT provider's readiness before the request path uses it.
+
+    Reuses ensure_local_ready()'s own ``_prewarm_lock``, so a request arriving
+    while a prewarm is already in flight blocks on that lock and returns once
+    the *existing* load finishes -- no second ``_get_model()`` call (AC 11).
+
+    Bounded by ``asyncio.wait_for(..., timeout=timeout)`` so a genuinely stuck
+    load (dead network mid-download, a broken driver) cannot hang the request
+    path indefinitely. On a real timeout this raises ``LocalReadinessTimeout``
+    -- the one outcome callers SHOULD treat as fatal, since letting the
+    request proceed risks an even longer, unbounded hang inside
+    ``transcribe()``'s own lazy ``_get_model()`` fallback.
+
+    Returns whether the active local provider ended up loaded. A ``False``
+    return (no timeout, but not loaded either) covers ensure_local_ready()'s
+    own fast early-return guards racing in -- ``stt_settings.mode`` flipping
+    away from LOCAL, or the cache moving on to a different provider instance
+    -- while this call was queued on ``_prewarm_lock``. Those are NOT
+    failures: the caller must not treat a plain ``False`` as fatal, only a
+    raised ``LocalReadinessTimeout``. `LocalSTTProvider.transcribe()` (and its
+    Vulkan/MLX siblings) retain their own lazy ``_get_model()`` fallback, so a
+    request that would have succeeded before this barrier existed must still
+    succeed after it -- the barrier only turns an already-doomed wait into a
+    bounded, clearly-labeled one; it must never turn a working request into a
+    failing one.
+
+    ``timeout=None`` (the default) reads the module-level ``_READY_TIMEOUT``
+    at call time rather than binding it as a default-argument value at
+    function-definition time -- the latter would freeze the value at import
+    time, defeating tests (and any future runtime override) that patch
+    ``_READY_TIMEOUT`` directly, mirroring this module's own
+    ``_HEALTH_POLL_MAX_ATTEMPTS``-style convention in ``local_vulkan.py``.
+    """
+    if timeout is None:
+        timeout = _READY_TIMEOUT
+    try:
+        await asyncio.wait_for(ensure_local_ready(stt_settings), timeout=timeout)
+    except asyncio.TimeoutError as e:
+        raise LocalReadinessTimeout(
+            f"Local speech-to-text model did not become ready within {timeout:.0f}s"
+        ) from e
+
+    from app.stt import peek_local_provider
+
+    provider = peek_local_provider()
+    return provider is not None and provider.is_loaded
 
 
 def _estimate_model_ram_mb() -> int | None:
