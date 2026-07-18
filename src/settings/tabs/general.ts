@@ -311,6 +311,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
       let friendly = `Check failed: ${raw}`;
       if (
         lower.includes("did not respond with a successful status code") ||
+        lower.includes("could not fetch a valid release json") ||
         lower.includes("couldn't fetch a valid release json") ||
         lower.includes("couldnt fetch a valid release json")
       ) {
