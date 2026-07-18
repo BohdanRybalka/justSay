@@ -2,7 +2,7 @@ import { type CloudKeyStatus, type UserSettings } from "../../api";
 import { saveSettings, getCloudKeyStatus } from "../settings";
 
 type KeyField = "gemini_api_key" | "groq_api_key";
-type KeyRowState = "stored" | "env" | "unset" | "editing";
+type KeyRowState = "stored" | "env" | "unset" | "unknown" | "editing";
 
 interface KeyRowSpec {
   field: KeyField;
@@ -10,6 +10,7 @@ interface KeyRowSpec {
   unsetHint: string;
   storedHint: string;
   envHint: string;
+  unknownHint: string;
   placeholder: string;
 }
 
@@ -20,6 +21,7 @@ const ROWS: KeyRowSpec[] = [
     unsetHint: "No key set — cloud STT will fail.",
     storedHint: "Key stored.",
     envHint: "Key active (from environment). Saving a key here will override it.",
+    unknownHint: "Cannot verify key status — reopen Settings to retry.",
     placeholder: "Paste your Gemini API key",
   },
   {
@@ -28,6 +30,7 @@ const ROWS: KeyRowSpec[] = [
     unsetHint: "No key set — cloud STT and LLM will fail.",
     storedHint: "Key stored.",
     envHint: "Key active (from environment). Saving a key here will override it.",
+    unknownHint: "Cannot verify key status — reopen Settings to retry.",
     placeholder: "Paste your Groq API key",
   },
 ];
@@ -44,8 +47,12 @@ function cloudFlag(cloud: CloudKeyStatus, field: KeyField): boolean {
 
 function rowState(settings: UserSettings, field: KeyField, cloud: CloudKeyStatus | null): KeyRowState {
   if (settings[field] === "***") return "stored";
-  if (cloud && cloudFlag(cloud, field)) return "env";
-  return "unset";
+  // cloud === null means "we don't know" (the cloud-status fetch failed or
+  // hasn't resolved yet), which is not the same claim as "there is no key" —
+  // collapsing the two would render the categorical unset hint from pure
+  // ignorance (Stage 5 review fix, spec 027).
+  if (cloud === null) return "unknown";
+  return cloudFlag(cloud, field) ? "env" : "unset";
 }
 
 function renderRowMarkup(spec: KeyRowSpec, state: KeyRowState): string {
@@ -71,7 +78,9 @@ function renderRowMarkup(spec: KeyRowSpec, state: KeyRowState): string {
       </div>
     `;
   } else {
-    // unset — first-time entry; no prior state to cancel back to.
+    // unset AND unknown — first-time entry, or status can't be verified;
+    // either way there's no prior stored/env state to Cancel back to, so
+    // the affordance is identical: an open input plus Save.
     inner = `
       <input type="password" id="${p}-key-input" autocomplete="off" spellcheck="false"
         placeholder="${spec.placeholder}" />
@@ -86,9 +95,11 @@ function renderRowMarkup(spec: KeyRowSpec, state: KeyRowState): string {
       ? spec.storedHint
       : state === "env"
         ? spec.envHint
-        : state === "editing"
-          ? "Editing stored key — Cancel to abort."
-          : spec.unsetHint;
+        : state === "unknown"
+          ? spec.unknownHint
+          : state === "editing"
+            ? "Editing stored key — Cancel to abort."
+            : spec.unsetHint;
 
   return `
     <div class="setting-group">
@@ -187,7 +198,8 @@ function wireKey(
     }
   }
 
-  // unset AND editing share the Save flow.
+  // unset, unknown, AND editing share the Save flow — none of them show a
+  // Replace button, so they all fall through to here.
   const saveBtn = container.querySelector<HTMLButtonElement>(`#${p}-save`)!;
 
   input.addEventListener("input", () => {

@@ -92,14 +92,28 @@ describe("renderKeys — env-sourced key indicator (Bug 1)", () => {
     expect(input.disabled).toBe(false);
   });
 
-  it("a null cloud status (fetch rejected) does not error and falls back to settings-file-only logic", () => {
+  it("a null cloud status (first-load fetch rejected) renders a hedged 'unknown' hint, not the categorical unset hint", () => {
+    // cloud === null means "we don't know" (the cloud-status fetch failed),
+    // not "there is no key" -- collapsing the two would render "No key set"
+    // from pure ignorance, which is exactly the false-negative class this
+    // spec exists to remove (Stage 5 review fix).
     const container = document.createElement("div");
     const settings = buildSettings({ gemini_api_key: "" });
 
     expect(() => renderKeys(container, settings, null)).not.toThrow();
-    expect(container.querySelector("#gemini-status")!.textContent).toBe(
-      "No key set — cloud STT will fail.",
-    );
+
+    const hint = container.querySelector("#gemini-status")!.textContent ?? "";
+    expect(hint).not.toBe("No key set — cloud STT will fail.");
+    expect(hint).not.toContain("No key set");
+    expect(hint).toContain("Cannot verify key status");
+
+    // Must still offer the same input/Save affordance as "unset" -- the
+    // user has to be able to enter a key even when status is unverifiable.
+    const input = container.querySelector<HTMLInputElement>("#gemini-key-input")!;
+    expect(input.disabled).toBe(false);
+    expect(input.type).toBe("password");
+    expect(container.querySelector("#gemini-save")).not.toBeNull();
+    expect(container.querySelector("#gemini-replace")).toBeNull();
   });
 });
 
