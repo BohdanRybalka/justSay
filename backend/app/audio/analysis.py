@@ -86,11 +86,20 @@ def analyze_silence(audio_path: Path, settings: AudioSettings) -> SilenceAnalysi
     is (spec 029, Stage 3 review RED-1: a 200 ms clip has only ~7 frames
     total). Silence is declared when the file's peak absolute sample never
     clears ``settings.silence_peak_dbfs`` OR too few frames clear the
-    per-frame floor — either condition alone is enough, biasing toward
-    letting a hallucination through rather than discarding real speech.
-    ``silence_peak_dbfs`` and ``silence_frame_dbfs`` must stay genuinely
-    different (peak > frame): at equal values ``rms(frame) <= max|frame| <=
-    global peak`` makes the peak check provably unreachable (RED-2) — see
+    per-frame floor — either condition alone is enough to discard. That
+    ``OR`` is the AGGRESSIVE direction: it makes the guard MORE willing to
+    discard, not less, so on its own it biases toward eating real speech,
+    not toward letting a hallucination through. What actually protects real
+    speech is the calibrated thresholds themselves (measured 0/80 false
+    positives at 0 dB / −12 dB across 200–1000 ms — see plan.md's
+    Deviations), not the choice of operator. Do not "fix" this to ``AND``:
+    that would make the guard fail to fire whenever either signal is
+    ambiguous, which is the wrong direction for a false NEGATIVE (a
+    hallucination reaching the user) versus the false POSITIVE this design
+    already accepts and mitigates via calibration. ``silence_peak_dbfs`` and
+    ``silence_frame_dbfs`` must stay genuinely different (peak > frame): at
+    equal values ``rms(frame) <= max|frame| <= global peak`` makes the peak
+    check provably unreachable (RED-2) — see
     docs/adr/015-pipeline-level-silence-guard.md.
 
     Returns ``None`` — never raises, never reports ``is_silent=True`` — in
@@ -128,10 +137,18 @@ def analyze_silence(audio_path: Path, settings: AudioSettings) -> SilenceAnalysi
         ):
             mono = block.mean(axis=1)
             total_samples_decoded += mono.size
+            # Guard rms_dbfs the same way the peak computation already is:
+            # np.mean of an empty array is `nan` (plus a RuntimeWarning),
+            # and `nan >= threshold` is silently False, so an unguarded call
+            # wouldn't crash but would look inconsistent with the line
+            # above. soundfile.blocks() never actually emits empty blocks,
+            # so this has no effect on any calibrated measurement — it's
+            # defensive symmetry, not a behavior change (GitHub review,
+            # PR #33).
             if mono.size:
                 peak = max(peak, float(np.max(np.abs(mono))))
-            if rms_dbfs(mono) >= settings.silence_frame_dbfs:
-                speech_frame_count += 1
+                if rms_dbfs(mono) >= settings.silence_frame_dbfs:
+                    speech_frame_count += 1
             total_frame_count += 1
     except Exception as e:
         log.warning(

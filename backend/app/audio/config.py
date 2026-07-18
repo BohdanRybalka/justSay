@@ -31,9 +31,21 @@ class AudioSettings(BaseSettings):
     # 3 review RED-2). At -45.0 it has an exclusive job the frame check
     # structurally cannot do: catching sustained low-crest-factor noise
     # (e.g. a 60 Hz hum whose frames clear the frame floor but whose peak,
-    # ~3 dB above its RMS, does not clear a 5 dB-higher peak floor). It
-    # cannot misfire on real speech, whose crest factor in the sample is
-    # ~25 dB. DO NOT set silence_peak_dbfs <= silence_frame_dbfs.
+    # ~3 dB above its RMS, does not clear a 5 dB-higher peak floor).
+    #
+    # It is NOT immune to misfiring on real speech in general -- it was
+    # only verified clean on this one sample's natural ~25 dB crest factor,
+    # at 0/-12 dB attenuation (the calibrated regime, 0/80 false
+    # positives). Under a lower crest factor -- e.g. a compressed/AGC'd
+    # voice, simulated by hard-clipping the sample to ~19 dB crest factor --
+    # AND heavy (-30 dB) attenuation, the peak check DOES misfire: measured
+    # 31/40 sampled 200ms windows
+    # wrongly discarded, 9 of them specifically by this peak check (spec
+    # 029 plan.md Deviations, "Stress test of the flagged assumption"). At
+    # 0/-12/-20 dB attenuation it stayed clean across every compression
+    # level tested. Treat this as a known, narrow residual risk (low crest
+    # factor + heavy attenuation), not as a threshold that's immune to
+    # misfiring. DO NOT set silence_peak_dbfs <= silence_frame_dbfs.
     silence_peak_dbfs: float = Field(default=-45.0)
     silence_frame_dbfs: float = Field(default=-50.0)
     # Absolute cap on the length-proportional requirement below -- the

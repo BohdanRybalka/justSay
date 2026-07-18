@@ -26,8 +26,10 @@ class DictateResponse(BaseModel):
     model_name: str = ""
     fallback_reason: str | None = None
     # Set (currently only to "silence") when process_audio short-circuited
-    # without calling a provider at all. Not yet consumed by the frontend --
-    # see specs/029-silence-guard-detected-language/plan.md's Cuts deferred.
+    # without calling a provider at all. Consumed by the frontend:
+    # src/widget/done-status.ts's computeDoneStatus renders it as a
+    # non-error "No speech" outcome (checked before the empty-text case),
+    # and src/widget/widget.ts skips the provider route badge when it's set.
     discarded_reason: str | None = None
 
 
