@@ -9,14 +9,16 @@ exercises the conftest.py guard fixture's own detection logic directly, and
 
 from __future__ import annotations
 
+import contextlib
 import re
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.core import history, user_settings
 from app.main import app
-from tests.conftest import _paths_under_real_root, _snapshot_real_roots
+from tests.conftest import _cleanup_data_dir, _paths_under_real_root, _snapshot_real_roots
 
 
 def test_testclient_lifespan_keeps_history_under_tmp_path(tmp_path):
@@ -255,3 +257,75 @@ def test_app_data_consumer_inventory_is_exhaustive():
         f"{sorted(stale_in_inventory)}. Remove the stale entry from both "
         f"_EXPECTED_APP_DATA_CONSUMERS and the ADR table."
     )
+
+
+# --- Session data-dir cleanup (Stage 6 tester finding) ----------------------
+#
+# `_cleanup_session_data_dir`'s finalizer silently failed on Windows, every
+# single run: `setup_logging()`'s RotatingFileHandler keeps backend.log open
+# for the process's lifetime, which keeps the whole session directory locked,
+# and `shutil.rmtree(..., ignore_errors=True)` swallowed the resulting
+# PermissionError completely. 44+ leftover `justsay-pytest-*` directories
+# accumulated under the OS temp dir before this was caught. Verified against
+# the pre-fix logic (bare `shutil.rmtree(path, ignore_errors=True)`, no
+# handler close) before applying the fix: the directory was NOT removed.
+
+
+def test_cleanup_data_dir_releases_the_log_handle_and_removes_the_directory(tmp_path):
+    """Reproduces the exact lock: installs a real `RotatingFileHandler`
+    tagged `_justsay_file` (matching `logging_config.setup_logging()`'s own
+    marker) writing into a throwaway directory -- on Windows, simply
+    *opening* that file is enough to lock it, no write required -- then
+    calls the actual cleanup helper without pre-closing it, and asserts
+    both the handler is detached from the root logger AND the directory is
+    actually gone afterwards."""
+    import logging.handlers
+
+    session_dir = tmp_path / "session"
+    log_file = session_dir / "logs" / "backend.log"
+    log_file.parent.mkdir(parents=True)
+
+    handler = logging.handlers.RotatingFileHandler(log_file, encoding="utf-8")
+    handler._justsay_file = True  # matches logging_config.setup_logging()'s own marker
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+    handler.emit(
+        logging.LogRecord("test", logging.INFO, __file__, 0, "hold the lock", None, None)
+    )
+
+    try:
+        assert session_dir.is_dir()
+
+        _cleanup_data_dir(session_dir)
+
+        assert handler not in root_logger.handlers, (
+            "the _justsay_file handler must be detached before rmtree is attempted"
+        )
+        assert not session_dir.exists(), (
+            "the session directory must actually be removed once the log "
+            "handle is released -- this is the Stage 6 regression: "
+            "ignore_errors=True let this assertion fail silently forever"
+        )
+    finally:
+        # Belt-and-braces teardown in case the assertions above fail and
+        # leave the handler attached / the file locked for later tests.
+        if handler in root_logger.handlers:
+            root_logger.removeHandler(handler)
+        with contextlib.suppress(Exception):
+            handler.close()
+
+
+def test_cleanup_data_dir_warns_instead_of_silently_swallowing_a_removal_failure(
+    tmp_path, monkeypatch
+):
+    """If the directory still can't be removed even after the log handle is
+    released (some other process has a file open, permissions, ...), that
+    must be surfaced -- not swallowed the way `ignore_errors=True` did."""
+
+    def _boom(path, *a, **kw):
+        raise OSError("simulated: still locked by something else")
+
+    monkeypatch.setattr("tests.conftest.shutil.rmtree", _boom)
+
+    with pytest.warns(UserWarning, match="Failed to remove"):
+        _cleanup_data_dir(tmp_path / "does-not-matter")

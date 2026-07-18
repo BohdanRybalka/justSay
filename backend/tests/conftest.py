@@ -19,7 +19,9 @@ import tempfile
 _SESSION_DATA_DIR = tempfile.mkdtemp(prefix="justsay-pytest-")
 os.environ["JUSTSAY_DATA_DIR"] = _SESSION_DATA_DIR
 
+import logging
 import shutil
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 
@@ -54,6 +56,45 @@ async def client():
 # patch was applied -- exactly the Spec 028 Item 1 bug this isolation closes.
 
 
+def _cleanup_data_dir(path: str | Path) -> None:
+    """Release the logging file handle, then remove `path`.
+
+    Stage 6 tester finding: `shutil.rmtree(path, ignore_errors=True)` alone
+    silently failed on Windows, every single run -- `setup_logging()`'s
+    `RotatingFileHandler` (tagged `_justsay_file`) keeps `backend.log` open
+    for the life of the process, which keeps the file (and therefore the
+    whole directory) locked. `ignore_errors=True` swallowed the resulting
+    `PermissionError` completely -- 44+ leftover `justsay-pytest-*`
+    directories accumulated under the OS temp dir before this was caught.
+    That silent-failure shape is exactly what this spec exists to
+    eliminate, so the fix is releasing the actual lock, not hiding the
+    error left over after failing to.
+
+    Detaching and closing the handler (rather than the blunter
+    `logging.shutdown()`, which would tear down every registered logger
+    process-wide, including ones unrelated to this directory) releases the
+    OS file handle. If removal still fails afterwards for some OTHER reason
+    (another process has a file open, permissions), that is surfaced via
+    `warnings.warn` -- naming the directory and the underlying error --
+    rather than swallowed.
+    """
+    root_logger = logging.getLogger()
+    for handler in list(root_logger.handlers):
+        if getattr(handler, "_justsay_file", False):
+            root_logger.removeHandler(handler)
+            handler.close()
+
+    try:
+        shutil.rmtree(path)
+    except OSError as e:
+        warnings.warn(
+            f"Failed to remove the throwaway pytest session data directory "
+            f"{str(path)!r} after releasing the logging handle: {e}. It "
+            f"will be left behind under the OS temp directory.",
+            stacklevel=2,
+        )
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _cleanup_session_data_dir():
     """Session finalizer for the throwaway directory `JUSTSAY_DATA_DIR` was
@@ -61,7 +102,7 @@ def _cleanup_session_data_dir():
     of times a day accumulates one leftover directory (containing a real
     backend.log, and possibly a history.db) per run under the OS temp dir."""
     yield
-    shutil.rmtree(_SESSION_DATA_DIR, ignore_errors=True)
+    _cleanup_data_dir(_SESSION_DATA_DIR)
 
 
 @pytest.fixture(scope="session", autouse=True)
