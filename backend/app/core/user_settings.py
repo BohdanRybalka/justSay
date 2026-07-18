@@ -20,8 +20,18 @@ from app.core.app_paths import resolve_app_data_root
 
 # See docs/adr/012-dev-mode-data-directory-isolation.md -- resolves to
 # ~/.justsay-dev for any from-source run, ~/.justsay only for the packaged app.
-SETTINGS_DIR = resolve_app_data_root()
-SETTINGS_PATH = SETTINGS_DIR / "settings.json"
+# See docs/adr/014-lazy-app-data-path-resolution.md -- resolution MUST happen
+# per call, not be frozen into a module-level constant. A module-level
+# SETTINGS_DIR/SETTINGS_PATH constant here was exactly the bug: it froze
+# against the real ~/.justsay-dev at import time, before any test fixture
+# could redirect it via JUSTSAY_DATA_DIR.
+def _settings_dir() -> Path:
+    return resolve_app_data_root()
+
+
+def _settings_path() -> Path:
+    return _settings_dir() / "settings.json"
+
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +41,7 @@ class UserSettings(BaseModel):
 
     language: str = "uk"
     shortcut: str = "Ctrl+Alt+KeyV"
-    output_dir: str = Field(default_factory=lambda: str(SETTINGS_DIR))
+    output_dir: str = Field(default_factory=lambda: str(_settings_dir()))
 
     # Provider modes
     stt_mode: Literal["cloud", "local"] = "cloud"
@@ -191,9 +201,10 @@ _FORBIDDEN_PARENTS = _forbidden_parents()
 
 def _load() -> UserSettings:
     """Load from disk or return defaults."""
-    if SETTINGS_PATH.exists():
+    settings_path = _settings_path()
+    if settings_path.exists():
         try:
-            data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
             return UserSettings.model_validate(data)
         except (json.JSONDecodeError, ValueError):
             # Corrupt file — reset to defaults
@@ -268,8 +279,8 @@ def sync_to_runtime(us: UserSettings) -> bool:
 
 def _save(s: UserSettings) -> None:
     """Write settings to disk."""
-    SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-    SETTINGS_PATH.write_text(
+    _settings_dir().mkdir(parents=True, exist_ok=True)
+    _settings_path().write_text(
         s.model_dump_json(indent=2),
         encoding="utf-8",
     )

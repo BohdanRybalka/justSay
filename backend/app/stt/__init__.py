@@ -37,6 +37,7 @@ __all__ = [
     "peek_local_provider",
     "clear_cache",
     "is_model_loaded",
+    "is_local_provider",
     "GROQ_SUPPORTED_FORMATS",
     "GEMINI_SUPPORTED_FORMATS",
 ]
@@ -201,6 +202,25 @@ def is_model_loaded() -> bool:
     if provider is None:
         return False
     return getattr(provider, "is_loaded", False)
+
+
+def is_local_provider(provider: STTProvider) -> bool:
+    """Is ``provider`` local? Reads the ``is_local`` class attribute the
+    provider itself declares (see :class:`app.stt.base.STTProvider` and
+    ``docs/adr/018-provider-declared-locality.md``) -- no I/O, no import of
+    ``local_factory``, no platform probe, no ``isinstance`` chain.
+
+    ADR 018 supersedes the first implementation of this function, which
+    asked the factory (``isinstance(provider, get_local_provider_class())``).
+    That performed a full GPU probe (``probe_gpu()``, ~126 ms) to answer
+    "is this local?" even for an obviously-Cloud provider, because resolving
+    *which* local provider class applies to this platform is not a free
+    lookup on Windows. Locality is a property of the object already held,
+    not a fact about the host -- deriving it from the platform was the
+    wrong instrument. Used by :func:`app.pipeline.service.process_audio` to
+    gate the Spec 028 Item 2 readiness barrier onto local routes only.
+    """
+    return getattr(provider, "is_local", False)
 
 
 def clear_cache() -> None:

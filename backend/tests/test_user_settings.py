@@ -13,20 +13,23 @@ from app.core.config import AppSettings
 
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    home.mkdir()
-    settings_dir = home / ".justsay"
-    settings_dir.mkdir()
+    """See docs/adr/014-lazy-app-data-path-resolution.md: `SETTINGS_DIR` /
+    `SETTINGS_PATH` no longer exist as module-level constants to monkeypatch
+    -- `JUSTSAY_DATA_DIR` (already set by conftest.py's autouse
+    `_isolated_app_data` fixture) is the one supported redirect seam.
+    Repointing it here to a nested settings_dir keeps this file's isolation
+    distinct from the outer conftest tmp_path, matching this fixture's
+    pre-existing shape."""
+    settings_dir = tmp_path / "home" / ".justsay"
+    settings_dir.mkdir(parents=True)
 
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setattr(user_settings, "SETTINGS_DIR", settings_dir)
-    monkeypatch.setattr(user_settings, "SETTINGS_PATH", settings_dir / "settings.json")
+    monkeypatch.setenv("JUSTSAY_DATA_DIR", str(settings_dir))
     monkeypatch.setattr(user_settings, "_settings", None)
     monkeypatch.setattr(history, "_output_dir", settings_dir)
     monkeypatch.setattr(history, "_conn", None)
     monkeypatch.setattr(history, "_stats_cache", None)
 
-    yield {"home": home, "settings_dir": settings_dir}
+    yield {"settings_dir": settings_dir}
 
     with history._lock:
         history._close_conn_locked()
