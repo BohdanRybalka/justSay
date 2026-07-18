@@ -157,7 +157,11 @@ async function stopAndProcess() {
     const outcome = computeDoneStatus(result);
     if (outcome) {
       setState("done", outcome.label, formatDuration(outcome.elapsedSeconds));
-      showRouteBadge(result);
+      // No provider ran on a silence-guard discard (model_name is ""), so a
+      // route badge would misleadingly name a model that never executed.
+      if (result.discarded_reason !== "silence") {
+        showRouteBadge(result);
+      }
     } else {
       setState("idle");
     }

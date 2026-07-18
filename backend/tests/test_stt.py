@@ -10,6 +10,7 @@ import soundfile as sf
 
 from app.core.types import ProviderMode
 from app.stt import clear_cache, get_provider
+from app.stt.base import TranscriptionResult, normalize_detected_language
 from app.stt.config import STTSettings
 from app.stt.cloud import GeminiSTTProvider
 from app.stt.local import LocalSTTProvider
@@ -29,6 +30,41 @@ def sample_wav(tmp_path) -> Path:
     path = tmp_path / "test.wav"
     sf.write(str(path), audio, 16000)
     return path
+
+
+# --- detected_language contract (spec 029) -----------------------------------
+
+
+def test_transcription_result_detected_language_defaults_to_none():
+    result = TranscriptionResult(text="hi")
+    assert result.detected_language is None
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("en", "en"),
+        ("EN", "en"),
+        ("uk", "uk"),
+        ("en-US", "en"),
+        ("pt_BR", "pt"),
+        ("english", "en"),
+        ("English", "en"),
+        ("ukrainian", "uk"),
+        ("Ukrainian", "uk"),
+        ("german", "de"),
+        ("chinese", "zh"),
+        (None, None),
+        ("", None),
+        ("   ", None),
+        ("not-a-real-language", None),
+    ],
+)
+def test_normalize_detected_language(raw, expected):
+    """AC-14: lowercase ISO-639-1 codes pass through, region suffixes strip,
+    full English names (at minimum the LANGUAGE_NAMES set) map to their code,
+    unrecognised/empty input returns None."""
+    assert normalize_detected_language(raw) == expected
 
 
 # --- Factory caching ---
@@ -145,6 +181,21 @@ async def test_cloud_stt_empty_response(sample_wav):
     assert mock_call.call_args.args[4] == "audio/wav"
 
 
+@pytest.mark.asyncio
+async def test_gemini_detected_language_always_none(sample_wav):
+    """AC-20: Gemini has no structured language field at any setting --
+    detected_language is unconditionally None, regardless of the language
+    kwarg."""
+    settings = STTSettings(mode=ProviderMode.CLOUD, gemini_api_key="test-key")
+    provider = GeminiSTTProvider(settings)
+    provider._client = MagicMock()
+
+    with patch.object(GeminiSTTProvider, "_call_gemini", return_value=("Привіт світ", None)):
+        result = await provider.transcribe(sample_wav, language="auto")
+
+    assert result.detected_language is None
+
+
 # --- Local STT ---
 
 
@@ -211,6 +262,27 @@ async def test_local_stt_transcribe(sample_wav):
 
     assert result.text == "Привіт світ"
     mock_model.transcribe.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_local_stt_populates_detected_language_from_info(sample_wav):
+    """AC-16: TranscriptionInfo.language (previously discarded as `_info` at
+    local.py:149) now reaches TranscriptionResult.detected_language,
+    normalized -- populated whether or not `language` was "auto"."""
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+    provider = LocalSTTProvider(settings)
+
+    seg = MagicMock()
+    seg.text = "hi"
+    info = MagicMock()
+    info.language = "uk"
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = ([seg], info)
+    provider._model = mock_model
+
+    result = await provider.transcribe(sample_wav, language="auto")
+
+    assert result.detected_language == "uk"
 
 
 @pytest.mark.asyncio

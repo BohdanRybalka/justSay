@@ -25,7 +25,7 @@ from pathlib import Path
 
 import httpx
 
-from app.stt.base import STTProvider, TranscriptionResult
+from app.stt.base import STTProvider, TranscriptionResult, normalize_detected_language
 from app.stt.config import STTSettings
 from app.stt.local_vulkan_cmd import build_server_argv, resolve_binary_path, resolve_model_path
 
@@ -313,18 +313,26 @@ class WhisperCppVulkanSTTProvider(STTProvider):
         `LocalSTTProvider`'s duration-driven beam_size/VAD tuning (plan 018,
         Cuts deferred: proving the base accelerated path works is the job;
         quality/latency tuning is a follow-up).
+
+        `response_format` escalates to ``verbose_json`` only when
+        ``language == "auto"`` -- plain ``"json"`` has no ``language`` field
+        at all, but the explicit-language hot path (latency-sensitive, and
+        on this Vulkan backend hardware this project cannot test against)
+        keeps its exact current wire format unchanged (spec 029 / docs/adr/
+        016-detected-language-on-stt-contract.md).
         """
         await asyncio.to_thread(self._get_model)
 
         url = f"http://{_HOST}:{_PORT}/inference"
-        data = {"language": language, "response_format": "json"}
+        response_format = "verbose_json" if language == "auto" else "json"
+        data = {"language": language, "response_format": response_format}
 
         log.info(
-            "whisper-server: transcribe model=%s file=%s lang=%s",
-            self._settings.whisper_model_size, audio_path.name, language,
+            "whisper-server: transcribe model=%s file=%s lang=%s format=%s",
+            self._settings.whisper_model_size, audio_path.name, language, response_format,
         )
 
-        def _post() -> str:
+        def _post() -> tuple[str, str | None]:
             with open(audio_path, "rb") as f:
                 files = {"file": (audio_path.name, f, "audio/wav")}
                 with httpx.Client(timeout=_INFERENCE_TIMEOUT) as client:
@@ -336,10 +344,19 @@ class WhisperCppVulkanSTTProvider(STTProvider):
             # embedded timestamps in the json/verbose_json `text` field) --
             # collapse to a single space-joined line, matching
             # LocalSTTProvider's output shape.
-            return " ".join(line.strip() for line in raw_text.splitlines() if line.strip())
+            text = " ".join(line.strip() for line in raw_text.splitlines() if line.strip())
+            # `.get()` -- verbose_json's shape is unverified on real
+            # AMD/Intel hardware (no such GPU in this project's dev/CI
+            # environment), so a missing/renamed field degrades to None
+            # rather than raising.
+            return text, body.get("language")
 
-        text = await asyncio.to_thread(_post)
-        return TranscriptionResult(text=text, tokens_used=None)
+        text, detected_raw = await asyncio.to_thread(_post)
+        return TranscriptionResult(
+            text=text,
+            tokens_used=None,
+            detected_language=normalize_detected_language(detected_raw),
+        )
 
     def cleanup(self) -> None:
         """Terminate the whisper-server child.

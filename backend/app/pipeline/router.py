@@ -25,6 +25,10 @@ class DictateResponse(BaseModel):
     copied_to_clipboard: bool
     model_name: str = ""
     fallback_reason: str | None = None
+    # Set (currently only to "silence") when process_audio short-circuited
+    # without calling a provider at all. Not yet consumed by the frontend --
+    # see specs/029-silence-guard-detected-language/plan.md's Cuts deferred.
+    discarded_reason: str | None = None
 
 
 @router.post("/dictate", response_model=DictateResponse)

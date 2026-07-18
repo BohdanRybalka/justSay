@@ -11,7 +11,7 @@ import logging
 import threading
 from pathlib import Path
 
-from app.stt.base import STTProvider, TranscriptionResult
+from app.stt.base import STTProvider, TranscriptionResult, normalize_detected_language
 from app.stt.config import STTSettings
 
 log = logging.getLogger(__name__)
@@ -145,8 +145,8 @@ class LocalSTTProvider(STTProvider):
             f"{len(glossary)}chars" if glossary else "none",
         )
 
-        def _transcribe():
-            segments, _info = model.transcribe(
+        def _transcribe() -> tuple[str, str | None]:
+            segments, info = model.transcribe(
                 str(audio_path),
                 language=whisper_language,
                 beam_size=beam_size,
@@ -155,10 +155,15 @@ class LocalSTTProvider(STTProvider):
                 no_repeat_ngram_size=3,
                 initial_prompt=glossary,
             )
-            return " ".join(segment.text.strip() for segment in segments)
+            text = " ".join(segment.text.strip() for segment in segments)
+            return text, info.language
 
-        text = await asyncio.to_thread(_transcribe)
-        return TranscriptionResult(text=text, tokens_used=None)
+        text, detected_raw = await asyncio.to_thread(_transcribe)
+        return TranscriptionResult(
+            text=text,
+            tokens_used=None,
+            detected_language=normalize_detected_language(detected_raw),
+        )
 
     def cleanup(self) -> None:
         """Release whisper model and GPU memory.

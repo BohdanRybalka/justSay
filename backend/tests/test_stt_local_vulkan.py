@@ -431,6 +431,80 @@ async def test_transcribe_sends_auto_language_unchanged(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# detected_language / verbose_json escalation (spec 029, AC 18)              #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_transcribe_keeps_plain_json_for_explicit_language(monkeypatch, tmp_path):
+    """The explicit-language hot path must keep byte-identical wire format --
+    "json", never escalated -- text extraction is unaffected."""
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+
+    captured = {}
+
+    def _post_impl(url, data, files):
+        captured["data"] = data
+        return _FakeResponse(200, {"text": "ok"})
+
+    _install_fake_httpx(monkeypatch, post_impl=_post_impl)
+    _install_fake_popen(monkeypatch)
+
+    result = await provider.transcribe(audio_path, language="uk")
+
+    assert captured["data"]["response_format"] == "json"
+    assert result.text == "ok"
+    assert result.detected_language is None
+
+
+@pytest.mark.asyncio
+async def test_transcribe_escalates_to_verbose_json_only_for_auto(monkeypatch, tmp_path):
+    """AC-18: response_format escalates to verbose_json only when
+    language == "auto", and the reported language is normalized onto
+    TranscriptionResult.detected_language."""
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+
+    captured = {}
+
+    def _post_impl(url, data, files):
+        captured["data"] = data
+        return _FakeResponse(200, {"text": "hello", "language": "en"})
+
+    _install_fake_httpx(monkeypatch, post_impl=_post_impl)
+    _install_fake_popen(monkeypatch)
+
+    result = await provider.transcribe(audio_path, language="auto")
+
+    assert captured["data"]["response_format"] == "verbose_json"
+    assert result.text == "hello"
+    assert result.detected_language == "en"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_auto_path_missing_language_key_is_none(monkeypatch, tmp_path):
+    """A verbose_json body with no "language" key -> detected_language is
+    None, not a KeyError -- the shape is unverified on real AMD/Intel
+    hardware (none available in this project's dev/CI environment), so
+    `.get()` reads must degrade gracefully."""
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+
+    post_impl = lambda url, data, files: _FakeResponse(200, {"text": "hello"})  # noqa: E731
+    _install_fake_httpx(monkeypatch, post_impl=post_impl)
+    _install_fake_popen(monkeypatch)
+
+    result = await provider.transcribe(audio_path, language="auto")
+
+    assert result.text == "hello"
+    assert result.detected_language is None
+
+
+# --------------------------------------------------------------------------- #
 # cleanup()                                                                   #
 # --------------------------------------------------------------------------- #
 

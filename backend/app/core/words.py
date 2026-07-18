@@ -8,8 +8,11 @@ Phase 1 of Plan 013. Architectural rules:
   alternative was rejected for testability and connection-threading
   simplicity.
 - Both Ukrainian and English stop-word lists are always applied — real
-  transcripts code-switch, ``entries.language`` is the user's selected
-  language at dictation time, not the actual content language.
+  transcripts code-switch, and ``entries.language`` is not a reliable
+  content-language signal: it's the user's explicit choice when they made
+  one, the provider-detected language when they requested ``"auto"``, and
+  the literal ``"auto"`` sentinel only when detection itself produced
+  nothing (spec 029 / docs/adr/016-detected-language-on-stt-contract.md).
 - Insights cache TTL = 1 h, invalidated via the history mutation-listener
   registry (one-way dependency: words → history).
 - Local mode privacy: insights LLM calls go through

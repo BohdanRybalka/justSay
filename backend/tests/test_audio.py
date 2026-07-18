@@ -7,6 +7,7 @@ import pytest
 import soundfile as sf
 from pydantic import ValidationError
 
+from app.audio.analysis import SilenceAnalysis, analyze_silence, rms_dbfs
 from app.audio.config import AudioSettings
 from app.audio.recorder import MicrophoneRecorder
 
@@ -239,3 +240,407 @@ def test_temp_dir_env_override_wins_over_default_factory(
     monkeypatch.setenv("JUSTSAY_AUDIO_TEMP_DIR", str(override))
 
     assert AudioSettings().temp_dir == override
+
+
+# --- rms_dbfs extraction parity (spec 029, AC 1-2) --------------------------
+#
+# `rms_dbfs` is a verbatim lift of the formula that used to live inline in
+# `MicrophoneRecorder._audio_callback` — these tests pin down that the
+# extraction changed nothing observable, not even the numeric type of the
+# comparison, for the Mic Test level meter / `/audio/level` SSE stream.
+
+
+def test_rms_dbfs_matches_manual_formula():
+    samples = np.random.uniform(-0.3, 0.3, 2048).astype(np.float32)
+    expected = 20 * np.log10(max(np.sqrt(np.mean(samples.astype(np.float64) ** 2)), 1e-10))
+    assert rms_dbfs(samples) == pytest.approx(expected)
+
+
+def test_rms_dbfs_zero_signal_floors_instead_of_raising():
+    zero = np.zeros(512, dtype=np.float32)
+    assert rms_dbfs(zero) == pytest.approx(-200.0)
+
+
+@pytest.mark.asyncio
+async def test_recorder_level_db_matches_pre_extraction_formula(audio_settings, mock_stream):
+    """AC-2: `recorder.level_db` returns the exact same value the old
+    inline formula would have computed — not just "some negative number"."""
+    _, _ = mock_stream
+    recorder = MicrophoneRecorder(audio_settings)
+    await recorder.start()
+
+    fake_audio = np.random.uniform(-0.1, 0.1, (1024, 1)).astype(np.float32)
+    recorder._audio_callback(fake_audio, 1024, None, MagicMock())
+
+    rms = np.sqrt(np.mean(fake_audio.astype(np.float64) ** 2))
+    expected_dbfs = 20 * np.log10(max(rms, 1e-10))
+
+    assert recorder.level_db == pytest.approx(expected_dbfs)
+
+
+# --- analyze_silence (spec 029) ---------------------------------------------
+
+
+def _write_wav(path: Path, data: np.ndarray, sr: int = 16000) -> Path:
+    sf.write(str(path), data.astype(np.float32), sr)
+    return path
+
+
+def test_analyze_silence_streams_frames_never_reads_whole_file(tmp_path, monkeypatch):
+    """AC-3: streaming via soundfile.blocks(), never sf.read() of the whole
+    file — memory use must not scale with file length. A regression back to
+    sf.read() is caught by making sf.read() itself raise."""
+    path = _write_wav(tmp_path / "audio.wav", np.random.uniform(-0.1, 0.1, 16000))
+
+    def _boom(*a, **kw):
+        raise AssertionError("analyze_silence must not call sf.read()")
+
+    monkeypatch.setattr(sf, "read", _boom)
+
+    result = analyze_silence(path, AudioSettings())
+
+    assert result is not None
+    assert isinstance(result, SilenceAnalysis)
+
+
+def test_analyze_silence_returns_none_for_corrupt_file(tmp_path):
+    """AC-4 (fail open): a file libsndfile cannot decode returns None, never
+    raises, never reports is_silent=True."""
+    path = tmp_path / "corrupt.wav"
+    path.write_bytes(b"this is not a real audio file, just garbage bytes" * 4)
+
+    result = analyze_silence(path, AudioSettings())
+
+    assert result is None
+
+
+def test_analyze_silence_returns_none_for_m4a_container_stub(tmp_path):
+    """AC-4 (the load-bearing fail-open case): /pipeline/process-file
+    accepts .m4a/.webm, which libsndfile cannot open at all. A guard that
+    treated "can't decode" as "silent" would silently break that tab."""
+    path = tmp_path / "clip.m4a"
+    path.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64)
+
+    result = analyze_silence(path, AudioSettings())
+
+    assert result is None
+
+
+def test_analyze_silence_digital_zero_is_silent(tmp_path):
+    """AC-9(a): 3s of true digital silence."""
+    path = _write_wav(tmp_path / "zero.wav", np.zeros(16000 * 3))
+
+    result = analyze_silence(path, AudioSettings())
+
+    assert result is not None
+    assert result.is_silent is True
+    assert result.speech_frame_count == 0
+
+
+def test_analyze_silence_room_tone_is_silent(tmp_path):
+    """AC-9(b): 3s of uniform noise in [-0.0005, 0.0005] (~-66 dBFS peak) —
+    a dead mic / room tone, not real speech."""
+    rng = np.random.default_rng(1234)
+    noise = rng.uniform(-0.0005, 0.0005, 16000 * 3)
+    path = _write_wav(tmp_path / "room_tone.wav", noise)
+
+    result = analyze_silence(path, AudioSettings())
+
+    assert result is not None
+    assert result.is_silent is True
+
+
+def test_analyze_silence_verdict_type_is_plain_bool_not_numpy(tmp_path):
+    """Regression guard: numpy scalar bools (np.bool_) are not `is`-identical
+    to Python's True/False, which would silently break
+    `assert result.is_silent is True/False`-style assertions downstream."""
+    path = _write_wav(tmp_path / "zero.wav", np.zeros(16000))
+
+    result = analyze_silence(path, AudioSettings())
+
+    assert type(result.is_silent) is bool
+
+
+def test_analyze_silence_settings_override_flips_verdict(tmp_path):
+    """AC-10: thresholds are real AudioSettings fields — an override changes
+    the verdict, not just the reported numbers."""
+    rng = np.random.default_rng(99)
+    noise = rng.uniform(-0.0005, 0.0005, 16000 * 3)
+    path = _write_wav(tmp_path / "room_tone.wav", noise)
+
+    assert analyze_silence(path, AudioSettings()).is_silent is True
+
+    permissive = AudioSettings(silence_min_speech_frames=0, silence_peak_dbfs=-100.0)
+    assert analyze_silence(path, permissive).is_silent is False
+
+
+def test_silence_settings_overridable_via_env_var(monkeypatch):
+    """AC-10: overridable via JUSTSAY_AUDIO_* env vars without a rebuild."""
+    monkeypatch.setenv("JUSTSAY_AUDIO_SILENCE_PEAK_DBFS", "-100.0")
+    monkeypatch.setenv("JUSTSAY_AUDIO_SILENCE_FRAME_DBFS", "-90.0")
+    monkeypatch.setenv("JUSTSAY_AUDIO_SILENCE_MIN_SPEECH_FRAMES", "1")
+
+    settings = AudioSettings()
+
+    assert settings.silence_peak_dbfs == -100.0
+    assert settings.silence_frame_dbfs == -90.0
+    assert settings.silence_min_speech_frames == 1
+
+
+# --- False-positive protection against real speech (spec 029, AC 8) --------
+#
+# train-audio-data/ is gitignored (never committed) and contains exactly ONE
+# real sample: one speaker, one microphone, one recording. This is a real
+# coverage gap accepted in the plan's Risks section, not overstated here —
+# these tests skip (not fail) when the file isn't present on disk, e.g. in a
+# fresh CI checkout that never had the local-only sample directory.
+
+_TRAIN_AUDIO_MP3 = (
+    Path(__file__).resolve().parents[2] / "train-audio-data" / "Record (online-voice-recorder.com).mp3"
+)
+
+
+def _resample_to_16k_mono(data: np.ndarray, orig_sr: int) -> np.ndarray:
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    if orig_sr == 16000:
+        return data.astype(np.float32)
+    ratio = orig_sr / 16000
+    if float(ratio).is_integer():
+        # Box-filter decimation -- numpy-only (no scipy in this dev venv).
+        # Good enough for a test fixture whose only job is feeding
+        # analyze_silence's RMS/peak measurement, not audio quality.
+        factor = int(ratio)
+        trimmed = data[: len(data) - (len(data) % factor)]
+        return trimmed.reshape(-1, factor).mean(axis=1).astype(np.float32)
+    duration = len(data) / orig_sr
+    n_target = int(duration * 16000)
+    x_orig = np.linspace(0, duration, num=len(data), endpoint=False)
+    x_target = np.linspace(0, duration, num=n_target, endpoint=False)
+    return np.interp(x_target, x_orig, data).astype(np.float32)
+
+
+@pytest.fixture(scope="module")
+def _real_speech_16k_mono() -> np.ndarray | None:
+    if not _TRAIN_AUDIO_MP3.exists():
+        return None
+    data, sr = sf.read(str(_TRAIN_AUDIO_MP3), dtype="float32")
+    return _resample_to_16k_mono(data, sr)
+
+
+@pytest.mark.skipif(
+    not _TRAIN_AUDIO_MP3.exists(),
+    reason="train-audio-data/ is gitignored and not present in this checkout",
+)
+@pytest.mark.parametrize("attenuation_db", [0.0, -12.0, -20.0, -30.0])
+def test_analyze_silence_does_not_discard_quiet_real_speech(
+    tmp_path, _real_speech_16k_mono, attenuation_db
+):
+    """AC-8, the load-bearing false-positive test: the real sample converted
+    to 16kHz mono, at 0/-12/-20/-30 dB gain, must never be discarded."""
+    attenuated = (_real_speech_16k_mono * (10 ** (attenuation_db / 20))).astype(np.float32)
+    path = _write_wav(tmp_path / f"speech_{attenuation_db}dB.wav", attenuated)
+
+    result = analyze_silence(path, AudioSettings())
+
+    assert result is not None
+    assert result.is_silent is False, (
+        f"real speech at {attenuation_db}dB attenuation was wrongly discarded "
+        f"(peak={result.peak_dbfs:.1f} dBFS, "
+        f"speech_frames={result.speech_frame_count}/{result.total_frame_count})"
+    )
+
+
+# --- Short-clip correctness, honest thresholds, fail-open floor -----------
+# (spec 029, Stage 3 review iteration 1 — RED-1/2/3, AC 25-30)
+#
+# AC-8 above only exercised one 382-second recording, where a 150ms
+# speech-frame floor is trivially met thousands of times over. These tests
+# exercise the regime that actually broke: short (200-1000ms) clips, where
+# the absolute frame-count rule discarded loud, unattenuated real speech.
+
+
+def test_rms_dbfs_returns_native_python_float():
+    """Item 6 (Stage 3 review nit): match analyze_silence's own casting
+    convention — np.log10 of a Python float is still np.float64."""
+    samples = np.random.uniform(-0.2, 0.2, 480).astype(np.float32)
+    assert type(rms_dbfs(samples)) is float
+
+
+@pytest.mark.parametrize(
+    "total_frame_count,expected_required",
+    [(3, 2), (7, 2), (17, 3), (34, 5), (100, 5), (12750, 5)],
+)
+def test_required_speech_frames_is_proportional_to_clip_length(
+    total_frame_count, expected_required
+):
+    """AC-27: required = min(silence_min_speech_frames, max(2,
+    ceil(total_frame_count * silence_min_speech_ratio))) — never the flat
+    absolute count that made a 200ms clip (~7 frames) impossible to pass
+    at any volume."""
+    from app.audio.analysis import _required_speech_frames
+
+    settings = AudioSettings()
+    assert _required_speech_frames(total_frame_count, settings) == expected_required
+
+
+def test_default_peak_threshold_exceeds_frame_threshold():
+    """AC-28's invariant, checked directly: with silence_peak_dbfs <=
+    silence_frame_dbfs, rms(frame) <= max|frame| <= global peak makes the
+    peak check provably unable to fire before the frame check already has
+    (Stage 3 review RED-2) — so the shipped defaults must keep
+    silence_peak_dbfs strictly greater than silence_frame_dbfs."""
+    settings = AudioSettings()
+    assert settings.silence_peak_dbfs > settings.silence_frame_dbfs
+
+
+def test_analyze_silence_peak_threshold_is_decisive_against_low_crest_factor_hum(tmp_path):
+    """AC-28: silence_peak_dbfs must be able to change the verdict on an
+    input silence_frame_dbfs/frame-count alone does not resolve.
+
+    Uses a 60Hz SQUARE wave (crest factor ~0dB: peak == RMS), not the sine
+    the plan's prose describes -- a sine's crest factor is mathematically
+    fixed at ~3.01dB (peak = RMS * sqrt(2)), so hitting peak≈-46.9dBFS while
+    RMS still clears the -50dBFS frame floor by a safe margin is not
+    simultaneously achievable without sitting within ~1dB of that floor,
+    which would make this a flaky test. A square wave at a single -47dBFS
+    level (both peak and RMS) demonstrates the identical point -- a
+    low-crest-factor signal the frame check alone calls "speech" -- with
+    several dB of margin on both sides instead of a fragile 1dB one.
+    """
+    sr = 16000
+    duration = 3.0
+    t = np.arange(int(sr * duration)) / sr
+    amp = 10 ** (-47.0 / 20)
+    hum = (amp * np.sign(np.sin(2 * np.pi * 60 * t))).astype(np.float32)
+    path = tmp_path / "hum_60hz_square.wav"
+    sf.write(str(path), hum, sr, subtype="FLOAT")  # avoid 16-bit quantization noise
+
+    default_result = analyze_silence(path, AudioSettings())
+    assert default_result is not None
+    assert default_result.is_silent is True, (
+        "default silence_peak_dbfs=-45.0 must catch this low-crest-factor hum "
+        f"(peak={default_result.peak_dbfs:.1f} dBFS, "
+        f"speech_frames={default_result.speech_frame_count}/{default_result.total_frame_count})"
+    )
+    # The frame check alone would have called this "speech" -- proves the
+    # peak check, not the frame-count rule, is what makes it silent above.
+    assert default_result.speech_frame_count >= 5
+
+    overridden = AudioSettings(silence_peak_dbfs=-50.0)  # == silence_frame_dbfs
+    overridden_result = analyze_silence(path, overridden)
+    assert overridden_result is not None
+    assert overridden_result.is_silent is False, (
+        "with silence_peak_dbfs collapsed onto silence_frame_dbfs, the peak "
+        "check is structurally dead and the frame check alone must call "
+        "this real (if low-crest-factor) signal 'speech'"
+    )
+
+
+def test_analyze_silence_returns_none_below_min_analysis_ms(tmp_path):
+    """AC-29: the guard abstains (None, not a verdict) when it decoded less
+    than silence_min_analysis_ms (default 100ms) of audio -- a decode-sanity
+    floor, not a short-clip exemption (200ms+ is still judged on content by
+    AC-25/26)."""
+    audio = np.random.uniform(-0.3, 0.3, int(16000 * 0.050)).astype(np.float32)  # 50ms
+    path = tmp_path / "too_short.wav"
+    sf.write(str(path), audio, 16000)
+
+    result = analyze_silence(path, AudioSettings())
+
+    assert result is None
+
+
+def test_analyze_silence_returns_none_for_truncated_wav_with_valid_header(tmp_path):
+    """AC-30 (Stage 3 review RED-3): a WAV written in full and then
+    physically truncated -- valid header, sf.info() opens it, sf.blocks()
+    yields data without raising -- must fail open (None), not report
+    is_silent=True. Comparing sf.info(...).frames against frames actually
+    read does NOT catch this: libsndfile clamps the declared count to the
+    physical file size, so the two already agree on a truncated file. Only
+    a decoded-duration floor (AC-29's mechanism) closes this."""
+    audio = np.random.uniform(-0.1, 0.1, 16000).astype(np.float32)  # 1s, well-formed
+    path = tmp_path / "truncated.wav"
+    sf.write(str(path), audio, 16000)
+    with open(path, "r+b") as f:
+        f.truncate(60)  # header survives; almost all sample data is gone
+
+    info = sf.info(str(path))  # sanity: still opens cleanly, declared frames
+    assert info.frames > 0     # already clamped to what's physically present
+
+    result = analyze_silence(path, AudioSettings())
+
+    assert result is None
+
+
+@pytest.mark.skipif(
+    not _TRAIN_AUDIO_MP3.exists(),
+    reason="train-audio-data/ is gitignored and not present in this checkout",
+)
+def test_analyze_silence_pinned_reviewer_counterexample(tmp_path, _real_speech_16k_mono):
+    """AC-26: the Stage 3 reviewer's exact counterexample, pinned as a
+    regression test. The 200ms window starting at 30.0s of the real sample,
+    at 0dB gain, is loud, unattenuated real speech that the iteration-1
+    absolute frame-count rule discarded (is_silent=True); the revised
+    proportional rule must not."""
+    start = int(30.0 * 16000)
+    window = _real_speech_16k_mono[start:start + int(16000 * 0.200)]
+    path = tmp_path / "reviewer_counterexample.wav"
+    sf.write(str(path), window, 16000)
+
+    result = analyze_silence(path, AudioSettings())
+
+    assert result is not None
+    assert result.total_frame_count == 7
+    assert result.speech_frame_count >= 4
+    assert result.peak_dbfs > -20.0  # unattenuated, clearly loud speech
+    assert result.is_silent is False
+
+
+@pytest.mark.skipif(
+    not _TRAIN_AUDIO_MP3.exists(),
+    reason="train-audio-data/ is gitignored and not present in this checkout",
+)
+@pytest.mark.parametrize("duration_ms", [200, 300, 500, 1000])
+@pytest.mark.parametrize("attenuation_db", [0.0, -12.0])
+def test_analyze_silence_short_speech_bearing_windows_zero_false_positives(
+    tmp_path, _real_speech_16k_mono, duration_ms, attenuation_db
+):
+    """AC-25, the new load-bearing false-positive test. 80 deterministically
+    (rng seed 7) sliced windows per cell — accepted only when they
+    demonstrably contain a spoken word, not an inter-sentence pause (at 0dB,
+    peak_dbfs > -25.0 AND rms_dbfs > -35.0) — must ALL survive the guard at
+    every duration from 200ms up, at both 0dB and -12dB gain. Zero false
+    positives, not a rate: this is what the iteration-1 absolute frame-count
+    rule failed (measured 3/80 at 200ms/0dB, 24-28/80 at 200ms/-12dB,
+    11/80 at 300ms/-12dB before this fix)."""
+    rng = np.random.default_rng(7)
+    audio = _real_speech_16k_mono
+    win_len = int(16000 * duration_ms / 1000)
+
+    windows: list[np.ndarray] = []
+    attempts = 0
+    while len(windows) < 80 and attempts < 200_000:
+        attempts += 1
+        start = int(rng.integers(0, len(audio) - win_len))
+        window = audio[start:start + win_len]
+        peak_dbfs = 20 * np.log10(max(np.max(np.abs(window)), 1e-10))
+        frame_rms_dbfs = rms_dbfs(window)
+        if peak_dbfs > -25.0 and frame_rms_dbfs > -35.0:
+            windows.append(window)
+    assert len(windows) == 80, "could not find 80 speech-bearing windows — sample or seed changed"
+
+    settings = AudioSettings()
+    false_positives = []
+    for i, window in enumerate(windows):
+        attenuated = (window * (10 ** (attenuation_db / 20))).astype(np.float32)
+        path = tmp_path / f"w_{duration_ms}ms_{attenuation_db}dB_{i}.wav"
+        sf.write(str(path), attenuated, 16000)
+        result = analyze_silence(path, settings)
+        if result is None or result.is_silent:
+            false_positives.append(i)
+
+    assert false_positives == [], (
+        f"{len(false_positives)}/80 false positives at {duration_ms}ms/{attenuation_db}dB "
+        f"(window indices: {false_positives})"
+    )
