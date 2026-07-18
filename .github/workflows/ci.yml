@@ -5,11 +5,24 @@
 # what `npm run lint:dead-code` actually needs: Node for knip, Python + the
 # backend `dev` extra for vulture. See docs/adr/017-static-analysis-in-pr-ci.md
 # for why this runs here rather than as a pre-commit hook or subagent-only step.
+#
+# Named "CI" rather than "Dead Code Check" deliberately: ADR 017's Consequences
+# already anticipates this workflow becoming the home for `tsc --noEmit`,
+# `pytest` and `ruff` once the dead-code job has proven itself across a few
+# real PRs (see spec 030's "Cuts deferred to a future spec"). The single
+# `dead-code` job today is a placeholder for that growth, not the final shape.
 
 name: CI
 
 on:
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   dead-code:
