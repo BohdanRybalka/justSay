@@ -1,0 +1,39 @@
+# PR-gating dead-code check (spec 030 / ADR 017).
+#
+# The project's first pull_request-triggered workflow. Deliberately minimal —
+# no Rust toolchain, no PyInstaller sidecar, no Vulkan SDK. It only installs
+# what `npm run lint:dead-code` actually needs: Node for knip, Python + the
+# backend `dev` extra for vulture. See docs/adr/017-static-analysis-in-pr-ci.md
+# for why this runs here rather than as a pre-commit hook or subagent-only step.
+
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  dead-code:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dev deps
+        run: pip install -e "backend[dev]"
+
+      - name: Run dead-code checks (knip + vulture)
+        run: npm run lint:dead-code

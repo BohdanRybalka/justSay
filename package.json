@@ -14,7 +14,10 @@
     "setup": "npm install && npm run backend:install",
     "test": "cd backend && python -m pytest tests/ -v",
     "test:frontend": "vitest run",
-    "test:rust": "cd src-tauri && cargo test"
+    "test:rust": "cd src-tauri && cargo test",
+    "lint:dead-code:ts": "knip",
+    "lint:dead-code:py": "cd backend && python -m vulture",
+    "lint:dead-code": "npm run lint:dead-code:ts && npm run lint:dead-code:py"
   },
   "dependencies": {
     "@tauri-apps/api": "~2.10.0",
@@ -29,7 +32,7 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
     "cross-env": "^7.0.3",
-    "knip": "^5.0.0",
+    "knip": "5.88.1",
     "typescript": "^5.5.3",
     "vite": "^6.0.0",
     "vitest": "^3.0.0"
