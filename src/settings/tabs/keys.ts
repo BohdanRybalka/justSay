@@ -1,13 +1,15 @@
-import { api, type UserSettings } from "../../api";
+import { type CloudKeyStatus, type UserSettings } from "../../api";
+import { saveSettings, getCloudKeyStatus } from "../settings";
 
 type KeyField = "gemini_api_key" | "groq_api_key";
-type KeyRowState = "stored" | "unset" | "editing";
+type KeyRowState = "stored" | "env" | "unset" | "editing";
 
 interface KeyRowSpec {
   field: KeyField;
   label: string;
   unsetHint: string;
   storedHint: string;
+  envHint: string;
   placeholder: string;
 }
 
@@ -17,6 +19,7 @@ const ROWS: KeyRowSpec[] = [
     label: "Gemini (STT — long audio &amp; structured)",
     unsetHint: "No key set — cloud STT will fail.",
     storedHint: "Key stored.",
+    envHint: "Key active (from environment). Saving a key here will override it.",
     placeholder: "Paste your Gemini API key",
   },
   {
@@ -24,6 +27,7 @@ const ROWS: KeyRowSpec[] = [
     label: "Groq (STT — short audio &amp; LLM)",
     unsetHint: "No key set — cloud STT and LLM will fail.",
     storedHint: "Key stored.",
+    envHint: "Key active (from environment). Saving a key here will override it.",
     placeholder: "Paste your Groq API key",
   },
 ];
@@ -34,14 +38,20 @@ function prefix(field: KeyField): string {
   return field === "gemini_api_key" ? "gemini" : "groq";
 }
 
-function rowState(settings: UserSettings, field: KeyField): KeyRowState {
-  return settings[field] === "***" ? "stored" : "unset";
+function cloudFlag(cloud: CloudKeyStatus, field: KeyField): boolean {
+  return field === "gemini_api_key" ? cloud.gemini_key_set : cloud.groq_key_set;
+}
+
+function rowState(settings: UserSettings, field: KeyField, cloud: CloudKeyStatus | null): KeyRowState {
+  if (settings[field] === "***") return "stored";
+  if (cloud && cloudFlag(cloud, field)) return "env";
+  return "unset";
 }
 
 function renderRowMarkup(spec: KeyRowSpec, state: KeyRowState): string {
   const p = prefix(spec.field);
   let inner: string;
-  if (state === "stored") {
+  if (state === "stored" || state === "env") {
     inner = `
       <input type="text" id="${p}-key-input" disabled
         value="${MASKED_DISPLAY}"
@@ -74,9 +84,11 @@ function renderRowMarkup(spec: KeyRowSpec, state: KeyRowState): string {
   const statusText =
     state === "stored"
       ? spec.storedHint
-      : state === "editing"
-        ? "Editing stored key — Cancel to abort."
-        : spec.unsetHint;
+      : state === "env"
+        ? spec.envHint
+        : state === "editing"
+          ? "Editing stored key — Cancel to abort."
+          : spec.unsetHint;
 
   return `
     <div class="setting-group">
@@ -94,11 +106,12 @@ function renderRowMarkup(spec: KeyRowSpec, state: KeyRowState): string {
 export function renderKeys(
   container: HTMLElement,
   settings: UserSettings,
+  cloud: CloudKeyStatus | null,
   overrideStates?: Partial<Record<KeyField, KeyRowState>>,
 ): () => void {
   const states: Record<KeyField, KeyRowState> = {
-    gemini_api_key: overrideStates?.gemini_api_key ?? rowState(settings, "gemini_api_key"),
-    groq_api_key: overrideStates?.groq_api_key ?? rowState(settings, "groq_api_key"),
+    gemini_api_key: overrideStates?.gemini_api_key ?? rowState(settings, "gemini_api_key", cloud),
+    groq_api_key: overrideStates?.groq_api_key ?? rowState(settings, "groq_api_key", cloud),
   };
 
   container.innerHTML = `
@@ -109,7 +122,7 @@ export function renderKeys(
   `;
 
   for (const spec of ROWS) {
-    wireKey(container, spec, states[spec.field]);
+    wireKey(container, spec, states[spec.field], settings, cloud, states);
   }
 
   // Editing-state focus: after the DOM is rebuilt, land the caret in the
@@ -135,18 +148,25 @@ function wireKey(
   container: HTMLElement,
   spec: KeyRowSpec,
   state: KeyRowState,
+  settings: UserSettings,
+  cloud: CloudKeyStatus | null,
+  states: Record<KeyField, KeyRowState>,
 ): void {
   const p = prefix(spec.field);
   const input = container.querySelector<HTMLInputElement>(`#${p}-key-input`)!;
   const status = container.querySelector<HTMLElement>(`#${p}-status`)!;
 
-  if (state === "stored") {
+  if (state === "stored" || state === "env") {
     const replaceBtn = container.querySelector<HTMLButtonElement>(`#${p}-replace`)!;
     replaceBtn.addEventListener("click", () => {
       // Single uniform update strategy: full re-render with editing state.
-      renderKeys(container, snapshotSettings(container), {
+      // Spread the already-computed `states` so the OTHER row keeps its
+      // exact current state (env/stored/unset) rather than being
+      // recomputed or corrupted.
+      renderKeys(container, settings, cloud, {
+        ...states,
         [spec.field]: "editing",
-      } as Partial<Record<KeyField, KeyRowState>>);
+      });
     });
     return;
   }
@@ -156,10 +176,13 @@ function wireKey(
     const cancelBtn = container.querySelector<HTMLButtonElement>(`#${p}-cancel`);
     if (cancelBtn) {
       cancelBtn.addEventListener("click", () => {
-        // Abort the edit — return to stored state without touching the backend.
-        renderKeys(container, snapshotSettings(container), {
-          [spec.field]: "stored",
-        } as Partial<Record<KeyField, KeyRowState>>);
+        // Abort the edit — return to the row's real pre-edit state, derived
+        // from settings/cloud (neither changed during the abort) rather than
+        // hardcoded, so an "env" row correctly reverts to "env" and not "stored".
+        renderKeys(container, settings, cloud, {
+          ...states,
+          [spec.field]: rowState(settings, spec.field, cloud),
+        });
       });
     }
   }
@@ -180,15 +203,19 @@ function wireKey(
     saveBtn.textContent = "Saving…";
     status.textContent = "";
     // Lock Cancel too — without this a fast Cancel-during-Save would race
-    // the in-flight `api.updateSettings` re-render and produce flicker.
+    // the in-flight save's re-render and produce flicker.
     const cancelBtnLock = container.querySelector<HTMLButtonElement>(`#${p}-cancel`);
     if (cancelBtnLock) cancelBtnLock.disabled = true;
 
     try {
-      const resp = await api.updateSettings({
+      // Routed through saveSettings (not api.updateSettings directly) so the
+      // module-level settings cache in ../settings is updated by the save —
+      // otherwise a subsequent tab switch re-reads the stale cache and the
+      // just-saved key reverts to looking unset.
+      const { settings: fresh } = await saveSettings({
         [spec.field]: value,
       } as Partial<UserSettings>);
-      renderKeys(container, resp.settings);
+      renderKeys(container, fresh, getCloudKeyStatus());
     } catch (err) {
       status.textContent = `Error: ${(err as Error).message}`;
       saveBtn.disabled = false;
@@ -200,21 +227,4 @@ function wireKey(
 
   // Activate Save on any pre-existing non-empty input
   input.dispatchEvent(new Event("input"));
-}
-
-// Snapshot the current `settings` state from the container DOM. Reading the
-// masked vs editable input is enough to know whether a key is stored or
-// not. Used by the Replace handler so the re-render keeps the OTHER row in
-// its current state when only one row transitions to editing.
-function snapshotSettings(container: HTMLElement): UserSettings {
-  const isStored = (p: string): boolean => {
-    const el = container.querySelector<HTMLInputElement>(`#${p}-key-input`);
-    return !!el && el.disabled;
-  };
-  // Other UserSettings fields aren't read inside renderKeys; pass minimal
-  // shape with only the two key fields populated meaningfully.
-  return {
-    gemini_api_key: isStored("gemini") ? "***" : "",
-    groq_api_key: isStored("groq") ? "***" : "",
-  } as UserSettings;
 }
