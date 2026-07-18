@@ -23,13 +23,13 @@
     "@tauri-apps/plugin-global-shortcut": "^2.0.0",
     "@tauri-apps/plugin-notification": "^2.0.0",
     "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-shell": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.0",
-    "geist": "^1.7.0"
+    "playwright-cli": "^0.262.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
     "cross-env": "^7.0.3",
+    "knip": "^5.0.0",
     "typescript": "^5.5.3",
     "vite": "^6.0.0",
     "vitest": "^3.0.0"
