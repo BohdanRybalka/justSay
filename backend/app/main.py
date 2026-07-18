@@ -27,6 +27,17 @@ except Exception as e:
     raise
 
 
+async def _warm_gpu_probe_cache() -> None:
+    """Off-thread, exception-swallowing warm-up of gpu_probe's process-
+    lifetime cache -- see the lifespan() call site (Spec 028 Item 2, AC 12)."""
+    from app.core.gpu_probe import probe_gpu
+
+    try:
+        await asyncio.to_thread(probe_gpu)
+    except Exception:
+        log.warning("GPU probe warm-up failed -- will be probed lazily on first use", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from pathlib import Path
@@ -53,6 +64,12 @@ async def lifespan(app: FastAPI):
     # on every watchdog respawn.
     from app.stt.local_setup import maybe_prewarm_local_at_startup
     maybe_prewarm_local_at_startup(settings.stt)
+    # Spec 028 Item 2: warm app.core.gpu_probe's process-lifetime cache off
+    # the request path, so a local dictation's first _detect_device() call
+    # never pays the uncached nvidia-smi/registry probe cost lazily. Fire-
+    # and-forget, exception-swallowing -- a failed probe here must not break
+    # startup; _detect_device() simply pays the cost later exactly as today.
+    asyncio.create_task(_warm_gpu_probe_cache())
     # Fire-and-forget sweep at every launch, catching any backlog left over
     # from a crash, a provider outage in the previous session, or an
     # upgrade from a pre-017 version. Startup does not block on it.

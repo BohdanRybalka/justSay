@@ -17,12 +17,12 @@ async def client(tmp_path, monkeypatch):
     settings_dir = home / ".justsay"
     settings_dir.mkdir()
 
-    from pathlib import Path
     from app.core import history
 
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setattr(user_settings, "SETTINGS_DIR", settings_dir)
-    monkeypatch.setattr(user_settings, "SETTINGS_PATH", settings_dir / "settings.json")
+    # See docs/adr/014-lazy-app-data-path-resolution.md: SETTINGS_DIR/
+    # SETTINGS_PATH no longer exist to monkeypatch -- JUSTSAY_DATA_DIR is the
+    # one supported redirect seam.
+    monkeypatch.setenv("JUSTSAY_DATA_DIR", str(settings_dir))
     monkeypatch.setattr(user_settings, "_settings", None)
     monkeypatch.setattr(history, "_output_dir", settings_dir)
     monkeypatch.setattr(history, "_conn", None)

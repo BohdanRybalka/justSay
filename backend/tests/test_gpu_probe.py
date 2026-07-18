@@ -376,6 +376,76 @@ def test_probe_gpu_caches_result_across_multiple_calls(monkeypatch):
     assert first.vendor == GpuVendor.AMD
 
 
+@pytest.mark.asyncio
+async def test_warm_gpu_probe_cache_populates_cache_so_request_path_reuses_it(monkeypatch):
+    """AC 12 (Spec 028 Item 2): app.main._warm_gpu_probe_cache() -- the
+    coroutine lifespan() schedules fire-and-forget at startup -- must warm
+    gpu_probe's process-lifetime cache off-thread, so a later call from the
+    request path (e.g. a local dictation's own device detection) reuses the
+    cached result instead of spawning nvidia-smi/reading the registry again."""
+    from app.main import _warm_gpu_probe_cache
+
+    gpu_probe.clear_cache()
+    monkeypatch.setenv("JUSTSAY_GPU_VENDOR", "amd")
+
+    probe_source_calls = {"n": 0}
+    real_env_override = gpu_probe._probe_env_override
+
+    def _counting_env_override():
+        probe_source_calls["n"] += 1
+        return real_env_override()
+
+    monkeypatch.setattr(gpu_probe, "_probe_env_override", _counting_env_override)
+
+    await _warm_gpu_probe_cache()  # simulates lifespan's startup warm-up completing
+
+    # Simulate the request-path call a local dictation would make.
+    result = gpu_probe.probe_gpu()
+
+    assert probe_source_calls["n"] == 1
+    assert result.vendor == GpuVendor.AMD
+
+
+@pytest.mark.asyncio
+async def test_warm_gpu_probe_cache_swallows_probe_failure(monkeypatch):
+    """A failed probe at startup must not raise -- _detect_device() simply
+    pays the cost later exactly as it does today."""
+    from app.main import _warm_gpu_probe_cache
+
+    gpu_probe.clear_cache()
+
+    def _boom():
+        raise RuntimeError("probe blew up")
+
+    monkeypatch.setattr(gpu_probe, "probe_gpu", _boom)
+
+    await _warm_gpu_probe_cache()  # must not raise
+
+
+def test_lifespan_schedules_gpu_probe_warmup_task(monkeypatch):
+    """Confirms app.main.lifespan() actually schedules _warm_gpu_probe_cache()
+    at startup -- not just that the helper itself works in isolation."""
+    import asyncio
+
+    import app.main as main_module
+    from fastapi.testclient import TestClient
+
+    scheduled = []
+    real_create_task = asyncio.create_task
+
+    def _capturing_create_task(coro, *a, **kw):
+        scheduled.append(coro)
+        return real_create_task(coro, *a, **kw)
+
+    monkeypatch.setattr(main_module.asyncio, "create_task", _capturing_create_task)
+
+    with TestClient(main_module.app):
+        pass
+
+    coro_names = [getattr(c, "__qualname__", "") for c in scheduled]
+    assert any("_warm_gpu_probe_cache" in name for name in coro_names)
+
+
 def test_clear_cache_forces_a_fresh_probe_on_next_call(monkeypatch):
     """The test/dev seam: `clear_cache()` must genuinely bust the cache, not
     just be a no-op -- otherwise flipping `JUSTSAY_GPU_VENDOR` (or a mocked

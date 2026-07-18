@@ -25,6 +25,8 @@ class LocalSTTProvider(STTProvider):
     Requires: pip install justsay-backend[local]
     """
 
+    is_local = True  # ADR 018 — declared, not derived from the platform
+
     def __init__(self, settings: STTSettings):
         self._settings = settings
         self._model = None

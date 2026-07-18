@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 
 @dataclass
@@ -54,6 +55,16 @@ def normalize_detected_language(raw: str | None) -> str | None:
 
 class STTProvider(ABC):
     """Contract: Audio file in -> transcribed text out."""
+
+    # Spec 028 Item 2 / ADR 018: locality is a property a provider declares
+    # about itself, not a fact derived by probing the host platform.
+    # `app.stt.is_local_provider()` reads this directly (a getattr, no I/O).
+    # Overridden `True` on LocalSTTProvider, MLXWhisperSTTProvider, and
+    # WhisperCppVulkanSTTProvider -- the three local, flat-sibling
+    # implementations under this ABC. A provider that forgets the override
+    # silently regresses to the pre-028 race (see docs/adr/018's Consequences
+    # and this spec's "declared subclasses" test).
+    is_local: ClassVar[bool] = False
 
     @property
     @abstractmethod

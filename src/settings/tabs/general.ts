@@ -1,7 +1,8 @@
 import { api, levelStream, type UserSettings } from "../../api";
-import { saveSettings } from "../settings";
+import { saveSettings, getCloudKeyStatus } from "../settings";
 import { escapeHtml } from "../html";
 import { renderKeys } from "./keys";
+import { notifyError } from "../../notify";
 
 const LANGUAGES = [
   { code: "uk", label: "Ukrainian" },
@@ -89,13 +90,21 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
 
   // Language
   const langSelect = container.querySelector<HTMLSelectElement>("#lang-select")!;
-  langSelect.addEventListener("change", () => {
-    saveSettings({ language: langSelect.value });
+  langSelect.addEventListener("change", async () => {
+    try {
+      await saveSettings({ language: langSelect.value });
+      // The recording widget runs in a separate webview and caches the
+      // language in module state — without this emit it keeps transcribing
+      // in the old language until the app restarts.
+      await emitSettingsChanged();
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : String(e));
+    }
   });
 
   // API Keys (ported from keys.ts — rendered as an embedded subsection)
   const keysSection = container.querySelector<HTMLElement>("#api-keys-section")!;
-  const destroyKeys = renderKeys(keysSection, settings);
+  const destroyKeys = renderKeys(keysSection, settings, getCloudKeyStatus());
 
   // Microphone test
   const btnTest = container.querySelector<HTMLButtonElement>("#btn-test-mic")!;

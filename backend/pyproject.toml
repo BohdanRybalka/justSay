@@ -68,4 +68,5 @@ markers = [
     "mlx: tests for MLXWhisperSTTProvider (opt out of the autouse fixture that forces the LocalSTTProvider path)",
     "prewarm: tests for maybe_prewarm_local/ensure_local_ready dispatch (opt out of the autouse fixture that no-ops maybe_prewarm_local)",
     "background_indexer: tests for vector_store.run_background_indexer itself (opt out of the autouse fixture that no-ops it)",
+    "no_factory_stub: tests asserting on the cost of calling app.stt.local_factory (opt out of the autouse fixture that stubs get_local_provider_class/get_local_provider_kind)",
 ]

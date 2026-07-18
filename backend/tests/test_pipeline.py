@@ -1,4 +1,5 @@
 import asyncio
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -78,6 +79,12 @@ def _make_stt_mock(text: str = "hello world", tokens: int | None = None):
     stt = MagicMock()
     stt.transcribe = AsyncMock(return_value=TranscriptionResult(text=text, tokens_used=tokens))
     stt.model_name = "mock/provider"
+    # Spec 028 Item 2 / ADR 018: is_local_provider() reads this attribute
+    # directly (getattr(provider, "is_local", False)) -- a bare MagicMock's
+    # auto-created child attribute is truthy by default, which would make
+    # every one of these cloud-route test doubles spuriously trip the
+    # readiness barrier. These mocks stand in for cloud providers.
+    stt.is_local = False
     return stt
 
 
@@ -218,6 +225,7 @@ async def test_pipeline_propagates_stt_failure(
     stt = MagicMock()
     stt.transcribe = AsyncMock(side_effect=RuntimeError("groq down"))
     stt.model_name = "mock/provider"
+    stt.is_local = False  # cloud-route test double -- see _make_stt_mock
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         with pytest.raises(RuntimeError, match="groq down"):
@@ -244,6 +252,7 @@ async def test_pipeline_concurrent_invocations_save_independently(
         m = MagicMock()
         m.transcribe = AsyncMock(return_value=TranscriptionResult(text=f"text-{idx}", tokens_used=None))
         m.model_name = "mock/provider"
+        m.is_local = False  # cloud-route test double -- see _make_stt_mock
         return m
 
     # spec 029, AC 32: process_audio now awaits `asyncio.to_thread(analyze_silence,
@@ -525,6 +534,137 @@ async def test_pipeline_silence_guard_does_not_block_event_loop(
     assert result.discarded_reason == "silence"
 
 
+# --- Spec 028 Item 2: Local STT readiness barrier ---------------------------
+
+
+@pytest.fixture
+def local_mode():
+    """Mirrors `cloud_mode` above but for Local -- restores the real STT
+    provider cache afterwards since these tests route through the real
+    LocalSTTProvider class (pinned by conftest.py's autouse
+    `_force_faster_whisper_for_local` fixture), not a mocked provider."""
+    from app.stt import clear_cache as clear_stt_cache
+
+    original_stt = settings.stt.mode
+    settings.stt.mode = ProviderMode.LOCAL
+    clear_stt_cache()
+    yield
+    settings.stt.mode = original_stt
+    clear_stt_cache()
+
+
+@pytest.mark.asyncio
+async def test_process_audio_skips_readiness_barrier_for_cloud_provider(
+    sample_wav, cloud_mode, _isolate_side_effects, monkeypatch
+):
+    """AC 10: the barrier must not even be consulted for a cloud-routed
+    request."""
+    stt = _make_stt_mock("hello")
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("await_local_ready must not be called for a cloud provider")
+
+    monkeypatch.setattr("app.stt.local_setup.await_local_ready", _boom)
+
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
+        result = await process_audio(sample_wav, style="normal")
+
+    assert result.text == "hello"
+
+
+@pytest.mark.asyncio
+async def test_process_audio_awaits_shared_readiness_barrier_no_second_get_model(
+    sample_wav, local_mode, _isolate_side_effects, monkeypatch
+):
+    """AC 11: two concurrent process_audio calls routed to the same
+    not-yet-loaded local provider must not trigger a second _get_model() --
+    the readiness barrier shares local_setup.ensure_local_ready()'s
+    _prewarm_lock, asserted by call count, not by timing."""
+    from app.stt.base import TranscriptionResult
+    from app.stt.local import LocalSTTProvider
+
+    _, save_mock = _isolate_side_effects
+    call_count = {"n": 0}
+
+    def _slow_get_model(self):
+        call_count["n"] += 1
+        time.sleep(0.05)
+        self._model = object()
+
+    monkeypatch.setattr(LocalSTTProvider, "_get_model", _slow_get_model)
+    monkeypatch.setattr(
+        LocalSTTProvider,
+        "transcribe",
+        AsyncMock(return_value=TranscriptionResult(text="ok", tokens_used=None)),
+    )
+
+    await asyncio.gather(
+        process_audio(sample_wav, style="normal"),
+        process_audio(sample_wav, style="normal"),
+    )
+
+    assert call_count["n"] == 1
+    assert save_mock.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_process_audio_raises_clear_error_when_readiness_wait_times_out(
+    sample_wav, local_mode, _isolate_side_effects, monkeypatch
+):
+    """AC 13: a genuinely stuck local load must surface a clear error
+    identifying the model as not ready, instead of process_audio hanging (or
+    silently falling through into an equally-unbounded transcribe() call)."""
+    from app.stt.local import LocalSTTProvider
+
+    def _stuck_get_model(self):
+        time.sleep(0.3)  # far longer than the barrier's own timeout below
+
+    monkeypatch.setattr(LocalSTTProvider, "_get_model", _stuck_get_model)
+    monkeypatch.setattr("app.stt.local_setup._READY_TIMEOUT", 0.05)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("transcribe() must not be reached when the barrier times out")
+
+    monkeypatch.setattr(LocalSTTProvider, "transcribe", _boom)
+
+    with pytest.raises(RuntimeError, match="not become ready"):
+        await process_audio(sample_wav, style="normal")
+
+
+@pytest.mark.asyncio
+async def test_process_audio_proceeds_to_transcribe_when_barrier_returns_not_ready_without_timeout(
+    sample_wav, local_mode, _isolate_side_effects, monkeypatch
+):
+    """Orchestrator correctness requirement: a non-timeout `False` from
+    await_local_ready() (e.g. ensure_local_ready()'s own early-return guards
+    racing in) must NOT block the request -- transcribe()'s own lazy
+    _get_model() fallback still applies, exactly as it did before this
+    barrier existed. A request must never be worse off than before."""
+    from app.stt.base import TranscriptionResult
+
+    _, save_mock = _isolate_side_effects
+
+    async def _fake_await_local_ready(stt_settings, timeout=None):
+        return False  # not ready, but NOT a timeout
+
+    monkeypatch.setattr(
+        "app.stt.local_setup.await_local_ready", _fake_await_local_ready
+    )
+
+    from app.stt.local import LocalSTTProvider
+
+    monkeypatch.setattr(
+        LocalSTTProvider,
+        "transcribe",
+        AsyncMock(return_value=TranscriptionResult(text="lazy-loaded anyway", tokens_used=None)),
+    )
+
+    result = await process_audio(sample_wav, style="normal")
+
+    assert result.text == "lazy-loaded anyway"
+    assert save_mock.call_count == 1
+
+
 # --- Detected-language substitution (spec 029) -------------------------------
 
 
@@ -539,6 +679,7 @@ async def test_pipeline_auto_language_substitutes_detected_language(
         return_value=TranscriptionResult(text="привіт", tokens_used=None, detected_language="uk")
     )
     stt.model_name = "mock/provider"
+    stt.is_local = False  # cloud-route test double -- see _make_stt_mock
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         await process_audio(sample_wav, language="auto", style="normal")
@@ -558,6 +699,7 @@ async def test_pipeline_explicit_language_never_overridden_by_detection(
         return_value=TranscriptionResult(text="hello", tokens_used=None, detected_language="en")
     )
     stt.model_name = "mock/provider"
+    stt.is_local = False  # cloud-route test double -- see _make_stt_mock
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         await process_audio(sample_wav, language="uk", style="normal")

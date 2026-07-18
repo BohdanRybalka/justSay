@@ -45,10 +45,19 @@ SCHEMA_VERSION = 3
 STATS_TTL_SECONDS = 5.0
 
 _lock = threading.Lock()
-# Pre-bootstrap() fallback -- see docs/adr/012-dev-mode-data-directory-isolation.md.
-# app_paths.py is a leaf module with no dependency on user_settings, preserving
-# the one-way dependency (user_settings -> history) documented above.
-_output_dir: Path = resolve_app_data_root()
+# Pre-bootstrap() fallback -- see docs/adr/012-dev-mode-data-directory-isolation.md
+# and docs/adr/014-lazy-app-data-path-resolution.md. `None` until `bootstrap()`/
+# `init_output_dir()`/`relocate()` assigns a concrete Path (genuine runtime
+# state -- the user can point history at a directory of their own choosing).
+# The *fallback* resolution used before any of those ever ran is lazy --
+# `_resolve_output_dir()` below -- not eagerly bound here at import time,
+# which was Spec 028 Item 1's AC 8a fix: this line used to read
+# `resolve_app_data_root()` directly, an eager, import-time resolved path --
+# precisely what ADR 014 forbids, in the module ADR 014 itself names as the
+# reference pattern. app_paths.py is a leaf module with no dependency on
+# user_settings, preserving the one-way dependency (user_settings -> history)
+# documented above.
+_output_dir: Path | None = None
 _conn: sqlite3.Connection | None = None
 _stats_cache: tuple[float, "HistoryStats"] | None = None
 
@@ -242,9 +251,16 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
 # --- Public path API -----------------------------------------------------
 
+def _resolve_output_dir() -> Path:
+    """`_output_dir` if `bootstrap()`/`init_output_dir()`/`relocate()` has
+    already set one, else a lazy fallback resolved fresh on every call --
+    never cached at import time (ADR 014, AC 8a)."""
+    return _output_dir if _output_dir is not None else resolve_app_data_root()
+
+
 def history_path() -> Path:
     """Lock-free read of the current history.db path."""
-    return _output_dir / HISTORY_FILENAME
+    return _resolve_output_dir() / HISTORY_FILENAME
 
 
 # --- Mutation-listener registry ------------------------------------------
@@ -334,7 +350,11 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
     fire_listeners = False
     try:
         with _lock:
-            old_dir = _output_dir
+            # _resolve_output_dir(), not the bare _output_dir global: a
+            # relocate() call before the first bootstrap()/init_output_dir()
+            # (unusual, but not prevented) would otherwise crash on
+            # `None / HISTORY_FILENAME` (ADR 014, AC 8a).
+            old_dir = _resolve_output_dir()
             old_path = old_dir / HISTORY_FILENAME
 
             try:
@@ -611,7 +631,7 @@ def _ensure_conn_locked() -> sqlite3.Connection:
     bootstrap was not)."""
     global _conn
     if _conn is None:
-        _conn = _connect(_output_dir / HISTORY_FILENAME)
+        _conn = _connect(_resolve_output_dir() / HISTORY_FILENAME)
         _init_schema(_conn)
     return _conn
 
