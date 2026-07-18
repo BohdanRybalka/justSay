@@ -53,3 +53,5 @@ Thumbs.db
 # Local-only working documents
 CLAUDE.md
 train-audio-data/
+/.playwright-mcp
+src-tauri/Cargo.toml
