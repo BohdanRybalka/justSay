@@ -90,7 +90,16 @@ class GeminiSTTProvider(STTProvider):
             log.exception("Gemini call failed")
             raise
 
-        return TranscriptionResult(text=self._clean_output(raw_text), tokens_used=tokens_used)
+        return TranscriptionResult(
+            text=self._clean_output(raw_text),
+            tokens_used=tokens_used,
+            # Gemini exposes no structured language field at any setting;
+            # scraping one out of generated prose was rejected as fragile,
+            # and meaningless for `ai_prompt` style, which restructures
+            # rather than transcribes. See
+            # docs/adr/016-detected-language-on-stt-contract.md.
+            detected_language=None,
+        )
 
     @staticmethod
     def _build_prompt(language: str, style: str, glossary: str | None = None) -> str:

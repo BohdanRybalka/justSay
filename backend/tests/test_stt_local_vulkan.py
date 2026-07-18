@@ -5,15 +5,33 @@ spawned and no real network call is made. `resolve_binary_path`/
 `resolve_model_path` are monkeypatched per-test to point at `tmp_path`.
 """
 
+import ctypes
 import subprocess
 import threading
 import time
+from ctypes import wintypes
 
 import pytest
 
 import app.stt.local_vulkan as local_vulkan_module
 from app.stt.config import STTSettings
 from app.stt.local_vulkan import WhisperCppVulkanSTTProvider
+
+
+@pytest.fixture(autouse=True)
+def _reset_orphan_registry():
+    """Spec 028 Item 3: `_spawn_server()` registers every spawned (fake, in
+    these tests) process in the module-level `_live_children` registry. Left
+    unreset, fake processes from tests that never call `_terminate_process()`
+    would accumulate across the session and still be "live" (`poll()`
+    returns None, since `_FakeProcess.returncode` stays `None`) when the
+    real interpreter exits -- causing the atexit reaper to fire against a
+    stale fake object, including logging into an already-closed stream
+    during pytest's own teardown."""
+    local_vulkan_module._live_children.clear()
+    yield
+    local_vulkan_module._live_children.clear()
+
 
 # --------------------------------------------------------------------------- #
 # Fakes                                                                       #
@@ -363,14 +381,17 @@ async def test_transcribe_spawns_server_at_most_once_across_two_calls(monkeypatc
 @pytest.mark.asyncio
 async def test_transcribe_joins_multiline_response_text(monkeypatch, tmp_path):
     """whisper-server's `output_str()` joins segments with `"\\n"` (no
-    embedded timestamps) -- the provider collapses that to a single
-    space-joined line, matching `LocalSTTProvider`'s output shape."""
+    embedded timestamps). Each segment carries its OWN leading space as
+    part of its text (a real BPE token-boundary artifact, confirmed against
+    a live server) -- the fixture reflects that shape (`" як справи"`, not
+    `"як справи"`), which is what makes concatenating with no added
+    separator the correct reconstruction here."""
     provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
     audio_path = tmp_path / "sample.wav"
     audio_path.write_bytes(b"RIFF....WAVEfmt ")
 
     post_impl = lambda url, data, files: _FakeResponse(  # noqa: E731
-        200, {"text": "Привіт світ\nяк справи\n"}
+        200, {"text": "Привіт світ\n як справи\n"}
     )
     _install_fake_httpx(monkeypatch, post_impl=post_impl)
     _install_fake_popen(monkeypatch)
@@ -378,6 +399,57 @@ async def test_transcribe_joins_multiline_response_text(monkeypatch, tmp_path):
     result = await provider.transcribe(audio_path, language="uk")
 
     assert result.text == "Привіт світ як справи"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_verbose_json_mid_word_segment_split_reconstructs_correctly(
+    monkeypatch, tmp_path
+):
+    """Regression for Stage 6 test finding: on a real whisper-server
+    (AMD RX 5700 XT), verbose_json segment boundaries routinely fall
+    MID-WORD, and the continuation segment carries NO leading space
+    (unlike a segment that starts a new word, which does). The previous
+    join logic (`" ".join(line.strip() for line in ...)`) inserted a space
+    at every "\\n" regardless, corrupting words at those boundaries --
+    e.g. real captured output: "секунд от" + "римати досить" -> "от римати"
+    instead of "отримати". This fixture is the actual multi-segment shape
+    captured from that live server (5 segments, several word-internal
+    breaks, each segment's own leading space -- or lack of one -- preserved
+    verbatim), not a single-segment "hello" that can't exercise this at
+    all. A single ".text" field is what the provider reads (both `json`
+    and `verbose_json` responses carry it), so this fixture mirrors
+    `body["text"]` directly rather than `body["segments"]`."""
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+
+    # Captured verbatim (via a live probe script) from whisper-server's
+    # real verbose_json "text" field for an 18s Ukrainian speech sample --
+    # segments 3 ("от") / 4 ("римати досить") split "отримати" mid-word.
+    raw_verbose_text = (
+        " і буквально за кілька секунд от\n"
+        "римати досить\n"
+        " якісну відповідь. При цьому дал\n"
+        "еко не всі\n"
+    )
+    post_impl = lambda url, data, files: _FakeResponse(  # noqa: E731
+        200, {"text": raw_verbose_text, "language": "uk"}
+    )
+    _install_fake_httpx(monkeypatch, post_impl=post_impl)
+    _install_fake_popen(monkeypatch)
+
+    result = await provider.transcribe(audio_path, language="auto")
+
+    assert result.text == (
+        "і буквально за кілька секунд отримати досить "
+        "якісну відповідь. При цьому далеко не всі"
+    )
+    # Pin the exact bug this regression guards against: the old join
+    # logic would have produced these corrupted mid-word splits.
+    assert "от римати" not in result.text
+    assert "дал еко" not in result.text
+    assert "отримати" in result.text
+    assert "далеко" in result.text
 
 
 @pytest.mark.asyncio
@@ -428,6 +500,80 @@ async def test_transcribe_sends_auto_language_unchanged(monkeypatch, tmp_path):
     await provider.transcribe(audio_path, language="auto")
 
     assert captured["data"]["language"] == "auto"
+
+
+# --------------------------------------------------------------------------- #
+# detected_language / verbose_json escalation (spec 029, AC 18)              #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_transcribe_keeps_plain_json_for_explicit_language(monkeypatch, tmp_path):
+    """The explicit-language hot path must keep byte-identical wire format --
+    "json", never escalated -- text extraction is unaffected."""
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+
+    captured = {}
+
+    def _post_impl(url, data, files):
+        captured["data"] = data
+        return _FakeResponse(200, {"text": "ok"})
+
+    _install_fake_httpx(monkeypatch, post_impl=_post_impl)
+    _install_fake_popen(monkeypatch)
+
+    result = await provider.transcribe(audio_path, language="uk")
+
+    assert captured["data"]["response_format"] == "json"
+    assert result.text == "ok"
+    assert result.detected_language is None
+
+
+@pytest.mark.asyncio
+async def test_transcribe_escalates_to_verbose_json_only_for_auto(monkeypatch, tmp_path):
+    """AC-18: response_format escalates to verbose_json only when
+    language == "auto", and the reported language is normalized onto
+    TranscriptionResult.detected_language."""
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+
+    captured = {}
+
+    def _post_impl(url, data, files):
+        captured["data"] = data
+        return _FakeResponse(200, {"text": "hello", "language": "en"})
+
+    _install_fake_httpx(monkeypatch, post_impl=_post_impl)
+    _install_fake_popen(monkeypatch)
+
+    result = await provider.transcribe(audio_path, language="auto")
+
+    assert captured["data"]["response_format"] == "verbose_json"
+    assert result.text == "hello"
+    assert result.detected_language == "en"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_auto_path_missing_language_key_is_none(monkeypatch, tmp_path):
+    """A verbose_json body with no "language" key -> detected_language is
+    None, not a KeyError -- the shape is unverified on real AMD/Intel
+    hardware (none available in this project's dev/CI environment), so
+    `.get()` reads must degrade gracefully."""
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+
+    post_impl = lambda url, data, files: _FakeResponse(200, {"text": "hello"})  # noqa: E731
+    _install_fake_httpx(monkeypatch, post_impl=post_impl)
+    _install_fake_popen(monkeypatch)
+
+    result = await provider.transcribe(audio_path, language="auto")
+
+    assert result.text == "hello"
+    assert result.detected_language is None
 
 
 # --------------------------------------------------------------------------- #
@@ -796,3 +942,259 @@ def test_download_lock_serializes_concurrent_downloads_and_second_skips_redownlo
     assert model_path.read_bytes() == b"fake-ggml-weights"
     assert not part_path.exists()  # renamed on success, no leftover partial file
     assert stream_calls["n"] == 1  # second call skipped the redundant download
+
+
+# --------------------------------------------------------------------------- #
+# Spec 028 Item 3: orphan-pid registry + atexit reaper                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_spawn_server_registers_child_in_live_children_registry(monkeypatch, tmp_path):
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    _install_fake_httpx(monkeypatch)
+    _popen_calls, process = _install_fake_popen(monkeypatch)
+
+    provider._get_model()
+
+    assert local_vulkan_module._live_children.get(process.pid) is process
+
+
+def test_terminate_process_deregisters_child_from_registry(monkeypatch, tmp_path):
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    _install_fake_httpx(monkeypatch)
+    _popen_calls, process = _install_fake_popen(monkeypatch)
+
+    provider._get_model()
+    assert process.pid in local_vulkan_module._live_children
+
+    provider._terminate_process(process)
+
+    assert process.pid not in local_vulkan_module._live_children
+
+
+def test_terminate_process_deregisters_even_when_process_already_exited():
+    """_terminate_process's early `poll() is not None` return must not skip
+    deregistration -- otherwise a process that exited on its own between
+    spawn and teardown would linger in the registry forever."""
+    process = _FakeProcess()
+    process.returncode = 0  # already exited
+    local_vulkan_module._register_child(process)
+
+    provider = WhisperCppVulkanSTTProvider(STTSettings())
+    provider._terminate_process(process)
+
+    assert process.pid not in local_vulkan_module._live_children
+
+
+def test_reap_orphans_terminates_and_clears_registered_still_live_process():
+    """AC 17: simulates an ungraceful teardown -- the registry is populated
+    but cleanup()/_terminate_process() was never called for it -- and proves
+    the reaper terminates the recorded pid, using a fake/stub process, never
+    a real whisper-server.exe spawn."""
+    process = _FakeProcess(exit_after_terminate=True)
+    local_vulkan_module._register_child(process)
+
+    local_vulkan_module._reap_orphans()
+
+    assert process.terminate_calls == 1
+    assert local_vulkan_module._live_children == {}
+
+
+def test_reap_orphans_skips_process_that_already_exited():
+    process = _FakeProcess()
+    process.returncode = 0  # already exited before the reaper ran
+    local_vulkan_module._register_child(process)
+
+    local_vulkan_module._reap_orphans()
+
+    assert process.terminate_calls == 0
+    assert local_vulkan_module._live_children == {}
+
+
+def test_reap_orphans_never_raises_when_terminate_itself_fails():
+    class _BoomOnTerminate(_FakeProcess):
+        def terminate(self):
+            raise OSError("access denied")
+
+    process = _BoomOnTerminate()
+    local_vulkan_module._register_child(process)
+
+    local_vulkan_module._reap_orphans()  # must not raise
+
+    assert local_vulkan_module._live_children == {}
+
+
+def test_reap_orphans_is_a_noop_when_registry_is_empty():
+    local_vulkan_module._reap_orphans()  # must not raise
+    assert local_vulkan_module._live_children == {}
+
+
+# --------------------------------------------------------------------------- #
+# Spec 028 Item 3: Windows Job Object (KILL_ON_JOB_CLOSE)                     #
+# --------------------------------------------------------------------------- #
+
+
+class _FakeKernel32:
+    """`CreateJobObjectW`/`SetInformationJobObject`/`AssignProcessToJobObject`
+    are set as INSTANCE attributes holding plain closures, not `def`
+    methods on the class -- production code (`_kernel32()`) sets
+    `.restype`/`.argtypes` on each before use (AC 16a), and a bound method
+    object does not support arbitrary attribute assignment
+    (`AttributeError: 'method' object has no attribute 'restype'`), while a
+    plain function object does.
+    """
+
+    def __init__(self, *, create_job_ok=True, set_info_ok=True, assign_ok=True):
+        self.create_calls = 0
+        self.set_info_calls = 0
+        self.assign_calls: list[tuple[int, int]] = []
+
+        def create_job_object_w(*_a):
+            self.create_calls += 1
+            return 4242 if create_job_ok else 0
+
+        def set_information_job_object(*_a):
+            self.set_info_calls += 1
+            return 1 if set_info_ok else 0
+
+        def assign_process_to_job_object(job, proc_handle):
+            self.assign_calls.append((job, proc_handle))
+            return 1 if assign_ok else 0
+
+        self.CreateJobObjectW = create_job_object_w
+        self.SetInformationJobObject = set_information_job_object
+        self.AssignProcessToJobObject = assign_process_to_job_object
+
+
+@pytest.fixture(autouse=True)
+def _reset_job_object_state(monkeypatch):
+    """Job object state is cached module-globally (created once, lazily) --
+    reset per test so each test's fake kernel32 mock is actually consulted
+    instead of a previous test's cached handle/DLL short-circuiting
+    `_get_or_create_job_object()`/`_kernel32()`."""
+    monkeypatch.setattr(local_vulkan_module, "_job_object_handle", None)
+    monkeypatch.setattr(local_vulkan_module, "_job_object_init_failed", False)
+    monkeypatch.setattr(local_vulkan_module, "_kernel32_dll", None)
+
+
+def test_assign_to_job_object_creates_job_once_and_assigns_process(monkeypatch):
+    fake_kernel32 = _FakeKernel32()
+    monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
+    monkeypatch.setattr(local_vulkan_module.sys, "platform", "win32")
+
+    process = _FakeProcess()
+    process._handle = 777  # Windows-only Popen attribute -- not on _FakeProcess by default
+
+    local_vulkan_module._assign_to_job_object(process)
+
+    assert fake_kernel32.create_calls == 1
+    assert fake_kernel32.set_info_calls == 1
+    assert fake_kernel32.assign_calls == [(4242, 777)]
+
+
+def test_assign_to_job_object_reuses_cached_job_across_calls(monkeypatch):
+    fake_kernel32 = _FakeKernel32()
+    monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
+    monkeypatch.setattr(local_vulkan_module.sys, "platform", "win32")
+
+    process1 = _FakeProcess()
+    process1._handle = 111
+    process2 = _FakeProcess()
+    process2._handle = 222
+
+    local_vulkan_module._assign_to_job_object(process1)
+    local_vulkan_module._assign_to_job_object(process2)
+
+    assert fake_kernel32.create_calls == 1  # job object created only once
+    assert fake_kernel32.assign_calls == [(4242, 111), (4242, 222)]
+
+
+def test_assign_to_job_object_is_noop_on_non_windows(monkeypatch):
+    monkeypatch.setattr(local_vulkan_module.sys, "platform", "linux")
+
+    def _boom(*a, **kw):
+        raise AssertionError("ctypes.WinDLL must not be touched on non-Windows")
+
+    monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", _boom)
+
+    process = _FakeProcess()
+    local_vulkan_module._assign_to_job_object(process)  # must not raise
+
+
+def test_assign_to_job_object_swallows_create_job_failure(monkeypatch):
+    fake_kernel32 = _FakeKernel32(create_job_ok=False)
+    monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
+    monkeypatch.setattr(local_vulkan_module.sys, "platform", "win32")
+
+    process = _FakeProcess()
+    process._handle = 777
+
+    local_vulkan_module._assign_to_job_object(process)  # must not raise
+
+    assert fake_kernel32.assign_calls == []
+
+
+def test_assign_to_job_object_swallows_assign_failure(monkeypatch):
+    fake_kernel32 = _FakeKernel32(assign_ok=False)
+    monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
+    monkeypatch.setattr(local_vulkan_module.sys, "platform", "win32")
+
+    process = _FakeProcess()
+    process._handle = 777
+
+    local_vulkan_module._assign_to_job_object(process)  # must not raise -- logged, not propagated
+
+
+def test_assign_to_job_object_swallows_missing_handle_attribute(monkeypatch):
+    """A process object without a `._handle` (e.g. this suite's own
+    `_FakeProcess`, or a platform where Popen doesn't expose it) must not
+    crash `_get_model()`'s success path."""
+    fake_kernel32 = _FakeKernel32()
+    monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
+    monkeypatch.setattr(local_vulkan_module.sys, "platform", "win32")
+
+    process = _FakeProcess()  # no ._handle attribute
+
+    local_vulkan_module._assign_to_job_object(process)  # must not raise
+
+    assert fake_kernel32.assign_calls == []
+
+
+def test_kernel32_prototypes_declare_restype_and_argtypes():
+    """AC 16a: without explicit restype/argtypes, ctypes marshals return and
+    argument values as 32-bit `c_int` by default, which silently truncates a
+    real 64-bit `HANDLE` -- it happens to work today only because handle
+    values for a young process are small (observed 368/372 in review), which
+    is luck, not a contract. Calls the real (unmocked) `_kernel32()` -- this
+    just loads kernel32.dll, no Job Object functions are actually invoked."""
+    kernel32 = local_vulkan_module._kernel32()
+
+    assert kernel32.CreateJobObjectW.restype == wintypes.HANDLE
+    assert kernel32.CreateJobObjectW.argtypes == [wintypes.LPVOID, wintypes.LPCWSTR]
+
+    assert kernel32.SetInformationJobObject.restype == wintypes.BOOL
+    assert kernel32.SetInformationJobObject.argtypes == [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+
+    assert kernel32.AssignProcessToJobObject.restype == wintypes.BOOL
+    assert kernel32.AssignProcessToJobObject.argtypes == [wintypes.HANDLE, wintypes.HANDLE]
+
+
+def test_get_model_success_path_still_works_when_job_object_creation_fails(monkeypatch, tmp_path):
+    """AC 15's wrapper contract: a Job Object failure must degrade to the
+    atexit registry, never break STT itself."""
+    fake_kernel32 = _FakeKernel32(create_job_ok=False)
+    monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
+    monkeypatch.setattr(local_vulkan_module.sys, "platform", "win32")
+
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    _install_fake_httpx(monkeypatch)
+    _install_fake_popen(monkeypatch)
+
+    provider._get_model()  # must not raise despite the Job Object failure
+
+    assert provider.is_loaded is True

@@ -559,6 +559,55 @@ def test_explicit_language_passed_through_unchanged(monkeypatch, tmp_path):
     assert captured_kwargs["language"] == "uk"
 
 
+def test_detected_language_populated_from_result_language_key(monkeypatch, tmp_path):
+    """AC-17 (spec 029): mlx-whisper's result dict `"language"` key reaches
+    TranscriptionResult.detected_language, normalized -- populated whether
+    or not `language` was "auto"."""
+    _clean_env(monkeypatch)
+
+    def _transcribe(audio_path, **kwargs):
+        return {"text": "hello", "segments": [], "language": "en"}
+
+    _install_mlx_whisper_stub(monkeypatch, transcribe=_transcribe)
+    monkeypatch.setattr(
+        "app.stt.local_mlx.scan_cache_dir",
+        MagicMock(return_value=MagicMock(repos=[])),
+    )
+
+    from app.stt.local_mlx import MLXWhisperSTTProvider
+
+    provider = MLXWhisperSTTProvider(_settings())
+    audio = tmp_path / "x.wav"
+    audio.write_bytes(b"RIFF....WAVEfake")
+
+    result = asyncio.run(provider.transcribe(audio, language="auto"))
+
+    assert result.detected_language == "en"
+
+
+def test_detected_language_none_when_result_has_no_language_key(monkeypatch, tmp_path):
+    _clean_env(monkeypatch)
+
+    def _transcribe(audio_path, **kwargs):
+        return {"text": "hello", "segments": []}
+
+    _install_mlx_whisper_stub(monkeypatch, transcribe=_transcribe)
+    monkeypatch.setattr(
+        "app.stt.local_mlx.scan_cache_dir",
+        MagicMock(return_value=MagicMock(repos=[])),
+    )
+
+    from app.stt.local_mlx import MLXWhisperSTTProvider
+
+    provider = MLXWhisperSTTProvider(_settings())
+    audio = tmp_path / "x.wav"
+    audio.write_bytes(b"RIFF....WAVEfake")
+
+    result = asyncio.run(provider.transcribe(audio, language="uk"))
+
+    assert result.detected_language is None
+
+
 def test_auto_language_translates_to_none(monkeypatch, tmp_path):
     """language="auto" must become language=None -- mlx-whisper's own native
     auto-detect sentinel (same convention as faster-whisper), not the literal

@@ -10,6 +10,7 @@ import soundfile as sf
 
 from app.core.types import ProviderMode
 from app.stt import clear_cache, get_provider
+from app.stt.base import TranscriptionResult, normalize_detected_language
 from app.stt.config import STTSettings
 from app.stt.cloud import GeminiSTTProvider
 from app.stt.local import LocalSTTProvider
@@ -29,6 +30,41 @@ def sample_wav(tmp_path) -> Path:
     path = tmp_path / "test.wav"
     sf.write(str(path), audio, 16000)
     return path
+
+
+# --- detected_language contract (spec 029) -----------------------------------
+
+
+def test_transcription_result_detected_language_defaults_to_none():
+    result = TranscriptionResult(text="hi")
+    assert result.detected_language is None
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("en", "en"),
+        ("EN", "en"),
+        ("uk", "uk"),
+        ("en-US", "en"),
+        ("pt_BR", "pt"),
+        ("english", "en"),
+        ("English", "en"),
+        ("ukrainian", "uk"),
+        ("Ukrainian", "uk"),
+        ("german", "de"),
+        ("chinese", "zh"),
+        (None, None),
+        ("", None),
+        ("   ", None),
+        ("not-a-real-language", None),
+    ],
+)
+def test_normalize_detected_language(raw, expected):
+    """AC-14: lowercase ISO-639-1 codes pass through, region suffixes strip,
+    full English names (at minimum the LANGUAGE_NAMES set) map to their code,
+    unrecognised/empty input returns None."""
+    assert normalize_detected_language(raw) == expected
 
 
 # --- Factory caching ---
@@ -145,6 +181,21 @@ async def test_cloud_stt_empty_response(sample_wav):
     assert mock_call.call_args.args[4] == "audio/wav"
 
 
+@pytest.mark.asyncio
+async def test_gemini_detected_language_always_none(sample_wav):
+    """AC-20: Gemini has no structured language field at any setting --
+    detected_language is unconditionally None, regardless of the language
+    kwarg."""
+    settings = STTSettings(mode=ProviderMode.CLOUD, gemini_api_key="test-key")
+    provider = GeminiSTTProvider(settings)
+    provider._client = MagicMock()
+
+    with patch.object(GeminiSTTProvider, "_call_gemini", return_value=("Привіт світ", None)):
+        result = await provider.transcribe(sample_wav, language="auto")
+
+    assert result.detected_language is None
+
+
 # --- Local STT ---
 
 
@@ -211,6 +262,27 @@ async def test_local_stt_transcribe(sample_wav):
 
     assert result.text == "Привіт світ"
     mock_model.transcribe.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_local_stt_populates_detected_language_from_info(sample_wav):
+    """AC-16: TranscriptionInfo.language (previously discarded as `_info` at
+    local.py:149) now reaches TranscriptionResult.detected_language,
+    normalized -- populated whether or not `language` was "auto"."""
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+    provider = LocalSTTProvider(settings)
+
+    seg = MagicMock()
+    seg.text = "hi"
+    info = MagicMock()
+    info.language = "uk"
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = ([seg], info)
+    provider._model = mock_model
+
+    result = await provider.transcribe(sample_wav, language="auto")
+
+    assert result.detected_language == "uk"
 
 
 @pytest.mark.asyncio
@@ -555,3 +627,97 @@ async def test_local_log_redacts_glossary_content(sample_wav, caplog):
     full_log = "\n".join(record.getMessage() for record in caplog.records)
     assert secret not in full_log
     assert f"{len(secret)}chars" in full_log
+
+
+# --- is_local_provider() / ADR 018 (spec 028 Item 2, iteration-2 review) ---
+
+
+@pytest.mark.no_factory_stub
+def test_is_local_provider_costs_zero_gpu_probe_or_factory_calls_for_cloud(monkeypatch):
+    """AC 10a. RED 2's exact regression: asking "is this local?" about an
+    obviously-Cloud provider must not touch the GPU probe or the local
+    factory at all -- measured at ~126 ms before ADR 018's fix (isinstance
+    against the platform-resolved class, which called
+    get_local_provider_kind() -> probe_gpu() on Windows even to answer "no").
+
+    Opted out of the autouse `_force_faster_whisper_for_local` fixture via
+    `@pytest.mark.no_factory_stub`: that fixture stubs
+    `get_local_provider_class`/`get_local_provider_kind` themselves, so with
+    it active this test would pass for the wrong reason (it never reaches
+    the real code path it exists to guard).
+    """
+    from app.core import gpu_probe
+    from app.stt import is_local_provider, local_factory
+    from app.stt.cloud import GeminiSTTProvider
+
+    probe_calls = {"n": 0}
+    factory_calls = {"n": 0}
+    kind_calls = {"n": 0}
+
+    real_probe = gpu_probe.probe_gpu
+    real_class = local_factory.get_local_provider_class
+    real_kind = local_factory.get_local_provider_kind
+
+    def _counting_probe(*a, **kw):
+        probe_calls["n"] += 1
+        return real_probe(*a, **kw)
+
+    def _counting_class(*a, **kw):
+        factory_calls["n"] += 1
+        return real_class(*a, **kw)
+
+    def _counting_kind(*a, **kw):
+        kind_calls["n"] += 1
+        return real_kind(*a, **kw)
+
+    monkeypatch.setattr(gpu_probe, "probe_gpu", _counting_probe)
+    monkeypatch.setattr(local_factory, "get_local_provider_class", _counting_class)
+    monkeypatch.setattr(local_factory, "get_local_provider_kind", _counting_kind)
+
+    provider = GeminiSTTProvider(STTSettings(gemini_api_key="test-key"))
+
+    assert is_local_provider(provider) is False
+    assert probe_calls["n"] == 0
+    assert factory_calls["n"] == 0
+    assert kind_calls["n"] == 0
+
+
+def test_is_local_provider_true_for_a_declared_local_provider():
+    from app.stt import is_local_provider
+
+    provider = LocalSTTProvider(STTSettings())
+    assert is_local_provider(provider) is True
+
+
+def test_is_local_provider_defaults_false_for_an_undeclared_provider():
+    """A provider that never overrides `is_local` (the STTProvider ABC
+    default) must read as not-local -- proves the getattr default matters,
+    not just the two named classes."""
+    from app.stt import is_local_provider
+    from app.stt.groq_whisper import GroqWhisperSTTProvider
+
+    provider = GroqWhisperSTTProvider(STTSettings(groq_api_key="test-key"))
+    assert is_local_provider(provider) is False
+
+
+def test_concrete_stt_providers_declare_the_expected_is_local():
+    """Risks mitigation (plan iteration-1 triage, issue 10): a future local
+    provider that forgets the `is_local = True` override would silently skip
+    the Spec 028 Item 2 readiness barrier and regress to the pre-028 race.
+    Walk every concrete STTProvider subclass and pin the expected value so
+    that regression is loud, not silent."""
+    from app.stt.cloud import GeminiSTTProvider
+    from app.stt.groq_whisper import GroqWhisperSTTProvider
+    from app.stt.local import LocalSTTProvider as _Local
+    from app.stt.local_mlx import MLXWhisperSTTProvider
+    from app.stt.local_vulkan import WhisperCppVulkanSTTProvider
+
+    expected_local = {
+        _Local: True,
+        MLXWhisperSTTProvider: True,
+        WhisperCppVulkanSTTProvider: True,
+        GeminiSTTProvider: False,
+        GroqWhisperSTTProvider: False,
+    }
+    for cls, expected in expected_local.items():
+        assert cls.is_local is expected, f"{cls.__name__}.is_local should be {expected}"

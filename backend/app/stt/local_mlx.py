@@ -21,7 +21,7 @@ from pathlib import Path
 
 from huggingface_hub import scan_cache_dir
 
-from app.stt.base import STTProvider, TranscriptionResult
+from app.stt.base import STTProvider, TranscriptionResult, normalize_detected_language
 from app.stt.config import STTSettings
 
 log = logging.getLogger(__name__)
@@ -69,6 +69,8 @@ class MLXWhisperSTTProvider(STTProvider):
 
     Requires: `pip install justsay-backend[local-mac]`.
     """
+
+    is_local = True  # ADR 018 — declared, not derived from the platform
 
     def __init__(self, settings: STTSettings):
         self._settings = settings
@@ -195,7 +197,7 @@ class MLXWhisperSTTProvider(STTProvider):
 
         async with self._transcribe_lock:
 
-            def _run_mlx() -> str:
+            def _run_mlx() -> tuple[str, str | None]:
                 # _get_model is sync; running it inside _run_mlx keeps the
                 # event loop free during a cold first-download. The returned
                 # repo_id is the same value that was validated and used to
@@ -222,14 +224,21 @@ class MLXWhisperSTTProvider(STTProvider):
                 result = mlx_whisper.transcribe(str(audio_path), **kwargs_mlx)
                 segments = result.get("segments") or []
                 if segments:
-                    return " ".join(seg["text"].strip() for seg in segments)
-                # Fallback for whole-clip-text responses on some mlx-whisper
-                # versions: `text` is provided even without segment splits.
-                return (result.get("text") or "").strip()
+                    text = " ".join(seg["text"].strip() for seg in segments)
+                else:
+                    # Fallback for whole-clip-text responses on some
+                    # mlx-whisper versions: `text` is provided even without
+                    # segment splits.
+                    text = (result.get("text") or "").strip()
+                return text, result.get("language")
 
-            text = await asyncio.to_thread(_run_mlx)
+            text, detected_raw = await asyncio.to_thread(_run_mlx)
             self._loaded = True
-            return TranscriptionResult(text=text, tokens_used=None)
+            return TranscriptionResult(
+                text=text,
+                tokens_used=None,
+                detected_language=normalize_detected_language(detected_raw),
+            )
 
     def cleanup(self) -> None:
         """Release MLX model and Metal memory.

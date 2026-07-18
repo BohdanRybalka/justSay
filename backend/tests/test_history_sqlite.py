@@ -11,7 +11,6 @@ import contextlib
 import sqlite3
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -21,15 +20,18 @@ from app.core import history, vector_store
 
 @pytest.fixture(autouse=True)
 def isolated_storage(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    home.mkdir()
-
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    """See docs/adr/014-lazy-app-data-path-resolution.md: patching
+    `Path.home()` is not a supported isolation mechanism (it's a no-op
+    against any already-resolved module-level constant, which was exactly
+    the Spec 028 Item 1 bug). conftest.py's autouse `_isolated_app_data`
+    fixture already redirects `JUSTSAY_DATA_DIR` at this same `tmp_path`
+    before this fixture runs -- the resets below are kept anyway so this
+    file's tests don't depend on conftest.py's exact reset shape."""
     monkeypatch.setattr(history, "_output_dir", tmp_path)
     monkeypatch.setattr(history, "_conn", None)
     monkeypatch.setattr(history, "_stats_cache", None)
 
-    yield {"home": home, "tmp_path": tmp_path}
+    yield {"tmp_path": tmp_path}
 
     with history._lock:
         history._close_conn_locked()
@@ -732,8 +734,10 @@ def test_search_empty_q_returns_200_empty(isolated_storage, tmp_path):
 
     with TestClient(app) as client:
         # The TestClient lifespan re-bootstraps history to the user-settings
-        # output_dir (Path.home() patched by isolated_storage). Save AFTER
-        # entering the context so the row lands in the same DB the request
+        # output_dir, which now resolves under JUSTSAY_DATA_DIR (conftest.py's
+        # autouse `_isolated_app_data` fixture) -- the same tmp_path this
+        # fixture uses. Save AFTER entering the context so the row lands in
+        # the same DB the request
         # will hit.
         history.save_entry(text="anything", duration_ms=1)
         resp = client.get("/history/search?q=")

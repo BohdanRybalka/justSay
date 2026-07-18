@@ -52,7 +52,15 @@ async def set_stt_mode(body: _ModeBody):
 
 @router.post("/transcribe", response_model=TranscribeResponse)
 async def transcribe_audio(file: UploadFile, language: str = "uk"):
-    """Transcribe an uploaded audio file using the current STT provider."""
+    """Transcribe an uploaded audio file using the current STT provider.
+
+    Deliberately NOT covered by the pipeline's silence guard
+    (`app.pipeline.service.process_audio`'s `analyze_silence` check) --
+    this is a raw provider-passthrough dev/test surface with no frontend
+    caller, and a guard here would mask the very provider behaviour someone
+    would be using this endpoint to observe. See
+    docs/adr/015-pipeline-level-silence-guard.md.
+    """
     ext = Path(file.filename).suffix.lower() if file.filename else ""
     # Read first so we can validate magic bytes, not just the filename.
     content = await read_upload_with_limit(file, MAX_UPLOAD_SIZE)

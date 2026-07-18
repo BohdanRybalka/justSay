@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -669,9 +670,14 @@ def _reset_prewarm_state():
     forever, and the next test that also contends the same lock in its own
     (different) loop blows up with "bound to a different event loop". A
     fresh Lock per test sidesteps that entirely.
+
+    `_active_load` (Stage 5 GitHub review, PR #34, finding 1) holds an
+    `asyncio.Task` -- the same closed-event-loop hazard applies, so it is
+    reset to `None` here too, before each test.
     """
     local_setup._prewarm_error = None
     local_setup._prewarm_lock = asyncio.Lock()
+    local_setup._active_load = None
     yield
     local_setup._prewarm_error = None
 
@@ -1080,3 +1086,225 @@ async def test_maybe_prewarm_local_resets_crash_guard_counter_on_explicit_trigge
 
     pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
     await asyncio.gather(*pending)
+
+
+# --- await_local_ready() (spec 028 Item 2) ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_await_local_ready_fast_path_when_already_loaded(monkeypatch):
+    provider = _FakePrewarmProvider()
+    provider.is_loaded = True
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+
+    def _boom():
+        raise AssertionError("_check_package_installed must not be called")
+
+    monkeypatch.setattr(local_setup, "_check_package_installed", _boom)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    result = await local_setup.await_local_ready(settings, timeout=5.0)
+
+    assert result is True
+    assert provider.get_model_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_await_local_ready_returns_true_after_successful_load(monkeypatch):
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+    result = await local_setup.await_local_ready(settings, timeout=5.0)
+
+    assert result is True
+    assert provider.get_model_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_await_local_ready_shares_prewarm_lock_no_second_get_model(monkeypatch):
+    """AC 11: two overlapping await_local_ready() calls for the same
+    not-yet-loaded provider must funnel through the shared _prewarm_lock --
+    the real _get_model() work happens exactly once."""
+    call_count = {"n": 0}
+
+    class _SlowFakeProvider:
+        def __init__(self):
+            self.is_loaded = False
+
+        def _get_model(self):
+            call_count["n"] += 1
+            time.sleep(0.05)
+            self.is_loaded = True
+
+        def cleanup(self):
+            pass
+
+    provider = _SlowFakeProvider()
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+    results = await asyncio.gather(
+        local_setup.await_local_ready(settings, timeout=5.0),
+        local_setup.await_local_ready(settings, timeout=5.0),
+    )
+
+    assert call_count["n"] == 1
+    assert results == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_await_local_ready_raises_typed_timeout_on_stuck_load(monkeypatch):
+    """AC 13: a genuinely stuck load must surface a clear, typed timeout
+    rather than hanging the request path indefinitely."""
+
+    class _StuckProvider:
+        def __init__(self):
+            self.is_loaded = False
+
+        def _get_model(self):
+            time.sleep(0.3)  # far longer than this test's own timeout budget
+            self.is_loaded = True
+
+        def cleanup(self):
+            pass
+
+    provider = _StuckProvider()
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    with pytest.raises(local_setup.LocalReadinessTimeout):
+        await local_setup.await_local_ready(settings, timeout=0.05)
+
+
+@pytest.mark.asyncio
+async def test_await_local_ready_returns_false_not_raises_when_mode_changes_mid_wait(
+    monkeypatch,
+):
+    """Plan Risks / orchestrator correctness requirement: ensure_local_ready()'s
+    own `mode != LOCAL` early-return guard racing in must surface as a plain
+    `False`, never a LocalReadinessTimeout -- a request must never be worse
+    off than before this barrier existed (it would have succeeded via the
+    provider's own lazy _get_model() fallback)."""
+    provider = _FakePrewarmProvider()
+    cache = {"current": provider}
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: cache["current"])
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: cache["current"])
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    def _install_and_flip_mode():
+        settings.mode = ProviderMode.CLOUD
+        cache["current"] = None  # like clear_cache() evicting the provider
+        return (0, "ok")
+
+    monkeypatch.setattr(local_setup, "_run_pip_install", _install_and_flip_mode)
+
+    result = await local_setup.await_local_ready(settings, timeout=5.0)
+
+    assert result is False
+    assert provider.get_model_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_await_local_ready_returns_false_not_raises_when_cache_moves_on_mid_load(
+    monkeypatch,
+):
+    """Same "must not raise" guarantee for the cache-identity-mismatch early
+    return (an unrelated clear_cache() mid-load, mode untouched -- spec 015
+    RED-1's exact scenario)."""
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+    cache: dict[str, _FakePrewarmProvider | None] = {"current": None}
+
+    def _flip_cache_during_load(self_provider):
+        cache["current"] = None  # like an external clear_cache()
+        self_provider.is_loaded = True
+
+    provider = _FakePrewarmProvider(get_model=_flip_cache_during_load)
+    cache["current"] = provider
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: cache["current"])
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: cache["current"])
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+
+    result = await local_setup.await_local_ready(settings, timeout=5.0)
+
+    assert result is False  # peek_local_provider() now resolves to None
+    assert provider.get_model_calls == 1
+    assert provider.cleanup_calls == 1
+
+
+# --- double-load window on timeout (Stage 5 GitHub review, PR #34, finding 1) --
+
+
+@pytest.mark.asyncio
+async def test_timeout_then_retry_joins_in_flight_load_instead_of_starting_a_second_one(
+    monkeypatch,
+):
+    """Reproduces the exact bug: asyncio.wait_for's timeout cancels the
+    WAITING coroutine, not the worker thread _get_model() actually runs on
+    (a thread cannot be cancelled). Without tracking the in-flight load
+    separately from _prewarm_lock, the lock frees up while the first
+    _get_model() call keeps running, and a retry that arrives while it is
+    still in flight would start a genuinely SECOND _get_model() call --
+    "Two heavy loads of the same provider running concurrently."
+
+    Uses a real threading.Event (not a mock) so the fake _get_model()
+    genuinely blocks its OWN worker thread, exactly like the real
+    WhisperModel(...)/whisper-server load this simulates -- a mocked sleep
+    would return before wait_for's timeout could ever race it.
+    """
+    call_count = {"n": 0}
+    started = threading.Event()
+    release = threading.Event()
+
+    class _SlowProvider:
+        def __init__(self):
+            self.is_loaded = False
+
+        def _get_model(self):
+            call_count["n"] += 1
+            started.set()
+            release.wait(timeout=5)
+            self.is_loaded = True
+
+        def cleanup(self):
+            pass
+
+    provider = _SlowProvider()
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    # First call: its own timeout fires long before the load actually
+    # finishes (release is not set yet) -- the load is genuinely still
+    # running in its worker thread when this raises.
+    with pytest.raises(local_setup.LocalReadinessTimeout):
+        await local_setup.await_local_ready(settings, timeout=0.05)
+
+    assert await asyncio.to_thread(started.wait, 2), "the worker thread never started"
+    assert call_count["n"] == 1
+
+    # Second call (the user's retry): the original attempt's thread is
+    # STILL blocked on `release`. Release it shortly after this call starts
+    # waiting, so a correct implementation joins the SAME in-flight attempt
+    # and succeeds well within its own generous timeout.
+    async def _release_soon():
+        await asyncio.sleep(0.1)
+        release.set()
+
+    asyncio.create_task(_release_soon())
+    result = await local_setup.await_local_ready(settings, timeout=5.0)
+
+    assert call_count["n"] == 1, "a second _get_model() call was started while the first was still in flight"
+    assert result is True
