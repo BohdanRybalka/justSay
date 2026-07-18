@@ -605,6 +605,33 @@ def test_check_status_prefers_provider_error_over_prewarm_error():
         clear_stt_cache()
 
 
+def test_check_status_merge_is_deterministic_when_package_missing_and_provider_error_latched():
+    """Tech-debt closure (spec 015 Review iteration 1, YELLOW #3): the
+    check_status() comment "mutually exclusive in practice" assumes
+    _check_package_installed() never flips True -> False mid-process, so an
+    install failure (_prewarm_error) and a provider load failure never
+    coexist. Force that "impossible" combined state anyway and pin the merge
+    outcome: get_local_load_error() or _prewarm_error -> the provider error
+    always wins, regardless of package_installed being False."""
+    from app.stt import _get_local
+    from app.stt import clear_cache as clear_stt_cache
+
+    clear_stt_cache()
+    settings = STTSettings()
+    provider = _get_local(settings)
+    provider._last_load_error = "provider-level load error"
+    local_setup._prewarm_error = "install-level prewarm error"
+    try:
+        with _apply(_patches(False, (False, None, "none"))):  # package MISSING
+            status = check_status(settings)
+        assert status.last_error == "provider-level load error"
+        assert status.package_installed is False
+        assert status.model_loaded is False
+    finally:
+        local_setup._prewarm_error = None
+        clear_stt_cache()
+
+
 # --- ensure_local_ready / maybe_prewarm_local (spec 015) ---
 
 
