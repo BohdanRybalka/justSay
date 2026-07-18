@@ -363,14 +363,17 @@ async def test_transcribe_spawns_server_at_most_once_across_two_calls(monkeypatc
 @pytest.mark.asyncio
 async def test_transcribe_joins_multiline_response_text(monkeypatch, tmp_path):
     """whisper-server's `output_str()` joins segments with `"\\n"` (no
-    embedded timestamps) -- the provider collapses that to a single
-    space-joined line, matching `LocalSTTProvider`'s output shape."""
+    embedded timestamps). Each segment carries its OWN leading space as
+    part of its text (a real BPE token-boundary artifact, confirmed against
+    a live server) -- the fixture reflects that shape (`" як справи"`, not
+    `"як справи"`), which is what makes concatenating with no added
+    separator the correct reconstruction here."""
     provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
     audio_path = tmp_path / "sample.wav"
     audio_path.write_bytes(b"RIFF....WAVEfmt ")
 
     post_impl = lambda url, data, files: _FakeResponse(  # noqa: E731
-        200, {"text": "Привіт світ\nяк справи\n"}
+        200, {"text": "Привіт світ\n як справи\n"}
     )
     _install_fake_httpx(monkeypatch, post_impl=post_impl)
     _install_fake_popen(monkeypatch)
@@ -378,6 +381,57 @@ async def test_transcribe_joins_multiline_response_text(monkeypatch, tmp_path):
     result = await provider.transcribe(audio_path, language="uk")
 
     assert result.text == "Привіт світ як справи"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_verbose_json_mid_word_segment_split_reconstructs_correctly(
+    monkeypatch, tmp_path
+):
+    """Regression for Stage 6 test finding: on a real whisper-server
+    (AMD RX 5700 XT), verbose_json segment boundaries routinely fall
+    MID-WORD, and the continuation segment carries NO leading space
+    (unlike a segment that starts a new word, which does). The previous
+    join logic (`" ".join(line.strip() for line in ...)`) inserted a space
+    at every "\\n" regardless, corrupting words at those boundaries --
+    e.g. real captured output: "секунд от" + "римати досить" -> "от римати"
+    instead of "отримати". This fixture is the actual multi-segment shape
+    captured from that live server (5 segments, several word-internal
+    breaks, each segment's own leading space -- or lack of one -- preserved
+    verbatim), not a single-segment "hello" that can't exercise this at
+    all. A single ".text" field is what the provider reads (both `json`
+    and `verbose_json` responses carry it), so this fixture mirrors
+    `body["text"]` directly rather than `body["segments"]`."""
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+
+    # Captured verbatim (via a live probe script) from whisper-server's
+    # real verbose_json "text" field for an 18s Ukrainian speech sample --
+    # segments 3 ("от") / 4 ("римати досить") split "отримати" mid-word.
+    raw_verbose_text = (
+        " і буквально за кілька секунд от\n"
+        "римати досить\n"
+        " якісну відповідь. При цьому дал\n"
+        "еко не всі\n"
+    )
+    post_impl = lambda url, data, files: _FakeResponse(  # noqa: E731
+        200, {"text": raw_verbose_text, "language": "uk"}
+    )
+    _install_fake_httpx(monkeypatch, post_impl=post_impl)
+    _install_fake_popen(monkeypatch)
+
+    result = await provider.transcribe(audio_path, language="auto")
+
+    assert result.text == (
+        "і буквально за кілька секунд отримати досить "
+        "якісну відповідь. При цьому далеко не всі"
+    )
+    # Pin the exact bug this regression guards against: the old join
+    # logic would have produced these corrupted mid-word splits.
+    assert "от римати" not in result.text
+    assert "дал еко" not in result.text
+    assert "отримати" in result.text
+    assert "далеко" in result.text
 
 
 @pytest.mark.asyncio

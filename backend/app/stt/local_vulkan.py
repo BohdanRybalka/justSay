@@ -341,14 +341,31 @@ class WhisperCppVulkanSTTProvider(STTProvider):
             body = resp.json()
             raw_text = body.get("text", "")
             # whisper-server's `output_str()` joins segments with "\n" (no
-            # embedded timestamps in the json/verbose_json `text` field) --
-            # collapse to a single space-joined line, matching
-            # LocalSTTProvider's output shape.
-            text = " ".join(line.strip() for line in raw_text.splitlines() if line.strip())
-            # `.get()` -- verbose_json's shape is unverified on real
-            # AMD/Intel hardware (no such GPU in this project's dev/CI
-            # environment), so a missing/renamed field degrades to None
-            # rather than raising.
+            # embedded timestamps in the json/verbose_json `text` field).
+            # Stage 6 test found on real hardware (AMD RX 5700 XT): each
+            # segment already carries whatever leading space it needs as
+            # part of its own text (a normal BPE token boundary) -- but
+            # whisper.cpp sometimes splits a segment mid-WORD, in which
+            # case the continuation segment carries NO leading space.
+            # Inserting a space at every "\n" (the previous approach) is
+            # therefore only correct when a segment break happens to land
+            # on a word boundary, and silently splits words apart
+            # ("отримати" -> "от римати") whenever it doesn't -- verified
+            # against real verbose_json output, where boundaries routinely
+            # fall mid-word. Concatenating with NO separator and trusting
+            # each segment's own (possibly absent) leading space is what
+            # actually reconstructs the source text: cross-checked directly
+            # against `body["segments"][*]["text"]`-concatenation (same
+            # result) and against the plain `json` branch's own `text`
+            # field for the identical audio (byte-identical output, per
+            # AC 18) -- see plan.md's Deviations, Stage 6 fix.
+            text = "".join(raw_text.splitlines()).strip()
+            # `.get()` -- verbose_json's exact shape was confirmed once on
+            # real AMD hardware (Stage 6, RX 5700 XT: top-level "language"
+            # key present, plus "segments"/"detected_language"/etc.), but
+            # this project still has no AMD/Intel GPU in CI, so a
+            # missing/renamed field on a different whisper.cpp build still
+            # degrades to None rather than raising.
             return text, body.get("language")
 
         text, detected_raw = await asyncio.to_thread(_post)
