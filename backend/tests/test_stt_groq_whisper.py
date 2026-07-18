@@ -38,7 +38,7 @@ async def test_transcribe_returns_stripped_text(tmp_path):
     provider = GroqWhisperSTTProvider(_settings())
     provider._client = MagicMock()  # skip real SDK init
 
-    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value="  привіт  "):
+    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("  привіт  ", None)):
         result = await provider.transcribe(_wav(tmp_path), language="uk")
 
     assert result.text == "привіт"
@@ -50,7 +50,7 @@ async def test_transcribe_ignores_unknown_kwargs(tmp_path):
     provider = GroqWhisperSTTProvider(_settings())
     provider._client = MagicMock()
 
-    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value="ok"):
+    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("ok", None)):
         result = await provider.transcribe(_wav(tmp_path), language="uk", style="ai_prompt")
 
     assert result.text == "ok"
@@ -173,3 +173,72 @@ def test_groq_sdk_payload_omits_language_key_for_auto(tmp_path):
 
     call_kwargs = client.audio.transcriptions.create.call_args.kwargs
     assert "language" not in call_kwargs
+
+
+# --- detected_language / verbose_json escalation (spec 029, AC 19) -----------
+
+
+def test_call_groq_uses_text_format_for_explicit_language(tmp_path):
+    provider = GroqWhisperSTTProvider(_settings())
+    client = MagicMock()
+    client.audio.transcriptions.create.return_value = "ok"
+
+    provider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None)
+
+    call_kwargs = client.audio.transcriptions.create.call_args.kwargs
+    assert call_kwargs["response_format"] == "text"
+
+
+def test_call_groq_escalates_to_verbose_json_for_auto(tmp_path):
+    """AC-19: response_format escalates to verbose_json only when
+    language == "auto" -- the explicit-language path keeps "text" unchanged."""
+    provider = GroqWhisperSTTProvider(_settings())
+    client = MagicMock()
+    client.audio.transcriptions.create.return_value = MagicMock(text="hello", language="en")
+
+    text, detected = provider._call_groq(
+        client, "whisper-large-v3-turbo", _wav(tmp_path), "auto", None
+    )
+
+    call_kwargs = client.audio.transcriptions.create.call_args.kwargs
+    assert call_kwargs["response_format"] == "verbose_json"
+    assert text == "hello"
+    assert detected == "en"
+
+
+def test_call_groq_bare_string_response_has_no_detected_language(tmp_path):
+    """Regression for the SDK-returns-a-bare-string case already handled at
+    groq_whisper.py:112-115 -- response_format="text" returns a plain
+    string with no metadata whatsoever."""
+    provider = GroqWhisperSTTProvider(_settings())
+    client = MagicMock()
+    client.audio.transcriptions.create.return_value = "плейн текст"
+
+    text, detected = provider._call_groq(
+        client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None
+    )
+
+    assert text == "плейн текст"
+    assert detected is None
+
+
+@pytest.mark.asyncio
+async def test_transcribe_populates_normalized_detected_language(tmp_path):
+    provider = GroqWhisperSTTProvider(_settings())
+    provider._client = MagicMock()
+
+    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("hello", "EN")):
+        result = await provider.transcribe(_wav(tmp_path), language="auto")
+
+    assert result.detected_language == "en"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_detected_language_none_for_explicit_language(tmp_path):
+    provider = GroqWhisperSTTProvider(_settings())
+    provider._client = MagicMock()
+
+    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("привіт", None)):
+        result = await provider.transcribe(_wav(tmp_path), language="uk")
+
+    assert result.detected_language is None

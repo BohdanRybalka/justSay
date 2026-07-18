@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
+from app.audio.analysis import rms_dbfs
 from app.audio.base import AudioRecorder
 from app.audio.config import AudioSettings
 
@@ -34,8 +35,7 @@ class MicrophoneRecorder(AudioRecorder):
             if not self._recording:
                 return
             self._frames.append(indata.copy())
-            rms = np.sqrt(np.mean(indata**2))
-            self._current_level = 20 * np.log10(max(rms, 1e-10))
+            self._current_level = rms_dbfs(indata)
 
     async def start(self) -> None:
         with self._lock:

@@ -5,6 +5,7 @@ short normal-style audio goes through Groq Whisper for minimum latency.
 ``/llm/process`` remains as a standalone endpoint for explicit cleanup.
 """
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from pathlib import Path
 import pyperclip
 from fastapi import BackgroundTasks
 
+from app.audio.analysis import analyze_silence
 from app.core.config import settings
 from app.core.history import save_entry
 from app.pipeline.utils import detect_duration
@@ -30,6 +32,11 @@ class ProcessingResult:
     copied_to_clipboard: bool
     model_name: str = ""               # which provider actually handled the call
     fallback_reason: str | None = None  # set when a pinned engine was overridden
+    # Set when process_audio short-circuited without calling a provider at
+    # all -- currently only "silence". Distinct from fallback_reason, which
+    # means something else entirely (a pinned engine was overridden) --
+    # see docs/adr/015-pipeline-level-silence-guard.md.
+    discarded_reason: str | None = None
 
 
 async def process_audio(
@@ -52,6 +59,33 @@ async def process_audio(
     duration = audio_duration
     if duration is None:
         duration = detect_duration(audio_path)
+
+    # Silence guard (spec 029 / docs/adr/015-pipeline-level-silence-guard.md):
+    # sits between duration detection and provider routing so a silent clip
+    # never reaches a provider at all -- saves STT latency locally and real
+    # Cloud API spend. `analyze_silence` fails open (returns None) on any
+    # decode failure -- e.g. .m4a/.webm uploads libsndfile can't open --
+    # so an unreadable file always falls through to normal transcription,
+    # never gets mistaken for silence. Run via asyncio.to_thread -- it's
+    # synchronous CPU/IO work on EVERY call, not only silent ones (measured
+    # 71ms/40s, 239ms/150s), and every comparable call in this codebase
+    # (local.py's _transcribe, local_mlx.py's _run_mlx) is already wrapped
+    # the same way (Stage 3 review YELLOW finding).
+    analysis = await asyncio.to_thread(analyze_silence, audio_path, settings.audio)
+    if analysis is not None and analysis.is_silent:
+        log.warning(
+            "Discarding silent audio: peak=%.1f dBFS, speech_frames=%d/%d",
+            analysis.peak_dbfs, analysis.speech_frame_count, analysis.total_frame_count,
+        )
+        # No STT call, no clipboard write, no save_entry -- a discarded
+        # accidental hotkey press must be a silent no-op, not a raised
+        # exception (the widget's error toast is wired to thrown exceptions).
+        return ProcessingResult(
+            text="",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            copied_to_clipboard=False,
+            discarded_reason="silence",
+        )
 
     file_ext = audio_path.suffix.lower() if audio_path.suffix else None
     stt, fallback_reason = get_routed_provider(
@@ -116,11 +150,19 @@ async def process_audio(
     duration_ms = int((time.perf_counter() - start) * 1000)
     word_count = len(text.split()) if text else 0
 
+    # An explicit user language choice is NEVER overridden by a provider's
+    # guess -- only the "auto" sentinel gets substituted, and only when the
+    # provider actually reported something (otherwise "auto" stays, current
+    # behaviour). See docs/adr/016-detected-language-on-stt-contract.md.
+    effective_language = language
+    if language == "auto" and result.detected_language:
+        effective_language = result.detected_language
+
     try:
         entry = save_entry(
             text=text,
             duration_ms=duration_ms,
-            language=language,
+            language=effective_language,
             style=style,
             model_name=stt.model_name,
             tokens_used=result.tokens_used,

@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 
 from app.core.constants import GROQ_TIMEOUT_SECONDS
-from app.stt.base import STTProvider, TranscriptionResult
+from app.stt.base import STTProvider, TranscriptionResult, normalize_detected_language
 from app.stt.config import STTSettings
 
 log = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ class GroqWhisperSTTProvider(STTProvider):
         )
 
         try:
-            text = await asyncio.to_thread(
+            text, detected_raw = await asyncio.to_thread(
                 self._call_groq,
                 client,
                 self._settings.groq_whisper_model,
@@ -69,7 +69,11 @@ class GroqWhisperSTTProvider(STTProvider):
         except Exception:
             log.exception("Groq Whisper call failed")
             raise
-        return TranscriptionResult(text=text.strip() if text else "", tokens_used=None)
+        return TranscriptionResult(
+            text=text.strip() if text else "",
+            tokens_used=None,
+            detected_language=normalize_detected_language(detected_raw),
+        )
 
     def cleanup(self) -> None:
         """No persistent resources — HTTP client is stateless. Reset for consistency."""
@@ -82,14 +86,23 @@ class GroqWhisperSTTProvider(STTProvider):
         audio_path: Path,
         language: str,
         prompt: str | None,
-    ) -> str:
-        """Isolated SDK call — mockable in tests without installing groq."""
+    ) -> tuple[str, str | None]:
+        """Isolated SDK call — mockable in tests without installing groq.
+
+        Returns ``(text, detected_language_raw)``. ``response_format``
+        escalates to ``"verbose_json"`` only when ``language == "auto"`` --
+        that's the only path that needs a detected language back. The
+        explicit-language hot path keeps its exact current wire format
+        (``"text"``, a bare string with no metadata) unchanged (spec 029 /
+        docs/adr/016-detected-language-on-stt-contract.md).
+        """
+        response_format = "verbose_json" if language == "auto" else "text"
         try:
             with audio_path.open("rb") as fh:
                 kwargs: dict = {
                     "file": (audio_path.name, fh.read()),
                     "model": model,
-                    "response_format": "text",
+                    "response_format": response_format,
                 }
                 # Omit "language" entirely for "auto" — mirrors the Groq SDK's
                 # own `Omit` default, which is the documented auto-detect path
@@ -111,5 +124,12 @@ class GroqWhisperSTTProvider(STTProvider):
 
         # response_format="text" returns a plain string; some SDK versions wrap it.
         if isinstance(response, str):
-            return response
-        return getattr(response, "text", str(response))
+            return response, None
+
+        text = getattr(response, "text", None)
+        if text is None:
+            text = str(response)
+        # Only populated by the SDK on the verbose_json (auto) path — absent
+        # (None) on the text-format explicit-language path.
+        detected_language = getattr(response, "language", None)
+        return text, detected_language
