@@ -26,8 +26,7 @@
     "@tauri-apps/plugin-global-shortcut": "^2.0.0",
     "@tauri-apps/plugin-notification": "^2.0.0",
     "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.10.0",
-    "playwright-cli": "^0.262.0"
+    "@tauri-apps/plugin-updater": "^2.10.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
