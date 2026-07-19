@@ -726,22 +726,22 @@ async def test_maybe_prewarm_local_schedules_ensure_local_ready_for_local_mode(m
 
 @pytest.mark.prewarm
 @pytest.mark.asyncio
-async def test_maybe_prewarm_local_routes_through_spawn_background_task(monkeypatch):
+async def test_maybe_prewarm_local_routes_through_spawn_background_task(
+    monkeypatch, spawn_spy
+):
     """AC 8 (Spec 032): maybe_prewarm_local() must schedule its
     ensure_local_ready() call through app.core.tasks.spawn_background_task()
     -- exactly once for LOCAL mode, and not at all for CLOUD mode.
 
     Marked @pytest.mark.prewarm for the same reason as the tests above --
     needs the real maybe_prewarm_local, not the autouse-patched no-op.
+
+    Uses the shared `spawn_spy` fixture (conftest.py) and awaits
+    `spawn_spy.tasks` -- the exact task(s) it spawned -- rather than every
+    task pending on the loop (GitHub review finding 1): the old
+    `asyncio.all_tasks()` sweep would also await unrelated pending tasks,
+    surfacing any failure among them as an unrelated-looking error here.
     """
-    spawned = []
-    real_spawn = local_setup.tasks.spawn_background_task
-
-    def _spy(coro, *, name):
-        spawned.append(name)
-        return real_spawn(coro, name=name)
-
-    monkeypatch.setattr(local_setup.tasks, "spawn_background_task", _spy)
 
     async def _fake_ensure_local_ready(stt_settings):
         return None
@@ -749,13 +749,12 @@ async def test_maybe_prewarm_local_routes_through_spawn_background_task(monkeypa
     monkeypatch.setattr(local_setup, "ensure_local_ready", _fake_ensure_local_ready)
 
     local_setup.maybe_prewarm_local(STTSettings(mode=ProviderMode.CLOUD))
-    assert spawned == []
+    assert spawn_spy.names == []
 
     local_setup.maybe_prewarm_local(STTSettings(mode=ProviderMode.LOCAL))
-    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    await asyncio.gather(*pending)
+    await asyncio.gather(*spawn_spy.tasks)
 
-    assert spawned == ["local-stt-prewarm"]
+    assert spawn_spy.names == ["local-stt-prewarm"]
 
 
 @pytest.mark.asyncio
@@ -1068,20 +1067,16 @@ async def test_maybe_prewarm_local_at_startup_marks_dirty_then_clears_on_complet
 @pytest.mark.prewarm
 @pytest.mark.asyncio
 async def test_maybe_prewarm_local_at_startup_routes_through_spawn_background_task(
-    _isolated_crash_guard_root, monkeypatch
+    _isolated_crash_guard_root, monkeypatch, spawn_spy
 ):
     """AC 8 (Spec 032): maybe_prewarm_local_at_startup() must schedule its
     _prewarm_then_clear_crash_guard() call through
     app.core.tasks.spawn_background_task() -- exactly once for LOCAL mode,
-    and not at all for CLOUD mode."""
-    spawned = []
-    real_spawn = local_setup.tasks.spawn_background_task
+    and not at all for CLOUD mode.
 
-    def _spy(coro, *, name):
-        spawned.append(name)
-        return real_spawn(coro, name=name)
-
-    monkeypatch.setattr(local_setup.tasks, "spawn_background_task", _spy)
+    Uses the shared `spawn_spy` fixture (conftest.py) and awaits
+    `spawn_spy.tasks` -- the exact task(s) it spawned -- rather than every
+    task pending on the loop (GitHub review finding 1)."""
 
     async def _fake_ensure_local_ready(stt_settings):
         return None
@@ -1089,13 +1084,12 @@ async def test_maybe_prewarm_local_at_startup_routes_through_spawn_background_ta
     monkeypatch.setattr(local_setup, "ensure_local_ready", _fake_ensure_local_ready)
 
     local_setup.maybe_prewarm_local_at_startup(STTSettings(mode=ProviderMode.CLOUD))
-    assert spawned == []
+    assert spawn_spy.names == []
 
     local_setup.maybe_prewarm_local_at_startup(STTSettings(mode=ProviderMode.LOCAL))
-    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    await asyncio.gather(*pending)
+    await asyncio.gather(*spawn_spy.tasks)
 
-    assert spawned == ["local-stt-prewarm-startup"]
+    assert spawn_spy.names == ["local-stt-prewarm-startup"]
 
 
 @pytest.mark.prewarm

@@ -131,17 +131,25 @@ _MARKER = "# background-task-ok:"
 
 
 def _find_unmarked_create_task_calls(source: str, label: str) -> list[str]:
+    """Flag unmarked `create_task`/`ensure_future` calls.
+
+    `asyncio.ensure_future(coro)` wraps a coroutine in a Task with the exact
+    same weak-reference semantics as `create_task` (GitHub review on PR #37,
+    finding 2) -- reaching for it would reintroduce this spec's bug while
+    passing a scanner that only knew about `create_task`. No such call
+    exists in `backend/app/` today; this closes the hole pre-emptively.
+    """
     lines = source.splitlines()
     findings = []
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        is_create_task = (
-            (isinstance(func, ast.Attribute) and func.attr == "create_task")
-            or (isinstance(func, ast.Name) and func.id == "create_task")
+        is_flagged_call = (
+            (isinstance(func, ast.Attribute) and func.attr in ("create_task", "ensure_future"))
+            or (isinstance(func, ast.Name) and func.id in ("create_task", "ensure_future"))
         )
-        if not is_create_task:
+        if not is_flagged_call:
             continue
         context = lines[max(0, node.lineno - 2):node.lineno]
         if not any(_MARKER in line for line in context):
@@ -161,16 +169,16 @@ def _scan_app_dir() -> list[str]:
 
 
 def test_no_unmarked_create_task_calls_in_app():
-    """AC 9: every backend/app/**/*.py fire-and-forget `create_task` call
-    must either route through `app.core.tasks.spawn_background_task()` (the
-    definer, `core/tasks.py`, is excluded from the scan) or carry a
-    `# background-task-ok: <reason>` marker on its own line or the line
-    directly above it."""
+    """AC 9: every backend/app/**/*.py fire-and-forget `create_task` or
+    `ensure_future` call must either route through
+    `app.core.tasks.spawn_background_task()` (the definer, `core/tasks.py`,
+    is excluded from the scan) or carry a `# background-task-ok: <reason>`
+    marker on its own line or the line directly above it."""
     findings = _scan_app_dir()
     assert not findings, (
-        f"Found unmarked create_task call(s): {findings}. Use "
-        f"app.core.tasks.spawn_background_task() or annotate the call with "
-        f"'{_MARKER} <reason>'."
+        f"Found unmarked create_task()/ensure_future() call(s): {findings}. "
+        f"Use app.core.tasks.spawn_background_task() or annotate the call "
+        f"with '{_MARKER} <reason>'."
     )
 
 
@@ -178,6 +186,16 @@ def test_scanner_detects_an_unmarked_create_task_call():
     """AC 10: the scanner must actually flag a violation, not merely always
     pass -- proven directly against a synthetic source string."""
     source = "import asyncio\n\n\nasync def f():\n    asyncio.create_task(g())\n"
+    findings = _find_unmarked_create_task_calls(source, "synthetic.py")
+    assert findings == ["synthetic.py:5"]
+
+
+def test_scanner_detects_an_unmarked_ensure_future_call():
+    """GitHub review on PR #37, finding 2: `asyncio.ensure_future(coro)` has
+    the exact same weak-reference semantics as `create_task` and must be
+    flagged too -- proven directly, the same way the `create_task` case
+    above is proven, rather than trusting the widened matcher on faith."""
+    source = "import asyncio\n\n\nasync def f():\n    asyncio.ensure_future(g())\n"
     findings = _find_unmarked_create_task_calls(source, "synthetic.py")
     assert findings == ["synthetic.py:5"]
 
