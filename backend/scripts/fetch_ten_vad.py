@@ -50,6 +50,13 @@ _ARTIFACTS = [
 
 VENDOR_DIR = Path(__file__).resolve().parents[1] / "vendor" / "ten-vad"
 
+# The hash gate protects integrity but runs only AFTER the body is in memory.
+# A redirected or compromised endpoint serving a multi-GB body would exhaust
+# the build machine's RAM before verification ever happens, so the read is
+# bounded first. The real artifacts are ~510 KB (DLL) and ~1 KB (LICENSE);
+# 64 MB is generous headroom for an upstream growing, tight enough to matter.
+_MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -57,6 +64,40 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _too_large(name: str, url: str, detail: str) -> None:
+    print(
+        f"ERROR: refusing oversized download for {name}\n"
+        f"  limit: {_MAX_DOWNLOAD_BYTES} bytes\n"
+        f"  {detail}\n"
+        f"  url:   {url}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _read_bounded(resp, name: str, url: str) -> bytes:
+    """Read the response body, refusing anything past ``_MAX_DOWNLOAD_BYTES``.
+
+    Content-Length is only a hint (absent on chunked responses, and a hostile
+    server can lie), so it is checked as a cheap early reject and the read
+    itself is capped independently: one byte over the cap is read on purpose,
+    so an exactly-at-limit body is distinguishable from a truncated one.
+    """
+    declared = resp.headers.get("Content-Length")
+    if declared is not None:
+        try:
+            declared_bytes = int(declared)
+        except ValueError:
+            declared_bytes = -1
+        if declared_bytes > _MAX_DOWNLOAD_BYTES:
+            _too_large(name, url, f"Content-Length: {declared_bytes} bytes")
+
+    payload = resp.read(_MAX_DOWNLOAD_BYTES + 1)
+    if len(payload) > _MAX_DOWNLOAD_BYTES:
+        _too_large(name, url, "body exceeded the limit while reading")
+    return payload
 
 
 def _fetch_one(url: str, name: str, expected_sha: str) -> bool:
@@ -70,7 +111,7 @@ def _fetch_one(url: str, name: str, expected_sha: str) -> bool:
     # urlopen follows redirects and raises HTTPError on non-2xx by default,
     # so this matches the previous raise_for_status + follow_redirects flow.
     with urllib.request.urlopen(url, timeout=120.0) as resp:
-        payload = resp.read()
+        payload = _read_bounded(resp, name, url)
 
     # Hash the payload BEFORE it reaches its final name: a mismatch must
     # leave no partially-trusted file behind for the sidecar build to pick up.

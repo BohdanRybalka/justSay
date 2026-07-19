@@ -190,8 +190,17 @@ class _TenVadLibrary:
 # but a concurrent caller now waits at most one 16 ms-hop inference instead
 # of a whole file scan (measured: 1628.9 ms behind a 300 s scan when the lock
 # spanned the scan).
-_LOAD_FAILED = object()
-_library: _TenVadLibrary | object | None = None
+class _LoadFailed:
+    """Sentinel type for a cached failed load.
+
+    A plain ``object()`` would force the cache annotation to include ``object``,
+    which subsumes every other union member and makes the type meaningless to
+    a checker. A dedicated class keeps the union assertive.
+    """
+
+
+_LOAD_FAILED = _LoadFailed()
+_library: _TenVadLibrary | _LoadFailed | None = None
 _library_lock = threading.Lock()
 
 

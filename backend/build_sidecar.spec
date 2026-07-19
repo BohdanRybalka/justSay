@@ -69,8 +69,22 @@ binaries = collect_dynamic_libs("soundfile")
 # `pyinstaller backend/build_sidecar.spec` from the repo root must bundle the
 # DLL identically to a `cd backend` build, instead of silently producing a
 # VAD-less sidecar whose only signal is a print() buried in the build log.
+#
+# The library filename mirrors app.audio.vad._platform_lib_name() rather than
+# hardcoding the Windows name. Today only the Windows DLL is ever fetched
+# (plan 033 Cuts: "macOS/Linux TEN VAD shipping" is deferred until macOS
+# hardware exists), so the non-Windows branches resolve to nothing and the
+# build degrades exactly as it does now -- but whoever implements that Cut
+# changes the resolver and the fetch script, and this spec then follows along
+# instead of silently producing a VAD-less sidecar.
 _ten_vad_dir = Path(SPECPATH) / "vendor" / "ten-vad"
-_ten_vad_lib = _ten_vad_dir / "ten_vad.dll"
+if sys.platform == "win32":
+    _ten_vad_lib_name = "ten_vad.dll"
+elif sys.platform == "darwin":
+    _ten_vad_lib_name = "libten_vad.dylib"
+else:
+    _ten_vad_lib_name = "libten_vad.so"
+_ten_vad_lib = _ten_vad_dir / _ten_vad_lib_name
 if _ten_vad_lib.is_file():
     binaries += [(str(_ten_vad_lib), "ten_vad")]
     _ten_vad_license = _ten_vad_dir / "LICENSE"
