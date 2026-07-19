@@ -22,12 +22,35 @@ log = logging.getLogger(__name__)
 
 _FRAME_SECONDS = 0.030  # 30 ms
 
-# Floor for the length-proportional speech-frame requirement below. A
+# Floor for the length-proportional speech-unit requirement below. A
 # module constant, deliberately NOT an AudioSettings/env-var field: it only
 # matters for sub-100ms-of-speech clips, and a reviewer pass on spec 029
 # specifically flagged env knobs that carry no useful tuning surface. See
 # docs/adr/015-pipeline-level-silence-guard.md.
-_MIN_SPEECH_FRAMES_FLOOR = 2
+_MIN_SPEECH_UNITS_FLOOR = 2
+
+
+def required_speech_units(total_unit_count: int, *, cap: int, ratio: float) -> int:
+    """How many "speech" units a clip of ``total_unit_count`` units must show.
+
+    The ONE implementation of this rule, shared by both detectors: the energy
+    guard's 30 ms frames (`_required_speech_frames`) and the neural VAD's
+    16 ms hops (`vad._required_speech_hops`). It lives here because
+    `analysis` is the always-present base module — the optional VAD layer
+    depends on it, never the reverse.
+
+    Why proportional rather than absolute (spec 029, Stage 3 review RED-1):
+    an absolute floor cannot be satisfied by a short clip no matter how loud
+    it is — a 200 ms clip has only ~7 energy frames (~12 VAD hops) total, so
+    a flat requirement of 5 unconditionally called it silent. Scaling with
+    clip length fixes that without weakening the long-clip requirement at
+    all: ``cap`` keeps that regime byte-identical to the old absolute rule,
+    and the floor keeps a handful of units meaning something.
+
+    ``cap``/``ratio`` are keyword-only so the two callers cannot silently
+    transpose them.
+    """
+    return min(cap, max(_MIN_SPEECH_UNITS_FLOOR, math.ceil(total_unit_count * ratio)))
 
 
 def rms_dbfs(samples: np.ndarray) -> float:
@@ -57,21 +80,14 @@ class SilenceAnalysis:
 def _required_speech_frames(total_frame_count: int, settings: AudioSettings) -> int:
     """Length-proportional speech-frame requirement (spec 029, AC 25-27).
 
-    An absolute floor (the pre-fix behaviour) cannot be satisfied by a short
-    clip no matter how loud it is: a 200 ms clip has only ~7 frames total,
-    so a flat requirement of 5 unconditionally called it silent. Scaling
-    with clip length — capped at ``silence_min_speech_frames`` for the
-    long-clip case, floored at the module constant ``_MIN_SPEECH_FRAMES_FLOOR``
-    so a handful of frames still means something — fixes that without
-    weakening the long-clip requirement at all (the cap keeps that regime
-    byte-identical to the old absolute rule).
+    The energy guard's 30 ms frames, capped by ``silence_min_speech_frames``.
+    The rule itself lives in `required_speech_units` — see its docstring for
+    the rationale.
     """
-    return min(
-        settings.silence_min_speech_frames,
-        max(
-            _MIN_SPEECH_FRAMES_FLOOR,
-            math.ceil(total_frame_count * settings.silence_min_speech_ratio),
-        ),
+    return required_speech_units(
+        total_frame_count,
+        cap=settings.silence_min_speech_frames,
+        ratio=settings.silence_min_speech_ratio,
     )
 
 

@@ -484,6 +484,50 @@ def test_required_speech_frames_is_proportional_to_clip_length(
     assert _required_speech_frames(total_frame_count, settings) == expected_required
 
 
+def test_both_speech_requirements_route_through_one_implementation(monkeypatch):
+    """Spec 034 AC-11: the anti-drift pin.
+
+    `analysis._required_speech_frames` and `vad._required_speech_hops` used
+    to be two structurally identical copies of the same rule, each with its
+    own tests — so a change to one would drift from the other silently. They
+    are now thin delegations to `analysis.required_speech_units`, and this
+    proves it: monkeypatching the shared helper must be visible through BOTH
+    wrappers. A "simplification" that inlines either copy back turns this
+    red, which is the whole point.
+
+    Each wrapper is also asserted to pass its OWN cap field through, so the
+    delegation cannot be proven by a wrapper that ignores its settings."""
+    from app.audio import analysis as analysis_module
+    from app.audio import vad as vad_module
+
+    seen: list[dict] = []
+
+    def _fake_required_speech_units(total_unit_count, *, cap, ratio):
+        seen.append({"total": total_unit_count, "cap": cap, "ratio": ratio})
+        return 4242
+
+    monkeypatch.setattr(
+        analysis_module, "required_speech_units", _fake_required_speech_units
+    )
+
+    settings = AudioSettings()
+    assert analysis_module._required_speech_frames(100, settings) == 4242
+    assert vad_module._required_speech_hops(100, settings) == 4242
+
+    assert seen == [
+        {
+            "total": 100,
+            "cap": settings.silence_min_speech_frames,
+            "ratio": settings.silence_min_speech_ratio,
+        },
+        {
+            "total": 100,
+            "cap": settings.silence_vad_min_speech_frames,
+            "ratio": settings.silence_min_speech_ratio,
+        },
+    ]
+
+
 def test_default_peak_threshold_exceeds_frame_threshold():
     """AC-28's invariant, checked directly: with silence_peak_dbfs <=
     silence_frame_dbfs, rms(frame) <= max|frame| <= global peak makes the

@@ -70,7 +70,7 @@ markers = [
     "background_indexer: tests for vector_store.run_background_indexer itself (opt out of the autouse fixture that no-ops it)",
     "no_factory_stub: tests asserting on the cost of calling app.stt.local_factory (opt out of the autouse fixture that stubs get_local_provider_class/get_local_provider_kind)",
     "no_vad_stub: tests for the spec-033 neural VAD pipeline layer (opt out of the autouse fixture that pins analyze_vad to None)",
-    "slow: multi-second sweeps over the real train-audio-data/ sample (960-window VAD/energy comparisons)",
+    "slow: multi-second tests — the real train-audio-data/ sample sweeps (960-window VAD/energy comparisons), the spec-033 lock-contention/concurrency regression pins, AND the spec-034 gate-latency pins (the only tests that fail if the energy pass creeps back onto the hot path, ADR 020); -m 'not slow' drops all three, not just the sweeps — it silently removes the pins that caught a 1.6s lock convoy and the ones guarding a ~100x upload-gate win",
 ]
 
 [tool.vulture]

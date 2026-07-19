@@ -61,48 +61,56 @@ async def process_audio(
     if duration is None:
         duration = detect_duration(audio_path)
 
-    # Silence guard (spec 029 / docs/adr/015-pipeline-level-silence-guard.md):
-    # sits between duration detection and provider routing so a silent clip
-    # never reaches a provider at all -- saves STT latency locally and real
-    # Cloud API spend. `analyze_silence` fails open (returns None) on any
-    # decode failure -- e.g. .m4a/.webm uploads libsndfile can't open --
-    # so an unreadable file always falls through to normal transcription,
-    # never gets mistaken for silence. Run via asyncio.to_thread -- it's
-    # synchronous CPU/IO work on EVERY call, not only silent ones (measured
-    # 71ms/40s, 239ms/150s), and every comparable call in this codebase
-    # (local.py's _transcribe, local_mlx.py's _run_mlx) is already wrapped
-    # the same way (Stage 3 review YELLOW finding).
-    analysis = await asyncio.to_thread(analyze_silence, audio_path, settings.audio)
-
-    # Layer 2, the neural front gate (spec 033 / docs/adr/019-ten-vad-neural-
-    # silence-gate.md). Runs AFTER the energy guard but OUTRANKS it: when the
-    # VAD produced a verdict, that verdict decides, in both directions. It can
-    # veto an energy false positive (029's residual quiet-speech zone) AND
-    # catch loud non-speech (clicks, hum, noise) that a loudness threshold
-    # passes by definition. `analyze_vad` fails open (returns None) on a
-    # missing binary, a load failure, or an undecodable file -- and on every
-    # non-Windows platform, where no binary ships at all. In all of those
-    # cases the energy verdict decides exactly as shipped in spec 029,
-    # bit-identically. That is what "demoted, not deleted" means mechanically.
+    # Pre-model silence gate (spec 029 -> 033 -> 034; see
+    # docs/adr/015-pipeline-level-silence-guard.md, 019-ten-vad-neural-
+    # silence-gate.md and 020-lazy-energy-guard-fallback.md). It sits between
+    # duration detection and provider routing so a silent clip never reaches a
+    # provider at all -- saves STT latency locally and real Cloud API spend.
+    #
+    # NOTE ON NUMBERING: the layer numbers below are ADR 019's and are NOT the
+    # execution order. ADR 019 fixes layer 1 = energy guard, layer 2 = TEN VAD,
+    # layer 3 = provider metadata, and those identities are stable — they name
+    # WHICH detector, and the WARNING logs (`layer=vad` / `layer=energy`) key
+    # off the names, not the numbers. ADR 020 changed only the order in which
+    # layers 1 and 2 execute (2 first, 1 lazily on abstention); it deliberately
+    # did not renumber them, so a reader following either ADR pointer from this
+    # file finds the same layer identities it uses.
+    #
+    # Layer 2, the neural front gate, EXECUTES FIRST and OUTRANKS everything
+    # below it: when the VAD produced a verdict, that verdict decides, in both
+    # directions. It catches loud non-speech (clicks, hum, noise) that a
+    # loudness threshold passes by definition, and it does not share the
+    # energy guard's residual false-positive zone on quiet speech.
+    # `analyze_vad` fails open (returns None) on a missing binary, a load
+    # failure, or an undecodable file -- and on every non-Windows platform,
+    # where no binary ships at all.
+    #
+    # Run via asyncio.to_thread -- synchronous CPU/IO work, like every
+    # comparable call in this codebase (local.py's _transcribe, local_mlx.py's
+    # _run_mlx).
     vad = None
     if settings.audio.silence_vad_enabled:
         vad = await asyncio.to_thread(analyze_vad, audio_path, settings.audio)
 
+    # Layer 1, the energy guard -- a LAZY fallback that now EXECUTES SECOND
+    # (ADR 020 amends ADR 019's "runs first, cheapest"). It is invoked
+    # ONLY when the VAD abstained or is disabled, because whenever a VAD
+    # verdict exists the energy verdict is overridden anyway: computing it was
+    # paying a full-file decode (measured 1707ms on a 6.4min upload, vs the
+    # VAD's 15.9ms early exit) to decide nothing. When the VAD abstains this
+    # is the SOLE authority and behaves bit-identically to shipped spec 029 --
+    # that is what "demoted, not deleted" means mechanically, and it is the
+    # only silence gate that exists on macOS and on un-fetched checkouts.
+    analysis = None
+    if vad is None:
+        analysis = await asyncio.to_thread(analyze_silence, audio_path, settings.audio)
+
     discard_log: tuple[str, tuple] | None = None
-    if vad is not None:
-        if analysis is not None and analysis.is_silent and not vad.is_silent:
-            log.info(
-                "Energy guard false positive averted by VAD: energy said silent "
-                "(peak=%.1f dBFS, speech_frames=%d/%d) but VAD found speech "
-                "(speech_hops=%d/%d, max_prob=%.3f) — transcribing",
-                analysis.peak_dbfs, analysis.speech_frame_count, analysis.total_frame_count,
-                vad.speech_frame_count, vad.total_frame_count, vad.max_probability,
-            )
-        if vad.is_silent:
-            discard_log = (
-                "Discarding no-speech audio (layer=vad): speech_hops=%d/%d, max_prob=%.3f",
-                (vad.speech_frame_count, vad.total_frame_count, vad.max_probability),
-            )
+    if vad is not None and vad.is_silent:
+        discard_log = (
+            "Discarding no-speech audio (layer=vad): speech_hops=%d/%d, max_prob=%.3f",
+            (vad.speech_frame_count, vad.total_frame_count, vad.max_probability),
+        )
     elif analysis is not None and analysis.is_silent:
         discard_log = (
             "Discarding silent audio (layer=energy): peak=%.1f dBFS, speech_frames=%d/%d",
