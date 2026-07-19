@@ -72,4 +72,28 @@ class AudioSettings(BaseSettings):
     # under this floor.
     silence_min_analysis_ms: float = Field(default=100.0, ge=0.0)
 
+    # Neural VAD front gate (spec 033 / docs/adr/019-ten-vad-neural-silence-gate.md).
+    # Layered IN FRONT of the energy thresholds above, which are kept
+    # verbatim as the cheap first gate and the sole fallback wherever the
+    # TEN VAD binary is absent (every non-Windows platform, and any checkout
+    # that never ran backend/scripts/fetch_ten_vad.py).
+    #
+    # silence_vad_enabled is a kill switch, not a feature flag: a field user
+    # hit by a VAD false positive drops back to shipped-029 behaviour with
+    # one env var and no rebuild.
+    silence_vad_enabled: bool = Field(default=True)
+    # Upstream TEN VAD's own default decision threshold, identical to
+    # Silero's reference default in faster-whisper's VadOptions. Deliberately
+    # NOT calibrated against this project's single recording -- the real
+    # sample is a regression gate (never discard it), never a tuning input.
+    silence_vad_probability: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Absolute cap on the length-proportional speech-hop requirement
+    # (required = min(this, max(2, ceil(total_hops * silence_min_speech_ratio)))
+    # -- the ratio is REUSED from the energy guard above rather than minting
+    # a second knob). 5 hops is ~80ms of speech-scored audio, deliberately
+    # BELOW the reference pipeline's 250ms minimum-speech-duration:
+    # faster-whisper trims segments for accuracy, we discard whole clips, and
+    # eating a clipped short word is the worse failure.
+    silence_vad_min_speech_frames: int = Field(default=5, ge=0)
+
     model_config = SettingsConfigDict(env_prefix="JUSTSAY_AUDIO_", env_file=".env", extra="ignore")

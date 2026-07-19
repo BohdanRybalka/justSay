@@ -15,6 +15,7 @@ import pyperclip
 from fastapi import BackgroundTasks
 
 from app.audio.analysis import analyze_silence
+from app.audio.vad import analyze_vad
 from app.core.config import settings
 from app.core.history import save_entry
 from app.pipeline.utils import detect_duration
@@ -72,11 +73,44 @@ async def process_audio(
     # (local.py's _transcribe, local_mlx.py's _run_mlx) is already wrapped
     # the same way (Stage 3 review YELLOW finding).
     analysis = await asyncio.to_thread(analyze_silence, audio_path, settings.audio)
-    if analysis is not None and analysis.is_silent:
-        log.warning(
-            "Discarding silent audio: peak=%.1f dBFS, speech_frames=%d/%d",
-            analysis.peak_dbfs, analysis.speech_frame_count, analysis.total_frame_count,
+
+    # Layer 2, the neural front gate (spec 033 / docs/adr/019-ten-vad-neural-
+    # silence-gate.md). Runs AFTER the energy guard but OUTRANKS it: when the
+    # VAD produced a verdict, that verdict decides, in both directions. It can
+    # veto an energy false positive (029's residual quiet-speech zone) AND
+    # catch loud non-speech (clicks, hum, noise) that a loudness threshold
+    # passes by definition. `analyze_vad` fails open (returns None) on a
+    # missing binary, a load failure, or an undecodable file -- and on every
+    # non-Windows platform, where no binary ships at all. In all of those
+    # cases the energy verdict decides exactly as shipped in spec 029,
+    # bit-identically. That is what "demoted, not deleted" means mechanically.
+    vad = None
+    if settings.audio.silence_vad_enabled:
+        vad = await asyncio.to_thread(analyze_vad, audio_path, settings.audio)
+
+    discard_log: tuple[str, tuple] | None = None
+    if vad is not None:
+        if analysis is not None and analysis.is_silent and not vad.is_silent:
+            log.info(
+                "Energy guard false positive averted by VAD: energy said silent "
+                "(peak=%.1f dBFS, speech_frames=%d/%d) but VAD found speech "
+                "(speech_hops=%d/%d, max_prob=%.3f) — transcribing",
+                analysis.peak_dbfs, analysis.speech_frame_count, analysis.total_frame_count,
+                vad.speech_frame_count, vad.total_frame_count, vad.max_probability,
+            )
+        if vad.is_silent:
+            discard_log = (
+                "Discarding no-speech audio (layer=vad): speech_hops=%d/%d, max_prob=%.3f",
+                (vad.speech_frame_count, vad.total_frame_count, vad.max_probability),
+            )
+    elif analysis is not None and analysis.is_silent:
+        discard_log = (
+            "Discarding silent audio (layer=energy): peak=%.1f dBFS, speech_frames=%d/%d",
+            (analysis.peak_dbfs, analysis.speech_frame_count, analysis.total_frame_count),
         )
+
+    if discard_log is not None:
+        log.warning(discard_log[0], *discard_log[1])
         # No STT call, no clipboard write, no save_entry -- a discarded
         # accidental hotkey press must be a silent no-op, not a raised
         # exception (the widget's error toast is wired to thrown exceptions).
@@ -129,6 +163,33 @@ async def process_audio(
     except Exception:
         log.exception("STT transcribe failed (%s)", stt.model_name)
         raise
+
+    # Layer 3, post-model (spec 033 / ADR 019). Whisper's own suppression is
+    # `no_speech_prob > 0.6 AND avg_logprob < -1.0`, so a CONFIDENTLY-decoded
+    # hallucination is never suppressed by the library -- thresholding
+    # no_speech_prob alone is strictly stronger. `result.no_speech_prob` is
+    # the MINIMUM across segments, so this discards only when EVERY segment
+    # looks like non-speech; one confident-speech segment keeps the whole
+    # result. None (no signal on this provider/path) always keeps it.
+    if (
+        result.no_speech_prob is not None
+        and result.no_speech_prob > settings.stt.no_speech_prob_threshold
+    ):
+        log.warning(
+            "Discarding transcription (layer=provider-metadata): no_speech_prob=%.3f > %.3f "
+            "(%s, %d chars discarded)",
+            result.no_speech_prob, settings.stt.no_speech_prob_threshold,
+            stt.model_name,
+            # Length only -- never the hallucinated text itself at WARNING.
+            len(result.text),
+        )
+        return ProcessingResult(
+            text="",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            copied_to_clipboard=False,
+            model_name=stt.model_name,
+            discarded_reason="silence",
+        )
 
     text = result.text
 

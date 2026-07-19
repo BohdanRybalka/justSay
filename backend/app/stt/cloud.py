@@ -99,6 +99,12 @@ class GeminiSTTProvider(STTProvider):
             # rather than transcribes. See
             # docs/adr/016-detected-language-on-stt-contract.md.
             detected_language=None,
+            # Same story for the no-speech signal (spec 033 / ADR 019):
+            # Gemini returns generated prose, not a structured per-segment
+            # payload, so there is no no_speech_prob to read at any setting.
+            # Gemini's protection against non-speech input is the pre-model
+            # energy + VAD gate, not this layer.
+            no_speech_prob=None,
         )
 
     @staticmethod

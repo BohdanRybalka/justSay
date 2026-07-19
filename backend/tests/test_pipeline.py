@@ -56,6 +56,30 @@ def silent_wav(tmp_path) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _vad_abstains(request):
+    """Pin the spec-033 neural VAD layer to "abstain" (``None``) by default.
+
+    Without this the suite is non-deterministic across machines: on a
+    checkout where `backend/scripts/fetch_ten_vad.py` has been run, the real
+    TEN VAD binary loads and correctly judges these synthetic
+    uniform-noise/tone fixtures to be non-speech — discarding them and
+    failing tests that were never about the VAD at all. ``None`` is the
+    honest default here because it means exactly "no VAD verdict available",
+    which is the shipped behaviour on every non-Windows platform and every
+    checkout without the binary — i.e. these tests keep asserting the
+    spec-029 energy-only path, bit-identically.
+
+    Tests that ARE about the VAD opt out with ``@pytest.mark.no_vad_stub``
+    and patch `app.pipeline.service.analyze_vad` themselves.
+    """
+    if "no_vad_stub" in request.keywords:
+        yield None
+        return
+    with patch("app.pipeline.service.analyze_vad", return_value=None) as vad_mock:
+        yield vad_mock
+
+
+@pytest.fixture(autouse=True)
 def _isolate_side_effects():
     """Clipboard writes and history persistence are side-effects we mock out."""
     with patch("app.pipeline.service.pyperclip.copy") as copy_mock, patch(
@@ -720,3 +744,377 @@ async def test_pipeline_auto_language_falls_back_to_auto_sentinel_when_provider_
         await process_audio(sample_wav, language="auto", style="normal")
 
     assert save_mock.call_args.kwargs["language"] == "auto"
+
+
+# --- Spec 033: three-layer no-speech defence -------------------------------
+#
+# The pre-model gate now has a three-way decision (VAD verdict / VAD absent /
+# VAD disabled) instead of one boolean, so it gets an explicit matrix. Every
+# test here patches BOTH detectors, so the suite is deterministic on machines
+# with and without the vendored TEN VAD binary (AC 8).
+
+
+def _silence_analysis(is_silent: bool):
+    from app.audio.analysis import SilenceAnalysis
+
+    return SilenceAnalysis(
+        peak_dbfs=-60.0 if is_silent else -12.0,
+        speech_frame_count=0 if is_silent else 30,
+        total_frame_count=33,
+        is_silent=is_silent,
+    )
+
+
+def _vad_analysis(is_silent: bool):
+    from app.audio.vad import VadAnalysis
+
+    return VadAnalysis(
+        speech_frame_count=0 if is_silent else 40,
+        total_frame_count=62,
+        max_probability=0.12 if is_silent else 0.93,
+        is_silent=is_silent,
+    )
+
+
+@pytest.mark.no_vad_stub
+@pytest.mark.asyncio
+async def test_vad_silent_energy_pass_is_discarded(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """AC-8(a): the loud-non-speech case (clicks, hum, noise). Energy passes
+    it by definition -- a loudness gate cannot see it -- and the VAD verdict
+    is what actually discards it. This is the primary hole spec 033 closes.
+
+    AC-9's full side-effect guarantee is asserted here, background tasks
+    included: today no embedding task can be scheduled because `save_entry`
+    is what schedules them, but a refactor that moved scheduling earlier
+    would otherwise regress silently on the layer that actually discards."""
+    copy_mock, save_mock = _isolate_side_effects
+    stt = _make_stt_mock("Дякую за перегляд")
+
+    bt = BackgroundTasks()
+    with (
+        patch.object(bt, "add_task") as add_task_mock,
+        patch("app.pipeline.service.analyze_silence", return_value=_silence_analysis(False)),
+        patch("app.pipeline.service.analyze_vad", return_value=_vad_analysis(True)),
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+    ):
+        result = await process_audio(
+            sample_wav, language="uk", style="normal", background_tasks=bt
+        )
+
+    assert result.discarded_reason == "silence"
+    assert result.text == ""
+    assert stt.transcribe.await_count == 0
+    copy_mock.assert_not_called()
+    save_mock.assert_not_called()
+    add_task_mock.assert_not_called()
+
+
+@pytest.mark.no_vad_stub
+@pytest.mark.asyncio
+async def test_vad_speech_vetoes_energy_false_positive(
+    sample_wav, cloud_mode, _isolate_side_effects, caplog
+):
+    """AC-8(b): the averted-false-positive case -- energy says silent (029's
+    residual -20dB quiet-speech zone), the VAD finds speech, and the VAD
+    wins. The user's words survive, and the averted FP is logged at INFO so
+    the improvement is observable in the field, not just in tests."""
+    import logging
+
+    stt = _make_stt_mock("тихе мовлення")
+
+    with (
+        patch("app.pipeline.service.analyze_silence", return_value=_silence_analysis(True)),
+        patch("app.pipeline.service.analyze_vad", return_value=_vad_analysis(False)),
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+        caplog.at_level(logging.INFO, logger="app.pipeline.service"),
+    ):
+        result = await process_audio(sample_wav, language="uk", style="normal")
+
+    assert result.discarded_reason is None
+    assert result.text == "тихе мовлення"
+    assert stt.transcribe.await_count == 1
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "averted" in full_log.lower()
+
+
+@pytest.mark.no_vad_stub
+@pytest.mark.asyncio
+async def test_vad_absent_falls_back_to_energy_verdict_bit_identically(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """AC-8(c): when the VAD abstains (no binary -- every non-Windows
+    platform and every un-fetched checkout), the energy verdict decides
+    exactly as shipped in spec 029."""
+    stt = _make_stt_mock("Дякую за перегляд")
+
+    with (
+        patch("app.pipeline.service.analyze_silence", return_value=_silence_analysis(True)),
+        patch("app.pipeline.service.analyze_vad", return_value=None),
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+    ):
+        discarded = await process_audio(sample_wav, language="uk", style="normal")
+
+    assert discarded.discarded_reason == "silence"
+    assert stt.transcribe.await_count == 0
+
+    stt2 = _make_stt_mock("привіт")
+    with (
+        patch("app.pipeline.service.analyze_silence", return_value=_silence_analysis(False)),
+        patch("app.pipeline.service.analyze_vad", return_value=None),
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt2, None)),
+    ):
+        kept = await process_audio(sample_wav, language="uk", style="normal")
+
+    assert kept.discarded_reason is None
+    assert kept.text == "привіт"
+
+
+@pytest.mark.no_vad_stub
+@pytest.mark.asyncio
+async def test_both_layers_pass_transcribes_normally(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """AC-8(d): the overwhelmingly common path -- nothing is discarded."""
+    stt = _make_stt_mock("привіт світ")
+
+    with (
+        patch("app.pipeline.service.analyze_silence", return_value=_silence_analysis(False)),
+        patch("app.pipeline.service.analyze_vad", return_value=_vad_analysis(False)),
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+    ):
+        result = await process_audio(sample_wav, language="uk", style="normal")
+
+    assert result.discarded_reason is None
+    assert result.text == "привіт світ"
+    assert stt.transcribe.await_count == 1
+
+
+@pytest.mark.no_vad_stub
+@pytest.mark.asyncio
+async def test_vad_discard_logs_deciding_layer_and_measurements(
+    sample_wav, cloud_mode, _isolate_side_effects, caplog
+):
+    """AC-9: the deciding layer must be diagnosable from the WARNING log
+    alone -- that is the entire reason all three layers can share
+    discarded_reason="silence" without a frontend change."""
+    import logging
+
+    stt = _make_stt_mock("Дякую за перегляд")
+
+    with (
+        patch("app.pipeline.service.analyze_silence", return_value=_silence_analysis(False)),
+        patch("app.pipeline.service.analyze_vad", return_value=_vad_analysis(True)),
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+        caplog.at_level(logging.WARNING, logger="app.pipeline.service"),
+    ):
+        await process_audio(sample_wav, language="uk", style="normal")
+
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "layer=vad" in full_log
+    assert "speech_hops=" in full_log
+    assert "max_prob=" in full_log
+
+
+@pytest.mark.no_vad_stub
+@pytest.mark.asyncio
+async def test_energy_discard_names_its_layer_in_the_log(
+    sample_wav, cloud_mode, _isolate_side_effects, caplog
+):
+    """AC-9: the fallback path is equally diagnosable."""
+    import logging
+
+    stt = _make_stt_mock("Дякую за перегляд")
+
+    with (
+        patch("app.pipeline.service.analyze_silence", return_value=_silence_analysis(True)),
+        patch("app.pipeline.service.analyze_vad", return_value=None),
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+        caplog.at_level(logging.WARNING, logger="app.pipeline.service"),
+    ):
+        await process_audio(sample_wav, language="uk", style="normal")
+
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "layer=energy" in full_log
+
+
+@pytest.mark.no_vad_stub
+@pytest.mark.asyncio
+async def test_vad_disabled_never_calls_analyze_vad(
+    sample_wav, cloud_mode, _isolate_side_effects, monkeypatch
+):
+    """AC-7: silence_vad_enabled=False is a real kill switch -- a field user
+    hit by a VAD false positive drops back to shipped-029 behaviour with one
+    env var and no rebuild, so the VAD must not even be invoked."""
+    stt = _make_stt_mock("привіт")
+    monkeypatch.setattr(settings.audio, "silence_vad_enabled", False)
+
+    with (
+        patch("app.pipeline.service.analyze_silence", return_value=_silence_analysis(False)),
+        patch("app.pipeline.service.analyze_vad") as vad_mock,
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+    ):
+        result = await process_audio(sample_wav, language="uk", style="normal")
+
+    assert vad_mock.call_count == 0
+    assert result.text == "привіт"
+
+
+@pytest.mark.no_vad_stub
+@pytest.mark.asyncio
+async def test_vad_runs_off_the_event_loop(sample_wav, cloud_mode, _isolate_side_effects):
+    """The VAD is synchronous CPU/IO work on EVERY call, so like
+    analyze_silence it must go through asyncio.to_thread -- a slow VAD must
+    not stall the event loop (the same YELLOW finding spec 029 fixed)."""
+    ticks = {"n": 0}
+
+    def _slow_vad(*args, **kwargs):
+        time.sleep(0.25)
+        return _vad_analysis(False)
+
+    async def _ticker():
+        while True:
+            ticks["n"] += 1
+            await asyncio.sleep(0.02)
+
+    stt = _make_stt_mock("привіт")
+    task = asyncio.create_task(_ticker())
+    try:
+        with (
+            patch("app.pipeline.service.analyze_silence", return_value=_silence_analysis(False)),
+            patch("app.pipeline.service.analyze_vad", _slow_vad),
+            patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+        ):
+            await process_audio(sample_wav, language="uk", style="normal")
+    finally:
+        task.cancel()
+
+    assert ticks["n"] > 1, "event loop was blocked during analyze_vad()"
+
+
+# --- Layer 3: post-model provider no-speech metadata (AC 19) --------------
+
+
+def _stt_mock_with_no_speech(text: str, no_speech_prob):
+    stt = MagicMock()
+    stt.transcribe = AsyncMock(
+        return_value=TranscriptionResult(text=text, no_speech_prob=no_speech_prob)
+    )
+    stt.model_name = "mock/provider"
+    stt.is_local = False
+    return stt
+
+
+@pytest.mark.asyncio
+async def test_high_no_speech_prob_discards_after_model(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """AC-19: the confidently-decoded hallucination -- the exact class
+    Whisper's own `no_speech_prob > 0.6 AND avg_logprob < -1.0` never
+    suppresses, because the AND fails on a confident decode."""
+    copy_mock, save_mock = _isolate_side_effects
+    stt = _stt_mock_with_no_speech("Дякую за перегляд!", 0.7)
+
+    bt = BackgroundTasks()
+    with (
+        patch.object(bt, "add_task") as add_task_mock,
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+    ):
+        result = await process_audio(
+            sample_wav, language="uk", style="normal", background_tasks=bt
+        )
+
+    assert result.discarded_reason == "silence"
+    assert result.text == ""
+    assert result.copied_to_clipboard is False
+    assert result.model_name == "mock/provider"
+    copy_mock.assert_not_called()
+    save_mock.assert_not_called()
+    add_task_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_no_speech_prob_exactly_at_threshold_is_kept(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """AC-19: the comparison is a strict `>`, so the boundary value keeps
+    the transcription. Fail open on ties."""
+    stt = _stt_mock_with_no_speech("реальні слова", 0.6)
+
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
+        result = await process_audio(sample_wav, language="uk", style="normal")
+
+    assert result.discarded_reason is None
+    assert result.text == "реальні слова"
+
+
+@pytest.mark.asyncio
+async def test_no_speech_prob_none_is_kept(sample_wav, cloud_mode, _isolate_side_effects):
+    """AC-19: providers with no signal on the path taken (Gemini always;
+    Groq/whisper.cpp on the explicit-language path) must never be discarded
+    by a layer that has nothing to say about them."""
+    stt = _stt_mock_with_no_speech("реальні слова", None)
+
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
+        result = await process_audio(sample_wav, language="uk", style="normal")
+
+    assert result.discarded_reason is None
+    assert result.text == "реальні слова"
+
+
+@pytest.mark.asyncio
+async def test_mixed_segments_min_keeps_transcription(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """AC-19: min-across-segments means one confident-speech segment keeps
+    the WHOLE result. This is what makes layer 3 maximally conservative on
+    real speech by construction -- a hallucinated tail after real words never
+    costs the user the real words."""
+    stt = _stt_mock_with_no_speech("справжні слова плюс галюцинація", 0.1)
+
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
+        result = await process_audio(sample_wav, language="uk", style="normal")
+
+    assert result.discarded_reason is None
+    assert result.text == "справжні слова плюс галюцинація"
+
+
+@pytest.mark.asyncio
+async def test_no_speech_discard_logs_layer_and_never_the_text(
+    sample_wav, cloud_mode, _isolate_side_effects, caplog
+):
+    """AC-19: the WARNING names the deciding layer, the threshold and the
+    measured value -- but only the LENGTH of the discarded text, never the
+    hallucinated text itself."""
+    import logging
+
+    secret = "Дякую за перегляд, підпишіться на канал"
+    stt = _stt_mock_with_no_speech(secret, 0.95)
+
+    with (
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+        caplog.at_level(logging.WARNING, logger="app.pipeline.service"),
+    ):
+        await process_audio(sample_wav, language="uk", style="normal")
+
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "layer=provider-metadata" in full_log
+    assert "0.95" in full_log
+    assert secret not in full_log
+
+
+@pytest.mark.asyncio
+async def test_no_speech_threshold_is_settings_driven(
+    sample_wav, cloud_mode, _isolate_side_effects, monkeypatch
+):
+    """AC-19: no_speech_prob_threshold is a real STTSettings field -- raising
+    it keeps a result the default would have discarded."""
+    stt = _stt_mock_with_no_speech("гранична впевненість", 0.7)
+    monkeypatch.setattr(settings.stt, "no_speech_prob_threshold", 0.9)
+
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
+        result = await process_audio(sample_wav, language="uk", style="normal")
+
+    assert result.discarded_reason is None
+    assert result.text == "гранична впевненість"

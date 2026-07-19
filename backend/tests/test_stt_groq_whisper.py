@@ -38,7 +38,7 @@ async def test_transcribe_returns_stripped_text(tmp_path):
     provider = GroqWhisperSTTProvider(_settings())
     provider._client = MagicMock()  # skip real SDK init
 
-    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("  привіт  ", None)):
+    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("  привіт  ", None, None)):
         result = await provider.transcribe(_wav(tmp_path), language="uk")
 
     assert result.text == "привіт"
@@ -50,7 +50,7 @@ async def test_transcribe_ignores_unknown_kwargs(tmp_path):
     provider = GroqWhisperSTTProvider(_settings())
     provider._client = MagicMock()
 
-    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("ok", None)):
+    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("ok", None, None)):
         result = await provider.transcribe(_wav(tmp_path), language="uk", style="ai_prompt")
 
     assert result.text == "ok"
@@ -97,7 +97,7 @@ async def test_groq_threads_initial_prompt_when_set(tmp_path):
 
     def _spy(client, model, audio_path, language, prompt):
         captured["prompt"] = prompt
-        return "ok"
+        return "ok", None, None
 
     with patch.object(GroqWhisperSTTProvider, "_call_groq", side_effect=_spy):
         await provider.transcribe(_wav(tmp_path), language="uk")
@@ -114,7 +114,7 @@ async def test_groq_omits_empty_prompt_to_avoid_400(tmp_path):
 
     def _spy(client, model, audio_path, language, prompt):
         captured["prompt"] = prompt
-        return "ok"
+        return "ok", None, None
 
     with patch.object(GroqWhisperSTTProvider, "_call_groq", side_effect=_spy):
         await provider.transcribe(_wav(tmp_path), language="uk")
@@ -196,7 +196,7 @@ def test_call_groq_escalates_to_verbose_json_for_auto(tmp_path):
     client = MagicMock()
     client.audio.transcriptions.create.return_value = MagicMock(text="hello", language="en")
 
-    text, detected = provider._call_groq(
+    text, detected, no_speech = provider._call_groq(
         client, "whisper-large-v3-turbo", _wav(tmp_path), "auto", None
     )
 
@@ -214,7 +214,7 @@ def test_call_groq_bare_string_response_has_no_detected_language(tmp_path):
     client = MagicMock()
     client.audio.transcriptions.create.return_value = "плейн текст"
 
-    text, detected = provider._call_groq(
+    text, detected, no_speech = provider._call_groq(
         client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None
     )
 
@@ -227,7 +227,7 @@ async def test_transcribe_populates_normalized_detected_language(tmp_path):
     provider = GroqWhisperSTTProvider(_settings())
     provider._client = MagicMock()
 
-    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("hello", "EN")):
+    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("hello", "EN", None)):
         result = await provider.transcribe(_wav(tmp_path), language="auto")
 
     assert result.detected_language == "en"
@@ -238,7 +238,102 @@ async def test_transcribe_detected_language_none_for_explicit_language(tmp_path)
     provider = GroqWhisperSTTProvider(_settings())
     provider._client = MagicMock()
 
-    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("привіт", None)):
+    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("привіт", None, None)):
         result = await provider.transcribe(_wav(tmp_path), language="uk")
 
     assert result.detected_language is None
+
+
+# --- Spec 033 / AC 18: no_speech_prob off the verbose_json branch ---------
+
+
+def test_call_groq_reads_min_no_speech_prob_from_object_segments(tmp_path):
+    """AC-18: the SDK returns attribute-objects on some versions -- the min
+    across segments must reach the caller."""
+    provider = GroqWhisperSTTProvider(_settings())
+    client = MagicMock()
+
+    class _Seg:
+        def __init__(self, p):
+            self.no_speech_prob = p
+
+    client.audio.transcriptions.create.return_value = MagicMock(
+        text="hello", language="en", segments=[_Seg(0.77), _Seg(0.12)]
+    )
+
+    text, detected, no_speech = provider._call_groq(
+        client, "whisper-large-v3-turbo", _wav(tmp_path), "auto", None
+    )
+
+    assert no_speech == 0.12
+    assert text == "hello"
+    assert detected == "en"
+
+
+def test_call_groq_reads_min_no_speech_prob_from_dict_segments(tmp_path):
+    """AC-18: ...and dicts on others. Both shapes, one reader."""
+    provider = GroqWhisperSTTProvider(_settings())
+    client = MagicMock()
+    client.audio.transcriptions.create.return_value = MagicMock(
+        text="hello",
+        language="en",
+        segments=[{"no_speech_prob": 0.9}, {"no_speech_prob": 0.35}],
+    )
+
+    _, _, no_speech = provider._call_groq(
+        client, "whisper-large-v3-turbo", _wav(tmp_path), "auto", None
+    )
+
+    assert no_speech == 0.35
+
+
+def test_call_groq_text_path_reports_no_no_speech_prob(tmp_path):
+    """AC-18: the explicit-language hot path uses response_format="text" --
+    a bare string with no metadata whatsoever. Escalating it to
+    verbose_json would re-open the blast radius ADR 016 bounded."""
+    provider = GroqWhisperSTTProvider(_settings())
+    client = MagicMock()
+    client.audio.transcriptions.create.return_value = "плейн текст"
+
+    text, detected, no_speech = provider._call_groq(
+        client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None
+    )
+
+    assert text == "плейн текст"
+    assert detected is None
+    assert no_speech is None
+
+
+def test_call_groq_missing_segments_fails_open(tmp_path):
+    """AC-18: Groq's inference server is closed-source and its payload shape
+    is not contractual -- a response without usable segments must yield None
+    (keep the transcription), never raise."""
+    provider = GroqWhisperSTTProvider(_settings())
+    client = MagicMock(spec=[])
+    response = MagicMock(spec=["text", "language"])
+    response.text = "hello"
+    response.language = "en"
+    client.audio = MagicMock()
+    client.audio.transcriptions = MagicMock()
+    client.audio.transcriptions.create = MagicMock(return_value=response)
+
+    _, _, no_speech = provider._call_groq(
+        client, "whisper-large-v3-turbo", _wav(tmp_path), "auto", None
+    )
+
+    assert no_speech is None
+
+
+@pytest.mark.asyncio
+async def test_transcribe_threads_no_speech_prob_onto_the_contract(tmp_path):
+    """AC-18: the value _call_groq returns actually lands on
+    TranscriptionResult, where the pipeline's layer-3 gate reads it."""
+    provider = GroqWhisperSTTProvider(_settings())
+    provider._client = MagicMock()
+
+    with patch.object(
+        GroqWhisperSTTProvider, "_call_groq", return_value=("привіт", "uk", 0.88)
+    ):
+        result = await provider.transcribe(_wav(tmp_path), language="auto")
+
+    assert result.no_speech_prob == 0.88

@@ -721,3 +721,158 @@ def test_concrete_stt_providers_declare_the_expected_is_local():
     }
     for cls, expected in expected_local.items():
         assert cls.is_local is expected, f"{cls.__name__}.is_local should be {expected}"
+
+
+# --- Spec 033 / ADR 019: no_speech_prob on the STT contract ---------------
+
+
+def test_transcription_result_defaults_no_speech_prob_to_none():
+    """AC-15: a provider that says nothing about no-speech must yield None,
+    which the pipeline treats as "keep the transcription" (fail open)."""
+    assert TranscriptionResult(text="привіт").no_speech_prob is None
+
+
+def test_min_no_speech_prob_across_dict_segments():
+    """AC-15: the contract value is the MINIMUM across segments -- the most
+    speech-like segment. One confident-speech segment therefore keeps the
+    whole result."""
+    from app.stt.base import min_no_speech_prob
+
+    segments = [{"no_speech_prob": 0.95}, {"no_speech_prob": 0.1}, {"no_speech_prob": 0.6}]
+    assert min_no_speech_prob(segments) == 0.1
+
+
+def test_min_no_speech_prob_across_attribute_objects():
+    """AC-18: Groq's SDK returns attribute-objects on some versions and
+    dicts on others -- both shapes must read identically."""
+    from app.stt.base import min_no_speech_prob
+
+    class _Seg:
+        def __init__(self, p):
+            self.no_speech_prob = p
+
+    assert min_no_speech_prob([_Seg(0.8), _Seg(0.25)]) == 0.25
+
+
+@pytest.mark.parametrize(
+    "segments",
+    [
+        None,
+        [],
+        "not a list",
+        [{}],
+        [{"text": "hi"}],
+        [{"no_speech_prob": None}],
+        [{"no_speech_prob": "high"}],
+        [object()],
+    ],
+)
+def test_min_no_speech_prob_fails_open_on_every_odd_shape(segments):
+    """AC-17: whisper.cpp builds vary in whether they populate the field at
+    all, and a shape surprise must fail OPEN (None -> keep the
+    transcription), never raise inside an already-successful transcription."""
+    from app.stt.base import min_no_speech_prob
+
+    assert min_no_speech_prob(segments) is None
+
+
+def test_min_no_speech_prob_rejects_bool_masquerading_as_number():
+    """`bool` is a subclass of `int`, so a stubbed `"no_speech_prob": false`
+    would otherwise read as 0.0 -- inventing a confident "definitely speech"
+    verdict out of a missing value."""
+    from app.stt.base import min_no_speech_prob
+
+    assert min_no_speech_prob([{"no_speech_prob": False}]) is None
+    assert min_no_speech_prob([{"no_speech_prob": True}]) is None
+
+
+def _seg(text, no_speech_prob):
+    seg = MagicMock()
+    seg.text = text
+    seg.no_speech_prob = no_speech_prob
+    return seg
+
+
+@pytest.mark.asyncio
+async def test_local_stt_reports_single_segment_no_speech_prob(sample_wav):
+    """AC-16: the whole-clip hallucination case -- one confidently-decoded
+    segment with a high no_speech_prob, which Whisper's own AND-suppression
+    never catches."""
+    provider = LocalSTTProvider(STTSettings(mode=ProviderMode.LOCAL))
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = ([_seg(" Дякую за перегляд ", 0.92)], MagicMock())
+    provider._model = mock_model
+
+    result = await provider.transcribe(sample_wav, language="uk")
+
+    assert result.no_speech_prob == 0.92
+    assert result.text == "Дякую за перегляд"
+
+
+@pytest.mark.asyncio
+async def test_local_stt_reports_min_across_mixed_segments(sample_wav):
+    """AC-16: min across segments -- one confident-speech segment (0.1)
+    keeps the whole result despite a hallucination-looking sibling (0.95)."""
+    provider = LocalSTTProvider(STTSettings(mode=ProviderMode.LOCAL))
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = (
+        [_seg(" галюцинація ", 0.95), _seg(" справжні слова ", 0.1)],
+        MagicMock(),
+    )
+    provider._model = mock_model
+
+    result = await provider.transcribe(sample_wav, language="uk")
+
+    assert result.no_speech_prob == 0.1
+    assert result.text == "галюцинація справжні слова"
+
+
+@pytest.mark.asyncio
+async def test_local_stt_rejects_bool_no_speech_prob(sample_wav):
+    """AC-16: the local provider's lazy-generator loop cannot reuse
+    `min_no_speech_prob`, but it must not drift from its defensiveness
+    either -- `False` is a subclass of `int` and would otherwise read as
+    0.0, inventing a confident "definitely speech" verdict out of a missing
+    value. Both readers now share `coerce_no_speech_prob`."""
+    provider = LocalSTTProvider(STTSettings(mode=ProviderMode.LOCAL))
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = ([_seg(" привіт ", False)], MagicMock())
+    provider._model = mock_model
+
+    result = await provider.transcribe(sample_wav, language="uk")
+
+    assert result.no_speech_prob is None
+    assert result.text == "привіт"
+
+
+@pytest.mark.asyncio
+async def test_local_stt_no_speech_prob_is_none_for_zero_segments(sample_wav):
+    """AC-16: no segments -> no signal -> None (kept, never discarded)."""
+    provider = LocalSTTProvider(STTSettings(mode=ProviderMode.LOCAL))
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = ([], MagicMock())
+    provider._model = mock_model
+
+    result = await provider.transcribe(sample_wav, language="uk")
+
+    assert result.no_speech_prob is None
+    assert result.text == ""
+
+
+@pytest.mark.asyncio
+async def test_local_stt_consumes_lazy_segment_generator_only_once(sample_wav):
+    """AC-16: faster-whisper returns a LAZY generator -- collecting
+    no_speech_prob must happen in the same single pass that builds the text.
+    A second iteration would silently yield empty text."""
+    provider = LocalSTTProvider(STTSettings(mode=ProviderMode.LOCAL))
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = (
+        iter([_seg(" привіт ", 0.3), _seg(" світ ", 0.2)]),
+        MagicMock(),
+    )
+    provider._model = mock_model
+
+    result = await provider.transcribe(sample_wav, language="uk")
+
+    assert result.text == "привіт світ"
+    assert result.no_speech_prob == 0.2

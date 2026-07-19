@@ -11,7 +11,12 @@ import logging
 import threading
 from pathlib import Path
 
-from app.stt.base import STTProvider, TranscriptionResult, normalize_detected_language
+from app.stt.base import (
+    STTProvider,
+    TranscriptionResult,
+    coerce_no_speech_prob,
+    normalize_detected_language,
+)
 from app.stt.config import STTSettings
 
 log = logging.getLogger(__name__)
@@ -147,7 +152,7 @@ class LocalSTTProvider(STTProvider):
             f"{len(glossary)}chars" if glossary else "none",
         )
 
-        def _transcribe() -> tuple[str, str | None]:
+        def _transcribe() -> tuple[str, str | None, float | None]:
             segments, info = model.transcribe(
                 str(audio_path),
                 language=whisper_language,
@@ -157,14 +162,29 @@ class LocalSTTProvider(STTProvider):
                 no_repeat_ngram_size=3,
                 initial_prompt=glossary,
             )
-            text = " ".join(segment.text.strip() for segment in segments)
-            return text, info.language
+            # `segments` is a lazy generator -- collect per-segment
+            # no_speech_prob during the SAME single pass that builds the
+            # text, never by iterating twice (the generator is consumed).
+            # Spec 033 / ADR 019: this metadata used to be thrown away here.
+            parts: list[str] = []
+            no_speech_probs: list[float] = []
+            for segment in segments:
+                parts.append(segment.text.strip())
+                probability = coerce_no_speech_prob(
+                    getattr(segment, "no_speech_prob", None)
+                )
+                if probability is not None:
+                    no_speech_probs.append(probability)
+            text = " ".join(parts)
+            # min = the most speech-like segment; None for zero segments.
+            return text, info.language, min(no_speech_probs) if no_speech_probs else None
 
-        text, detected_raw = await asyncio.to_thread(_transcribe)
+        text, detected_raw, no_speech_prob = await asyncio.to_thread(_transcribe)
         return TranscriptionResult(
             text=text,
             tokens_used=None,
             detected_language=normalize_detected_language(detected_raw),
+            no_speech_prob=no_speech_prob,
         )
 
     def cleanup(self) -> None:

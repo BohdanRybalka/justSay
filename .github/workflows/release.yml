@@ -72,9 +72,35 @@ jobs:
           pip install -e ".[cloud,audio]"
           pip install pyinstaller
 
+      # TEN VAD neural silence gate (spec 033 / ADR 019). Windows-only: it is
+      # the only platform this project ships the prebuilt library for (no
+      # macOS hardware exists here to verify a framework bundle against).
+      # MUST run BEFORE the PyInstaller step — build_sidecar.spec bundles the
+      # DLL only when backend/vendor/ten-vad/ already exists, and tolerates
+      # its absence so from-source builds still work. That tolerance is
+      # exactly why the post-build assertion below is not optional.
+      - name: Fetch TEN VAD library (Windows)
+        if: runner.os == 'Windows'
+        run: python backend/scripts/fetch_ten_vad.py
+
       - name: Build PyInstaller sidecar
         working-directory: backend
         run: pyinstaller --clean --noconfirm build_sidecar.spec
+
+      # Mirrors the sqlite-vec precedent: assert the shipped artifact
+      # actually contains the DLL, so a regression in the fetch step (or a
+      # silently changed upstream layout) fails the release loudly instead
+      # of shipping a Windows build whose neural VAD is quietly inert.
+      - name: Verify TEN VAD bundled in frozen sidecar (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          DLL="backend/dist/justsay-backend/_internal/ten_vad/ten_vad.dll"
+          if [ ! -f "$DLL" ]; then
+            echo "ERROR: $DLL missing — the Windows sidecar would ship without the neural VAD."
+            exit 1
+          fi
+          echo "OK: $DLL present ($(wc -c < "$DLL") bytes)"
 
       # Mirrors the v0.8.0 local-3.10 smoke matrix against the CI-built
       # 3.12 artifact: bind-test port 9377, launch the frozen sidecar,

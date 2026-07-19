@@ -14,6 +14,15 @@ class TranscriptionResult:
     # (Gemini) or normalization didn't recognise the raw value.
     # See docs/adr/016-detected-language-on-stt-contract.md.
     detected_language: str | None = field(default=None)
+    # The MINIMUM `no_speech_prob` across the provider's returned segments —
+    # i.e. the most speech-like segment's no-speech probability. `None` when
+    # the provider has no such signal on the path taken, or returned zero
+    # segments. Min (not mean/max) is what makes the pipeline's post-model
+    # gate maximally conservative on real speech: one confident-speech
+    # segment keeps the entire result, while the whole-clip hallucination
+    # case (typically a single high-no_speech_prob segment) is still caught.
+    # See docs/adr/019-ten-vad-neural-silence-gate.md.
+    no_speech_prob: float | None = field(default=None)
 
 
 def normalize_detected_language(raw: str | None) -> str | None:
@@ -51,6 +60,62 @@ def normalize_detected_language(raw: str | None) -> str | None:
 
     name_to_code = {name.lower(): code for code, name in LANGUAGE_NAMES.items()}
     return name_to_code.get(candidate) or name_to_code.get(primary)
+
+
+def coerce_no_speech_prob(value) -> float | None:
+    """Coerce one raw ``no_speech_prob`` value to a float, or ``None``.
+
+    ``bool`` is excluded explicitly: it is a subclass of ``int``, so a
+    stubbed ``"no_speech_prob": false`` would otherwise read as 0.0 — a
+    confident "definitely speech" verdict invented out of a missing value,
+    which the pipeline's post-model gate would then trust.
+
+    Shared by `min_no_speech_prob` (the ``verbose_json`` readers) and
+    `LocalSTTProvider._transcribe`'s lazy-generator loop, which cannot reuse
+    the aggregate helper but must not drift from its defensiveness.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def min_no_speech_prob(segments) -> float | None:
+    """Minimum ``no_speech_prob`` across ``segments``, or ``None``.
+
+    Shared by the two providers that read this off a ``verbose_json``
+    payload (`WhisperCppVulkanSTTProvider`, `GroqWhisperSTTProvider`) — one
+    defensive reader rather than two drifting copies.
+
+    Deliberately total: ``None``/non-sequence input, an empty list, segments
+    that are neither dicts nor attribute-objects, and a missing or
+    non-numeric ``no_speech_prob`` field all yield ``None`` rather than
+    raising. whisper.cpp builds vary in whether they populate the field at
+    all, and Groq's SDK returns attribute-objects or dicts depending on
+    version — a shape surprise must fail OPEN (keep the transcription), never
+    break a transcription that already succeeded.
+
+    Only ``list``/``tuple`` are accepted by design: any other sequence type a
+    future provider version might return (generator, pydantic sequence) fails
+    open to ``None`` rather than being consumed speculatively.
+
+    Per-value coercion — including the ``bool`` exclusion — is delegated to
+    `coerce_no_speech_prob`.
+    """
+    if not isinstance(segments, (list, tuple)):
+        return None
+
+    values: list[float] = []
+    for segment in segments:
+        if isinstance(segment, dict):
+            raw = segment.get("no_speech_prob")
+        else:
+            raw = getattr(segment, "no_speech_prob", None)
+        probability = coerce_no_speech_prob(raw)
+        if probability is not None:
+            values.append(probability)
+    return min(values) if values else None
 
 
 class STTProvider(ABC):
@@ -116,6 +181,21 @@ class STTProvider(ABC):
                   explicit-language requests. Always ``None`` otherwise.
                 - ``GeminiSTTProvider``: always ``None`` — no structured
                   language field exists at any setting.
+
+            ``no_speech_prob`` (min across segments) is populated just as
+            unevenly, and for the same wire-format reasons:
+                - ``LocalSTTProvider``: always — faster-whisper's
+                  ``Segment.no_speech_prob`` is on every segment.
+                - ``WhisperCppVulkanSTTProvider`` / ``GroqWhisperSTTProvider``:
+                  only when ``language == "auto"`` (the only path that uses
+                  ``verbose_json``), and read defensively there — whisper.cpp
+                  builds vary in whether the field carries a live value, and a
+                  missing/stubbed field yields ``None``, never an exception.
+                - ``GeminiSTTProvider``: always ``None`` — no structured
+                  no-speech signal at any setting (ADR 016).
+                - ``MLXWhisperSTTProvider``: always ``None`` in this spec —
+                  the signal exists upstream but no macOS hardware exists to
+                  verify it against (spec 033, Cuts).
         """
 
     def cleanup(self) -> None:
