@@ -422,28 +422,27 @@ async def test_warm_gpu_probe_cache_swallows_probe_failure(monkeypatch):
     await _warm_gpu_probe_cache()  # must not raise
 
 
-def test_lifespan_schedules_gpu_probe_warmup_task(monkeypatch):
-    """Confirms app.main.lifespan() actually schedules _warm_gpu_probe_cache()
-    at startup -- not just that the helper itself works in isolation."""
-    import asyncio
+def test_lifespan_schedules_gpu_probe_warmup_task(spawn_spy):
+    """Confirms app.main.lifespan() actually schedules both of its
+    fire-and-forget call sites (the GPU-probe warm-up and the vector-store
+    background indexer sweep) through app.core.tasks.spawn_background_task
+    -- not just that the underlying coroutines work in isolation.
 
+    Rewritten for Spec 032 (AC 7, AC 13): spies on the shared helper instead
+    of monkeypatching the stdlib asyncio.create_task globally, since both
+    lifespan() call sites now route through spawn_background_task() rather
+    than calling asyncio.create_task() directly. Uses the shared `spawn_spy`
+    fixture (conftest.py) rather than a locally-defined spy closure (GitHub
+    review finding 3).
+    """
     import app.main as main_module
     from fastapi.testclient import TestClient
-
-    scheduled = []
-    real_create_task = asyncio.create_task
-
-    def _capturing_create_task(coro, *a, **kw):
-        scheduled.append(coro)
-        return real_create_task(coro, *a, **kw)
-
-    monkeypatch.setattr(main_module.asyncio, "create_task", _capturing_create_task)
 
     with TestClient(main_module.app):
         pass
 
-    coro_names = [getattr(c, "__qualname__", "") for c in scheduled]
-    assert any("_warm_gpu_probe_cache" in name for name in coro_names)
+    assert "gpu-probe-warmup" in spawn_spy.names
+    assert "vector-store-indexer" in spawn_spy.names
 
 
 def test_clear_cache_forces_a_fresh_probe_on_next_call(monkeypatch):

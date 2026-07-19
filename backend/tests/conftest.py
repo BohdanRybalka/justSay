@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 
@@ -43,6 +44,44 @@ async def client():
         transport=ASGITransport(app=app), base_url="http://test"
     ) as ac:
         yield ac
+
+
+class _SpawnSpy:
+    """Records each call `app.core.tasks.spawn_background_task()` makes while
+    patched in: the `name` it was given, and the real `asyncio.Task` object
+    it returned. `.tasks` exists specifically so a test can await the exact
+    tasks it spawned rather than everything pending on the loop (Spec 032,
+    GitHub review finding 1)."""
+
+    def __init__(self) -> None:
+        self.names: list[str] = []
+        self.tasks: list[asyncio.Task] = []
+
+
+@pytest.fixture
+def spawn_spy(monkeypatch):
+    """Spy on `app.core.tasks.spawn_background_task`, still calling through
+    to the real implementation (Spec 032, GitHub review finding 3 -- shared
+    fixture instead of a `_spy` closure copy-pasted at each call site).
+
+    `main.py` and `local_setup.py` both do `from app.core import tasks` and
+    call `tasks.spawn_background_task(...)` -- there is only one
+    `app.core.tasks` module object, so patching its attribute here is visible
+    through either module's `tasks` reference.
+    """
+    from app.core import tasks
+
+    spy = _SpawnSpy()
+    real_spawn = tasks.spawn_background_task
+
+    def _spy(coro, *, name):
+        task = real_spawn(coro, name=name)
+        spy.names.append(name)
+        spy.tasks.append(task)
+        return task
+
+    monkeypatch.setattr(tasks, "spawn_background_task", _spy)
+    return spy
 
 
 # --- Spec 028 Item 1: app-data path isolation -------------------------------
@@ -403,7 +442,12 @@ def _no_prewarm_by_default(monkeypatch, request):
     `ensure_local_ready`/`await_local_ready` too. It holds an `asyncio.Task`
     bound to the test's own event loop; left stale, a later test could try
     to `asyncio.shield()` a task from an already-closed loop.
+
+    Also clears `app.core.tasks._background_tasks` (Spec 032, AC 14) for the
+    same reason -- a strong-referenced `asyncio.Task` bound to a test's own
+    (now-closed) event loop must not survive into the next test.
     """
+    from app.core import tasks
     from app.stt import local_setup
 
     if not request.node.get_closest_marker("prewarm"):
@@ -414,6 +458,7 @@ def _no_prewarm_by_default(monkeypatch, request):
     yield
     local_setup._prewarm_error = None
     local_setup._active_load = None
+    tasks._background_tasks.clear()
 
 
 @pytest.fixture(autouse=True)

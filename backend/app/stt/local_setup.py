@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from app.core import tasks
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
 from app.stt.config import STTSettings
@@ -166,7 +167,7 @@ def maybe_prewarm_local(stt_settings: STTSettings) -> None:
     if stt_settings.mode != ProviderMode.LOCAL:
         return
     _write_consecutive_incomplete_prewarms(0)
-    asyncio.create_task(ensure_local_ready(stt_settings))
+    tasks.spawn_background_task(ensure_local_ready(stt_settings), name="local-stt-prewarm")
 
 
 MAX_CONSECUTIVE_INCOMPLETE_PREWARMS = 2
@@ -234,7 +235,9 @@ def maybe_prewarm_local_at_startup(stt_settings: STTSettings) -> None:
         return
 
     _write_consecutive_incomplete_prewarms(consecutive + 1)
-    asyncio.create_task(_prewarm_then_clear_crash_guard(stt_settings))
+    tasks.spawn_background_task(
+        _prewarm_then_clear_crash_guard(stt_settings), name="local-stt-prewarm-startup"
+    )
 
 
 async def _prewarm_then_clear_crash_guard(stt_settings: STTSettings) -> None:
@@ -295,6 +298,15 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
     task is still running finds it in ``_active_load`` and re-joins it
     instead of starting a genuinely second ``_get_model()`` call.
 
+    That ``asyncio.create_task()`` call (unlike every other fire-and-forget
+    call site in this module, which route through
+    ``app.core.tasks.spawn_background_task()``, Spec 032) is deliberately
+    left bare: ``_active_load`` already holds its own strong reference for
+    the task's whole lifetime, and its exception is already retrieved via
+    the ``asyncio.shield()`` below, so wrapping it in the shared helper
+    would add a redundant registry entry and a redundant exception
+    retrieval for no correctness gain.
+
     ``asyncio.shield()`` is called from *inside* the ``_prewarm_lock``
     block, matching the lock's original scope, deliberately: moving it
     outside would let a second caller's own ``get_provider()`` lookup run
@@ -341,6 +353,7 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
             or _active_load[0] is not provider
             or _active_load[1].done()
         ):
+            # background-task-ok: strong ref held in _active_load; awaited via shield()
             _active_load = (provider, asyncio.create_task(_run_get_model(provider)))
         load_task = _active_load[1]
 
