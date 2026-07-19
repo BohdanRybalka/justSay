@@ -74,9 +74,10 @@ class AudioSettings(BaseSettings):
 
     # Neural VAD front gate (spec 033 / docs/adr/019-ten-vad-neural-silence-gate.md).
     # Layered IN FRONT of the energy thresholds above, which are kept
-    # verbatim as the cheap first gate and the sole fallback wherever the
-    # TEN VAD binary is absent (every non-Windows platform, and any checkout
-    # that never ran backend/scripts/fetch_ten_vad.py).
+    # verbatim but, since ADR 020, execute only as a lazy fallback when the
+    # VAD abstains -- making them the sole gate wherever the TEN VAD binary is
+    # absent (every non-Windows platform, and any checkout that never ran
+    # backend/scripts/fetch_ten_vad.py).
     #
     # silence_vad_enabled is a kill switch, not a feature flag: a field user
     # hit by a VAD false positive drops back to shipped-029 behaviour with

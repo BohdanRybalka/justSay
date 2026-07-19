@@ -54,12 +54,13 @@ async def set_stt_mode(body: _ModeBody):
 async def transcribe_audio(file: UploadFile, language: str = "uk"):
     """Transcribe an uploaded audio file using the current STT provider.
 
-    Deliberately NOT covered by the pipeline's silence guard
-    (`app.pipeline.service.process_audio`'s `analyze_silence` check) --
-    this is a raw provider-passthrough dev/test surface with no frontend
-    caller, and a guard here would mask the very provider behaviour someone
-    would be using this endpoint to observe. See
-    docs/adr/015-pipeline-level-silence-guard.md.
+    Deliberately NOT covered by the pipeline's silence gate
+    (`app.pipeline.service.process_audio`'s neural VAD, with `analyze_silence`
+    as the lazy fallback when the VAD abstains) -- this is a raw
+    provider-passthrough dev/test surface with no frontend caller, and a gate
+    here would mask the very provider behaviour someone would be using this
+    endpoint to observe. See docs/adr/015-pipeline-level-silence-guard.md and
+    020-lazy-energy-guard-fallback.md.
     """
     ext = Path(file.filename).suffix.lower() if file.filename else ""
     # Read first so we can validate magic bytes, not just the filename.
