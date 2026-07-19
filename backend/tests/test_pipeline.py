@@ -778,12 +778,13 @@ def _vad_analysis(is_silent: bool):
 
 @pytest.mark.no_vad_stub
 @pytest.mark.asyncio
-async def test_vad_silent_energy_pass_is_discarded(
+async def test_vad_silent_verdict_is_discarded(
     sample_wav, cloud_mode, _isolate_side_effects
 ):
-    """AC-8(a): the loud-non-speech case (clicks, hum, noise). Energy passes
-    it by definition -- a loudness gate cannot see it -- and the VAD verdict
-    is what actually discards it. This is the primary hole spec 033 closes.
+    """AC-8(a): the loud-non-speech case (clicks, hum, noise) -- the primary
+    hole spec 033 closes. A loudness gate cannot see this input at all; since
+    spec 034 / ADR 020 the energy guard is not even asked, because the VAD
+    verdict decides on its own.
 
     AC-9's full side-effect guarantee is asserted here, background tasks
     included: today no embedding task can be scheduled because `save_entry`
@@ -795,7 +796,6 @@ async def test_vad_silent_energy_pass_is_discarded(
     bt = BackgroundTasks()
     with (
         patch.object(bt, "add_task") as add_task_mock,
-        patch("app.pipeline.service.analyze_silence", return_value=_silence_analysis(False)),
         patch("app.pipeline.service.analyze_vad", return_value=_vad_analysis(True)),
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
     ):
@@ -813,30 +813,91 @@ async def test_vad_silent_energy_pass_is_discarded(
 
 @pytest.mark.no_vad_stub
 @pytest.mark.asyncio
-async def test_vad_speech_vetoes_energy_false_positive(
-    sample_wav, cloud_mode, _isolate_side_effects, caplog
+async def test_vad_speech_verdict_skips_energy_pass_entirely(
+    sample_wav, cloud_mode, _isolate_side_effects
 ):
-    """AC-8(b): the averted-false-positive case -- energy says silent (029's
-    residual -20dB quiet-speech zone), the VAD finds speech, and the VAD
-    wins. The user's words survive, and the averted FP is logged at INFO so
-    the improvement is observable in the field, not just in tests."""
-    import logging
+    """Spec 034 AC-4, the successor to spec 033's AC-8(b).
 
+    This test used to assert an INFO log ("energy guard false positive
+    averted by VAD"). Spec 034 / ADR 020 removed that log together with the
+    energy pass that fed it: the energy guard is now invoked ONLY when the
+    VAD abstains, so on a VAD-speech verdict there is no energy verdict to
+    be wrong and nothing to avert. The log's premise stopped existing.
+
+    What survives is the stronger property. The verdict half is unchanged
+    (quiet speech the energy guard would have eaten is transcribed), and it
+    is now pinned end-to-end against the REAL detectors and the real -20dB
+    window by test_vad.py::test_averted_energy_false_positive_is_not_
+    discarded_end_to_end, which spec 034 left untouched. On top of that we
+    pin the new invariant: energy is not merely overridden, it is never
+    called."""
     stt = _make_stt_mock("тихе мовлення")
 
     with (
-        patch("app.pipeline.service.analyze_silence", return_value=_silence_analysis(True)),
+        patch("app.pipeline.service.analyze_silence") as energy_mock,
         patch("app.pipeline.service.analyze_vad", return_value=_vad_analysis(False)),
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
-        caplog.at_level(logging.INFO, logger="app.pipeline.service"),
     ):
         result = await process_audio(sample_wav, language="uk", style="normal")
 
     assert result.discarded_reason is None
     assert result.text == "тихе мовлення"
     assert stt.transcribe.await_count == 1
-    full_log = "\n".join(r.getMessage() for r in caplog.records)
-    assert "averted" in full_log.lower()
+    assert energy_mock.call_count == 0, (
+        "ADR 020 VIOLATED — the energy guard ran despite a VAD verdict being "
+        "available. Its verdict would be overridden anyway, and computing it "
+        "costs a full-file decode (1707ms on a 6.4min upload)."
+    )
+
+
+@pytest.mark.no_vad_stub
+@pytest.mark.parametrize("vad_is_silent", [True, False])
+@pytest.mark.asyncio
+async def test_energy_pass_is_skipped_whenever_the_vad_has_a_verdict(
+    sample_wav, cloud_mode, _isolate_side_effects, vad_is_silent
+):
+    """AC-1: the lazy-fallback ordering, pinned in BOTH verdict directions.
+
+    A VAD verdict — silent or speech — decides on its own, so the energy
+    decode must not be paid at all. Parametrized because a naive
+    implementation could easily skip energy on one branch and still run it
+    on the other."""
+    stt = _make_stt_mock("привіт")
+
+    with (
+        patch("app.pipeline.service.analyze_silence") as energy_mock,
+        patch("app.pipeline.service.analyze_vad", return_value=_vad_analysis(vad_is_silent)),
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+    ):
+        result = await process_audio(sample_wav, language="uk", style="normal")
+
+    assert energy_mock.call_count == 0
+    assert result.discarded_reason == ("silence" if vad_is_silent else None)
+
+
+@pytest.mark.no_vad_stub
+@pytest.mark.asyncio
+async def test_energy_pass_runs_exactly_once_when_the_vad_abstains(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """AC-1, the other half: abstention is what makes the fallback fire.
+
+    The no-DLL path (every non-Windows platform, every un-fetched checkout)
+    depends on this — there the energy guard is the sole authority, not a
+    vestige."""
+    stt = _make_stt_mock("привіт")
+
+    with (
+        patch(
+            "app.pipeline.service.analyze_silence", return_value=_silence_analysis(False)
+        ) as energy_mock,
+        patch("app.pipeline.service.analyze_vad", return_value=None),
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+    ):
+        result = await process_audio(sample_wav, language="uk", style="normal")
+
+    assert energy_mock.call_count == 1
+    assert result.text == "привіт"
 
 
 @pytest.mark.no_vad_stub
@@ -873,14 +934,17 @@ async def test_vad_absent_falls_back_to_energy_verdict_bit_identically(
 
 @pytest.mark.no_vad_stub
 @pytest.mark.asyncio
-async def test_both_layers_pass_transcribes_normally(
+async def test_vad_speech_verdict_transcribes_normally(
     sample_wav, cloud_mode, _isolate_side_effects
 ):
-    """AC-8(d): the overwhelmingly common path -- nothing is discarded."""
+    """AC-8(d): the overwhelmingly common path -- nothing is discarded.
+
+    Named "both layers pass" until spec 034; since ADR 020 only one layer
+    runs here -- the VAD's speech verdict is enough on its own and the energy
+    guard is never invoked."""
     stt = _make_stt_mock("привіт світ")
 
     with (
-        patch("app.pipeline.service.analyze_silence", return_value=_silence_analysis(False)),
         patch("app.pipeline.service.analyze_vad", return_value=_vad_analysis(False)),
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
     ):
@@ -904,7 +968,6 @@ async def test_vad_discard_logs_deciding_layer_and_measurements(
     stt = _make_stt_mock("Дякую за перегляд")
 
     with (
-        patch("app.pipeline.service.analyze_silence", return_value=_silence_analysis(False)),
         patch("app.pipeline.service.analyze_vad", return_value=_vad_analysis(True)),
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
         caplog.at_level(logging.WARNING, logger="app.pipeline.service"),
@@ -963,6 +1026,46 @@ async def test_vad_disabled_never_calls_analyze_vad(
 
 @pytest.mark.no_vad_stub
 @pytest.mark.asyncio
+async def test_vad_disabled_still_discards_on_the_energy_verdict(
+    sample_wav, cloud_mode, _isolate_side_effects, monkeypatch
+):
+    """Spec 034 review YELLOW-1: the kill switch must leave a WORKING gate.
+
+    `test_vad_disabled_never_calls_analyze_vad` above pins only that the VAD
+    is not invoked, on a NON-silent energy verdict — so it cannot fail if the
+    energy pass stops running too. Spec 034 is the change that made that
+    invocation conditional, and this is the branch it made conditional:
+    `silence_vad_enabled=False` is exactly what a field user flips when the
+    VAD misbehaves, and it must fall back to shipped-029 behaviour, not to no
+    gate at all. Narrowing service.py's fallback condition to
+    `if vad is None and settings.audio.silence_vad_enabled:` fails here."""
+    copy_mock, save_mock = _isolate_side_effects
+    stt = _make_stt_mock("Дякую за перегляд")
+    monkeypatch.setattr(settings.audio, "silence_vad_enabled", False)
+
+    with (
+        patch(
+            "app.pipeline.service.analyze_silence", return_value=_silence_analysis(True)
+        ) as energy_mock,
+        patch("app.pipeline.service.analyze_vad") as vad_mock,
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+    ):
+        result = await process_audio(sample_wav, language="uk", style="normal")
+
+    assert vad_mock.call_count == 0
+    assert energy_mock.call_count == 1, (
+        "the kill switch disabled the VAD *and* the energy guard — with "
+        "silence_vad_enabled=False there is no silence gate left at all"
+    )
+    assert result.discarded_reason == "silence"
+    assert result.text == ""
+    assert stt.transcribe.await_count == 0
+    copy_mock.assert_not_called()
+    save_mock.assert_not_called()
+
+
+@pytest.mark.no_vad_stub
+@pytest.mark.asyncio
 async def test_vad_runs_off_the_event_loop(sample_wav, cloud_mode, _isolate_side_effects):
     """The VAD is synchronous CPU/IO work on EVERY call, so like
     analyze_silence it must go through asyncio.to_thread -- a slow VAD must
@@ -982,7 +1085,6 @@ async def test_vad_runs_off_the_event_loop(sample_wav, cloud_mode, _isolate_side
     task = asyncio.create_task(_ticker())
     try:
         with (
-            patch("app.pipeline.service.analyze_silence", return_value=_silence_analysis(False)),
             patch("app.pipeline.service.analyze_vad", _slow_vad),
             patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
         ):

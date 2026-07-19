@@ -18,6 +18,8 @@ skip reason will say why.
 """
 
 import ctypes
+import math
+import statistics
 import threading
 import time
 from pathlib import Path
@@ -889,4 +891,153 @@ def test_cold_cache_stampede_loads_the_library_exactly_once(tmp_path, monkeypatc
     assert loads["n"] == 1, (
         f"AC 14(c) VIOLATED — {loads['n']} library loads for 4 concurrent cold-cache "
         "calls; the cache must be read and written under _library_lock"
+    )
+
+
+# --- Spec 034 AC 7-8: the lazy-energy-fallback gate latency ----------------
+#
+# These measure the WHOLE pre-model gate through the real `process_audio`,
+# not `analyze_vad` in isolation — the point of spec 034 is orchestration, so
+# a detector-only measurement would be blind to it. They live in test_vad.py
+# rather than test_pipeline.py on purpose: this file is outside that module's
+# autouse `_vad_abstains` fixture, so BOTH detectors are real here.
+#
+# Shipped ordering paid >= 1707ms for the energy pass alone on the full
+# sample (spec 033 Deviations, AC 14). Ceilings below are deliberately
+# generous against expected ~16-50ms; the recorded medians in plan.md's
+# Deviations are what actually show the win.
+
+
+# A real full scan of 300s of hum measured ~1.7s (spec 033). Anything under
+# this is not a scan at all -- it is analyze_vad's fail-open path returning
+# immediately, which makes the contention test both vacuous and a hot spin.
+_MIN_CONTENTION_SCAN_S = 0.05
+
+
+async def _median_gate_ms(path: Path, duration: float, runs: int = 5) -> float:
+    """Median wall time of `process_audio` over `path`, gate work only.
+
+    Routing, clipboard and history are patched out, and ``audio_duration`` is
+    passed explicitly so `detect_duration` never runs — what is left inside
+    the timed region is the silence gate plus mock overhead."""
+    stt = MagicMock()
+    stt.transcribe = AsyncMock(return_value=TranscriptionResult(text="ok"))
+    stt.model_name = "mock/provider"
+    stt.is_local = False
+
+    samples: list[float] = []
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)), \
+            patch("app.pipeline.service.pyperclip.copy"), \
+            patch("app.pipeline.service.save_entry"):
+        # Warm the cached library handle and the OS file cache; the autouse
+        # _reset_library_cache fixture means every test starts cold.
+        await process_audio(path, language="uk", style="normal", audio_duration=duration)
+        for _ in range(runs):
+            started = time.perf_counter()
+            await process_audio(
+                path, language="uk", style="normal", audio_duration=duration
+            )
+            samples.append((time.perf_counter() - started) * 1000)
+    return statistics.median(samples)
+
+
+@_requires_dll
+@_requires_sample
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_gate_latency_on_full_real_sample_solo():
+    """AC-7: the headline number. The full ~6.4min sample through the real
+    pipeline must clear the gate in <= 500ms median of 5.
+
+    Before spec 034 this path paid the energy guard's full-file decode
+    (1707ms) and then threw the verdict away, because the VAD's verdict
+    outranks it whenever one exists. Now the energy pass is never invoked and
+    the VAD early-exits on the speech at the front."""
+    median_ms = await _median_gate_ms(_TRAIN_AUDIO_MP3, duration=384.0)
+
+    assert median_ms <= 500.0, (
+        f"AC 7 VIOLATED — the pre-model gate took {median_ms:.1f}ms (median of 5) on the "
+        "full sample. Shipped-033 ordering paid >=1707ms here; a number in that range "
+        "means the energy pass is running again despite a VAD verdict (ADR 020)."
+    )
+
+
+@_requires_dll
+@_requires_sample
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_gate_latency_on_full_real_sample_under_contention(tmp_path):
+    """AC-8: the same measurement while a full scan hogs the library.
+
+    Spec 033's lesson, applied to the gate rather than the detector: a
+    single-threaded measurement is structurally blind to a lock convoy (the
+    whole-scan lock measured 15.2ms solo and 1628.9ms under contention). The
+    background input is 300s of hum, which scores zero speech hops and so can
+    never early-exit — the contention window cannot close and let this pass
+    vacuously."""
+    long_path = _hum_wav(tmp_path / "long_hum.wav", 300)
+
+    in_flight = threading.Event()
+    stop = threading.Event()
+    fastest_scan = {"s": math.inf}
+
+    def _long_scans():
+        while not stop.is_set():
+            started = time.perf_counter()
+            analyze_vad(long_path, AudioSettings())
+            elapsed = time.perf_counter() - started
+            fastest_scan["s"] = min(fastest_scan["s"], elapsed)
+            in_flight.set()
+            # analyze_vad fails open in MICROSECONDS on a library error, which
+            # would turn this loop into a hot spin: it would burn a core for
+            # the rest of the run and skew the very measurement it exists to
+            # create. `stop.wait` doubles as the sleep and the exit check.
+            if elapsed < _MIN_CONTENTION_SCAN_S:
+                stop.wait(0.05)
+
+    worker = threading.Thread(target=_long_scans, daemon=True)
+    worker.start()
+    try:
+        assert in_flight.wait(timeout=120), "the background long scan never got going"
+        median_ms = await _median_gate_ms(_TRAIN_AUDIO_MP3, duration=384.0)
+    finally:
+        stop.set()
+        worker.join(timeout=120)
+
+    assert not worker.is_alive(), (
+        "the background scan thread did not stop within 120s — it would leak "
+        "into every test that runs after this one"
+    )
+    assert fastest_scan["s"] >= _MIN_CONTENTION_SCAN_S, (
+        f"the background scan returned in {fastest_scan['s'] * 1000:.1f}ms, i.e. it failed "
+        "open instead of scanning 300s of hum — there was no contention to measure and "
+        "this test would have passed vacuously"
+    )
+
+    assert median_ms <= 750.0, (
+        f"AC 8 VIOLATED — the pre-model gate took {median_ms:.1f}ms (median of 5) on the "
+        "full sample while a 300s scan was in flight (ceiling 750ms = AC 7's 500ms plus "
+        "a 250ms contention allowance)."
+    )
+
+
+@_requires_dll
+@_requires_sample
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_gate_latency_on_dictation_length_clip(tmp_path):
+    """AC-8's second half: the reorder must not have regressed dictation.
+
+    A 3s speech-bearing slice of the real sample — the Instant Prompt shape —
+    held to spec 033's own AC 14(b) ceiling of 250ms. Dictation always paid
+    the smaller energy cost, so this is the guard against the reorder
+    trading a file-upload win for a dictation loss."""
+    audio = _speech_16k_mono()
+    path = _write_wav(tmp_path / "dictation.wav", audio[:16000 * 3])
+
+    median_ms = await _median_gate_ms(path, duration=3.0)
+
+    assert median_ms <= 250.0, (
+        f"AC 8 VIOLATED — a 3s dictation-length clip took {median_ms:.1f}ms (median of 5) "
+        "through the pre-model gate, against spec 033's own 250ms bound."
     )

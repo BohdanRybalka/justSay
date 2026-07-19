@@ -24,7 +24,6 @@ verdict", never "silent".
 
 import ctypes
 import logging
-import math
 import os
 import sys
 import threading
@@ -33,6 +32,11 @@ from pathlib import Path
 
 import numpy as np
 
+# Imported as a MODULE, not `from ... import required_speech_units`: the
+# delegation below resolves through the module attribute, which is what lets
+# a test monkeypatch `analysis.required_speech_units` and prove both
+# detectors route through one implementation (spec 034, AC 11).
+from app.audio import analysis
 from app.audio.config import AudioSettings
 
 log = logging.getLogger(__name__)
@@ -40,14 +44,9 @@ log = logging.getLogger(__name__)
 # TEN VAD's own default hop: 256 samples @ 16 kHz = 16 ms. A module
 # constant, NOT an AudioSettings field -- the library's model is trained for
 # this hop, so it is a property of the engine rather than a tuning knob
-# (same rationale as analysis.py's _MIN_SPEECH_FRAMES_FLOOR).
+# (same rationale as analysis.py's _MIN_SPEECH_UNITS_FLOOR).
 _HOP_SAMPLES = 256
 _VAD_SAMPLE_RATE = 16000
-
-# Floor for the length-proportional speech-hop requirement, mirroring
-# analysis.py's convention verbatim so short clips are not held to an
-# absolute count they structurally cannot meet (spec 029 RED-1).
-_MIN_SPEECH_HOPS_FLOOR = 2
 
 # 1 s decode blocks -- streaming, so memory stays flat regardless of upload
 # length (a 6-minute meeting upload must not be read into RAM whole).
@@ -245,19 +244,16 @@ def _reset_library_cache() -> None:
 def _required_speech_hops(total_hop_count: int, settings: AudioSettings) -> int:
     """Length-proportional speech-hop requirement.
 
-    Reuses the SHIPPED ``silence_min_speech_ratio`` (0.15) and the floor-of-2
-    convention from `analysis._required_speech_frames` rather than minting a
-    new knob — a 200 ms clip is only ~12 hops, so an absolute floor of 5
-    would hold short clips to a bar that has nothing to do with whether
-    someone spoke (spec 029 RED-1, applied up front here instead of being
-    relearned).
+    The VAD's 16 ms hops, capped by ``silence_vad_min_speech_frames`` — the
+    one field distinguishing this from the energy guard's frame requirement.
+    Reuses the SHIPPED ``silence_min_speech_ratio`` (0.15) rather than
+    minting a new knob; the rule itself lives in
+    `analysis.required_speech_units` — see its docstring for the rationale.
     """
-    return min(
-        settings.silence_vad_min_speech_frames,
-        max(
-            _MIN_SPEECH_HOPS_FLOOR,
-            math.ceil(total_hop_count * settings.silence_min_speech_ratio),
-        ),
+    return analysis.required_speech_units(
+        total_hop_count,
+        cap=settings.silence_vad_min_speech_frames,
+        ratio=settings.silence_min_speech_ratio,
     )
 
 
