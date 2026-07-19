@@ -9,7 +9,12 @@ import logging
 from pathlib import Path
 
 from app.core.constants import GROQ_TIMEOUT_SECONDS
-from app.stt.base import STTProvider, TranscriptionResult, normalize_detected_language
+from app.stt.base import (
+    STTProvider,
+    TranscriptionResult,
+    min_no_speech_prob,
+    normalize_detected_language,
+)
 from app.stt.config import STTSettings
 
 log = logging.getLogger(__name__)
@@ -58,7 +63,7 @@ class GroqWhisperSTTProvider(STTProvider):
         )
 
         try:
-            text, detected_raw = await asyncio.to_thread(
+            text, detected_raw, no_speech_prob = await asyncio.to_thread(
                 self._call_groq,
                 client,
                 self._settings.groq_whisper_model,
@@ -73,6 +78,7 @@ class GroqWhisperSTTProvider(STTProvider):
             text=text.strip() if text else "",
             tokens_used=None,
             detected_language=normalize_detected_language(detected_raw),
+            no_speech_prob=no_speech_prob,
         )
 
     def cleanup(self) -> None:
@@ -86,10 +92,10 @@ class GroqWhisperSTTProvider(STTProvider):
         audio_path: Path,
         language: str,
         prompt: str | None,
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str, str | None, float | None]:
         """Isolated SDK call — mockable in tests without installing groq.
 
-        Returns ``(text, detected_language_raw)``. ``response_format``
+        Returns ``(text, detected_language_raw, no_speech_prob)``. ``response_format``
         escalates to ``"verbose_json"`` only when ``language == "auto"`` --
         that's the only path that needs a detected language back. The
         explicit-language hot path keeps its exact current wire format
@@ -124,7 +130,7 @@ class GroqWhisperSTTProvider(STTProvider):
 
         # response_format="text" returns a plain string; some SDK versions wrap it.
         if isinstance(response, str):
-            return response, None
+            return response, None, None
 
         text = getattr(response, "text", None)
         if text is None:
@@ -132,4 +138,14 @@ class GroqWhisperSTTProvider(STTProvider):
         # Only populated by the SDK on the verbose_json (auto) path — absent
         # (None) on the text-format explicit-language path.
         detected_language = getattr(response, "language", None)
-        return text, detected_language
+        # Spec 033 / ADR 019: same auto-only availability as the language
+        # field. The SDK returns segments as attribute-objects or dicts
+        # depending on version — the shared helper handles both shapes and
+        # fails open to None on anything unexpected, since Groq's inference
+        # server is closed-source and its payload shape is not contractual.
+        no_speech_prob = (
+            min_no_speech_prob(getattr(response, "segments", None))
+            if response_format == "verbose_json"
+            else None
+        )
+        return text, detected_language, no_speech_prob

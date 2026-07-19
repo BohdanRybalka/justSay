@@ -49,6 +49,40 @@ datas = (
 # We try anyway; if empty, pipeline falls back to Gemini for unknown-length audio.
 binaries = collect_dynamic_libs("soundfile")
 
+# TEN VAD neural silence gate (spec 033 / docs/adr/019-ten-vad-neural-silence-gate.md).
+# Loaded INTO this process via ctypes (not spawned as a child like
+# whisper-server), so its natural home is inside the PyInstaller bundle
+# itself -- landing at _internal/ten_vad/ten_vad.dll, which travels to users
+# inside the already-declared resources/justsay-backend directory. That is
+# why this spec needs ZERO Tauri-layer changes: no new bundle.resources
+# entry, no placeholder mkdir in package.json, and therefore no repeat of
+# spec 018's `tauri:dev` breakage.
+#
+# CONDITIONAL by design: backend/vendor/ten-vad/ is gitignored and populated
+# by backend/scripts/fetch_ten_vad.py. A from-source or CI build that never
+# ran the fetch script must still build successfully and degrade to the
+# energy guard alone (app.audio.vad.resolve_ten_vad_lib() -> None), rather
+# than failing the build. release.yml's Windows leg runs the fetch step
+# first and then asserts the DLL landed, so a silently VAD-less Windows
+# release is impossible despite this tolerance.
+# Anchored to SPECPATH (this .spec file's own directory), never the CWD:
+# `pyinstaller backend/build_sidecar.spec` from the repo root must bundle the
+# DLL identically to a `cd backend` build, instead of silently producing a
+# VAD-less sidecar whose only signal is a print() buried in the build log.
+_ten_vad_dir = Path(SPECPATH) / "vendor" / "ten-vad"
+_ten_vad_lib = _ten_vad_dir / "ten_vad.dll"
+if _ten_vad_lib.is_file():
+    binaries += [(str(_ten_vad_lib), "ten_vad")]
+    _ten_vad_license = _ten_vad_dir / "LICENSE"
+    if _ten_vad_license.is_file():
+        datas += [(str(_ten_vad_license), "ten_vad")]
+    print(f"build_sidecar: bundling TEN VAD from {_ten_vad_dir}")
+else:
+    print(
+        f"build_sidecar: {_ten_vad_lib} not found — building WITHOUT the neural VAD "
+        "(energy guard only). Run backend/scripts/fetch_ten_vad.py to include it."
+    )
+
 hiddenimports = [
     # FastAPI/uvicorn picks these up via dynamic dispatch
     "uvicorn.logging",

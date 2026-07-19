@@ -1198,3 +1198,91 @@ def test_get_model_success_path_still_works_when_job_object_creation_fails(monke
     provider._get_model()  # must not raise despite the Job Object failure
 
     assert provider.is_loaded is True
+
+
+# --- Spec 033 / AC 17: no_speech_prob off the verbose_json branch ---------
+
+
+@pytest.mark.asyncio
+async def test_verbose_json_reads_min_no_speech_prob_across_segments(monkeypatch, tmp_path):
+    """AC-17: on the auto path, the min across segments reaches the
+    contract -- the most speech-like segment decides."""
+    provider, _ = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+
+    body = {
+        "text": " привіт світ",
+        "language": "uk",
+        "segments": [
+            {"text": " привіт", "no_speech_prob": 0.82},
+            {"text": " світ", "no_speech_prob": 0.14},
+        ],
+    }
+    _install_fake_httpx(
+        monkeypatch, post_impl=lambda url, data, files: _FakeResponse(200, body)
+    )
+    _install_fake_popen(monkeypatch)
+
+    result = await provider.transcribe(audio_path, language="auto")
+
+    assert result.no_speech_prob == 0.14
+    assert result.text == "привіт світ"
+
+
+@pytest.mark.asyncio
+async def test_plain_json_branch_never_reports_no_speech_prob(monkeypatch, tmp_path):
+    """AC-17: the explicit-language hot path uses plain `json`, which has no
+    segments at all -- and its wire format stays untouched (ADR 016's
+    deliberately bounded blast radius)."""
+    provider, _ = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+
+    _install_fake_httpx(
+        monkeypatch,
+        post_impl=lambda url, data, files: _FakeResponse(200, {"text": " привіт"}),
+    )
+    _install_fake_popen(monkeypatch)
+
+    result = await provider.transcribe(audio_path, language="uk")
+
+    assert result.no_speech_prob is None
+    assert result.text == "привіт"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "segments",
+    [
+        None,
+        [],
+        [{"text": " привіт"}],
+        [{"text": " привіт", "no_speech_prob": None}],
+        [{"text": " привіт", "no_speech_prob": "n/a"}],
+    ],
+)
+async def test_verbose_json_missing_or_stubbed_field_fails_open(
+    monkeypatch, tmp_path, segments
+):
+    """AC-17, the load-bearing defensive case: whisper.cpp builds vary in
+    whether verbose_json carries a real no_speech_prob. A missing/stubbed
+    field must yield None (keep the transcription) and never raise inside a
+    transcription that already succeeded. This project has no AMD/Intel GPU
+    in CI, so this defensiveness cannot be verified any other way."""
+    provider, _ = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+
+    body = {"text": " привіт", "language": "uk"}
+    if segments is not None:
+        body["segments"] = segments
+    _install_fake_httpx(
+        monkeypatch, post_impl=lambda url, data, files: _FakeResponse(200, body)
+    )
+    _install_fake_popen(monkeypatch)
+
+    result = await provider.transcribe(audio_path, language="auto")
+
+    assert result.no_speech_prob is None
+    assert result.text == "привіт"

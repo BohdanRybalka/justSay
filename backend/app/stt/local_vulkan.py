@@ -28,7 +28,12 @@ from pathlib import Path
 
 import httpx
 
-from app.stt.base import STTProvider, TranscriptionResult, normalize_detected_language
+from app.stt.base import (
+    STTProvider,
+    TranscriptionResult,
+    min_no_speech_prob,
+    normalize_detected_language,
+)
 from app.stt.config import STTSettings
 from app.stt.local_vulkan_cmd import build_server_argv, resolve_binary_path, resolve_model_path
 
@@ -548,7 +553,7 @@ class WhisperCppVulkanSTTProvider(STTProvider):
             self._settings.whisper_model_size, audio_path.name, language, response_format,
         )
 
-        def _post() -> tuple[str, str | None]:
+        def _post() -> tuple[str, str | None, float | None]:
             with open(audio_path, "rb") as f:
                 files = {"file": (audio_path.name, f, "audio/wav")}
                 with httpx.Client(timeout=_INFERENCE_TIMEOUT) as client:
@@ -582,13 +587,25 @@ class WhisperCppVulkanSTTProvider(STTProvider):
             # this project still has no AMD/Intel GPU in CI, so a
             # missing/renamed field on a different whisper.cpp build still
             # degrades to None rather than raising.
-            return text, body.get("language")
+            # Spec 033 / ADR 019: only the verbose_json (auto) branch carries
+            # segments at all -- the plain `json` branch has no such key, so
+            # it stays None. Read via the shared defensive helper: some
+            # whisper.cpp builds stub or omit no_speech_prob entirely, and
+            # this project has no AMD/Intel GPU in CI to pin which, so a
+            # missing field must fail open (None -> keep the transcription).
+            no_speech_prob = (
+                min_no_speech_prob(body.get("segments"))
+                if response_format == "verbose_json"
+                else None
+            )
+            return text, body.get("language"), no_speech_prob
 
-        text, detected_raw = await asyncio.to_thread(_post)
+        text, detected_raw, no_speech_prob = await asyncio.to_thread(_post)
         return TranscriptionResult(
             text=text,
             tokens_used=None,
             detected_language=normalize_detected_language(detected_raw),
+            no_speech_prob=no_speech_prob,
         )
 
     def cleanup(self) -> None:
