@@ -403,7 +403,12 @@ def _no_prewarm_by_default(monkeypatch, request):
     `ensure_local_ready`/`await_local_ready` too. It holds an `asyncio.Task`
     bound to the test's own event loop; left stale, a later test could try
     to `asyncio.shield()` a task from an already-closed loop.
+
+    Also clears `app.core.tasks._background_tasks` (Spec 032, AC 14) for the
+    same reason -- a strong-referenced `asyncio.Task` bound to a test's own
+    (now-closed) event loop must not survive into the next test.
     """
+    from app.core import tasks
     from app.stt import local_setup
 
     if not request.node.get_closest_marker("prewarm"):
@@ -414,6 +419,7 @@ def _no_prewarm_by_default(monkeypatch, request):
     yield
     local_setup._prewarm_error = None
     local_setup._active_load = None
+    tasks._background_tasks.clear()
 
 
 @pytest.fixture(autouse=True)

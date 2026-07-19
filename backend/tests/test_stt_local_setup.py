@@ -724,6 +724,40 @@ async def test_maybe_prewarm_local_schedules_ensure_local_ready_for_local_mode(m
     assert called["n"] == 1
 
 
+@pytest.mark.prewarm
+@pytest.mark.asyncio
+async def test_maybe_prewarm_local_routes_through_spawn_background_task(monkeypatch):
+    """AC 8 (Spec 032): maybe_prewarm_local() must schedule its
+    ensure_local_ready() call through app.core.tasks.spawn_background_task()
+    -- exactly once for LOCAL mode, and not at all for CLOUD mode.
+
+    Marked @pytest.mark.prewarm for the same reason as the tests above --
+    needs the real maybe_prewarm_local, not the autouse-patched no-op.
+    """
+    spawned = []
+    real_spawn = local_setup.tasks.spawn_background_task
+
+    def _spy(coro, *, name):
+        spawned.append(name)
+        return real_spawn(coro, name=name)
+
+    monkeypatch.setattr(local_setup.tasks, "spawn_background_task", _spy)
+
+    async def _fake_ensure_local_ready(stt_settings):
+        return None
+
+    monkeypatch.setattr(local_setup, "ensure_local_ready", _fake_ensure_local_ready)
+
+    local_setup.maybe_prewarm_local(STTSettings(mode=ProviderMode.CLOUD))
+    assert spawned == []
+
+    local_setup.maybe_prewarm_local(STTSettings(mode=ProviderMode.LOCAL))
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    await asyncio.gather(*pending)
+
+    assert spawned == ["local-stt-prewarm"]
+
+
 @pytest.mark.asyncio
 async def test_ensure_local_ready_noop_when_mode_not_local_at_entry(monkeypatch):
     """Never touches the provider cache when mode isn't LOCAL at entry."""
@@ -1029,6 +1063,39 @@ async def test_maybe_prewarm_local_at_startup_marks_dirty_then_clears_on_complet
     await asyncio.gather(*pending)
 
     assert local_setup._read_consecutive_incomplete_prewarms() == 0
+
+
+@pytest.mark.prewarm
+@pytest.mark.asyncio
+async def test_maybe_prewarm_local_at_startup_routes_through_spawn_background_task(
+    _isolated_crash_guard_root, monkeypatch
+):
+    """AC 8 (Spec 032): maybe_prewarm_local_at_startup() must schedule its
+    _prewarm_then_clear_crash_guard() call through
+    app.core.tasks.spawn_background_task() -- exactly once for LOCAL mode,
+    and not at all for CLOUD mode."""
+    spawned = []
+    real_spawn = local_setup.tasks.spawn_background_task
+
+    def _spy(coro, *, name):
+        spawned.append(name)
+        return real_spawn(coro, name=name)
+
+    monkeypatch.setattr(local_setup.tasks, "spawn_background_task", _spy)
+
+    async def _fake_ensure_local_ready(stt_settings):
+        return None
+
+    monkeypatch.setattr(local_setup, "ensure_local_ready", _fake_ensure_local_ready)
+
+    local_setup.maybe_prewarm_local_at_startup(STTSettings(mode=ProviderMode.CLOUD))
+    assert spawned == []
+
+    local_setup.maybe_prewarm_local_at_startup(STTSettings(mode=ProviderMode.LOCAL))
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    await asyncio.gather(*pending)
+
+    assert spawned == ["local-stt-prewarm-startup"]
 
 
 @pytest.mark.prewarm

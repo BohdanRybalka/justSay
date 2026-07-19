@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
+from app.core import tasks
 from app.core.config import settings
 from app.core.logging_config import setup_logging
 
@@ -69,12 +70,12 @@ async def lifespan(app: FastAPI):
     # never pays the uncached nvidia-smi/registry probe cost lazily. Fire-
     # and-forget, exception-swallowing -- a failed probe here must not break
     # startup; _detect_device() simply pays the cost later exactly as today.
-    asyncio.create_task(_warm_gpu_probe_cache())
+    tasks.spawn_background_task(_warm_gpu_probe_cache(), name="gpu-probe-warmup")
     # Fire-and-forget sweep at every launch, catching any backlog left over
     # from a crash, a provider outage in the previous session, or an
     # upgrade from a pre-017 version. Startup does not block on it.
     from app.core import vector_store
-    asyncio.create_task(vector_store.run_background_indexer())
+    tasks.spawn_background_task(vector_store.run_background_indexer(), name="vector-store-indexer")
     from app.audio import MicrophoneRecorder
     app.state.recorder = MicrophoneRecorder(settings.audio)
     yield
