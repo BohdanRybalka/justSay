@@ -2,7 +2,6 @@
   "$schema": "https://unpkg.com/knip@5/schema.json",
   "entry": ["src/widget/widget.ts"],
   "project": ["src/**/*.ts"],
-  "ignoreDependencies": ["playwright-cli"],
   "ignoreBinaries": ["python", "pip", "pyinstaller"],
   "ignoreExportsUsedInFile": true
 }
