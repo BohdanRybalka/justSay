@@ -52,6 +52,17 @@ async def cancel_all(
     *caller's own* task while it is awaiting here -- `asyncio.wait()` re-raises
     that. Callers whose subsequent steps must run regardless (see
     `app.main.lifespan`) need a `try/finally` around this call.
+
+    BOUNDARY -- the registry is snapshotted at entry, before the first await.
+    A task spawned via `spawn_background_task()` AFTER that point is NOT
+    cancelled by this call and dies with the event loop, unobserved -- the
+    exact defect Spec 036 removes. So: do not call `spawn_background_task()`
+    from shutdown code running concurrently with, or after, this drain, and
+    that includes anything a cancelled task starts from its own
+    `except CancelledError` / `finally` block. No call site does this today;
+    if one ever needs to, add a bounded second pass here (a fixed number of
+    passes, never a `while` loop -- a task that respawns on cancel would make
+    it non-terminating).
     """
     # Snapshot before awaiting: _on_task_done discards entries from
     # _background_tasks as the drain proceeds, and iterating the live set

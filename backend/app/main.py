@@ -95,14 +95,27 @@ async def lifespan(app: FastAPI):
         await tasks.cancel_all(extra=[peek_active_load()])
     finally:
         log.info("Backend shutdown: releasing model caches")
-        # Shutdown: release model resources (GPU memory, Ollama model unload)
+        # Shutdown: release model resources (GPU memory, Ollama model unload,
+        # audio stream). Each step runs independently: ADR 021 declares the
+        # release must always run, and a single raising step must not skip the
+        # ones after it -- a failing clear_stt() used to leak the audio stream.
+        # `Exception`, not `BaseException`: a CancelledError delivered here must
+        # still propagate rather than be swallowed.
         from app.stt import clear_cache as clear_stt
         from app.llm import clear_cache as clear_llm
         from app.embeddings import clear_cache as clear_embeddings
-        clear_stt()
-        clear_llm()
-        clear_embeddings()
-        app.state.recorder.cleanup()
+        for step_name, step in (
+            ("STT cache", clear_stt),
+            ("LLM cache", clear_llm),
+            ("embeddings cache", clear_embeddings),
+            ("audio recorder", app.state.recorder.cleanup),
+        ):
+            try:
+                step()
+            except Exception:
+                log.warning(
+                    "Backend shutdown: releasing %s failed -- continuing", step_name, exc_info=True
+                )
 
 
 app = FastAPI(

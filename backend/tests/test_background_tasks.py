@@ -310,11 +310,18 @@ async def test_drain_reaches_the_active_load_created_by_real_ensure_local_ready(
     # thread via asyncio.to_thread and, exactly as in production, survives the
     # task cancellation -- the test must release it explicitly.
     release = threading.Event()
+    loop = asyncio.get_running_loop()
+    # Set from the worker thread the moment the load is actually running.
+    # `_active_load` is assigned before `_run_get_model` reaches to_thread
+    # (local_setup.py:369), so this event firing proves peek_active_load() is
+    # populated -- deterministic, no polling.
+    entered_load = asyncio.Event()
 
     class _BlockingProvider:
         is_loaded = False
 
         def _get_model(self) -> None:
+            loop.call_soon_threadsafe(entered_load.set)
             release.wait(10)
 
         def cleanup(self) -> None:
@@ -332,10 +339,7 @@ async def test_drain_reaches_the_active_load_created_by_real_ensure_local_ready(
         name="real-prewarm-caller",
     )
     try:
-        for _ in range(200):
-            await asyncio.sleep(0.01)
-            if local_setup.peek_active_load() is not None:
-                break
+        await asyncio.wait_for(entered_load.wait(), timeout=10)
         load_task = local_setup.peek_active_load()
         assert load_task is not None, "ensure_local_ready() never populated _active_load"
 
@@ -395,8 +399,11 @@ def teardown_probe(monkeypatch):
     `lifespan()` startup is otherwise left real. `_warm_gpu_probe_cache` is
     stubbed because conftest no-ops prewarm and the indexer but NOT
     `probe_gpu`, so an unpatched startup runs a genuine GPU probe in a
-    worker thread.
+    worker thread. The recorder is stubbed too: `cleanup()` is the last
+    release step and the only one with a real OS resource (the audio stream)
+    behind it, so it is recorded rather than left unobserved.
     """
+    import app.audio
     import app.embeddings
     import app.llm
     import app.main
@@ -407,7 +414,15 @@ def teardown_probe(monkeypatch):
     async def _noop_probe() -> None:
         return None
 
+    class _StubRecorder:
+        def __init__(self, audio_settings) -> None:
+            pass
+
+        def cleanup(self) -> None:
+            order.append("recorder_cleanup")
+
     monkeypatch.setattr(app.main, "_warm_gpu_probe_cache", _noop_probe)
+    monkeypatch.setattr(app.audio, "MicrophoneRecorder", _StubRecorder)
     monkeypatch.setattr(app.stt, "clear_cache", lambda: order.append("clear_stt"))
     monkeypatch.setattr(app.llm, "clear_cache", lambda: order.append("clear_llm"))
     monkeypatch.setattr(
@@ -439,6 +454,7 @@ async def test_lifespan_drains_background_tasks_before_clearing_caches(teardown_
         "clear_stt",
         "clear_llm",
         "clear_embeddings",
+        "recorder_cleanup",
     ]
     assert task.done()
     assert tasks._background_tasks == set()
@@ -466,11 +482,46 @@ async def test_lifespan_still_clears_caches_when_the_drain_times_out(
     # Generous bound against the real 1.0s budget: a tight assertion would be
     # flaky on a loaded runner without catching anything a loose one misses.
     assert elapsed < 2.0
-    assert teardown_probe == ["clear_stt", "clear_llm", "clear_embeddings"]
+    assert teardown_probe == [
+        "clear_stt",
+        "clear_llm",
+        "clear_embeddings",
+        "recorder_cleanup",
+    ]
     assert not task.done()
     assert any("stubborn-quit" in r.getMessage() for r in caplog.records)
 
     await _drain_leftover(task)
+
+
+@pytest.mark.asyncio
+async def test_lifespan_release_steps_do_not_skip_each_other_on_failure(
+    teardown_probe, monkeypatch, caplog
+):
+    """GitHub review finding 1: the release block must always COMPLETE, not
+    just start. A raising `clear_stt()` used to skip `clear_llm()`,
+    `clear_embeddings()` and `recorder.cleanup()` -- leaking the audio
+    stream, the one release step with a real OS resource behind it."""
+    import app.stt
+    from app.main import app as fastapi_app, lifespan
+
+    def _boom() -> None:
+        teardown_probe.append("clear_stt_raised")
+        raise RuntimeError("model release blew up")
+
+    monkeypatch.setattr(app.stt, "clear_cache", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        async with lifespan(fastapi_app):
+            pass
+
+    assert teardown_probe == [
+        "clear_stt_raised",
+        "clear_llm",
+        "clear_embeddings",
+        "recorder_cleanup",
+    ]
+    assert any("STT cache" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -502,6 +553,7 @@ async def test_lifespan_cancels_the_active_load_with_no_registered_task(teardown
         "clear_stt",
         "clear_llm",
         "clear_embeddings",
+        "recorder_cleanup",
     ]
     assert load_task.done()
 
