@@ -577,6 +577,71 @@ async def test_run_background_indexer_swallows_backfill_exception(caplog):
     )
 
 
+@pytest.mark.background_indexer
+@pytest.mark.asyncio
+async def test_run_background_indexer_cancelled_mid_sweep_loses_no_committed_work():
+    """Spec 036: shutdown now cancels this sweep mid-flight, so the cancel
+    must be safe. Every entry embedded before the cancel keeps its
+    `entry_embeddings` row (history's connection is autocommit and
+    `insert_embedding` contains no `await`, so a cancellation cannot land
+    part-way through one row's write), and a fresh run finishes the rest.
+
+    Also pins the claim that `CancelledError` is NOT swallowed by
+    `run_background_indexer`'s `except Exception` -- it derives from
+    `BaseException`, so it propagates and the task ends up genuinely
+    cancelled rather than logged as a spurious failure.
+    """
+    for i in range(12):
+        history.save_entry(text=f"cancel entry {i}", duration_ms=1)
+
+    reached_sixth = asyncio.Event()
+
+    class _BlockingProvider:
+        model_name = "gemini/text-embedding-004"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def embed(self, text: str) -> list[float]:
+            self.calls += 1
+            if self.calls > 5:
+                reached_sixth.set()
+                await asyncio.sleep(30)  # the cancel lands inside this embed
+            return [1.0, 2.0, 3.0]
+
+    with patch(
+        "app.embeddings.resolve_embedding_provider",
+        new=AsyncMock(return_value=(_BlockingProvider(), None)),
+    ):
+        # background-task-ok: test fixture, awaited below
+        sweep = asyncio.create_task(vector_store.run_background_indexer())
+        await asyncio.wait_for(reached_sixth.wait(), timeout=5)
+        sweep.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sweep
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        embedded = conn.execute("SELECT COUNT(*) FROM entry_embeddings").fetchone()[0]
+    assert embedded == 5, "committed rows were lost by the mid-sweep cancel"
+
+    fake = _FakeProvider("gemini/text-embedding-004", vector=[1.0, 2.0, 3.0])
+    with (
+        patch(
+            "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+        ),
+        patch.object(vector_store, "_INDEXER_PACING_SECONDS", 0),
+    ):
+        await vector_store.run_background_indexer()
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM entries WHERE id NOT IN (SELECT entry_id FROM entry_embeddings)"
+        ).fetchone()[0]
+    assert remaining == 0
+
+
 # --- embed_entry_background: best-effort contract ---------------------------
 
 @pytest.mark.asyncio
