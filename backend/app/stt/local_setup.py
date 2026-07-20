@@ -57,6 +57,18 @@ _active_load: tuple[object, asyncio.Task] | None = None
 _READY_TIMEOUT = 300.0
 
 
+def peek_active_load() -> asyncio.Task | None:
+    """Read-only view of the in-flight model-load task, if any.
+
+    Exists so `lifespan()`'s shutdown drain can cancel it. `_active_load` is
+    deliberately NOT registered in `app.core.tasks` (it holds its own strong
+    reference and its exception is retrieved via `shield()`), so the drain
+    cannot reach it through the registry -- but leaving it running while
+    `clear_stt()` fires is exactly the race this accessor closes.
+    """
+    return _active_load[1] if _active_load is not None else None
+
+
 class LocalReadinessTimeout(Exception):
     """Raised by await_local_ready() when the bounded wait genuinely times
     out -- i.e. ensure_local_ready() itself did not return within the

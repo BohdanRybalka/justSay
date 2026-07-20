@@ -79,15 +79,43 @@ async def lifespan(app: FastAPI):
     from app.audio import MicrophoneRecorder
     app.state.recorder = MicrophoneRecorder(settings.audio)
     yield
-    log.info("Backend shutdown: releasing model caches")
-    # Shutdown: release model resources (GPU memory, Ollama model unload)
-    from app.stt import clear_cache as clear_stt
-    from app.llm import clear_cache as clear_llm
-    from app.embeddings import clear_cache as clear_embeddings
-    clear_stt()
-    clear_llm()
-    clear_embeddings()
-    app.state.recorder.cleanup()
+    # Drain BEFORE releasing caches, not after: a prewarm still inside
+    # _get_model() holds _load_lock, and cleanup() acquires it with
+    # blocking=False -- so an un-drained teardown makes the model release
+    # silently no-op in exactly the case where a model is resident.
+    # Hard-bounded, so a task that swallows CancelledError cannot hang quit.
+    log.info("Backend shutdown: draining background tasks")
+    from app.stt.local_setup import peek_active_load
+    # try/finally, not a bare await: the drain is the only suspension point
+    # between `yield` and the release below, so a CancelledError delivered to
+    # the lifespan task itself (e.g. a graceful-shutdown timeout upstream)
+    # would otherwise skip the model release entirely -- the one teardown step
+    # ADR 021 declares must always run.
+    try:
+        await tasks.cancel_all(extra=[peek_active_load()])
+    finally:
+        log.info("Backend shutdown: releasing model caches")
+        # Shutdown: release model resources (GPU memory, Ollama model unload,
+        # audio stream). Each step runs independently: ADR 021 declares the
+        # release must always run, and a single raising step must not skip the
+        # ones after it -- a failing clear_stt() used to leak the audio stream.
+        # `Exception`, not `BaseException`: a CancelledError delivered here must
+        # still propagate rather than be swallowed.
+        from app.stt import clear_cache as clear_stt
+        from app.llm import clear_cache as clear_llm
+        from app.embeddings import clear_cache as clear_embeddings
+        for step_name, step in (
+            ("STT cache", clear_stt),
+            ("LLM cache", clear_llm),
+            ("embeddings cache", clear_embeddings),
+            ("audio recorder", app.state.recorder.cleanup),
+        ):
+            try:
+                step()
+            except Exception:
+                log.warning(
+                    "Backend shutdown: releasing %s failed -- continuing", step_name, exc_info=True
+                )
 
 
 app = FastAPI(
