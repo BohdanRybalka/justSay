@@ -11,8 +11,9 @@
 //! Dev mode (no frozen sidecar at the resolved `resource_dir()` path)
 //! falls back to `std::process::Command` spawning the system Python
 //! interpreter against `backend/app.main:app`. This branch is intentionally
-//! NOT routed through the shell plugin — it has no fixed scope path and
-//! is debug-only.
+//! NOT routed through the shell plugin — it has no fixed scope path. It is
+//! the debug default, but is also reached in a release build whenever
+//! `resolve_sidecar()` finds no frozen sidecar.
 //!
 //! `spawn_watchdog()` polls `is_process_alive()` and respawns the backend
 //! on an unexpected crash, bounded by `MAX_RESPAWN_ATTEMPTS` with
@@ -45,15 +46,26 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
-/// Windows CREATE_NO_WINDOW flag (0x08000000) — used only by the dev-mode
-/// fallback (std::process::Command). The shell plugin's `Command` builder
-/// does NOT expose `creation_flags`; for the frozen-sidecar production
-/// path the console window is suppressed by building the sidecar with
-/// `console=False` (see `backend/build_sidecar.spec`) plus the Python
-/// entrypoint redirecting stdout/stderr to `~/<data_dir_name>/logs/sidecar.log`,
-/// where `data_dir_name` is `.justsay` or `.justsay-dev` depending on
-/// `spawn()`'s `force_dev_data_dir` flag — see `append_sidecar_log()` below
-/// and `docs/adr/012-dev-mode-data-directory-isolation.md`.
+/// Windows CREATE_NO_WINDOW flag (0x08000000) — suppresses a console-window
+/// flash for short-lived helper spawns via `std::process::Command`: the
+/// Python version probe (`find_python`), the orphan-sidecar
+/// `tasklist`/`taskkill` (`reap_orphan_sidecar`), the production
+/// sidecar's `taskkill` graceful-stop fallback, and the `spawn_throwaway_child`
+/// test helper. On the dev backend spawn it is set conditionally: omitted in a
+/// debug build so the child inherits the dev parent's shared console and a later
+/// `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` reaches it, but kept on the
+/// release fallback (the Dev branch is reachable in a release build with no
+/// frozen sidecar, where the windows-subsystem parent owns no console to inherit)
+/// so the child gets no fresh visible window — see the dev spawn site below and
+/// `docs/adr/024-dev-backend-never-receives-ctrl-break.md`.
+/// The shell plugin's `Command` builder does NOT expose `creation_flags`;
+/// for the frozen-sidecar production path the console window is suppressed
+/// by building the sidecar with `console=False` (see
+/// `backend/build_sidecar.spec`) plus the Python entrypoint redirecting
+/// stdout/stderr to `~/<data_dir_name>/logs/sidecar.log`, where
+/// `data_dir_name` is `.justsay` or `.justsay-dev` depending on `spawn()`'s
+/// `force_dev_data_dir` flag — see `append_sidecar_log()` below and
+/// `docs/adr/012-dev-mode-data-directory-isolation.md`.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -657,10 +669,31 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         if force_dev_data_dir {
             cmd.env("JUSTSAY_FORCE_DEV_DATA_DIR", "1");
         }
-        // CREATE_NEW_PROCESS_GROUP lets terminate_gracefully() later target
-        // this child alone with CTRL_BREAK_EVENT (see the constant's doc).
+        // CREATE_NEW_PROCESS_GROUP (always) lets terminate_gracefully() later
+        // target this child alone with CTRL_BREAK_EVENT (see the constant's doc).
+        // CREATE_NO_WINDOW is conditional, because this Dev branch is reachable
+        // in a release build too (the `else` when resolve_sidecar() finds no
+        // frozen sidecar):
+        //   - Debug: parent is console-subsystem (main.rs gates
+        //     windows_subsystem="windows" on not(debug_assertions)). Omit
+        //     CREATE_NO_WINDOW so the child inherits the parent's shared console;
+        //     GenerateConsoleCtrlEvent only reaches processes sharing the caller's
+        //     console, so this delivery is what makes CTRL_BREAK work. No window
+        //     appears and nothing is written because stdout/stderr go to null above.
+        //   - Release fallback: parent is windows-subsystem and owns no console
+        //     for the child to inherit, so CTRL_BREAK is undeliverable regardless.
+        //     Keep CREATE_NO_WINDOW so the console-subsystem python.exe does not
+        //     get a fresh visible console window (behaves as today: force-killed).
+        // See docs/adr/024-dev-backend-never-receives-ctrl-break.md.
         #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+        {
+            let mut flags = CREATE_NEW_PROCESS_GROUP;
+            if !cfg!(debug_assertions) {
+                // release-fallback: no parent console to inherit; avoid a visible window
+                flags |= CREATE_NO_WINDOW;
+            }
+            cmd.creation_flags(flags);
+        }
         let child = cmd
             .spawn()
             .map_err(|e| format!("Failed to start backend: {}", e))?;
