@@ -26,7 +26,20 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 #[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+#[cfg(windows)]
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+    JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
@@ -427,6 +440,100 @@ fn reap_orphan_sidecar() -> bool {
     true
 }
 
+/// Process-lifetime Windows Job Object carrying `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`,
+/// created lazily on first `spawn()` (mirrors the `HTTP_CLIENT` `OnceLock`
+/// pattern above). The backend child is assigned to it right after spawn (see
+/// `assign_child_to_job` / `assign_pid_to_job`); the Tauri parent holds the sole
+/// job handle and never closes it. When the parent dies by ANY means —
+/// `taskkill /F`, Task Manager "End Task", a hard crash, `TerminateProcess` —
+/// the OS closes that last handle and the kernel terminates every process still
+/// in the job, freeing port 9377 for the next launch. This is the one backstop
+/// that survives a kill running no in-process code (the panic hook, console
+/// handler, `RunEvent::Exit` and the next-launch reap are all in-process) — see
+/// `docs/adr/023-force-kill-orphaned-backend.md`.
+///
+/// `Option`: a failed create/configure stores `None` once, logs once, and every
+/// caller degrades to the existing `reap_orphan_sidecar()` fallback rather than
+/// failing startup. The raw `HANDLE` (`*mut c_void`, not `Send`/`Sync`) is
+/// stored as `isize` and cast back on use so the static stays thread-safe.
+#[cfg(windows)]
+static BACKEND_JOB: OnceLock<Option<isize>> = OnceLock::new();
+
+/// Create (once) the kill-on-close job and return its handle as `isize`, or
+/// `None` if creation/configuration failed (logged once; never fatal).
+///
+/// `CreateJobObjectW(NULL, NULL)` returns a NON-inheritable handle by default —
+/// required, so no spawned child can inherit a handle to the job and keep it
+/// open past the parent's death, which would defeat KILL_ON_JOB_CLOSE.
+#[cfg(windows)]
+fn backend_job() -> Option<isize> {
+    *BACKEND_JOB.get_or_init(|| {
+        // SAFETY: raw Win32 FFI. `CreateJobObjectW` returns NULL on failure
+        // (checked). `SetInformationJobObject` is handed a fully-zeroed,
+        // correctly-sized `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` with only
+        // `LimitFlags` set; on failure the job handle is closed and `None`
+        // reported. The official `windows-sys` binding owns the struct layout,
+        // so the `LimitFlags` write cannot land at a wrong offset (ADR 023).
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                log::warn!(
+                    "CreateJobObjectW failed; force-kill orphan protection unavailable this session"
+                );
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let configured = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if configured == 0 {
+                log::warn!(
+                    "SetInformationJobObject failed; force-kill orphan protection unavailable this session"
+                );
+                CloseHandle(job);
+                return None;
+            }
+            Some(job as isize)
+        }
+    })
+}
+
+/// Assign the Dev-branch backend child to `job` via its raw OS process handle.
+/// Returns `false` on failure so the caller can log-and-continue. `job` is a
+/// handle from `backend_job()` (or a test-local job).
+#[cfg(windows)]
+fn assign_child_to_job(job: isize, child: &Child) -> bool {
+    // SAFETY: `child` is a process we just spawned and still own, so its raw
+    // handle is valid; the call neither consumes nor closes either handle.
+    unsafe { AssignProcessToJobObject(job as HANDLE, child.as_raw_handle() as HANDLE) != 0 }
+}
+
+/// Assign the Sidecar-branch backend to `job` by pid — the shell plugin's
+/// `CommandChild` exposes only `pid()`, no raw handle. Opens the minimum rights
+/// `AssignProcessToJobObject` needs, assigns, and closes the OPENED handle
+/// (never the job). Returns `false` on any failure — a non-existent pid, a
+/// denied `OpenProcess`, or a refused assignment — so `spawn()` can
+/// log-and-continue.
+#[cfg(windows)]
+fn assign_pid_to_job(job: isize, pid: u32) -> bool {
+    // SAFETY: raw Win32 FFI. `OpenProcess` returns NULL on failure (bad pid,
+    // access denied), guarded before use; a successfully-opened handle is
+    // always closed, whether or not the assignment succeeded.
+    unsafe {
+        let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+        if process.is_null() {
+            return false;
+        }
+        let assigned = AssignProcessToJobObject(job as HANDLE, process) != 0;
+        CloseHandle(process);
+        assigned
+    }
+}
+
 /// Spawn the Python FastAPI backend as a child process.
 ///
 /// Preference order:
@@ -474,6 +581,22 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         let (mut rx, child) = shell_cmd
             .spawn()
             .map_err(|e| format!("Failed to start backend sidecar: {}", e))?;
+
+        // Enroll the sidecar in the kill-on-close job so a force-kill of the
+        // Tauri parent takes it (and its whisper-server/FFmpeg descendants)
+        // down too. The shell plugin gives us only a pid, hence the OpenProcess
+        // path. Non-fatal: on failure the next-launch reap still applies.
+        #[cfg(windows)]
+        if let Some(job) = backend_job() {
+            let pid = child.pid();
+            if !assign_pid_to_job(job, pid) {
+                log::warn!(
+                    "Failed to assign backend sidecar (PID {}) to the kill-on-close job; \
+                     a force-kill of the app may orphan it (reap fallback still applies)",
+                    pid
+                );
+            }
+        }
 
         let alive = Arc::new(AtomicBool::new(true));
         let alive_clone = alive.clone();
@@ -541,6 +664,23 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         let child = cmd
             .spawn()
             .map_err(|e| format!("Failed to start backend: {}", e))?;
+
+        // Enroll the dev child (python.exe running uvicorn) in the kill-on-close
+        // job. The dev branch owns a real `Child`, so it assigns via the raw
+        // handle. Non-fatal: dev has no reap fallback for python.exe, so a
+        // failed assignment silently re-opens the orphan bug for this session
+        // (logged only) — strictly no worse than before this existed.
+        #[cfg(windows)]
+        if let Some(job) = backend_job() {
+            if !assign_child_to_job(job, &child) {
+                log::warn!(
+                    "Failed to assign dev backend (PID {}) to the kill-on-close job; \
+                     a force-kill of the app may orphan it",
+                    child.id()
+                );
+            }
+        }
+
         BackendProcess::Dev(child)
     };
 
@@ -959,5 +1099,132 @@ mod tests {
         assert_eq!(respawn_backoff(0), Duration::from_secs(2));
         assert_eq!(respawn_backoff(1), Duration::from_secs(4));
         assert_eq!(respawn_backoff(2), Duration::from_secs(8));
+    }
+
+    /// Create a throwaway kill-on-close job for a single test. Never the shared
+    /// `BACKEND_JOB` static — a test must be able to `CloseHandle` it (the kill
+    /// trigger) and must not leak process-lifetime state into the test binary.
+    #[cfg(windows)]
+    fn create_test_job() -> isize {
+        // SAFETY: same create+configure sequence as `backend_job()`; asserts on
+        // failure since a broken job invalidates the test rather than the code.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            assert!(!job.is_null(), "CreateJobObjectW failed in test");
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let configured = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            assert_ne!(configured, 0, "SetInformationJobObject failed in test");
+            job as isize
+        }
+    }
+
+    /// Spawn a short-lived throwaway child that stays alive long enough to
+    /// prove the job kills it (`ping -n 30` ~ 29s), with no console window.
+    #[cfg(windows)]
+    fn spawn_throwaway_child() -> Child {
+        Command::new("cmd")
+            .args(["/c", "ping", "-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .expect("failed to spawn throwaway test child")
+    }
+
+    /// Bounded poll (~5s) for the child to exit; force-kills and returns false
+    /// on timeout so a bug can never leave the child running or hang the suite.
+    #[cfg(windows)]
+    fn wait_for_exit(child: &mut Child) -> bool {
+        for _ in 0..50 {
+            match child.try_wait() {
+                Ok(Some(_)) => return true,
+                _ => std::thread::sleep(Duration::from_millis(100)),
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        false
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn kill_on_job_close_terminates_child_assigned_via_raw_handle() {
+        let job = create_test_job();
+        let mut child = spawn_throwaway_child();
+
+        assert!(
+            assign_child_to_job(job, &child),
+            "raw-handle assignment should succeed for a live owned child"
+        );
+        assert!(
+            matches!(child.try_wait(), Ok(None)),
+            "child must be alive before the job handle is closed"
+        );
+
+        // Closing the last (only) handle to the job makes the kernel terminate
+        // every process still in it.
+        // SAFETY: `job` is the sole handle to a test-local job; closing it here
+        // is the deliberate kill trigger and it is never used again.
+        unsafe {
+            CloseHandle(job as HANDLE);
+        }
+
+        assert!(
+            wait_for_exit(&mut child),
+            "child must exit after the job's last handle is closed"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn kill_on_job_close_terminates_child_assigned_via_pid() {
+        let job = create_test_job();
+        let mut child = spawn_throwaway_child();
+
+        assert!(
+            assign_pid_to_job(job, child.id()),
+            "pid/OpenProcess assignment should succeed for a live process"
+        );
+        assert!(
+            matches!(child.try_wait(), Ok(None)),
+            "child must be alive before the job handle is closed"
+        );
+
+        // SAFETY: sole handle to a test-local job; closing it is the kill trigger.
+        unsafe {
+            CloseHandle(job as HANDLE);
+        }
+
+        assert!(
+            wait_for_exit(&mut child),
+            "child must exit after the job's last handle is closed"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn assign_pid_to_job_is_non_fatal_for_a_nonexistent_pid() {
+        let job = create_test_job();
+
+        // `u32::MAX` is far above any live pid and (as a Windows implementation
+        // detail) not a multiple of 4, so `OpenProcess` cannot open it — the
+        // helper must return false, never panic, and never kill anything.
+        let assigned = assign_pid_to_job(job, u32::MAX);
+        assert!(
+            !assigned,
+            "assigning a non-existent pid must return false, not panic"
+        );
+
+        // SAFETY: sole handle to a test-local job with nothing assigned to it;
+        // closing it kills nothing.
+        unsafe {
+            CloseHandle(job as HANDLE);
+        }
     }
 }
