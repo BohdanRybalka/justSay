@@ -75,7 +75,7 @@ class LocalLLMProvider(LLMProvider):
         ``think=False`` is unconditional: Qwen3 is a hybrid-reasoning model
         whose reasoning text otherwise arrives in a separate ``thinking``
         field ahead of ``content``, competing with it for the ``num_predict``
-        budget once a cap is in place (see ADR 010).
+        budget once a cap is in place (see ADR 022).
         """
         response = client.chat(
             model=model,

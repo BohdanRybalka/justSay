@@ -3,7 +3,7 @@
 Sibling to ``app/llm/config.py`` (which model/vendor/host to use) — this
 module is the other, independent axis: how to sample, keyed by task
 purpose. Cloud and Local providers resolve the same profile for a given
-task and apply it uniformly; see docs/adr/010-llm-task-generation-profiles.md
+task and apply it uniformly; see docs/adr/022-llm-task-generation-profiles.md
 for the full rationale.
 """
 
