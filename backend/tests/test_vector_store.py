@@ -674,7 +674,7 @@ async def test_embed_entry_background_skips_deleted_entry():
 
 def test_selftest_ok():
     ok, msg = vector_store.selftest()
-    assert ok is True
+    assert ok is True, msg
     assert msg == "ok"
 
 

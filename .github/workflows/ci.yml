@@ -1,16 +1,30 @@
-# PR-gating dead-code check (spec 030 / ADR 017).
+# PR-gating CI (spec 030 / 039, ADR 017 / 025).
 #
-# The project's first pull_request-triggered workflow. Deliberately minimal —
-# no Rust toolchain, no PyInstaller sidecar, no Vulkan SDK. It only installs
-# what `npm run lint:dead-code` actually needs: Node for knip, Python + the
-# backend `dev` extra for vulture. See docs/adr/017-static-analysis-in-pr-ci.md
-# for why this runs here rather than as a pre-commit hook or subagent-only step.
+# Four per-check jobs run in parallel — each check routes through an npm
+# script so CI and a local run share one definition (ADR 017's
+# single-definition rule):
 #
-# Named "CI" rather than "Dead Code Check" deliberately: ADR 017's Consequences
-# already anticipates this workflow becoming the home for `tsc --noEmit`,
-# `pytest` and `ruff` once the dead-code job has proven itself across a few
-# real PRs (see spec 030's "Cuts deferred to a future spec"). The single
-# `dead-code` job today is a placeholder for that growth, not the final shape.
+#   frontend-lint — Node only: knip (dead code) + tsc --noEmit. Grouped like
+#                   backend-lint below: both are static analysis, neither runs
+#                   the app. A frontend-lint failure needs the job log to tell
+#                   knip from tsc apart — same trade-off backend-lint already
+#                   accepts for ruff vs. vulture.
+#   frontend-test — Node only: vitest.
+#   backend-lint  — Node entry point + Python[dev]: ruff + vulture.
+#   backend-test  — Node entry point + Python[dev,audio]: pytest.
+#
+# backend-lint installs only backend[dev] and skips PortAudio: neither ruff nor
+# vulture imports the app. Both backend jobs drop `npm ci` — their npm scripts
+# are all `cd backend && python -m …` with no node_modules binary dependency.
+# npm + pip caching is on for every job that installs deps, to offset the extra
+# per-job setup the split re-pays.
+#
+# Deliberately a subset of the local Stage 2 gate: no Rust toolchain, no
+# PyInstaller sidecar, no Vulkan SDK, and pytest runs `-m "not slow"` so the
+# hardware-less runner skips the timing-sensitive pins. See
+# docs/adr/025-pr-ci-gate-scope-and-exclusions.md for why this subset (no Rust,
+# no coverage gate) and docs/adr/017-static-analysis-in-pr-ci.md for why these
+# checks live in a PR workflow rather than a pre-commit hook or subagent step.
 
 name: CI
 
@@ -25,7 +39,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  dead-code:
+  frontend-lint:
     runs-on: ubuntu-latest
 
     steps:
@@ -40,13 +54,90 @@ jobs:
       - name: Install npm deps
         run: npm ci
 
+      - name: Run dead-code check (knip)
+        run: npm run lint:dead-code:ts
+
+      - name: Typecheck (tsc --noEmit)
+        run: npm run typecheck
+
+  frontend-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Run frontend tests (vitest)
+        run: npm run test:frontend
+
+  # Static analysis over backend/app — ruff + vulture, both fast and neither
+  # imports the app, so this job installs only backend[dev] (no audio extra, no
+  # libportaudio2) and skips `npm ci` (npm is only the entry point for the
+  # `cd backend && python -m …` scripts).
+  backend-lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/pyproject.toml
 
-      - name: Install backend dev deps
+      - name: Install backend deps
         run: pip install -e "backend[dev]"
 
-      - name: Run dead-code checks (knip + vulture)
-        run: npm run lint:dead-code
+      - name: Run ruff (lint)
+        run: npm run lint:ruff
+
+      - name: Run dead-code check (vulture)
+        run: npm run lint:dead-code:py
+
+  backend-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/pyproject.toml
+
+      # PortAudio is a runtime dependency of `sounddevice`, imported at module
+      # load in backend/app/audio/recorder.py and reached at pytest collection
+      # via app.main. Installed proactively so collection resolves regardless of
+      # whether the sounddevice Linux wheel bundles PortAudio; harmless if it does.
+      - name: Install PortAudio
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2
+
+      - name: Install backend deps
+        run: pip install -e "backend[dev,audio]"
+
+      - name: Run backend tests (pytest, not slow)
+        run: npm run test -- -m "not slow"

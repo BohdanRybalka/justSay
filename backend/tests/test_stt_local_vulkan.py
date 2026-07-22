@@ -7,6 +7,7 @@ spawned and no real network call is made. `resolve_binary_path`/
 
 import ctypes
 import subprocess
+import sys
 import threading
 import time
 from ctypes import wintypes
@@ -16,6 +17,12 @@ import pytest
 import app.stt.local_vulkan as local_vulkan_module
 from app.stt.config import STTSettings
 from app.stt.local_vulkan import WhisperCppVulkanSTTProvider
+
+# `ctypes.WinDLL` only exists on Windows -- mocking `sys.platform` doesn't make it exist.
+_requires_windows = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="ctypes.WinDLL exists only on Windows; the Job Object path is Windows-only",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1077,6 +1084,7 @@ def _reset_job_object_state(monkeypatch):
     monkeypatch.setattr(local_vulkan_module, "_kernel32_dll", None)
 
 
+@_requires_windows
 def test_assign_to_job_object_creates_job_once_and_assigns_process(monkeypatch):
     fake_kernel32 = _FakeKernel32()
     monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
@@ -1092,6 +1100,7 @@ def test_assign_to_job_object_creates_job_once_and_assigns_process(monkeypatch):
     assert fake_kernel32.assign_calls == [(4242, 777)]
 
 
+@_requires_windows
 def test_assign_to_job_object_reuses_cached_job_across_calls(monkeypatch):
     fake_kernel32 = _FakeKernel32()
     monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
@@ -1109,6 +1118,7 @@ def test_assign_to_job_object_reuses_cached_job_across_calls(monkeypatch):
     assert fake_kernel32.assign_calls == [(4242, 111), (4242, 222)]
 
 
+@_requires_windows
 def test_assign_to_job_object_is_noop_on_non_windows(monkeypatch):
     monkeypatch.setattr(local_vulkan_module.sys, "platform", "linux")
 
@@ -1121,6 +1131,7 @@ def test_assign_to_job_object_is_noop_on_non_windows(monkeypatch):
     local_vulkan_module._assign_to_job_object(process)  # must not raise
 
 
+@_requires_windows
 def test_assign_to_job_object_swallows_create_job_failure(monkeypatch):
     fake_kernel32 = _FakeKernel32(create_job_ok=False)
     monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
@@ -1134,6 +1145,7 @@ def test_assign_to_job_object_swallows_create_job_failure(monkeypatch):
     assert fake_kernel32.assign_calls == []
 
 
+@_requires_windows
 def test_assign_to_job_object_swallows_assign_failure(monkeypatch):
     fake_kernel32 = _FakeKernel32(assign_ok=False)
     monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
@@ -1145,6 +1157,7 @@ def test_assign_to_job_object_swallows_assign_failure(monkeypatch):
     local_vulkan_module._assign_to_job_object(process)  # must not raise -- logged, not propagated
 
 
+@_requires_windows
 def test_assign_to_job_object_swallows_missing_handle_attribute(monkeypatch):
     """A process object without a `._handle` (e.g. this suite's own
     `_FakeProcess`, or a platform where Popen doesn't expose it) must not
@@ -1160,6 +1173,7 @@ def test_assign_to_job_object_swallows_missing_handle_attribute(monkeypatch):
     assert fake_kernel32.assign_calls == []
 
 
+@_requires_windows
 def test_kernel32_prototypes_declare_restype_and_argtypes():
     """AC 16a: without explicit restype/argtypes, ctypes marshals return and
     argument values as 32-bit `c_int` by default, which silently truncates a
@@ -1184,6 +1198,7 @@ def test_kernel32_prototypes_declare_restype_and_argtypes():
     assert kernel32.AssignProcessToJobObject.argtypes == [wintypes.HANDLE, wintypes.HANDLE]
 
 
+@_requires_windows
 def test_get_model_success_path_still_works_when_job_object_creation_fails(monkeypatch, tmp_path):
     """AC 15's wrapper contract: a Job Object failure must degrade to the
     atexit registry, never break STT itself."""

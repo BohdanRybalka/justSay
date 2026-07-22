@@ -5,12 +5,19 @@ Real hardware numbers (AMD Radeon RX 5700 XT, 8GB card) are reproduced from
 `docs/adr/008-gpu-vendor-probe.md`'s live verification.
 """
 
+import sys
 from unittest.mock import MagicMock
 
 import pytest
 
 from app.core import gpu_probe
 from app.core.gpu_probe import GpuProbeResult, GpuVendor
+
+# `import winreg` raises ModuleNotFoundError off Windows -- not mockable, must skip.
+_requires_windows = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="winreg is a Windows-only stdlib module; this probe runs only on Windows",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -220,6 +227,7 @@ def test_nvidia_smi_probe_parses_name_and_total_vram(monkeypatch):
     assert result.vram_total_mb == 12288
 
 
+@_requires_windows
 def test_windows_registry_probe_returns_none_on_openkey_failure(monkeypatch):
     monkeypatch.setattr(gpu_probe.os, "name", "nt")
     import winreg
@@ -242,6 +250,7 @@ class _FakeAdapterKey:
         return False
 
 
+@_requires_windows
 def test_windows_registry_probe_classifies_amd_and_picks_max_vram_adapter(monkeypatch):
     """Reproduces the ADR-008 live measurement: AMD Radeon RX 5700 XT reports
     HardwareInformation.qwMemorySize = 8573157376 bytes (7.98 GiB, correct) —
@@ -294,6 +303,7 @@ def test_windows_registry_probe_classifies_amd_and_picks_max_vram_adapter(monkey
     assert result.vram_total_mb == 8573157376 // (1024 * 1024)
 
 
+@_requires_windows
 def test_windows_registry_probe_skips_unclassifiable_provider(monkeypatch):
     """A ProviderName that isn't AMD/Intel-shaped (e.g. a basic software
     render adapter) must be skipped rather than guessed at."""
