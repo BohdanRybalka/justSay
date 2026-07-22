@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node -e \"require('fs').mkdirSync('src-tauri/resources/whisper-cpp-vulkan',{recursive:true})\" && vite",
     "build": "node -e \"require('fs').mkdirSync('src-tauri/resources/whisper-cpp-vulkan',{recursive:true})\" && tsc && vite build",
+    "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:dev:frozen": "npm run sidecar:build && cross-env JUSTSAY_USE_FROZEN_SIDECAR=1 tauri dev",
     "sidecar:build": "cd backend && pyinstaller build_sidecar.spec --noconfirm --distpath ../src-tauri/resources",
