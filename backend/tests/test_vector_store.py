@@ -18,6 +18,36 @@ from app.core.config import settings
 from app.core.types import ProviderMode
 
 
+def _loadable_sqlite_extensions_available() -> bool:
+    """Whether this interpreter's ``sqlite3`` was built with
+    ``--enable-loadable-sqlite-extensions``. The ``actions/setup-python``
+    Linux builds used in CI are compiled without it, so
+    ``Connection.enable_load_extension``/``load_extension`` are absent and
+    sqlite-vec cannot load; the production sidecar ships a Python built with
+    the flag. Gate the real-load selftest on the actual runtime capability,
+    not on a CI env var -- a genuine sqlite-vec regression on a
+    capable interpreter still fails."""
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.enable_load_extension(True)
+        return True
+    except (AttributeError, sqlite3.OperationalError):
+        return False
+    finally:
+        conn.close()
+
+
+_requires_loadable_extensions = pytest.mark.skipif(
+    not _loadable_sqlite_extensions_available(),
+    reason=(
+        "this Python's sqlite3 was built without "
+        "--enable-loadable-sqlite-extensions (e.g. the actions/setup-python "
+        "Linux CI build), so sqlite-vec cannot load; the production sidecar "
+        "ships a Python with extension support"
+    ),
+)
+
+
 @pytest.fixture(autouse=True)
 def isolated_storage(tmp_path, monkeypatch):
     home = tmp_path / "home"
@@ -672,9 +702,10 @@ async def test_embed_entry_background_skips_deleted_entry():
 
 # --- selftest / --selftest-sqlite-vec ---------------------------------------
 
+@_requires_loadable_extensions
 def test_selftest_ok():
     ok, msg = vector_store.selftest()
-    assert ok is True
+    assert ok is True, msg
     assert msg == "ok"
 
 
