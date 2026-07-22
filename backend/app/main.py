@@ -4,9 +4,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from app import __version__
 from app.core import tasks
+from app.core.auth_middleware import LaunchTokenMiddleware
 from app.core.config import settings
 from app.core.logging_config import setup_logging
 
@@ -124,6 +126,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Middleware execution order is TrustedHost -> CORS -> LaunchToken -> route.
+# add_middleware inserts at index 0 and the stack is built in reverse, so the
+# LAST-added middleware is the OUTERMOST -- hence TrustedHost is added last.
+# See docs/adr/026-loopback-api-request-authentication.md.
+app.add_middleware(LaunchTokenMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -141,8 +149,14 @@ app.add_middleware(
         "http://127.0.0.1:5173",
     ],
     allow_methods=["*"],
+    # allow_headers=["*"] already permits X-JustSay-Token, and CORS
+    # short-circuits the preflight OPTIONS so the token middleware never sees it.
     allow_headers=["*"],
 )
+
+# Outermost: rejects a rebound Host with 400 before any other middleware or
+# route runs. Unconditional -- always on, dev and production.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
 
 app.include_router(core_router)
 app.include_router(settings_router)

@@ -30,8 +30,13 @@ class STTSettings(BaseSettings):
     # Above the threshold, or when style == "ai_prompt", we route to Gemini.
     cloud_routing_threshold: float = Field(default=30.0, gt=0)
 
-    # Local: faster-whisper
-    whisper_model_size: str = "large-v3-turbo"
+    # Local: faster-whisper. Pattern guards the load / env construction paths
+    # against a path separator or ``..`` in the model-cache path (defense-in-
+    # depth; PUT /settings is guarded in user_settings.update_user_settings).
+    # See docs/adr/026-loopback-api-request-authentication.md.
+    # \A...\z (not ^...$): pydantic's rust-regex $ is fine, but the anchors make
+    # the full-string intent explicit and reject a trailing newline everywhere.
+    whisper_model_size: str = Field(default="large-v3-turbo", pattern=r"\A[A-Za-z0-9._-]+\z")
     whisper_device: str = "auto"  # auto | cpu | cuda
 
     # User-tunable glossary / vocabulary hint. Threaded into every STT

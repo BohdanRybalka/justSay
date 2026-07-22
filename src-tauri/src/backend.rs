@@ -185,6 +185,17 @@ pub fn install_ctrl_handler() {
 
 pub const PORT: u16 = 9377;
 
+/// Per-launch shared secret for the loopback API. Generated once (UUIDv4) and
+/// stable for the process lifetime. Handed to the sidecar via the
+/// `JUSTSAY_API_TOKEN` env var (see `spawn()`) and to the WebView via the
+/// `get_backend_token` command (see `lib.rs`), which sends it back as the
+/// `X-JustSay-Token` header. See
+/// `docs/adr/026-loopback-api-request-authentication.md`.
+pub fn api_token() -> &'static str {
+    static API_TOKEN: OnceLock<String> = OnceLock::new();
+    API_TOKEN.get_or_init(|| uuid::Uuid::new_v4().to_string())
+}
+
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(300);
 const HEALTH_POLL_MAX_ATTEMPTS: u32 = 100; // 30 seconds
@@ -586,7 +597,10 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         let mut shell_cmd = app
             .shell()
             .command(sidecar_str)
-            .args(["--host", "127.0.0.1", "--port", &port_str]);
+            .args(["--host", "127.0.0.1", "--port", &port_str])
+            // Per-launch API token via env (never a CLI arg, which any local
+            // process could read) -- see api_token()'s doc and ADR 026.
+            .env("JUSTSAY_API_TOKEN", api_token());
         if force_dev_data_dir {
             shell_cmd = shell_cmd.env("JUSTSAY_FORCE_DEV_DATA_DIR", "1");
         }
@@ -665,7 +679,9 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         ])
         .current_dir(&backend_dir)
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::null())
+        // Per-launch API token via env (see api_token()'s doc and ADR 026).
+        .env("JUSTSAY_API_TOKEN", api_token());
         if force_dev_data_dir {
             cmd.env("JUSTSAY_FORCE_DEV_DATA_DIR", "1");
         }
@@ -1132,6 +1148,13 @@ mod tests {
         assert_eq!(respawn_backoff(0), Duration::from_secs(2));
         assert_eq!(respawn_backoff(1), Duration::from_secs(4));
         assert_eq!(respawn_backoff(2), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn api_token_is_non_empty_and_stable_across_calls() {
+        let first = api_token();
+        assert!(!first.is_empty(), "api_token must not be empty");
+        assert_eq!(first, api_token(), "api_token must be stable across calls");
     }
 
     /// Create a throwaway kill-on-close job for a single test. Never the shared

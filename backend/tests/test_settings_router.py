@@ -253,3 +253,29 @@ async def test_cleanup_removes_files_from_configured_temp_dir(client, _isolated_
 
     assert _isolated_temp_dir.exists()
     assert list(_isolated_temp_dir.iterdir()) == []
+
+
+# --- PUT /settings whisper_model_size hardening (spec 040) -------------------
+#
+# model_copy(update=...) does not re-run field validators, so the explicit
+# check in update_user_settings is what actually guards this path -- see
+# docs/adr/026-loopback-api-request-authentication.md.
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "bad_value",
+    # "large-v3\n" guards the regex anchor: Python's $ matches just before a
+    # trailing newline, so a full-string match (fullmatch / \A..\z) is required.
+    ["../evil", "..\\evil", "foo/bar", "foo\\bar", "..", "a b", "large-v3;rm", "large-v3\n"],
+)
+async def test_put_settings_rejects_unsafe_whisper_model_size(client, bad_value):
+    resp = await client.put("/settings", json={"whisper_model_size": bad_value})
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_put_settings_accepts_valid_whisper_model_size(client):
+    resp = await client.put("/settings", json={"whisper_model_size": "large-v3-turbo"})
+    assert resp.status_code == 200
+    assert user_settings.get_user_settings().whisper_model_size == "large-v3-turbo"

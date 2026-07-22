@@ -31,6 +31,7 @@ tauri-plugin-shell = "2.3.5"
 tauri-plugin-updater = "2.10.1"
 reqwest = { version = "0.12", features = ["rustls-tls"] }
 tokio = { version = "1", features = ["time"] }
+uuid = { version = "1", features = ["v4"] }
 
 # Windows-only Win32 surface for the backend-child Job Object
 # (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, see docs/adr/023). Version 0.60 matches

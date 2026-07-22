@@ -20,6 +20,17 @@ import tempfile
 _SESSION_DATA_DIR = tempfile.mkdtemp(prefix="justsay-pytest-")
 os.environ["JUSTSAY_DATA_DIR"] = _SESSION_DATA_DIR
 
+# TrustedHostMiddleware (spec 040) rejects any Host outside settings.trusted_hosts
+# with 400. The test clients reach the app over base_url "http://test" (Host:
+# test) and Starlette's TestClient uses "testserver", so both must be allowed.
+# Set here -- before the first `app.*` import below constructs the AppSettings()
+# singleton -- because JUSTSAY_TRUSTED_HOSTS is only read at that construction,
+# mirroring the JUSTSAY_DATA_DIR seam above. See
+# docs/adr/026-loopback-api-request-authentication.md.
+os.environ["JUSTSAY_TRUSTED_HOSTS"] = (
+    '["127.0.0.1", "localhost", "test", "testserver"]'
+)
+
 import logging
 import shutil
 import warnings
