@@ -1,16 +1,17 @@
 # PR-gating CI (spec 030 / 039, ADR 017 / 025).
 #
-# Five per-check jobs run in parallel — one job per check type — so a failing
-# check surfaces as its own line in `gh pr checks` (lint / typecheck / test
-# identifiable without opening a job log). Each check routes through an npm
+# Four per-check jobs run in parallel — each check routes through an npm
 # script so CI and a local run share one definition (ADR 017's
 # single-definition rule):
 #
-#   frontend-lint      — Node only: knip (dead code).
-#   frontend-typecheck — Node only: tsc --noEmit.
-#   frontend-test      — Node only: vitest.
-#   backend-lint       — Node entry point + Python[dev]: ruff + vulture.
-#   backend-test       — Node entry point + Python[dev,audio]: pytest.
+#   frontend-lint — Node only: knip (dead code) + tsc --noEmit. Grouped like
+#                   backend-lint below: both are static analysis, neither runs
+#                   the app. A frontend-lint failure needs the job log to tell
+#                   knip from tsc apart — same trade-off backend-lint already
+#                   accepts for ruff vs. vulture.
+#   frontend-test — Node only: vitest.
+#   backend-lint  — Node entry point + Python[dev]: ruff + vulture.
+#   backend-test  — Node entry point + Python[dev,audio]: pytest.
 #
 # backend-lint installs only backend[dev] and skips PortAudio: neither ruff nor
 # vulture imports the app. Both backend jobs drop `npm ci` — their npm scripts
@@ -55,21 +56,6 @@ jobs:
 
       - name: Run dead-code check (knip)
         run: npm run lint:dead-code:ts
-
-  frontend-typecheck:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-          cache: "npm"
-
-      - name: Install npm deps
-        run: npm ci
 
       - name: Typecheck (tsc --noEmit)
         run: npm run typecheck
