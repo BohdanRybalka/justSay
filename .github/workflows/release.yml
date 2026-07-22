@@ -60,10 +60,43 @@ jobs:
           node-version: "24"
           cache: "npm"
 
-      - name: Install Python
+      # Windows: actions/setup-python is fine here — the loadable-sqlite-
+      # extensions problem below is macOS-only.
+      - name: Install Python (Windows)
+        if: runner.os == 'Windows'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # macOS: actions/setup-python's macOS CPython (>= 3.11.0-rc.2) is built
+      # WITHOUT --enable-loadable-sqlite-extensions by design (actions/setup-
+      # python#540 — won't-fix, no toggle exists), so sqlite3.Connection has no
+      # enable_load_extension and sqlite-vec (semantic search) cannot load — the
+      # "Verify sqlite-vec loads in frozen sidecar" step below is exactly what
+      # caught this on the first release to run it. uv's python-build-standalone
+      # sets PY_SQLITE_ENABLE_LOAD_EXTENSION=1, so use it for the macOS
+      # interpreter that pip + PyInstaller run against. The venv (built --seed so
+      # it carries pip) goes on PATH, so every later step's python/pip/pyinstaller
+      # resolves to it and PyInstaller freezes THAT interpreter. arm64 is
+      # preserved (uv installs the arm64 build on macos-14). Windows is untouched.
+      - name: Install uv (macOS)
+        if: runner.os == 'macOS'
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install Python via uv (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          uv python install 3.12
+          uv venv --python 3.12 --seed "$GITHUB_WORKSPACE/.venv"
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/.venv" >> "$GITHUB_ENV"
+
+      # Fail fast (~1s, both OSes) BEFORE the multi-minute pip + PyInstaller build
+      # if the interpreter on PATH lacks loadable-extension support. Prints
+      # sys.executable so a wrong-Python-on-PATH pickup is obvious in the log.
+      - name: Assert loadable sqlite extensions are available
+        run: |
+          python -c "import sqlite3, sys; c = sqlite3.connect(':memory:'); assert hasattr(c, 'enable_load_extension'), 'CPython built WITHOUT loadable sqlite extensions: ' + sys.executable; print('OK loadable-extensions:', sys.executable)"
 
       - name: Install Python deps + PyInstaller
         working-directory: backend

@@ -164,19 +164,34 @@ if (-not (Test-Path (Join-Path $SrcDir ".git"))) {
     Write-Step "Reusing existing checkout at $SrcDir (pass -Clean to force a fresh clone)"
 }
 
-Write-Step "Configuring (CMake + Ninja, GGML_VULKAN=ON)"
-
 # All build commands run inside one cmd.exe invocation so vcvars64.bat's
 # environment (cl.exe on PATH, INCLUDE/LIB set, etc.) is visible to the
 # cmake/ninja calls that follow it -- each `Bash`/PowerShell-tool-style
 # separate process invocation would lose that environment immediately.
+#
+# The batch is written to a temp .bat with CRLF endings and run via `cmd /c
+# <file>`, NOT `cmd /c <multi-line-string>`. cmd.exe only treats CRLF (not a
+# bare LF) as a command separator, and this .ps1 can be checked out with LF
+# endings (the repo has no .gitattributes, so a CI runner gets the LF blob).
+# With LF, `cmd /c $string` ran ONLY the first line (`call vcvars`) and silently
+# skipped the cmake line -- a 0-exit no-op that produced no binary. A .bat file
+# with forced CRLF executes every line regardless of this script's own endings.
+function Invoke-VcEnvBatch([string]$Script) {
+    $crlf = (($Script -replace "`r?`n", "`r`n").Trim()) + "`r`n"
+    $bat = Join-Path ([System.IO.Path]::GetTempPath()) ("justsay-vc-" + [guid]::NewGuid().ToString("N") + ".bat")
+    [System.IO.File]::WriteAllText($bat, $crlf, [System.Text.Encoding]::ASCII)
+    try { cmd /c "`"$bat`"" } finally { Remove-Item $bat -Force -ErrorAction SilentlyContinue }
+}
+
+Write-Step "Configuring (CMake + Ninja, GGML_VULKAN=ON)"
+
 $configureCmd = @"
 call "$($vs.VcVars)" >nul
 set VULKAN_SDK=$vulkanSdk
 set PATH=%VULKAN_SDK%\Bin;%PATH%
 "$($vs.Cmake)" -S "$SrcDir" -B "$BuildDir" -G Ninja -DCMAKE_MAKE_PROGRAM="$($vs.Ninja)" -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DWHISPER_SDL2=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_SERVER=ON
 "@
-cmd /c $configureCmd
+Invoke-VcEnvBatch $configureCmd
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed (exit $LASTEXITCODE)." }
 
 Write-Step "Building whisper-server (this can take several minutes)"
@@ -187,7 +202,7 @@ set VULKAN_SDK=$vulkanSdk
 set PATH=%VULKAN_SDK%\Bin;%PATH%
 "$($vs.Cmake)" --build "$BuildDir" --target whisper-server --config Release -j $env:NUMBER_OF_PROCESSORS
 "@
-cmd /c $buildCmd
+Invoke-VcEnvBatch $buildCmd
 if ($LASTEXITCODE -ne 0) { throw "Build failed (exit $LASTEXITCODE)." }
 
 $binDir = Join-Path $BuildDir "bin"
