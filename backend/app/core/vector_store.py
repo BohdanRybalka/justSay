@@ -323,12 +323,8 @@ def selftest() -> tuple[bool, str]:
                 "INSERT INTO vt(rowid, embedding) VALUES (1, ?)",
                 (sqlite_vec.serialize_float32([1.0, 2.0, 3.0]),),
             )
-            # `k = ?` alone bounds the result set to one row; adding `LIMIT`
-            # is forbidden by sqlite-vec ("Only LIMIT or 'k =?' can be
-            # provided, not both") whenever SQLite pushes the LIMIT down to
-            # the vec0 vtab -- which it does for this single-table query on
-            # newer SQLite builds (e.g. the CI runner), though not for the
-            # JOIN-wrapped `query_similar` above.
+            # No LIMIT: sqlite-vec rejects it alongside `k = ?` once SQLite pushes
+            # LIMIT into the vec0 vtab, which it does here (unlike query_similar's JOIN).
             row = conn.execute(
                 "SELECT rowid FROM vt WHERE embedding MATCH ? AND k = ? ORDER BY distance",
                 (sqlite_vec.serialize_float32([1.0, 2.0, 3.0]), 1),

@@ -60,13 +60,8 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
-# Pre-existing-debt ignore list (spec 039 / ADR 025). The backend violates these
-# 13 rules in code that predates the PR-CI ruff gate; cleaning them is a rename-
-# heavy, import-order-fragile repo-wide edit deferred to its own spec. The gate
-# still enforces `select` MINUS these — every other E/F/I/N/W/UP rule is live.
-# Each entry is cleared by deleting its line as the debt for that rule clears
-# (a ratchet that only tightens). "ruff passes" here means "no violation outside
-# these 13 tracked-debt rules", NOT "the backend is ruff-clean".
+# Pre-existing debt, not false positives (spec 039 / ADR 025) — real violations
+# predating the PR-CI gate. Clear a line once that rule's violations are fixed.
 ignore = [
     "E501",  # line-too-long (42) — long SQL/log/annotation lines
     "E402",  # module-import-not-at-top (16) — tests/conftest.py ordering (ADR 014)

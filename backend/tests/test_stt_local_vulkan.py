@@ -18,11 +18,7 @@ import app.stt.local_vulkan as local_vulkan_module
 from app.stt.config import STTSettings
 from app.stt.local_vulkan import WhisperCppVulkanSTTProvider
 
-# The Job Object tests exercise the Windows-only `_assign_to_job_object`
-# path, which calls `ctypes.WinDLL`. `WinDLL` is defined in CPython's ctypes
-# only when actually running on Windows, so monkeypatching `sys.platform` to
-# "win32" does not make it exist off Windows -- the setattr itself raises
-# AttributeError. Skip these on non-Windows; the path is Windows-only.
+# `ctypes.WinDLL` only exists on Windows -- mocking `sys.platform` doesn't make it exist.
 _requires_windows = pytest.mark.skipif(
     sys.platform != "win32",
     reason="ctypes.WinDLL exists only on Windows; the Job Object path is Windows-only",

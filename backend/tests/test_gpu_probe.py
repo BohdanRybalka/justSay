@@ -13,10 +13,7 @@ import pytest
 from app.core import gpu_probe
 from app.core.gpu_probe import GpuProbeResult, GpuVendor
 
-# The Windows registry probe tests import the stdlib `winreg` module, which
-# exists only on Windows -- on other platforms the import is a
-# ModuleNotFoundError, not something monkeypatch can stub. Skip them off
-# Windows; the registry code path itself is Windows-only.
+# `import winreg` raises ModuleNotFoundError off Windows -- not mockable, must skip.
 _requires_windows = pytest.mark.skipif(
     sys.platform != "win32",
     reason="winreg is a Windows-only stdlib module; this probe runs only on Windows",
