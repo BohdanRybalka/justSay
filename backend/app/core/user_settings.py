@@ -5,6 +5,7 @@ This is Layer 2 config (user preferences). Layer 1 (secrets/.env) is read-only.
 
 import json
 import logging
+import re
 import sys
 import threading
 import uuid
@@ -36,6 +37,18 @@ def _settings_path() -> Path:
 log = logging.getLogger(__name__)
 
 
+# Whisper model size is used to build a Hugging Face repo id / on-disk cache
+# path, so it must never carry a path separator or a ``..`` traversal segment.
+_WHISPER_MODEL_SIZE_CHARS = r"[A-Za-z0-9._-]+"
+# For the pydantic Field(pattern=...) below: \A...\z fully anchor the match.
+# Plain ^...$ is unsafe -- in Python's re (used by the fullmatch runtime check)
+# $ also matches just before a trailing newline, so "large-v3\n" would slip
+# through. \z is rust-regex's end-of-haystack anchor; \Z (Python's spelling for
+# it) is rejected by pydantic's rust-regex engine at schema-build time.
+_WHISPER_MODEL_SIZE_PATTERN = rf"\A{_WHISPER_MODEL_SIZE_CHARS}\z"
+_WHISPER_MODEL_SIZE_RE = re.compile(_WHISPER_MODEL_SIZE_CHARS)
+
+
 class UserSettings(BaseModel):
     """User-editable settings. Auto-saved to disk on mutation."""
 
@@ -51,8 +64,13 @@ class UserSettings(BaseModel):
     # Groq / Gemini pin a single provider.
     stt_engine: Literal["auto", "groq", "gemini"] = "auto"
 
-    # Local STT (faster-whisper)
-    whisper_model_size: str = "large-v3-turbo"
+    # Local STT (faster-whisper). The pattern is defense-in-depth for the
+    # load / env construction paths; the PUT /settings path is guarded
+    # separately in update_user_settings (model_copy does not re-run
+    # validators). See docs/adr/026-loopback-api-request-authentication.md.
+    whisper_model_size: str = Field(
+        default="large-v3-turbo", pattern=_WHISPER_MODEL_SIZE_PATTERN
+    )
     whisper_device: str = "auto"  # auto | cpu | cuda
 
     # Local LLM (Ollama)
@@ -122,11 +140,36 @@ def update_user_settings(updates: dict) -> UpdateOutcome:
 
             updates = {**updates, "output_dir": str(new_dir)}
 
+        if "whisper_model_size" in updates:
+            # model_copy(update=...) does NOT re-run field validators, so the
+            # Field(pattern=...) on UserSettings alone would not guard this
+            # path -- enforce it explicitly here (mirrors output_dir above).
+            _validate_whisper_model_size(updates["whisper_model_size"])
+
         merged = current.model_copy(update=updates)
         _save(merged)
         global _settings
         _settings = merged
         return UpdateOutcome(settings=merged, warning=warning)
+
+
+def _validate_whisper_model_size(value: object) -> None:
+    """Reject a whisper_model_size that could escape its model cache path.
+
+    Raises ValueError (which ``put_settings`` maps to 400) on any value that
+    is not a plain model-size token: it must consist only of ``[A-Za-z0-9._-]``
+    (full-string match -- a trailing newline is rejected) and must not contain
+    ``..``.
+    """
+    if (
+        not isinstance(value, str)
+        or not _WHISPER_MODEL_SIZE_RE.fullmatch(value)
+        or ".." in value
+    ):
+        raise ValueError(
+            "whisper_model_size must contain only letters, digits, '.', '_', "
+            "or '-', and must not contain '..'"
+        )
 
 
 def _validate_output_dir(value: object) -> Path:

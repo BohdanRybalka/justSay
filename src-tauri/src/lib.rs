@@ -42,6 +42,14 @@ fn get_backend_url() -> String {
     format!("http://127.0.0.1:{}", backend::PORT)
 }
 
+/// Expose the per-launch API token to the WebView, which sends it back as the
+/// `X-JustSay-Token` header on every backend request. See
+/// docs/adr/026-loopback-api-request-authentication.md.
+#[tauri::command]
+fn get_backend_token() -> String {
+    backend::api_token().to_string()
+}
+
 
 #[tauri::command]
 fn widget_ready(app: AppHandle) {
@@ -155,7 +163,12 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![backend_request, get_backend_url, widget_ready])
+        .invoke_handler(tauri::generate_handler![
+            backend_request,
+            get_backend_url,
+            widget_ready,
+            get_backend_token
+        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 

@@ -4,11 +4,42 @@
 
 const BASE_URL = "http://127.0.0.1:9377";
 
+// Per-launch API token from the Tauri shell (ADR 026). Fetched via the
+// `get_backend_token` command. A *successful* token is cached for the session;
+// a *failure* is logged and NOT cached, so a transient invoke error inside the
+// real WebView doesn't permanently poison every request into a 401 (ADR 026
+// Risk #3). Outside Tauri (manual browser dev) the import/invoke fails, so no
+// header is sent — matching the backend's open mode when no token is configured.
+let cachedToken: string | null = null;
+let tokenPromise: Promise<string | null> | null = null;
+
+function getToken(): Promise<string | null> {
+  if (cachedToken !== null) {
+    return Promise.resolve(cachedToken);
+  }
+  return (tokenPromise ??= (async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      cachedToken = await invoke<string>("get_backend_token");
+      return cachedToken;
+    } catch (err) {
+      // Not cached: the next request retries. One retry per request (deduped
+      // while a fetch is in flight), never a retry loop.
+      console.warn("getToken: failed to fetch backend token, will retry", err);
+      return null;
+    } finally {
+      tokenPromise = null;
+    }
+  })());
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const opts: RequestInit = {
-    method,
-    headers: { "Content-Type": "application/json" },
-  };
+  const token = await getToken();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) {
+    headers["X-JustSay-Token"] = token;
+  }
+  const opts: RequestInit = { method, headers };
   if (body) {
     opts.body = JSON.stringify(body);
   }
@@ -230,7 +261,13 @@ export const api = {
     const blob = new Blob([fileBytes], { type: "application/octet-stream" });
     form.append("file", blob, filename);
     const url = `${BASE_URL}/pipeline/process-file?language=${language}`;
-    const resp = await fetch(url, { method: "POST", body: form });
+    // No Content-Type header: the browser sets the multipart boundary itself.
+    const token = await getToken();
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers["X-JustSay-Token"] = token;
+    }
+    const resp = await fetch(url, { method: "POST", body: form, headers });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ detail: resp.statusText }));
       throw new Error(err.detail || `HTTP ${resp.status}`);
@@ -311,10 +348,18 @@ export function levelStream(
 ): AbortController {
   const controller = new AbortController();
 
-  fetch(`${BASE_URL}/audio/level-stream`, {
-    method: "GET",
-    signal: controller.signal,
-  })
+  getToken()
+    .then((token) => {
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers["X-JustSay-Token"] = token;
+      }
+      return fetch(`${BASE_URL}/audio/level-stream`, {
+        method: "GET",
+        signal: controller.signal,
+        headers,
+      });
+    })
     .then(async (resp) => {
       if (!resp.ok || !resp.body) {
         onError(`HTTP ${resp.status}`);
