@@ -15,6 +15,8 @@
     "test": "cd backend && python -m pytest tests/ -v",
     "test:frontend": "vitest run",
     "test:rust": "cd src-tauri && cargo test",
+    "typecheck": "tsc --noEmit",
+    "lint:ruff": "cd backend && python -m ruff check .",
     "lint:dead-code:ts": "knip",
     "lint:dead-code:py": "cd backend && python -m vulture",
     "lint:dead-code": "npm run lint:dead-code:ts && npm run lint:dead-code:py"
