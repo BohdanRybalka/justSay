@@ -44,8 +44,9 @@ local-mac = [
     "mlx-whisper>=0.4.0,<1.0",
 ]
 local-llm = [
-    # Optional: only needed for the standalone /llm/process endpoint in local mode.
-    # The default audio pipeline no longer runs an LLM cleanup step.
+    # Optional: the Ollama client for Local mode. The default audio pipeline
+    # runs no LLM cleanup step; Ollama is used by the local embedding provider
+    # (nomic-embed-text) for semantic search.
     "ollama>=0.6.1",
 ]
 audio = [
@@ -93,4 +94,6 @@ markers = [
 [tool.vulture]
 paths = ["app"]
 min_confidence = 100
-ignore_names = ["time_info"]
+# Unused sounddevice audio-callback params — the callback signature is fixed by
+# sounddevice (positional), so these names must stay even though we read neither.
+ignore_names = ["time_info", "status"]

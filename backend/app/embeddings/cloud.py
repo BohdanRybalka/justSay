@@ -48,8 +48,7 @@ class CloudEmbeddingProvider:
 
     def cleanup(self) -> None:
         """No-op — the google-genai client holds no persistent local
-        resource worth releasing, matching CloudLLMProvider.cleanup()'s
-        own no-op."""
+        resource worth releasing."""
 
     @staticmethod
     def _call_embed(client, model: str, text: str) -> list[float]:

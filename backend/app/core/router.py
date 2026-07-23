@@ -11,7 +11,6 @@ from app.core.config import settings
 from app.core.schemas import HealthResponse, ConfigResponse
 from app.core.utils import bytes_to_gb, bytes_to_mb
 from app.stt import get_provider as get_stt_provider
-from app.llm import get_llm_provider
 
 router = APIRouter()
 
@@ -45,12 +44,10 @@ async def health():
 @router.get("/config", response_model=ConfigResponse)
 async def get_config():
     stt = get_stt_provider(settings.stt.mode, settings.stt)
-    llm = get_llm_provider(settings.llm)
     return ConfigResponse(
         stt_mode=settings.stt.mode,
         llm_mode=settings.llm.mode,
         stt_model=stt.model_name,
-        llm_model=llm.model_name,
     )
 
 

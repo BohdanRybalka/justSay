@@ -2,9 +2,8 @@
 
 Single most important AC of this spec: eligibility must be derived STRICTLY
 from (stt.mode, llm.mode) with no cloud bypass hiding inside the local
-branch. Mocks the factory's internal constructors directly (the same
-pattern test_words.py uses for get_llm_provider) so a direct cloud-SDK
-bypass cannot pass.
+branch. Mocks the factory's internal constructors directly so a direct
+cloud-SDK bypass cannot pass.
 """
 
 from __future__ import annotations

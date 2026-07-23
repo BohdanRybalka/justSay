@@ -1,4 +1,4 @@
-"""Phase 1 tests — word stats, tokeniser, stop-words, insights cache + privacy."""
+"""Phase 1 tests — word stats, tokeniser, stop-words, search."""
 
 from __future__ import annotations
 
@@ -22,9 +22,6 @@ def isolated_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(history, "_output_dir", tmp_path)
     monkeypatch.setattr(history, "_conn", None)
     monkeypatch.setattr(history, "_stats_cache", None)
-    # Insights cache is a separate module variable — wipe between tests so
-    # one test's payload doesn't survive into the next.
-    monkeypatch.setattr(words, "_insights_cache", None)
 
     history.bootstrap(tmp_path)
     yield
@@ -151,128 +148,6 @@ def test_top_words_empty_db_returns_empty():
     assert out.scanned == 0
 
 
-# --- Insights cache + privacy --------------------------------------------
-
-@pytest.mark.asyncio
-async def test_insights_cache_hits_within_ttl():
-    """Second call within TTL must NOT re-invoke the LLM."""
-    history.save_entry(text="cat cat cat dog", duration_ms=1)
-
-    fake_provider = AsyncMock()
-    fake_provider.model_name = "ollama/test"
-    fake_provider.process = AsyncMock(return_value="Insight one\nInsight two")
-
-    with patch("app.llm.get_llm_provider", return_value=fake_provider):
-        first = await words.get_insights()
-        second = await words.get_insights()
-
-    assert first == second
-    assert fake_provider.process.call_count == 1
-
-
-@pytest.mark.asyncio
-async def test_insights_cache_invalidated_by_save():
-    """Closes Plan 013 invalidation contract — save_entry fires the
-    mutation-listener registry which clears the insights cache."""
-    history.save_entry(text="cat cat dog", duration_ms=1)
-
-    fake_provider = AsyncMock()
-    fake_provider.model_name = "ollama/test"
-    fake_provider.process = AsyncMock(return_value="Insight A")
-
-    with patch("app.llm.get_llm_provider", return_value=fake_provider):
-        await words.get_insights()
-        # Mutate — listener must wipe the cache.
-        history.save_entry(text="more text", duration_ms=1)
-        await words.get_insights()
-
-    assert fake_provider.process.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_insights_cache_invalidated_by_delete():
-    # Two entries so the second get_insights still has content to feed
-    # the LLM after the delete (empty DB short-circuits before the LLM).
-    e = history.save_entry(text="cat cat dog", duration_ms=1)
-    history.save_entry(text="apple banana", duration_ms=1)
-
-    fake_provider = AsyncMock()
-    fake_provider.model_name = "ollama/test"
-    fake_provider.process = AsyncMock(return_value="Insight A")
-
-    with patch("app.llm.get_llm_provider", return_value=fake_provider):
-        await words.get_insights()
-        history.delete_entry(e.id)
-        await words.get_insights()
-
-    assert fake_provider.process.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_insights_cache_invalidated_by_clear():
-    history.save_entry(text="cat cat dog", duration_ms=1)
-
-    fake_provider = AsyncMock()
-    fake_provider.model_name = "ollama/test"
-    fake_provider.process = AsyncMock(return_value="Insight A")
-
-    with patch("app.llm.get_llm_provider", return_value=fake_provider):
-        await words.get_insights()
-        history.clear_all()
-        # Empty DB → no LLM call (early return) — assert separately.
-        result = await words.get_insights()
-
-    assert result.insights == []
-    assert result.scanned_words == 0
-    # The clear_all call invalidated the cache; the second get_insights
-    # short-circuits on empty top-words and never calls the provider.
-    assert fake_provider.process.call_count == 1
-
-
-@pytest.mark.asyncio
-async def test_insights_error_not_cached():
-    """Closes QA YELLOW-5: LLM failures must NOT poison the cache. The
-    next call retries the provider."""
-    history.save_entry(text="cat cat dog", duration_ms=1)
-
-    fake_provider = AsyncMock()
-    fake_provider.model_name = "ollama/test"
-    fake_provider.process = AsyncMock(side_effect=RuntimeError("ollama down"))
-
-    with patch("app.llm.get_llm_provider", return_value=fake_provider):
-        with pytest.raises(RuntimeError):
-            await words.get_insights()
-        # Recover the provider; the cache must be empty so this call hits it.
-        fake_provider.process = AsyncMock(return_value="Insight A")
-        recovered = await words.get_insights()
-
-    assert recovered.insights == ["Insight A"]
-
-
-@pytest.mark.asyncio
-async def test_insights_privacy_uses_active_provider_factory():
-    """Closes QA YELLOW-1: /words/insights MUST route through
-    ``get_llm_provider(settings.llm)`` so it inherits ``llm_mode``. In
-    Local mode the cloud provider must never appear.
-
-    The test mocks ``get_llm_provider`` itself (not the HTTP client) so a
-    direct cloud-SDK bypass would still fail the assertion below.
-    """
-    history.save_entry(text="cat cat dog", duration_ms=1)
-
-    fake_local = AsyncMock()
-    fake_local.model_name = "ollama/gemma3:4b"
-    fake_local.process = AsyncMock(return_value="Insight A")
-
-    with patch("app.llm.get_llm_provider", return_value=fake_local) as factory:
-        result = await words.get_insights()
-
-    factory.assert_called_once()  # words.py uses the factory, no SDK bypass
-    assert result.model == "ollama/gemma3:4b"
-    fake_local.process.assert_awaited_once()
-    assert fake_local.process.call_args.kwargs["task"] == "insights"
-
-
 # --- Router smoke tests --------------------------------------------------
 
 @pytest.mark.asyncio
@@ -293,20 +168,6 @@ async def test_words_top_limit_validated_by_fastapi(client):
     contract."""
     resp = await client.get("/words/top?limit=99999")
     assert resp.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_words_insights_503_when_llm_fails(client):
-    history.save_entry(text="cat cat dog", duration_ms=1)
-    fake_provider = AsyncMock()
-    fake_provider.model_name = "ollama/test"
-    fake_provider.process = AsyncMock(side_effect=RuntimeError("ollama down"))
-
-    with patch("app.llm.get_llm_provider", return_value=fake_provider):
-        resp = await client.get("/words/insights")
-
-    assert resp.status_code == 503
-    assert "Insights unavailable" in resp.json()["detail"]
 
 
 # --- Plan 021: search sanitization + highlight ---------------------------

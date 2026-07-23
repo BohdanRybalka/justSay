@@ -1,7 +1,6 @@
 import {
   api,
   type HistoryStats,
-  type InsightsResponse,
   type TopWordsResponse,
 } from "../../api";
 import { escapeHtml } from "../html";
@@ -33,13 +32,9 @@ export function renderWords(container: HTMLElement): () => void {
 
   let cancelled = false;
   let topLang: Lang = "all";
-  // Concurrent-call guard: only one /words/insights at a time.
-  let insightsLoading = false;
-  let insightsLoadedOnce = false;
-  // /words/top + /words/insights are post-v0.10.4 — older frozen sidecars
-  // return 404; remember that so we degrade gracefully.
+  // /words/top is post-v0.10.4 — older frozen sidecars return 404; remember
+  // that so we degrade gracefully.
   let topUnsupported = false;
-  let insightsUnsupported = false;
   // True once renderPage has assigned the full body markup; refreshStats
   // can skip its work while we're still in the zero-state placeholder.
   let pageRendered = false;
@@ -82,9 +77,6 @@ export function renderWords(container: HTMLElement): () => void {
 
       if (pageRendered) {
         if (top) wireLangToggle();
-        if (top && !insightsUnsupported && !insightsLoading && !insightsLoadedOnce) {
-          loadInsights(false);
-        }
       }
     } catch (e) {
       if (cancelled) return;
@@ -100,8 +92,7 @@ export function renderWords(container: HTMLElement): () => void {
 
       // First tick before the initial renderPage finished — skip without
       // synthesising a fake "zero → non-zero" transition that would race
-      // an in-flight renderPage(), produce a detached insights box, and
-      // strand it on "Loading insights…".
+      // an in-flight renderPage() and trigger a spurious full re-paint.
       if (lastTotalEntries < 0) return;
 
       // Zero ↔ non-zero transition triggers a full re-paint instead of
@@ -164,54 +155,11 @@ export function renderWords(container: HTMLElement): () => void {
           toggle.querySelectorAll<HTMLButtonElement>("button").forEach((b) => {
             b.classList.toggle("active", b.dataset.lang === topLang);
           });
-          // Auto-refresh insights to keep the two sections in sync. Only
-          // fires after the top-words update succeeded — if wordsTop failed
-          // we keep both sections on their previous content. Fire-and-forget;
-          // the `insightsLoading` guard inside loadInsights() blocks
-          // overlapping requests when the user spams the toggle.
-          if (!insightsUnsupported) {
-            void loadInsights(true);
-          }
         } catch (e) {
           console.error(e);
         }
       });
     });
-  }
-
-  async function loadInsights(force: boolean) {
-    // Race-condition guard — stays active regardless of `force`.
-    if (insightsLoading) return;
-    if (!force && insightsLoadedOnce) return;
-    const box = body.querySelector<HTMLElement>("#words-insights-box");
-    if (!box) return;
-    insightsLoading = true;
-    box.innerHTML = `<div class="value" style="color:var(--text-muted)">Generating insights...</div>`;
-    try {
-      const insights = await api.wordsInsights();
-      if (cancelled) return;
-      box.innerHTML = renderInsights(insights);
-      insightsLoadedOnce = true;
-    } catch (e) {
-      if (cancelled) return;
-      if (isNotFound(e)) {
-        insightsUnsupported = true;
-        // Drop the whole insights block silently — older sidecar.
-        const wrap = body.querySelector<HTMLElement>("#words-insights-wrap");
-        if (wrap) wrap.remove();
-        return;
-      }
-      const msg = (e as Error).message || "Insights unavailable";
-      box.innerHTML = `
-        <div class="value" style="color:var(--text-muted)">
-          Insights unavailable — start Ollama or switch to Cloud mode.
-          <div style="font-size: 11px; opacity: 0.7; margin-top: 4px">${escapeHtml(msg)}</div>
-        </div>`;
-      // Do NOT set insightsLoadedOnce — error states are retryable on the
-      // next language-toggle click (which calls loadInsights(true)).
-    } finally {
-      insightsLoading = false;
-    }
   }
 
   renderPage();
@@ -239,7 +187,6 @@ function renderBody(
   return `
     ${renderStatsCards(stats)}
     ${top ? renderTopWordsBlock(top, lang) : ""}
-    ${top ? renderInsightsBlock() : ""}
     ${renderBucket("By language", "words-by-lang", stats.by_language, (code) => LANGUAGE_LABELS[code] || code)}
     ${renderBucket("By model", "words-by-model", stats.by_model, (m) => m)}
   `;
@@ -311,39 +258,6 @@ function renderTopWords(top: TopWordsResponse): string {
     <div class="bucket-list">${rows}</div>
     <div class="value" style="color:var(--text-muted); font-size:11px; margin-top:6px;">
       Based on ${top.scanned.toLocaleString("uk-UA")} transcript${top.scanned !== 1 ? "s" : ""}.
-    </div>
-  `;
-}
-
-function renderInsightsBlock(): string {
-  return `
-    <div class="setting-group" id="words-insights-wrap" style="margin-top:24px;">
-      <div class="setting-label">Insights</div>
-      <div id="words-insights-box">
-        <div class="value" style="color:var(--text-muted)">Loading insights...</div>
-      </div>
-    </div>
-  `;
-}
-
-function renderInsights(payload: InsightsResponse): string {
-  if (payload.insights.length === 0) {
-    return `<div class="value" style="color:var(--text-muted)">No insights yet — dictate a few transcripts and come back.</div>`;
-  }
-  const cards = payload.insights
-    .map(
-      (text) => `
-        <div class="word-card" style="text-align:left; padding:10px 12px;">
-          <div class="word-card-sub" style="font-size:13px; color:var(--text);">
-            ${escapeHtml(text)}
-          </div>
-        </div>`,
-    )
-    .join("");
-  return `
-    <div class="word-cards" style="grid-template-columns: 1fr;">${cards}</div>
-    <div class="value" style="color:var(--text-muted); font-size:11px; margin-top:6px;">
-      Generated by ${escapeHtml(payload.model)}.
     </div>
   `;
 }

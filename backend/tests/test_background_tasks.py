@@ -405,7 +405,6 @@ def teardown_probe(monkeypatch):
     """
     import app.audio
     import app.embeddings
-    import app.llm
     import app.main
     import app.stt
 
@@ -424,7 +423,6 @@ def teardown_probe(monkeypatch):
     monkeypatch.setattr(app.main, "_warm_gpu_probe_cache", _noop_probe)
     monkeypatch.setattr(app.audio, "MicrophoneRecorder", _StubRecorder)
     monkeypatch.setattr(app.stt, "clear_cache", lambda: order.append("clear_stt"))
-    monkeypatch.setattr(app.llm, "clear_cache", lambda: order.append("clear_llm"))
     monkeypatch.setattr(
         app.embeddings, "clear_cache", lambda: order.append("clear_embeddings")
     )
@@ -452,7 +450,6 @@ async def test_lifespan_drains_background_tasks_before_clearing_caches(teardown_
     assert teardown_probe == [
         "probe-cancelled",
         "clear_stt",
-        "clear_llm",
         "clear_embeddings",
         "recorder_cleanup",
     ]
@@ -484,7 +481,6 @@ async def test_lifespan_still_clears_caches_when_the_drain_times_out(
     assert elapsed < 2.0
     assert teardown_probe == [
         "clear_stt",
-        "clear_llm",
         "clear_embeddings",
         "recorder_cleanup",
     ]
@@ -499,9 +495,9 @@ async def test_lifespan_release_steps_do_not_skip_each_other_on_failure(
     teardown_probe, monkeypatch, caplog
 ):
     """GitHub review finding 1: the release block must always COMPLETE, not
-    just start. A raising `clear_stt()` used to skip `clear_llm()`,
-    `clear_embeddings()` and `recorder.cleanup()` -- leaking the audio
-    stream, the one release step with a real OS resource behind it."""
+    just start. A raising `clear_stt()` used to skip `clear_embeddings()`
+    and `recorder.cleanup()` -- leaking the audio stream, the one release
+    step with a real OS resource behind it."""
     import app.stt
     from app.main import app as fastapi_app, lifespan
 
@@ -517,7 +513,6 @@ async def test_lifespan_release_steps_do_not_skip_each_other_on_failure(
 
     assert teardown_probe == [
         "clear_stt_raised",
-        "clear_llm",
         "clear_embeddings",
         "recorder_cleanup",
     ]
@@ -551,7 +546,6 @@ async def test_lifespan_cancels_the_active_load_with_no_registered_task(teardown
     assert teardown_probe == [
         "active-load-cancelled",
         "clear_stt",
-        "clear_llm",
         "clear_embeddings",
         "recorder_cleanup",
     ]

@@ -2,7 +2,6 @@
 
 Gemini's ai_prompt style handles transcription and structuring in a single call;
 short normal-style audio goes through Groq Whisper for minimum latency.
-``/llm/process`` remains as a standalone endpoint for explicit cleanup.
 """
 
 import asyncio

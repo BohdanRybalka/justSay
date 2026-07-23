@@ -65,11 +65,10 @@ class LocalEmbeddingProvider:
         return await asyncio.to_thread(self._call_embed, client, self._model, text)
 
     def cleanup(self) -> None:
-        """Unload nomic-embed-text from Ollama's memory. Mirrors
-        ``LocalLLMProvider.cleanup()`` exactly — the project's stated 8 GB
-        unified-memory Local-mode target platform (CLAUDE.md) makes leaving
-        an embedding model resident indefinitely a real, not hypothetical,
-        cost."""
+        """Unload nomic-embed-text from Ollama's memory. The project's stated
+        8 GB unified-memory Local-mode target platform (CLAUDE.md) makes
+        leaving an embedding model resident indefinitely a real, not
+        hypothetical, cost."""
         if self._client is not None:
             try:
                 log.info("Unloading Ollama embedding model %s", self._model)

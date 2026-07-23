@@ -46,7 +46,6 @@ from app.core.config import settings
 from app.core.gpu_probe import clear_cache as clear_gpu_probe_cache
 from app.main import app
 from app.stt import clear_cache as clear_stt_cache
-from app.llm import clear_cache as clear_llm_cache
 
 
 @pytest.fixture
@@ -361,7 +360,6 @@ def _reset_settings():
     settings.stt.mode = original_stt_mode
     settings.llm.mode = original_llm_mode
     clear_stt_cache()
-    clear_llm_cache()
     clear_gpu_probe_cache()
 
 

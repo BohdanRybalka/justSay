@@ -22,7 +22,6 @@ try:
     from app.core.history_router import router as history_router
     from app.core.words_router import router as words_router
     from app.stt.router import router as stt_router
-    from app.llm.router import router as llm_router
     from app.audio.router import router as audio_router
     from app.pipeline.router import router as pipeline_router
 except Exception as e:
@@ -104,11 +103,9 @@ async def lifespan(app: FastAPI):
         # `Exception`, not `BaseException`: a CancelledError delivered here must
         # still propagate rather than be swallowed.
         from app.stt import clear_cache as clear_stt
-        from app.llm import clear_cache as clear_llm
         from app.embeddings import clear_cache as clear_embeddings
         for step_name, step in (
             ("STT cache", clear_stt),
-            ("LLM cache", clear_llm),
             ("embeddings cache", clear_embeddings),
             ("audio recorder", app.state.recorder.cleanup),
         ):
@@ -163,7 +160,6 @@ app.include_router(settings_router)
 app.include_router(history_router)
 app.include_router(words_router)
 app.include_router(stt_router, prefix="/stt", tags=["STT"])
-app.include_router(llm_router, prefix="/llm", tags=["LLM"])
 app.include_router(audio_router, prefix="/audio", tags=["Audio"])
 app.include_router(pipeline_router, prefix="/pipeline", tags=["Pipeline"])
 

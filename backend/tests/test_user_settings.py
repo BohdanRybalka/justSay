@@ -131,7 +131,7 @@ def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
         "app.stt.clear_cache", lambda: cleared.append("stt")
     )
     monkeypatch.setattr(
-        "app.llm.clear_cache", lambda: cleared.append("llm")
+        "app.embeddings.clear_cache", lambda: cleared.append("emb")
     )
 
     # No diffs → no clear.
@@ -139,10 +139,40 @@ def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
     assert user_settings.sync_to_runtime(us) is False
     assert cleared == []
 
-    # STT mode change → STT clear fires.
+    # STT mode change → STT clear fires, and the embeddings cache is
+    # invalidated alongside it (the (stt.mode, llm.mode) key changed).
     us2 = user_settings.UserSettings(stt_mode="local", llm_mode="cloud")
     assert user_settings.sync_to_runtime(us2) is True
-    assert cleared == ["stt"]
+    assert cleared == ["stt", "emb"]
+
+
+def test_sync_to_runtime_llm_mode_change_invalidates_embeddings_cache(monkeypatch):
+    """Changing llm.mode alone must invalidate the embeddings provider cache —
+    llm.mode is one half of the (stt.mode, llm.mode) key that gates embedding
+    eligibility, so a stale Cloud embedding provider must not survive a switch
+    to Local. STT is untouched, so the STT cache must NOT be cleared."""
+    from app.core.config import settings as runtime_settings
+    from app.core.types import ProviderMode
+
+    runtime_settings.stt.mode = ProviderMode.CLOUD
+    runtime_settings.stt.engine = "auto"
+    runtime_settings.stt.whisper_model_size = "large-v3-turbo"
+    runtime_settings.stt.whisper_device = "auto"
+    runtime_settings.stt.initial_prompt = ""
+    runtime_settings.stt.gemini_api_key = ""
+    runtime_settings.stt.groq_api_key = ""
+    runtime_settings.llm.mode = ProviderMode.CLOUD
+    runtime_settings.llm.ollama_host = "http://localhost:11434"
+    runtime_settings.llm.ollama_model = "qwen3:1.7b"
+    runtime_settings.llm.groq_api_key = ""
+
+    cleared: list[str] = []
+    monkeypatch.setattr("app.stt.clear_cache", lambda: cleared.append("stt"))
+    monkeypatch.setattr("app.embeddings.clear_cache", lambda: cleared.append("emb"))
+
+    us = user_settings.UserSettings(stt_mode="cloud", llm_mode="local")
+    assert user_settings.sync_to_runtime(us) is False  # STT unchanged
+    assert cleared == ["emb"]
 
 
 def test_sync_to_runtime_propagates_initial_prompt_and_invalidates_cache(monkeypatch):
@@ -166,13 +196,13 @@ def test_sync_to_runtime_propagates_initial_prompt_and_invalidates_cache(monkeyp
 
     cleared: list[str] = []
     monkeypatch.setattr("app.stt.clear_cache", lambda: cleared.append("stt"))
-    monkeypatch.setattr("app.llm.clear_cache", lambda: cleared.append("llm"))
+    monkeypatch.setattr("app.embeddings.clear_cache", lambda: cleared.append("emb"))
 
     us = user_settings.UserSettings(initial_prompt="Tauri Pydantic")
     user_settings.sync_to_runtime(us)
 
     assert runtime_settings.stt.initial_prompt == "Tauri Pydantic"
-    assert cleared == ["stt"]
+    assert cleared == ["stt", "emb"]
 
 
 def test_initial_prompt_max_length_validation():
@@ -218,7 +248,7 @@ def test_sync_to_runtime_propagates_keys(monkeypatch):
 
     cleared: list[str] = []
     monkeypatch.setattr("app.stt.clear_cache", lambda: cleared.append("stt"))
-    monkeypatch.setattr("app.llm.clear_cache", lambda: cleared.append("llm"))
+    monkeypatch.setattr("app.embeddings.clear_cache", lambda: cleared.append("emb"))
 
     us = user_settings.UserSettings(gemini_api_key="AIza-new", groq_api_key="gsk-new")
     user_settings.sync_to_runtime(us)
@@ -227,7 +257,7 @@ def test_sync_to_runtime_propagates_keys(monkeypatch):
     assert runtime_settings.stt.groq_api_key == "gsk-new"
     assert runtime_settings.llm.groq_api_key == "gsk-new"
     assert "stt" in cleared
-    assert "llm" in cleared
+    assert "emb" in cleared
 
 
 def test_sync_to_runtime_preserves_env_key_when_user_key_empty(monkeypatch):
@@ -238,7 +268,7 @@ def test_sync_to_runtime_preserves_env_key_when_user_key_empty(monkeypatch):
     runtime_settings.llm.groq_api_key = "env-groq"
 
     monkeypatch.setattr("app.stt.clear_cache", lambda: None)
-    monkeypatch.setattr("app.llm.clear_cache", lambda: None)
+    monkeypatch.setattr("app.embeddings.clear_cache", lambda: None)
 
     us = user_settings.UserSettings(gemini_api_key="", groq_api_key="")
     user_settings.sync_to_runtime(us)
