@@ -1,6 +1,6 @@
 """Tests for the magic-bytes audio validator (Plan 008 / Task 3 tech-debt batch).
 
-`/stt/transcribe` and `/pipeline/process-file` used to trust the filename's
+`/pipeline/process-file` used to trust the filename's
 extension alone. This module covers the new content-aware validation:
 empty/short files, extension/content mismatch (renamed executables), niche
 formats we trust on extension, and the MIME→extension family map.

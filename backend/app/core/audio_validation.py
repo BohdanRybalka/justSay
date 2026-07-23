@@ -1,6 +1,6 @@
 """Audio upload validation — magic-bytes detector + family check.
 
-The two upload endpoints (`/stt/transcribe`, `/pipeline/process-file`)
+The upload endpoint (`/pipeline/process-file`)
 used to trust the filename's extension alone. That accepted any payload
 renamed to `.wav` — including executables, polyglots, or zero-byte files
 that crash the STT provider with a noisy 500.

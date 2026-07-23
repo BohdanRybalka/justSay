@@ -3,7 +3,7 @@
 This file is the **routing and cache** layer on top of the provider classes.
 Pipeline code calls :func:`get_routed_provider` with the audio metadata
 (mode, duration, style) and gets back the correct provider to use.
-Other endpoints (status, transcribe, /config) call :func:`get_provider`
+Other endpoints (status, /config) call :func:`get_provider`
 which returns the mode-level provider without engine/duration heuristics.
 
 Routing rules (see ``docs/plans/005-hybrid-stt-pipeline.md``):
@@ -92,7 +92,7 @@ def _get_local(stt_settings: STTSettings) -> STTProvider:
 def get_provider(mode: ProviderMode, stt_settings: STTSettings) -> STTProvider:
     """Mode-level provider lookup, no routing heuristics.
 
-    For `/stt/transcribe`, `/stt/local/load`, `/config`, status endpoints —
+    For `/stt/local/load`, `/config`, status endpoints —
     callers that don't have audio duration / style context. Cloud mode always
     returns Gemini (engine pin and duration routing live in
     :func:`get_routed_provider`).

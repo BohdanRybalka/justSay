@@ -30,7 +30,7 @@ block_cipher = None
 # google-genai ships protobuf descriptors as package data and groq ships
 # JSON schema files for tool calling. Both modules use `importlib.resources`
 # to load them at runtime, which PyInstaller does not infer statically.
-# Without this, the first real /stt/transcribe call against Gemini explodes
+# Without this, the first real /pipeline/process-file call against Gemini explodes
 # inside the frozen binary with a FileNotFoundError deep in the SDK.
 datas = (
     collect_data_files("google.genai")

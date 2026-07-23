@@ -98,31 +98,6 @@ async def test_switch_stt_mode_invalid(client):
     assert resp.status_code == 422
 
 
-# --- /stt/transcribe content validation -----------------------------
-
-@pytest.mark.asyncio
-async def test_transcribe_rejects_extension_content_mismatch(client):
-    """`.wav` filename with non-WAV bytes is rejected at the validator boundary,
-    not handed off to the STT provider where it would 500 deep inside soundfile."""
-    fake_payload = b"MZ" + (b"\x00" * 64)  # DOS / PE prefix
-    resp = await client.post(
-        "/stt/transcribe",
-        files={"file": ("evil.wav", fake_payload, "audio/wav")},
-    )
-    assert resp.status_code == 400
-    assert "does not match" in resp.json()["detail"].lower()
-
-
-@pytest.mark.asyncio
-async def test_transcribe_rejects_empty_file(client):
-    resp = await client.post(
-        "/stt/transcribe",
-        files={"file": ("speech.wav", b"", "audio/wav")},
-    )
-    assert resp.status_code == 400
-    assert "too small" in resp.json()["detail"].lower()
-
-
 @pytest.mark.asyncio
 async def test_switch_llm_mode_invalid(client):
     resp = await client.put("/llm/mode", json={"mode": "quantum"})

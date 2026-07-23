@@ -1,4 +1,5 @@
-"""Pipeline router — /pipeline/process-file's ``language`` query-param default.
+"""Pipeline router — /pipeline/process-file's ``language`` query-param
+default and its upload-content validation.
 
 Dedicated router-test file, split from the service-level `test_pipeline.py`
 the same way `test_settings_router.py` is split from `test_user_settings.py`
@@ -77,3 +78,36 @@ async def test_process_file_forwards_explicit_language_code_unchanged(client):
 
     assert resp.status_code == 200
     assert mock_process_audio.call_args.kwargs["language"] == "uk"
+
+
+# --- Upload content validation ---------------------------------------
+
+
+@pytest.mark.anyio
+async def test_process_file_rejects_extension_content_mismatch(client):
+    """`.wav` filename with non-WAV bytes is rejected at the validator boundary,
+    not handed off to the STT provider where it would 500 deep inside soundfile."""
+    fake_payload = b"MZ" + (b"\x00" * 64)  # DOS / PE prefix
+    # Patched even though validation raises before process_audio is reached: a
+    # future validation regression must surface as a failed assertion here, not
+    # as a real STT call.
+    with patch("app.pipeline.router.process_audio", AsyncMock(return_value=_fake_result())):
+        resp = await client.post(
+            "/pipeline/process-file",
+            files={"file": ("evil.wav", fake_payload, "audio/wav")},
+        )
+
+    assert resp.status_code == 400
+    assert "does not match" in resp.json()["detail"].lower()
+
+
+@pytest.mark.anyio
+async def test_process_file_rejects_empty_file(client):
+    with patch("app.pipeline.router.process_audio", AsyncMock(return_value=_fake_result())):
+        resp = await client.post(
+            "/pipeline/process-file",
+            files={"file": ("speech.wav", b"", "audio/wav")},
+        )
+
+    assert resp.status_code == 400
+    assert "too small" in resp.json()["detail"].lower()
