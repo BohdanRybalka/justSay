@@ -12,7 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class EmbeddingSettings(BaseSettings):
-    cloud_model: str = "text-embedding-004"
+    cloud_model: str = "gemini-embedding-001"
     local_model: str = "nomic-embed-text"
 
     model_config = SettingsConfigDict(
