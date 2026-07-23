@@ -1,4 +1,4 @@
-"""Cloud embedding provider — Gemini ``text-embedding-004`` via google-genai.
+"""Cloud embedding provider — Gemini embeddings via google-genai.
 
 Reuses the Gemini API key already used for cloud STT
 (``settings.stt.gemini_api_key``) — no separate embeddings key. See
@@ -15,7 +15,9 @@ import asyncio
 
 
 class CloudEmbeddingProvider:
-    """Gemini text-embedding-004 — cloud embedding provider.
+    """Gemini cloud embedding provider — model id comes from
+    ``EmbeddingSettings.cloud_model`` (settings layer owns the concrete
+    default; see ``docs/adr/001-sqlite-vec-embedding-provider-selection.md``).
 
     Requires: pip install justsay-backend[cloud]
     """
