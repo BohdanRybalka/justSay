@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from app.core import user_settings
+from app.core.auth_middleware import _EXEMPT_PATHS
 from app.core.config import settings
 
 
@@ -90,6 +91,16 @@ async def test_wrong_token_returns_401(client, _token):
 
 
 # --- Exemptions: /health and OPTIONS ----------------------------------------
+
+
+def test_exempt_paths_are_exactly_health():
+    """The exempt-path set is duplicated in the frontend as TOKEN_EXEMPT_PATHS
+    (src/api.ts), which uses it to decide that a 2xx from such a path proves
+    nothing about authentication. Exempting a second path here without
+    mirroring it there would let that path's 200 clear the frontend's auth
+    flag and repaint the status badge green over an unauthorized app -- the
+    exact failure ADR 028 exists to remove. Update both, or neither."""
+    assert _EXEMPT_PATHS == frozenset({"/health"})
 
 
 @pytest.mark.anyio

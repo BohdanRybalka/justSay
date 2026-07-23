@@ -4,14 +4,81 @@
 
 const BASE_URL = "http://127.0.0.1:9377";
 
+/** Why the per-launch token could not be obtained, retained so the UI can name
+ *  the failing layer instead of presenting as a dead window (ADR 028).
+ *  `bridge-missing` = Tauri's injected bridge scripts never ran (a synchronous
+ *  throw); `invoke-timeout` = the bridge ran but the IPC transport never
+ *  answered (an unbounded hang, capped here); `invoke-failed` = the command
+ *  itself rejected. The three are distinguishable on purpose: they point at
+ *  different layers, and on macOS there is nothing else to attach to. */
+export type BridgeDiagnosis =
+  | { kind: "ok" }
+  | { kind: "bridge-missing" }
+  | { kind: "invoke-timeout" }
+  | { kind: "invoke-failed"; detail: string };
+
+/** Thrown on a `401` so callers can tell "the backend refused this request"
+ *  from any other failure, and carry the bridge diagnosis that explains it. */
+export class ApiAuthError extends Error {
+  readonly diagnosis: BridgeDiagnosis;
+
+  constructor(message: string, diagnosis: BridgeDiagnosis) {
+    super(message);
+    this.name = "ApiAuthError";
+    this.diagnosis = diagnosis;
+  }
+}
+
+// `invoke()` settles only through a registered callback and its send path has
+// no reject channel, so a blocked IPC transport hangs forever (ADR 028). This
+// bound is what turns that hang into an observable state.
+const TOKEN_TIMEOUT_MS = 3000;
+const TOKEN_TIMED_OUT = Symbol("token-timed-out");
+
 // Per-launch API token from the Tauri shell (ADR 026). Fetched via the
 // `get_backend_token` command. A *successful* token is cached for the session;
 // a *failure* is logged and NOT cached, so a transient invoke error inside the
 // real WebView doesn't permanently poison every request into a 401 (ADR 026
-// Risk #3). Outside Tauri (manual browser dev) the import/invoke fails, so no
+// Risk #3). Outside Tauri (manual browser dev) the bridge is absent, so no
 // header is sent — matching the backend's open mode when no token is configured.
 let cachedToken: string | null = null;
 let tokenPromise: Promise<string | null> | null = null;
+let bridgeDiagnosis: BridgeDiagnosis = { kind: "ok" };
+let authFailureSeen = false;
+
+// Mirrors _EXEMPT_PATHS in backend/app/core/auth_middleware.py. A 2xx from one
+// of these says nothing about whether the token was accepted, so it must never
+// clear authFailureSeen — `api.health()` runs through the same request()
+// helper, and letting the 5 s health poll clear the flag would repaint the
+// badge green over a completely unauthenticated app (ADR 028).
+const TOKEN_EXEMPT_PATHS = new Set(["/health"]);
+
+export function lastBridgeDiagnosis(): BridgeDiagnosis {
+  return bridgeDiagnosis;
+}
+
+/** The outcome of the most recent token-gated request: `true` once one came
+ *  back `401`, `false` again once one succeeds. Deliberately keyed on an
+ *  observed rejection rather than on "are we inside Tauri": a backend launched
+ *  without a token never returns 401, so the plain-browser dev flow is never
+ *  mislabelled as broken. */
+export function sawAuthFailure(): boolean {
+  return authFailureSeen;
+}
+
+/** The single writer of `authFailureSeen`. Every authenticated call site
+ *  reports through it — a flag that also clears has to be driven from all of
+ *  them, or the badge starts disagreeing with itself. */
+function recordAuthOutcome(path: string, resp: { ok: boolean; status: number }): void {
+  if (TOKEN_EXEMPT_PATHS.has(path.split("?")[0])) {
+    return;
+  }
+  if (resp.status === 401) {
+    authFailureSeen = true;
+  } else if (resp.ok) {
+    authFailureSeen = false;
+  }
+}
 
 function getToken(): Promise<string | null> {
   if (cachedToken !== null) {
@@ -19,18 +86,51 @@ function getToken(): Promise<string | null> {
   }
   return (tokenPromise ??= (async () => {
     try {
+      if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
+        bridgeDiagnosis = { kind: "bridge-missing" };
+        return null;
+      }
       const { invoke } = await import("@tauri-apps/api/core");
-      cachedToken = await invoke<string>("get_backend_token");
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expiry = new Promise<typeof TOKEN_TIMED_OUT>((resolve) => {
+        timer = setTimeout(() => resolve(TOKEN_TIMED_OUT), TOKEN_TIMEOUT_MS);
+      });
+      let token: string | typeof TOKEN_TIMED_OUT;
+      try {
+        token = await Promise.race([invoke<string>("get_backend_token"), expiry]);
+      } finally {
+        clearTimeout(timer);
+      }
+      if (token === TOKEN_TIMED_OUT) {
+        bridgeDiagnosis = { kind: "invoke-timeout" };
+        console.warn(`getToken: get_backend_token did not settle in ${TOKEN_TIMEOUT_MS} ms`);
+        return null;
+      }
+      bridgeDiagnosis = { kind: "ok" };
+      cachedToken = token;
       return cachedToken;
     } catch (err) {
       // Not cached: the next request retries. One retry per request (deduped
       // while a fetch is in flight), never a retry loop.
+      bridgeDiagnosis = {
+        kind: "invoke-failed",
+        detail: err instanceof Error ? err.message : String(err),
+      };
       console.warn("getToken: failed to fetch backend token, will retry", err);
       return null;
     } finally {
       tokenPromise = null;
     }
   })());
+}
+
+async function responseError(resp: Response): Promise<Error> {
+  const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+  const detail = err.detail || `HTTP ${resp.status}`;
+  if (resp.status === 401) {
+    return new ApiAuthError(detail, bridgeDiagnosis);
+  }
+  return new Error(detail);
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -44,9 +144,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     opts.body = JSON.stringify(body);
   }
   const resp = await fetch(`${BASE_URL}${path}`, opts);
+  recordAuthOutcome(path, resp);
   if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-    throw new Error(err.detail || `HTTP ${resp.status}`);
+    throw await responseError(resp);
   }
   return resp.json();
 }
@@ -260,17 +360,17 @@ export const api = {
     const form = new FormData();
     const blob = new Blob([fileBytes], { type: "application/octet-stream" });
     form.append("file", blob, filename);
-    const url = `${BASE_URL}/pipeline/process-file?language=${language}`;
+    const path = `/pipeline/process-file?language=${language}`;
     // No Content-Type header: the browser sets the multipart boundary itself.
     const token = await getToken();
     const headers: Record<string, string> = {};
     if (token) {
       headers["X-JustSay-Token"] = token;
     }
-    const resp = await fetch(url, { method: "POST", body: form, headers });
+    const resp = await fetch(`${BASE_URL}${path}`, { method: "POST", body: form, headers });
+    recordAuthOutcome(path, resp);
     if (!resp.ok) {
-      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-      throw new Error(err.detail || `HTTP ${resp.status}`);
+      throw await responseError(resp);
     }
     return resp.json();
   },
@@ -341,6 +441,8 @@ export interface LevelStreamEvent {
   is_recording: boolean;
 }
 
+const LEVEL_STREAM_PATH = "/audio/level-stream";
+
 export function levelStream(
   onLevel: (data: LevelStreamEvent) => void,
   onDone: () => void,
@@ -354,13 +456,14 @@ export function levelStream(
       if (token) {
         headers["X-JustSay-Token"] = token;
       }
-      return fetch(`${BASE_URL}/audio/level-stream`, {
+      return fetch(`${BASE_URL}${LEVEL_STREAM_PATH}`, {
         method: "GET",
         signal: controller.signal,
         headers,
       });
     })
     .then(async (resp) => {
+      recordAuthOutcome(LEVEL_STREAM_PATH, resp);
       if (!resp.ok || !resp.body) {
         onError(`HTTP ${resp.status}`);
         return;

@@ -84,13 +84,29 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            // Logging is registered in release builds too. A packaged launch
+            // that fails (backend spawn, or the WebView never getting its
+            // token) leaves no other trace on a machine we cannot attach a
+            // debugger to — see docs/adr/028-csp-must-enumerate-every-tauri-bridge-source.md.
+            // The plugin's 40 KB default with KeepOne can rotate the startup
+            // lines away mid-session, which is exactly what must survive, so
+            // the ceiling is raised to ~1 MB per file (~2 MB retained).
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(if cfg!(debug_assertions) {
+                        log::LevelFilter::Debug
+                    } else {
+                        log::LevelFilter::Info
+                    })
+                    .max_file_size(1_000_000)
+                    .build(),
+            )?;
+
+            log::info!(
+                "JustSay {} starting up (backend port {})",
+                app.package_info().version,
+                backend::PORT
+            );
 
             // Spawn Python backend (production = shell-plugin spawn, dev = system Python)
             if let Err(e) = backend::spawn(app.handle().clone()) {
