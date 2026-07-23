@@ -214,6 +214,13 @@ html, body {
   color: var(--text-muted);
 }
 
+/* `error` (backend reachable but refusing us) shares the base red dot with
+   `offline`, so without its own text colour the two states are told apart only
+   by their label — and this badge exists to be read off a screenshot. */
+.status-indicator.error {
+  color: var(--red);
+}
+
 /* --- Tab content shared styles --- */
 
 .tab-title {

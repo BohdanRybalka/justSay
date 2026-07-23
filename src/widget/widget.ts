@@ -1,6 +1,7 @@
 import { api } from "../api";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
 import { computeDoneStatus } from "./done-status";
+import { dictationErrorLabel } from "./error-label";
 
 // --- State ---
 
@@ -166,14 +167,9 @@ async function stopAndProcess() {
       setState("idle");
     }
   } catch (e) {
-    const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
-    const errorLabel = msg.includes("missing") ? "Add key in Settings" : "Failed";
-    setState("error", errorLabel);
-    notifyError(
-      msg.includes("missing")
-        ? "No API key set — add one in Settings."
-        : "Dictation failed — try again.",
-    );
+    const { label, toast } = dictationErrorLabel(e);
+    setState("error", label);
+    notifyError(toast);
     console.error("Pipeline failed:", e);
   } finally {
     isTransitioning = false;

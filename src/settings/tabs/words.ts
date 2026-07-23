@@ -88,7 +88,7 @@ export function renderWords(container: HTMLElement): () => void {
       }
     } catch (e) {
       if (cancelled) return;
-      body.innerHTML = `<div class="value" style="color:var(--red)">Failed to load: ${(e as Error).message}</div>`;
+      body.innerHTML = `<div class="value" style="color:var(--red)">Failed to load: ${escapeHtml((e as Error).message)}</div>`;
       pageRendered = false;
     }
   }
