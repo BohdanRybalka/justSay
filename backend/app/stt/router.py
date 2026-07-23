@@ -1,17 +1,12 @@
 import asyncio
-import uuid
-from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.core.audio_validation import validate_audio_upload
 from app.core.config import settings
-from app.core.constants import MAX_UPLOAD_SIZE
 from app.core.types import ProviderMode
 from app.core.user_settings import update_user_settings
-from app.core.utils import read_upload_with_limit
 from app.stt import clear_cache, get_provider
 from app.stt.local_setup import (
     LocalSttStatus,
@@ -20,11 +15,6 @@ from app.stt.local_setup import (
 )
 
 router = APIRouter()
-
-
-class TranscribeResponse(BaseModel):
-    text: str
-    model: str
 
 
 class _ModeBody(BaseModel):
@@ -48,43 +38,6 @@ async def set_stt_mode(body: _ModeBody):
     # Local without making this response wait on the model load.
     maybe_prewarm_local(settings.stt)
     return {"stt_mode": settings.stt.mode, "model": provider.model_name}
-
-
-@router.post("/transcribe", response_model=TranscribeResponse)
-async def transcribe_audio(file: UploadFile, language: str = "uk"):
-    """Transcribe an uploaded audio file using the current STT provider.
-
-    Deliberately NOT covered by the pipeline's silence gate
-    (`app.pipeline.service.process_audio`'s neural VAD, with `analyze_silence`
-    as the lazy fallback when the VAD abstains) -- this is a raw
-    provider-passthrough dev/test surface with no frontend caller, and a gate
-    here would mask the very provider behaviour someone would be using this
-    endpoint to observe. See docs/adr/015-pipeline-level-silence-guard.md and
-    020-lazy-energy-guard-fallback.md.
-    """
-    ext = Path(file.filename).suffix.lower() if file.filename else ""
-    # Read first so we can validate magic bytes, not just the filename.
-    content = await read_upload_with_limit(file, MAX_UPLOAD_SIZE)
-    # Raises HTTPException(400) on bad extension / bad magic / mismatch.
-    validate_audio_upload(content, file.filename)
-
-    temp_path = settings.audio.temp_dir / f"upload_{uuid.uuid4().hex}{ext}"
-
-    try:
-        settings.audio.temp_dir.mkdir(parents=True, exist_ok=True)
-        temp_path.write_bytes(content)
-
-        provider = get_provider(settings.stt.mode, settings.stt)
-        result = await provider.transcribe(temp_path, language=language)
-
-        return TranscribeResponse(text=result.text, model=provider.model_name)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {type(e).__name__}")
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
 
 
 @router.get("/local/status", response_model=LocalSttStatus)
