@@ -26,22 +26,6 @@ pub fn install_console_ctrl_handler() {
     backend::install_ctrl_handler();
 }
 
-#[tauri::command]
-async fn backend_request(
-    method: String,
-    path: String,
-    body: Option<String>,
-) -> Result<String, String> {
-    backend::request(&method, &path, body.as_deref())
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn get_backend_url() -> String {
-    format!("http://127.0.0.1:{}", backend::PORT)
-}
-
 /// Expose the per-launch API token to the WebView, which sends it back as the
 /// `X-JustSay-Token` header on every backend request. See
 /// docs/adr/026-loopback-api-request-authentication.md.
@@ -180,8 +164,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            backend_request,
-            get_backend_url,
             widget_ready,
             get_backend_token
         ])
