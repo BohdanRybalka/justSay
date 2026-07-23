@@ -986,49 +986,6 @@ fn kill_current_process() {
     }
 }
 
-/// HTTP request to the backend.
-pub async fn request(
-    method: &str,
-    path: &str,
-    body: Option<&str>,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let url = format!("http://127.0.0.1:{}{}", PORT, path);
-
-    let client = http_client()?;
-
-    let response = match method.to_uppercase().as_str() {
-        "GET" => client.get(&url).send().await?,
-        "POST" => {
-            let mut req = client.post(&url);
-            if let Some(b) = body {
-                req = req
-                    .header("Content-Type", "application/json")
-                    .body(b.to_string());
-            }
-            req.send().await?
-        }
-        "PUT" => {
-            let mut req = client.put(&url);
-            if let Some(b) = body {
-                req = req
-                    .header("Content-Type", "application/json")
-                    .body(b.to_string());
-            }
-            req.send().await?
-        }
-        _ => return Err(format!("Unsupported method: {}", method).into()),
-    };
-
-    let status = response.status();
-    let text = response.text().await?;
-
-    if !status.is_success() {
-        return Err(format!("HTTP {}: {}", status.as_u16(), text).into());
-    }
-
-    Ok(text)
-}
-
 const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_RESPAWN_ATTEMPTS: u32 = 3;
 
