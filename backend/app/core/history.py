@@ -68,12 +68,6 @@ _stats_cache: tuple[float, "HistoryStats"] | None = None
 _vec_available: bool = False
 _vec_load_warned = False  # log the load failure once per process, not per connect
 
-# Mutation-listener registry — see register_mutation_listener.
-# Listeners are invoked AFTER the lock is released, never under _lock,
-# so a slow listener cannot block dictation. Direction is words → history;
-# history must never import from words.
-_mutation_listeners: list = []
-
 
 class RelocateResult(str, Enum):
     MOVED = "moved"
@@ -263,36 +257,6 @@ def history_path() -> Path:
     return _resolve_output_dir() / HISTORY_FILENAME
 
 
-# --- Mutation-listener registry ------------------------------------------
-
-def register_mutation_listener(listener) -> None:
-    """Register a zero-argument callable invoked after every successful
-    history mutation (save / delete / clear / relocate).
-
-    Contract for listeners:
-      - MUST be cheap. They run inline in the mutator's caller thread.
-      - MUST NOT call any history mutator. Re-entrant calls would deadlock
-        on _lock (listeners run outside _lock, but a mutator call would
-        re-acquire it; correctness is the issue, not deadlock).
-      - MAY raise — failures are caught and logged, the mutator stays
-        successful.
-
-    Used by ``app.core.words`` to invalidate the insights cache without
-    creating a circular import (history exposes the registry; words
-    depends on history, never the reverse).
-    """
-    _mutation_listeners.append(listener)
-
-
-def _fire_mutation_listeners() -> None:
-    """Invoke every registered listener. MUST be called OUTSIDE _lock."""
-    for fn in _mutation_listeners:
-        try:
-            fn()
-        except Exception:  # pragma: no cover — defensive
-            log.exception("Mutation listener raised")
-
-
 # --- Lifespan / bootstrap ------------------------------------------------
 
 def init_output_dir(target: Path) -> None:
@@ -347,98 +311,90 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
     has them.
     """
     global _output_dir, _conn, _stats_cache
-    fire_listeners = False
-    try:
-        with _lock:
-            # _resolve_output_dir(), not the bare _output_dir global: a
-            # relocate() call before the first bootstrap()/init_output_dir()
-            # (unusual, but not prevented) would otherwise crash on
-            # `None / HISTORY_FILENAME` (ADR 014, AC 8a).
-            old_dir = _resolve_output_dir()
-            old_path = old_dir / HISTORY_FILENAME
+    with _lock:
+        # _resolve_output_dir(), not the bare _output_dir global: a
+        # relocate() call before the first bootstrap()/init_output_dir()
+        # (unusual, but not prevented) would otherwise crash on
+        # `None / HISTORY_FILENAME` (ADR 014, AC 8a).
+        old_dir = _resolve_output_dir()
+        old_path = old_dir / HISTORY_FILENAME
 
-            try:
-                same = old_dir.resolve() == new_dir.resolve()
-            except OSError:
-                same = False
+        try:
+            same = old_dir.resolve() == new_dir.resolve()
+        except OSError:
+            same = False
 
-            if same:
-                _stats_cache = None
-                return RelocateResult.NO_OLD_FILE, None
+        if same:
+            _stats_cache = None
+            return RelocateResult.NO_OLD_FILE, None
 
-            new_path = new_dir / HISTORY_FILENAME
+        new_path = new_dir / HISTORY_FILENAME
 
-            try:
-                new_dir.mkdir(parents=True, exist_ok=True)
-            except OSError as e:
-                return RelocateResult.FAILED, f"Could not create target directory: {e}"
+        try:
+            new_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return RelocateResult.FAILED, f"Could not create target directory: {e}"
 
-            if new_path.exists():
-                _close_conn_locked()
-                _output_dir = new_dir
-                _conn = _connect(new_path)
-                _init_schema(_conn)
-                _stats_cache = None
-                fire_listeners = True
-                return RelocateResult.NEW_ALREADY_HAS_FILE, None
-
-            if not old_path.exists():
-                _close_conn_locked()
-                _output_dir = new_dir
-                _conn = _connect(new_path)
-                _init_schema(_conn)
-                _stats_cache = None
-                fire_listeners = True
-                return RelocateResult.NO_OLD_FILE, None
-
-            # Move: close the old conn first so SQLite releases the lock on Windows.
+        if new_path.exists():
             _close_conn_locked()
-            new_conn: sqlite3.Connection | None = None
-            try:
-                shutil.copy2(old_path, new_path)
-                if not _verify_db_row_count(old_path, new_path):
-                    new_path.unlink(missing_ok=True)
-                    _conn = _connect(old_path)
-                    _init_schema(_conn)
-                    _stats_cache = None
-                    return RelocateResult.FAILED, "Verification failed: entry count mismatch"
+            _output_dir = new_dir
+            _conn = _connect(new_path)
+            _init_schema(_conn)
+            _stats_cache = None
+            return RelocateResult.NEW_ALREADY_HAS_FILE, None
 
-                # Open and validate the new connection BEFORE deleting the old file.
-                # If _connect raises, we still have old_path intact and rollback safely.
-                new_conn = _connect(new_path)
-                _init_schema(new_conn)
-                # Phase 2: do not trust the copied FTS index — always rebuild
-                # on the new path so search results are consistent with entries
-                # right after the move.
-                new_conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
+        if not old_path.exists():
+            _close_conn_locked()
+            _output_dir = new_dir
+            _conn = _connect(new_path)
+            _init_schema(_conn)
+            _stats_cache = None
+            return RelocateResult.NO_OLD_FILE, None
 
-                # Point of no return — only after the new connection is healthy.
-                old_path.unlink()
-                _output_dir = new_dir
-                _conn = new_conn
-                new_conn = None  # ownership transferred
-                _stats_cache = None
-                log.info("Relocated history %s → %s", old_path, new_path)
-                fire_listeners = True
-                return RelocateResult.MOVED, None
-            except (OSError, sqlite3.Error) as e:
-                if new_conn is not None:
-                    try:
-                        new_conn.close()
-                    except sqlite3.Error:
-                        pass
+        # Move: close the old conn first so SQLite releases the lock on Windows.
+        _close_conn_locked()
+        new_conn: sqlite3.Connection | None = None
+        try:
+            shutil.copy2(old_path, new_path)
+            if not _verify_db_row_count(old_path, new_path):
                 new_path.unlink(missing_ok=True)
-                try:
-                    _conn = _connect(old_path)
-                    _init_schema(_conn)
-                except sqlite3.Error:
-                    _conn = None
+                _conn = _connect(old_path)
+                _init_schema(_conn)
                 _stats_cache = None
-                log.exception("Relocate failed: %s", e)
-                return RelocateResult.FAILED, f"Move failed: {e}"
-    finally:
-        if fire_listeners:
-            _fire_mutation_listeners()
+                return RelocateResult.FAILED, "Verification failed: entry count mismatch"
+
+            # Open and validate the new connection BEFORE deleting the old file.
+            # If _connect raises, we still have old_path intact and rollback safely.
+            new_conn = _connect(new_path)
+            _init_schema(new_conn)
+            # Phase 2: do not trust the copied FTS index — always rebuild
+            # on the new path so search results are consistent with entries
+            # right after the move.
+            new_conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
+
+            # Point of no return — only after the new connection is healthy.
+            old_path.unlink()
+            _output_dir = new_dir
+            _conn = new_conn
+            new_conn = None  # ownership transferred
+            _stats_cache = None
+            log.info("Relocated history %s → %s", old_path, new_path)
+            return RelocateResult.MOVED, None
+        except (OSError, sqlite3.Error) as e:
+            if new_conn is not None:
+                try:
+                    new_conn.close()
+                except sqlite3.Error:
+                    pass
+            new_path.unlink(missing_ok=True)
+            try:
+                _conn = _connect(old_path)
+                _init_schema(_conn)
+            except sqlite3.Error:
+                _conn = None
+            _stats_cache = None
+            log.exception("Relocate failed: %s", e)
+            return RelocateResult.FAILED, f"Move failed: {e}"
 
 
 # --- CRUD ----------------------------------------------------------------
@@ -491,7 +447,6 @@ def save_entry(
             raise
         _stats_cache = None
 
-    _fire_mutation_listeners()
     return entry
 
 
@@ -529,8 +484,6 @@ def delete_entry(entry_id: str) -> bool:
         if deleted:
             _stats_cache = None
 
-    if deleted:
-        _fire_mutation_listeners()
     return deleted
 
 
@@ -548,7 +501,6 @@ def clear_all() -> int:
             raise
         _stats_cache = None
 
-    _fire_mutation_listeners()
     return count
 
 

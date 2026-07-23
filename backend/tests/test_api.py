@@ -5,8 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.audio import get_recorder
-from app.llm.router import STYLE_TASK_MAP
-from app.llm.tasks import TASK_PROFILES
 from app.main import app
 from app.pipeline.service import ProcessingResult
 
@@ -30,7 +28,7 @@ async def test_config(client):
     assert "stt_mode" in data
     assert "llm_mode" in data
     assert "stt_model" in data
-    assert "llm_model" in data
+    assert "llm_model" not in data
 
 
 @pytest.mark.asyncio
@@ -46,61 +44,8 @@ async def test_set_stt_mode_accepts_json_object(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "style, expected_task",
-    [
-        ("normal", "dictation_cleanup"),
-        ("ai_prompt", "ai_prompt_structuring"),
-        ("unknown_style", "dictation_cleanup"),
-    ],
-)
-async def test_llm_process_maps_style_to_task(client, style, expected_task):
-    """`POST /llm/process`'s `style` field must map to the right generation
-    task before reaching the provider — this is the task-identifying
-    mechanism spec 016 designed for the only HTTP entry point."""
-    fake_provider = AsyncMock()
-    fake_provider.model_name = "groq/test"
-    fake_provider.process = AsyncMock(return_value="processed")
-
-    with patch("app.llm.router.get_llm_provider", return_value=fake_provider):
-        resp = await client.post(
-            "/llm/process",
-            json={"text": "raw text", "system_prompt": "clean it", "style": style},
-        )
-
-    assert resp.status_code == 200
-    assert resp.json()["result"] == "processed"
-    fake_provider.process.assert_awaited_once()
-    assert fake_provider.process.call_args.kwargs["task"] == expected_task
-
-
-def test_style_task_map_values_match_task_profiles():
-    """Every `STYLE_TASK_MAP` value must be a valid `TASK_PROFILES` key — a
-    future `TASK_PROFILES` rename that isn't mirrored here must fail this
-    test instead of silently degrading `/llm/process`'s style routing."""
-    assert set(STYLE_TASK_MAP.values()) <= set(TASK_PROFILES)
-
-
-@pytest.mark.asyncio
-async def test_set_llm_mode_accepts_json_object(client):
-    resp = await client.put("/llm/mode", json={"mode": "local"})
-    assert resp.status_code == 200
-    assert resp.json()["llm_mode"] == "local"
-
-    resp = await client.put("/llm/mode", json={"mode": "cloud"})
-    assert resp.status_code == 200
-    assert resp.json()["llm_mode"] == "cloud"
-
-
-@pytest.mark.asyncio
 async def test_switch_stt_mode_invalid(client):
     resp = await client.put("/stt/mode", json={"mode": "quantum"})
-    assert resp.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_switch_llm_mode_invalid(client):
-    resp = await client.put("/llm/mode", json={"mode": "quantum"})
     assert resp.status_code == 422
 
 

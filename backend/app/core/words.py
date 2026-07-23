@@ -1,4 +1,4 @@
-"""Word frequency + LLM insights.
+"""Word frequency + transcript search.
 
 Phase 1 of Plan 013. Architectural rules:
 
@@ -13,11 +13,6 @@ Phase 1 of Plan 013. Architectural rules:
   one, the provider-detected language when they requested ``"auto"``, and
   the literal ``"auto"`` sentinel only when detection itself produced
   nothing (spec 029 / docs/adr/016-detected-language-on-stt-contract.md).
-- Insights cache TTL = 1 h, invalidated via the history mutation-listener
-  registry (one-way dependency: words → history).
-- Local mode privacy: insights LLM calls go through
-  ``get_llm_provider(settings.llm)`` so they inherit ``llm_mode``. No
-  cloud bypass in Local mode.
 """
 
 from __future__ import annotations
@@ -26,8 +21,6 @@ import asyncio
 import html
 import logging
 import re
-import threading
-import time
 from collections import Counter
 from typing import Literal
 
@@ -39,8 +32,6 @@ from app.core.stopwords_uk import STOPWORDS_UK
 
 log = logging.getLogger(__name__)
 
-INSIGHTS_TTL_SECONDS = 3600.0
-INSIGHTS_MAX_WORDS_IN_PROMPT = 30
 TOP_LIMIT_MAX = 500
 SEARCH_LIMIT_MAX = 100
 RRF_K = 60  # Cormack et al. 2009; same value used by sqlite-vec's own hybrid-search writeup
@@ -113,99 +104,6 @@ def top_words(
         for w, c in counter.most_common(clamped_limit)
     ]
     return TopWordsResponse(items=items, scanned=len(rows))
-
-
-# --- Insights cache ------------------------------------------------------
-
-_insights_lock = threading.Lock()
-# (timestamp, payload) — only successful LLM responses are cached.
-_insights_cache: tuple[float, "InsightsResponse"] | None = None
-
-
-class InsightsResponse(BaseModel):
-    model: str
-    insights: list[str]
-    scanned_words: int
-
-
-def invalidate_insights_cache() -> None:
-    """Mutation-listener callback. Registered with ``history`` at module
-    import. MUST NOT call any history mutator (contract enforced socially)."""
-    global _insights_cache
-    with _insights_lock:
-        _insights_cache = None
-
-
-# One-way registration: history exposes the registry, words depends on
-# history. This module never appears in history.py's imports.
-history.register_mutation_listener(invalidate_insights_cache)
-
-
-def _cached_insights() -> "InsightsResponse | None":
-    with _insights_lock:
-        entry = _insights_cache
-        if entry is None:
-            return None
-        ts, payload = entry
-        if (time.monotonic() - ts) >= INSIGHTS_TTL_SECONDS:
-            return None
-        return payload
-
-
-def _store_insights(payload: "InsightsResponse") -> None:
-    global _insights_cache
-    with _insights_lock:
-        _insights_cache = (time.monotonic(), payload)
-
-
-_INSIGHTS_SYSTEM_PROMPT = (
-    "You are a concise analyst. Given a list of the user's most frequent "
-    "spoken words (with counts), return 2-4 short fun-fact insights in "
-    "the user's voice. One sentence per insight, no preamble, no "
-    "numbering, no bullet markers. Return them separated by single "
-    "newlines. Keep each under 100 characters."
-)
-
-
-async def compute_insights() -> InsightsResponse:
-    """Compute fresh insights via the active LLM provider.
-
-    Caller decides caching policy — use ``get_insights`` for the cached
-    path. Raises if the LLM call fails (cache stays empty so the next
-    request retries; we never cache errors).
-    """
-    # Late import — settings / llm only needed inside the call to avoid
-    # tight coupling at module-import time.
-    from app.core.config import settings
-    from app.llm import get_llm_provider
-
-    top = top_words(lang="all", limit=INSIGHTS_MAX_WORDS_IN_PROMPT)
-    if not top.items:
-        return InsightsResponse(model="(none)", insights=[], scanned_words=0)
-
-    provider = get_llm_provider(settings.llm)
-    word_block = "\n".join(f"{w.word}: {w.count}" for w in top.items)
-    user_msg = f"Top words from my recent dictations:\n{word_block}"
-    raw = await provider.process(user_msg, _INSIGHTS_SYSTEM_PROMPT, task="insights")
-
-    lines = [ln.strip().lstrip("-•* \t") for ln in raw.splitlines()]
-    insights = [ln for ln in lines if ln][:4]
-    return InsightsResponse(
-        model=provider.model_name,
-        insights=insights,
-        scanned_words=sum(w.count for w in top.items),
-    )
-
-
-async def get_insights() -> InsightsResponse:
-    """Cached insights path used by the router. Only successful responses
-    are cached; LLM exceptions propagate so the router maps them to 5xx."""
-    hit = _cached_insights()
-    if hit is not None:
-        return hit
-    fresh = await compute_insights()
-    _store_insights(fresh)
-    return fresh
 
 
 # --- Search --------------------------------------------------------------
@@ -407,9 +305,9 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
     spans — relevance here isn't token-based, so there's no single matched
     span to highlight.
     """
-    # Late imports: same lazy-import discipline used elsewhere in this
-    # module (get_llm_provider) — keeps embeddings/vector_store optional
-    # from words.py's own import-time perspective.
+    # Late imports: keep embeddings/vector_store optional from words.py's own
+    # import-time perspective (resolve_embedding_provider is imported here,
+    # not at module top).
     from app.core import vector_store
     from app.core.config import settings
     from app.embeddings import resolve_embedding_provider

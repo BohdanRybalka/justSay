@@ -308,8 +308,10 @@ def sync_to_runtime(us: UserSettings) -> bool:
         from app.embeddings import clear_cache as clear_embeddings_cache
         clear_embeddings_cache()
     if changed_llm:
-        from app.llm import clear_cache as clear_llm_cache
-        clear_llm_cache()
+        # Keep this: llm.mode is one half of the (stt.mode, llm.mode) key that
+        # gates embedding eligibility, so flipping it must invalidate the
+        # embedding provider cache -- otherwise a stale Cloud embedding
+        # provider could survive a switch to Local (zero-leak regression).
         from app.embeddings import clear_cache as clear_embeddings_cache
         clear_embeddings_cache()
 

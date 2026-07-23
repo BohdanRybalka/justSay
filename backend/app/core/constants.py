@@ -6,7 +6,6 @@ their owning module.
 """
 
 MAX_UPLOAD_SIZE: int = 25 * 1024 * 1024  # 25 MB — Groq free-tier upper bound
-MAX_TEXT_LENGTH: int = 100_000           # ~100 KB body for /llm/process
 
 # All popular containers users may drop into upload endpoints. Per-provider
 # whitelists (Groq vs Gemini) live next to the routing logic in app/stt/__init__.py.

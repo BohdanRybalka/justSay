@@ -43,7 +43,7 @@ class EmbeddingProvider(Protocol):
 
         Called on mode switch and app shutdown. Structural protocol —
         every concrete provider must define this itself (no shared base
-        class here), same shape as ``app.llm.LLMProvider.cleanup()``.
+        class here).
         """
 
 
@@ -81,10 +81,10 @@ async def resolve_embedding_provider(
     stt: STTSettings, llm: LLMSettings, emb: EmbeddingSettings
 ) -> tuple[EmbeddingProvider | None, str | None]:
     """Factory with caching, keyed on ``(stt.mode, llm.mode)`` — same
-    cached-mode pattern as ``app.llm.get_llm_provider``. Deliberately
-    ``async`` (unlike the LLM/STT factories) because the Local-mode branch
-    must probe Ollama's tag list over HTTP to check for ``nomic-embed-text``
-    before deciding eligibility.
+    cached-mode pattern as ``app.stt.get_provider``. Deliberately ``async``
+    (unlike the STT factory) because the Local-mode branch must probe
+    Ollama's tag list over HTTP to check for ``nomic-embed-text`` before
+    deciding eligibility.
 
     A ``(LOCAL, LOCAL)`` cache entry is re-probed against Ollama's tag list
     on *every* call, in both directions: a cached negative result caused by
@@ -164,12 +164,11 @@ def clear_cache() -> None:
 
     Hooked into ``user_settings.sync_to_runtime``'s existing
     ``changed_stt``/``changed_llm`` invalidation, and into ``main.py``'s
-    ``lifespan`` shutdown block alongside ``app.llm.clear_cache()``.
+    ``lifespan`` shutdown block alongside the STT-cache release.
 
-    Mirrors ``app.llm.clear_cache()`` exactly: calls the cached provider's
-    ``cleanup()`` (swallowing any exception) before dropping the reference,
-    so ``LocalEmbeddingProvider`` gets a chance to unload
-    ``nomic-embed-text`` from Ollama's memory.
+    Calls the cached provider's ``cleanup()`` (swallowing any exception)
+    before dropping the reference, so ``LocalEmbeddingProvider`` gets a
+    chance to unload ``nomic-embed-text`` from Ollama's memory.
     """
     global _cached_provider, _cached_reason, _cached_key
     with _cache_lock:

@@ -1,4 +1,4 @@
-"""Words API — top-frequency words + LLM-generated insights."""
+"""Words API — top-frequency words."""
 
 from __future__ import annotations
 
@@ -27,29 +27,3 @@ async def words_top(
         if "locked" in str(e).lower():
             raise _busy_to_503("Words store busy") from e
         raise
-
-
-@router.get("/insights", response_model=words.InsightsResponse)
-async def words_insights():
-    """LLM-generated insights over the user's most frequent words.
-
-    Routed through the active LLM provider (``llm_mode``) — in Local mode
-    this hits Ollama; in Cloud mode the configured cloud provider. No
-    silent fallback to cloud when Local mode is selected.
-
-    Only successful responses are cached. LLM errors surface as 503 and
-    leave the cache empty so the next call retries.
-    """
-    try:
-        return await words.get_insights()
-    except sqlite3.OperationalError as e:
-        if "locked" in str(e).lower():
-            raise _busy_to_503("Insights store busy") from e
-        raise
-    except Exception as e:
-        # LLM upstream failed (Ollama down, cloud API error, network).
-        # Do NOT cache — the cache only stores successful payloads.
-        raise HTTPException(
-            status_code=503,
-            detail=f"Insights unavailable: {type(e).__name__}",
-        ) from e

@@ -2,7 +2,8 @@
 
 Lives next to ``history.py`` (not ``app/embeddings/``) because it shares its
 ``_lock`` and connection — mirrors how ``words.py`` keeps its SQL narrowly
-scoped and delegates provider selection to ``app.llm.get_llm_provider``.
+scoped and delegates provider selection to
+``app.embeddings.resolve_embedding_provider``.
 
 Import direction: this module imports ``app.core.history`` at module level
 (needs ``_lock``/``_ensure_conn_locked``). ``history.py`` imports THIS
@@ -10,7 +11,7 @@ module back, but only via a lazy import inside ``_init_schema`` (function
 body, not module top) — that keeps both modules importable in either order
 without a circular-import crash at load time. ``app.embeddings`` is also
 always lazy-imported here, same discipline ``words.py`` uses for
-``app.llm.get_llm_provider``.
+``app.embeddings.resolve_embedding_provider``.
 """
 
 from __future__ import annotations

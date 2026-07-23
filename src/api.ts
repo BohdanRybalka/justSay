@@ -225,28 +225,6 @@ export interface LocalSttStatus {
   last_error: string | null;
 }
 
-export interface OllamaModel {
-  name: string;
-  size_bytes: number | null;
-  parameter_size: string | null;
-}
-
-export interface LocalLlmStatus {
-  ollama_running: boolean;
-  ollama_version: string | null;
-  model_downloaded: boolean;
-  model_name: string;
-  model_size_bytes: number | null;
-  model_loaded: boolean;
-  vram_used_bytes: number | null;
-  available_models: OllamaModel[];
-  /** Best-effort AMD/Intel guidance (e.g. nudging toward OLLAMA_VULKAN=1, or
-   *  confirming acceleration appears active). Null for NVIDIA/no-GPU, and for
-   *  AMD/Intel when there's nothing actionable to say yet. Not a claim about
-   *  which backend Ollama actually picked — its API doesn't report that. */
-  gpu_hint: string | null;
-}
-
 export interface GpuInfo {
   name: string;
   vendor: string;
@@ -328,12 +306,6 @@ export interface TopWordsResponse {
   scanned: number;
 }
 
-export interface InsightsResponse {
-  model: string;
-  insights: string[];
-  scanned_words: number;
-}
-
 // --- API ---
 
 export const api = {
@@ -378,9 +350,6 @@ export const api = {
   setSttMode: (mode: "cloud" | "local") =>
     request("PUT", "/stt/mode", { mode }),
 
-  setLlmMode: (mode: "cloud" | "local") =>
-    request("PUT", "/llm/mode", { mode }),
-
   // Resources
   resources: () => request<ResourceInfo>("GET", "/resources"),
 
@@ -391,11 +360,6 @@ export const api = {
   /** Retry affordance for the Local STT status indicator's error state —
    *  fire-and-forget on the backend, returns before the model finishes loading. */
   sttLocalPrewarm: () => request<{ started: boolean }>("POST", "/stt/local/prewarm"),
-
-  llmLocalStatus: () => request<LocalLlmStatus>("GET", "/llm/local/status"),
-  llmLocalLoad: () => request<{ loaded: boolean; error: string | null }>("POST", "/llm/local/load"),
-  llmLocalUnload: () => request<{ unloaded: boolean; error: string | null }>("POST", "/llm/local/unload"),
-  llmLocalStart: () => request<{ started: boolean; error: string | null }>("POST", "/llm/local/start"),
 
   // Settings
   getSettings: () => request<UserSettings>("GET", "/settings"),
@@ -430,8 +394,6 @@ export const api = {
   // Words (Phase 1 — Plan 013)
   wordsTop: (lang: "all" | "uk" | "en" = "all", limit = 50) =>
     request<TopWordsResponse>("GET", `/words/top?lang=${lang}&limit=${limit}`),
-
-  wordsInsights: () => request<InsightsResponse>("GET", "/words/insights"),
 };
 
 // --- SSE helper for the live microphone level meter ---
