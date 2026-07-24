@@ -10,6 +10,8 @@ from app.core.types import ProviderMode
 from app.core.utils import sse_event
 from app.stt import local_setup
 from app.stt.config import STTSettings
+from app.stt.local_factory import get_local_provider_class as _real_get_local_provider_class
+from app.stt.local_factory import get_local_provider_kind as _real_get_local_provider_kind
 from app.stt.local_setup import (
     LocalSttStatus,
     _check_package_installed,
@@ -18,11 +20,6 @@ from app.stt.local_setup import (
     check_status,
     install_local_packages,
 )
-
-from app.stt.local_factory import get_local_provider_class as _real_get_local_provider_class
-from app.stt.local_factory import get_local_provider_kind as _real_get_local_provider_kind
-
-
 
 
 def _patches(installed: bool, gpu: tuple[bool, str | None, str]):
@@ -115,7 +112,6 @@ def test_check_status_reports_amd_gpu_name_and_vendor_but_not_available():
 def test_check_status_surfaces_last_load_error():
     """When _get_model latched an error, status.last_error must contain it."""
     from app.stt import clear_cache as clear_stt_cache
-    from app.stt.local import LocalSTTProvider
 
     clear_stt_cache()
     settings = STTSettings()
@@ -133,7 +129,8 @@ def test_check_status_surfaces_last_load_error():
 
 
 def test_get_local_load_error_returns_none_before_provider_instantiation():
-    from app.stt import clear_cache as clear_stt_cache, get_local_load_error
+    from app.stt import clear_cache as clear_stt_cache
+    from app.stt import get_local_load_error
 
     clear_stt_cache()
     settings = STTSettings()

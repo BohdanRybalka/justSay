@@ -15,7 +15,6 @@ import pytest
 from app.core import tasks
 
 
-
 @pytest.mark.asyncio
 async def test_strong_ref_held_while_pending_and_released_on_completion():
     """AC 2: the task is registered in `_background_tasks` immediately after
@@ -403,7 +402,8 @@ async def test_lifespan_drains_background_tasks_before_clearing_caches(teardown_
     """AC 2: every background task has reached a done state before the first
     `clear_*()` call -- asserted on the actual recorded call order, with a
     task that is still running at `yield`."""
-    from app.main import app as fastapi_app, lifespan
+    from app.main import app as fastapi_app
+    from app.main import lifespan
 
     async def _probe() -> None:
         try:
@@ -434,7 +434,8 @@ async def test_lifespan_still_clears_caches_when_the_drain_times_out(
     real 1.0s budget, and the model-release step is never skipped or
     truncated by a straggler -- all three `clear_*()` calls still run, and
     the straggler is named at WARNING."""
-    from app.main import app as fastapi_app, lifespan
+    from app.main import app as fastapi_app
+    from app.main import lifespan
 
     loop = asyncio.get_running_loop()
 
@@ -466,7 +467,8 @@ async def test_lifespan_release_steps_do_not_skip_each_other_on_failure(
     and `recorder.cleanup()` -- leaking the audio stream, the one release
     step with a real OS resource behind it."""
     import app.stt
-    from app.main import app as fastapi_app, lifespan
+    from app.main import app as fastapi_app
+    from app.main import lifespan
 
     def _boom() -> None:
         teardown_probe.append("clear_stt_raised")
@@ -492,7 +494,8 @@ async def test_lifespan_cancels_the_active_load_with_no_registered_task(teardown
     cache-clear block, even though it is not in `_background_tasks` -- the
     exact case where `clear_stt()` would otherwise hit `cleanup()`'s
     busy-lock skip path and free nothing."""
-    from app.main import app as fastapi_app, lifespan
+    from app.main import app as fastapi_app
+    from app.main import lifespan
     from app.stt import local_setup
 
     async def _load() -> None:

@@ -2,7 +2,7 @@ import asyncio
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -11,8 +11,8 @@ import soundfile as sf
 from app.core.types import ProviderMode
 from app.stt import clear_cache, get_provider
 from app.stt.base import TranscriptionResult, normalize_detected_language
-from app.stt.config import STTSettings
 from app.stt.cloud import GeminiSTTProvider
+from app.stt.config import STTSettings
 from app.stt.local import LocalSTTProvider
 
 

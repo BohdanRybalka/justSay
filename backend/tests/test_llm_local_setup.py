@@ -4,8 +4,6 @@ import pytest
 from app.llm.local_setup import _list_models, _model_matches
 
 
-
-
 def test_model_matches_exact():
     assert _model_matches("gemma3:4b", "gemma3:4b") is True
 

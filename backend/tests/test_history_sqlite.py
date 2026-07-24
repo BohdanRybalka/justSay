@@ -338,6 +338,7 @@ def test_concurrent_saves_no_loss(isolated_storage, tmp_path):
 
 def test_operational_error_mapped_to_503(isolated_storage, tmp_path):
     from fastapi.testclient import TestClient
+
     from app.main import app
 
     target = tmp_path / "target"
@@ -693,6 +694,7 @@ def test_fresh_db_has_v3_embeddings_tables_but_not_vec_entries(isolated_storage,
 
 def test_search_empty_q_returns_200_empty(isolated_storage, tmp_path):
     from fastapi.testclient import TestClient
+
     from app.main import app
 
     with TestClient(app) as client:
@@ -707,6 +709,7 @@ def test_search_returns_results_ordered_by_relevance(isolated_storage, tmp_path)
     best first). Guards against the 'fake-green tests just check non-empty'
     failure mode flagged by QA RED-1."""
     from fastapi.testclient import TestClient
+
     from app.main import app
 
     with TestClient(app) as client:
@@ -725,6 +728,7 @@ def test_search_sanitized_to_empty_returns_200_empty(isolated_storage, tmp_path)
     like ``"`` now sanitizes to an empty string and the endpoint returns
     200 with an empty list (was 400 pre-Plan-021)."""
     from fastapi.testclient import TestClient
+
     from app.main import app
 
     with TestClient(app) as client:
@@ -738,6 +742,7 @@ def test_search_query_too_long_returns_422(isolated_storage, tmp_path):
     """Plan 021: ``q`` has ``max_length=500`` at the router; FastAPI emits
     422 for over-long inputs."""
     from fastapi.testclient import TestClient
+
     from app.main import app
 
     with TestClient(app) as client:
@@ -748,6 +753,7 @@ def test_search_query_too_long_returns_422(isolated_storage, tmp_path):
 
 def test_search_lock_error_returns_503(isolated_storage, tmp_path):
     from fastapi.testclient import TestClient
+
     from app.main import app
 
     with TestClient(app) as client:
@@ -776,6 +782,7 @@ def test_testclient_lifespan_does_not_invoke_real_background_indexer(isolated_st
     `run_background_indexer` loops on internally) and asserting it is never
     reached."""
     from fastapi.testclient import TestClient
+
     from app.main import app
 
     with patch.object(vector_store, "backfill_batch", new=AsyncMock()) as sentinel:

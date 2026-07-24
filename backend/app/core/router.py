@@ -1,7 +1,7 @@
 """Core routes: health check, config aggregation, resource monitoring."""
 
-import os
 import asyncio
+import os
 import signal
 
 from fastapi import APIRouter, HTTPException
@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from app import __version__
 from app.core.config import settings
-from app.core.schemas import HealthResponse, ConfigResponse, ShutdownResponse
+from app.core.schemas import ConfigResponse, HealthResponse, ShutdownResponse
 from app.core.utils import bytes_to_gb, bytes_to_mb
 from app.stt import get_provider as get_stt_provider
 

@@ -1,9 +1,9 @@
 from typing import Literal
 
-from app.core.types import ProviderMode
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.types import ProviderMode
 
 SttEngine = Literal["auto", "groq", "gemini"]
 

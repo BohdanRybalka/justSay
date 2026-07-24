@@ -13,7 +13,6 @@ import sys
 import threading
 import time
 import types
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest

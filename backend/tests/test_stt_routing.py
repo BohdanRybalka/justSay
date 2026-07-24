@@ -1,5 +1,4 @@
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -190,6 +189,7 @@ def test_detect_duration_returns_none_for_missing_file(tmp_path):
 def test_detect_duration_reads_real_wav(tmp_path):
     import numpy as np
     import soundfile as sf
+
     from app.pipeline.utils import detect_duration
 
     path = tmp_path / "two-seconds.wav"

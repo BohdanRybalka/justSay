@@ -13,8 +13,6 @@ from app.core.auth_middleware import _EXEMPT_PATHS
 from app.core.config import settings
 
 
-
-
 @pytest.mark.anyio
 async def test_disallowed_host_is_rejected_with_400_before_the_route(client):
     """A rebound Host outside the allowlist is rejected with 400 before any

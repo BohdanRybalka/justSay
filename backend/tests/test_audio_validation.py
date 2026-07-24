@@ -19,7 +19,6 @@ from app.core.audio_validation import (
 from app.core.constants import ALLOWED_AUDIO_EXTENSIONS, MIME_BY_AUDIO_EXTENSION
 
 
-
 def test_every_allowed_extension_has_a_mime():
     """If a new container is added to ALLOWED_AUDIO_EXTENSIONS, the MIME map
     must grow with it — else the Gemini call falls back to ``audio/wav`` and

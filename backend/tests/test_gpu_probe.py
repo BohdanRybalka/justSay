@@ -438,8 +438,9 @@ def test_lifespan_schedules_gpu_probe_warmup_task(spawn_spy):
     fixture (conftest.py) rather than a locally-defined spy closure (GitHub
     review finding 3).
     """
-    import app.main as main_module
     from fastapi.testclient import TestClient
+
+    import app.main as main_module
 
     with TestClient(main_module.app):
         pass
