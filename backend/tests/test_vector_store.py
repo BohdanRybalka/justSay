@@ -48,7 +48,6 @@ def _rowid(conn: sqlite3.Connection, entry_id: str) -> int:
     return conn.execute("SELECT rowid FROM entries WHERE id = ?", (entry_id,)).fetchone()[0]
 
 
-# --- DDL / migration -------------------------------------------------------
 
 def test_schema_version_is_v3():
     with history._lock:
@@ -68,7 +67,6 @@ def test_v3_tables_and_trigger_exist_vec_entries_lazy():
     assert "embeddings_meta" in names
     assert "entry_embeddings" in names
     assert "entry_embeddings_dim_guard" in names
-    # vec_entries is created lazily on first successful embed, not at bootstrap.
     assert "vec_entries" not in names
 
 
@@ -142,13 +140,13 @@ def test_crash_before_v3_pragma_retries(tmp_path):
     try:
         raw.executescript(history._DDL_V1)
         raw.executescript(history._DDL_V2)
-        raw.executescript(vector_store._DDL_V3)  # simulate v3 DDL applied
-        raw.execute("PRAGMA user_version = 2")  # crash window: version NOT bumped
+        raw.executescript(vector_store._DDL_V3)
+        raw.execute("PRAGMA user_version = 2")
         raw.commit()
     finally:
         raw.close()
 
-    history.bootstrap(tmp_path)  # must not raise
+    history.bootstrap(tmp_path)
 
     with history._lock:
         conn = history._ensure_conn_locked()
@@ -168,7 +166,7 @@ def test_partial_migration_recovery_v3_tables_missing(tmp_path):
         raw.executescript(history._DDL_V1)
         raw.executescript(history._DDL_V2)
         raw.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
-        raw.execute("PRAGMA user_version = 3")  # v3 tables never actually created
+        raw.execute("PRAGMA user_version = 3")
         raw.commit()
     finally:
         raw.close()
@@ -188,7 +186,6 @@ def test_partial_migration_recovery_v3_tables_missing(tmp_path):
     assert "entry_embeddings_dim_guard" in names
 
 
-# --- dim-guard trigger -----------------------------------------------------
 
 def test_dim_guard_trigger_rejects_mismatched_dim():
     e = history.save_entry(text="hello", duration_ms=1)
@@ -214,13 +211,11 @@ def test_dim_guard_trigger_allows_matching_dim():
         )
 
 
-# --- ensure_vec_table_locked: model-switch wipe ----------------------------
 
 def test_ensure_vec_table_idempotent_when_unchanged():
     with history._lock:
         conn = history._ensure_conn_locked()
         vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
-        # must not raise
         vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
         meta = conn.execute(
             "SELECT provider, model, dim FROM embeddings_meta WHERE id=1"
@@ -249,7 +244,6 @@ def test_ensure_vec_table_wipes_on_model_switch():
     assert count_after == 0
     assert tuple(meta) == ("local", "nomic-embed-text", 5)
 
-    # Existing FTS5 keyword search is provably unaffected by the vector wipe.
     fts_hits = words_module.search_history("alpha", limit=5)
     assert len(fts_hits) == 1
 
@@ -295,7 +289,6 @@ async def test_provider_switch_via_embed_background_wipes_old_embeddings():
         meta_after = conn.execute(
             "SELECT provider, model, dim FROM embeddings_meta WHERE id=1"
         ).fetchone()
-    # Wiped-then-reinserted: exactly the current entry, embedded under the new model.
     assert count_after == 1
     assert tuple(meta_after) == ("local", "ollama/nomic-embed-text", 5)
 
@@ -303,7 +296,6 @@ async def test_provider_switch_via_embed_background_wipes_old_embeddings():
     assert len(fts_hits) == 1
 
 
-# --- cascade delete: no new code in history.py's mutators ------------------
 
 def test_delete_entry_cascades_to_entry_embeddings():
     e = history.save_entry(text="cascade me", duration_ms=1)
@@ -314,7 +306,7 @@ def test_delete_entry_cascades_to_entry_embeddings():
             conn, e.id, _rowid(conn, e.id), [1.0, 2.0, 3.0], "cloud", "text-embedding-004"
         )
 
-    history.delete_entry(e.id)  # calls ONLY history.delete_entry — no vector_store call
+    history.delete_entry(e.id)
 
     with history._lock:
         conn = history._ensure_conn_locked()
@@ -331,7 +323,7 @@ def test_clear_all_cascades_to_entry_embeddings():
             conn, e.id, _rowid(conn, e.id), [1.0, 2.0, 3.0], "cloud", "text-embedding-004"
         )
 
-    history.clear_all()  # calls ONLY history.clear_all — no vector_store call
+    history.clear_all()
 
     with history._lock:
         conn = history._ensure_conn_locked()
@@ -357,7 +349,6 @@ def test_delete_entry_removes_vec_entries_row_via_trigger():
     assert row is None
 
 
-# --- relocate integrity -----------------------------------------------------
 
 def test_relocate_preserves_embeddings_and_semantic_search(tmp_path):
     e1 = history.save_entry(text="close match alpha", duration_ms=1)
@@ -384,7 +375,6 @@ def test_relocate_preserves_embeddings_and_semantic_search(tmp_path):
     assert rows[0]["id"] == e1.id
 
 
-# --- backfill resumability + clamping ---------------------------------------
 
 @pytest.mark.asyncio
 async def test_backfill_resumable_across_two_calls():
@@ -399,9 +389,6 @@ async def test_backfill_resumable_across_two_calls():
         assert first.processed == 2
         assert first.remaining == 3
 
-        # Simulate the process being killed between calls: close + reopen
-        # the connection. "already has an entry_embeddings row" IS the
-        # resume cursor — no separate progress table.
         with history._lock:
             history._close_conn_locked()
 
@@ -446,7 +433,6 @@ async def test_backfill_noop_when_disabled():
     assert result.remaining == 1
 
 
-# --- run_background_indexer (spec 017 / ADR 010) -----------------------------
 
 @pytest.mark.background_indexer
 @pytest.mark.asyncio
@@ -492,7 +478,7 @@ async def test_run_background_indexer_stops_after_one_stalled_batch():
         ),
         patch.object(vector_store, "backfill_batch", wraps=vector_store.backfill_batch) as spy,
     ):
-        await vector_store.run_background_indexer()  # must return, not hang
+        await vector_store.run_background_indexer()
 
     assert spy.await_count == 1
 
@@ -537,7 +523,7 @@ async def test_run_background_indexer_serializes_concurrent_calls():
         active += 1
         max_active = max(max_active, active)
         try:
-            await asyncio.sleep(0.05)  # widen the window a concurrent bug would land in
+            await asyncio.sleep(0.05)
             return await real_backfill_batch(batch_size)
         finally:
             active -= 1
@@ -570,7 +556,7 @@ async def test_run_background_indexer_swallows_backfill_exception(caplog):
         patch.object(vector_store, "backfill_batch", side_effect=RuntimeError("boom")),
         caplog.at_level(logging.WARNING, logger="app.core.vector_store"),
     ):
-        await vector_store.run_background_indexer()  # must not raise
+        await vector_store.run_background_indexer()
 
     assert any(
         "Background indexer sweep failed" in rec.getMessage() for rec in caplog.records
@@ -606,7 +592,7 @@ async def test_run_background_indexer_cancelled_mid_sweep_loses_no_committed_wor
             self.calls += 1
             if self.calls > 5:
                 reached_sixth.set()
-                await asyncio.sleep(30)  # the cancel lands inside this embed
+                await asyncio.sleep(30)
             return [1.0, 2.0, 3.0]
 
     with patch(
@@ -642,7 +628,6 @@ async def test_run_background_indexer_cancelled_mid_sweep_loses_no_committed_wor
     assert remaining == 0
 
 
-# --- embed_entry_background: best-effort contract ---------------------------
 
 @pytest.mark.asyncio
 async def test_embed_entry_background_never_raises_on_provider_failure():
@@ -651,7 +636,7 @@ async def test_embed_entry_background_never_raises_on_provider_failure():
     with patch(
         "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(failing, None))
     ):
-        await vector_store.embed_entry_background(e.id, "will fail")  # must not raise
+        await vector_store.embed_entry_background(e.id, "will fail")
 
     with history._lock:
         conn = history._ensure_conn_locked()
@@ -667,10 +652,9 @@ async def test_embed_entry_background_skips_deleted_entry():
     with patch(
         "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
     ):
-        await vector_store.embed_entry_background("does-not-exist", "text")  # must not raise
+        await vector_store.embed_entry_background("does-not-exist", "text")
 
 
-# --- selftest / --selftest-sqlite-vec ---------------------------------------
 
 def test_selftest_ok():
     ok, msg = vector_store.selftest()

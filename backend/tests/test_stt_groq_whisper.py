@@ -36,7 +36,7 @@ def test_missing_api_key_raises():
 @pytest.mark.asyncio
 async def test_transcribe_returns_stripped_text(tmp_path):
     provider = GroqWhisperSTTProvider(_settings())
-    provider._client = MagicMock()  # skip real SDK init
+    provider._client = MagicMock()
 
     with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("  привіт  ", None, None)):
         result = await provider.transcribe(_wav(tmp_path), language="uk")
@@ -85,7 +85,6 @@ def test_cleanup_resets_client():
     assert provider._client is None
 
 
-# --- STT quality wins: initial_prompt threading ---
 
 
 @pytest.mark.asyncio
@@ -145,7 +144,6 @@ def test_groq_sdk_payload_includes_prompt_when_set(tmp_path):
     assert call_kwargs["prompt"] == "glossary text"
 
 
-# --- STT auto-detect (spec 019) ---
 
 
 def test_groq_sdk_payload_includes_language_when_explicit_code(tmp_path):
@@ -175,7 +173,6 @@ def test_groq_sdk_payload_omits_language_key_for_auto(tmp_path):
     assert "language" not in call_kwargs
 
 
-# --- detected_language / verbose_json escalation (spec 029, AC 19) -----------
 
 
 def test_call_groq_uses_text_format_for_explicit_language(tmp_path):
@@ -244,7 +241,6 @@ async def test_transcribe_detected_language_none_for_explicit_language(tmp_path)
     assert result.detected_language is None
 
 
-# --- Spec 033 / AC 18: no_speech_prob off the verbose_json branch ---------
 
 
 def test_call_groq_reads_min_no_speech_prob_from_object_segments(tmp_path):

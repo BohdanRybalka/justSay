@@ -105,12 +105,8 @@ def test_factory_returns_mlx_on_macos_arm64(monkeypatch):
 
     cls = get_local_provider_class()
     assert cls.__name__ == "MLXWhisperSTTProvider"
-    # Asserting on class name (not import) keeps this test green even on a
-    # Windows dev box where `mlx_whisper` is not installed — the MLX provider
-    # module imports `huggingface_hub` at module top, which IS installed.
 
 
-# --- get_local_provider_kind() branch matrix (spec 018) ---
 
 
 def test_kind_is_apple_mlx_on_macos_arm64_regardless_of_os_name_or_vendor(monkeypatch):
@@ -120,7 +116,7 @@ def test_kind_is_apple_mlx_on_macos_arm64_regardless_of_os_name_or_vendor(monkey
     from app.stt.local_factory import LocalProviderKind, get_local_provider_kind
 
     _stub_platform(monkeypatch, "darwin", "arm64")
-    monkeypatch.setattr("os.name", "nt")  # deliberately contradictory — must still be ignored
+    monkeypatch.setattr("os.name", "nt")
     _stub_vendor(monkeypatch, GpuVendor.AMD)
 
     assert get_local_provider_kind() is LocalProviderKind.APPLE_MLX
@@ -210,14 +206,10 @@ def test_factory_module_imports_no_third_party_at_module_level():
     import importlib
     import sys
 
-    # Drop cached entries first so the re-import actually runs module-body code.
     for name in list(sys.modules):
         if name == "app.stt.local_factory":
             del sys.modules[name]
     importlib.import_module("app.stt.local_factory")
-    # Plain factory import must not have imported the heavy deps.
-    # (They may already be in sys.modules from earlier tests — we only
-    # assert the factory module itself doesn't reference them at top level.)
     factory_mod = sys.modules["app.stt.local_factory"]
     assert not hasattr(factory_mod, "mlx_whisper")
     assert not hasattr(factory_mod, "faster_whisper")

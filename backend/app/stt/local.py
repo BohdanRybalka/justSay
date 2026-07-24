@@ -30,16 +30,12 @@ class LocalSTTProvider(STTProvider):
     Requires: pip install justsay-backend[local]
     """
 
-    is_local = True  # ADR 018 — declared, not derived from the platform
+    is_local = True
 
     def __init__(self, settings: STTSettings):
         self._settings = settings
         self._model = None
         self._last_load_error: str | None = None
-        # Sync primitive — `_get_model` is called both directly on the event
-        # loop thread (from `transcribe`) and via `asyncio.to_thread` (from
-        # `router.py`'s `/stt/local/load`), so a genuine OS-thread race is
-        # possible; `asyncio.Lock` would not serialise the latter call path.
         self._load_lock: threading.Lock = threading.Lock()
 
     @property
@@ -78,7 +74,6 @@ class LocalSTTProvider(STTProvider):
                     self._last_load_error = None
                     log.info("Whisper loaded successfully")
                 except Exception as e:
-                    # Format with type so the UI shows e.g. "OSError: [WinError 126] ..."
                     msg = f"{type(e).__name__}: {e}"
                     self._last_load_error = msg
                     log.exception("Whisper load failed: %s", msg)
@@ -116,29 +111,15 @@ class LocalSTTProvider(STTProvider):
         ``condition_on_previous_text=False`` (kills silence-hallucination
         cascade); long clips keep ``beam_size=5`` and cross-segment context.
         """
-        # Offloaded to a thread (mirrors /stt/local/load's existing pattern)
-        # so a dictation request that races an in-flight, not-yet-started, or
-        # failed pre-warm doesn't block the entire FastAPI event loop for the
-        # duration of a cold model load (spec 015, RED-2).
         model = await asyncio.to_thread(self._get_model)
         audio_duration = kwargs.get("audio_duration")
 
-        # Reuse the cloud routing threshold so "short" means the same thing
-        # everywhere in the pipeline. Drift between two magic-30.0 constants
-        # was caught by entry-gate /architect.
         threshold = self._settings.cloud_routing_threshold
         is_short = audio_duration is not None and audio_duration <= threshold
 
         beam_size = 1 if is_short else 5
-        # Cross-segment context helps long meetings stay coherent but caused
-        # silence-hallucination cascades on short dictation (research:
-        # docs/research/whisper-llm-need.md). Only disable for short clips.
         condition_on_previous_text = not is_short
         glossary = self._settings.initial_prompt.strip() or None
-        # faster-whisper's own auto-detect sentinel is `language=None`, not the
-        # literal string "auto" (which it would treat as an invalid two-letter
-        # code) — translate here, but keep the original "auto" string in the
-        # log line below for observability.
         whisper_language = None if language == "auto" else language
 
         log.info(
@@ -147,8 +128,6 @@ class LocalSTTProvider(STTProvider):
             self._settings.whisper_model_size, audio_path.name, language,
             f"{audio_duration:.1f}s" if audio_duration is not None else "?",
             beam_size, condition_on_previous_text,
-            # Never log glossary content — could leak PII / a stray API key
-            # the user pasted by mistake. Only the bool/length is observable.
             f"{len(glossary)}chars" if glossary else "none",
         )
 
@@ -162,10 +141,6 @@ class LocalSTTProvider(STTProvider):
                 no_repeat_ngram_size=3,
                 initial_prompt=glossary,
             )
-            # `segments` is a lazy generator -- collect per-segment
-            # no_speech_prob during the SAME single pass that builds the
-            # text, never by iterating twice (the generator is consumed).
-            # Spec 033 / ADR 019: this metadata used to be thrown away here.
             parts: list[str] = []
             no_speech_probs: list[float] = []
             for segment in segments:
@@ -176,7 +151,6 @@ class LocalSTTProvider(STTProvider):
                 if probability is not None:
                     no_speech_probs.append(probability)
             text = " ".join(parts)
-            # min = the most speech-like segment; None for zero segments.
             return text, info.language, min(no_speech_probs) if no_speech_probs else None
 
         text, detected_raw, no_speech_prob = await asyncio.to_thread(_transcribe)

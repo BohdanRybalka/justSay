@@ -35,7 +35,6 @@ def isolated(tmp_path, monkeypatch):
         history._close_conn_locked()
 
 
-# --- _validate_output_dir branches --------------------------------------
 
 def test_validate_output_dir_rejects_relative():
     with pytest.raises(ValueError, match="absolute"):
@@ -69,7 +68,7 @@ def test_validate_output_dir_rejects_when_not_writable(tmp_path, monkeypatch):
     target = tmp_path / "ro"
     target.mkdir()
 
-    def deny_write(self, data):  # patched method
+    def deny_write(self, data):
         raise OSError("Permission denied")
 
     monkeypatch.setattr(Path, "write_bytes", deny_write)
@@ -88,7 +87,6 @@ def test_validate_output_dir_rejects_forbidden_parent():
         user_settings._validate_output_dir(forbidden)
 
 
-# --- update_user_settings → history.relocate -----------------------------
 
 def test_update_output_dir_triggers_history_relocate(tmp_path, monkeypatch):
     new_dir = tmp_path / "new"
@@ -107,14 +105,11 @@ def test_update_output_dir_triggers_history_relocate(tmp_path, monkeypatch):
     assert calls[0] == new_dir.resolve()
 
 
-# --- sync_to_runtime ----------------------------------------------------
 
 def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
     from app.core.config import settings as runtime_settings
     from app.core.types import ProviderMode
 
-    # Pre-align runtime to match defaults — so the only differences we test are
-    # the ones we deliberately introduce below.
     runtime_settings.stt.mode = ProviderMode.CLOUD
     runtime_settings.stt.engine = "auto"
     runtime_settings.stt.whisper_model_size = "large-v3-turbo"
@@ -134,13 +129,10 @@ def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
         "app.embeddings.clear_cache", lambda: cleared.append("emb")
     )
 
-    # No diffs → no clear.
     us = user_settings.UserSettings(stt_mode="cloud", llm_mode="cloud")
     assert user_settings.sync_to_runtime(us) is False
     assert cleared == []
 
-    # STT mode change → STT clear fires, and the embeddings cache is
-    # invalidated alongside it (the (stt.mode, llm.mode) key changed).
     us2 = user_settings.UserSettings(stt_mode="local", llm_mode="cloud")
     assert user_settings.sync_to_runtime(us2) is True
     assert cleared == ["stt", "emb"]
@@ -171,7 +163,7 @@ def test_sync_to_runtime_llm_mode_change_invalidates_embeddings_cache(monkeypatc
     monkeypatch.setattr("app.embeddings.clear_cache", lambda: cleared.append("emb"))
 
     us = user_settings.UserSettings(stt_mode="cloud", llm_mode="local")
-    assert user_settings.sync_to_runtime(us) is False  # STT unchanged
+    assert user_settings.sync_to_runtime(us) is False
     assert cleared == ["emb"]
 
 
@@ -211,11 +203,9 @@ def test_initial_prompt_max_length_validation():
     with pytest.raises(ValueError):
         user_settings.UserSettings(initial_prompt=too_long)
 
-    # 500 chars exactly is fine.
     user_settings.UserSettings(initial_prompt="a" * 500)
 
 
-# --- ENV nested override after Phase 1.4 default refactor ----------------
 
 def test_env_nested_stt_key_override(monkeypatch):
     """ENV override flows through STTSettings's own ``env_prefix="JUSTSAY_STT_"``
@@ -228,7 +218,6 @@ def test_env_nested_stt_key_override(monkeypatch):
     assert fresh.stt.gemini_api_key == "env-injected-key"
 
 
-# --- API key fields in UserSettings ----------------------------------------
 
 def test_api_keys_round_trip(tmp_path):
     """gemini_api_key and groq_api_key persist through update_user_settings."""

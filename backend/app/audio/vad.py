@@ -32,24 +32,14 @@ from pathlib import Path
 
 import numpy as np
 
-# Imported as a MODULE, not `from ... import required_speech_units`: the
-# delegation below resolves through the module attribute, which is what lets
-# a test monkeypatch `analysis.required_speech_units` and prove both
-# detectors route through one implementation (spec 034, AC 11).
 from app.audio import analysis
 from app.audio.config import AudioSettings
 
 log = logging.getLogger(__name__)
 
-# TEN VAD's own default hop: 256 samples @ 16 kHz = 16 ms. A module
-# constant, NOT an AudioSettings field -- the library's model is trained for
-# this hop, so it is a property of the engine rather than a tuning knob
-# (same rationale as analysis.py's _MIN_SPEECH_UNITS_FLOOR).
 _HOP_SAMPLES = 256
 _VAD_SAMPLE_RATE = 16000
 
-# 1 s decode blocks -- streaming, so memory stays flat regardless of upload
-# length (a 6-minute meeting upload must not be read into RAM whole).
 _BLOCK_SECONDS = 1.0
 
 _ENV_OVERRIDE = "JUSTSAY_TEN_VAD_LIB"
@@ -96,9 +86,6 @@ def resolve_ten_vad_lib() -> Path | None:
             _ENV_OVERRIDE, candidate,
         )
 
-    # PyInstaller onedir: sys._MEIPASS is the _internal/ directory the
-    # release workflow ships (build_sidecar.spec places the DLL under
-    # ten_vad/ there).
     if getattr(sys, "frozen", False):
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
@@ -175,20 +162,6 @@ class _TenVadLibrary:
         self._lib.ten_vad_destroy(ctypes.byref(handle))
 
 
-# The CDLL handle is loaded once per process and cached. A FAILED load is
-# cached too (as the _LOAD_FAILED sentinel) so a missing/broken binary logs
-# once at WARNING instead of once per dictation. EVERY read and write of the
-# cache happens under this lock -- without it, a cold-cache stampede loads
-# the DLL once per racing thread and emits one WARNING each.
-#
-# The same lock serialises entry into the library, but only ONE ENTRY AT A
-# TIME: ten_vad_create, each per-hop ten_vad_process, ten_vad_destroy.
-# Decode/resample/carry work stays outside it. Upstream documents nothing
-# about thread-safety (README and include/ten_vad.h at the pinned tag are
-# both silent), so strict mutual exclusion of library entries is preserved --
-# but a concurrent caller now waits at most one 16 ms-hop inference instead
-# of a whole file scan (measured: 1628.9 ms behind a 300 s scan when the lock
-# spanned the scan).
 class _LoadFailed:
     """Sentinel type for a cached failed load.
 
@@ -322,10 +295,6 @@ def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None
         if not samplerate:
             return None
 
-        # Hop count the file COULD yield if fully decoded -- needed for the
-        # length-proportional requirement before early exit can trigger.
-        # Derived from the declared duration; the decoded-ms floor below is
-        # what actually catches a truncated file.
         estimated_total_hops = max(
             1, int(info.frames * _VAD_SAMPLE_RATE / samplerate) // _HOP_SAMPLES
         )
@@ -339,9 +308,6 @@ def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None
         total_samples_decoded = 0
         early_exit = False
 
-        # The lock wraps each INDIVIDUAL library entry, never the scan: a
-        # concurrent dictation waits on one hop's inference, not on this
-        # file's whole decode (AC 14(b)).
         with _library_lock:
             handle = library.create(float(settings.silence_vad_probability))
         try:
@@ -355,10 +321,6 @@ def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None
                 n_hops = carry.size // _HOP_SAMPLES
                 for i in range(n_hops):
                     chunk = carry[i * _HOP_SAMPLES:(i + 1) * _HOP_SAMPLES]
-                    # int16 conversion matching the C API's expected
-                    # sample format; clip first so an over-unity float
-                    # sample wraps to a loud click instead of silently
-                    # overflowing into garbage the model would score.
                     hop = np.ascontiguousarray(
                         np.clip(chunk, -1.0, 1.0) * 32767.0, dtype=np.int16
                     )
@@ -384,9 +346,6 @@ def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None
         )
         return None
 
-    # Only meaningful when the whole file was actually consumed: an early
-    # exit stops mid-file by design, and that case is already a not-silent
-    # verdict, so the floor has nothing to protect against there.
     if not early_exit:
         decoded_ms = (total_samples_decoded / samplerate) * 1000.0
         if decoded_ms < settings.silence_min_analysis_ms:
@@ -396,13 +355,8 @@ def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None
                 decoded_ms, audio_path, settings.silence_min_analysis_ms,
             )
             return None
-        # The file is fully decoded, so the estimate is now a fact -- recompute
-        # against the real hop count rather than the header-derived guess.
         required_hops = _required_speech_hops(max(1, total_hops), settings)
 
-    # int()/float()/bool(): numpy scalar types are not `is`-identical to
-    # Python builtins, which would silently break `is False`-style assertions
-    # downstream (same convention as analysis.py).
     return VadAnalysis(
         speech_frame_count=int(speech_hops),
         total_frame_count=int(total_hops),

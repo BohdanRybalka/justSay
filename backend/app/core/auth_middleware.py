@@ -19,12 +19,6 @@ from app.core.config import settings
 
 _TOKEN_HEADER = b"x-justsay-token"
 
-# /health is the Rust watchdog's readiness poll, which reqwest sends without a
-# token. Mirrored by TOKEN_EXEMPT_PATHS in src/api.ts, which must not read a
-# 2xx from one of these as proof the token was accepted (ADR 028): adding an
-# entry here without adding it there re-greens the frontend's status badge over
-# an app that is in fact unauthorized. test_auth.py pins the set so that a
-# one-sided change fails loudly.
 _EXEMPT_PATHS = frozenset({"/health"})
 
 
@@ -37,16 +31,10 @@ class LaunchTokenMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # OPTIONS is the CORS preflight (already short-circuited by CORS, but
-        # exempt here too). It stays a method check rather than joining
-        # _EXEMPT_PATHS: the frontend never issues a preflight itself, so it
-        # has no mirror on that side.
         if scope["method"] == "OPTIONS" or scope["path"] in _EXEMPT_PATHS:
             await self.app(scope, receive, send)
             return
 
-        # Read at request time so tests can monkeypatch settings.api_token and
-        # so a manually started backend with no token stays open (dev workflow).
         expected = settings.api_token
         if not expected:
             await self.app(scope, receive, send)
@@ -58,8 +46,6 @@ class LaunchTokenMiddleware:
                 provided = value
                 break
 
-        # Bytes comparison so a non-ASCII forged header can't raise inside
-        # compare_digest; constant-time to avoid leaking the token by timing.
         if not secrets.compare_digest(provided, expected.encode("utf-8")):
             response = JSONResponse(
                 {"detail": "Missing or invalid API token"}, status_code=401

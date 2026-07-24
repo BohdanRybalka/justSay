@@ -4,7 +4,6 @@ import pytest
 from app.llm.local_setup import _list_models, _model_matches
 
 
-# --- _model_matches ---
 
 
 def test_model_matches_exact():
@@ -24,7 +23,6 @@ def test_model_matches_different_model():
     assert _model_matches("llama3:8b", "gemma3:4b") is False
 
 
-# --- _list_models ---
 
 
 _BASE = "http://localhost:11434"

@@ -19,9 +19,6 @@ async def client(tmp_path, monkeypatch):
 
     from app.core import history
 
-    # See docs/adr/014-lazy-app-data-path-resolution.md: SETTINGS_DIR/
-    # SETTINGS_PATH no longer exist to monkeypatch -- JUSTSAY_DATA_DIR is the
-    # one supported redirect seam.
     monkeypatch.setenv("JUSTSAY_DATA_DIR", str(settings_dir))
     monkeypatch.setattr(user_settings, "_settings", None)
     monkeypatch.setattr(history, "_output_dir", settings_dir)
@@ -36,7 +33,6 @@ async def client(tmp_path, monkeypatch):
         _close_conn_locked()
 
 
-# --- GET /settings masks keys -----------------------------------------------
 
 @pytest.mark.anyio
 async def test_get_settings_masks_stored_key(client, monkeypatch):
@@ -59,7 +55,6 @@ async def test_get_settings_returns_empty_string_when_no_key(client):
     assert data["groq_api_key"] == ""
 
 
-# --- PUT /settings masks response and guards placeholder --------------------
 
 @pytest.mark.anyio
 async def test_put_settings_response_masks_key(client):
@@ -82,7 +77,6 @@ async def test_put_settings_placeholder_does_not_overwrite(client, monkeypatch):
     assert stored.gemini_api_key == "AIza-original"
 
 
-# --- GET /settings/cloud-status all four combinations -----------------------
 
 @pytest.fixture(autouse=True)
 def _reset_runtime_keys():
@@ -131,7 +125,6 @@ async def test_cloud_status_groq_only(client):
     assert resp.json() == {"gemini_key_set": False, "groq_key_set": True}
 
 
-# --- PUT /settings triggers maybe_prewarm_local (spec 015) -----------------
 
 
 def _counting_spy(counter: dict):
@@ -168,11 +161,6 @@ async def test_put_settings_triggers_prewarm_on_incidental_cache_clear(client, m
     — otherwise that edit would silently reintroduce a cold lazy-load."""
     import app.stt.local_setup as local_setup_module
 
-    # Snapshot + auto-restore: unlike `mode` (already reset by conftest's
-    # autouse `_reset_settings`), `initial_prompt` on the shared runtime
-    # singleton has no such reset — leaking it here would break the *next*
-    # test that assumes a pristine default (test_user_settings.py's
-    # sync_to_runtime tests).
     monkeypatch.setattr(runtime_settings.stt, "initial_prompt", runtime_settings.stt.initial_prompt)
 
     call_count = {"n": 0}
@@ -196,10 +184,6 @@ async def test_put_settings_does_not_prewarm_on_non_stt_field_change(client, mon
     `sync_to_runtime`'s own `changed_stt` return value instead."""
     import app.stt.local_setup as local_setup_module
 
-    # Snapshot + auto-restore: see the identical line in
-    # test_put_settings_triggers_prewarm_on_incidental_cache_clear above for
-    # the full rationale (leaking `initial_prompt` on the shared runtime
-    # singleton would break a later test that assumes a pristine default).
     monkeypatch.setattr(runtime_settings.stt, "initial_prompt", runtime_settings.stt.initial_prompt)
 
     call_count = {"n": 0}
@@ -218,12 +202,6 @@ async def test_put_settings_does_not_prewarm_on_non_stt_field_change(client, mon
     assert call_count["n"] == 2
 
 
-# --- GET /settings/storage and POST /settings/cleanup (spec 020) ------------
-#
-# Both endpoints must read runtime_settings.audio.temp_dir directly rather
-# than reconstructing SETTINGS_DIR / "tmp" -- see
-# docs/adr/012-dev-mode-data-directory-isolation.md. No coverage existed for
-# this endpoint pair before spec 020.
 
 
 @pytest.fixture
@@ -255,18 +233,11 @@ async def test_cleanup_removes_files_from_configured_temp_dir(client, _isolated_
     assert list(_isolated_temp_dir.iterdir()) == []
 
 
-# --- PUT /settings whisper_model_size hardening (spec 040) -------------------
-#
-# model_copy(update=...) does not re-run field validators, so the explicit
-# check in update_user_settings is what actually guards this path -- see
-# docs/adr/026-loopback-api-request-authentication.md.
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "bad_value",
-    # "large-v3\n" guards the regex anchor: Python's $ matches just before a
-    # trailing newline, so a full-string match (fullmatch / \A..\z) is required.
     ["../evil", "..\\evil", "foo/bar", "foo\\bar", "..", "a b", "large-v3;rm", "large-v3\n"],
 )
 async def test_put_settings_rejects_unsafe_whisper_model_size(client, bad_value):

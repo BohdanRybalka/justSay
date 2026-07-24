@@ -15,11 +15,6 @@ from app.core.app_paths import resolve_app_data_root
 
 _FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 
-# Set once setup_logging() actually configures a handler. See
-# docs/adr/014-lazy-app-data-path-resolution.md: resolution itself must be
-# lazy (a function call, not a frozen module-level constant), but a
-# RotatingFileHandler is bound to one fixed file for the process's lifetime
-# once created, so the chosen path is cached here after that one-time setup.
 _log_file: Path | None = None
 
 
@@ -36,7 +31,6 @@ def setup_logging() -> Path:
     log_file = log_dir / "backend.log"
 
     root = logging.getLogger()
-    # If something else (uvicorn) already set handlers, leave them but ensure our file handler exists.
     already_configured = any(
         getattr(h, "_justsay_file", False) for h in root.handlers
     )
@@ -62,7 +56,6 @@ def setup_logging() -> Path:
     stream_handler.setLevel(level)
     root.addHandler(stream_handler)
 
-    # Tame noisy third-party loggers.
     for noisy in ("httpcore", "httpx", "urllib3", "watchfiles"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 

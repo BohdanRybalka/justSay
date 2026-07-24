@@ -124,7 +124,7 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
     if ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_CLOSE_EVENT {
         wait_for_inflight_shutdown_then_exit();
     }
-    0 // Not handled — fall through to the next handler / default action.
+    0
 }
 
 /// Bounded wait for any already-in-progress `shutdown()` call (e.g.
@@ -155,10 +155,6 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
 #[cfg(windows)]
 fn wait_for_inflight_shutdown_then_exit() -> ! {
     const POLL_INTERVAL: Duration = Duration::from_millis(100);
-    // 6s: comfortably covers terminate_gracefully()'s own 3s grace poll plus
-    // force_kill() overhead (taskkill/CommandChild::kill), so the common
-    // "another shutdown is genuinely finishing" case waits it out rather
-    // than racing it.
     const MAX_ATTEMPTS: u32 = 60;
 
     for _ in 0..MAX_ATTEMPTS {
@@ -175,9 +171,6 @@ fn wait_for_inflight_shutdown_then_exit() -> ! {
 /// Call once, early in `main()`, before the backend is spawned.
 #[cfg(windows)]
 pub fn install_ctrl_handler() {
-    // SAFETY: `console_ctrl_handler` matches `PHANDLER_ROUTINE`'s required
-    // signature (`extern "system" fn(u32) -> i32`) exactly; `add = 1` adds
-    // it rather than removing a previously-registered handler.
     unsafe {
         SetConsoleCtrlHandler(Some(console_ctrl_handler), 1);
     }
@@ -198,7 +191,7 @@ pub fn api_token() -> &'static str {
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(300);
-const HEALTH_POLL_MAX_ATTEMPTS: u32 = 100; // 30 seconds
+const HEALTH_POLL_MAX_ATTEMPTS: u32 = 100;
 
 /// Production sidecar handle: shell-plugin child + liveness flag updated
 /// by a background event-drain task. `try_wait()` is not available on
@@ -411,8 +404,6 @@ fn check_port_available() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         if reap_orphan_sidecar() {
-            // Windows takes a moment to release a closed socket; poll
-            // briefly rather than rely on a fixed sleep.
             for _ in 0..20 {
                 std::thread::sleep(Duration::from_millis(100));
                 if try_bind_port() {
@@ -448,9 +439,6 @@ fn reap_orphan_sidecar() -> bool {
         Ok(o) => o.stdout,
         Err(_) => return false,
     };
-    // `tasklist` with no match prints a localised "INFO:" line on stderr
-    // and an empty (or "No tasks") stdout — checking for our image name
-    // in stdout is the only locale-independent signal.
     let listed = String::from_utf8_lossy(&stdout);
     if !listed.to_lowercase().contains("justsay-backend.exe") {
         return false;
@@ -491,12 +479,6 @@ static BACKEND_JOB: OnceLock<Option<isize>> = OnceLock::new();
 #[cfg(windows)]
 fn backend_job() -> Option<isize> {
     *BACKEND_JOB.get_or_init(|| {
-        // SAFETY: raw Win32 FFI. `CreateJobObjectW` returns NULL on failure
-        // (checked). `SetInformationJobObject` is handed a fully-zeroed,
-        // correctly-sized `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` with only
-        // `LimitFlags` set; on failure the job handle is closed and `None`
-        // reported. The official `windows-sys` binding owns the struct layout,
-        // so the `LimitFlags` write cannot land at a wrong offset (ADR 023).
         unsafe {
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if job.is_null() {
@@ -530,8 +512,6 @@ fn backend_job() -> Option<isize> {
 /// handle from `backend_job()` (or a test-local job).
 #[cfg(windows)]
 fn assign_child_to_job(job: isize, child: &Child) -> bool {
-    // SAFETY: `child` is a process we just spawned and still own, so its raw
-    // handle is valid; the call neither consumes nor closes either handle.
     unsafe { AssignProcessToJobObject(job as HANDLE, child.as_raw_handle() as HANDLE) != 0 }
 }
 
@@ -543,9 +523,6 @@ fn assign_child_to_job(job: isize, child: &Child) -> bool {
 /// log-and-continue.
 #[cfg(windows)]
 fn assign_pid_to_job(job: isize, pid: u32) -> bool {
-    // SAFETY: raw Win32 FFI. `OpenProcess` returns NULL on failure (bad pid,
-    // access denied), guarded before use; a successfully-opened handle is
-    // always closed, whether or not the assignment succeeded.
     unsafe {
         let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
         if process.is_null() {
@@ -574,13 +551,6 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
     let prefer_python_source =
         cfg!(debug_assertions) && std::env::var("JUSTSAY_USE_FROZEN_SIDECAR").is_err();
 
-    // See docs/adr/012-dev-mode-data-directory-isolation.md: sys.frozen alone
-    // cannot distinguish a real end-user install from a debug build
-    // smoke-testing the actual frozen sidecar binary (tauri:dev:frozen,
-    // JUSTSAY_USE_FROZEN_SIDECAR=1) -- that launch has sys.frozen == True but
-    // is still a dev/test context. Set unconditionally on both spawn
-    // branches below: one unambiguous statement of intent from the one
-    // place that actually knows whether this is a debug build.
     let force_dev_data_dir = cfg!(debug_assertions);
     let data_dir_name: &'static str = if force_dev_data_dir { ".justsay-dev" } else { ".justsay" };
 
@@ -598,8 +568,6 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
             .shell()
             .command(sidecar_str)
             .args(["--host", "127.0.0.1", "--port", &port_str])
-            // Per-launch API token via env (never a CLI arg, which any local
-            // process could read) -- see api_token()'s doc and ADR 026.
             .env("JUSTSAY_API_TOKEN", api_token());
         if force_dev_data_dir {
             shell_cmd = shell_cmd.env("JUSTSAY_FORCE_DEV_DATA_DIR", "1");
@@ -608,10 +576,6 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
             .spawn()
             .map_err(|e| format!("Failed to start backend sidecar: {}", e))?;
 
-        // Enroll the sidecar in the kill-on-close job so a force-kill of the
-        // Tauri parent takes it (and its whisper-server/FFmpeg descendants)
-        // down too. The shell plugin gives us only a pid, hence the OpenProcess
-        // path. Non-fatal: on failure the next-launch reap still applies.
         #[cfg(windows)]
         if let Some(job) = backend_job() {
             let pid = child.pid();
@@ -627,9 +591,6 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         let alive = Arc::new(AtomicBool::new(true));
         let alive_clone = alive.clone();
 
-        // Drain the event stream: forward stderr to the log file and flip
-        // `alive` to false when the process terminates (or the channel
-        // closes, which means the same thing in practice).
         tauri::async_runtime::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
@@ -652,7 +613,6 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
                     _ => {}
                 }
             }
-            // Channel closed without explicit Terminated — treat as dead.
             alive_clone.store(false, Ordering::Release);
         });
 
@@ -680,32 +640,14 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         .current_dir(&backend_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // Per-launch API token via env (see api_token()'s doc and ADR 026).
         .env("JUSTSAY_API_TOKEN", api_token());
         if force_dev_data_dir {
             cmd.env("JUSTSAY_FORCE_DEV_DATA_DIR", "1");
         }
-        // CREATE_NEW_PROCESS_GROUP (always) lets terminate_gracefully() later
-        // target this child alone with CTRL_BREAK_EVENT (see the constant's doc).
-        // CREATE_NO_WINDOW is conditional, because this Dev branch is reachable
-        // in a release build too (the `else` when resolve_sidecar() finds no
-        // frozen sidecar):
-        //   - Debug: parent is console-subsystem (main.rs gates
-        //     windows_subsystem="windows" on not(debug_assertions)). Omit
-        //     CREATE_NO_WINDOW so the child inherits the parent's shared console;
-        //     GenerateConsoleCtrlEvent only reaches processes sharing the caller's
-        //     console, so this delivery is what makes CTRL_BREAK work. No window
-        //     appears and nothing is written because stdout/stderr go to null above.
-        //   - Release fallback: parent is windows-subsystem and owns no console
-        //     for the child to inherit, so CTRL_BREAK is undeliverable regardless.
-        //     Keep CREATE_NO_WINDOW so the console-subsystem python.exe does not
-        //     get a fresh visible console window (behaves as today: force-killed).
-        // See docs/adr/024-dev-backend-never-receives-ctrl-break.md.
         #[cfg(windows)]
         {
             let mut flags = CREATE_NEW_PROCESS_GROUP;
             if !cfg!(debug_assertions) {
-                // release-fallback: no parent console to inherit; avoid a visible window
                 flags |= CREATE_NO_WINDOW;
             }
             cmd.creation_flags(flags);
@@ -714,11 +656,6 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
             .spawn()
             .map_err(|e| format!("Failed to start backend: {}", e))?;
 
-        // Enroll the dev child (python.exe running uvicorn) in the kill-on-close
-        // job. The dev branch owns a real `Child`, so it assigns via the raw
-        // handle. Non-fatal: dev has no reap fallback for python.exe, so a
-        // failed assignment silently re-opens the orphan bug for this session
-        // (logged only) — strictly no worse than before this existed.
         #[cfg(windows)]
         if let Some(job) = backend_job() {
             if !assign_child_to_job(job, &child) {
@@ -738,12 +675,6 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         *guard = Some(backend);
     }
 
-    // A shutdown() call may have landed while the child was still launching
-    // (real OS calls above take real wall-clock time, outside any lock) and
-    // lost the BACKEND_PROCESS lock race or found nothing to clean up yet.
-    // Rechecking here after releasing the lock closes both orphan-leak
-    // windows a second spawn() call opens — see
-    // docs/adr/006-backend-watchdog-respawn-on-crash.md.
     if is_shutdown_requested() {
         shutdown();
     }
@@ -846,8 +777,6 @@ fn terminate_gracefully(
     #[cfg(target_os = "windows")]
     {
         if windows_ctrl_break {
-            // SAFETY: pid is the still-running child's own process group id —
-            // only true when it was spawned with CREATE_NEW_PROCESS_GROUP (Dev only).
             let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } != 0;
             if sent {
                 for _ in 0..30 {
@@ -899,11 +828,6 @@ fn kill_current_process() {
                     pid,
                     move || alive.load(Ordering::Acquire),
                     move || {
-                        // Windows: tree-kill via taskkill. `CommandChild::kill()`
-                        // only sends `TerminateProcess` to the direct child, so a
-                        // sidecar that spawned subprocesses (e.g. FFmpeg) would
-                        // orphan them. `/T` walks the descendant tree, `/F`
-                        // forces termination — same path the dev branch uses.
                         #[cfg(target_os = "windows")]
                         {
                             use std::os::windows::process::CommandExt;
@@ -938,19 +862,12 @@ fn kill_current_process() {
                             }
                         }
                     },
-                    // The shell plugin's Command builder never sets
-                    // CREATE_NEW_PROCESS_GROUP, so CTRL_BREAK_EVENT could not
-                    // safely target only this child — unchanged forced kill.
                     false,
                 );
             }
             BackendProcess::Dev(child) => {
                 let pid = child.id();
                 log::info!("Shutting down backend (dev, PID: {})", pid);
-                // RefCell so both the `is_alive` poll closure and the
-                // `force_kill` closure can independently borrow `&mut Child`
-                // (try_wait/kill both need `&mut self`) without the borrow
-                // checker treating them as overlapping mutable captures.
                 let child_cell = std::cell::RefCell::new(child);
                 terminate_gracefully(
                     pid,
@@ -975,8 +892,6 @@ fn kill_current_process() {
                             let _ = child_cell.borrow_mut().kill();
                         }
                     },
-                    // Dev's child is spawned with CREATE_NEW_PROCESS_GROUP
-                    // (see spawn()), so CTRL_BREAK_EVENT can safely target it.
                     true,
                 );
 
@@ -990,7 +905,7 @@ const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_RESPAWN_ATTEMPTS: u32 = 3;
 
 fn respawn_backoff(attempt: u32) -> Duration {
-    Duration::from_secs(2u64.pow(attempt + 1)) // attempt 0/1/2 -> 2s/4s/8s
+    Duration::from_secs(2u64.pow(attempt + 1))
 }
 
 /// Background task: detect an unexpected backend crash (or hang) and
@@ -1015,10 +930,6 @@ fn respawn_backoff(attempt: u32) -> Duration {
 pub fn spawn_watchdog(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut attempt: u32 = 0;
-        // Confirmed via wait_for_ready(), NOT inferred from
-        // is_process_alive() alone. This call also subsumes the initial-
-        // readiness log that used to live as a separate fire-and-forget
-        // task in lib.rs's setup() (removed — see Files to modify).
         let mut confirmed_healthy = match wait_for_ready().await {
             Ok(()) => true,
             Err(e) => {
@@ -1035,9 +946,8 @@ pub fn spawn_watchdog(app: AppHandle) {
 
             if confirmed_healthy {
                 if is_process_alive() {
-                    continue; // steady state: last-known-good, still running
+                    continue;
                 }
-                // A confirmed-healthy process just died -- new episode.
                 confirmed_healthy = false;
                 attempt = 0;
             }
@@ -1062,12 +972,6 @@ pub fn spawn_watchdog(app: AppHandle) {
                 return;
             }
 
-            // The previous candidate may still be alive but was never
-            // confirmed ready (hung, not exited) -- kill it before a fresh
-            // spawn(), otherwise the new spawn's check_port_available()
-            // could collide with it on the port. A no-op (already gone) is
-            // safe and cheap if it already exited on its own during the
-            // backoff sleep.
             if is_process_alive() {
                 log::warn!(
                     "Backend watchdog: previous backend never became ready; terminating before respawn"
@@ -1119,8 +1023,6 @@ mod tests {
     /// trigger) and must not leak process-lifetime state into the test binary.
     #[cfg(windows)]
     fn create_test_job() -> isize {
-        // SAFETY: same create+configure sequence as `backend_job()`; asserts on
-        // failure since a broken job invalidates the test rather than the code.
         unsafe {
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             assert!(!job.is_null(), "CreateJobObjectW failed in test");
@@ -1180,10 +1082,6 @@ mod tests {
             "child must be alive before the job handle is closed"
         );
 
-        // Closing the last (only) handle to the job makes the kernel terminate
-        // every process still in it.
-        // SAFETY: `job` is the sole handle to a test-local job; closing it here
-        // is the deliberate kill trigger and it is never used again.
         unsafe {
             CloseHandle(job as HANDLE);
         }
@@ -1209,7 +1107,6 @@ mod tests {
             "child must be alive before the job handle is closed"
         );
 
-        // SAFETY: sole handle to a test-local job; closing it is the kill trigger.
         unsafe {
             CloseHandle(job as HANDLE);
         }
@@ -1225,17 +1122,12 @@ mod tests {
     fn assign_pid_to_job_is_non_fatal_for_a_nonexistent_pid() {
         let job = create_test_job();
 
-        // `u32::MAX` is far above any live pid and (as a Windows implementation
-        // detail) not a multiple of 4, so `OpenProcess` cannot open it — the
-        // helper must return false, never panic, and never kill anything.
         let assigned = assign_pid_to_job(job, u32::MAX);
         assert!(
             !assigned,
             "assigning a non-existent pid must return false, not panic"
         );
 
-        // SAFETY: sole handle to a test-local job with nothing assigned to it;
-        // closing it kills nothing.
         unsafe {
             CloseHandle(job as HANDLE);
         }

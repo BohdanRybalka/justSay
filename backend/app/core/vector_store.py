@@ -30,12 +30,6 @@ log = logging.getLogger(__name__)
 
 BACKFILL_BATCH_MAX = 200
 
-# Static v3 DDL — registered inside history.py's _init_schema. `vec_entries`
-# itself is NOT here: it is created lazily on first successful embed (its
-# dimension depends on the active provider, unknown until then). The
-# `entries_ad_vec` delete-propagation trigger similarly lives in
-# `ensure_vec_table_locked`, not here, since it only makes sense once
-# `vec_entries` exists.
 _DDL_V3 = """
 CREATE TABLE IF NOT EXISTS embeddings_meta (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -57,11 +51,6 @@ BEGIN
 END;
 """
 
-# Detail strings for SemanticSearchUnavailableError, consumed internally by
-# words._semantic_lane (spec 017 / ADR 010) to decide how to log a degraded
-# lane -- never surfaced to an HTTP client, since /history/search always
-# returns 200 now. Kept as module constants so tests reference the exact
-# same text.
 VEC_EXTENSION_UNAVAILABLE_DETAIL = (
     "sqlite-vec extension failed to load on this platform — semantic search unavailable"
 )
@@ -103,8 +92,6 @@ def ensure_vec_table_locked(conn: sqlite3.Connection, provider: str, model: str,
         return
 
     if row is not None:
-        # Embeddings from a different model are not comparable vectors —
-        # a partial mix would silently corrupt ranking. See ADR 001.
         conn.execute("DROP TABLE IF EXISTS vec_entries")
         conn.execute("DELETE FROM entry_embeddings")
 
@@ -186,10 +173,6 @@ async def embed_entry_background(entry_id: str, text: str) -> None:
         log.debug("sqlite-vec unavailable — skipping background embed for %s", entry_id)
         return
 
-    # Everything below (including resolve_embedding_provider itself, which
-    # may make an HTTP call to Ollama) is inside the try block — the whole
-    # point of this function is "never raise", not just "never raise after
-    # a provider was found".
     try:
         from app.core.config import settings
         from app.embeddings import resolve_embedding_provider
@@ -208,7 +191,7 @@ async def embed_entry_background(entry_id: str, text: str) -> None:
             ensure_vec_table_locked(conn, provider_id, provider.model_name, len(vector))
             row = conn.execute("SELECT rowid FROM entries WHERE id = ?", (entry_id,)).fetchone()
             if row is None:
-                return  # entry deleted before the background task ran
+                return
             insert_embedding(conn, entry_id, row[0], vector, provider_id, provider.model_name)
     except Exception:
         log.warning("Background embedding failed for entry %s", entry_id, exc_info=True)
@@ -230,8 +213,6 @@ async def backfill_batch(batch_size: int) -> BackfillResult:
             "ORDER BY ts ASC LIMIT ?",
             (clamped,),
         ).fetchall()
-    # Lock released here — backfill must not hold the write lock across N
-    # network calls (embedding one row can take real wall-clock time).
 
     processed = 0
     if rows and history._vec_available:
@@ -265,11 +246,9 @@ async def backfill_batch(batch_size: int) -> BackfillResult:
     return BackfillResult(processed=processed, remaining=remaining)
 
 
-# --- Automatic background indexing (spec 017 / ADR 010) --------------------
 
-_INDEXER_BATCH_SIZE = 20       # gentler than the old manual button's 50 — this now runs
-_INDEXER_PACING_SECONDS = 1.5  # unattended, possibly stacked behind live dictation traffic
-                                # competing for the same cloud/Ollama rate limits
+_INDEXER_BATCH_SIZE = 20
+_INDEXER_PACING_SECONDS = 1.5
 _indexer_lock = asyncio.Lock()
 
 
@@ -324,8 +303,6 @@ def selftest() -> tuple[bool, str]:
                 "INSERT INTO vt(rowid, embedding) VALUES (1, ?)",
                 (sqlite_vec.serialize_float32([1.0, 2.0, 3.0]),),
             )
-            # No LIMIT: sqlite-vec rejects it alongside `k = ?` once SQLite pushes
-            # LIMIT into the vec0 vtab, which it does here (unlike query_similar's JOIN).
             row = conn.execute(
                 "SELECT rowid FROM vt WHERE embedding MATCH ? AND k = ? ORDER BY distance",
                 (sqlite_vec.serialize_float32([1.0, 2.0, 3.0]), 1),

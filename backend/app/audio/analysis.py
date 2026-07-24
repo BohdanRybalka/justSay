@@ -20,13 +20,8 @@ from app.audio.config import AudioSettings
 
 log = logging.getLogger(__name__)
 
-_FRAME_SECONDS = 0.030  # 30 ms
+_FRAME_SECONDS = 0.030
 
-# Floor for the length-proportional speech-unit requirement below. A
-# module constant, deliberately NOT an AudioSettings/env-var field: it only
-# matters for sub-100ms-of-speech clips, and a reviewer pass on spec 029
-# specifically flagged env knobs that carry no useful tuning surface. See
-# docs/adr/015-pipeline-level-silence-guard.md.
 _MIN_SPEECH_UNITS_FLOOR = 2
 
 
@@ -63,9 +58,6 @@ def rms_dbfs(samples: np.ndarray) -> float:
     ``1e-10`` floor avoids ``log10(0)`` on true digital silence.
     """
     rms = float(np.sqrt(np.mean(np.asarray(samples, dtype=np.float64) ** 2)))
-    # float(): np.log10 of a Python float still returns np.float64, which is
-    # not `is`-identical to a plain float -- match analyze_silence's own
-    # float()/bool() casting convention below.
     return float(20 * np.log10(max(rms, 1e-10)))
 
 
@@ -153,14 +145,6 @@ def analyze_silence(audio_path: Path, settings: AudioSettings) -> SilenceAnalysi
         ):
             mono = block.mean(axis=1)
             total_samples_decoded += mono.size
-            # Guard rms_dbfs the same way the peak computation already is:
-            # np.mean of an empty array is `nan` (plus a RuntimeWarning),
-            # and `nan >= threshold` is silently False, so an unguarded call
-            # wouldn't crash but would look inconsistent with the line
-            # above. soundfile.blocks() never actually emits empty blocks,
-            # so this has no effect on any calibrated measurement — it's
-            # defensive symmetry, not a behavior change (GitHub review,
-            # PR #33).
             if mono.size:
                 peak = max(peak, float(np.max(np.abs(mono))))
                 if rms_dbfs(mono) >= settings.silence_frame_dbfs:
@@ -182,9 +166,6 @@ def analyze_silence(audio_path: Path, settings: AudioSettings) -> SilenceAnalysi
         )
         return None
 
-    # float()/bool() here: numpy scalar types (np.float64/np.bool_) are not
-    # `is`-identical to Python's builtin True/False, which would silently
-    # break `assert result.is_silent is True`-style test assertions.
     peak_dbfs = float(20 * np.log10(max(peak, 1e-10)))
     required_speech_frames = _required_speech_frames(total_frame_count, settings)
     is_silent = bool(

@@ -22,7 +22,6 @@ log = logging.getLogger(__name__)
 
 _ENV_VAR = "JUSTSAY_GPU_VENDOR"
 
-# Display Adapters device-setup class — stable across Windows versions.
 _DISPLAY_ADAPTER_CLASS_KEY = (
     r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
 )
@@ -40,21 +39,10 @@ class GpuProbeResult:
     vendor: GpuVendor
     name: str | None = None
     vram_total_mb: int | None = None
-    # Only ever populated via the torch.cuda source — no other source has a
-    # live-usage reading (see ADR 008's Consequences).
     vram_used_mb: int | None = None
     vram_free_mb: int | None = None
 
 
-# Process-lifetime cache: GPU hardware presence isn't expected to change
-# while the app is running (no hot-plug scenario this app needs to handle),
-# and `probe_gpu()` has several independent, uncoordinated call sites per
-# `check_status()`/`get_local_provider_kind()` invocation (docs/TODO.md ->
-# Tech Debt; sharpened by Spec 018's GitHub review, PR #21 iteration 2, which
-# found ~5 uncached calls per check_status() tick even after threading a
-# pre-fetched vendor through the one call site that was fixed). Caching here,
-# at the source, closes the whole class of problem regardless of how many
-# call sites reach it -- cheaper and safer than chasing each one individually.
 _cache_lock = threading.Lock()
 _cached_result: GpuProbeResult | None = None
 
@@ -258,10 +246,6 @@ def _classify_provider_name(provider_name) -> GpuVendor | None:
     if not isinstance(provider_name, str):
         return None
     lowered = provider_name.lower()
-    # "ati" alone is too generic a substring (it false-positives on e.g.
-    # "Intel Corporation", which contains "...corpor-ati-on..."); match the
-    # full legacy vendor string instead ("ATI Technologies Inc." pre-dates
-    # AMD's 2006 acquisition and can still appear in older drivers).
     if "advanced micro devices" in lowered or "ati technologies" in lowered:
         return GpuVendor.AMD
     if "intel" in lowered:

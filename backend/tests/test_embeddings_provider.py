@@ -306,7 +306,6 @@ async def test_concurrent_local_calls_each_reprobe_no_coalescing():
     assert all(reason is None for _, reason in results)
 
 
-# --- "Disabled means disabled" — closes the silent-fallback failure mode --
 
 @pytest.mark.asyncio
 async def test_embed_entry_background_noop_when_disabled():
@@ -344,11 +343,6 @@ async def test_embed_entry_background_noop_when_vec_unavailable():
     resolve_mock.assert_not_called()
 
 
-# --- CloudEmbeddingProvider — direct unit tests -----------------------------
-# Every test above replaces this class with a mock; these exercise the real
-# SDK-response-parsing code (`response.embeddings[0].values`) and the
-# missing-API-key `RuntimeError` path in `_get_client`, mirroring the
-# pattern test_llm.py already uses for CloudLLMProvider.
 
 
 def test_cloud_embedding_model_name():
@@ -375,7 +369,7 @@ async def test_cloud_embedding_embed_parses_response():
 
     fake_client = MagicMock()
     fake_client.models.embed_content.return_value = fake_response
-    provider._client = fake_client  # skip _get_client
+    provider._client = fake_client
 
     result = await provider.embed("hello world")
 
@@ -394,7 +388,6 @@ def test_cloud_embedding_cleanup_is_noop():
     assert provider._client is not None
 
 
-# --- LocalEmbeddingProvider — direct unit tests -----------------------------
 
 
 def test_local_embedding_model_name():
@@ -414,7 +407,7 @@ async def test_local_embedding_embed_parses_response():
 
     fake_client = MagicMock()
     fake_client.embeddings.return_value = {"embedding": [0.4, 0.5, 0.6]}
-    provider._client = fake_client  # skip _get_client
+    provider._client = fake_client
 
     result = await provider.embed("hello world")
 
@@ -451,6 +444,6 @@ def test_local_embedding_cleanup_swallows_errors():
     fake_client.embeddings.side_effect = RuntimeError("connection refused")
     provider._client = fake_client
 
-    provider.cleanup()  # must not raise
+    provider.cleanup()
 
     assert provider._client is None

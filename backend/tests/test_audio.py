@@ -33,7 +33,6 @@ def _simulate_audio_callback(recorder: MicrophoneRecorder, num_blocks: int = 5):
         recorder._audio_callback(fake_audio, 1024, None, MagicMock())
 
 
-# --- Recording lifecycle ---
 
 
 @pytest.mark.asyncio
@@ -54,7 +53,7 @@ async def test_start_idempotent(audio_settings, mock_stream):
     recorder = MicrophoneRecorder(audio_settings)
 
     await recorder.start()
-    await recorder.start()  # second call protected by lock — no-op
+    await recorder.start()
 
     mock_cls.assert_called_once()
 
@@ -98,7 +97,6 @@ async def test_double_stop_raises(audio_settings, mock_stream):
         await recorder.stop()
 
 
-# --- Audio level ---
 
 
 @pytest.mark.asyncio
@@ -112,7 +110,7 @@ async def test_level_db_updates_during_recording(audio_settings, mock_stream):
     _simulate_audio_callback(recorder, num_blocks=3)
 
     assert recorder.level_db > float("-inf")
-    assert recorder.level_db < 0  # dBFS is always negative for non-clipping audio
+    assert recorder.level_db < 0
 
 
 @pytest.mark.asyncio
@@ -134,19 +132,15 @@ async def test_last_duration_persists_after_stop(audio_settings, mock_stream):
 
     await recorder.start()
     _simulate_audio_callback(recorder, num_blocks=5)
-    # Force a known duration by back-dating the start.
     import time
     recorder._start_time = time.monotonic() - 7.5
     await recorder.stop()
 
     assert recorder.is_recording is False
-    # duration_seconds returns 0 after stop (by contract), but last_duration_seconds
-    # holds the captured span.
     assert recorder.duration_seconds == 0.0
     assert recorder.last_duration_seconds > 7.0
 
 
-# --- cleanup() ---
 
 
 @pytest.mark.asyncio
@@ -166,7 +160,7 @@ async def test_cleanup_stops_and_closes_open_stream(audio_settings, mock_stream)
 def test_cleanup_noop_when_never_started(audio_settings):
     recorder = MicrophoneRecorder(audio_settings)
 
-    recorder.cleanup()  # must not raise
+    recorder.cleanup()
 
     assert recorder.is_recording is False
 
@@ -182,14 +176,13 @@ async def test_cleanup_twice_is_noop_on_second_call(audio_settings, mock_stream)
     await recorder.start()
     _simulate_audio_callback(recorder, num_blocks=3)
     recorder.cleanup()
-    recorder.cleanup()  # second call — must be a genuine no-op
+    recorder.cleanup()
 
     stream_instance.stop.assert_called_once()
     stream_instance.close.assert_called_once()
     assert recorder.is_recording is False
 
 
-# --- Config validation ---
 
 
 def test_config_rejects_negative_sample_rate():
@@ -202,11 +195,6 @@ def test_config_rejects_zero_channels():
         AudioSettings(sample_rate=16000, channels=0)
 
 
-# --- temp_dir default_factory resolution (spec 020) --------------------------
-#
-# AudioSettings.temp_dir's default_factory delegates to
-# app.core.app_paths.resolve_app_data_root() -- mirrors test_app_paths.py's
-# isolation fixture and sys.frozen monkeypatch conventions.
 
 
 @pytest.fixture
@@ -242,12 +230,6 @@ def test_temp_dir_env_override_wins_over_default_factory(
     assert AudioSettings().temp_dir == override
 
 
-# --- rms_dbfs extraction parity (spec 029, AC 1-2) --------------------------
-#
-# `rms_dbfs` is a verbatim lift of the formula that used to live inline in
-# `MicrophoneRecorder._audio_callback` — these tests pin down that the
-# extraction changed nothing observable, not even the numeric type of the
-# comparison, for the Mic Test level meter / `/audio/level` SSE stream.
 
 
 def test_rms_dbfs_matches_manual_formula():
@@ -278,7 +260,6 @@ async def test_recorder_level_db_matches_pre_extraction_formula(audio_settings, 
     assert recorder.level_db == pytest.approx(expected_dbfs)
 
 
-# --- analyze_silence (spec 029) ---------------------------------------------
 
 
 def _write_wav(path: Path, data: np.ndarray, sr: int = 16000) -> Path:
@@ -387,13 +368,6 @@ def test_silence_settings_overridable_via_env_var(monkeypatch):
     assert settings.silence_min_speech_frames == 1
 
 
-# --- False-positive protection against real speech (spec 029, AC 8) --------
-#
-# train-audio-data/ is gitignored (never committed) and contains exactly ONE
-# real sample: one speaker, one microphone, one recording. This is a real
-# coverage gap accepted in the plan's Risks section, not overstated here —
-# these tests skip (not fail) when the file isn't present on disk, e.g. in a
-# fresh CI checkout that never had the local-only sample directory.
 
 _TRAIN_AUDIO_MP3 = (
     Path(__file__).resolve().parents[2] / "train-audio-data" / "Record (online-voice-recorder.com).mp3"
@@ -407,9 +381,6 @@ def _resample_to_16k_mono(data: np.ndarray, orig_sr: int) -> np.ndarray:
         return data.astype(np.float32)
     ratio = orig_sr / 16000
     if float(ratio).is_integer():
-        # Box-filter decimation -- numpy-only (no scipy in this dev venv).
-        # Good enough for a test fixture whose only job is feeding
-        # analyze_silence's RMS/peak measurement, not audio quality.
         factor = int(ratio)
         trimmed = data[: len(data) - (len(data) % factor)]
         return trimmed.reshape(-1, factor).mean(axis=1).astype(np.float32)
@@ -451,13 +422,6 @@ def test_analyze_silence_does_not_discard_quiet_real_speech(
     )
 
 
-# --- Short-clip correctness, honest thresholds, fail-open floor -----------
-# (spec 029, Stage 3 review iteration 1 — RED-1/2/3, AC 25-30)
-#
-# AC-8 above only exercised one 382-second recording, where a 150ms
-# speech-frame floor is trivially met thousands of times over. These tests
-# exercise the regime that actually broke: short (200-1000ms) clips, where
-# the absolute frame-count rule discarded loud, unattenuated real speech.
 
 
 def test_rms_dbfs_returns_native_python_float():
@@ -558,7 +522,7 @@ def test_analyze_silence_peak_threshold_is_decisive_against_low_crest_factor_hum
     amp = 10 ** (-47.0 / 20)
     hum = (amp * np.sign(np.sin(2 * np.pi * 60 * t))).astype(np.float32)
     path = tmp_path / "hum_60hz_square.wav"
-    sf.write(str(path), hum, sr, subtype="FLOAT")  # avoid 16-bit quantization noise
+    sf.write(str(path), hum, sr, subtype="FLOAT")
 
     default_result = analyze_silence(path, AudioSettings())
     assert default_result is not None
@@ -567,11 +531,9 @@ def test_analyze_silence_peak_threshold_is_decisive_against_low_crest_factor_hum
         f"(peak={default_result.peak_dbfs:.1f} dBFS, "
         f"speech_frames={default_result.speech_frame_count}/{default_result.total_frame_count})"
     )
-    # The frame check alone would have called this "speech" -- proves the
-    # peak check, not the frame-count rule, is what makes it silent above.
     assert default_result.speech_frame_count >= 5
 
-    overridden = AudioSettings(silence_peak_dbfs=-50.0)  # == silence_frame_dbfs
+    overridden = AudioSettings(silence_peak_dbfs=-50.0)
     overridden_result = analyze_silence(path, overridden)
     assert overridden_result is not None
     assert overridden_result.is_silent is False, (
@@ -586,7 +548,7 @@ def test_analyze_silence_returns_none_below_min_analysis_ms(tmp_path):
     than silence_min_analysis_ms (default 100ms) of audio -- a decode-sanity
     floor, not a short-clip exemption (200ms+ is still judged on content by
     AC-25/26)."""
-    audio = np.random.uniform(-0.3, 0.3, int(16000 * 0.050)).astype(np.float32)  # 50ms
+    audio = np.random.uniform(-0.3, 0.3, int(16000 * 0.050)).astype(np.float32)
     path = tmp_path / "too_short.wav"
     sf.write(str(path), audio, 16000)
 
@@ -603,14 +565,14 @@ def test_analyze_silence_returns_none_for_truncated_wav_with_valid_header(tmp_pa
     read does NOT catch this: libsndfile clamps the declared count to the
     physical file size, so the two already agree on a truncated file. Only
     a decoded-duration floor (AC-29's mechanism) closes this."""
-    audio = np.random.uniform(-0.1, 0.1, 16000).astype(np.float32)  # 1s, well-formed
+    audio = np.random.uniform(-0.1, 0.1, 16000).astype(np.float32)
     path = tmp_path / "truncated.wav"
     sf.write(str(path), audio, 16000)
     with open(path, "r+b") as f:
-        f.truncate(60)  # header survives; almost all sample data is gone
+        f.truncate(60)
 
-    info = sf.info(str(path))  # sanity: still opens cleanly, declared frames
-    assert info.frames > 0     # already clamped to what's physically present
+    info = sf.info(str(path))
+    assert info.frames > 0
 
     result = analyze_silence(path, AudioSettings())
 
@@ -637,7 +599,7 @@ def test_analyze_silence_pinned_reviewer_counterexample(tmp_path, _real_speech_1
     assert result is not None
     assert result.total_frame_count == 7
     assert result.speech_frame_count >= 4
-    assert result.peak_dbfs > -20.0  # unattenuated, clearly loud speech
+    assert result.peak_dbfs > -20.0
     assert result.is_silent is False
 
 

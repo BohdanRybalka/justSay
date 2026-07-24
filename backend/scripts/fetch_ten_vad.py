@@ -21,28 +21,15 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-# STDLIB ONLY, deliberately. httpx is declared only in the `dev` extra, while
-# release.yml's Windows leg installs ".[cloud,audio]" and receives httpx only
-# transitively via groq — availability by accident, which nothing pins. This
-# script runs before the sidecar build in that exact environment.
 
-# Pinned upstream release. TEN-framework/ten-vad has exactly two tags (v1.0,
-# v1.0-ONNX); v1.0 is the prebuilt-native-library one. Verified against the
-# tag's real tree at implementation time — the DLL genuinely lives at
-# lib/Windows/x64/ten_vad.dll (plan AC 21).
 TEN_VAD_TAG = "v1.0"
 _RAW_BASE = "https://raw.githubusercontent.com/TEN-framework/ten-vad"
 
-# The tag's tree carries NO license file (verified: repo root at v1.0 holds
-# only .gitignore/README.md/requirements.txt/setup.py plus directories), so
-# the license is pinned separately by an immutable commit SHA on `main`
-# rather than by tag. See plan.md Deviations.
 LICENSE_COMMIT = "22a3bcd4509d0faaa8eef4881e8af5f39c178950"
 
 _DLL_SHA256 = "38937f5604fa93a7941db7b9326992b792fa3731ebf9353973b3234457c6064b"
 _LICENSE_SHA256 = "03d862b922867b8c3406a0c17791e256ed3d76f197d88c1996c4aebfb79f688e"
 
-# (url, destination filename, expected sha256)
 _ARTIFACTS = [
     (f"{_RAW_BASE}/{TEN_VAD_TAG}/lib/Windows/x64/ten_vad.dll", "ten_vad.dll", _DLL_SHA256),
     (f"{_RAW_BASE}/{LICENSE_COMMIT}/LICENSE", "LICENSE", _LICENSE_SHA256),
@@ -50,11 +37,6 @@ _ARTIFACTS = [
 
 VENDOR_DIR = Path(__file__).resolve().parents[1] / "vendor" / "ten-vad"
 
-# The hash gate protects integrity but runs only AFTER the body is in memory.
-# A redirected or compromised endpoint serving a multi-GB body would exhaust
-# the build machine's RAM before verification ever happens, so the read is
-# bounded first. The real artifacts are ~510 KB (DLL) and ~1 KB (LICENSE);
-# 64 MB is generous headroom for an upstream growing, tight enough to matter.
 _MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 
 
@@ -108,13 +90,9 @@ def _fetch_one(url: str, name: str, expected_sha: str) -> bool:
         return False
 
     print(f"  {name}: downloading {url}")
-    # urlopen follows redirects and raises HTTPError on non-2xx by default,
-    # so this matches the previous raise_for_status + follow_redirects flow.
     with urllib.request.urlopen(url, timeout=120.0) as resp:
         payload = _read_bounded(resp, name, url)
 
-    # Hash the payload BEFORE it reaches its final name: a mismatch must
-    # leave no partially-trusted file behind for the sidecar build to pick up.
     with tempfile.NamedTemporaryFile(delete=False, dir=str(VENDOR_DIR)) as tmp:
         tmp.write(payload)
         staged = Path(tmp.name)

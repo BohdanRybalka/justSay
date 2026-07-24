@@ -32,11 +32,7 @@ export function renderWords(container: HTMLElement): () => void {
 
   let cancelled = false;
   let topLang: Lang = "all";
-  // /words/top is post-v0.10.4 — older frozen sidecars return 404; remember
-  // that so we degrade gracefully.
   let topUnsupported = false;
-  // True once renderPage has assigned the full body markup; refreshStats
-  // can skip its work while we're still in the zero-state placeholder.
   let pageRendered = false;
   let lastTotalEntries = -1;
 
@@ -90,13 +86,8 @@ export function renderWords(container: HTMLElement): () => void {
       const stats = await api.historyStats();
       if (cancelled) return;
 
-      // First tick before the initial renderPage finished — skip without
-      // synthesising a fake "zero → non-zero" transition that would race
-      // an in-flight renderPage() and trigger a spurious full re-paint.
       if (lastTotalEntries < 0) return;
 
-      // Zero ↔ non-zero transition triggers a full re-paint instead of
-      // mutating absent nodes.
       const wasEmpty = lastTotalEntries === 0;
       const isEmpty = stats.total_entries === 0;
       lastTotalEntries = stats.total_entries;
@@ -299,8 +290,6 @@ function renderBucket(
   bucket: Record<string, number>,
   labelFn: (k: string) => string,
 ): string {
-  // Always emit the container even when empty so refreshStats() can rely
-  // on the IDs being present from first mount.
   return `
     <div class="setting-group" style="margin-top:20px;">
       <div class="setting-label">${title}</div>

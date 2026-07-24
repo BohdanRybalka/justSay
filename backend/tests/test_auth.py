@@ -13,7 +13,6 @@ from app.core.auth_middleware import _EXEMPT_PATHS
 from app.core.config import settings
 
 
-# --- TrustedHostMiddleware: Host-header allowlist ---------------------------
 
 
 @pytest.mark.anyio
@@ -40,7 +39,6 @@ async def test_allowed_host_with_or_without_port_passes(client, host):
     assert resp.status_code == 200
 
 
-# --- LaunchTokenMiddleware: token gate --------------------------------------
 
 
 @pytest.fixture
@@ -90,7 +88,6 @@ async def test_wrong_token_returns_401(client, _token):
     assert resp.status_code == 401
 
 
-# --- Exemptions: /health and OPTIONS ----------------------------------------
 
 
 def test_exempt_paths_are_exactly_health():
@@ -126,7 +123,6 @@ async def test_options_preflight_is_not_rejected_by_the_token_check(client, _tok
     assert resp.status_code == 200
 
 
-# --- Open mode: no token configured -----------------------------------------
 
 
 @pytest.mark.anyio

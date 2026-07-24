@@ -30,12 +30,8 @@ class ProcessingResult:
     text: str
     duration_ms: int
     copied_to_clipboard: bool
-    model_name: str = ""               # which provider actually handled the call
-    fallback_reason: str | None = None  # set when a pinned engine was overridden
-    # Set when process_audio short-circuited without calling a provider at
-    # all -- currently only "silence". Distinct from fallback_reason, which
-    # means something else entirely (a pinned engine was overridden) --
-    # see docs/adr/015-pipeline-level-silence-guard.md.
+    model_name: str = ""
+    fallback_reason: str | None = None
     discarded_reason: str | None = None
 
 
@@ -60,46 +56,10 @@ async def process_audio(
     if duration is None:
         duration = detect_duration(audio_path)
 
-    # Pre-model silence gate (spec 029 -> 033 -> 034; see
-    # docs/adr/015-pipeline-level-silence-guard.md, 019-ten-vad-neural-
-    # silence-gate.md and 020-lazy-energy-guard-fallback.md). It sits between
-    # duration detection and provider routing so a silent clip never reaches a
-    # provider at all -- saves STT latency locally and real Cloud API spend.
-    #
-    # NOTE ON NUMBERING: the layer numbers below are ADR 019's and are NOT the
-    # execution order. ADR 019 fixes layer 1 = energy guard, layer 2 = TEN VAD,
-    # layer 3 = provider metadata, and those identities are stable — they name
-    # WHICH detector, and the WARNING logs (`layer=vad` / `layer=energy`) key
-    # off the names, not the numbers. ADR 020 changed only the order in which
-    # layers 1 and 2 execute (2 first, 1 lazily on abstention); it deliberately
-    # did not renumber them, so a reader following either ADR pointer from this
-    # file finds the same layer identities it uses.
-    #
-    # Layer 2, the neural front gate, EXECUTES FIRST and OUTRANKS everything
-    # below it: when the VAD produced a verdict, that verdict decides, in both
-    # directions. It catches loud non-speech (clicks, hum, noise) that a
-    # loudness threshold passes by definition, and it does not share the
-    # energy guard's residual false-positive zone on quiet speech.
-    # `analyze_vad` fails open (returns None) on a missing binary, a load
-    # failure, or an undecodable file -- and on every non-Windows platform,
-    # where no binary ships at all.
-    #
-    # Run via asyncio.to_thread -- synchronous CPU/IO work, like every
-    # comparable call in this codebase (local.py's _transcribe, local_mlx.py's
-    # _run_mlx).
     vad = None
     if settings.audio.silence_vad_enabled:
         vad = await asyncio.to_thread(analyze_vad, audio_path, settings.audio)
 
-    # Layer 1, the energy guard -- a LAZY fallback that now EXECUTES SECOND
-    # (ADR 020 amends ADR 019's "runs first, cheapest"). It is invoked
-    # ONLY when the VAD abstained or is disabled, because whenever a VAD
-    # verdict exists the energy verdict is overridden anyway: computing it was
-    # paying a full-file decode (measured 1707ms on a 6.4min upload, vs the
-    # VAD's 15.9ms early exit) to decide nothing. When the VAD abstains this
-    # is the SOLE authority and behaves bit-identically to shipped spec 029 --
-    # that is what "demoted, not deleted" means mechanically, and it is the
-    # only silence gate that exists on macOS and on un-fetched checkouts.
     analysis = None
     if vad is None:
         analysis = await asyncio.to_thread(analyze_silence, audio_path, settings.audio)
@@ -118,9 +78,6 @@ async def process_audio(
 
     if discard_log is not None:
         log.warning(discard_log[0], *discard_log[1])
-        # No STT call, no clipboard write, no save_entry -- a discarded
-        # accidental hotkey press must be a silent no-op, not a raised
-        # exception (the widget's error toast is wired to thrown exceptions).
         return ProcessingResult(
             text="",
             duration_ms=int((time.perf_counter() - start) * 1000),
@@ -145,12 +102,6 @@ async def process_audio(
         fallback_reason or "no",
     )
 
-    # Spec 028 Item 2: wait for the local model to be ready before the
-    # transcribe call instead of racing it. Skipped entirely for cloud
-    # providers. See app.stt.local_setup.await_local_ready's docstring for
-    # why a plain "not ready" (False) is NOT treated as fatal here -- only a
-    # genuine LocalReadinessTimeout is; transcribe() keeps its own lazy
-    # _get_model() fallback either way.
     if is_local_provider(stt):
         from app.stt.local_setup import LocalReadinessTimeout, await_local_ready
 
@@ -171,13 +122,6 @@ async def process_audio(
         log.exception("STT transcribe failed (%s)", stt.model_name)
         raise
 
-    # Layer 3, post-model (spec 033 / ADR 019). Whisper's own suppression is
-    # `no_speech_prob > 0.6 AND avg_logprob < -1.0`, so a CONFIDENTLY-decoded
-    # hallucination is never suppressed by the library -- thresholding
-    # no_speech_prob alone is strictly stronger. `result.no_speech_prob` is
-    # the MINIMUM across segments, so this discards only when EVERY segment
-    # looks like non-speech; one confident-speech segment keeps the whole
-    # result. None (no signal on this provider/path) always keeps it.
     if (
         result.no_speech_prob is not None
         and result.no_speech_prob > settings.stt.no_speech_prob_threshold
@@ -187,7 +131,6 @@ async def process_audio(
             "(%s, %d chars discarded)",
             result.no_speech_prob, settings.stt.no_speech_prob_threshold,
             stt.model_name,
-            # Length only -- never the hallucinated text itself at WARNING.
             len(result.text),
         )
         return ProcessingResult(
@@ -218,10 +161,6 @@ async def process_audio(
     duration_ms = int((time.perf_counter() - start) * 1000)
     word_count = len(text.split()) if text else 0
 
-    # An explicit user language choice is NEVER overridden by a provider's
-    # guess -- only the "auto" sentinel gets substituted, and only when the
-    # provider actually reported something (otherwise "auto" stays, current
-    # behaviour). See docs/adr/016-detected-language-on-stt-contract.md.
     effective_language = language
     if language == "auto" and result.detected_language:
         effective_language = result.detected_language

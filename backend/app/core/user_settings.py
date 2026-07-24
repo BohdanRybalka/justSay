@@ -19,13 +19,6 @@ from app.core import history
 from app.core.app_paths import resolve_app_data_root
 
 
-# See docs/adr/012-dev-mode-data-directory-isolation.md -- resolves to
-# ~/.justsay-dev for any from-source run, ~/.justsay only for the packaged app.
-# See docs/adr/014-lazy-app-data-path-resolution.md -- resolution MUST happen
-# per call, not be frozen into a module-level constant. A module-level
-# SETTINGS_DIR/SETTINGS_PATH constant here was exactly the bug: it froze
-# against the real ~/.justsay-dev at import time, before any test fixture
-# could redirect it via JUSTSAY_DATA_DIR.
 def _settings_dir() -> Path:
     return resolve_app_data_root()
 
@@ -37,14 +30,7 @@ def _settings_path() -> Path:
 log = logging.getLogger(__name__)
 
 
-# Whisper model size is used to build a Hugging Face repo id / on-disk cache
-# path, so it must never carry a path separator or a ``..`` traversal segment.
 _WHISPER_MODEL_SIZE_CHARS = r"[A-Za-z0-9._-]+"
-# For the pydantic Field(pattern=...) below: \A...\z fully anchor the match.
-# Plain ^...$ is unsafe -- in Python's re (used by the fullmatch runtime check)
-# $ also matches just before a trailing newline, so "large-v3\n" would slip
-# through. \z is rust-regex's end-of-haystack anchor; \Z (Python's spelling for
-# it) is rejected by pydantic's rust-regex engine at schema-build time.
 _WHISPER_MODEL_SIZE_PATTERN = rf"\A{_WHISPER_MODEL_SIZE_CHARS}\z"
 _WHISPER_MODEL_SIZE_RE = re.compile(_WHISPER_MODEL_SIZE_CHARS)
 
@@ -56,40 +42,23 @@ class UserSettings(BaseModel):
     shortcut: str = "Ctrl+Alt+KeyV"
     output_dir: str = Field(default_factory=lambda: str(_settings_dir()))
 
-    # Provider modes
     stt_mode: Literal["cloud", "local"] = "cloud"
     llm_mode: Literal["cloud", "local"] = "cloud"
 
-    # Cloud STT engine override — Auto keeps the duration+style routing,
-    # Groq / Gemini pin a single provider.
     stt_engine: Literal["auto", "groq", "gemini"] = "auto"
 
-    # Local STT (faster-whisper). The pattern is defense-in-depth for the
-    # load / env construction paths; the PUT /settings path is guarded
-    # separately in update_user_settings (model_copy does not re-run
-    # validators). See docs/adr/026-loopback-api-request-authentication.md.
     whisper_model_size: str = Field(
         default="large-v3-turbo", pattern=_WHISPER_MODEL_SIZE_PATTERN
     )
-    whisper_device: str = "auto"  # auto | cpu | cuda
+    whisper_device: str = "auto"
 
-    # Local LLM (Ollama)
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "qwen3:1.7b"
 
-    # Smart routing threshold — audio <= this goes to Groq Whisper, above to Gemini.
     cloud_routing_threshold: float = 30.0
 
-    # Custom vocabulary / glossary plumbed into every STT provider. See
-    # ``app.stt.config.STTSettings.initial_prompt`` for per-provider semantics.
-    # 500 char ceiling stays inside Whisper's ~224-token prompt budget for
-    # Cyrillic input.
     initial_prompt: str = Field(default="", max_length=500)
 
-    # Cloud API keys (Layer 2 — user preference, stored plaintext in ~/.justsay/settings.json).
-    # Empty string means "not set via UI — fall back to .env / AppSettings default".
-    # sync_to_runtime only pushes non-empty values so .env keys remain active if the
-    # user has never visited Settings → Keys.
     gemini_api_key: str = ""
     groq_api_key: str = ""
 
@@ -141,9 +110,6 @@ def update_user_settings(updates: dict) -> UpdateOutcome:
             updates = {**updates, "output_dir": str(new_dir)}
 
         if "whisper_model_size" in updates:
-            # model_copy(update=...) does NOT re-run field validators, so the
-            # Field(pattern=...) on UserSettings alone would not guard this
-            # path -- enforce it explicitly here (mirrors output_dir above).
             _validate_whisper_model_size(updates["whisper_model_size"])
 
         merged = current.model_copy(update=updates)
@@ -188,8 +154,6 @@ def _validate_output_dir(value: object) -> Path:
         try:
             inside = candidate.is_relative_to(forbidden)
         except (ValueError, OSError):
-            # Different drives on Windows, or unresolvable path — skip this
-            # particular forbidden parent and check the rest.
             continue
         if inside:
             raise ValueError(f"output_dir is inside a system directory: {forbidden}")
@@ -250,7 +214,6 @@ def _load() -> UserSettings:
             data = json.loads(settings_path.read_text(encoding="utf-8"))
             return UserSettings.model_validate(data)
         except (json.JSONDecodeError, ValueError):
-            # Corrupt file — reset to defaults
             pass
     return UserSettings()
 
@@ -291,7 +254,6 @@ def sync_to_runtime(us: UserSettings) -> bool:
     settings.stt.cloud_routing_threshold = us.cloud_routing_threshold
     settings.stt.engine = us.stt_engine
     settings.stt.initial_prompt = us.initial_prompt
-    # Only overwrite if non-empty: preserves .env fallback when user hasn't set a key via UI.
     if us.gemini_api_key:
         settings.stt.gemini_api_key = us.gemini_api_key
     if us.groq_api_key:
@@ -308,17 +270,9 @@ def sync_to_runtime(us: UserSettings) -> bool:
         from app.embeddings import clear_cache as clear_embeddings_cache
         clear_embeddings_cache()
     if changed_llm:
-        # Keep this: llm.mode is one half of the (stt.mode, llm.mode) key that
-        # gates embedding eligibility, so flipping it must invalidate the
-        # embedding provider cache -- otherwise a stale Cloud embedding
-        # provider could survive a switch to Local (zero-leak regression).
         from app.embeddings import clear_cache as clear_embeddings_cache
         clear_embeddings_cache()
 
-    # changed_stt is built from `or`/`and` chains, so on an all-falsy path it
-    # can end up as "" (the last short-circuited operand from the
-    # gemini/groq key checks) rather than the literal `False` its `-> bool`
-    # signature promises -- coerce explicitly so callers get a real bool.
     return bool(changed_stt)
 
 

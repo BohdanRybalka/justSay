@@ -2,31 +2,9 @@ import asyncio
 import os
 import tempfile
 
-# Spec 028 Item 1 (iteration-2 review fix, RED 1). This MUST be the very
-# first thing this module does -- before `from app.main import app` and
-# before every other `app.*` import, including transitive ones. Laziness
-# alone (the iteration-1 fix) is not enough: a value can be resolved lazily
-# and still be frozen once, early. `AudioSettings.temp_dir`
-# (backend/app/audio/config.py:14) uses a `default_factory`, but the
-# `settings = AppSettings()` singleton (backend/app/core/config.py:40)
-# invokes it exactly ONCE at import time, during pytest collection, before
-# any fixture can exist -- so a per-test `monkeypatch.setenv` fixture can
-# never reach it; there is nothing to intercept, only an absence of a call
-# during the test. Setting the env var here, before the first `app.*`
-# import, makes the real root unreachable for the WHOLE process: every
-# import-time resolution -- found or not yet found, audited or not --
-# freezes against this throwaway directory instead. See
-# docs/adr/014-lazy-app-data-path-resolution.md.
 _SESSION_DATA_DIR = tempfile.mkdtemp(prefix="justsay-pytest-")
 os.environ["JUSTSAY_DATA_DIR"] = _SESSION_DATA_DIR
 
-# TrustedHostMiddleware (spec 040) rejects any Host outside settings.trusted_hosts
-# with 400. The test clients reach the app over base_url "http://test" (Host:
-# test) and Starlette's TestClient uses "testserver", so both must be allowed.
-# Set here -- before the first `app.*` import below constructs the AppSettings()
-# singleton -- because JUSTSAY_TRUSTED_HOSTS is only read at that construction,
-# mirroring the JUSTSAY_DATA_DIR seam above. See
-# docs/adr/026-loopback-api-request-authentication.md.
 os.environ["JUSTSAY_TRUSTED_HOSTS"] = (
     '["127.0.0.1", "localhost", "test", "testserver"]'
 )
@@ -94,15 +72,6 @@ def spawn_spy(monkeypatch):
     return spy
 
 
-# --- Spec 028 Item 1: app-data path isolation -------------------------------
-#
-# See docs/adr/014-lazy-app-data-path-resolution.md. `JUSTSAY_DATA_DIR` is the
-# one supported test/dev seam for redirecting the data root -- it is checked
-# first in `resolve_app_data_root()`, so it wins regardless of import order or
-# what has already been imported. Patching `Path.home()` (the mechanism
-# several older per-file fixtures used) is NOT supported: it is a no-op
-# against any module-level constant that was already resolved before the
-# patch was applied -- exactly the Spec 028 Item 1 bug this isolation closes.
 
 
 def _cleanup_data_dir(path: str | Path) -> None:
@@ -184,16 +153,11 @@ def _isolated_app_data(tmp_path, monkeypatch):
     same scope).
     """
     monkeypatch.setenv("JUSTSAY_DATA_DIR", str(tmp_path))
-    # settings.audio.temp_dir was already frozen at process start (see the
-    # module-top env-var seam above) -- the session-wide value is harmless
-    # (it points under _SESSION_DATA_DIR, never the real root), but each test
-    # still gets its own tmp_path here so per-test isolation is complete
-    # rather than merely session-wide.
     monkeypatch.setattr(settings.audio, "temp_dir", tmp_path / "tmp")
     user_settings._settings = None
     with history._lock:
         history._close_conn_locked()
-        history._output_dir = None  # AC 8a: lazy fallback inside history_path()
+        history._output_dir = None
         history._stats_cache = None
     yield
     with history._lock:
@@ -220,15 +184,6 @@ def _monitored_app_data_paths() -> list[tuple[str, "Path"]]:
         try:
             resolved.append((label, getter()))
         except Exception:
-            # A test that monkeypatches a low-level platform primitive
-            # (os.name, sys.platform) for an unrelated purpose -- e.g.
-            # simulating a non-Windows GPU-vendor path in
-            # test_stt_local_factory.py/test_gpu_probe.py -- can transiently
-            # make pathlib's own Path() construction raise here (it picks
-            # WindowsPath/PosixPath from the live os.name). That's a
-            # collision with unrelated test state, not a data-isolation
-            # leak -- skip a label we structurally can't evaluate rather
-            # than crashing this guard fixture over it.
             continue
     return resolved
 

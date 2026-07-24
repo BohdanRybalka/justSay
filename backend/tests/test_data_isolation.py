@@ -46,7 +46,6 @@ def test_testclient_lifespan_keeps_settings_path_under_tmp_path(tmp_path):
         assert user_settings._settings_path().is_relative_to(tmp_path)
 
 
-# --- Guard fixture's own detection logic (AC 5) -----------------------------
 
 
 def test_guard_helper_reports_no_offenders_when_isolated(tmp_path):
@@ -137,15 +136,6 @@ def test_guard_helper_checks_both_real_roots_prod_and_dev(tmp_path, monkeypatch)
     assert "user_settings._settings_path()" in labels
 
 
-# --- AC 5c: session snapshot backstop is recursive --------------------------
-#
-# Review pass 2, the one YELLOW: `_snapshot_real_roots()` used `iterdir()`
-# (direct children only), so a file written into `logs/` or `tmp/` -- the
-# two subdirectories actually written to in production (backend.log,
-# pipeline audio temp files) -- went unnoticed. Verified against the
-# pre-fix, non-recursive version before applying the fix: this exact test
-# failed there (the leaked file was invisible to both snapshots, so
-# `after == before` held and nothing was flagged).
 
 
 def test_snapshot_detects_new_file_in_a_subdirectory_of_a_real_root(tmp_path):
@@ -188,22 +178,14 @@ def test_snapshot_survives_a_file_vanishing_between_listing_and_stat(tmp_path, m
 
     monkeypatch.setattr(Path, "stat", _flaky_stat)
 
-    snapshot = _snapshot_real_roots([fake_real_root])  # must not raise
+    snapshot = _snapshot_real_roots([fake_real_root])
 
     assert ghost not in snapshot
 
 
-# --- AC 5b: machine-checked consumer inventory ------------------------------
 
 _APP_DIR = Path(__file__).resolve().parent.parent / "app"
 
-# Every backend/app/ site that resolves an app-data path (via
-# resolve_app_data_root() or a literal Path.home()), and how. Mirrors
-# docs/adr/014-lazy-app-data-path-resolution.md's Consumer inventory table --
-# keep the two in sync. `app_paths.py` itself (the definer of
-# resolve_app_data_root(), and the one legitimate literal-Path.home() site)
-# is deliberately excluded from the scan below: it is the source of truth,
-# not a consumer of it.
 _EXPECTED_APP_DATA_CONSUMERS: dict[str, str] = {
     "audio/config.py": "frozen-at-import",
     "core/history.py": "lazy",
@@ -259,16 +241,6 @@ def test_app_data_consumer_inventory_is_exhaustive():
     )
 
 
-# --- Session data-dir cleanup (Stage 6 tester finding) ----------------------
-#
-# `_cleanup_session_data_dir`'s finalizer silently failed on Windows, every
-# single run: `setup_logging()`'s RotatingFileHandler keeps backend.log open
-# for the process's lifetime, which keeps the whole session directory locked,
-# and `shutil.rmtree(..., ignore_errors=True)` swallowed the resulting
-# PermissionError completely. 44+ leftover `justsay-pytest-*` directories
-# accumulated under the OS temp dir before this was caught. Verified against
-# the pre-fix logic (bare `shutil.rmtree(path, ignore_errors=True)`, no
-# handler close) before applying the fix: the directory was NOT removed.
 
 
 def test_cleanup_data_dir_releases_the_log_handle_and_removes_the_directory(tmp_path):
@@ -286,7 +258,7 @@ def test_cleanup_data_dir_releases_the_log_handle_and_removes_the_directory(tmp_
     log_file.parent.mkdir(parents=True)
 
     handler = logging.handlers.RotatingFileHandler(log_file, encoding="utf-8")
-    handler._justsay_file = True  # matches logging_config.setup_logging()'s own marker
+    handler._justsay_file = True
     root_logger = logging.getLogger()
     root_logger.addHandler(handler)
     handler.emit(
@@ -307,8 +279,6 @@ def test_cleanup_data_dir_releases_the_log_handle_and_removes_the_directory(tmp_
             "ignore_errors=True let this assertion fail silently forever"
         )
     finally:
-        # Belt-and-braces teardown in case the assertions above fail and
-        # leave the handler attached / the file locked for later tests.
         if handler in root_logger.handlers:
             root_logger.removeHandler(handler)
         with contextlib.suppress(Exception):

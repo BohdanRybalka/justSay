@@ -15,7 +15,7 @@ async def test_health(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ok"
-    assert data["version"]  # non-empty
+    assert data["version"]
     assert data["stt_mode"] in ("cloud", "local")
     assert data["llm_mode"] in ("cloud", "local")
 
@@ -49,7 +49,6 @@ async def test_switch_stt_mode_invalid(client):
     assert resp.status_code == 422
 
 
-# --- Eager pre-warm dispatch (spec 015) ---
 
 
 @pytest.mark.prewarm
@@ -85,13 +84,10 @@ async def test_set_stt_mode_triggers_prewarm_without_awaiting_it(client, monkeyp
 
     assert resp.status_code == 200
     assert call_count["n"] == 1
-    # The response came back even though the background task the spy kicked
-    # off is still pending — an inline `await maybe_prewarm_local(...)` would
-    # have hung this request on `never_set`, which this test never sets.
     assert not background["task"].done()
 
     never_set.set()
-    await background["task"]  # avoid a "task was never awaited" warning
+    await background["task"]
 
 
 @pytest.mark.asyncio
@@ -124,7 +120,7 @@ async def test_stt_local_prewarm_dispatches_and_returns_started(client, monkeypa
 
     resp = await client.put("/stt/mode", json={"mode": "local"})
     assert resp.status_code == 200
-    assert call_count["n"] == 1  # from the mode switch itself
+    assert call_count["n"] == 1
 
     resp = await client.post("/stt/local/prewarm")
     assert resp.status_code == 200
@@ -194,7 +190,6 @@ async def test_get_recorder_raises_when_app_state_unset(client):
         await client.get("/audio/status")
 
 
-# --- /audio/level-stream --------------------------------------------
 
 class _FakeStreamingRecorder:
     """Fake recorder whose is_recording flips False after N reads — the

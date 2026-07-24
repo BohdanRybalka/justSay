@@ -72,7 +72,6 @@ class LocalEmbeddingProvider:
         if self._client is not None:
             try:
                 log.info("Unloading Ollama embedding model %s", self._model)
-                # keep_alive=0 tells Ollama to immediately unload the model from memory
                 self._client.embeddings(model=self._model, prompt="", keep_alive=0)
                 log.info("Ollama embedding model unloaded")
             except Exception as e:

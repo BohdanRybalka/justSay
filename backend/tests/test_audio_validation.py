@@ -19,7 +19,6 @@ from app.core.audio_validation import (
 from app.core.constants import ALLOWED_AUDIO_EXTENSIONS, MIME_BY_AUDIO_EXTENSION
 
 
-# --- Sanity: every allowed extension has a MIME mapping ----------------
 
 def test_every_allowed_extension_has_a_mime():
     """If a new container is added to ALLOWED_AUDIO_EXTENSIONS, the MIME map
@@ -29,7 +28,6 @@ def test_every_allowed_extension_has_a_mime():
     assert missing == set(), f"Extensions without MIME mapping: {missing}"
 
 
-# --- detect_audio_mime: each recognised container ----------------------
 
 def test_detect_wav_riff_header():
     wav = b"RIFF" + (b"\x00" * 4) + b"WAVE" + (b"\x00" * 32)
@@ -83,7 +81,6 @@ def test_detect_short_payload_returns_none():
     assert detect_audio_mime(b"") is None
 
 
-# --- validate_audio_upload --------------------------------------------
 
 def _wav_bytes(payload_size: int = 1024) -> bytes:
     """Synthesise a minimal RIFF/WAVE header + payload."""
@@ -122,7 +119,7 @@ def test_validate_rejects_missing_filename():
 
 def test_validate_rejects_extension_content_mismatch():
     """A file renamed from .exe to .wav but with no audio magic bytes is rejected."""
-    fake = b"MZ" + (b"\x00" * 64)  # DOS / PE header (Windows executables)
+    fake = b"MZ" + (b"\x00" * 64)
     with pytest.raises(HTTPException) as exc_info:
         validate_audio_upload(fake, "evil.wav")
     assert exc_info.value.status_code == 400
@@ -140,7 +137,7 @@ def test_validate_rejects_mp3_content_under_wav_extension():
 
 def test_validate_accepts_aac_on_extension_trust():
     """AAC ADTS frames collide with MP3 magic. We trust the .aac extension."""
-    fake_aac = bytes([0xFF, 0xF1]) + (b"\x00" * 32)  # ADTS sync
+    fake_aac = bytes([0xFF, 0xF1]) + (b"\x00" * 32)
     assert validate_audio_upload(fake_aac, "voice.aac") == "audio/aac"
 
 
@@ -155,11 +152,10 @@ def test_validate_accepts_m4a_with_mp4_magic():
     assert validate_audio_upload(m4a, "voice.m4a") == "audio/mp4"
 
 
-# --- mime_for_extension fallback --------------------------------------
 
 def test_mime_for_extension_known_formats():
     assert mime_for_extension("audio.wav") == "audio/wav"
-    assert mime_for_extension("audio.MP3") == "audio/mpeg"  # case-insensitive
+    assert mime_for_extension("audio.MP3") == "audio/mpeg"
     assert mime_for_extension("audio.webm") == "audio/webm"
 
 

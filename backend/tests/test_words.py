@@ -29,7 +29,6 @@ def isolated_storage(tmp_path, monkeypatch):
         history._close_conn_locked()
 
 
-# --- Tokeniser -----------------------------------------------------------
 
 def test_tokenize_basic_latin():
     assert words.tokenize("hello world hello") == ["hello", "world", "hello"]
@@ -50,14 +49,13 @@ def test_tokenize_keeps_apostrophe_words():
     assert "don't" in out
     assert "м'яко" in out
     assert "she's" in out
-    # Confirm we did NOT produce the broken stems "don", "t", "м", "яко".
     assert "don" not in out
     assert "т" not in out
     assert "яко" not in out
 
 
 def test_tokenize_typographic_apostrophe():
-    out = words.tokenize("ім’я")  # ’ U+2019
+    out = words.tokenize("ім’я")
     assert "ім’я" in out
 
 
@@ -65,7 +63,6 @@ def test_tokenize_drops_punctuation():
     assert words.tokenize("hello, world!") == ["hello", "world"]
 
 
-# --- Stop-word filtering -------------------------------------------------
 
 def test_stopwords_filtered_code_switching():
     """`the кіт sat на the килим` → only content words survive in both
@@ -76,8 +73,8 @@ def test_stopwords_filtered_code_switching():
     assert "кіт" in surviving
     assert "килим" in surviving
     assert "sat" in surviving
-    assert "the" not in surviving  # EN stop-word
-    assert "на" not in surviving   # UK stop-word
+    assert "the" not in surviving
+    assert "на" not in surviving
 
 
 def test_stopword_lists_disjoint_in_intent():
@@ -87,7 +84,6 @@ def test_stopword_lists_disjoint_in_intent():
     assert "на" in STOPWORDS_UK and "на" not in STOPWORDS_EN
 
 
-# --- top_words behaviour -------------------------------------------------
 
 def test_top_words_round_trip():
     history.save_entry(text="cat dog cat fish", duration_ms=1, language="en")
@@ -109,7 +105,7 @@ def test_top_words_delete_removes_tokens():
 
     out = words.top_words(lang="all", limit=10)
     by_word = {i.word: i.count for i in out.items}
-    assert by_word.get("apple") is None  # all apple entries gone
+    assert by_word.get("apple") is None
     assert by_word.get("banana") == 2
 
 
@@ -148,7 +144,6 @@ def test_top_words_empty_db_returns_empty():
     assert out.scanned == 0
 
 
-# --- Router smoke tests --------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_words_top_endpoint_smoke(client):
@@ -170,7 +165,6 @@ async def test_words_top_limit_validated_by_fastapi(client):
     assert resp.status_code == 422
 
 
-# --- Plan 021: search sanitization + highlight ---------------------------
 
 import logging
 from html.parser import HTMLParser
@@ -187,12 +181,9 @@ def test_sanitize_lowercases_fts5_operator_keywords():
     The sanitizer must lowercase them so they become literal prefix terms."""
     expr, tokens = words._sanitize_fts_query("NOT AND OR meeting")
     assert expr == "not* and* or* meeting*"
-    # Regression: the rewritten expression must not raise FTS5 syntax error.
     history.save_entry(text="meeting brief", duration_ms=1)
-    # Direct conn check to prove the expression itself is FTS5-valid.
     with history._lock:
         conn = history._ensure_conn_locked()
-        # Run a MATCH with the expression — should not OperationalError.
         conn.execute(
             "SELECT count(*) FROM entry_fts WHERE entry_fts MATCH ?", (expr,)
         ).fetchone()
@@ -203,7 +194,6 @@ def test_sanitize_strips_fts5_specials_and_dash_slash():
     The trailing ``*`` per token is the prefix syntax we deliberately
     add, so we only check that NO ``*`` appears inside a token."""
     expr, _tokens = words._sanitize_fts_query('"(bad:chars)*')
-    # Specials stripped — only sanitized tokens with trailing `*` survive.
     assert expr == "bad* chars*"
     for bad in '"():':
         assert bad not in expr
@@ -214,7 +204,6 @@ def test_sanitize_strips_fts5_specials_and_dash_slash():
 
     expr, _tokens = words._sanitize_fts_query("NEAR/3 word")
     assert "/" not in expr
-    # 'NEAR' is no longer an operator after lowercase, and '/' is stripped.
     assert "near*" in expr and "3*" in expr and "word*" in expr
 
 
@@ -260,7 +249,6 @@ def test_build_highlight_overlapping_tokens_produce_valid_html():
     HTML."""
     out = words._build_highlight("mark spot", ["mark", "ar"])
 
-    # Round-trip through the HTML parser to assert well-formedness.
     class Validator(HTMLParser):
         def __init__(self):
             super().__init__()
@@ -341,9 +329,7 @@ def test_search_history_empty_fts5_then_like_only_no_sql_error():
     """Iter-2 RED-3: ``id NOT IN ()`` would be a SQL syntax error if the
     LIKE-fallback lane ran without any FTS5 results. The guard must skip
     the NOT IN clause when ``fts_rows`` is empty."""
-    # Substring 'кадабр' does NOT prefix-match any token; FTS5 returns 0.
     history.save_entry(text="абракадабра", duration_ms=1)
-    # Should not raise OperationalError("near ')': syntax error").
     hits = words.search_history("кадабр", limit=5)
     assert len(hits) == 1
 
@@ -374,7 +360,6 @@ async def test_search_endpoint_returns_highlighted_text_field(client):
     assert "<mark>прав</mark>" in data["entries"][0]["highlighted_text"]
 
 
-# --- search_history_semantic lane coverage (spec 017 review triage, YELLOW #2) ---
 
 @pytest.mark.asyncio
 async def test_search_history_semantic_ranks_by_distance_with_plain_highlight():
@@ -413,7 +398,7 @@ async def test_search_history_semantic_ranks_by_distance_with_plain_highlight():
 
     fake_provider = AsyncMock()
     fake_provider.model_name = "text-embedding-004"
-    fake_provider.embed = AsyncMock(return_value=[1.0, 0.0, 0.0])  # exact match to `near`
+    fake_provider.embed = AsyncMock(return_value=[1.0, 0.0, 0.0])
 
     with patch(
         "app.embeddings.resolve_embedding_provider",
@@ -425,7 +410,6 @@ async def test_search_history_semantic_ranks_by_distance_with_plain_highlight():
     assert all("<mark>" not in h.highlighted_text for h in hits)
 
 
-# --- Hybrid RRF search (spec 017 / ADR 010) -------------------------------
 
 def _make_hit(entry_id: str, highlighted_text: str = "") -> words.HistorySearchHit:
     return words.HistorySearchHit(
@@ -449,8 +433,8 @@ def test_rrf_fuse_tie_scoring_is_symmetric_and_deterministic():
     filler_fts = _make_hit("filler_fts")
     filler_semantic = _make_hit("filler_semantic")
 
-    fts_hits = [a, filler_fts, b]              # A rank 1, B rank 3
-    semantic_hits = [b, filler_semantic, a]     # B rank 1, A rank 3
+    fts_hits = [a, filler_fts, b]
+    semantic_hits = [b, filler_semantic, a]
 
     fused = words._rrf_fuse(fts_hits, semantic_hits, limit=10)
 
@@ -476,17 +460,13 @@ def test_rrf_fuse_dedup_combined_score_and_highlight_precedence():
     must be the FTS lane's ``<mark>``-tagged version, never the semantic
     lane's plain-escaped one."""
     fts_hit = _make_hit("shared", highlighted_text="<mark>alpha</mark> text")
-    semantic_hit = _make_hit("shared", highlighted_text="alpha text")  # plain, no marks
-    solo_fts_hit = _make_hit("solo")  # FTS-only, also rank 1 in its lane
+    semantic_hit = _make_hit("shared", highlighted_text="alpha text")
+    solo_fts_hit = _make_hit("solo")
 
-    # Dedup: exactly one row for "shared", not two.
     fused = words._rrf_fuse([fts_hit], [semantic_hit], limit=10)
     assert [h.id for h in fused] == ["shared"]
     assert fused[0].highlighted_text == "<mark>alpha</mark> text"
 
-    # Combined scoring: "shared" (rank 1 in BOTH lanes) must outrank "solo"
-    # (rank 1 in the FTS lane only) — proving both lanes' terms were summed
-    # rather than one lane's contribution being discarded.
     fused_vs_solo = words._rrf_fuse([fts_hit, solo_fts_hit], [semantic_hit], limit=10)
     assert [h.id for h in fused_vs_solo] == ["shared", "solo"]
 
@@ -519,8 +499,8 @@ async def test_search_history_hybrid_runs_lanes_concurrently():
         await words.search_history_hybrid("anything", limit=10)
         elapsed = time.monotonic() - start
 
-    assert elapsed >= semantic_delay - 0.05  # at least the larger delay
-    assert elapsed < fts_delay + semantic_delay - 0.1  # well below the sequential sum (0.75s)
+    assert elapsed >= semantic_delay - 0.05
+    assert elapsed < fts_delay + semantic_delay - 0.1
 
 
 @pytest.mark.asyncio

@@ -12,10 +12,6 @@ import os
 import sys
 from pathlib import Path
 
-# Manual escape hatch -- mirrors app.core.gpu_probe.py's JUSTSAY_GPU_VENDOR
-# and app.stt.local_vulkan_cmd's JUSTSAY_WHISPER_CPP_BIN pattern: a raw
-# os.environ.get() read, not a BaseSettings field, since this is a dev/test
-# seam, not a user-facing setting.
 _DATA_DIR_ENV_VAR = "JUSTSAY_DATA_DIR"
 _FORCE_DEV_ENV_VAR = "JUSTSAY_FORCE_DEV_DATA_DIR"
 

@@ -1,12 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// getToken() checks for Tauri's injected bridge, then dynamically imports
-// @tauri-apps/api/core and calls invoke("get_backend_token"). Mock the module
-// so we can drive every branch, and install/remove the bridge marker per test
-// — its absence is itself one of the states under test. The token is cached at
-// module scope in api.ts, so each test resets the module registry
-// (vi.resetModules) and re-imports ./api to get a fresh cache.
 const invokeMock = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
@@ -72,7 +66,6 @@ describe("token injection when a backend token is available", () => {
 
   it("levelStream() attaches X-JustSay-Token", async () => {
     const { levelStream } = await import("./api");
-    // Resolve a non-ok response so the SSE reader loop returns immediately.
     fetchMock.mockResolvedValue({ ok: false, status: 500, body: null });
 
     levelStream(
@@ -97,8 +90,6 @@ describe("token injection when a backend token is available", () => {
 
 describe("open mode when invoke is unavailable", () => {
   beforeEach(() => {
-    // Simulates running outside a Tauri WebView (invoke rejects / module
-    // absent). getToken() must swallow this and resolve null.
     invokeMock.mockRejectedValue(new Error("not running in tauri"));
   });
 
@@ -116,7 +107,6 @@ describe("token cache does not poison on a transient failure", () => {
   it("retries invoke on a later request after a failed invoke (does not cache null forever)", async () => {
     const { api } = await import("./api");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    // First fetch of the token fails; a later one succeeds.
     invokeMock
       .mockRejectedValueOnce(new Error("transient"))
       .mockResolvedValue("recovered-token");
@@ -147,9 +137,6 @@ describe("token cache does not poison on a transient failure", () => {
   });
 });
 
-// The three diagnoses below are the whole point of spec 042: on macOS they are
-// the only signal available about which layer failed, so they must stay
-// distinguishable from one another.
 describe("bridge diagnosis", () => {
   it("bridge-missing: Tauri's injected globals never ran, so invoke is not even attempted", async () => {
     removeBridge();
@@ -167,9 +154,6 @@ describe("bridge diagnosis", () => {
     vi.useFakeTimers();
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { api, lastBridgeDiagnosis } = await import("./api");
-    // The real hang mode: invoke() settles only through a registered callback
-    // and its send path has no reject channel (ADR 028). Without the timeout
-    // in getToken() this pending promise hangs the suite.
     invokeMock.mockReturnValue(new Promise(() => {}));
     fetchMock.mockResolvedValue(okJson({ status: "ok" }));
 
@@ -268,9 +252,6 @@ describe("401 handling", () => {
     expect(sawAuthFailure()).toBe(false);
   });
 
-  // The negative case the diagnosis must never fire on: a manually launched
-  // backend with no token configured returns 200 everywhere, so nothing is
-  // wrong even though the bridge is absent.
   it("an open backend with no bridge never reports an auth failure", async () => {
     removeBridge();
     const { api, sawAuthFailure } = await import("./api");
@@ -283,9 +264,6 @@ describe("401 handling", () => {
   });
 });
 
-// sawAuthFailure() means "the outcome of the most recent token-gated request",
-// so it has to move in both directions — a flag that only latches on makes the
-// badge stop tracking reality just as surely as one that never fires.
 describe("sawAuthFailure() clears as well as sets", () => {
   async function observeA401() {
     const mod = await import("./api");
@@ -308,10 +286,6 @@ describe("sawAuthFailure() clears as well as sets", () => {
     expect(sawAuthFailure()).toBe(false);
   });
 
-  // AC 10, and the whole point of TOKEN_EXEMPT_PATHS: GET /health is exempt
-  // from the backend's token gate, so a 200 from it is not evidence the token
-  // was accepted. Clearing on it would let the 5 s health poll repaint the
-  // badge green over a completely unauthorized app.
   it("a 200 from GET /health never clears it — the route is exempt from the gate", async () => {
     const { api, sawAuthFailure } = await observeA401();
 

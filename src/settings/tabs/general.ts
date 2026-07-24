@@ -88,25 +88,19 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     </div>
   `;
 
-  // Language
   const langSelect = container.querySelector<HTMLSelectElement>("#lang-select")!;
   langSelect.addEventListener("change", async () => {
     try {
       await saveSettings({ language: langSelect.value });
-      // The recording widget runs in a separate webview and caches the
-      // language in module state — without this emit it keeps transcribing
-      // in the old language until the app restarts.
       await emitSettingsChanged();
     } catch (e) {
       notifyError(e instanceof Error ? e.message : String(e));
     }
   });
 
-  // API Keys (ported from keys.ts — rendered as an embedded subsection)
   const keysSection = container.querySelector<HTMLElement>("#api-keys-section")!;
   const destroyKeys = renderKeys(keysSection, settings, getCloudKeyStatus());
 
-  // Microphone test
   const btnTest = container.querySelector<HTMLButtonElement>("#btn-test-mic")!;
   const recLabel = container.querySelector<HTMLElement>("#rec-label")!;
   const levelFill = container.querySelector<HTMLElement>("#level-fill")!;
@@ -118,13 +112,11 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     stopLevelStream();
     levelStreamAbort = levelStream(
       (data) => {
-        // dBFS range: -60 (silent) to 0 (max). Map to 0-100%.
         const pct = Math.max(0, Math.min(100, ((data.level_db + 60) / 60) * 100));
         fill.style.width = `${pct}%`;
       },
-      () => { /* server closed the stream because recording stopped; the
-                 "Stop" click branch already resets the fill explicitly */ },
-      () => { /* ignore transport errors, mirrors the old catch-all */ },
+      () => {  },
+      () => {  },
     );
   }
 
@@ -139,21 +131,20 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     if (isRecording) {
       try {
         await api.audioStop();
-      } catch { /* ignore */ }
+      } catch {  }
       isRecording = false;
       btnTest.textContent = "Record";
       recLabel.textContent = "Click to test microphone";
       stopLevelStream();
       levelFill.style.width = "0%";
     } else {
-      // Check if already recording (widget might be using it)
       try {
         const status = await api.audioStatus();
         if (status.is_recording) {
           recLabel.textContent = "Microphone busy (widget recording)";
           return;
         }
-      } catch { /* ignore */ }
+      } catch {  }
 
       try {
         await api.audioStart();
@@ -168,12 +159,10 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     }
   });
 
-  // Shortcut recorder
   const shortcutBtn = container.querySelector<HTMLButtonElement>("#shortcut-btn")!;
   const shortcutHint = container.querySelector<HTMLElement>("#shortcut-hint")!;
   let recording = false;
 
-  // Files: output directory + temp file cleanup
   const outputDir = container.querySelector<HTMLInputElement>("#output-dir")!;
   const outputStatus = container.querySelector<HTMLElement>("#output-dir-status")!;
   const btnBrowse = container.querySelector<HTMLButtonElement>("#btn-browse")!;
@@ -214,7 +203,6 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
       if (destroyed) return;
       const msg = e instanceof Error ? e.message : String(e);
       showStatus(msg, "error");
-      // Revert input to last known good value so the field reflects backend state.
       outputDir.value = lastOutputDir;
     }
   }
@@ -260,7 +248,6 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     }
   });
 
-  // About / Updates
   const versionEl = container.querySelector<HTMLElement>("#app-version")!;
   const updatesBtn = container.querySelector<HTMLButtonElement>("#check-updates-btn")!;
   const updatesStatus = container.querySelector<HTMLElement>("#updates-status")!;
@@ -305,18 +292,12 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
           updatesStatus.textContent = `Install failed: ${(err as Error).message ?? err}`;
           updatesBtn.textContent = "Retry install";
           updatesBtn.disabled = false;
-          // Release the busy flag so a subsequent click on the same
-          // (renamed) button doesn't get swallowed by the outer guard.
           updatesBusy = false;
         }
       };
     } catch (err) {
       const raw = (err as Error).message ?? String(err);
       const lower = raw.toLowerCase();
-      // The Tauri updater reports two common operational failures with
-      // cryptic strings that scared the user. Translate them to actionable
-      // hints. Anything else falls through to the raw text so we don't
-      // mask unexpected bugs.
       let friendly = `Check failed: ${raw}`;
       if (
         lower.includes("did not respond with a successful status code") ||
@@ -355,7 +336,6 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
       e.preventDefault();
       e.stopPropagation();
 
-      // Wait for a non-modifier key
       if (["Control", "Shift", "Alt", "Meta"].includes(e.key)) return;
 
       const parts: string[] = [];
@@ -364,7 +344,6 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
       if (e.shiftKey) parts.push("Shift");
       if (e.metaKey) parts.push("Super");
 
-      // Need at least one modifier
       if (parts.length === 0) {
         shortcutHint.textContent = "Must include at least one modifier (Ctrl, Alt, Shift)";
         return;
@@ -428,6 +407,5 @@ async function emitSettingsChanged() {
     const { emit } = await import("@tauri-apps/api/event");
     await emit("settings-changed");
   } catch {
-    // Not in Tauri
   }
 }

@@ -8,20 +8,7 @@ from typing import ClassVar
 class TranscriptionResult:
     text: str
     tokens_used: int | None = field(default=None)
-    # The language the provider actually detected/used, normalized to a
-    # lowercase ISO-639-1 code via `normalize_detected_language` — never a
-    # raw provider string. `None` when the provider can't report one
-    # (Gemini) or normalization didn't recognise the raw value.
-    # See docs/adr/016-detected-language-on-stt-contract.md.
     detected_language: str | None = field(default=None)
-    # The MINIMUM `no_speech_prob` across the provider's returned segments —
-    # i.e. the most speech-like segment's no-speech probability. `None` when
-    # the provider has no such signal on the path taken, or returned zero
-    # segments. Min (not mean/max) is what makes the pipeline's post-model
-    # gate maximally conservative on real speech: one confident-speech
-    # segment keeps the entire result, while the whole-clip hallucination
-    # case (typically a single high-no_speech_prob segment) is still caught.
-    # See docs/adr/019-ten-vad-neural-silence-gate.md.
     no_speech_prob: float | None = field(default=None)
 
 
@@ -52,10 +39,6 @@ def normalize_detected_language(raw: str | None) -> str | None:
     if len(primary) == 2 and primary.isalpha():
         return primary
 
-    # Late import: mirrors the existing cross-layer import in
-    # app/stt/cloud.py (GeminiSTTProvider._build_prompt) — avoids a
-    # module-level stt -> pipeline dependency for a lookup table only
-    # needed inside this one function.
     from app.pipeline.prompts import LANGUAGE_NAMES
 
     name_to_code = {name.lower(): code for code, name in LANGUAGE_NAMES.items()}
@@ -121,14 +104,6 @@ def min_no_speech_prob(segments) -> float | None:
 class STTProvider(ABC):
     """Contract: Audio file in -> transcribed text out."""
 
-    # Spec 028 Item 2 / ADR 018: locality is a property a provider declares
-    # about itself, not a fact derived by probing the host platform.
-    # `app.stt.is_local_provider()` reads this directly (a getattr, no I/O).
-    # Overridden `True` on LocalSTTProvider, MLXWhisperSTTProvider, and
-    # WhisperCppVulkanSTTProvider -- the three local, flat-sibling
-    # implementations under this ABC. A provider that forgets the override
-    # silently regresses to the pre-028 race (see docs/adr/018's Consequences
-    # and this spec's "declared subclasses" test).
     is_local: ClassVar[bool] = False
 
     @property

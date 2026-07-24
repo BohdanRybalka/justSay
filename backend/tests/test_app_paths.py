@@ -26,7 +26,6 @@ def _isolated_home_and_env(tmp_path, monkeypatch):
     yield home
 
 
-# --- Case 3: default (not frozen) -----------------------------------------
 
 
 def test_defaults_to_dev_dir_when_not_frozen_and_no_env_vars(_isolated_home_and_env):
@@ -34,7 +33,6 @@ def test_defaults_to_dev_dir_when_not_frozen_and_no_env_vars(_isolated_home_and_
     assert resolve_app_data_root() == home / ".justsay-dev"
 
 
-# --- Case 2: frozen production ---------------------------------------------
 
 
 def test_frozen_and_not_forced_dev_resolves_to_prod_dir(_isolated_home_and_env, monkeypatch):
@@ -44,7 +42,6 @@ def test_frozen_and_not_forced_dev_resolves_to_prod_dir(_isolated_home_and_env, 
     assert resolve_app_data_root() == home / ".justsay"
 
 
-# --- Case 3 gap-closer: frozen + forced dev (tauri:dev:frozen) -------------
 
 
 def test_frozen_and_forced_dev_resolves_to_dev_dir(_isolated_home_and_env, monkeypatch):
@@ -55,7 +52,6 @@ def test_frozen_and_forced_dev_resolves_to_dev_dir(_isolated_home_and_env, monke
     assert resolve_app_data_root() == home / ".justsay-dev"
 
 
-# --- JUSTSAY_DATA_DIR override wins across all combinations ---------------
 
 
 @pytest.mark.parametrize(
@@ -93,7 +89,6 @@ def test_data_dir_override_expands_user(monkeypatch):
     assert "~" not in str(result)
 
 
-# --- Module-level constants -------------------------------------------------
 
 
 def test_dir_name_constants_are_distinct():

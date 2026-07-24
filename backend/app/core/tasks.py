@@ -7,14 +7,8 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# Hard ceiling on how long shutdown may wait for cancelled tasks to settle.
-# Shutdown must never hang: a task that swallows CancelledError is logged by
-# name and abandoned. See docs/adr/021-bounded-task-drain-before-model-release.md.
 SHUTDOWN_DRAIN_TIMEOUT_SECONDS = 1.0
 
-# The event loop holds only a WEAK reference to a pending task; without this
-# set a still-pending task can be garbage-collected mid-execution, silently
-# stopping halfway with nothing logged. Entries are discarded by _on_task_done.
 _background_tasks: set[asyncio.Task] = set()
 
 
@@ -26,7 +20,6 @@ def spawn_background_task(coro: Coroutine[Any, Any, Any], *, name: str) -> async
 
 
 def _on_task_done(task: asyncio.Task) -> None:
-    # Discard FIRST: a failure inside the logging below must never leak the ref.
     _background_tasks.discard(task)
     if task.cancelled():
         log.debug("Background task %r was cancelled", task.get_name())
@@ -64,9 +57,6 @@ async def cancel_all(
     passes, never a `while` loop -- a task that respawns on cancel would make
     it non-terminating).
     """
-    # Snapshot before awaiting: _on_task_done discards entries from
-    # _background_tasks as the drain proceeds, and iterating the live set
-    # would risk "Set changed size during iteration".
     pending = {t for t in (*_background_tasks, *extra) if t is not None and not t.done()}
     if not pending:
         return []
@@ -74,9 +64,6 @@ async def cancel_all(
     for task in pending:
         task.cancel()
 
-    # asyncio.wait(), not gather(): it returns failed and cancelled tasks in
-    # its `done` set instead of re-raising, which is what makes "never raises"
-    # true here without a blanket `except BaseException`.
     _, still_pending = await asyncio.wait(pending, timeout=timeout)
 
     stragglers = [t.get_name() for t in still_pending]

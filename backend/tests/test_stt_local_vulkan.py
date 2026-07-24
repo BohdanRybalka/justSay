@@ -18,7 +18,6 @@ import app.stt.local_vulkan as local_vulkan_module
 from app.stt.config import STTSettings
 from app.stt.local_vulkan import WhisperCppVulkanSTTProvider
 
-# `ctypes.WinDLL` only exists on Windows -- mocking `sys.platform` doesn't make it exist.
 _requires_windows = pytest.mark.skipif(
     sys.platform != "win32",
     reason="ctypes.WinDLL exists only on Windows; the Job Object path is Windows-only",
@@ -40,9 +39,6 @@ def _reset_orphan_registry():
     local_vulkan_module._live_children.clear()
 
 
-# --------------------------------------------------------------------------- #
-# Fakes                                                                       #
-# --------------------------------------------------------------------------- #
 
 
 class _FakeProcess:
@@ -177,9 +173,6 @@ def _make_provider(
     return WhisperCppVulkanSTTProvider(settings), model_path
 
 
-# --------------------------------------------------------------------------- #
-# Contract shape                                                              #
-# --------------------------------------------------------------------------- #
 
 
 def test_model_name_reflects_settings():
@@ -219,12 +212,9 @@ def test_contract_shape_via_get_or_create(monkeypatch):
     provider._last_load_error = "boom"
     assert get_local_load_error(settings) == "boom"
 
-    clear_stt_cache()  # must call provider.cleanup() without raising
+    clear_stt_cache()
 
 
-# --------------------------------------------------------------------------- #
-# _get_model — happy path, download, idempotency                             #
-# --------------------------------------------------------------------------- #
 
 
 def test_get_model_raises_and_latches_error_when_binary_missing(monkeypatch):
@@ -263,7 +253,7 @@ def test_get_model_does_not_redownload_existing_model(monkeypatch, tmp_path):
     provider, model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
     original_bytes = model_path.read_bytes()
 
-    _install_fake_httpx(monkeypatch)  # no stream_impl -- must not be called
+    _install_fake_httpx(monkeypatch)
     _install_fake_popen(monkeypatch)
 
     provider._get_model()
@@ -295,8 +285,6 @@ def test_get_model_latches_error_on_health_poll_timeout(monkeypatch, tmp_path):
     _install_fake_httpx(monkeypatch, get_impl=lambda url: _FakeResponse(503))
     _install_fake_popen(monkeypatch)
 
-    # Keep the test fast: shrink the poll budget and no-op the sleep between
-    # attempts instead of waiting out the real ~120s budget.
     monkeypatch.setattr(local_vulkan_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
     monkeypatch.setattr(local_vulkan_module.time, "sleep", lambda _s: None)
 
@@ -327,12 +315,10 @@ def test_get_model_terminates_orphaned_process_after_health_poll_timeout_then_re
         provider._get_model()
 
     assert len(popen_calls) == 1
-    assert first_process.terminate_calls == 1  # the orphaned process was terminated
-    assert provider._process is None  # handle cleared -- nothing left to leak
+    assert first_process.terminate_calls == 1
+    assert provider._process is None
     assert provider.is_loaded is False
 
-    # Retry with a healthy server: must spawn a brand-new process, not reuse
-    # or lose track of the leaked one.
     _install_fake_httpx(monkeypatch, get_impl=lambda url: _FakeResponse(200))
     second_process = _FakeProcess()
 
@@ -344,7 +330,7 @@ def test_get_model_terminates_orphaned_process_after_health_poll_timeout_then_re
 
     provider._get_model()
 
-    assert len(popen_calls) == 2  # a genuinely fresh spawn, not a reused handle
+    assert len(popen_calls) == 2
     assert provider._process is second_process
     assert provider.is_loaded is True
 
@@ -357,14 +343,11 @@ def test_get_model_is_idempotent_when_already_warm(monkeypatch, tmp_path):
     provider._get_model()
     assert len(popen_calls) == 1
 
-    provider._get_model()  # second call -- must not respawn
+    provider._get_model()
     assert len(popen_calls) == 1
     assert provider.is_loaded is True
 
 
-# --------------------------------------------------------------------------- #
-# transcribe()                                                                #
-# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.asyncio
@@ -430,9 +413,6 @@ async def test_transcribe_verbose_json_mid_word_segment_split_reconstructs_corre
     audio_path = tmp_path / "sample.wav"
     audio_path.write_bytes(b"RIFF....WAVEfmt ")
 
-    # Captured verbatim (via a live probe script) from whisper-server's
-    # real verbose_json "text" field for an 18s Ukrainian speech sample --
-    # segments 3 ("от") / 4 ("римати досить") split "отримати" mid-word.
     raw_verbose_text = (
         " і буквально за кілька секунд от\n"
         "римати досить\n"
@@ -451,8 +431,6 @@ async def test_transcribe_verbose_json_mid_word_segment_split_reconstructs_corre
         "і буквально за кілька секунд отримати досить "
         "якісну відповідь. При цьому далеко не всі"
     )
-    # Pin the exact bug this regression guards against: the old join
-    # logic would have produced these corrupted mid-word splits.
     assert "от римати" not in result.text
     assert "дал еко" not in result.text
     assert "отримати" in result.text
@@ -509,9 +487,6 @@ async def test_transcribe_sends_auto_language_unchanged(monkeypatch, tmp_path):
     assert captured["data"]["language"] == "auto"
 
 
-# --------------------------------------------------------------------------- #
-# detected_language / verbose_json escalation (spec 029, AC 18)              #
-# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.asyncio
@@ -583,9 +558,6 @@ async def test_transcribe_auto_path_missing_language_key_is_none(monkeypatch, tm
     assert result.detected_language is None
 
 
-# --------------------------------------------------------------------------- #
-# cleanup()                                                                   #
-# --------------------------------------------------------------------------- #
 
 
 def _wait_until(predicate, timeout: float = 2.0, interval: float = 0.01) -> bool:
@@ -631,8 +603,8 @@ def test_cleanup_returns_promptly_without_deadlock_when_load_lock_held():
     holder.join(timeout=2)
 
     assert elapsed < 1.0, f"cleanup() blocked for {elapsed:.2f}s while the lock was held"
-    assert provider._process is sentinel_process  # untouched — cleanup bailed out
-    assert provider.is_loaded is True  # untouched — cleanup bailed out
+    assert provider._process is sentinel_process
+    assert provider.is_loaded is True
 
 
 def test_cleanup_returns_immediately_and_terminates_in_background_when_lock_is_free():
@@ -650,7 +622,7 @@ def test_cleanup_returns_immediately_and_terminates_in_background_when_lock_is_f
     elapsed = time.monotonic() - start
 
     assert elapsed < 1.0, f"cleanup() blocked for {elapsed:.2f}s"
-    assert provider._process is None  # cleared synchronously
+    assert provider._process is None
     assert provider.is_loaded is False
 
     assert _wait_until(lambda: process.terminate_calls == 1), (
@@ -670,7 +642,7 @@ def test_cleanup_kills_process_in_background_when_terminate_does_not_exit_in_tim
 
     provider.cleanup()
 
-    assert provider._process is None  # cleared synchronously, before the thread even runs
+    assert provider._process is None
 
     assert _wait_until(lambda: process.kill_calls == 1), (
         "background thread never called kill()"
@@ -691,7 +663,7 @@ def test_cleanup_returns_immediately_even_though_terminate_sequence_would_block(
 
     monkeypatch.setattr(local_vulkan_module, "_GRACE_POLL_MAX_ATTEMPTS", 5)
     monkeypatch.setattr(local_vulkan_module, "_GRACE_POLL_INTERVAL", 0.05)
-    grace_window = 5 * 0.05  # ~0.25s -- what a synchronous cleanup() would have blocked for
+    grace_window = 5 * 0.05
 
     start = time.monotonic()
     provider.cleanup()
@@ -709,13 +681,10 @@ def test_cleanup_returns_immediately_even_though_terminate_sequence_would_block(
 
 def test_cleanup_is_a_noop_when_nothing_was_ever_spawned():
     provider = WhisperCppVulkanSTTProvider(STTSettings())
-    provider.cleanup()  # must not raise
+    provider.cleanup()
     assert provider._process is None
 
 
-# --------------------------------------------------------------------------- #
-# _terminate_process() never raises (Stage 3 review, iteration 2, RED-2)     #
-# --------------------------------------------------------------------------- #
 
 
 def test_terminate_process_does_not_raise_when_kill_fallback_wait_times_out(monkeypatch):
@@ -729,7 +698,7 @@ def test_terminate_process_does_not_raise_when_kill_fallback_wait_times_out(monk
     monkeypatch.setattr(local_vulkan_module, "_GRACE_POLL_MAX_ATTEMPTS", 2)
     monkeypatch.setattr(local_vulkan_module.time, "sleep", lambda _s: None)
 
-    provider._terminate_process(process)  # must not raise
+    provider._terminate_process(process)
 
     assert process.terminate_calls == 1
     assert process.kill_calls == 1
@@ -762,15 +731,12 @@ def test_get_model_except_branch_reraises_original_error_not_timeout_expired(
     with pytest.raises(RuntimeError, match="did not become healthy") as exc_info:
         provider._get_model()
 
-    assert exc_info.type is RuntimeError  # not subprocess.TimeoutExpired
-    assert process.kill_calls == 1  # the terminate -> kill sequence actually ran
-    assert provider._process is None  # cleanup reached despite the wait() timeout
+    assert exc_info.type is RuntimeError
+    assert process.kill_calls == 1
+    assert provider._process is None
     assert provider.is_loaded is False
 
 
-# --------------------------------------------------------------------------- #
-# _port_lock cross-instance race (Stage 3 review, iteration 2, RED-1)        #
-# --------------------------------------------------------------------------- #
 
 
 class _BlockingTerminateProcess(_FakeProcess):
@@ -787,7 +753,7 @@ class _BlockingTerminateProcess(_FakeProcess):
     def terminate(self):
         self._started_event.set()
         self._release_event.wait(timeout=2)
-        super().terminate()  # flips returncode -> "dead", same as the base fake
+        super().terminate()
 
 
 def test_port_lock_blocks_second_providers_spawn_until_first_providers_terminate_completes(
@@ -806,33 +772,26 @@ def test_port_lock_blocks_second_providers_spawn_until_first_providers_terminate
     old_process = _BlockingTerminateProcess(terminate_started, release_terminate)
     provider1 = WhisperCppVulkanSTTProvider(STTSettings())
 
-    # Exercise _terminate_process() directly on a background thread --
-    # mirrors what cleanup()'s own background daemon thread does, without
-    # depending on cleanup()'s lock-acquire bookkeeping for this test.
     terminate_thread = threading.Thread(
         target=provider1._terminate_process, args=(old_process,)
     )
     terminate_thread.start()
     assert terminate_started.wait(timeout=2), "first provider's terminate() never started"
-    # _port_lock is now held by provider1's in-flight termination.
 
     provider2, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
-    _install_fake_httpx(monkeypatch)  # health-poll always 200 once spawned
+    _install_fake_httpx(monkeypatch)
     popen_calls, _new_process = _install_fake_popen(monkeypatch)
 
     get_model_thread = threading.Thread(target=provider2._get_model)
     get_model_thread.start()
 
-    # Give the second provider's thread every real chance to race ahead if
-    # _port_lock weren't actually serializing the spawn against the
-    # in-flight termination -- it must not have spawned yet.
     time.sleep(0.2)
     assert len(popen_calls) == 0, (
         "second provider's spawn proceeded before the first's in-flight "
         "termination completed -- _port_lock did not serialize them"
     )
 
-    release_terminate.set()  # let the first termination finish and release _port_lock
+    release_terminate.set()
     terminate_thread.join(timeout=2)
     assert not terminate_thread.is_alive()
 
@@ -844,10 +803,6 @@ def test_port_lock_blocks_second_providers_spawn_until_first_providers_terminate
     assert old_process.terminate_calls == 1
 
 
-# --------------------------------------------------------------------------- #
-# _download_lock cross-instance race (GitHub review, PR #21, iteration 1,     #
-# issue #1)                                                                    #
-# --------------------------------------------------------------------------- #
 
 
 class _BlockingStreamCtx:
@@ -922,15 +877,10 @@ def test_download_lock_serializes_concurrent_downloads_and_second_skips_redownlo
     thread1 = threading.Thread(target=provider1._download_model, args=(model_path,))
     thread1.start()
     assert download_started.wait(timeout=2), "first download never started"
-    # _download_lock is now held by provider1's in-flight download (the fake
-    # stream is blocked mid-iter_bytes, inside the lock's `with` body).
 
     thread2 = threading.Thread(target=provider2._download_model, args=(model_path,))
     thread2.start()
 
-    # Give the second call every real chance to race ahead if _download_lock
-    # weren't actually serializing the two -- it must still be blocked, and
-    # the model must not exist yet (the first download hasn't completed).
     time.sleep(0.2)
     assert thread2.is_alive(), (
         "second _download_model() call proceeded before the first released "
@@ -938,7 +888,7 @@ def test_download_lock_serializes_concurrent_downloads_and_second_skips_redownlo
     )
     assert not model_path.is_file()
 
-    release_download.set()  # let the first download finish and release the lock
+    release_download.set()
     thread1.join(timeout=2)
     assert not thread1.is_alive()
 
@@ -947,13 +897,10 @@ def test_download_lock_serializes_concurrent_downloads_and_second_skips_redownlo
 
     assert model_path.is_file()
     assert model_path.read_bytes() == b"fake-ggml-weights"
-    assert not part_path.exists()  # renamed on success, no leftover partial file
-    assert stream_calls["n"] == 1  # second call skipped the redundant download
+    assert not part_path.exists()
+    assert stream_calls["n"] == 1
 
 
-# --------------------------------------------------------------------------- #
-# Spec 028 Item 3: orphan-pid registry + atexit reaper                        #
-# --------------------------------------------------------------------------- #
 
 
 def test_spawn_server_registers_child_in_live_children_registry(monkeypatch, tmp_path):
@@ -984,7 +931,7 @@ def test_terminate_process_deregisters_even_when_process_already_exited():
     deregistration -- otherwise a process that exited on its own between
     spawn and teardown would linger in the registry forever."""
     process = _FakeProcess()
-    process.returncode = 0  # already exited
+    process.returncode = 0
     local_vulkan_module._register_child(process)
 
     provider = WhisperCppVulkanSTTProvider(STTSettings())
@@ -1009,7 +956,7 @@ def test_reap_orphans_terminates_and_clears_registered_still_live_process():
 
 def test_reap_orphans_skips_process_that_already_exited():
     process = _FakeProcess()
-    process.returncode = 0  # already exited before the reaper ran
+    process.returncode = 0
     local_vulkan_module._register_child(process)
 
     local_vulkan_module._reap_orphans()
@@ -1026,19 +973,16 @@ def test_reap_orphans_never_raises_when_terminate_itself_fails():
     process = _BoomOnTerminate()
     local_vulkan_module._register_child(process)
 
-    local_vulkan_module._reap_orphans()  # must not raise
+    local_vulkan_module._reap_orphans()
 
     assert local_vulkan_module._live_children == {}
 
 
 def test_reap_orphans_is_a_noop_when_registry_is_empty():
-    local_vulkan_module._reap_orphans()  # must not raise
+    local_vulkan_module._reap_orphans()
     assert local_vulkan_module._live_children == {}
 
 
-# --------------------------------------------------------------------------- #
-# Spec 028 Item 3: Windows Job Object (KILL_ON_JOB_CLOSE)                     #
-# --------------------------------------------------------------------------- #
 
 
 class _FakeKernel32:
@@ -1091,7 +1035,7 @@ def test_assign_to_job_object_creates_job_once_and_assigns_process(monkeypatch):
     monkeypatch.setattr(local_vulkan_module.sys, "platform", "win32")
 
     process = _FakeProcess()
-    process._handle = 777  # Windows-only Popen attribute -- not on _FakeProcess by default
+    process._handle = 777
 
     local_vulkan_module._assign_to_job_object(process)
 
@@ -1114,7 +1058,7 @@ def test_assign_to_job_object_reuses_cached_job_across_calls(monkeypatch):
     local_vulkan_module._assign_to_job_object(process1)
     local_vulkan_module._assign_to_job_object(process2)
 
-    assert fake_kernel32.create_calls == 1  # job object created only once
+    assert fake_kernel32.create_calls == 1
     assert fake_kernel32.assign_calls == [(4242, 111), (4242, 222)]
 
 
@@ -1128,7 +1072,7 @@ def test_assign_to_job_object_is_noop_on_non_windows(monkeypatch):
     monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", _boom)
 
     process = _FakeProcess()
-    local_vulkan_module._assign_to_job_object(process)  # must not raise
+    local_vulkan_module._assign_to_job_object(process)
 
 
 @_requires_windows
@@ -1140,7 +1084,7 @@ def test_assign_to_job_object_swallows_create_job_failure(monkeypatch):
     process = _FakeProcess()
     process._handle = 777
 
-    local_vulkan_module._assign_to_job_object(process)  # must not raise
+    local_vulkan_module._assign_to_job_object(process)
 
     assert fake_kernel32.assign_calls == []
 
@@ -1154,7 +1098,7 @@ def test_assign_to_job_object_swallows_assign_failure(monkeypatch):
     process = _FakeProcess()
     process._handle = 777
 
-    local_vulkan_module._assign_to_job_object(process)  # must not raise -- logged, not propagated
+    local_vulkan_module._assign_to_job_object(process)
 
 
 @_requires_windows
@@ -1166,9 +1110,9 @@ def test_assign_to_job_object_swallows_missing_handle_attribute(monkeypatch):
     monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
     monkeypatch.setattr(local_vulkan_module.sys, "platform", "win32")
 
-    process = _FakeProcess()  # no ._handle attribute
+    process = _FakeProcess()
 
-    local_vulkan_module._assign_to_job_object(process)  # must not raise
+    local_vulkan_module._assign_to_job_object(process)
 
     assert fake_kernel32.assign_calls == []
 
@@ -1210,12 +1154,11 @@ def test_get_model_success_path_still_works_when_job_object_creation_fails(monke
     _install_fake_httpx(monkeypatch)
     _install_fake_popen(monkeypatch)
 
-    provider._get_model()  # must not raise despite the Job Object failure
+    provider._get_model()
 
     assert provider.is_loaded is True
 
 
-# --- Spec 033 / AC 17: no_speech_prob off the verbose_json branch ---------
 
 
 @pytest.mark.asyncio

@@ -47,10 +47,6 @@ function cloudFlag(cloud: CloudKeyStatus, field: KeyField): boolean {
 
 function rowState(settings: UserSettings, field: KeyField, cloud: CloudKeyStatus | null): KeyRowState {
   if (settings[field] === "***") return "stored";
-  // cloud === null means "we don't know" (the cloud-status fetch failed or
-  // hasn't resolved yet), which is not the same claim as "there is no key" —
-  // collapsing the two would render the categorical unset hint from pure
-  // ignorance (Stage 5 review fix, spec 027).
   if (cloud === null) return "unknown";
   return cloudFlag(cloud, field) ? "env" : "unset";
 }
@@ -68,7 +64,6 @@ function renderRowMarkup(spec: KeyRowSpec, state: KeyRowState): string {
       </div>
     `;
   } else if (state === "editing") {
-    // Editing entered via Replace — show Cancel to abort the change.
     inner = `
       <input type="password" id="${p}-key-input" autocomplete="off" spellcheck="false"
         placeholder="${spec.placeholder}" />
@@ -78,9 +73,6 @@ function renderRowMarkup(spec: KeyRowSpec, state: KeyRowState): string {
       </div>
     `;
   } else {
-    // unset AND unknown — first-time entry, or status can't be verified;
-    // either way there's no prior stored/env state to Cancel back to, so
-    // the affordance is identical: an open input plus Save.
     inner = `
       <input type="password" id="${p}-key-input" autocomplete="off" spellcheck="false"
         placeholder="${spec.placeholder}" />
@@ -136,10 +128,6 @@ export function renderKeys(
     wireKey(container, spec, states[spec.field], settings, cloud, states);
   }
 
-  // Editing-state focus: after the DOM is rebuilt, land the caret in the
-  // first editing row's input so the keyboard works immediately. Wrapping
-  // in rAF avoids WebView2 occasionally dropping the focus call when it
-  // fires before layout has committed the rebuilt input.
   for (const spec of ROWS) {
     if (states[spec.field] === "editing") {
       const input = container.querySelector<HTMLInputElement>(
@@ -170,10 +158,6 @@ function wireKey(
   if (state === "stored" || state === "env") {
     const replaceBtn = container.querySelector<HTMLButtonElement>(`#${p}-replace`)!;
     replaceBtn.addEventListener("click", () => {
-      // Single uniform update strategy: full re-render with editing state.
-      // Spread the already-computed `states` so the OTHER row keeps its
-      // exact current state (env/stored/unset) rather than being
-      // recomputed or corrupted.
       renderKeys(container, settings, cloud, {
         ...states,
         [spec.field]: "editing",
@@ -182,14 +166,10 @@ function wireKey(
     return;
   }
 
-  // editing has an extra Cancel button next to Save.
   if (state === "editing") {
     const cancelBtn = container.querySelector<HTMLButtonElement>(`#${p}-cancel`);
     if (cancelBtn) {
       cancelBtn.addEventListener("click", () => {
-        // Abort the edit — return to the row's real pre-edit state, derived
-        // from settings/cloud (neither changed during the abort) rather than
-        // hardcoded, so an "env" row correctly reverts to "env" and not "stored".
         renderKeys(container, settings, cloud, {
           ...states,
           [spec.field]: rowState(settings, spec.field, cloud),
@@ -198,8 +178,6 @@ function wireKey(
     }
   }
 
-  // unset, unknown, AND editing share the Save flow — none of them show a
-  // Replace button, so they all fall through to here.
   const saveBtn = container.querySelector<HTMLButtonElement>(`#${p}-save`)!;
 
   input.addEventListener("input", () => {
@@ -214,16 +192,10 @@ function wireKey(
     input.disabled = true;
     saveBtn.textContent = "Saving…";
     status.textContent = "";
-    // Lock Cancel too — without this a fast Cancel-during-Save would race
-    // the in-flight save's re-render and produce flicker.
     const cancelBtnLock = container.querySelector<HTMLButtonElement>(`#${p}-cancel`);
     if (cancelBtnLock) cancelBtnLock.disabled = true;
 
     try {
-      // Routed through saveSettings (not api.updateSettings directly) so the
-      // module-level settings cache in ../settings is updated by the save —
-      // otherwise a subsequent tab switch re-reads the stale cache and the
-      // just-saved key reverts to looking unset.
       const { settings: fresh } = await saveSettings({
         [spec.field]: value,
       } as Partial<UserSettings>);
@@ -237,6 +209,5 @@ function wireKey(
     }
   });
 
-  // Activate Save on any pre-existing non-empty input
   input.dispatchEvent(new Event("input"));
 }
