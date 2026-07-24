@@ -47,7 +47,7 @@ STATS_TTL_SECONDS = 5.0
 _lock = threading.Lock()
 _output_dir: Path | None = None
 _conn: sqlite3.Connection | None = None
-_stats_cache: tuple[float, "HistoryStats"] | None = None
+_stats_cache: tuple[float, HistoryStats] | None = None
 
 _vec_available: bool = False
 _vec_load_warned = False

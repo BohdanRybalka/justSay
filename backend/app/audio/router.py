@@ -7,7 +7,6 @@ from pydantic import BaseModel
 from app.audio import MicrophoneRecorder, get_recorder
 from app.core.utils import sse_event
 
-
 router = APIRouter()
 
 

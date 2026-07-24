@@ -1,7 +1,8 @@
 from app.core.types import ProviderMode
-from app.stt import clear_cache as clear_stt_cache, get_provider
-from app.stt.config import STTSettings
+from app.stt import clear_cache as clear_stt_cache
+from app.stt import get_provider
 from app.stt.cloud import GeminiSTTProvider
+from app.stt.config import STTSettings
 from app.stt.local import LocalSTTProvider
 
 

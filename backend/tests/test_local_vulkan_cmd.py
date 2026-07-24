@@ -12,7 +12,6 @@ import app.stt.local_vulkan_cmd as local_vulkan_cmd_module
 from app.stt.local_vulkan_cmd import build_server_argv, resolve_binary_path, resolve_model_path
 
 
-
 def test_build_server_argv_returns_list_of_str():
     argv = build_server_argv(
         binary_path=Path("whisper-server.exe"),

@@ -10,8 +10,10 @@ from app.core.user_settings import update_user_settings
 from app.stt import clear_cache, get_provider
 from app.stt.local_setup import (
     LocalSttStatus,
-    check_status as check_local_status,
     install_local_packages,
+)
+from app.stt.local_setup import (
+    check_status as check_local_status,
 )
 
 router = APIRouter()

@@ -18,13 +18,13 @@ log = logging.getLogger(__name__)
 SHUTDOWN_CONNECTION_DRAIN_SECONDS = 2.0
 
 try:
+    from app.audio.router import router as audio_router
+    from app.core.history_router import router as history_router
     from app.core.router import router as core_router
     from app.core.settings_router import router as settings_router
-    from app.core.history_router import router as history_router
     from app.core.words_router import router as words_router
-    from app.stt.router import router as stt_router
-    from app.audio.router import router as audio_router
     from app.pipeline.router import router as pipeline_router
+    from app.stt.router import router as stt_router
 except Exception as e:
     log.critical("Router import failed — sidecar will exit: %s", e, exc_info=True)
     raise
@@ -69,8 +69,8 @@ async def lifespan(app: FastAPI):
         await tasks.cancel_all(extra=[peek_active_load()])
     finally:
         log.info("Backend shutdown: releasing model caches")
-        from app.stt import clear_cache as clear_stt
         from app.embeddings import clear_cache as clear_embeddings
+        from app.stt import clear_cache as clear_stt
         for step_name, step in (
             ("STT cache", clear_stt),
             ("embeddings cache", clear_embeddings),

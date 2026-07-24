@@ -21,7 +21,6 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-
 TEN_VAD_TAG = "v1.0"
 _RAW_BASE = "https://raw.githubusercontent.com/TEN-framework/ten-vad"
 

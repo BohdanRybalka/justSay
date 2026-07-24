@@ -56,7 +56,7 @@ audio = [
 ]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py310"
 line-length = 100
 
 [tool.ruff.lint]
@@ -64,19 +64,12 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # Pre-existing debt, not false positives (spec 039 / ADR 025) — real violations
 # predating the PR-CI gate. Clear a line once that rule's violations are fixed.
 ignore = [
-    "E501",  # line-too-long (42) — long SQL/log/annotation lines
-    "E402",  # module-import-not-at-top (16) — tests/conftest.py ordering (ADR 014)
+    "E501",  # line-too-long (24) — long SQL/log/annotation lines
+    "E402",  # module-import-not-at-top (15) — tests/conftest.py ordering (ADR 014)
     "E702",  # multiple-statements-on-one-line-semicolon (2)
-    "F401",  # unused-import (5)
-    "F821",  # undefined-name (1) — quoted type-only "NoReturn" in scripts/smoke_sidecar.py, never evaluated
-    "I001",  # unsorted-imports (35) — reordering ties into the conftest E402 ordering
+    "F821",  # undefined-name (1) — type-only NoReturn in scripts/smoke_sidecar.py, never evaluated (from __future__ import annotations)
     "N801",  # invalid-class-name (3) — renames public classes
-    "N806",  # non-lowercase-variable-in-function (4)
     "N818",  # error-suffix-on-exception-name (1) — renames an exception type
-    "UP017", # datetime-timezone-utc (7)
-    "UP037", # quoted-annotation (5)
-    "UP041", # timeout-error-alias (1)
-    "UP042", # replace-str-enum (4) — StrEnum migration of public enums
 ]
 
 [tool.pytest.ini_options]

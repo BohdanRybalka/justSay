@@ -6,14 +6,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.core.config import settings as runtime_settings
-from app.core.utils import compute_dir_size
 from app.core.user_settings import (
     UserSettings,
     get_user_settings,
-    update_user_settings,
     sync_to_runtime,
+    update_user_settings,
 )
-
+from app.core.utils import compute_dir_size
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 

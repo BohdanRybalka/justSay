@@ -25,7 +25,6 @@ from fastapi import HTTPException
 
 from app.core.constants import ALLOWED_AUDIO_EXTENSIONS, MIME_BY_AUDIO_EXTENSION
 
-
 _DETECTED_MIME_TO_EXTS: dict[str, frozenset[str]] = {
     "audio/wav":      frozenset({".wav"}),
     "audio/mpeg":     frozenset({".mp3"}),

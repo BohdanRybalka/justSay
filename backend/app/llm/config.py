@@ -1,5 +1,6 @@
-from app.core.types import ProviderMode
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.types import ProviderMode
 
 
 class LLMSettings(BaseSettings):
