@@ -11,8 +11,15 @@ mod backend;
 /// Kill the backend child process if one is running. Safe to call even if
 /// nothing is running (no-op). Exposed narrowly for `main.rs`'s panic hook —
 /// see docs/adr/002-backend-process-panic-safe-shutdown.md.
+///
+/// Calls the non-waiting `shutdown_without_waiting()`, never `shutdown()`:
+/// this runs from the main-thread panic hook, which can re-enter on the same
+/// thread `RunEvent::Exit` → `shutdown()` is already mid-run on, and
+/// `std::sync::Mutex` is not reentrant — a blocking or waiting acquire here
+/// would hang the app instead of letting it crash. See
+/// docs/adr/032-production-quit-runs-backend-teardown.md.
 pub fn shutdown_backend() {
-    backend::shutdown();
+    backend::shutdown_without_waiting();
 }
 
 /// Install a Windows console-control handler so a raw Ctrl+C or console

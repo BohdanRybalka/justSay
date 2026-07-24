@@ -16,3 +16,7 @@ class ConfigResponse(BaseModel):
     stt_mode: ProviderMode
     llm_mode: ProviderMode
     stt_model: str
+
+
+class ShutdownResponse(BaseModel):
+    status: str

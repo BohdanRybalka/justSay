@@ -15,6 +15,8 @@ from app.core.logging_config import setup_logging
 setup_logging()
 log = logging.getLogger(__name__)
 
+SHUTDOWN_CONNECTION_DRAIN_SECONDS = 2.0
+
 try:
     from app.core.router import router as core_router
     from app.core.settings_router import router as settings_router
@@ -156,6 +158,7 @@ def _cli() -> None:
         host=args.host,
         port=args.port,
         log_level=args.log_level,
+        timeout_graceful_shutdown=SHUTDOWN_CONNECTION_DRAIN_SECONDS,
     )
 
 

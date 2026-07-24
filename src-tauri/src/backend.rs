@@ -74,8 +74,11 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 /// targets only the child's own process group, not the calling Tauri
 /// process's group (which would also receive the event and tear itself
 /// down). The shell plugin's `Command` builder exposes no way to set this
-/// flag, so the production `Sidecar` path cannot use it — see
-/// `docs/adr/004-windows-graceful-backend-stop.md`.
+/// flag, so the production `Sidecar` path cannot use `CTRL_BREAK_EVENT` —
+/// see `docs/adr/004-windows-graceful-backend-stop.md`. That path instead
+/// runs its own graceful stop over the loopback `POST /shutdown` route (see
+/// `request_sidecar_shutdown()` and `docs/adr/032-production-quit-runs-backend-teardown.md`),
+/// which needs no process group of its own.
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
@@ -129,8 +132,17 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
 
 /// Bounded wait for any already-in-progress `shutdown()` call (e.g.
 /// `RunEvent::Exit`'s `terminate_gracefully()`, mid-poll on the main thread
-/// for up to ~3s while holding `BACKEND_PROCESS`) to finish, before running
-/// our own (by then idempotent, likely-no-op) `shutdown()` and exiting.
+/// while holding `BACKEND_PROCESS`) to finish, before running our own (by
+/// then idempotent, likely-no-op) `shutdown()` and exiting. `shutdown()`
+/// itself may have to wait up to `SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS *
+/// SHUTDOWN_LOCK_WAIT_POLL_INTERVAL` (7s) for a contended guard before
+/// running its own up-to-6s `GracefulStop::ShutdownEndpoint` stop -- 1s
+/// `/shutdown` request + 5s liveness poll -- so the composed worst case this
+/// loop must outlast is 13s, not 6s. `CONSOLE_SHUTDOWN_MAX_ATTEMPTS` *
+/// `CONSOLE_SHUTDOWN_POLL_INTERVAL` (14s) is kept strictly above that
+/// composed worst case so a concurrent console event can never cut a
+/// legitimate graceful stop short (see
+/// `docs/adr/032-production-quit-runs-backend-teardown.md`).
 ///
 /// `shutdown()`'s `try_lock()` was only ever designed to make *same-thread*
 /// reentrancy (this handler's own thread, or the panic hook, calling
@@ -152,16 +164,24 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
 /// The wait is bounded (not indefinite) purely as a fail-safe in case the
 /// in-flight shutdown somehow runs long — same 100ms-poll shape already
 /// used by `terminate_gracefully()` above.
+///
+/// This pre-poll is now an optimisation, not the guarantee: `shutdown()`'s
+/// own bounded wait (`LockWait::UntilFree` inside `kill_current_process()`)
+/// is what actually makes the guard contract hold, so a below-budget guard
+/// still in use when this loop gives up is picked up by that inner wait
+/// instead of being skipped.
+#[cfg(windows)]
+const CONSOLE_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(windows)]
+const CONSOLE_SHUTDOWN_MAX_ATTEMPTS: u32 = 140;
+
 #[cfg(windows)]
 fn wait_for_inflight_shutdown_then_exit() -> ! {
-    const POLL_INTERVAL: Duration = Duration::from_millis(100);
-    const MAX_ATTEMPTS: u32 = 60;
-
-    for _ in 0..MAX_ATTEMPTS {
-        if BACKEND_PROCESS.try_lock().is_ok() {
+    for _ in 0..CONSOLE_SHUTDOWN_MAX_ATTEMPTS {
+        if lock_with_wait(&BACKEND_PROCESS, LockWait::Skip).is_some() {
             break;
         }
-        std::thread::sleep(POLL_INTERVAL);
+        std::thread::sleep(CONSOLE_SHUTDOWN_POLL_INTERVAL);
     }
     shutdown();
     std::process::exit(0);
@@ -211,20 +231,24 @@ enum BackendProcess {
 
 static BACKEND_PROCESS: Mutex<Option<BackendProcess>> = Mutex::new(None);
 
-/// Set by `shutdown()` as its literal first statement, before anything else
-/// runs. Polled by `spawn()`'s post-store recheck and by `spawn_watchdog()`'s
+/// Set by `shutdown()` and `shutdown_without_waiting()` as their literal
+/// first statement, before anything else runs. Polled by `spawn()`'s
+/// entry-point pre-check, its post-store recheck, and by `spawn_watchdog()`'s
 /// loop to distinguish an intentional stop from a crash — see
 /// `docs/adr/006-backend-watchdog-respawn-on-crash.md` for the race this
 /// closes.
 ///
 /// **One-way latch: never reset back to `false`.** Correctness depends on
-/// every `shutdown()` call site leading to the whole process exiting shortly
-/// after — true today for all of them (`RunEvent::Exit`, the main-thread
-/// panic hook, the Windows console Ctrl+C/close handler). A future
-/// `shutdown()` call site that does NOT lead to process exit would
-/// permanently and silently disable the watchdog for the rest of the
-/// session, since `is_shutdown_requested()` would never report `false`
-/// again.
+/// every call site that sets it leading to the whole process exiting shortly
+/// after; true today for all of them (`RunEvent::Exit` and the Windows
+/// console Ctrl+C/close handler, both via `shutdown()`; the main-thread panic
+/// hook via `shutdown_without_waiting()`). `spawn()`'s post-store recheck
+/// reads the latch but does not set it — it calls `kill_current_process()`
+/// directly rather than `shutdown()`, since it only ever runs when the latch
+/// is already `true`. A future call site that does NOT lead to process exit
+/// would permanently and silently disable the watchdog for the rest of the
+/// session, since
+/// `is_shutdown_requested()` would never report `false` again.
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn is_shutdown_requested() -> bool {
@@ -545,7 +569,20 @@ fn assign_pid_to_job(job: isize, pid: u32) -> bool {
 /// rebuild needed between edits. To force the frozen path in dev (e.g.,
 /// to smoke-test the bundled binary end-to-end), set
 /// `JUSTSAY_USE_FROZEN_SIDECAR=1` before launching.
+///
+/// Refuses to start once a quit has been requested (`is_shutdown_requested()`
+/// checked before `check_port_available()`): without this, a watchdog retry
+/// racing a quit would reach `check_port_available()` while the quitting
+/// thread's graceful stop still has the port bound, `try_bind_port()` would
+/// fail, and `reap_orphan_sidecar()`'s `taskkill /F /T /IM
+/// justsay-backend.exe` would kill the backend mid-`lifespan` — by image
+/// name, so it hits the very process being torn down. See
+/// `docs/adr/032-production-quit-runs-backend-teardown.md` point 8.
 pub fn spawn(app: AppHandle) -> Result<(), String> {
+    if is_shutdown_requested() {
+        return Err("Shutdown already requested; refusing to spawn a new backend".to_string());
+    }
+
     check_port_available()?;
 
     let prefer_python_source =
@@ -676,7 +713,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
     }
 
     if is_shutdown_requested() {
-        shutdown();
+        kill_current_process(LockWait::UntilFree, GracefulStop::ForceKillOnly);
     }
 
     Ok(())
@@ -739,28 +776,190 @@ pub async fn wait_for_ready() -> Result<(), String> {
     )
 }
 
+#[cfg(windows)]
+const GRACEFUL_POLL_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(windows)]
+const CTRL_BREAK_POLL_MAX_ATTEMPTS: u32 = 30;
+#[cfg(windows)]
+const SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS: u32 = 50;
+#[cfg(windows)]
+const SIDECAR_SHUTDOWN_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Poll interval and attempt budget for `lock_with_wait(..., LockWait::UntilFree)`.
+/// Cross-platform (no `#[cfg(windows)]`): the guard contract they express —
+/// "the quit path waits for `BACKEND_PROCESS` instead of silently skipping
+/// it" — applies on every platform, not just Windows. Sized against the
+/// longest bounded hold any other thread can still take on this lock: the
+/// Windows `Sidecar` branch's own `GracefulStop::ShutdownEndpoint` window,
+/// `SIDECAR_SHUTDOWN_REQUEST_TIMEOUT` (1s) + `SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS`
+/// * `GRACEFUL_POLL_INTERVAL` (50 * 100ms = 5s) = 6s — not the 3s macOS
+/// `SIGTERM` poll or the 3s `CtrlBreakEvent` poll, both of which are shorter.
+/// `lock_with_wait` sleeps one interval fewer than it has attempts (the last
+/// attempt logs instead of sleeping), so the realised wait is
+/// `(SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS - 1) * SHUTDOWN_LOCK_WAIT_POLL_INTERVAL`
+/// = 69 * 100ms = 6.9s, strictly above the 6s it must outlast. See
+/// `docs/adr/032-production-quit-runs-backend-teardown.md`.
+const SHUTDOWN_LOCK_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS: u32 = 70;
+
+/// Whether `lock_with_wait()` should retry a contended lock or give up at once.
+enum LockWait {
+    /// Try once; return `None` immediately if the lock is not free. Used by
+    /// `shutdown_without_waiting()` (the main-thread panic hook — a same-thread
+    /// re-entrant wait would deadlock, see ADR 002) and by the watchdog's
+    /// pre-respawn `kill_current_process()` call, which has nothing to gain
+    /// from waiting now that it always uses `GracefulStop::ForceKillOnly`.
+    Skip,
+    /// Retry every `SHUTDOWN_LOCK_WAIT_POLL_INTERVAL` up to
+    /// `SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS` times. Used by `shutdown()` (the
+    /// waiting entry point called from `RunEvent::Exit` and the console
+    /// fail-safe handler) and, directly rather than through `shutdown()`, by
+    /// `spawn()`'s post-store recheck.
+    UntilFree,
+}
+
+/// Bounded `try_lock()` poll. Never a blocking `Mutex::lock()` — `main.rs`'s
+/// panic hook can re-enter `shutdown_without_waiting()` on the same thread
+/// that already holds `BACKEND_PROCESS`, and `std::sync::Mutex` is not
+/// reentrant, so a blocking lock would hang the app instead of crashing it
+/// (the deadlock ADR 002's `try_lock()` was chosen to avoid).
+///
+/// Returns the guard rather than a `bool` so callers can't reintroduce a
+/// check-then-lock gap. A poisoned mutex returns `None` at once in **both**
+/// modes — waiting cannot un-poison it — and logs at `error!`, as does an
+/// exhausted `UntilFree` budget: the failure mode this exists to fix is
+/// *silence* on contention, so the give-up path must be loud even though it
+/// still gives up.
+fn lock_with_wait<T>(mutex: &Mutex<T>, wait: LockWait) -> Option<std::sync::MutexGuard<'_, T>> {
+    let max_attempts = match wait {
+        LockWait::Skip => 1,
+        LockWait::UntilFree => SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS,
+    };
+
+    for attempt in 0..max_attempts {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                log::error!("lock_with_wait: mutex is poisoned; giving up without acquiring it");
+                return None;
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if matches!(wait, LockWait::UntilFree) {
+                    if attempt + 1 == max_attempts {
+                        log::error!(
+                            "lock_with_wait: gave up after {} attempts ({:?} apart) without \
+                             acquiring the lock",
+                            max_attempts,
+                            SHUTDOWN_LOCK_WAIT_POLL_INTERVAL,
+                        );
+                    } else {
+                        std::thread::sleep(SHUTDOWN_LOCK_WAIT_POLL_INTERVAL);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Which Windows mechanism `terminate_gracefully()` should attempt before
+/// falling back to a forced kill. Non-Windows builds never construct or
+/// read this — the `#[cfg(not(target_os = "windows"))]` arm of
+/// `terminate_gracefully()` always sends `SIGTERM` regardless — so the type
+/// carries `allow(dead_code)` there rather than being `#[cfg(windows)]`
+/// itself: both call sites in `kill_current_process()` construct a variant
+/// unconditionally, on every platform.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+enum GracefulStop {
+    /// `Dev` call site only — the child was spawned with
+    /// `CREATE_NEW_PROCESS_GROUP`, so `CTRL_BREAK_EVENT` can safely target
+    /// it alone.
+    CtrlBreakEvent,
+    /// Production `Sidecar` call site — the shell plugin's `Command`
+    /// builder exposes no way to set `CREATE_NEW_PROCESS_GROUP`, so a
+    /// console event is unsafe. Calls the sidecar's own `POST /shutdown`
+    /// route instead.
+    ShutdownEndpoint,
+    /// The watchdog's pre-respawn `kill_current_process()` call only — never
+    /// `RunEvent::Exit`. Skips the graceful request and the liveness poll
+    /// entirely and force-kills at once. Not a latency tweak: a backend hung
+    /// inside `asyncio.to_thread(provider._get_model)` still answers
+    /// `POST /shutdown` (its event loop is free), so a graceful watchdog kill
+    /// would run `lifespan`'s teardown, which cancels
+    /// `local-stt-prewarm-startup` and resets `prewarm_crash_guard.json` to
+    /// `0` — erasing the exact counter `MAX_CONSECUTIVE_INCOMPLETE_PREWARMS`
+    /// exists to trip. This call site fires only when the backend never
+    /// became ready, so it holds no resident model and no history connection
+    /// worth closing cleanly. See
+    /// `docs/adr/032-production-quit-runs-backend-teardown.md` point 7.
+    ForceKillOnly,
+}
+
+/// POST `http://127.0.0.1:{PORT}/shutdown` with the per-launch token and
+/// return whether the response was a `2xx`.
+///
+/// **Must** run the request on a dedicated `std::thread` that is
+/// `join()`ed — never call `tauri::async_runtime::block_on` directly on the
+/// calling thread. `tauri::async_runtime::block_on` is
+/// `tokio::runtime::Runtime::block_on`, which panics when called from
+/// inside a tokio runtime, and this function's only caller
+/// (`terminate_gracefully`, via `kill_current_process()`) is reachable from
+/// a tokio task through `spawn_watchdog()`'s pre-respawn
+/// `kill_current_process()` call. Spawning a fresh OS thread and blocking
+/// only that thread on the async client call sidesteps the panic
+/// unconditionally, regardless of which thread this function itself is
+/// called from.
+#[cfg(windows)]
+fn request_sidecar_shutdown() -> bool {
+    let fut = async {
+        let client = match http_client() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let url = format!("http://127.0.0.1:{}/shutdown", PORT);
+        client
+            .post(&url)
+            .header("X-JustSay-Token", api_token())
+            .timeout(SIDECAR_SHUTDOWN_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map(|resp| resp.status().is_success())
+            .unwrap_or(false)
+    };
+    std::thread::spawn(move || tauri::async_runtime::block_on(fut))
+        .join()
+        .unwrap_or(false)
+}
+
 /// Attempt a graceful stop before falling back to a forced kill.
 ///
 /// Non-Windows: sends `SIGTERM` via the `kill` command, then polls
 /// `is_alive` every 100ms for up to 3s; if the process is still alive after
 /// that window, calls `force_kill`.
 ///
-/// Windows has no POSIX `SIGTERM`. When `windows_ctrl_break` is `true` (the
+/// Windows has no POSIX `SIGTERM`. `GracefulStop::CtrlBreakEvent` (the
 /// `Dev` call site only — the child must have been spawned with
-/// `CREATE_NEW_PROCESS_GROUP` for this to target only itself), this sends
-/// `CTRL_BREAK_EVENT` and polls the same way as the non-Windows branch
-/// before falling back to a forced kill. When `windows_ctrl_break` is
-/// `false` (the production `Sidecar` call site), behavior is unchanged from
-/// before this parameter existed: an immediate forced `taskkill` — the
-/// shell plugin's `Command` builder exposes no way to add
-/// `CREATE_NEW_PROCESS_GROUP`, so `CTRL_BREAK_EVENT` cannot safely target
-/// only that child (see `docs/adr/004-windows-graceful-backend-stop.md`).
+/// `CREATE_NEW_PROCESS_GROUP` for this to target only itself) sends
+/// `CTRL_BREAK_EVENT` and polls the same way as the non-Windows branch, for
+/// `CTRL_BREAK_POLL_MAX_ATTEMPTS`, before falling back to a forced kill.
+/// `GracefulStop::ShutdownEndpoint` (the production `Sidecar` call site)
+/// calls `request_sidecar_shutdown()` instead: on success it polls
+/// `is_alive` every `GRACEFUL_POLL_INTERVAL` for
+/// `SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS`, returning early once the child is
+/// gone; on failure (no token configured, connection refused, non-2xx,
+/// timeout) it logs the reason and falls straight through to `force_kill`
+/// — the same outcome this call site had before this endpoint existed.
+/// `GracefulStop::ForceKillOnly` (the watchdog's pre-respawn call site only)
+/// calls `force_kill` immediately — `is_alive` is never invoked and no
+/// request is sent. See
+/// `docs/adr/032-production-quit-runs-backend-teardown.md`.
 #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 fn terminate_gracefully(
     pid: u32,
     mut is_alive: impl FnMut() -> bool,
     force_kill: impl FnOnce(),
-    windows_ctrl_break: bool,
+    windows_stop: GracefulStop,
 ) {
     #[cfg(not(target_os = "windows"))]
     {
@@ -776,29 +975,74 @@ fn terminate_gracefully(
     }
     #[cfg(target_os = "windows")]
     {
-        if windows_ctrl_break {
-            let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } != 0;
-            if sent {
-                for _ in 0..30 {
-                    if !is_alive() {
-                        log::info!("PID {} exited gracefully after CTRL_BREAK_EVENT", pid);
-                        return;
+        match windows_stop {
+            GracefulStop::CtrlBreakEvent => {
+                let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } != 0;
+                if sent {
+                    for _ in 0..CTRL_BREAK_POLL_MAX_ATTEMPTS {
+                        if !is_alive() {
+                            log::info!("PID {} exited gracefully after CTRL_BREAK_EVENT", pid);
+                            return;
+                        }
+                        std::thread::sleep(GRACEFUL_POLL_INTERVAL);
                     }
-                    std::thread::sleep(Duration::from_millis(100));
+                    log::warn!("PID {} still alive 3s after CTRL_BREAK_EVENT; force-killing", pid);
+                } else {
+                    log::warn!("GenerateConsoleCtrlEvent failed for PID {}; force-killing", pid);
                 }
-                log::warn!("PID {} still alive 3s after CTRL_BREAK_EVENT; force-killing", pid);
-            } else {
-                log::warn!("GenerateConsoleCtrlEvent failed for PID {}; force-killing", pid);
+            }
+            GracefulStop::ShutdownEndpoint => {
+                if request_sidecar_shutdown() {
+                    for _ in 0..SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS {
+                        if !is_alive() {
+                            log::info!("PID {} exited gracefully after /shutdown", pid);
+                            return;
+                        }
+                        std::thread::sleep(GRACEFUL_POLL_INTERVAL);
+                    }
+                    log::warn!("PID {} still alive 5s after /shutdown; force-killing", pid);
+                } else {
+                    log::warn!("/shutdown request failed for PID {}; force-killing", pid);
+                }
+            }
+            GracefulStop::ForceKillOnly => {
+                log::info!(
+                    "PID {} — watchdog pre-respawn kill; skipping the graceful stop to protect \
+                     the prewarm crash guard",
+                    pid
+                );
             }
         }
     }
     force_kill();
 }
 
-/// Kill the backend process on shutdown.
+/// Kill the backend process on shutdown, waiting up to
+/// `SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS * SHUTDOWN_LOCK_WAIT_POLL_INTERVAL` for
+/// `BACKEND_PROCESS` to free up if another thread currently holds it.
+/// Callers: `RunEvent::Exit` (`lib.rs`), `spawn()`'s post-store recheck, and
+/// `wait_for_inflight_shutdown_then_exit()`.
 pub fn shutdown() {
     SHUTDOWN_REQUESTED.store(true, Ordering::Release);
-    kill_current_process();
+    kill_current_process(LockWait::UntilFree, GracefulStop::ShutdownEndpoint);
+}
+
+/// Kill the backend process without waiting for a contended `BACKEND_PROCESS`
+/// — returns at once if another thread already holds it. Its **only** caller
+/// is `lib.rs`'s `shutdown_backend()`, the main-thread panic hook. Two
+/// independent reasons, not one: `LockWait::Skip` is because that hook can
+/// re-enter on the same thread `RunEvent::Exit` → `shutdown()` is mid-run on,
+/// and `std::sync::Mutex` is not reentrant, so waiting here risks the
+/// same-thread deadlock ADR 002's `try_lock()` was chosen to avoid.
+/// `GracefulStop::ForceKillOnly` is separate: a crashing process must not
+/// spend up to 6s spawning a thread, opening a socket and polling for a
+/// `/shutdown` response inside its own panic hook, which runs synchronously
+/// before `default_hook(info)`. It also gains nothing by trying: on Windows
+/// ADR 023's Job Object kills the child at process exit regardless of
+/// whether this call did anything.
+pub fn shutdown_without_waiting() {
+    SHUTDOWN_REQUESTED.store(true, Ordering::Release);
+    kill_current_process(LockWait::Skip, GracefulStop::ForceKillOnly);
 }
 
 /// Terminate whatever process `BACKEND_PROCESS` currently tracks, if any —
@@ -812,10 +1056,31 @@ pub fn shutdown() {
 /// to `false` (see that static's doc comment). Calling `shutdown()` from a
 /// watchdog retry would permanently poison `is_shutdown_requested()` after
 /// the very first retry, defeating the watchdog for the rest of the session.
-fn kill_current_process() {
-    let mut guard = match BACKEND_PROCESS.try_lock() {
-        Ok(g) => g,
-        Err(_) => return,
+///
+/// `wait` controls how long to retry a contended `BACKEND_PROCESS` before
+/// giving up (see `LockWait`). `sidecar_stop` selects which
+/// `GracefulStop` the `Sidecar` branch attempts; the `Dev` branch always uses
+/// `GracefulStop::CtrlBreakEvent` regardless of this argument.
+///
+/// **`BACKEND_PROCESS` stays locked for the whole `terminate_gracefully()`
+/// call below, deliberately.** `guard.take()` empties the `Option` on its
+/// first line but does not end the guard's own lifetime — the `let mut guard`
+/// binding keeps `BACKEND_PROCESS` held until this function returns, so a
+/// `GracefulStop::ShutdownEndpoint` stop can hold it for up to 6s. This is
+/// the completion barrier `shutdown()`'s `LockWait::UntilFree` wait depends
+/// on: a second caller that acquires the guard has proof the previous
+/// holder's `terminate_gracefully()` **returned**, not merely started. Do
+/// **not** "fix" this by dropping the guard right after `take()` — that was
+/// considered and rejected (see
+/// `docs/adr/032-production-quit-runs-backend-teardown.md`, "Rejected:
+/// releasing the guard before the graceful stop"): releasing early would let
+/// a concurrent `RunEvent::Exit` acquire the guard instantly, see `None`, and
+/// return immediately instead of waiting — turning a rare loss of the
+/// graceful window into a deterministic one.
+fn kill_current_process(wait: LockWait, sidecar_stop: GracefulStop) {
+    let mut guard = match lock_with_wait(&BACKEND_PROCESS, wait) {
+        Some(g) => g,
+        None => return,
     };
 
     if let Some(backend) = guard.take() {
@@ -862,7 +1127,7 @@ fn kill_current_process() {
                             }
                         }
                     },
-                    false,
+                    sidecar_stop,
                 );
             }
             BackendProcess::Dev(child) => {
@@ -892,7 +1157,7 @@ fn kill_current_process() {
                             let _ = child_cell.borrow_mut().kill();
                         }
                     },
-                    true,
+                    GracefulStop::CtrlBreakEvent,
                 );
 
                 let _ = child_cell.borrow_mut().wait();
@@ -976,7 +1241,7 @@ pub fn spawn_watchdog(app: AppHandle) {
                 log::warn!(
                     "Backend watchdog: previous backend never became ready; terminating before respawn"
                 );
-                kill_current_process();
+                kill_current_process(LockWait::Skip, GracefulStop::ForceKillOnly);
             }
 
             match spawn(app.clone()) {
@@ -1016,6 +1281,243 @@ mod tests {
         let first = api_token();
         assert!(!first.is_empty(), "api_token must not be empty");
         assert_eq!(first, api_token(), "api_token must be stable across calls");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn graceful_shutdown_budget_fits_inside_console_failsafe() {
+        let graceful_worst_case =
+            SIDECAR_SHUTDOWN_REQUEST_TIMEOUT + SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS * GRACEFUL_POLL_INTERVAL;
+        let console_failsafe = CONSOLE_SHUTDOWN_MAX_ATTEMPTS * CONSOLE_SHUTDOWN_POLL_INTERVAL;
+        assert!(
+            graceful_worst_case < console_failsafe,
+            "graceful shutdown worst case ({:?}) must stay strictly below the console \
+             fail-safe wait ({:?}), or a concurrent console event could kill a legitimate \
+             graceful stop mid-teardown",
+            graceful_worst_case,
+            console_failsafe,
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn composed_quit_budget_fits_inside_console_failsafe() {
+        let lock_wait_worst_case = SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS * SHUTDOWN_LOCK_WAIT_POLL_INTERVAL;
+        let graceful_worst_case =
+            SIDECAR_SHUTDOWN_REQUEST_TIMEOUT + SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS * GRACEFUL_POLL_INTERVAL;
+        let composed = lock_wait_worst_case + graceful_worst_case;
+        let console_failsafe = CONSOLE_SHUTDOWN_MAX_ATTEMPTS * CONSOLE_SHUTDOWN_POLL_INTERVAL;
+        assert!(
+            composed < console_failsafe,
+            "composed quit budget ({:?} lock wait + {:?} graceful stop = {:?}) must stay \
+             strictly below the console fail-safe wait ({:?}), or a concurrent console event \
+             could kill a legitimate quit mid-teardown",
+            lock_wait_worst_case,
+            graceful_worst_case,
+            composed,
+            console_failsafe,
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn guard_wait_strictly_outlasts_the_longest_graceful_stop() {
+        let realised_guard_wait =
+            (SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS - 1) * SHUTDOWN_LOCK_WAIT_POLL_INTERVAL;
+        let longest_graceful_stop =
+            SIDECAR_SHUTDOWN_REQUEST_TIMEOUT + SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS * GRACEFUL_POLL_INTERVAL;
+        assert!(
+            realised_guard_wait > longest_graceful_stop,
+            "the realised guard wait ({:?}, {} attempts since the last one logs instead of \
+             sleeping) must strictly outlast the longest graceful stop any other thread can \
+             still hold BACKEND_PROCESS for ({:?}), or a waiter could give up while the holder \
+             is still mid-teardown",
+            realised_guard_wait,
+            SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS - 1,
+            longest_graceful_stop,
+        );
+    }
+
+    fn strip_doc_comment_lines(source: &str) -> String {
+        source
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("///") && !trimmed.starts_with("//!")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn extract_fn_body<'a>(source: &'a str, fn_name: &str) -> &'a str {
+        let needle_pub = format!("pub fn {}(", fn_name);
+        let needle_priv = format!("fn {}(", fn_name);
+        let start = source
+            .find(needle_pub.as_str())
+            .or_else(|| source.find(needle_priv.as_str()))
+            .unwrap_or_else(|| panic!("could not find `fn {}(` in source", fn_name));
+        let rest = &source[start..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("could not find the end of fn {}", fn_name));
+        &rest[..end + "\n}\n".len()]
+    }
+
+    #[test]
+    fn call_site_wiring_matches_the_documented_graceful_stop_per_function() {
+        let backend_source = strip_doc_comment_lines(include_str!("backend.rs"));
+        let lib_source = strip_doc_comment_lines(include_str!("lib.rs"));
+
+        let shutdown_body = extract_fn_body(&backend_source, "shutdown");
+        assert!(
+            shutdown_body.contains("GracefulStop::ShutdownEndpoint"),
+            "shutdown()'s body must request the graceful /shutdown endpoint"
+        );
+
+        for name in ["shutdown_without_waiting", "spawn", "spawn_watchdog"] {
+            let body = extract_fn_body(&backend_source, name);
+            assert!(
+                body.contains("GracefulStop::ForceKillOnly"),
+                "{}()'s body must use GracefulStop::ForceKillOnly",
+                name
+            );
+            assert!(
+                !body.contains("GracefulStop::ShutdownEndpoint"),
+                "{}()'s body must not request the graceful /shutdown endpoint",
+                name
+            );
+        }
+
+        let spawn_body = extract_fn_body(&backend_source, "spawn");
+        let shutdown_check_index = spawn_body
+            .find("is_shutdown_requested()")
+            .expect("spawn() must call is_shutdown_requested()");
+        let port_check_index = spawn_body
+            .find("check_port_available()")
+            .expect("spawn() must call check_port_available()");
+        assert!(
+            shutdown_check_index < port_check_index,
+            "spawn()'s is_shutdown_requested() check must run before check_port_available()"
+        );
+
+        assert_eq!(
+            lib_source.matches("backend::shutdown_without_waiting").count(),
+            1,
+            "lib.rs must name backend::shutdown_without_waiting exactly once"
+        );
+        assert_eq!(
+            lib_source.matches("backend::shutdown()").count(),
+            1,
+            "lib.rs must name backend::shutdown() exactly once"
+        );
+    }
+
+    #[test]
+    fn lock_with_wait_until_free_waits_for_contention_then_acquires() {
+        let m: Mutex<i32> = Mutex::new(0);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _guard = m.lock().unwrap();
+                std::thread::sleep(Duration::from_millis(400));
+            });
+            std::thread::sleep(Duration::from_millis(50));
+
+            let start = std::time::Instant::now();
+            let acquired = lock_with_wait(&m, LockWait::UntilFree);
+            let elapsed = start.elapsed();
+
+            assert!(acquired.is_some(), "UntilFree must acquire the lock once it frees");
+            assert!(
+                elapsed >= Duration::from_millis(300),
+                "expected UntilFree to wait at least 300ms for the contended lock, waited {:?}",
+                elapsed
+            );
+        });
+    }
+
+    #[test]
+    fn lock_with_wait_skip_returns_immediately_under_contention() {
+        let m: Mutex<i32> = Mutex::new(0);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _guard = m.lock().unwrap();
+                std::thread::sleep(Duration::from_millis(400));
+            });
+            std::thread::sleep(Duration::from_millis(50));
+
+            let start = std::time::Instant::now();
+            let acquired = lock_with_wait(&m, LockWait::Skip);
+            let elapsed = start.elapsed();
+
+            assert!(acquired.is_none(), "Skip must not wait for a contended lock");
+            assert!(
+                elapsed < Duration::from_millis(50),
+                "expected Skip to return immediately under contention, took {:?}",
+                elapsed
+            );
+        });
+    }
+
+    #[test]
+    fn lock_with_wait_returns_none_immediately_on_a_poisoned_mutex_in_both_modes() {
+        let m: Mutex<i32> = Mutex::new(0);
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let _guard = m.lock().unwrap();
+                panic!("poisoning the mutex for this test");
+            });
+            let _ = handle.join();
+        });
+        assert!(m.is_poisoned());
+
+        let start = std::time::Instant::now();
+        let acquired = lock_with_wait(&m, LockWait::UntilFree);
+        let elapsed = start.elapsed();
+        assert!(acquired.is_none(), "a poisoned mutex must never be acquired");
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "UntilFree must not burn its wait budget on a poisoned mutex, took {:?}",
+            elapsed
+        );
+
+        let start = std::time::Instant::now();
+        let acquired = lock_with_wait(&m, LockWait::Skip);
+        let elapsed = start.elapsed();
+        assert!(acquired.is_none(), "a poisoned mutex must never be acquired");
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "Skip must return immediately on a poisoned mutex, took {:?}",
+            elapsed
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn graceful_stop_force_kill_only_runs_no_graceful_step() {
+        let is_alive_calls = std::sync::atomic::AtomicU32::new(0);
+        let force_kill_ran = AtomicBool::new(false);
+
+        terminate_gracefully(
+            u32::MAX,
+            || {
+                is_alive_calls.fetch_add(1, Ordering::SeqCst);
+                false
+            },
+            || {
+                force_kill_ran.store(true, Ordering::SeqCst);
+            },
+            GracefulStop::ForceKillOnly,
+        );
+
+        assert_eq!(
+            is_alive_calls.load(Ordering::SeqCst),
+            0,
+            "ForceKillOnly must not poll liveness at all"
+        );
+        assert!(
+            force_kill_ran.load(Ordering::SeqCst),
+            "ForceKillOnly must still run force_kill"
+        );
     }
 
     /// Create a throwaway kill-on-close job for a single test. Never the shared
