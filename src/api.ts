@@ -31,17 +31,24 @@ export class ApiAuthError extends Error {
 
 const TOKEN_TIMEOUT_MS = 3000;
 const TOKEN_TIMED_OUT = Symbol("token-timed-out");
+/** How long a single unanswered `get_backend_token` call may keep being reused
+ *  before a fresh one is started anyway. Reuse alone would turn a *recoverable*
+ *  wedge — one dropped response on an otherwise live transport — into a
+ *  permanent one, because a call that never settles would be raced forever and
+ *  no new `invoke()` would ever be attempted. */
+const TOKEN_CALL_REUSE_MS = 60_000;
 
 let cachedToken: string | null = null;
 let tokenPromise: Promise<string | null> | null = null;
-/** The single outstanding `get_backend_token` IPC call. When the transport
- *  hangs, `invoke()` never settles and has no reject channel (ADR 028), so the
- *  losing side of the timeout race is left pending forever. A failed token
- *  fetch is deliberately not cached — the next request must retry — which means
- *  every 5 s `/health` poll would otherwise start another one and strand it.
- *  Reusing the unsettled call keeps the retry guarantee (a *rejection* settles
- *  it, so the next round starts fresh) and bounds the strays at one. */
-let pendingTokenCall: Promise<string> | null = null;
+/** The outstanding `get_backend_token` IPC call, with the time it started. When
+ *  the transport hangs, `invoke()` never settles and has no reject channel
+ *  (ADR 028), so the losing side of the timeout race is left pending forever. A
+ *  failed token fetch is deliberately not cached — the next request must retry —
+ *  which means every 5 s `/health` poll would otherwise start another one and
+ *  strand it. Reusing the unsettled call keeps the retry guarantee (a
+ *  *rejection* settles it, so the next round starts fresh) while cutting the
+ *  strays to one per `TOKEN_CALL_REUSE_MS`. */
+let pendingTokenCall: { call: Promise<string>; startedAt: number } | null = null;
 let bridgeDiagnosis: BridgeDiagnosis = { kind: "ok" };
 let authFailureSeen = false;
 
@@ -75,17 +82,21 @@ function recordAuthOutcome(path: string, resp: { ok: boolean; status: number }):
 }
 
 function sharedTokenCall(start: () => Promise<string>): Promise<string> {
+  const now = Date.now();
+  if (pendingTokenCall !== null && now - pendingTokenCall.startedAt >= TOKEN_CALL_REUSE_MS) {
+    pendingTokenCall = null;
+  }
   if (pendingTokenCall === null) {
-    const call = start();
-    pendingTokenCall = call;
+    const entry = { call: start(), startedAt: now };
+    pendingTokenCall = entry;
     const release = () => {
-      if (pendingTokenCall === call) {
+      if (pendingTokenCall === entry) {
         pendingTokenCall = null;
       }
     };
-    call.then(release, release);
+    entry.call.then(release, release);
   }
-  return pendingTokenCall;
+  return pendingTokenCall.call;
 }
 
 function getToken(): Promise<string | null> {

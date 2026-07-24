@@ -156,6 +156,28 @@ describe("a hung IPC transport strands at most one token call", () => {
     warnSpy.mockRestore();
   });
 
+  it("a call still unanswered past the reuse window is abandoned for a fresh one", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { api } = await import("./api");
+    invokeMock.mockReturnValue(new Promise(() => {}));
+    fetchMock.mockResolvedValue(okJson({ status: "ok" }));
+
+    const first = api.health();
+    await vi.advanceTimersByTimeAsync(3000);
+    await first;
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    const later = api.health();
+    await vi.advanceTimersByTimeAsync(3000);
+    await later;
+
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+    warnSpy.mockRestore();
+  });
+
   it("a hung call that finally answers does not wedge later requests", async () => {
     vi.useFakeTimers();
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
