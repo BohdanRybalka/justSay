@@ -106,7 +106,7 @@ export async function loadSettings(): Promise<UserSettings> {
     api.getSettings(),
     api.cloudKeyStatus().then(
       (status) => { cloudStatus = status; },
-      () => {  },
+      () => {},
     ),
   ]);
   settings = loaded;

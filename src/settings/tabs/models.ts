@@ -109,7 +109,7 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
     (async () => {
       try {
         await api.sttLocalPrewarm();
-      } catch {  }
+      } catch {}
       await refreshSttStatus();
     })();
   });

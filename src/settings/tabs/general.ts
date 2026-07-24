@@ -115,8 +115,8 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
         const pct = Math.max(0, Math.min(100, ((data.level_db + 60) / 60) * 100));
         fill.style.width = `${pct}%`;
       },
-      () => {  },
-      () => {  },
+      () => {},
+      () => {},
     );
   }
 
@@ -131,7 +131,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     if (isRecording) {
       try {
         await api.audioStop();
-      } catch {  }
+      } catch {}
       isRecording = false;
       btnTest.textContent = "Record";
       recLabel.textContent = "Click to test microphone";
@@ -144,7 +144,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
           recLabel.textContent = "Microphone busy (widget recording)";
           return;
         }
-      } catch {  }
+      } catch {}
 
       try {
         await api.audioStart();

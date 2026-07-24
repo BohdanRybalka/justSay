@@ -237,7 +237,7 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
 
   return () => {
     if (unlistenDrop) {
-      try { unlistenDrop(); } catch {  }
+      try { unlistenDrop(); } catch {}
     }
   };
 }

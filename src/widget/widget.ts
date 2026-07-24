@@ -218,7 +218,7 @@ async function setupGlobalShortcut(shortcut: string) {
     if (unregisterFn) {
       try {
         await unregisterFn();
-      } catch {  }
+      } catch {}
     }
 
     await register(shortcut, (event) => {
