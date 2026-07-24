@@ -34,6 +34,14 @@ const TOKEN_TIMED_OUT = Symbol("token-timed-out");
 
 let cachedToken: string | null = null;
 let tokenPromise: Promise<string | null> | null = null;
+/** The single outstanding `get_backend_token` IPC call. When the transport
+ *  hangs, `invoke()` never settles and has no reject channel (ADR 028), so the
+ *  losing side of the timeout race is left pending forever. A failed token
+ *  fetch is deliberately not cached — the next request must retry — which means
+ *  every 5 s `/health` poll would otherwise start another one and strand it.
+ *  Reusing the unsettled call keeps the retry guarantee (a *rejection* settles
+ *  it, so the next round starts fresh) and bounds the strays at one. */
+let pendingTokenCall: Promise<string> | null = null;
 let bridgeDiagnosis: BridgeDiagnosis = { kind: "ok" };
 let authFailureSeen = false;
 
@@ -66,6 +74,20 @@ function recordAuthOutcome(path: string, resp: { ok: boolean; status: number }):
   }
 }
 
+function sharedTokenCall(start: () => Promise<string>): Promise<string> {
+  if (pendingTokenCall === null) {
+    const call = start();
+    pendingTokenCall = call;
+    const release = () => {
+      if (pendingTokenCall === call) {
+        pendingTokenCall = null;
+      }
+    };
+    call.then(release, release);
+  }
+  return pendingTokenCall;
+}
+
 function getToken(): Promise<string | null> {
   if (cachedToken !== null) {
     return Promise.resolve(cachedToken);
@@ -83,7 +105,10 @@ function getToken(): Promise<string | null> {
       });
       let token: string | typeof TOKEN_TIMED_OUT;
       try {
-        token = await Promise.race([invoke<string>("get_backend_token"), expiry]);
+        token = await Promise.race([
+          sharedTokenCall(() => invoke<string>("get_backend_token")),
+          expiry,
+        ]);
       } finally {
         clearTimeout(timer);
       }

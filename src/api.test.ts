@@ -137,6 +137,53 @@ describe("token cache does not poison on a transient failure", () => {
   });
 });
 
+describe("a hung IPC transport strands at most one token call", () => {
+  it("repeated polls against a never-settling invoke issue exactly one invoke", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { api, lastBridgeDiagnosis } = await import("./api");
+    invokeMock.mockReturnValue(new Promise(() => {}));
+    fetchMock.mockResolvedValue(okJson({ status: "ok" }));
+
+    for (let poll = 0; poll < 4; poll++) {
+      const inFlight = api.health();
+      await vi.advanceTimersByTimeAsync(3000);
+      await inFlight;
+    }
+
+    expect(lastBridgeDiagnosis()).toEqual({ kind: "invoke-timeout" });
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    warnSpy.mockRestore();
+  });
+
+  it("a hung call that finally answers does not wedge later requests", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { api } = await import("./api");
+    let answer: (token: string) => void = () => {};
+    invokeMock.mockReturnValueOnce(
+      new Promise<string>((resolve) => {
+        answer = resolve;
+      }),
+    );
+    fetchMock.mockResolvedValue(okJson({ status: "ok" }));
+
+    const timedOut = api.health();
+    await vi.advanceTimersByTimeAsync(3000);
+    await timedOut;
+    expect(headerOf(0)["X-JustSay-Token"]).toBeUndefined();
+
+    answer("late-token");
+    await vi.advanceTimersByTimeAsync(0);
+    invokeMock.mockResolvedValue("late-token");
+
+    await api.health();
+
+    expect(headerOf(1)["X-JustSay-Token"]).toBe("late-token");
+    warnSpy.mockRestore();
+  });
+});
+
 describe("bridge diagnosis", () => {
   it("bridge-missing: Tauri's injected globals never ran, so invoke is not even attempted", async () => {
     removeBridge();
