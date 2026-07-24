@@ -1,6 +1,12 @@
 !macro JustSayStopRunningProcesses
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
-  !insertmacro CheckIfAppIsRunning "justsay-backend.exe" "${PRODUCTNAME} background engine"
+
+  !if "${INSTALLMODE}" == "currentUser"
+    nsis_tauri_utils::KillProcessCurrentUser "justsay-backend.exe"
+  !else
+    nsis_tauri_utils::KillProcess "justsay-backend.exe"
+  !endif
+  Pop $R9
 
   StrCpy $R8 0
   justsay_await_sidecar:
@@ -15,7 +21,7 @@
     ${EndIf}
     IntOp $R8 $R8 + 1
     ${If} $R8 >= 10
-      Abort "JustSay's background engine (justsay-backend.exe) is still running. Close JustSay and run this installer again."
+      Abort "JustSay's background engine (justsay-backend.exe) is still running and holds files this step must replace. Close JustSay and try again."
     ${EndIf}
     Sleep 500
     Goto justsay_await_sidecar

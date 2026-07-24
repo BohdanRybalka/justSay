@@ -59,26 +59,54 @@ def test_installer_hooks_file_defines_both_hooks() -> None:
     assert "NSIS_HOOK_PREUNINSTALL" in bodies
 
 
+def _sidecar_call(verb: str, sidecar_name: str) -> re.Pattern[str]:
+    return re.compile(
+        rf'nsis_tauri_utils::{verb}Process(?:CurrentUser)?\s+"{re.escape(sidecar_name)}"'
+    )
+
+
 def test_both_hooks_stop_the_shell_before_the_sidecar() -> None:
     text = _installer_hooks_path().read_text(encoding="utf-8")
     bodies = _macro_bodies(text)
     sidecar_name = _sidecar_image_name()
     shell_call = 'CheckIfAppIsRunning "${MAINBINARYNAME}.exe"'
-    sidecar_call = f'CheckIfAppIsRunning "{sidecar_name}"'
+    kill_sidecar = _sidecar_call("Kill", sidecar_name)
 
     for hook in ("NSIS_HOOK_PREINSTALL", "NSIS_HOOK_PREUNINSTALL"):
         resolved = _resolve_macro_text(hook, bodies)
         assert shell_call in resolved, f"{hook} never calls {shell_call}"
-        assert sidecar_call in resolved, f"{hook} never calls {sidecar_call}"
-        shell_index = resolved.index(shell_call)
-        sidecar_index = resolved.index(sidecar_call)
-        assert shell_index < sidecar_index, (
-            f"{hook} must call {shell_call} before {sidecar_call} — "
+        kill = kill_sidecar.search(resolved)
+        assert kill, f"{hook} never kills {sidecar_name}"
+        assert resolved.index(shell_call) < kill.start(), (
+            f"{hook} must stop {shell_call} before killing {sidecar_name} — "
             "killing the sidecar first lets the shell's watchdog respawn it mid-copy"
         )
 
 
-def test_sidecar_name_in_hook_matches_backend_rs() -> None:
+def test_both_hooks_wait_for_the_sidecar_and_abort_if_it_survives() -> None:
+    text = _installer_hooks_path().read_text(encoding="utf-8")
+    bodies = _macro_bodies(text)
+    sidecar_name = _sidecar_image_name()
+    find_sidecar = _sidecar_call("Find", sidecar_name)
+
+    for hook in ("NSIS_HOOK_PREINSTALL", "NSIS_HOOK_PREUNINSTALL"):
+        resolved = _resolve_macro_text(hook, bodies)
+        assert find_sidecar.search(resolved), (
+            f"{hook} kills {sidecar_name} but never polls for it — the kill is "
+            "asynchronous, so proceeding immediately can still hit locked files"
+        )
+        assert "Abort" in resolved, (
+            f"{hook} must abort loudly when {sidecar_name} outlives the wait; "
+            "continuing is what produces the half-written install"
+        )
+
+
+def test_sidecar_name_reaches_a_process_call_not_only_the_abort_message() -> None:
     text = _installer_hooks_path().read_text(encoding="utf-8")
     sidecar_name = _sidecar_image_name()
-    assert sidecar_name in text
+    assert _sidecar_call("Kill", sidecar_name).search(text), (
+        f"{sidecar_name} must appear in a Kill call, not merely somewhere in the file"
+    )
+    assert _sidecar_call("Find", sidecar_name).search(text), (
+        f"{sidecar_name} must appear in a Find call, not merely somewhere in the file"
+    )
