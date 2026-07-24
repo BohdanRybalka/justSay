@@ -4,6 +4,11 @@
     "resources": {
       "resources/justsay-backend": "justsay-backend",
       "resources/whisper-cpp-vulkan": "whisper-cpp-vulkan"
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "installer-hooks.nsh"
+      }
     }
   }
 }
