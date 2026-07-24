@@ -34,7 +34,9 @@ async def test_list_models_target_found():
             {"name": "llama3:8b", "size": 4_000_000_000, "details": {"parameter_size": "8B"}},
         ]
     })
-    async with httpx.AsyncClient(base_url=_BASE, transport=httpx.MockTransport(lambda req: mock_response)) as client:
+    async with httpx.AsyncClient(
+        base_url=_BASE, transport=httpx.MockTransport(lambda req: mock_response)
+    ) as client:
         models, found, size = await _list_models(client, "gemma3:4b")
     assert len(models) == 2
     assert models[0].name == "gemma3:4b"
@@ -50,7 +52,9 @@ async def test_list_models_target_not_found():
             {"name": "llama3:8b", "size": 4_000_000_000, "details": {}},
         ]
     })
-    async with httpx.AsyncClient(base_url=_BASE, transport=httpx.MockTransport(lambda req: mock_response)) as client:
+    async with httpx.AsyncClient(
+        base_url=_BASE, transport=httpx.MockTransport(lambda req: mock_response)
+    ) as client:
         models, found, size = await _list_models(client, "gemma3:4b")
     assert len(models) == 1
     assert found is False
@@ -60,7 +64,9 @@ async def test_list_models_target_not_found():
 @pytest.mark.asyncio
 async def test_list_models_empty():
     mock_response = httpx.Response(200, json={"models": []})
-    async with httpx.AsyncClient(base_url=_BASE, transport=httpx.MockTransport(lambda req: mock_response)) as client:
+    async with httpx.AsyncClient(
+        base_url=_BASE, transport=httpx.MockTransport(lambda req: mock_response)
+    ) as client:
         models, found, size = await _list_models(client, "gemma3:4b")
     assert len(models) == 0
     assert found is False

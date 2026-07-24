@@ -268,7 +268,9 @@ async def test_pipeline_concurrent_invocations_save_independently(
 
     def make_stt(idx: int):
         m = MagicMock()
-        m.transcribe = AsyncMock(return_value=TranscriptionResult(text=f"text-{idx}", tokens_used=None))
+        m.transcribe = AsyncMock(
+            return_value=TranscriptionResult(text=f"text-{idx}", tokens_used=None)
+        )
         m.model_name = "mock/provider"
         m.is_local = False
         return m

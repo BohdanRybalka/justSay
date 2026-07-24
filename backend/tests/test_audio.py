@@ -370,7 +370,9 @@ def test_silence_settings_overridable_via_env_var(monkeypatch):
 
 
 _TRAIN_AUDIO_MP3 = (
-    Path(__file__).resolve().parents[2] / "train-audio-data" / "Record (online-voice-recorder.com).mp3"
+    Path(__file__).resolve().parents[2]
+    / "train-audio-data"
+    / "Record (online-voice-recorder.com).mp3"
 )
 
 

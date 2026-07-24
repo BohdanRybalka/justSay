@@ -112,7 +112,9 @@ class STTProvider(ABC):
         """Human-readable name of the current model."""
 
     @abstractmethod
-    async def transcribe(self, audio_path: Path, language: str = "uk", **kwargs) -> TranscriptionResult:
+    async def transcribe(
+        self, audio_path: Path, language: str = "uk", **kwargs
+    ) -> TranscriptionResult:
         """Transcribe audio file to text.
 
         Args:

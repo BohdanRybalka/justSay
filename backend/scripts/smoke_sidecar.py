@@ -35,13 +35,14 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import NoReturn
 
 
 def log(msg: str) -> None:
     print(f"[smoke] {msg}", flush=True)
 
 
-def fail(msg: str) -> NoReturn:  # type: ignore[name-defined]
+def fail(msg: str) -> NoReturn:
     print(f"[smoke] FAIL: {msg}", file=sys.stderr, flush=True)
     sys.exit(1)
 

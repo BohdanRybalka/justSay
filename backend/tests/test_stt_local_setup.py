@@ -1212,7 +1212,7 @@ async def test_await_local_ready_raises_typed_timeout_on_stuck_load(monkeypatch)
 
     settings = STTSettings(mode=ProviderMode.LOCAL)
 
-    with pytest.raises(local_setup.LocalReadinessTimeout):
+    with pytest.raises(local_setup.LocalReadinessTimeoutError):
         await local_setup.await_local_ready(settings, timeout=0.05)
 
 
@@ -1222,7 +1222,7 @@ async def test_await_local_ready_returns_false_not_raises_when_mode_changes_mid_
 ):
     """Plan Risks / orchestrator correctness requirement: ensure_local_ready()'s
     own `mode != LOCAL` early-return guard racing in must surface as a plain
-    `False`, never a LocalReadinessTimeout -- a request must never be worse
+    `False`, never a LocalReadinessTimeoutError -- a request must never be worse
     off than before this barrier existed (it would have succeeded via the
     provider's own lazy _get_model() fallback)."""
     provider = _FakePrewarmProvider()
@@ -1316,7 +1316,7 @@ async def test_timeout_then_retry_joins_in_flight_load_instead_of_starting_a_sec
 
     settings = STTSettings(mode=ProviderMode.LOCAL)
 
-    with pytest.raises(local_setup.LocalReadinessTimeout):
+    with pytest.raises(local_setup.LocalReadinessTimeoutError):
         await local_setup.await_local_ready(settings, timeout=0.05)
 
     assert await asyncio.to_thread(started.wait, 2), "the worker thread never started"
@@ -1329,5 +1329,7 @@ async def test_timeout_then_retry_joins_in_flight_load_instead_of_starting_a_sec
     asyncio.create_task(_release_soon())
     result = await local_setup.await_local_ready(settings, timeout=5.0)
 
-    assert call_count["n"] == 1, "a second _get_model() call was started while the first was still in flight"
+    assert call_count["n"] == 1, (
+        "a second _get_model() call was started while the first was still in flight"
+    )
     assert result is True

@@ -38,7 +38,9 @@ async def test_transcribe_returns_stripped_text(tmp_path):
     provider = GroqWhisperSTTProvider(_settings())
     provider._client = MagicMock()
 
-    with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("  привіт  ", None, None)):
+    with patch.object(
+        GroqWhisperSTTProvider, "_call_groq", return_value=("  привіт  ", None, None)
+    ):
         result = await provider.transcribe(_wav(tmp_path), language="uk")
 
     assert result.text == "привіт"
