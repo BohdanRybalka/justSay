@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -163,11 +165,6 @@ async def test_words_top_limit_validated_by_fastapi(client):
     contract."""
     resp = await client.get("/words/top?limit=99999")
     assert resp.status_code == 422
-
-
-
-import logging
-from html.parser import HTMLParser
 
 
 def test_sanitize_lowercases_and_appends_star():

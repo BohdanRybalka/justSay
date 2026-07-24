@@ -103,7 +103,9 @@ class LocalSTTProvider(STTProvider):
             log.info("GPU probe: no GPU detected — using cpu")
         return "cpu"
 
-    async def transcribe(self, audio_path: Path, language: str = "uk", **kwargs) -> TranscriptionResult:
+    async def transcribe(
+        self, audio_path: Path, language: str = "uk", **kwargs
+    ) -> TranscriptionResult:
         """Transcribe locally. ``style`` kwarg is accepted for interface parity but ignored.
 
         ``audio_duration`` (kwarg, seconds) — when provided, drives a

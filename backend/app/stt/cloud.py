@@ -56,7 +56,9 @@ class GeminiSTTProvider(STTProvider):
     def cleanup(self) -> None:
         self._client = None
 
-    async def transcribe(self, audio_path: Path, language: str = "uk", **kwargs) -> TranscriptionResult:
+    async def transcribe(
+        self, audio_path: Path, language: str = "uk", **kwargs
+    ) -> TranscriptionResult:
         from app.core.audio_validation import mime_for_extension
 
         client = self._get_client()
@@ -67,7 +69,8 @@ class GeminiSTTProvider(STTProvider):
         prompt = self._build_prompt(language, style, glossary)
         mime_type = mime_for_extension(audio_path.name)
         log.info(
-            "Gemini STT: POST generate_content model=%s file=%s mime=%s size=%.1fKB lang=%s style=%s glossary=%s",
+            "Gemini STT: POST generate_content model=%s file=%s mime=%s "
+            "size=%.1fKB lang=%s style=%s glossary=%s",
             self._settings.gemini_model, audio_path.name, mime_type,
             len(audio_bytes) / 1024, language, style,
             f"{len(glossary)}chars" if glossary else "none",
@@ -109,7 +112,8 @@ class GeminiSTTProvider(STTProvider):
             base = (
                 f"Transcribe this audio and structure the output as a professional document. "
                 f"{lang_clause} "
-                f"The speaker may use words from other languages — write them in their original form.\n\n"
+                f"The speaker may use words from other languages — "
+                f"write them in their original form.\n\n"
                 "Instructions:\n"
                 "1. Transcribe faithfully, removing speech disfluencies (hesitation, filler words, "
                 "repeated words).\n"
@@ -128,8 +132,10 @@ class GeminiSTTProvider(STTProvider):
             base = (
                 f"Transcribe this audio faithfully. "
                 f"{lang_clause} "
-                f"The speaker may use words from other languages — write them in their original form. "
-                f"Include natural punctuation (periods, commas, question marks) based on speech intonation. "
+                f"The speaker may use words from other languages — "
+                f"write them in their original form. "
+                f"Include natural punctuation (periods, commas, question marks) "
+                f"based on speech intonation. "
                 f"Output ONLY the transcription text, nothing else."
             )
 

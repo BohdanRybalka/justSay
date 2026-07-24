@@ -103,11 +103,11 @@ async def process_audio(
     )
 
     if is_local_provider(stt):
-        from app.stt.local_setup import LocalReadinessTimeout, await_local_ready
+        from app.stt.local_setup import LocalReadinessTimeoutError, await_local_ready
 
         try:
             await await_local_ready(settings.stt)
-        except LocalReadinessTimeout as e:
+        except LocalReadinessTimeoutError as e:
             log.error("Local STT readiness wait failed: %s", e)
             raise RuntimeError(str(e)) from e
 

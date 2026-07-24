@@ -40,7 +40,7 @@ def peek_active_load() -> asyncio.Task | None:
     return _active_load[1] if _active_load is not None else None
 
 
-class LocalReadinessTimeout(Exception):
+class LocalReadinessTimeoutError(Exception):
     """Raised by await_local_ready() when the bounded wait genuinely times
     out -- i.e. ensure_local_ready() itself did not return within the
     budget, as opposed to returning promptly via one of its own early-return
@@ -324,7 +324,7 @@ async def await_local_ready(
 
     Bounded by ``asyncio.wait_for(..., timeout=timeout)`` so a genuinely stuck
     load (dead network mid-download, a broken driver) cannot hang the request
-    path indefinitely. On a real timeout this raises ``LocalReadinessTimeout``
+    path indefinitely. On a real timeout this raises ``LocalReadinessTimeoutError``
     -- the one outcome callers SHOULD treat as fatal, since letting the
     request proceed risks an even longer, unbounded hang inside
     ``transcribe()``'s own lazy ``_get_model()`` fallback.
@@ -335,7 +335,7 @@ async def await_local_ready(
     away from LOCAL, or the cache moving on to a different provider instance
     -- while this call was queued on ``_prewarm_lock``. Those are NOT
     failures: the caller must not treat a plain ``False`` as fatal, only a
-    raised ``LocalReadinessTimeout``. `LocalSTTProvider.transcribe()` (and its
+    raised ``LocalReadinessTimeoutError``. `LocalSTTProvider.transcribe()` (and its
     Vulkan/MLX siblings) retain their own lazy ``_get_model()`` fallback, so a
     plain ``False`` return here is never fatal to the caller.
 
@@ -347,7 +347,7 @@ async def await_local_ready(
     load that would have EVENTUALLY succeeded but takes LONGER than
     ``timeout`` -- a genuinely slow but working cold start: a large model on
     a slow disk, a throttled first-time download -- is deliberately
-    converted into an explicit ``LocalReadinessTimeout`` (surfaced by
+    converted into an explicit ``LocalReadinessTimeoutError`` (surfaced by
     ``process_audio`` as a clear error) rather than the unbounded hang it
     used to be. That trade is intentional -- an indefinite hang is worse
     than a clear, actionable error -- but it does mean a request that would
@@ -366,7 +366,7 @@ async def await_local_ready(
     try:
         await asyncio.wait_for(ensure_local_ready(stt_settings), timeout=timeout)
     except asyncio.TimeoutError as e:
-        raise LocalReadinessTimeout(
+        raise LocalReadinessTimeoutError(
             f"Local speech-to-text model did not become ready within {timeout:.0f}s"
         ) from e
 
@@ -468,7 +468,10 @@ async def install_local_packages() -> AsyncIterator[str]:
             if exit_code == 0:
                 yield sse_event("done", {"status": "success"})
             else:
-                yield sse_event("error", {"status": "error", "error": output[-500:] if output else "pip install failed"})
+                yield sse_event(
+                    "error",
+                    {"status": "error", "error": output[-500:] if output else "pip install failed"},
+                )
         except Exception as e:
             log.warning("pip install failed: %s", e)
             yield sse_event("error", {"status": "error", "error": str(e)})

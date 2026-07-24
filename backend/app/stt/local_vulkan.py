@@ -109,7 +109,7 @@ _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 
 
-class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):  # noqa: N801
     _fields_ = [
         ("PerProcessUserTimeLimit", ctypes.c_int64),
         ("PerJobUserTimeLimit", ctypes.c_int64),
@@ -123,7 +123,7 @@ class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
     ]
 
 
-class _IO_COUNTERS(ctypes.Structure):
+class _IO_COUNTERS(ctypes.Structure):  # noqa: N801
     _fields_ = [
         ("ReadOperationCount", ctypes.c_uint64),
         ("WriteOperationCount", ctypes.c_uint64),
@@ -134,7 +134,7 @@ class _IO_COUNTERS(ctypes.Structure):
     ]
 
 
-class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):  # noqa: N801
     _fields_ = [
         ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
         ("IoInfo", _IO_COUNTERS),

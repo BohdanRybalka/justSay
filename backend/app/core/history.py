@@ -145,10 +145,12 @@ CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
   INSERT INTO entry_fts(rowid, cleaned_text) VALUES (new.rowid, new.cleaned_text);
 END;
 CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
-  INSERT INTO entry_fts(entry_fts, rowid, cleaned_text) VALUES('delete', old.rowid, old.cleaned_text);
+  INSERT INTO entry_fts(entry_fts, rowid, cleaned_text)
+  VALUES('delete', old.rowid, old.cleaned_text);
 END;
 CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
-  INSERT INTO entry_fts(entry_fts, rowid, cleaned_text) VALUES('delete', old.rowid, old.cleaned_text);
+  INSERT INTO entry_fts(entry_fts, rowid, cleaned_text)
+  VALUES('delete', old.rowid, old.cleaned_text);
   INSERT INTO entry_fts(rowid, cleaned_text) VALUES (new.rowid, new.cleaned_text);
 END;
 """
@@ -453,7 +455,8 @@ def compute_stats(now: datetime | None = None) -> HistoryStats:
 
     today = now.date()
     week_cutoff = now - timedelta(days=7)
-    today_start_ms = int(round(datetime(today.year, today.month, today.day, tzinfo=now.tzinfo).timestamp() * 1000))
+    today_start = datetime(today.year, today.month, today.day, tzinfo=now.tzinfo)
+    today_start_ms = int(round(today_start.timestamp() * 1000))
     week_cutoff_ms = int(round(week_cutoff.timestamp() * 1000))
 
     with _lock:

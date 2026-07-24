@@ -166,7 +166,8 @@ def test_stats_cache_ttl_returns_cached_value(isolated_storage, tmp_path):
     with history._lock:
         conn = history._ensure_conn_locked()
         conn.execute(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms, word_count) "
+            "INSERT INTO entries(id, ts, language, style, raw_text, "
+            "cleaned_text, duration_ms, word_count) "
             "VALUES ('zzz', 0, 'uk', 'normal', '', '', 0, 99)"
         )
     s2 = history.compute_stats()
@@ -346,7 +347,10 @@ def test_operational_error_mapped_to_503(isolated_storage, tmp_path):
     history.save_entry(text="x", duration_ms=1)
 
     with TestClient(app) as client:
-        with patch("app.core.history_router.compute_stats", side_effect=sqlite3.OperationalError("database is locked")):
+        with patch(
+            "app.core.history_router.compute_stats",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
             resp = client.get("/history/stats")
             assert resp.status_code == 503
             assert resp.headers.get("Retry-After") == "1"
@@ -938,8 +942,10 @@ def test_concurrent_save_and_search_serialised(isolated_storage, tmp_path):
 
     t1 = threading.Thread(target=writer)
     t2 = threading.Thread(target=searcher)
-    t1.start(); t2.start()
-    t1.join(); t2.join()
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
 
     assert errors == []
     assert all(0 <= n <= 20 for n in seen)
