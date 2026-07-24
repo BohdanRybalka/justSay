@@ -67,7 +67,7 @@ ignore = [
     "E501",  # line-too-long (24) — long SQL/log/annotation lines
     "E402",  # module-import-not-at-top (15) — tests/conftest.py ordering (ADR 014)
     "E702",  # multiple-statements-on-one-line-semicolon (2)
-    "F821",  # undefined-name (1) — quoted type-only "NoReturn" in scripts/smoke_sidecar.py, never evaluated
+    "F821",  # undefined-name (1) — type-only NoReturn in scripts/smoke_sidecar.py, never evaluated (from __future__ import annotations)
     "N801",  # invalid-class-name (3) — renames public classes
     "N818",  # error-suffix-on-exception-name (1) — renames an exception type
 ]
