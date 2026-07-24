@@ -12,17 +12,8 @@ import {
   bindIndicatorActivation,
 } from "../../status-indicator";
 
-// Edge-triggered latch for the Local STT indicator's last-seen error — drives
-// onIndicatorStateChange() so notifyError() fires once per new error, not
-// once per 3-second poll while the same error persists.
 let prevLastError: string | null = null;
 
-// Pure request-ordering guard (docs/TODO.md's poll-vs-retry race item).
-// A response is stale exactly when a newer request has been issued by the
-// time it resolves -- independent of which request actually finishes first.
-// Extracted as a standalone function so the ordering decision itself is
-// unit-testable without jsdom (no DOM-testing infra exists yet, see
-// docs/TODO.md).
 export function isStaleStatusResponse(requestToken: number, latestIssuedToken: number): boolean {
   return requestToken !== latestIssuedToken;
 }
@@ -74,7 +65,6 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
   let currentSttMode = settings.stt_mode;
   let latestSttStatusToken = 0;
 
-  // --- Render panels based on current mode ---
   function renderCurrentStt() {
     if (currentSttMode === "cloud") {
       renderIndicator(sttLocalIndicator, "idle");
@@ -85,7 +75,6 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
     }
   }
 
-  // --- STT indicator + caption update, shared by the success/failure paths ---
   function applyLocalIndicator(error: string | null, ready: boolean, captionText: string) {
     const state = computeIndicatorState({ active: currentSttMode === "local", ready, error });
     renderIndicator(sttLocalIndicator, state, {
@@ -103,18 +92,11 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
     prevLastError = error;
   }
 
-  // --- STT Status refresh ---
   async function refreshSttStatus() {
     if (currentSttMode !== "local") return;
     const token = ++latestSttStatusToken;
     try {
       const s: LocalSttStatus = await api.sttLocalStatus();
-      // Re-check after the await: the user may have switched to Cloud while
-      // this request was in flight (e.g. a slow first-run pip-install poll
-      // tick). A stale response must not touch the badge/caption/latch or
-      // fire notifyError() — Cloud mode must never surface a Local STT toast.
-      // The token check guards a different race: two same-mode requests
-      // (poll tick vs. retry click) resolving out of order.
       if (isStaleStatusResponse(token, latestSttStatusToken) || currentSttMode !== "local") return;
       applyLocalIndicator(s.last_error, s.model_loaded, `${s.model_name} · ${s.device}`);
     } catch {
@@ -123,22 +105,17 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
     }
   }
 
-  // --- Retry on click or Enter/Space when the indicator shows an error ---
   bindIndicatorActivation(sttLocalIndicator, () => {
     (async () => {
       try {
         await api.sttLocalPrewarm();
-      } catch { /* surfaced via the next status poll */ }
+      } catch {}
       await refreshSttStatus();
     })();
   });
 
-  // --- Mode toggle handler ---
   async function switchStt(mode: "cloud" | "local") {
     if (currentSttMode === mode) return;
-    // No explicit unload here: PUT /stt/mode's clear_cache() already tears
-    // down the Local provider unconditionally on every mode change, so a
-    // frontend pre-emptive unload was always redundant.
     currentSttMode = mode;
     sttCloud.classList.toggle("active", mode === "cloud");
     sttLocal.classList.toggle("active", mode === "local");
@@ -151,10 +128,8 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
   sttCloud.addEventListener("click", () => switchStt("cloud"));
   sttLocal.addEventListener("click", () => switchStt("local"));
 
-  // --- Initial render ---
   renderCurrentStt();
 
-  // --- Polling ---
   const pollInterval = setInterval(() => {
     if (currentSttMode === "local") refreshSttStatus();
   }, 3000);

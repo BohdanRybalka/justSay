@@ -47,10 +47,6 @@ def fail(msg: str) -> "NoReturn":  # type: ignore[name-defined]
 
 
 def assert_port_free(host: str, port: int) -> None:
-    # TOCTOU: between the close() below and the sidecar's actual bind()
-    # another process could grab the port. Acceptable in CI (clean runner,
-    # the next call is immediate) and in the local smoke (single user).
-    # Real production protection is the port-busy error from uvicorn.
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.bind((host, port))
@@ -151,8 +147,6 @@ def main() -> int:
 
     creationflags = 0
     if os.name == "nt":
-        # CREATE_NO_WINDOW — keep the smoke run headless even with
-        # console=True in the spec.
         creationflags = 0x08000000
 
     child = subprocess.Popen(

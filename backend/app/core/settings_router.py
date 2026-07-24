@@ -50,7 +50,6 @@ async def get_settings():
 @router.put("", response_model=SettingsUpdateResponse)
 async def put_settings(updates: dict):
     allowed_fields = set(UserSettings.model_fields.keys())
-    # Strip the masked placeholder — sending "***" back must not overwrite a stored key.
     filtered = {
         k: v for k, v in updates.items()
         if k in allowed_fields
@@ -63,18 +62,7 @@ async def put_settings(updates: dict):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     changed_stt = sync_to_runtime(outcome.settings)
-    # Only re-trigger a Local prewarm when an STT-relevant field actually
-    # changed (the same changed_stt check sync_to_runtime uses for its own
-    # cache invalidation) -- calling maybe_prewarm_local() on every
-    # unrelated edit (shortcut, output_dir, llm_mode, ...) needlessly reset
-    # Spec 023's crash-loop guard counter for edits that have nothing to do
-    # with STT, which could zero it out from under a startup prewarm still
-    # in flight (Spec 023's Review, iteration 1, YELLOW; corroborated by
-    # that spec's GitHub review).
     if changed_stt:
-        # Lazy import (not a module-level from-import) so tests can
-        # monkeypatch app.stt.local_setup.maybe_prewarm_local directly;
-        # same pattern as app.stt._get_local's factory patch comment.
         from app.stt.local_setup import maybe_prewarm_local
 
         maybe_prewarm_local(runtime_settings.stt)
@@ -101,15 +89,7 @@ async def cloud_key_status():
 
 @router.get("/storage", response_model=StorageInfo)
 async def get_storage_info():
-    # Read directly off AudioSettings rather than re-deriving SETTINGS_DIR / "tmp"
-    # -- the two used to coincide only because both hardcoded the same literal;
-    # see docs/adr/012-dev-mode-data-directory-isolation.md.
     tmp_dir = runtime_settings.audio.temp_dir
-    # `temp_size_bytes` is the only field: `temp_dir` itself is only used
-    # internally (via `compute_dir_size`) and never returned. `output_dir`
-    # used to be returned here too (masked via a now-deleted `_mask_home`
-    # helper), but its only reader (`general.ts`'s `loadFilesInfo()`) never
-    # read it — `GET /settings` is the canonical source for `output_dir`.
     return StorageInfo(temp_size_bytes=compute_dir_size(tmp_dir))
 
 

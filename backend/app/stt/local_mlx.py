@@ -27,10 +27,6 @@ from app.stt.config import STTSettings
 log = logging.getLogger(__name__)
 
 
-# Mapping from `STTSettings.whisper_model_size` to the actual mlx-community
-# Hugging Face repo ID. The naming convention is NOT a clean prefix:
-# `large-v3-turbo` has no `-mlx` suffix; all other sizes do. Hard-coded by
-# choice — see plan 019, RED-2 (iteration 1) for the audit trail.
 MLX_REPO_BY_SIZE: dict[str, str] = {
     "tiny": "mlx-community/whisper-tiny-mlx",
     "base": "mlx-community/whisper-base-mlx",
@@ -53,7 +49,6 @@ def _hf_cache_has_snapshot(repo_id: str) -> bool:
     try:
         info = scan_cache_dir()
     except Exception as e:
-        # Brand-new machine: cache dir does not exist yet, or is unreadable.
         log.debug("scan_cache_dir failed, treating cache as empty: %s", e)
         return False
     return any(repo.repo_id == repo_id for repo in info.repos)
@@ -70,16 +65,13 @@ class MLXWhisperSTTProvider(STTProvider):
     Requires: `pip install justsay-backend[local-mac]`.
     """
 
-    is_local = True  # ADR 018 — declared, not derived from the platform
+    is_local = True
 
     def __init__(self, settings: STTSettings):
         self._settings = settings
         self._loaded: bool = False
         self._last_load_error: str | None = None
-        # Sync primitive — `_get_model` runs on a worker thread via
-        # `asyncio.to_thread`, so `asyncio.Lock` would not serialise it.
         self._load_lock: threading.Lock = threading.Lock()
-        # Async primitive — guards the async `transcribe` body.
         self._transcribe_lock: asyncio.Lock = asyncio.Lock()
 
     @property
@@ -132,17 +124,13 @@ class MLXWhisperSTTProvider(STTProvider):
                     and ModelHolder.model_path == repo_id
                 ):
                     self._last_load_error = None
-                    return repo_id  # already warm for this repo
+                    return repo_id
 
                 from mlx_whisper.load_models import load_model
 
                 if _hf_cache_has_snapshot(repo_id):
                     os.environ["HF_HUB_OFFLINE"] = "1"
                 else:
-                    # Allow first-time download of a *new* model size when the
-                    # offline flag was set by a previous load. Without this,
-                    # switching whisper_model_size to an uncached value in the
-                    # same process would fail with `OfflineModeIsEnabled`.
                     os.environ.pop("HF_HUB_OFFLINE", None)
 
                 log.info("Loading MLX whisper: repo=%s", repo_id)
@@ -176,10 +164,6 @@ class MLXWhisperSTTProvider(STTProvider):
         beam_size = 1 if is_short else 5
         condition_on_previous_text = not is_short
         glossary = self._settings.initial_prompt.strip() or None
-        # mlx-whisper's own auto-detect sentinel is `language=None` (same
-        # convention as faster-whisper — mlx-whisper is a port of OpenAI's
-        # reference whisper implementation) — translate here, but keep the
-        # original "auto" string in the log line below for observability.
         whisper_language = None if language == "auto" else language
 
         log.info(
@@ -191,18 +175,12 @@ class MLXWhisperSTTProvider(STTProvider):
             f"{audio_duration:.1f}s" if audio_duration is not None else "?",
             beam_size,
             condition_on_previous_text,
-            # Never log glossary content — could leak PII / API keys.
             f"{len(glossary)}chars" if glossary else "none",
         )
 
         async with self._transcribe_lock:
 
             def _run_mlx() -> tuple[str, str | None]:
-                # _get_model is sync; running it inside _run_mlx keeps the
-                # event loop free during a cold first-download. The returned
-                # repo_id is the same value that was validated and used to
-                # warm ModelHolder — reusing it here avoids a second
-                # `_get_repo_id()` call outside the try/except boundary.
                 repo_id = self._get_model()
                 import mlx_whisper
 
@@ -214,21 +192,12 @@ class MLXWhisperSTTProvider(STTProvider):
                     "initial_prompt": glossary,
                 }
                 if is_short:
-                    # Explicit temperature=0.0 (scalar) disables the upstream
-                    # temperature-fallback loop, which strips beam_size when
-                    # t > 0. Short clips prioritise latency over rescue retries.
                     kwargs_mlx["temperature"] = 0.0
-                # NB: no_repeat_ngram_size and vad_filter are NOT valid
-                # mlx-whisper kwargs — verified against the upstream
-                # DecodingOptions dataclass. Do not add them.
                 result = mlx_whisper.transcribe(str(audio_path), **kwargs_mlx)
                 segments = result.get("segments") or []
                 if segments:
                     text = " ".join(seg["text"].strip() for seg in segments)
                 else:
-                    # Fallback for whole-clip-text responses on some
-                    # mlx-whisper versions: `text` is provided even without
-                    # segment splits.
                     text = (result.get("text") or "").strip()
                 return text, result.get("language")
 

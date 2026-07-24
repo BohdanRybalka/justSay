@@ -112,7 +112,6 @@ def _speech_bearing_windows_with_starts(audio: np.ndarray, duration_ms: int, cou
     return windows
 
 
-# --- AC 2: library resolution chain ---------------------------------------
 
 
 def test_resolve_prefers_env_override(tmp_path, monkeypatch):
@@ -157,7 +156,6 @@ def test_resolve_uses_frozen_bundle_path(tmp_path, monkeypatch):
     assert resolve_ten_vad_lib() == bundled
 
 
-# --- AC 6: verdict rule ----------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -179,7 +177,6 @@ def test_required_speech_hops_reuses_shipped_ratio_not_a_new_knob():
     assert _required_speech_hops(4, permissive) == 4
 
 
-# --- AC 4: fail-open ladder, rung by rung ---------------------------------
 
 
 def test_analyze_vad_returns_none_when_library_unavailable(tmp_path, monkeypatch):
@@ -302,7 +299,6 @@ def test_failed_library_load_is_cached_not_retried_per_call(tmp_path, monkeypatc
     assert calls["n"] == 1
 
 
-# --- AC 5: streaming + early exit -----------------------------------------
 
 
 @_requires_dll
@@ -360,8 +356,6 @@ def test_analyze_vad_exits_early_once_verdict_is_certain(tmp_path):
             consumed["blocks"] += 1
             yield block
 
-    # analyze_vad imports soundfile lazily inside the function, so patching
-    # the attribute on the module object is what the lazy import resolves to.
     sf.blocks = _counting_blocks
     try:
         result = analyze_vad(path, AudioSettings())
@@ -370,13 +364,11 @@ def test_analyze_vad_exits_early_once_verdict_is_certain(tmp_path):
 
     assert result is not None
     assert result.is_silent is False
-    # 1s blocks over a 10s file: a full scan is 10, early exit lands far below.
     assert consumed["blocks"] < 10, (
         f"analyze_vad consumed {consumed['blocks']}/10 blocks — early exit did not fire"
     )
 
 
-# --- AC 3 / AC 7: contract types and settings -----------------------------
 
 
 @_requires_dll
@@ -418,8 +410,6 @@ def test_probability_setting_override_flips_verdict(tmp_path):
     default_result = analyze_vad(path, AudioSettings())
     assert default_result is not None
     assert default_result.is_silent is False
-    # An unreachable threshold: no hop can score >= 1.01, so nothing counts
-    # as speech and the verdict must flip.
     strict = AudioSettings(silence_vad_probability=1.0, silence_vad_min_speech_frames=5)
     strict_result = analyze_vad(path, strict)
     assert strict_result is not None
@@ -443,13 +433,8 @@ def test_vad_settings_defaults_and_env_override(monkeypatch):
     assert overridden.silence_vad_min_speech_frames == 9
 
 
-# --- AC 11 / 12 / 13 / 14: behavioural claims against the real model ------
 
 
-# AC 11(c): the single tolerated net-new discard (a window the 033 pipeline
-# eats that shipped-029 kept), pinned by cell AND identity so a *different*
-# net-new window, or a second one, fails the suite instead of hiding inside a
-# count. Measured at implementation time — see plan.md Deviation 2.
 _PINNED_NET_NEW = (200, -12.0, 30)
 _PINNED_NET_NEW_START_SECONDS = 240.55
 
@@ -493,8 +478,6 @@ def test_real_speech_is_never_discarded(tmp_path):
                 energy = analyze_silence(path, settings)
                 vad = analyze_vad(path, settings)
                 energy_silent = energy is not None and energy.is_silent
-                # The shipped decision rule: VAD decides whenever it produced
-                # a verdict; energy is the fallback when it abstained.
                 shipped_silent = vad.is_silent if vad is not None else energy_silent
                 if energy_silent:
                     energy_discards[cell].append(i)
@@ -511,7 +494,6 @@ def test_real_speech_is_never_discarded(tmp_path):
         f"(029's documented residual zone) but discarded only {energy_total}"
     )
 
-    # (a) Native capture level: no acceptable rate of eating normal speech.
     native = {
         cell: idx for cell, idx in shipped_discards.items() if cell[1] == 0.0 and idx
     }
@@ -520,7 +502,6 @@ def test_real_speech_is_never_discarded(tmp_path):
         f"at 0 dB, where the bar is absolute zero: {native}"
     )
 
-    # (b) The quiet regime, per cell: this is the whole reason -20 dB is swept.
     quiet_losses = {
         cell: (len(shipped_discards[cell]), len(energy_discards[cell]))
         for cell in shipped_discards
@@ -531,7 +512,6 @@ def test_real_speech_is_never_discarded(tmp_path):
         f"the energy guard in every -20 dB cell; (vad, energy) per failing cell: {quiet_losses}"
     )
 
-    # (c) Whole-sweep magnitude, and the net-new set by identity, not by count.
     assert shipped_total < energy_total / 5, (
         f"AC 11(c) VIOLATED — the VAD pipeline discarded {shipped_total}/960 real-speech "
         f"windows against energy's {energy_total}: regression toward energy-level "
@@ -592,8 +572,6 @@ async def test_averted_energy_false_positive_is_not_discarded_end_to_end(tmp_pat
         f"max_prob={vad.max_probability:.3f})"
     )
 
-    # Guard the whole point of this test: if some future refactor stubs the
-    # VAD out from under it, the pipeline half below would pass vacuously.
     assert vad_module.resolve_ten_vad_lib() is not None
     assert service_module.analyze_vad is analyze_vad, (
         "the pipeline must call the REAL analyze_vad here — AC 12 is about the "
@@ -699,7 +677,7 @@ def test_analyze_vad_latency_on_short_clip(tmp_path):
     signal = _normalized_to_rms_dbfs(np.random.default_rng(11).normal(0, 1, n), -20.0)
     path = _write_wav(tmp_path / "three_seconds.wav", signal)
 
-    analyze_vad(path, AudioSettings())  # warm the cached library handle
+    analyze_vad(path, AudioSettings())
     started = time.perf_counter()
     analyze_vad(path, AudioSettings())
     elapsed_ms = (time.perf_counter() - started) * 1000
@@ -714,7 +692,7 @@ def test_analyze_vad_latency_on_full_real_sample():
     exit makes this far cheaper than the energy pass over the same file
     (measured ~16ms vs ~1707ms) — speech at the front means the scan stops
     almost immediately."""
-    analyze_vad(_TRAIN_AUDIO_MP3, AudioSettings())  # warm
+    analyze_vad(_TRAIN_AUDIO_MP3, AudioSettings())
     started = time.perf_counter()
     result = analyze_vad(_TRAIN_AUDIO_MP3, AudioSettings())
     elapsed_ms = (time.perf_counter() - started) * 1000
@@ -724,12 +702,6 @@ def test_analyze_vad_latency_on_full_real_sample():
     assert elapsed_ms <= 3000.0, f"analyze_vad took {elapsed_ms:.1f}ms on the full sample"
 
 
-# --- AC 14(b)(c): contention and concurrency ------------------------------
-#
-# These exist because AC 14's original bounds were ALL single-threaded, and a
-# single-threaded measurement is structurally blind to a lock convoy: the
-# whole-scan lock measured 15.2ms solo and 1628.9ms under contention. Solo
-# numbers cannot catch that class, so these tests are genuinely concurrent.
 
 
 def _hum_wav(path: Path, seconds: int) -> Path:
@@ -758,7 +730,7 @@ def test_short_clip_is_not_blocked_behind_a_long_scan(tmp_path):
     long_path = _hum_wav(tmp_path / "long_hum.wav", 300)
     short_path = _hum_wav(tmp_path / "short_hum.wav", 3)
 
-    analyze_vad(short_path, AudioSettings())  # warm the cached library handle
+    analyze_vad(short_path, AudioSettings())
 
     in_flight = threading.Event()
     stop = threading.Event()
@@ -859,8 +831,6 @@ def test_cold_cache_stampede_loads_the_library_exactly_once(tmp_path, monkeypatc
         def __init__(self, lib_path):
             with load_lock:
                 loads["n"] += 1
-            # Widen the race window: a genuinely unsynchronised _get_library
-            # would have all four threads inside this constructor at once.
             time.sleep(0.05)
 
         def create(self, threshold):
@@ -894,23 +864,8 @@ def test_cold_cache_stampede_loads_the_library_exactly_once(tmp_path, monkeypatc
     )
 
 
-# --- Spec 034 AC 7-8: the lazy-energy-fallback gate latency ----------------
-#
-# These measure the WHOLE pre-model gate through the real `process_audio`,
-# not `analyze_vad` in isolation — the point of spec 034 is orchestration, so
-# a detector-only measurement would be blind to it. They live in test_vad.py
-# rather than test_pipeline.py on purpose: this file is outside that module's
-# autouse `_vad_abstains` fixture, so BOTH detectors are real here.
-#
-# Shipped ordering paid >= 1707ms for the energy pass alone on the full
-# sample (spec 033 Deviations, AC 14). Ceilings below are deliberately
-# generous against expected ~16-50ms; the recorded medians in plan.md's
-# Deviations are what actually show the win.
 
 
-# A real full scan of 300s of hum measured ~1.7s (spec 033). Anything under
-# this is not a scan at all -- it is analyze_vad's fail-open path returning
-# immediately, which makes the contention test both vacuous and a hot spin.
 _MIN_CONTENTION_SCAN_S = 0.05
 
 
@@ -929,8 +884,6 @@ async def _median_gate_ms(path: Path, duration: float, runs: int = 5) -> float:
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)), \
             patch("app.pipeline.service.pyperclip.copy"), \
             patch("app.pipeline.service.save_entry"):
-        # Warm the cached library handle and the OS file cache; the autouse
-        # _reset_library_cache fixture means every test starts cold.
         await process_audio(path, language="uk", style="normal", audio_duration=duration)
         for _ in range(runs):
             started = time.perf_counter()
@@ -988,10 +941,6 @@ async def test_gate_latency_on_full_real_sample_under_contention(tmp_path):
             elapsed = time.perf_counter() - started
             fastest_scan["s"] = min(fastest_scan["s"], elapsed)
             in_flight.set()
-            # analyze_vad fails open in MICROSECONDS on a library error, which
-            # would turn this loop into a hot spin: it would burn a core for
-            # the rest of the run and skew the very measurement it exists to
-            # create. `stop.wait` doubles as the sleep and the exit check.
             if elapsed < _MIN_CONTENTION_SCAN_S:
                 stop.wait(0.05)
 

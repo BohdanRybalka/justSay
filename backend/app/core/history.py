@@ -45,28 +45,12 @@ SCHEMA_VERSION = 3
 STATS_TTL_SECONDS = 5.0
 
 _lock = threading.Lock()
-# Pre-bootstrap() fallback -- see docs/adr/012-dev-mode-data-directory-isolation.md
-# and docs/adr/014-lazy-app-data-path-resolution.md. `None` until `bootstrap()`/
-# `init_output_dir()`/`relocate()` assigns a concrete Path (genuine runtime
-# state -- the user can point history at a directory of their own choosing).
-# The *fallback* resolution used before any of those ever ran is lazy --
-# `_resolve_output_dir()` below -- not eagerly bound here at import time,
-# which was Spec 028 Item 1's AC 8a fix: this line used to read
-# `resolve_app_data_root()` directly, an eager, import-time resolved path --
-# precisely what ADR 014 forbids, in the module ADR 014 itself names as the
-# reference pattern. app_paths.py is a leaf module with no dependency on
-# user_settings, preserving the one-way dependency (user_settings -> history)
-# documented above.
 _output_dir: Path | None = None
 _conn: sqlite3.Connection | None = None
 _stats_cache: tuple[float, "HistoryStats"] | None = None
 
-# Phase 3 (sqlite-vec) — set on every _connect() call. Semantic search is
-# gated on this flag; a platform where the extension fails to load
-# (enable_load_extension compiled out — see ADR 001) degrades to "semantic
-# search unavailable" rather than crashing the sidecar.
 _vec_available: bool = False
-_vec_load_warned = False  # log the load failure once per process, not per connect
+_vec_load_warned = False
 
 
 class RelocateResult(str, Enum):
@@ -99,7 +83,6 @@ class HistoryStats(BaseModel):
     by_model: dict[str, int]
 
 
-# --- Connection factory --------------------------------------------------
 
 def _connect(db_path: Path) -> sqlite3.Connection:
     """Open a connection with the canonical PRAGMAs.
@@ -151,10 +134,6 @@ CREATE TABLE IF NOT EXISTS entries (
 CREATE INDEX IF NOT EXISTS entries_ts_idx ON entries(ts DESC);
 """
 
-# Phase 2 — FTS5 full-text search over cleaned_text.
-# External-content table (content='entries') means FTS doesn't duplicate
-# the data; triggers keep its index in sync. IF NOT EXISTS everywhere so a
-# partial migration (user_version=2 but FTS missing) can self-heal.
 _DDL_V2 = """
 CREATE VIRTUAL TABLE IF NOT EXISTS entry_fts USING fts5(
   cleaned_text,
@@ -189,10 +168,6 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         Also re-run v3 DDL (IF NOT EXISTS) so a partial migration that left
         user_version=3 but the embeddings tables missing self-heals too.
     """
-    # Lazy import: vector_store imports `history` at module level (it needs
-    # `_lock`/`_ensure_conn_locked`), so importing it back at history.py's
-    # own module top would be circular. A local import inside this function
-    # body runs after both modules have finished loading — no cycle.
     from app.core import vector_store
 
     conn.executescript(_DDL_V1)
@@ -203,21 +178,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         conn.executescript(vector_store._DDL_V3)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     else:
-        # Idempotent recovery from a partially-applied v2: if the FTS
-        # table or its triggers were dropped between boots (interrupted
-        # migration, manual edit), the IF NOT EXISTS clauses recreate
-        # them. A row-count probe then detects the empty-index case
-        # (integrity-check trivially passes on an empty FTS) and a
-        # divergence probe catches deeper corruption — either branch
-        # ends in a rebuild.
         conn.executescript(_DDL_V2)
-        # Probe whether the FTS index is in sync with `entries`.
-        # `count(*)` on the FTS virtual table is forwarded to the
-        # external content table, so we read the FTS-side count from
-        # the shadow `entry_fts_docsize` table. That shadow name is
-        # SQLite-internal; if it is ever missing (interrupted DDL,
-        # SQLite version quirk), fall through to a full rebuild
-        # rather than crashing the migrator.
         entries_rows = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
         needs_rebuild = False
         try:
@@ -235,15 +196,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         if needs_rebuild:
             conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
 
-        # v3 recovery: IF NOT EXISTS everywhere in _DDL_V3 makes this a
-        # no-op when the tables are already present, and self-heals a
-        # partial migration that left user_version=3 but the embeddings
-        # tables missing (interrupted DDL, manual edit). No data-replay
-        # step is needed — unlike FTS, these tables start empty.
         conn.executescript(vector_store._DDL_V3)
 
 
-# --- Public path API -----------------------------------------------------
 
 def _resolve_output_dir() -> Path:
     """`_output_dir` if `bootstrap()`/`init_output_dir()`/`relocate()` has
@@ -257,7 +212,6 @@ def history_path() -> Path:
     return _resolve_output_dir() / HISTORY_FILENAME
 
 
-# --- Lifespan / bootstrap ------------------------------------------------
 
 def init_output_dir(target: Path) -> None:
     """Test/internal helper. Real lifespan callers should use ``bootstrap``."""
@@ -289,7 +243,6 @@ def _epoch_ms_to_iso(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
 
 
-# --- Relocate ------------------------------------------------------------
 
 def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
     """Move history.db to new_dir. Mutates _output_dir + closes/reopens
@@ -312,10 +265,6 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
     """
     global _output_dir, _conn, _stats_cache
     with _lock:
-        # _resolve_output_dir(), not the bare _output_dir global: a
-        # relocate() call before the first bootstrap()/init_output_dir()
-        # (unusual, but not prevented) would otherwise crash on
-        # `None / HISTORY_FILENAME` (ADR 014, AC 8a).
         old_dir = _resolve_output_dir()
         old_path = old_dir / HISTORY_FILENAME
 
@@ -351,7 +300,6 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
             _stats_cache = None
             return RelocateResult.NO_OLD_FILE, None
 
-        # Move: close the old conn first so SQLite releases the lock on Windows.
         _close_conn_locked()
         new_conn: sqlite3.Connection | None = None
         try:
@@ -363,20 +311,14 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
                 _stats_cache = None
                 return RelocateResult.FAILED, "Verification failed: entry count mismatch"
 
-            # Open and validate the new connection BEFORE deleting the old file.
-            # If _connect raises, we still have old_path intact and rollback safely.
             new_conn = _connect(new_path)
             _init_schema(new_conn)
-            # Phase 2: do not trust the copied FTS index — always rebuild
-            # on the new path so search results are consistent with entries
-            # right after the move.
             new_conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
 
-            # Point of no return — only after the new connection is healthy.
             old_path.unlink()
             _output_dir = new_dir
             _conn = new_conn
-            new_conn = None  # ownership transferred
+            new_conn = None
             _stats_cache = None
             log.info("Relocated history %s → %s", old_path, new_path)
             return RelocateResult.MOVED, None
@@ -397,7 +339,6 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
             return RelocateResult.FAILED, f"Move failed: {e}"
 
 
-# --- CRUD ----------------------------------------------------------------
 
 def save_entry(
     text: str,
@@ -560,7 +501,6 @@ def compute_stats(now: datetime | None = None) -> HistoryStats:
         return stats
 
 
-# --- Internals -----------------------------------------------------------
 
 def _row_to_entry(row: sqlite3.Row) -> HistoryEntry:
     return HistoryEntry(

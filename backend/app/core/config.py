@@ -21,23 +21,12 @@ class AppSettings(BaseSettings):
     port: int = 9377
     debug: bool = False
 
-    # Per-launch shared secret injected by the Tauri shell via
-    # ``JUSTSAY_API_TOKEN`` and enforced by ``LaunchTokenMiddleware``. Empty
-    # (the default, e.g. a manually started ``uvicorn`` backend) means open
-    # mode -- no token is required. See
-    # docs/adr/026-loopback-api-request-authentication.md.
     api_token: str = ""
 
-    # Host-header allowlist for ``TrustedHostMiddleware`` (defeats DNS
-    # rebinding). Defaults strict; ``JUSTSAY_TRUSTED_HOSTS`` (JSON-parsed) is a
-    # config-layer seam the test suite widens before import. Starlette strips
-    # the port before matching, so ``:9377`` is accepted.
     trusted_hosts: list[str] = Field(
         default_factory=lambda: ["127.0.0.1", "localhost"]
     )
 
-    # default_factory ensures each ``AppSettings()`` re-reads env (matters for
-    # tests that ``monkeypatch.setenv`` after module import).
     stt: STTSettings = Field(default_factory=STTSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     audio: AudioSettings = Field(default_factory=AudioSettings)

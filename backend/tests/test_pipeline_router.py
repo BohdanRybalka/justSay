@@ -80,17 +80,13 @@ async def test_process_file_forwards_explicit_language_code_unchanged(client):
     assert mock_process_audio.call_args.kwargs["language"] == "uk"
 
 
-# --- Upload content validation ---------------------------------------
 
 
 @pytest.mark.anyio
 async def test_process_file_rejects_extension_content_mismatch(client):
     """`.wav` filename with non-WAV bytes is rejected at the validator boundary,
     not handed off to the STT provider where it would 500 deep inside soundfile."""
-    fake_payload = b"MZ" + (b"\x00" * 64)  # DOS / PE prefix
-    # Patched even though validation raises before process_audio is reached: a
-    # future validation regression must surface as a failed assertion here, not
-    # as a real STT call.
+    fake_payload = b"MZ" + (b"\x00" * 64)
     with patch("app.pipeline.router.process_audio", AsyncMock(return_value=_fake_result())):
         resp = await client.post(
             "/pipeline/process-file",

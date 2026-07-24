@@ -20,40 +20,11 @@ log = logging.getLogger(__name__)
 
 _install_lock = asyncio.Lock()
 
-# Serializes the entire probe -> install-if-needed -> load attempt end to
-# end, so a fast Local<->Cloud flap collapses to at most one real attempt
-# instead of racing multiple overlapping loads. Must be an asyncio.Lock, not
-# threading.Lock: the critical section spans genuine `await`s (pip install
-# via asyncio.to_thread, the model load itself) — mirrors
-# app.embeddings.resolve_embedding_provider's (LOCAL, LOCAL) probe/decide/
-# cleanup-or-reuse lock (spec 013 precedent).
 _prewarm_lock = asyncio.Lock()
-# Surfaced through check_status().last_error alongside the provider's own
-# last_load_error — set on an install failure (before a provider-level error
-# could even occur), cleared on a successful install or a fresh install
-# attempt.
 _prewarm_error: str | None = None
 
-# (provider, Task) for whichever _get_model() attempt is currently in
-# flight, if any -- tracked independently of _prewarm_lock (Stage 5 GitHub
-# review on PR #34, finding 1). `asyncio.wait_for`'s timeout cancels the
-# *waiting coroutine*, not the worker thread `_get_model()` actually runs
-# on -- a thread cannot be cancelled. Without this, a caller whose own wait
-# times out releases `_prewarm_lock` while its `_get_model()` call keeps
-# running unobserved; the NEXT caller then sees `is_loaded=False` (the
-# orphaned load hasn't finished), passes every check, and starts a
-# genuinely SECOND `_get_model()` call. Storing the in-flight (provider,
-# Task) here lets a later caller find and re-join the SAME attempt via
-# `asyncio.shield()` in `ensure_local_ready()` instead of starting a
-# redundant one -- `asyncio.shield()` is what lets a caller's own timeout
-# detach it from *observing* the task without cancelling the task itself.
 _active_load: tuple[object, asyncio.Task] | None = None
 
-# Generous enough to cover a genuinely cold first run -- pip install (up to
-# 300s per _run_pip_install's own subprocess timeout) plus the model load
-# itself -- so this bound only ever trips on a load that is truly stuck
-# (broken GPU driver, dead network mid-download), not on an ordinary slow
-# first-time setup. See await_local_ready().
 _READY_TIMEOUT = 300.0
 
 
@@ -84,10 +55,6 @@ class LocalSttStatus(BaseModel):
     model_ram_mb: int | None = None
     gpu_available: bool = False
     gpu_name: str | None = None
-    # "apple" on macOS arm64, else the app.core.gpu_probe vendor value
-    # ("nvidia"/"amd"/"intel"/"none"). Populated even when gpu_available is
-    # False (e.g. an explicit whisper_device="cpu" override) — AMD/Intel
-    # Windows is Vulkan-accelerated (see WHISPER_CPP_VULKAN in local_factory.py).
     gpu_vendor: str = "none"
     device: str = "cpu"
     compute_type: str = "int8"
@@ -97,27 +64,12 @@ class LocalSttStatus(BaseModel):
 def check_status(stt_settings: STTSettings) -> LocalSttStatus:
     """Check local STT readiness: package installed + load state + GPU + last error."""
     installed = _check_package_installed()
-    # `cuda_probe_available` feeds only the "auto" -> cuda/cpu decision below
-    # (faster-whisper/CTranslate2 has no AMD/Intel backend, so that decision
-    # stays NVIDIA-only) — the status object's own `gpu_available` field is
-    # computed separately, from the final resolved `device`, further down.
     cuda_probe_available, gpu_name, gpu_vendor = _detect_gpu()
 
     if is_macos_arm64():
         device = "mlx"
-        # Informational label — actual dtype is controlled inside mlx-whisper.
-        # Accurate for the project default large-v3-turbo and other large
-        # variants; smaller MLX checkpoints ship as float16.
         compute_type = "bfloat16"
     else:
-        # Pass the vendor _detect_gpu() already resolved straight through to
-        # get_local_provider_kind() instead of letting it call probe_gpu() a
-        # second time — probe_gpu() has no caching (docs/TODO.md → Tech
-        # Debt), and check_status() is polled every 3s by the Settings tab.
-        # gpu_vendor is always "nvidia"/"amd"/"intel"/"none" here (the
-        # "apple" value only comes back from the is_macos_arm64() branch of
-        # _detect_gpu(), which can't be true in this else branch since it's
-        # the same is_macos_arm64() check).
         from app.core.gpu_probe import GpuVendor
 
         kind = get_local_provider_kind(GpuVendor(gpu_vendor))
@@ -130,18 +82,10 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
                 device = "cuda" if cuda_probe_available else "cpu"
             compute_type = "float16" if device == "cuda" else "int8"
 
-    # True whenever the *final resolved* device indicates real GPU
-    # acceleration — not just NVIDIA — so a Vulkan-accelerated AMD/Intel
-    # session never reports the contradictory device: "vulkan" +
-    # gpu_available: false pair (Stage 3 review, iteration 1, issue #2).
     gpu_available = device in ("cuda", "vulkan", "mlx")
 
-    # is_model_loaded reads the cached provider; safe even if the package is missing.
     from app.stt import get_local_load_error, is_model_loaded
 
-    # Mutually exclusive in practice: an install failure returns before any
-    # provider-level error could be set, and a load failure only ever
-    # happens after install already succeeded (_prewarm_error is None by then).
     last_error = get_local_load_error(stt_settings) or _prewarm_error
 
     return LocalSttStatus(
@@ -272,12 +216,12 @@ async def _run_get_model(provider) -> None:
     try:
         await asyncio.to_thread(provider._get_model)
     except Exception:
-        pass  # provider._last_load_error is already latched
+        pass
     finally:
         from app.stt import peek_local_provider
 
         if peek_local_provider() is not provider:
-            provider.cleanup()  # orphaned — cache moved on mid-load
+            provider.cleanup()
 
 
 async def ensure_local_ready(stt_settings: STTSettings) -> None:
@@ -332,18 +276,16 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
     global _prewarm_error, _active_load
     async with _prewarm_lock:
         if stt_settings.mode != ProviderMode.LOCAL:
-            return  # superseded before this attempt even started
+            return
 
         from app.stt import get_provider, peek_local_provider
 
         provider = get_provider(ProviderMode.LOCAL, stt_settings)
         if provider.is_loaded:
-            return  # already warm — the common case after the first prewarm
+            return
 
         if not _check_package_installed():
             if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_VULKAN:
-                # Nothing to `pip install` for this kind — the whisper-server
-                # binary is either bundled/dev-vendored or it isn't.
                 _prewarm_error = (
                     "whisper-server binary not found. Set JUSTSAY_WHISPER_CPP_BIN, "
                     "or run backend/scripts/build_whisper_cpp_vulkan.ps1 for local dev."
@@ -356,9 +298,8 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
                 return
             _prewarm_error = None
 
-        # Identity check, NOT a stt_settings.mode check — see docstring above.
         if peek_local_provider() is not provider:
-            return  # cache moved on before we even started the model load
+            return
 
         if (
             _active_load is None
@@ -455,7 +396,7 @@ def _estimate_model_ram_mb() -> int | None:
 
         rss = psutil.Process(os.getpid()).memory_info().rss
         return rss // (1024 * 1024)
-    except Exception:  # psutil missing on a stripped install
+    except Exception:
         return None
 
 
@@ -505,10 +446,6 @@ async def install_local_packages() -> AsyncIterator[str]:
         yield sse_event("error", {"status": "error", "error": "Installation already in progress"})
         return
 
-    # pip install is impossible from a PyInstaller-frozen sidecar: there's no
-    # pyproject.toml, no editable source tree, and sys.executable points at
-    # the frozen interpreter itself. Surface a clear error instead of running
-    # pip from `_MEIPASS` with surprising side effects.
     if getattr(sys, "frozen", False):
         yield sse_event("error", {
             "status": "error",
@@ -519,7 +456,6 @@ async def install_local_packages() -> AsyncIterator[str]:
         })
         return
 
-    # Already installed?
     if _check_package_installed():
         yield sse_event("done", {"status": "already_installed"})
         return
@@ -548,7 +484,7 @@ def _run_pip_install() -> tuple[int, str]:
         cwd=str(backend_dir),
         capture_output=True,
         text=True,
-        timeout=300,  # 5 min max
+        timeout=300,
     )
 
     output = result.stdout + result.stderr
@@ -563,14 +499,12 @@ def _get_backend_dir():
     """Get the backend project directory (where pyproject.toml lives)."""
     from pathlib import Path
 
-    # Walk up from this file to find pyproject.toml
     current = Path(__file__).resolve().parent
     for _ in range(5):
         if (current / "pyproject.toml").exists():
             return current
         current = current.parent
 
-    # Fallback: assume backend/ is two levels up from app/stt/
     return Path(__file__).resolve().parent.parent.parent
 
 

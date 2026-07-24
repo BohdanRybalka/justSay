@@ -47,11 +47,6 @@ class EmbeddingProvider(Protocol):
         """
 
 
-# Reason strings are consumed internally by words._semantic_lane (spec 017
-# / ADR 010), which logs them at `debug` and degrades to an empty semantic
-# lane -- neither surface that used to re-expose them verbatim
-# (`mode=semantic`'s 503 `detail`, `/history/embeddings-status`'s `reason`
-# field) exists anymore.
 MIXED_MODE_REASON = (
     "Semantic search needs matching Cloud/Local mode on both Speech-to-Text "
     "and AI Processing"
@@ -62,15 +57,6 @@ LOCAL_MISSING_MODEL_REASON = (
 )
 
 _cache_lock = threading.Lock()
-# Serializes the entire (LOCAL, LOCAL) probe -> decide -> cleanup-or-reuse ->
-# cache-write sequence end to end, so at most one such resolution is ever
-# in flight. Must be an asyncio.Lock, not threading.Lock: the critical
-# section spans a genuine `await` (the Ollama HTTP probe), and a
-# threading.Lock held across an await would block the whole event-loop
-# thread instead of suspending the waiting coroutine. The Cloud/mixed-mode
-# branch below never awaits while holding a stale-instance reference and
-# never reuses-or-cleans-up across an await, so it has no equivalent race
-# and keeps using only the lightweight _cache_lock.
 _local_reprobe_lock = asyncio.Lock()
 _cached_provider: EmbeddingProvider | None = None
 _cached_reason: str | None = None
@@ -144,7 +130,7 @@ async def resolve_embedding_provider(
             return _cached_provider, _cached_reason
 
     if stt.mode == ProviderMode.CLOUD and llm.mode == ProviderMode.CLOUD:
-        from app.embeddings.cloud import CloudEmbeddingProvider  # lazy: imports google-genai
+        from app.embeddings.cloud import CloudEmbeddingProvider
 
         provider = CloudEmbeddingProvider(gemini_api_key=stt.gemini_api_key, model=emb.cloud_model)
         reason = None

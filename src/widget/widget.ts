@@ -3,7 +3,6 @@ import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from
 import { computeDoneStatus } from "./done-status";
 import { dictationErrorLabel } from "./error-label";
 
-// --- State ---
 
 type WidgetState = "idle" | "recording" | "processing" | "done" | "error";
 type IconState = "idle" | "hover" | "recording" | "processing" | "done" | "error";
@@ -24,20 +23,17 @@ let durationInterval: ReturnType<typeof setInterval> | null = null;
 let iconFlashTimer: ReturnType<typeof setTimeout> | null = null;
 let connectionState: ConnectionCheckState = { offline: false, firstCheckDone: false };
 
-// Settings (loaded from backend)
 let currentShortcut = "Ctrl+Alt+KeyV";
 let currentLanguage = "uk";
 
 const AUTO_REVERT_MS = 3000;
 
-// --- DOM ---
 
 const widget = document.getElementById("widget")!;
 const iconEl = document.getElementById("widget-icon")!;
 const text = document.getElementById("widget-text")!;
 const durationEl = document.getElementById("widget-duration")!;
 
-// --- Icon helpers ---
 
 function updateIcon(next: IconState) {
   const keep = [...iconEl.classList].filter(
@@ -48,14 +44,10 @@ function updateIcon(next: IconState) {
   iconEl.className = ["widget-icon", "js-widget", ...keep, `js-widget--${next}`].join(" ");
 }
 
-// "Interactive window" — when hover should respond. Idle is the obvious case;
-// the calm tail of `done` (after the 700 ms one-shot, while the compact status
-// is still showing) is also interactive, so the icon doesn't get stuck on `hover`.
 function isInteractive(): boolean {
   return state === "idle" || (state === "done" && iconFlashTimer === null);
 }
 
-// --- State management ---
 
 function setState(newState: WidgetState, message?: string, durationLabel?: string) {
   state = newState;
@@ -128,7 +120,6 @@ function formatDuration(seconds: number): string {
   return `${s}.${ms}s`;
 }
 
-// --- Recording flow ---
 
 async function startRecording() {
   if (state === "recording" || state === "processing" || isTransitioning) return;
@@ -158,8 +149,6 @@ async function stopAndProcess() {
     const outcome = computeDoneStatus(result);
     if (outcome) {
       setState("done", outcome.label, formatDuration(outcome.elapsedSeconds));
-      // No provider ran on a silence-guard discard (model_name is ""), so a
-      // route badge would misleadingly name a model that never executed.
       if (result.discarded_reason !== "silence") {
         showRouteBadge(result);
       }
@@ -203,13 +192,11 @@ async function toggleRecording() {
   }
 }
 
-// --- Click ---
 
 widget.addEventListener("click", () => {
   toggleRecording();
 });
 
-// --- Hover (icon-only — only flips when the widget is in an interactive state) ---
 
 widget.addEventListener("mouseenter", () => {
   isHovered = true;
@@ -221,7 +208,6 @@ widget.addEventListener("mouseleave", () => {
   if (isInteractive()) updateIcon("idle");
 });
 
-// --- Global shortcut ---
 
 let unregisterFn: (() => Promise<void>) | null = null;
 
@@ -229,11 +215,10 @@ async function setupGlobalShortcut(shortcut: string) {
   try {
     const { register, unregister } = await import("@tauri-apps/plugin-global-shortcut");
 
-    // Unregister previous if exists
     if (unregisterFn) {
       try {
         await unregisterFn();
-      } catch { /* ignore */ }
+      } catch {}
     }
 
     await register(shortcut, (event) => {
@@ -251,7 +236,6 @@ async function setupGlobalShortcut(shortcut: string) {
   }
 }
 
-// --- Load settings ---
 
 async function loadSettings() {
   try {
@@ -266,7 +250,6 @@ async function loadSettings() {
   }
 }
 
-// --- Listen for settings changes from Settings window ---
 
 async function listenForSettingsChanges() {
   try {
@@ -275,11 +258,9 @@ async function listenForSettingsChanges() {
       await loadSettings();
     });
   } catch {
-    // Not in Tauri
   }
 }
 
-// --- Health check ---
 
 async function checkConnection() {
   let healthOk = true;
@@ -299,7 +280,6 @@ async function checkConnection() {
   }
 }
 
-// --- Init ---
 
 async function init() {
   await checkConnection();
@@ -309,12 +289,10 @@ async function init() {
   await setupGlobalShortcut(currentShortcut);
   await listenForSettingsChanges();
 
-  // Signal Rust that webview is loaded
   try {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("widget_ready");
   } catch {
-    // Not in Tauri
   }
 }
 

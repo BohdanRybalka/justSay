@@ -34,18 +34,10 @@ log = logging.getLogger(__name__)
 
 TOP_LIMIT_MAX = 500
 SEARCH_LIMIT_MAX = 100
-RRF_K = 60  # Cormack et al. 2009; same value used by sqlite-vec's own hybrid-search writeup
+RRF_K = 60
 
-# Merged filter — applied for every language including lang=all. Allows
-# Cyrillic stop-words to be filtered out of an "en" entry that happens to
-# contain a Ukrainian phrase, and vice versa.
 STOPWORDS_ALL: frozenset[str] = STOPWORDS_UK | STOPWORDS_EN
 
-# Apostrophe-aware Unicode word regex. Captures Latin + Cyrillic word chars
-# and inner apostrophes (straight ' and typographic '). Examples:
-#   "don't"  → ["don't"]
-#   "м'яко"  → ["м'яко"]
-#   "she's"  → ["she's"]
 _TOKEN_RE = re.compile(r"[\wЀ-ӿ]+(?:['’][\wЀ-ӿ]+)*", re.UNICODE)
 
 
@@ -95,7 +87,7 @@ def top_words(
         for tok in tokenize(row["cleaned_text"]):
             if tok in STOPWORDS_ALL:
                 continue
-            if len(tok) < 2:  # drop single letters that survived the regex
+            if len(tok) < 2:
                 continue
             counter[tok] += 1
 
@@ -106,16 +98,11 @@ def top_words(
     return TopWordsResponse(items=items, scanned=len(rows))
 
 
-# --- Search --------------------------------------------------------------
 
 class HistorySearchHit(history.HistoryEntry):
     highlighted_text: str = ""
 
 
-# Whitelist: Unicode letters/digits, straight + curly apostrophes, whitespace.
-# Everything else (`-`, `/`, `:`, `^`, `*`, `"`, `(`, `)`, etc.) is stripped
-# before the prefix rewrite — closes every FTS5 special-character surface in
-# one shot.
 _SANITIZE_KEEP_RE = re.compile(r"[^\w\s'’‘]", re.UNICODE)
 
 
@@ -156,7 +143,6 @@ def _build_highlight(text: str | None, tokens: list[str]) -> str:
     if not tokens:
         return html.escape(text)
 
-    # Collect spans across all tokens, dropping zero-width matches.
     spans: list[tuple[int, int]] = []
     for tok in tokens:
         if not tok:
@@ -168,7 +154,6 @@ def _build_highlight(text: str | None, tokens: list[str]) -> str:
     if not spans:
         return html.escape(text)
 
-    # Merge overlapping/adjacent spans.
     spans.sort()
     merged: list[list[int]] = [[spans[0][0], spans[0][1]]]
     for start, end in spans[1:]:
@@ -242,13 +227,9 @@ def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
 
         hits = [_hit_from_row(r, tokens) for r in fts_rows]
 
-        # LIKE-fallback lane: only when the FTS5 lane left room.
         residual = clamped_limit - len(hits)
         if residual > 0:
             like_clauses = " AND ".join(["cleaned_text LIKE ? ESCAPE '\\'"] * len(tokens))
-            # Escape LIKE wildcards (`%`, `_`) and the backslash itself so a
-            # token containing them only matches the literal characters in
-            # transcript content (exit-gate YELLOW-1).
             def _escape_like(t: str) -> str:
                 return t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             like_params: list = [f"%{_escape_like(t)}%" for t in tokens]
@@ -259,8 +240,6 @@ def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
                 not_in_clause = f" AND id NOT IN ({placeholders})"
                 params = (*like_params, *existing_ids, residual)
             else:
-                # Empty set — skip the NOT IN clause entirely; emitting
-                # ``id NOT IN ()`` would be an SQLite syntax error.
                 not_in_clause = ""
                 params = (*like_params, residual)
 
@@ -275,12 +254,9 @@ def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
 
             hits.extend(_hit_from_row(r, tokens) for r in like_rows)
 
-    # Defensive: enforce the overall cap (the SQL residual LIMIT should
-    # already make this a no-op).
     return hits[:clamped_limit]
 
 
-# --- Semantic search (Phase 3 — spec 003) ---------------------------------
 
 async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearchHit]:
     """Embed ``q`` with the currently-resolved embedding provider and rank
@@ -305,18 +281,12 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
     spans — relevance here isn't token-based, so there's no single matched
     span to highlight.
     """
-    # Late imports: keep embeddings/vector_store optional from words.py's own
-    # import-time perspective (resolve_embedding_provider is imported here,
-    # not at module top).
     from app.core import vector_store
     from app.core.config import settings
     from app.embeddings import resolve_embedding_provider
 
     clamped_limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
 
-    # Mirrors search_history's own empty-query short-circuit: an empty/
-    # whitespace `q` returns an empty list immediately and never reaches
-    # the availability checks below or spends a cloud embedding API call.
     if not q or not q.strip():
         return []
 
@@ -337,11 +307,6 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
     if indexed == 0:
         raise vector_store.SemanticSearchUnavailableError(vector_store.NO_ENTRIES_EMBEDDED_DETAIL)
 
-    # Any embedding-provider runtime failure (auth error, network failure,
-    # malformed SDK response) maps to the same SemanticSearchUnavailableError
-    # _semantic_lane already catches and swallows -- since spec 017, no
-    # caller of this function ever lets the raw exception type reach an
-    # HTTP response.
     try:
         query_vector = await provider.embed(q)
     except Exception as e:
@@ -356,7 +321,6 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
     return [_hit_from_row(r, []) for r in rows]
 
 
-# --- Hybrid RRF search (spec 017 / ADR 010) --------------------------------
 
 async def _semantic_lane(q: str, limit: int) -> list[HistorySearchHit]:
     """Wraps ``search_history_semantic`` so every failure mode degrades to an
@@ -391,7 +355,7 @@ def _rrf_fuse(
     by_id: dict[str, HistorySearchHit] = {}
     for rank, hit in enumerate(fts_hits, start=1):
         scores[hit.id] = scores.get(hit.id, 0.0) + 1.0 / (RRF_K + rank)
-        by_id.setdefault(hit.id, hit)  # FTS's <mark>-tagged text wins ties
+        by_id.setdefault(hit.id, hit)
     for rank, hit in enumerate(semantic_hits, start=1):
         scores[hit.id] = scores.get(hit.id, 0.0) + 1.0 / (RRF_K + rank)
         by_id.setdefault(hit.id, hit)

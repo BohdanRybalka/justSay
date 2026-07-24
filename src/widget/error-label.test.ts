@@ -4,9 +4,6 @@ import { dictationErrorLabel } from "./error-label";
 
 describe("dictationErrorLabel", () => {
   it("an ApiAuthError never renders the API-key label, even though its message contains 'missing'", () => {
-    // Verbatim body of the backend's 401 (backend/app/core/auth_middleware.py).
-    // The old inline heuristic matched "missing" here and told the user to add
-    // a cloud API key — the wrong place entirely (spec 042).
     const error = new ApiAuthError("Missing or invalid API token", { kind: "bridge-missing" });
 
     const { label, toast } = dictationErrorLabel(error);

@@ -13,7 +13,6 @@ import pytest
 from app.core import gpu_probe
 from app.core.gpu_probe import GpuProbeResult, GpuVendor
 
-# `import winreg` raises ModuleNotFoundError off Windows -- not mockable, must skip.
 _requires_windows = pytest.mark.skipif(
     sys.platform != "win32",
     reason="winreg is a Windows-only stdlib module; this probe runs only on Windows",
@@ -25,7 +24,6 @@ def _clear_env_override(monkeypatch):
     monkeypatch.delenv("JUSTSAY_GPU_VENDOR", raising=False)
 
 
-# --- Module import hygiene ---
 
 
 def test_module_imports_no_third_party_at_module_level():
@@ -46,7 +44,6 @@ def test_module_imports_no_third_party_at_module_level():
     assert not hasattr(mod, "winreg")
 
 
-# --- Priority order ---
 
 
 def test_env_override_wins_over_all_auto_detected_sources(monkeypatch):
@@ -67,7 +64,7 @@ def test_env_override_wins_over_all_auto_detected_sources(monkeypatch):
     result = gpu_probe.probe_gpu()
 
     assert result.vendor == GpuVendor.AMD
-    assert result.name is None  # env override carries no name/VRAM data
+    assert result.name is None
 
 
 def test_env_override_case_insensitive_value(monkeypatch):
@@ -130,7 +127,6 @@ def test_registry_probe_not_invoked_when_not_windows(monkeypatch):
     assert gpu_probe._probe_windows_registry() is None
 
 
-# --- Never-raises / degrade-on-failure guarantee ---
 
 
 def test_probe_gpu_never_raises_and_degrades_to_none_when_every_source_fails(monkeypatch):
@@ -183,13 +179,13 @@ def test_torch_cuda_probe_computes_vram_from_real_total_memory_attribute():
 
     fake_props = MagicMock(spec=["name", "total_memory"])
     fake_props.name = "NVIDIA GeForce RTX 3060"
-    fake_props.total_memory = 12 * 1024 * 1024 * 1024  # 12 GiB
+    fake_props.total_memory = 12 * 1024 * 1024 * 1024
 
     fake_torch = MagicMock()
     fake_torch.cuda.is_available.return_value = True
     fake_torch.cuda.get_device_properties.return_value = fake_props
-    fake_torch.cuda.memory_reserved.return_value = 2 * 1024 * 1024 * 1024  # 2 GiB reserved
-    fake_torch.cuda.memory_allocated.return_value = 1 * 1024 * 1024 * 1024  # 1 GiB allocated
+    fake_torch.cuda.memory_reserved.return_value = 2 * 1024 * 1024 * 1024
+    fake_torch.cuda.memory_allocated.return_value = 1 * 1024 * 1024 * 1024
 
     with patch.dict("sys.modules", {"torch": fake_torch}):
         result = gpu_probe._probe_torch_cuda()
@@ -338,7 +334,6 @@ def test_windows_registry_probe_skips_unclassifiable_provider(monkeypatch):
     assert gpu_probe._probe_windows_registry() is None
 
 
-# --- _classify_provider_name ---
 
 
 def test_classify_provider_name_amd():
@@ -357,7 +352,6 @@ def test_classify_provider_name_non_string_returns_none():
     assert gpu_probe._classify_provider_name(None) is None
 
 
-# --- Process-lifetime cache (Spec 018 GitHub review, PR #21 iteration 2) ---
 
 
 def test_probe_gpu_caches_result_across_multiple_calls(monkeypatch):
@@ -382,7 +376,7 @@ def test_probe_gpu_caches_result_across_multiple_calls(monkeypatch):
     third = gpu_probe.probe_gpu()
 
     assert call_count == 1
-    assert first is second is third  # literally the same cached object
+    assert first is second is third
     assert first.vendor == GpuVendor.AMD
 
 
@@ -407,9 +401,8 @@ async def test_warm_gpu_probe_cache_populates_cache_so_request_path_reuses_it(mo
 
     monkeypatch.setattr(gpu_probe, "_probe_env_override", _counting_env_override)
 
-    await _warm_gpu_probe_cache()  # simulates lifespan's startup warm-up completing
+    await _warm_gpu_probe_cache()
 
-    # Simulate the request-path call a local dictation would make.
     result = gpu_probe.probe_gpu()
 
     assert probe_source_calls["n"] == 1
@@ -429,7 +422,7 @@ async def test_warm_gpu_probe_cache_swallows_probe_failure(monkeypatch):
 
     monkeypatch.setattr(gpu_probe, "probe_gpu", _boom)
 
-    await _warm_gpu_probe_cache()  # must not raise
+    await _warm_gpu_probe_cache()
 
 
 def test_lifespan_schedules_gpu_probe_warmup_task(spawn_spy):

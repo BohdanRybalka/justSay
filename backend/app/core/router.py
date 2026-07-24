@@ -15,8 +15,6 @@ from app.stt import get_provider as get_stt_provider
 router = APIRouter()
 
 
-# psutil.Process.cpu_percent() needs a primed previous sample. Cache the
-# Process instance at module level so consecutive calls return meaningful values.
 _proc_cache = None
 
 
@@ -26,7 +24,6 @@ def _get_proc():
         import psutil
 
         _proc_cache = psutil.Process(os.getpid())
-        # Prime — first call always returns 0.0; the second one is the real diff.
         _proc_cache.cpu_percent(None)
     return _proc_cache
 
@@ -55,8 +52,6 @@ class GpuInfo(BaseModel):
     name: str
     vendor: str
     vram_total_mb: int
-    # Only the torch.cuda probe source has a live used/free split — the
-    # Windows-registry AMD/Intel source only ever has a VRAM total.
     vram_used_mb: int | None
     vram_free_mb: int | None
 
@@ -91,7 +86,7 @@ def _collect_resources() -> ResourceInfo:
     threads = psutil.cpu_count(logical=True) or 1
 
     rss_bytes = proc.memory_info().rss
-    proc_cpu_raw = proc.cpu_percent(None)  # already a diff vs the cached prime
+    proc_cpu_raw = proc.cpu_percent(None)
     proc_cpu_normalised = min(proc_cpu_raw / threads, 100.0)
 
     gpu = _get_gpu_info()

@@ -29,28 +29,14 @@ export class ApiAuthError extends Error {
   }
 }
 
-// `invoke()` settles only through a registered callback and its send path has
-// no reject channel, so a blocked IPC transport hangs forever (ADR 028). This
-// bound is what turns that hang into an observable state.
 const TOKEN_TIMEOUT_MS = 3000;
 const TOKEN_TIMED_OUT = Symbol("token-timed-out");
 
-// Per-launch API token from the Tauri shell (ADR 026). Fetched via the
-// `get_backend_token` command. A *successful* token is cached for the session;
-// a *failure* is logged and NOT cached, so a transient invoke error inside the
-// real WebView doesn't permanently poison every request into a 401 (ADR 026
-// Risk #3). Outside Tauri (manual browser dev) the bridge is absent, so no
-// header is sent — matching the backend's open mode when no token is configured.
 let cachedToken: string | null = null;
 let tokenPromise: Promise<string | null> | null = null;
 let bridgeDiagnosis: BridgeDiagnosis = { kind: "ok" };
 let authFailureSeen = false;
 
-// Mirrors _EXEMPT_PATHS in backend/app/core/auth_middleware.py. A 2xx from one
-// of these says nothing about whether the token was accepted, so it must never
-// clear authFailureSeen — `api.health()` runs through the same request()
-// helper, and letting the 5 s health poll clear the flag would repaint the
-// badge green over a completely unauthenticated app (ADR 028).
 const TOKEN_EXEMPT_PATHS = new Set(["/health"]);
 
 export function lastBridgeDiagnosis(): BridgeDiagnosis {
@@ -110,8 +96,6 @@ function getToken(): Promise<string | null> {
       cachedToken = token;
       return cachedToken;
     } catch (err) {
-      // Not cached: the next request retries. One retry per request (deduped
-      // while a fetch is in flight), never a retry loop.
       bridgeDiagnosis = {
         kind: "invoke-failed",
         detail: err instanceof Error ? err.message : String(err),
@@ -151,7 +135,6 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return resp.json();
 }
 
-// --- Types ---
 
 export interface HealthResponse {
   status: string;
@@ -306,7 +289,6 @@ export interface TopWordsResponse {
   scanned: number;
 }
 
-// --- API ---
 
 export const api = {
   health: () => request<HealthResponse>("GET", "/health"),
@@ -333,7 +315,6 @@ export const api = {
     const blob = new Blob([fileBytes], { type: "application/octet-stream" });
     form.append("file", blob, filename);
     const path = `/pipeline/process-file?language=${language}`;
-    // No Content-Type header: the browser sets the multipart boundary itself.
     const token = await getToken();
     const headers: Record<string, string> = {};
     if (token) {
@@ -350,10 +331,8 @@ export const api = {
   setSttMode: (mode: "cloud" | "local") =>
     request("PUT", "/stt/mode", { mode }),
 
-  // Resources
   resources: () => request<ResourceInfo>("GET", "/resources"),
 
-  // Local mode status & control
   sttLocalStatus: () => request<LocalSttStatus>("GET", "/stt/local/status"),
   sttLocalLoad: () => request<{ loaded: boolean; model?: string }>("POST", "/stt/local/load"),
   sttLocalUnload: () => request<{ unloaded: boolean }>("POST", "/stt/local/unload"),
@@ -361,7 +340,6 @@ export const api = {
    *  fire-and-forget on the backend, returns before the model finishes loading. */
   sttLocalPrewarm: () => request<{ started: boolean }>("POST", "/stt/local/prewarm"),
 
-  // Settings
   getSettings: () => request<UserSettings>("GET", "/settings"),
 
   updateSettings: (updates: Partial<UserSettings>) =>
@@ -373,7 +351,6 @@ export const api = {
 
   cloudKeyStatus: () => request<CloudKeyStatus>("GET", "/settings/cloud-status"),
 
-  // History
   getHistory: (limit = 50, offset = 0) =>
     request<HistoryListResponse>("GET", `/history?limit=${limit}&offset=${offset}`),
 
@@ -391,12 +368,10 @@ export const api = {
       `/history/search?q=${encodeURIComponent(q)}&limit=${limit}`,
     ),
 
-  // Words (Phase 1 — Plan 013)
   wordsTop: (lang: "all" | "uk" | "en" = "all", limit = 50) =>
     request<TopWordsResponse>("GET", `/words/top?lang=${lang}&limit=${limit}`),
 };
 
-// --- SSE helper for the live microphone level meter ---
 
 export interface LevelStreamEvent {
   level_db: number;
@@ -455,7 +430,6 @@ export function levelStream(
                 onLevel(data);
               }
             } catch {
-              // skip malformed JSON
             }
           }
         }

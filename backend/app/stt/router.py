@@ -28,14 +28,8 @@ async def set_stt_mode(body: _ModeBody):
     clear_cache()
     update_user_settings({"stt_mode": body.mode.value})
     provider = get_provider(settings.stt.mode, settings.stt)
-    # Lazy import (not a module-level from-import) so the autouse conftest
-    # fixture — and tests that monkeypatch app.stt.local_setup directly —
-    # can intercept this call; same pattern as app.stt._get_local's factory
-    # patch comment.
     from app.stt.local_setup import maybe_prewarm_local
 
-    # Fire-and-forget: no-op for Cloud, kicks off an eager pre-warm task for
-    # Local without making this response wait on the model load.
     maybe_prewarm_local(settings.stt)
     return {"stt_mode": settings.stt.mode, "model": provider.model_name}
 
@@ -54,11 +48,9 @@ async def stt_local_load():
 
     try:
         provider = get_provider(settings.stt.mode, settings.stt)
-        # _get_model() triggers lazy load — run in thread (blocking, downloads model)
         await asyncio.to_thread(provider._get_model)
         return {"loaded": True, "model": provider.model_name}
     except Exception as e:
-        # _get_model already latched the error message. Surface it to the user.
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 

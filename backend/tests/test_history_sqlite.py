@@ -37,7 +37,6 @@ def isolated_storage(tmp_path, monkeypatch):
         history._close_conn_locked()
 
 
-# --- Schema / PRAGMA -----------------------------------------------------
 
 def test_user_version_set(isolated_storage, tmp_path):
     target = tmp_path / "target"
@@ -59,7 +58,6 @@ def test_pragmas_set_in_factory(isolated_storage, tmp_path):
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         jm = conn.execute("PRAGMA journal_mode").fetchone()[0]
         assert jm.lower() == "delete"
-        # synchronous=FULL = 2
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2
 
 
@@ -77,7 +75,6 @@ def test_check_constraint_rejects_negative_duration(isolated_storage, tmp_path):
         history.save_entry(text="x", duration_ms=-1)
 
 
-# --- CRUD round-trip ----------------------------------------------------
 
 def test_save_then_get_entries(isolated_storage, tmp_path):
     target = tmp_path / "target"
@@ -101,13 +98,11 @@ def test_delete_nonexistent_id_returns_false(isolated_storage, tmp_path):
     target = tmp_path / "target"
     history.bootstrap(target)
     history.save_entry(text="x", duration_ms=1, word_count=5)
-    # Trigger stats cache so we can detect (un)invalidation.
     history.compute_stats()
     cache_before = history._stats_cache
 
     assert history.delete_entry("does-not-exist") is False
 
-    # Cache must NOT have been invalidated by a no-op delete.
     assert history._stats_cache is cache_before
 
 
@@ -120,7 +115,6 @@ def test_clear_all_returns_count_and_empties(isolated_storage, tmp_path):
     assert history.get_count() == 0
 
 
-# --- Stats cache TTL + invalidation -------------------------------------
 
 def test_stats_cache_invalidated_on_save(isolated_storage, tmp_path):
     target = tmp_path / "target"
@@ -159,7 +153,7 @@ def test_stats_cache_invalidated_on_relocate(isolated_storage, tmp_path):
     new_dir = tmp_path / "new"
     history.relocate(new_dir)
     s2 = history.compute_stats()
-    assert s2.total_entries == 1  # data moved with it
+    assert s2.total_entries == 1
 
 
 def test_stats_cache_ttl_returns_cached_value(isolated_storage, tmp_path):
@@ -169,7 +163,6 @@ def test_stats_cache_ttl_returns_cached_value(isolated_storage, tmp_path):
     history.save_entry(text="x", duration_ms=1, word_count=5)
 
     s1 = history.compute_stats()
-    # Mutate state at the SQL layer WITHOUT going through save_entry → cache stays fresh
     with history._lock:
         conn = history._ensure_conn_locked()
         conn.execute(
@@ -177,7 +170,7 @@ def test_stats_cache_ttl_returns_cached_value(isolated_storage, tmp_path):
             "VALUES ('zzz', 0, 'uk', 'normal', '', '', 0, 99)"
         )
     s2 = history.compute_stats()
-    assert s2.total_entries == s1.total_entries  # cache served the old value
+    assert s2.total_entries == s1.total_entries
 
 
 def test_compute_stats_empty_db_zero_counts(isolated_storage, tmp_path):
@@ -202,10 +195,9 @@ def test_compute_stats_excludes_null_model_name(isolated_storage, tmp_path):
     s = history.compute_stats()
     assert None not in s.by_model
     assert s.by_model == {"gemini/flash": 20}
-    assert s.total_words == 30  # both entries counted in totals
+    assert s.total_words == 30
 
 
-# --- Explicit transactions ----------------------------------------------
 
 def test_save_entry_issues_begin_and_commit(isolated_storage, tmp_path):
     """save_entry MUST issue an explicit BEGIN before INSERT and COMMIT after."""
@@ -215,7 +207,7 @@ def test_save_entry_issues_begin_and_commit(isolated_storage, tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.isolation_level is None  # manual txn control
+        assert conn.isolation_level is None
         conn.set_trace_callback(lambda s: statements.append(s.strip().upper()))
 
     history.save_entry(text="x", duration_ms=1)
@@ -229,7 +221,6 @@ def test_save_entry_issues_begin_and_commit(isolated_storage, tmp_path):
     assert begin_idx < insert_idx < commit_idx
 
 
-# --- ISO ↔ epoch ms round-trip ------------------------------------------
 
 def test_iso_to_epoch_ms_with_offset():
     iso = "2026-01-01T12:00:00+02:00"
@@ -256,7 +247,6 @@ def test_round_trip_through_db_preserves_iso(isolated_storage, tmp_path):
     assert abs((t_out - t_in).total_seconds()) < 0.001
 
 
-# --- Relocate branches --------------------------------------------------
 
 def test_relocate_moved_branch(isolated_storage, tmp_path):
     target = tmp_path / "target"
@@ -274,7 +264,6 @@ def test_relocate_moved_branch(isolated_storage, tmp_path):
 def test_relocate_no_old_file_branch(isolated_storage, tmp_path):
     target = tmp_path / "target"
     history.bootstrap(target)
-    # Don't save any entries; close the conn so the file doesn't get auto-created.
     with history._lock:
         history._close_conn_locked()
     (target / "history.db").unlink(missing_ok=True)
@@ -289,16 +278,14 @@ def test_relocate_new_already_has_file_branch(isolated_storage, tmp_path):
     history.bootstrap(target)
     history.save_entry(text="old", duration_ms=1)
 
-    # Pre-populate the new directory with its own history.db
     new_dir = tmp_path / "new"
     new_dir.mkdir()
     history.bootstrap(new_dir)
     history.save_entry(text="new", duration_ms=1)
-    history.bootstrap(target)  # switch back to old
+    history.bootstrap(target)
 
     res, _ = history.relocate(new_dir)
     assert res == history.RelocateResult.NEW_ALREADY_HAS_FILE
-    # Existing file at new location preserved.
     assert (new_dir / "history.db").exists()
 
 
@@ -317,11 +304,9 @@ def test_relocate_failed_on_copy_oserror(isolated_storage, tmp_path, monkeypatch
     res, reason = history.relocate(new_dir)
     assert res == history.RelocateResult.FAILED
     assert reason and "simulated copy failure" in reason
-    # Old file still present.
     assert (target / "history.db").exists()
 
 
-# --- Concurrent saves ---------------------------------------------------
 
 def test_concurrent_saves_no_loss(isolated_storage, tmp_path):
     """10 threads × 5 saves each = 50 distinct rows, all unique IDs."""
@@ -347,10 +332,9 @@ def test_concurrent_saves_no_loss(isolated_storage, tmp_path):
     assert history.get_count() == 50
     entries = history.get_entries(limit=100)
     ids = {e.id for e in entries}
-    assert len(ids) == 50  # all unique
+    assert len(ids) == 50
 
 
-# --- 503 mapping at router ----------------------------------------------
 
 def test_operational_error_mapped_to_503(isolated_storage, tmp_path):
     from fastapi.testclient import TestClient
@@ -367,7 +351,6 @@ def test_operational_error_mapped_to_503(isolated_storage, tmp_path):
             assert resp.headers.get("Retry-After") == "1"
 
 
-# --- Phase 2 — FTS5 schema migration + triggers --------------------------
 
 def test_schema_version_is_v3(isolated_storage, tmp_path):
     """Bumped to 3 by Phase 3 (sqlite-vec) — see the Phase 3 section below."""
@@ -453,8 +436,6 @@ def test_migration_v1_to_v2_populates_fts(isolated_storage, tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        # bootstrap() always migrates through to the current SCHEMA_VERSION
-        # (3, post-Phase-3) in one boot — there is no "stop at v2" state.
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         hits = conn.execute(
             "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'brown'"
@@ -478,17 +459,11 @@ def test_partial_migration_recovery_docsize_shadow_missing(isolated_storage, tmp
         )
         raw.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
         raw.execute("PRAGMA user_version = 2")
-        # Drop the FTS table — this removes its shadow tables atomically.
         raw.execute("DROP TABLE entry_fts")
         raw.commit()
     finally:
         raw.close()
 
-    # bootstrap() runs _init_schema, which re-creates entry_fts via
-    # IF NOT EXISTS. After DROP TABLE the shadow tables are gone too, so
-    # the freshly-created FTS sits over a populated `entries` table with
-    # an empty docsize → the row-count probe spots the divergence and
-    # the recovery branch issues a rebuild.
     history.bootstrap(tmp_path)
 
     with history._lock:
@@ -496,7 +471,7 @@ def test_partial_migration_recovery_docsize_shadow_missing(isolated_storage, tmp
         hits = conn.execute(
             "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'shadow'"
         ).fetchall()
-    assert len(hits) == 1  # rebuild ran, index is populated again
+    assert len(hits) == 1
 
 
 def test_partial_migration_recovery_fts_missing(isolated_storage, tmp_path):
@@ -539,12 +514,11 @@ def test_crash_before_user_version_pragma_retries(isolated_storage, tmp_path, mo
     raw = sqlite3.connect(db_path)
     try:
         raw.executescript(history._DDL_V1)
-        raw.executescript(history._DDL_V2)  # simulate FTS DDL applied
+        raw.executescript(history._DDL_V2)
         raw.execute(
             "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
             "VALUES ('a', 0, 'uk', 'normal', 'crash safety', 'crash safety', 0)"
         )
-        # user_version intentionally NOT set — simulates the crash window.
         raw.execute("PRAGMA user_version = 1")
         raw.commit()
     finally:
@@ -554,8 +528,6 @@ def test_crash_before_user_version_pragma_retries(isolated_storage, tmp_path, mo
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        # bootstrap() always migrates through to the current SCHEMA_VERSION
-        # (3, post-Phase-3) in one boot — there is no "stop at v2" state.
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         hits = conn.execute(
             "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'crash'"
@@ -582,12 +554,6 @@ def test_relocate_rebuilds_fts(isolated_storage, tmp_path):
     assert len(hits) == 1
 
 
-# --- Phase 3 — sqlite-vec schema migration (spec 003) ---------------------
-#
-# Mirrors the exact crash-safety/idempotency pattern the v1->v2 migration
-# tests above already establish: DDL is executed manually against a raw
-# connection to simulate an out-of-band prior version, then history.bootstrap
-# is called and the migrator's self-healing behaviour is asserted.
 
 def test_v1_to_v3_migration_lands_at_v3(isolated_storage, tmp_path):
     """A pre-existing v1 DB (only `entries`, no FTS, no embeddings tables)
@@ -647,7 +613,7 @@ def test_v2_to_v3_migration_lands_at_v3(isolated_storage, tmp_path):
             "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'migrated'"
         ).fetchall()
     assert {"embeddings_meta", "entry_embeddings", "entry_embeddings_dim_guard"}.issubset(names)
-    assert len(fts_hits) == 1  # v2 data untouched by the v3 upgrade
+    assert len(fts_hits) == 1
 
 
 def test_crash_before_v3_user_version_pragma_retries(isolated_storage, tmp_path):
@@ -662,19 +628,17 @@ def test_crash_before_v3_user_version_pragma_retries(isolated_storage, tmp_path)
     try:
         raw.executescript(history._DDL_V1)
         raw.executescript(history._DDL_V2)
-        raw.executescript(vector_store._DDL_V3)  # simulate v3 DDL already applied
+        raw.executescript(vector_store._DDL_V3)
         raw.execute(
             "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
             "VALUES ('a', 0, 'uk', 'normal', 'crash safety v3', 'crash safety v3', 0)"
         )
-        # user_version intentionally left at 2 — simulates the crash window
-        # between the v3 DDL running and the PRAGMA write.
         raw.execute("PRAGMA user_version = 2")
         raw.commit()
     finally:
         raw.close()
 
-    history.bootstrap(tmp_path)  # must not raise, must retry idempotently
+    history.bootstrap(tmp_path)
 
     with history._lock:
         conn = history._ensure_conn_locked()
@@ -696,12 +660,12 @@ def test_partial_v3_migration_recovery_tables_missing(isolated_storage, tmp_path
         raw.executescript(history._DDL_V1)
         raw.executescript(history._DDL_V2)
         raw.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
-        raw.execute("PRAGMA user_version = 3")  # embeddings tables never actually created
+        raw.execute("PRAGMA user_version = 3")
         raw.commit()
     finally:
         raw.close()
 
-    history.bootstrap(tmp_path)  # must not raise
+    history.bootstrap(tmp_path)
 
     with history._lock:
         conn = history._ensure_conn_locked()
@@ -726,19 +690,12 @@ def test_fresh_db_has_v3_embeddings_tables_but_not_vec_entries(isolated_storage,
     assert "vec_entries" not in names
 
 
-# --- /history/search router behaviour ------------------------------------
 
 def test_search_empty_q_returns_200_empty(isolated_storage, tmp_path):
     from fastapi.testclient import TestClient
     from app.main import app
 
     with TestClient(app) as client:
-        # The TestClient lifespan re-bootstraps history to the user-settings
-        # output_dir, which now resolves under JUSTSAY_DATA_DIR (conftest.py's
-        # autouse `_isolated_app_data` fixture) -- the same tmp_path this
-        # fixture uses. Save AFTER entering the context so the row lands in
-        # the same DB the request
-        # will hit.
         history.save_entry(text="anything", duration_ms=1)
         resp = client.get("/history/search?q=")
         assert resp.status_code == 200
@@ -754,7 +711,7 @@ def test_search_returns_results_ordered_by_relevance(isolated_storage, tmp_path)
 
     with TestClient(app) as client:
         history.save_entry(text="brown bear at the zoo", duration_ms=1)
-        history.save_entry(text="brown brown brown bear bear", duration_ms=1)  # strongest
+        history.save_entry(text="brown brown brown bear bear", duration_ms=1)
         history.save_entry(text="completely unrelated text", duration_ms=1)
         resp = client.get("/history/search?q=brown bear")
         assert resp.status_code == 200
@@ -804,7 +761,6 @@ def test_search_lock_error_returns_503(isolated_storage, tmp_path):
             assert resp.headers.get("Retry-After") == "1"
 
 
-# --- Background indexer opt-in guard (spec 017 / ADR 010) ----------------
 
 def test_testclient_lifespan_does_not_invoke_real_background_indexer(isolated_storage, tmp_path):
     """Regression test for the Acceptance Criteria's "Automatic background
@@ -831,22 +787,6 @@ def test_testclient_lifespan_does_not_invoke_real_background_indexer(isolated_st
         sentinel.assert_not_called()
 
 
-# --- Hybrid search endpoint (spec 017 / ADR 010) --------------------------
-#
-# `mode` is gone: /history/search always runs the hybrid FTS+semantic path
-# and degrades silently to FTS-only on any semantic-lane failure. Uses the
-# async ``client`` fixture (conftest.py, ASGITransport — no lifespan) rather
-# than ``TestClient(app)``: TestClient's context manager runs the FastAPI
-# lifespan, which re-bootstraps history at whatever
-# `user_settings.get_user_settings().output_dir` resolves to. Within a
-# single test *file* that value is cached at first use and NOT reset by
-# this file's `isolated_storage` fixture (only test_user_settings.py /
-# test_settings_router.py reset that cache), so successive TestClient-based
-# tests in this file silently share one growing DB. The other pre-existing
-# TestClient-based tests above tolerate this (`>=`, or an empty-query
-# short-circuit); these new tests assert exact counts, so they use the
-# lifespan-free `client` fixture over `isolated_storage`'s own
-# directly-bootstrapped `history` state instead.
 
 @pytest.mark.parametrize(
     "unavailable_state",
@@ -890,7 +830,7 @@ async def test_search_degrades_to_200_fts_only_for_every_semantic_unavailable_st
                 new=AsyncMock(return_value=(fake, None)),
             )
         )
-    else:  # embed_call_raises
+    else:
         fake = MagicMock()
         fake.model_name = "gemini/text-embedding-004"
         fake.embed = AsyncMock(side_effect=RuntimeError("upstream auth failed"))
@@ -900,8 +840,6 @@ async def test_search_degrades_to_200_fts_only_for_every_semantic_unavailable_st
                 new=AsyncMock(return_value=(fake, None)),
             )
         )
-        # Seed one embedded entry so the zero-entries-embedded short-circuit
-        # is bypassed and the embed call itself actually runs and raises.
         e1 = history.save_entry(text="already embedded", duration_ms=1)
         with history._lock:
             conn = history._ensure_conn_locked()
@@ -923,7 +861,6 @@ async def test_search_degrades_to_200_fts_only_for_every_semantic_unavailable_st
     data = resp.json()
     assert isinstance(data["entries"], list)
     assert isinstance(data["total"], int)
-    # FTS-only degradation: the seeded FTS-matchable entry is still found.
     assert any("brown bear" in e["text"] for e in data["entries"])
 
 
@@ -998,7 +935,5 @@ def test_concurrent_save_and_search_serialised(isolated_storage, tmp_path):
     t1.join(); t2.join()
 
     assert errors == []
-    # Monotonic: search results never decreased once a row was visible.
-    # (Cannot assert strict equality — interleaving is non-deterministic.)
     assert all(0 <= n <= 20 for n in seen)
     assert history.get_count() == 20

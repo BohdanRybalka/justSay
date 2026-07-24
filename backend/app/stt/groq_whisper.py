@@ -52,9 +52,6 @@ class GroqWhisperSTTProvider(STTProvider):
         """Send audio file to Groq Whisper API. ``style`` kwarg is ignored (Groq can't structure)."""
         client = self._get_client()
         size_kb = audio_path.stat().st_size / 1024
-        # Groq rejects ``prompt=""`` with 400, so coerce empty/whitespace to None.
-        # Never log the glossary content itself — only length — to avoid leaking
-        # whatever the user happened to paste.
         prompt = self._settings.initial_prompt.strip() or None
         log.info(
             "Groq Whisper: POST transcriptions model=%s file=%s size=%.1fKB lang=%s glossary=%s",
@@ -110,17 +107,12 @@ class GroqWhisperSTTProvider(STTProvider):
                     "model": model,
                     "response_format": response_format,
                 }
-                # Omit "language" entirely for "auto" — mirrors the Groq SDK's
-                # own `Omit` default, which is the documented auto-detect path
-                # (Groq's inference server is closed-source, so the literal
-                # string "auto" is not verified to mean anything to it).
                 if language and language != "auto":
                     kwargs["language"] = language
                 if prompt:
                     kwargs["prompt"] = prompt
                 response = client.audio.transcriptions.create(**kwargs)
         except Exception as e:
-            # HTTP 429 (rate limit) bubbles up with a clearer message.
             msg = str(e)
             if "429" in msg or "rate_limit" in msg.lower():
                 raise RuntimeError(
@@ -128,21 +120,13 @@ class GroqWhisperSTTProvider(STTProvider):
                 ) from e
             raise
 
-        # response_format="text" returns a plain string; some SDK versions wrap it.
         if isinstance(response, str):
             return response, None, None
 
         text = getattr(response, "text", None)
         if text is None:
             text = str(response)
-        # Only populated by the SDK on the verbose_json (auto) path — absent
-        # (None) on the text-format explicit-language path.
         detected_language = getattr(response, "language", None)
-        # Spec 033 / ADR 019: same auto-only availability as the language
-        # field. The SDK returns segments as attribute-objects or dicts
-        # depending on version — the shared helper handles both shapes and
-        # fails open to None on anything unexpected, since Groq's inference
-        # server is closed-source and its payload shape is not contractual.
         no_speech_prob = (
             min_no_speech_prob(getattr(response, "segments", None))
             if response_format == "verbose_json"

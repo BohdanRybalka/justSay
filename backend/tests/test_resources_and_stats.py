@@ -16,18 +16,15 @@ async def test_resources_includes_cpu_percent_and_gb(client):
     assert resp.status_code == 200
     data = resp.json()
 
-    # Process & system CPU percentage fields exist and are non-negative.
     assert data["cpu_percent_process"] >= 0
     assert data["cpu_percent_total"] >= 0
 
-    # GB fields are positive floats and match the MB versions within rounding.
     assert data["ram_total_gb"] > 0
     assert data["pid_ram_gb"] >= 0
     assert abs(data["ram_total_gb"] - data["ram_total_mb"] / 1024) < 0.01
     assert abs(data["pid_ram_gb"] - data["pid_ram_mb"] / 1024) < 0.01
 
 
-# --- _get_gpu_info (spec 014 — previously zero coverage) ---
 
 
 def test_get_gpu_info_returns_none_when_probe_reports_none(monkeypatch):
@@ -117,7 +114,7 @@ def test_compute_stats_buckets_by_language_and_model(tmp_path, monkeypatch):
     assert stats.total_entries == 3
     assert stats.total_words == 350
     assert stats.today_words == 100
-    assert stats.week_words == 150  # today + yesterday only; the month-old one is out
+    assert stats.week_words == 150
     assert stats.by_language == {"uk": 300, "en": 50}
     assert stats.by_model == {
         "gemini-2.5-flash": 100,

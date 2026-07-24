@@ -34,7 +34,6 @@ def _cloud_settings(**overrides) -> STTSettings:
     return STTSettings(**defaults)
 
 
-# --- Mode-level dispatch ---
 
 
 def test_local_mode_always_returns_local():
@@ -50,7 +49,6 @@ def test_local_mode_ignores_style_and_duration():
     assert isinstance(p, LocalSTTProvider)
 
 
-# --- Cloud routing by duration ---
 
 
 def test_short_normal_goes_to_groq():
@@ -78,7 +76,6 @@ def test_unknown_duration_falls_back_to_gemini():
     assert isinstance(p, GeminiSTTProvider)
 
 
-# --- Cloud routing by style ---
 
 
 def test_ai_prompt_always_goes_to_gemini_regardless_of_duration():
@@ -89,7 +86,6 @@ def test_ai_prompt_always_goes_to_gemini_regardless_of_duration():
     assert isinstance(long, GeminiSTTProvider)
 
 
-# --- Cloud routing by file extension ---
 
 
 def test_webm_short_normal_falls_back_to_gemini():
@@ -112,14 +108,13 @@ def test_format_supports_sets_are_consistent():
     assert ".webm" in GEMINI_SUPPORTED_FORMATS
 
 
-# --- Cache behaviour ---
 
 
 def test_same_provider_is_cached_across_calls():
     s = _cloud_settings()
     p1, _ = get_routed_provider(s, audio_duration=5.0, style="normal")
     p2, _ = get_routed_provider(s, audio_duration=10.0, style="normal")
-    assert p1 is p2  # both Groq
+    assert p1 is p2
 
 
 def test_different_providers_coexist_in_cache():
@@ -142,7 +137,6 @@ def test_clear_cache_triggers_cleanup_on_all():
         gm_mock.assert_called_once()
 
 
-# --- Engine pin ---
 
 
 def test_engine_pin_groq_overrides_long_audio():
@@ -175,7 +169,6 @@ def test_engine_pin_gemini_overrides_short_audio():
     assert fallback is None
 
 
-# --- Config validator ---
 
 
 def test_cloud_routing_threshold_must_be_positive():
@@ -186,7 +179,6 @@ def test_cloud_routing_threshold_must_be_positive():
         STTSettings(cloud_routing_threshold=-5)
 
 
-# --- detect_duration ---
 
 
 def test_detect_duration_returns_none_for_missing_file(tmp_path):
@@ -201,7 +193,7 @@ def test_detect_duration_reads_real_wav(tmp_path):
     from app.pipeline.utils import detect_duration
 
     path = tmp_path / "two-seconds.wav"
-    samples = np.zeros(32000, dtype=np.float32)  # 2s @ 16kHz
+    samples = np.zeros(32000, dtype=np.float32)
     sf.write(str(path), samples, 16000)
 
     duration = detect_duration(path)

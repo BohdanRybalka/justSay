@@ -38,7 +38,6 @@ fn get_backend_token() -> String {
 #[tauri::command]
 fn widget_ready(app: AppHandle) {
     if let Some(widget) = app.get_webview_window("widget") {
-        // Position at bottom-center of screen
         if let Ok(Some(monitor)) = widget.current_monitor() {
             let screen = monitor.size();
             let scale = monitor.scale_factor();
@@ -52,8 +51,6 @@ fn widget_ready(app: AppHandle) {
             ));
         }
 
-        // Pill shape and translucency are handled uniformly in CSS on a
-        // transparent window, so no platform-specific window shaping here.
         let _ = widget.show();
     }
 }
@@ -68,13 +65,6 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            // Logging is registered in release builds too. A packaged launch
-            // that fails (backend spawn, or the WebView never getting its
-            // token) leaves no other trace on a machine we cannot attach a
-            // debugger to — see docs/adr/028-csp-must-enumerate-every-tauri-bridge-source.md.
-            // The plugin's 40 KB default with KeepOne can rotate the startup
-            // lines away mid-session, which is exactly what must survive, so
-            // the ceiling is raised to ~1 MB per file (~2 MB retained).
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .level(if cfg!(debug_assertions) {
@@ -92,19 +82,12 @@ pub fn run() {
                 backend::PORT
             );
 
-            // Spawn Python backend (production = shell-plugin spawn, dev = system Python)
             if let Err(e) = backend::spawn(app.handle().clone()) {
                 log::error!("Backend spawn failed: {}", e);
             }
 
-            // Watchdog: detect a crashed/never-came-up backend and respawn
-            // it (bounded retries with backoff) — same retry path handles
-            // both cases, deliberately not distinguished. See
-            // docs/adr/006-backend-watchdog-respawn-on-crash.md.
             backend::spawn_watchdog(app.handle().clone());
 
-            // Create widget window — transparent so the CSS-drawn rounded pill
-            // renders identically on macOS and Windows (corners stay see-through).
             let _widget = WebviewWindowBuilder::new(
                 app,
                 "widget",
@@ -121,7 +104,6 @@ pub fn run() {
             .shadow(false)
             .build()?;
 
-            // System tray
             let settings_item =
                 MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit JustSay", true, None::<&str>)?;
@@ -148,7 +130,6 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Settings window: hide on close instead of quitting
             let settings_handle = app.handle().clone();
             if let Some(settings) = app.get_webview_window("settings") {
                 settings.on_window_event(move |event| {

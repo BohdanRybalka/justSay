@@ -32,11 +32,6 @@ vi.mock("../../notify", () => ({
   notifyError: notifyErrorMock,
 }));
 
-// emitSettingsChanged() dynamically imports @tauri-apps/api/event inside a
-// try/catch. The package is genuinely installed, so without this mock the
-// real emit() runs (and fails silently outside a Tauri webview) — the test
-// would then pass vacuously against both pre- and post-fix code. Mocking it
-// makes the emit call directly observable.
 const emitMock = vi.fn();
 vi.mock("@tauri-apps/api/event", () => ({
   emit: emitMock,

@@ -43,9 +43,6 @@ __all__ = [
 ]
 
 
-# Per-provider accepted extensions (enforced before routing).
-# Groq Whisper API: WAV/MP3/FLAC/OGG/M4A/MP4 (no webm/opus container).
-# Gemini Native Audio: a superset including webm/opus/aac/etc.
 GROQ_SUPPORTED_FORMATS: frozenset[str] = frozenset(
     {".wav", ".mp3", ".flac", ".ogg", ".oga", ".m4a", ".mp4"}
 )
@@ -81,9 +78,6 @@ def _get_groq(stt_settings: STTSettings) -> STTProvider:
 
 
 def _get_local(stt_settings: STTSettings) -> STTProvider:
-    # Lazy import inside the function so the autouse conftest fixture can
-    # monkeypatch `app.stt.local_factory.get_local_provider_class` without
-    # an already-bound module-level reference defeating it.
     from app.stt.local_factory import get_local_provider_class
     cls = get_local_provider_class()
     return _get_or_create(cls, stt_settings)
@@ -128,20 +122,16 @@ def get_routed_provider(
     ext = file_extension.lower() if file_extension else None
     engine = getattr(stt_settings, "engine", "auto")
 
-    # --- Pinned engines --------------------------------------------------
     if engine == "gemini":
         return _get_gemini(stt_settings), None
 
     if engine == "groq":
-        # Groq can't structure ai_prompt — Gemini fallback for that style.
         if style == "ai_prompt":
             return _get_gemini(stt_settings), "ai_prompt requires Gemini structuring"
-        # Groq can't ingest .webm — Gemini fallback for that container.
         if ext is not None and ext not in GROQ_SUPPORTED_FORMATS:
             return _get_gemini(stt_settings), f"Groq doesn't support {ext}"
         return _get_groq(stt_settings), None
 
-    # --- Auto (default) — duration+style heuristic ----------------------
     if style == "ai_prompt":
         return _get_gemini(stt_settings), None
 
@@ -152,10 +142,8 @@ def get_routed_provider(
     if duration_short:
         if ext is None or ext in GROQ_SUPPORTED_FORMATS:
             return _get_groq(stt_settings), None
-        # Groq can't handle this container (e.g. .webm) — fall back to Gemini.
         return _get_gemini(stt_settings), None
 
-    # Long audio or unknown duration -> Gemini (safe default).
     return _get_gemini(stt_settings), None
 
 
@@ -229,6 +217,6 @@ def clear_cache() -> None:
         for p in _providers.values():
             try:
                 p.cleanup()
-            except Exception:  # cleanup must never raise
+            except Exception:
                 pass
         _providers.clear()

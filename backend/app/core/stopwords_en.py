@@ -34,8 +34,6 @@ STOPWORDS_EN: frozenset[str] = frozenset(
         "was", "we", "were", "what", "when", "where", "which", "while", "who",
         "whom", "why", "will", "with", "would",
         "you", "your", "yours", "yourself", "yourselves",
-        # English contraction stems (after apostrophe split that doesn't happen
-        # in our regex — kept defensive).
         "ll", "re", "ve", "m", "d",
     }
 )

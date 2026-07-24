@@ -40,76 +40,25 @@ from app.stt.local_vulkan_cmd import build_server_argv, resolve_binary_path, res
 log = logging.getLogger(__name__)
 
 _HOST = "127.0.0.1"
-# Arbitrary, fixed local-only port -- distinct from the main backend's own
-# hardcoded 9377 (src-tauri/src/backend.rs::PORT). Single-user local desktop
-# app; a fixed constant carries the same low collision risk the main
-# backend already accepts (see plan 018's Cuts deferred).
 _PORT = 8878
 
 _HEALTH_POLL_INTERVAL = 0.5
-# ~120s -- generous for a first-run cold load of a multi-GB model into VRAM.
-# whisper-server loads the model BEFORE binding its listen socket (confirmed
-# by reading examples/server/server.cpp), so there is no incremental
-# "still loading" signal -- a refused connection just means "not ready yet".
 _HEALTH_POLL_MAX_ATTEMPTS = 240
 _HEALTH_REQUEST_TIMEOUT = httpx.Timeout(connect=1.0, read=2.0, write=2.0, pool=2.0)
 _INFERENCE_TIMEOUT = httpx.Timeout(connect=3.0, read=120.0, write=120.0, pool=120.0)
 _DOWNLOAD_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=60.0)
 
 _GRACE_POLL_INTERVAL = 0.1
-_GRACE_POLL_MAX_ATTEMPTS = 30  # 3s, mirrors backend.rs's terminate_gracefully() grace window
+_GRACE_POLL_MAX_ATTEMPTS = 30
 
-# Serializes "someone is tearing down a whisper-server on _PORT" against
-# "someone is spawning a whisper-server on _PORT" -- module-level (not an
-# instance attribute) because the port itself is a process-wide resource
-# shared across provider *instances*: `clear_cache()` always replaces the
-# cached provider with a brand-new instance on every Local<->Cloud switch
-# (app/stt/__init__.py::_get_or_create), so the dying old instance and the
-# spawning new instance share no instance state to synchronize on directly.
-# Never held from the FastAPI event-loop thread: `_terminate_process()` only
-# ever runs from `cleanup()`'s background daemon thread or from `_get_model`'s
-# except-branch, and `_spawn_server()` only ever runs from `_get_model`,
-# itself always invoked via `asyncio.to_thread` (transcribe(), router.py's
-# `POST /stt/local/load`, local_setup.ensure_local_ready() -- confirmed by
-# reading all three call sites). See plan 018, Review history iteration 2,
-# RED-1.
 _port_lock = threading.Lock()
 
-# Serializes "someone is streaming the GGML model to model_path.part" against
-# a second, independent WhisperCppVulkanSTTProvider instance doing the exact
-# same thing -- module-level for the same reason _port_lock is: clear_cache()
-# always replaces the cached provider with a brand-new instance on every
-# Local<->Cloud switch, so an old instance's in-flight download (e.g. Spec
-# 015's eager pre-warm) and a new instance's own _get_model() call share no
-# instance state to synchronize on directly. A single lock covering the whole
-# download step (not one keyed per model_size) is simplest and sufficient --
-# single-user local desktop app, same rationale as _port_lock's own choice of
-# a single module-level lock over per-resource locking. See GitHub review on
-# PR #21, iteration 1, issue #1.
 _download_lock = threading.Lock()
 
-# ggerganov/whisper.cpp's own Hugging Face model repo -- GGML format,
-# distinct from the CTranslate2 format faster-whisper auto-downloads for
-# LocalSTTProvider (a real, permanent second-model-file cost, see plan 018's
-# Risks).
 _HF_MODEL_URL_TEMPLATE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{size}.bin"
-_DOWNLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MiB
+_DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 
 
-# --- Spec 028 Item 3: orphan reaping ----------------------------------------
-#
-# Two independent layers (a deliberate scope trim -- the plan's third layer,
-# a psutil-based process-tree kill, was dropped: whisper-server spawns no
-# grandchildren today, so tree-kill would guard a hypothetical):
-#
-# 1. Registry + atexit (this section). Covers a clean interpreter exit or an
-#    unhandled exception where cleanup()/clear_cache() was simply never
-#    called -- atexit handlers DO run in both of those cases.
-# 2. Windows Job Object (_assign_to_job_object, called from _spawn_server).
-#    atexit does NOT run on TerminateProcess, which is the actual ungraceful
-#    crash shape a Tauri-side `taskkill /T` or a hard process kill produces.
-#    This is the real guarantee for that case; layer 1 is the portable floor
-#    for everything else.
 
 _live_children_lock = threading.Lock()
 _live_children: dict[int, subprocess.Popen] = {}
@@ -155,7 +104,6 @@ def _reap_orphans() -> None:
 atexit.register(_reap_orphans)
 
 
-# --- Spec 028 Item 3: Windows Job Object (KILL_ON_JOB_CLOSE) ----------------
 
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
@@ -200,7 +148,7 @@ class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
 _job_object_lock = threading.Lock()
 _job_object_handle: int | None = None
 _job_object_init_failed = False
-_kernel32_dll = None  # cached WinDLL handle, prototypes configured once
+_kernel32_dll = None
 
 
 def _kernel32():
@@ -305,17 +253,13 @@ class WhisperCppVulkanSTTProvider(STTProvider):
     ``local_vulkan_cmd.resolve_binary_path()``.
     """
 
-    is_local = True  # ADR 018 — declared, not derived from the platform
+    is_local = True
 
     def __init__(self, settings: STTSettings):
         self._settings = settings
         self._process: subprocess.Popen | None = None
         self._server_ready: bool = False
         self._last_load_error: str | None = None
-        # Sync primitive -- `_get_model` runs both directly (from
-        # `transcribe()` via `asyncio.to_thread`) and from router.py's
-        # `POST /stt/local/load` (also via `asyncio.to_thread`) -- same
-        # genuine OS-thread-race rationale as `LocalSTTProvider._load_lock`.
         self._load_lock: threading.Lock = threading.Lock()
 
     @property
@@ -346,7 +290,7 @@ class WhisperCppVulkanSTTProvider(STTProvider):
         """
         with self._load_lock:
             if self._server_ready and self._process is not None and self._process.poll() is None:
-                return  # already warm -- the common case after the first load
+                return
             try:
                 binary_path = resolve_binary_path()
                 if binary_path is None:
@@ -358,12 +302,6 @@ class WhisperCppVulkanSTTProvider(STTProvider):
                 if not model_path.is_file():
                     self._download_model(model_path)
 
-                # Held only around the spawn itself -- not the download or
-                # health-poll steps, neither of which touches the port --
-                # so a new spawn blocks until any in-flight termination of a
-                # previous instance's process (see _terminate_process()) has
-                # genuinely finished, guaranteeing _PORT is actually free
-                # before the Popen() call.
                 with _port_lock:
                     self._spawn_server(binary_path, model_path)
                 self._wait_until_healthy()
@@ -378,13 +316,6 @@ class WhisperCppVulkanSTTProvider(STTProvider):
                 self._last_load_error = msg
                 self._server_ready = False
                 log.exception("whisper-server load failed: %s", msg)
-                # _spawn_server() may have succeeded even though a later step
-                # (model download happens earlier, but _wait_until_healthy()
-                # can still time out) raised -- terminate the orphaned child
-                # and clear the handle so a subsequent _get_model() call spawns
-                # a genuinely fresh process instead of silently overwriting a
-                # still-alive one and leaking it (VRAM + a port-8878-holding
-                # zombie).
                 self._terminate_process(self._process)
                 self._process = None
                 raise
@@ -432,9 +363,6 @@ class WhisperCppVulkanSTTProvider(STTProvider):
         argv = build_server_argv(binary_path, model_path, _HOST, _PORT)
         creationflags = 0
         if sys.platform == "win32":
-            # Same 0x08000000 value src-tauri/src/backend.rs already uses
-            # for its own child spawns -- same suppress-console-flash
-            # intent, one process layer down.
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         log.info("Spawning whisper-server: %s", argv)
         self._process = subprocess.Popen(
@@ -444,9 +372,6 @@ class WhisperCppVulkanSTTProvider(STTProvider):
             stdin=subprocess.DEVNULL,
             creationflags=creationflags,
         )
-        # Spec 028 Item 3: register for atexit reaping and put the child in a
-        # Windows Job Object so an ungraceful death of this process can't
-        # strand it holding VRAM -- see the module-level comment above.
         _register_child(self._process)
         _assign_to_job_object(self._process)
 
@@ -476,12 +401,6 @@ class WhisperCppVulkanSTTProvider(STTProvider):
         """
         if process is None:
             return
-        # Deregister up front, regardless of outcome below: this call is the
-        # designated teardown path (from cleanup() or _get_model()'s own
-        # except-branch orphan cleanup), so the atexit reaper must not also
-        # try to terminate a process this method already took responsibility
-        # for -- it should only ever see pids where this method was never
-        # called at all (spec 028 Item 3).
         _deregister_child(process)
         with _port_lock:
             if process.poll() is not None:
@@ -561,38 +480,7 @@ class WhisperCppVulkanSTTProvider(STTProvider):
             resp.raise_for_status()
             body = resp.json()
             raw_text = body.get("text", "")
-            # whisper-server's `output_str()` joins segments with "\n" (no
-            # embedded timestamps in the json/verbose_json `text` field).
-            # Stage 6 test found on real hardware (AMD RX 5700 XT): each
-            # segment already carries whatever leading space it needs as
-            # part of its own text (a normal BPE token boundary) -- but
-            # whisper.cpp sometimes splits a segment mid-WORD, in which
-            # case the continuation segment carries NO leading space.
-            # Inserting a space at every "\n" (the previous approach) is
-            # therefore only correct when a segment break happens to land
-            # on a word boundary, and silently splits words apart
-            # ("отримати" -> "от римати") whenever it doesn't -- verified
-            # against real verbose_json output, where boundaries routinely
-            # fall mid-word. Concatenating with NO separator and trusting
-            # each segment's own (possibly absent) leading space is what
-            # actually reconstructs the source text: cross-checked directly
-            # against `body["segments"][*]["text"]`-concatenation (same
-            # result) and against the plain `json` branch's own `text`
-            # field for the identical audio (byte-identical output, per
-            # AC 18) -- see plan.md's Deviations, Stage 6 fix.
             text = "".join(raw_text.splitlines()).strip()
-            # `.get()` -- verbose_json's exact shape was confirmed once on
-            # real AMD hardware (Stage 6, RX 5700 XT: top-level "language"
-            # key present, plus "segments"/"detected_language"/etc.), but
-            # this project still has no AMD/Intel GPU in CI, so a
-            # missing/renamed field on a different whisper.cpp build still
-            # degrades to None rather than raising.
-            # Spec 033 / ADR 019: only the verbose_json (auto) branch carries
-            # segments at all -- the plain `json` branch has no such key, so
-            # it stays None. Read via the shared defensive helper: some
-            # whisper.cpp builds stub or omit no_speech_prob entirely, and
-            # this project has no AMD/Intel GPU in CI to pin which, so a
-            # missing field must fail open (None -> keep the transcription).
             no_speech_prob = (
                 min_no_speech_prob(body.get("segments"))
                 if response_format == "verbose_json"

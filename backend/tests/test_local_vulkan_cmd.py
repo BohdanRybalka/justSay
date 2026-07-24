@@ -11,7 +11,6 @@ import app.stt.local_vulkan as local_vulkan_module
 import app.stt.local_vulkan_cmd as local_vulkan_cmd_module
 from app.stt.local_vulkan_cmd import build_server_argv, resolve_binary_path, resolve_model_path
 
-# --- build_server_argv ---
 
 
 def test_build_server_argv_returns_list_of_str():
@@ -52,7 +51,6 @@ def test_build_server_argv_preserves_space_containing_paths_as_single_element():
 
     assert str(binary) in argv
     assert str(model) in argv
-    # No element got split/mangled on the internal space.
     assert all(" " not in part or part in (str(binary), str(model)) for part in argv)
 
 
@@ -76,7 +74,6 @@ def test_no_shell_true_anywhere_in_local_vulkan_or_cmd_module():
         assert forbidden not in source
 
 
-# --- resolve_binary_path ---
 
 
 def _binary_name() -> str:
@@ -145,7 +142,6 @@ def test_resolve_binary_path_returns_none_when_nothing_resolves(tmp_path, monkey
     assert resolve_binary_path() is None
 
 
-# --- resolve_model_path ---
 
 
 def test_resolve_model_path_is_pure_path_arithmetic():
@@ -154,6 +150,5 @@ def test_resolve_model_path_is_pure_path_arithmetic():
 
 
 def test_resolve_model_path_does_not_touch_filesystem():
-    # Must not raise even though nothing on disk exists at this path.
     path = resolve_model_path("tiny")
     assert path.name == "ggml-tiny.bin"

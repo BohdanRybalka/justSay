@@ -53,9 +53,6 @@ export function renderHistory(container: HTMLElement): () => void {
 
   async function loadEntries(append = false) {
     inSearchMode = false;
-    // Bump the sequence so any still-pending search response is dropped
-    // by the runSearch guard — prevents a stale search result from
-    // overwriting the newest-first list after the user cleared the box.
     ++searchSeq;
     try {
       const resp = await api.getHistory(LIMIT, offset);
@@ -88,8 +85,6 @@ export function renderHistory(container: HTMLElement): () => void {
     searchHint.textContent = "Searching...";
     try {
       const resp = await api.searchHistory(q, LIMIT);
-      // Out-of-order responses: a slower previous query must not overwrite
-      // a fresher result.
       if (seq !== searchSeq) return;
       listEl.innerHTML = "";
       countEl.textContent = `${resp.total} match${resp.total !== 1 ? "es" : ""}`;
@@ -105,11 +100,6 @@ export function renderHistory(container: HTMLElement): () => void {
       if (seq !== searchSeq) return;
       const msg = (e as Error).message || "Search failed";
       const lower = msg.toLowerCase();
-      // 405 happens because a pre-Plan-013 sidecar exposes only
-      // `DELETE /history/{entry_id}`; a GET to /history/search slots into
-      // that route with entry_id="search" and FastAPI rejects the verb.
-      // Treat it the same as 404 — the sidecar simply doesn't know the
-      // route yet.
       const sidecarTooOld =
         lower.includes("not found") ||
         lower.includes("http 404") ||
@@ -162,9 +152,6 @@ export function renderHistory(container: HTMLElement): () => void {
       badges.push(`<span class="history-badge history-badge-ai">AI Prompt</span>`);
     }
 
-    // Plan 021: search responses carry pre-escaped `<mark>…</mark>` HTML
-    // in `highlighted_text`. Outside search mode we fall back to the
-    // plain-text path.
     const textHtml = entry.highlighted_text
       ? entry.highlighted_text
       : escapeHtml(entry.text).replace(/\n/g, "<br>");

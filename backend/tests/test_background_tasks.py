@@ -14,7 +14,6 @@ import pytest
 
 from app.core import tasks
 
-# --- AC 2-5: spawn_background_task / _on_task_done ---------------------------
 
 
 @pytest.mark.asyncio
@@ -52,11 +51,6 @@ async def test_failed_task_logs_warning_with_name_and_traceback(caplog):
     record = records[0]
     assert record.levelname == "WARNING"
     assert "ac3-boom" in record.getMessage()
-    # `record.exc_info is not None` alone is too weak: a future
-    # `exc_info=exc` -> `exc_info=True` edit, called from a done-callback
-    # (never inside an active `except` block), would resolve via
-    # `sys.exc_info()` to `(None, None, None)` -- itself not `None`, so the
-    # weaker assertion would stay green with the traceback actually empty.
     assert record.exc_info[0] is RuntimeError
     assert isinstance(record.exc_info[1], RuntimeError)
     assert "kaboom" in str(record.exc_info[1])
@@ -73,7 +67,7 @@ async def test_cancelled_task_logs_no_warning_or_error(caplog):
 
     with caplog.at_level(logging.DEBUG, logger="app.core.tasks"):
         task = tasks.spawn_background_task(_sleep_forever(), name="ac4-cancel")
-        await asyncio.sleep(0)  # let it actually start running
+        await asyncio.sleep(0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -82,21 +76,9 @@ async def test_cancelled_task_logs_no_warning_or_error(caplog):
     assert all(r.levelno < logging.WARNING for r in records)
     assert tasks._background_tasks == set()
 
-    # Positive-branch proof: filtering on WARNING+ alone would stay green
-    # even if `task.exception()` were ever moved ahead of `task.cancelled()`,
-    # because the resulting CancelledError is swallowed by asyncio's own
-    # `call_exception_handler` and logged under the "asyncio" logger, not
-    # "app.core.tasks". This asserts the cancelled() branch was actually
-    # taken -- a DEBUG record naming this task must exist.
     debug_records = [r for r in records if r.levelno == logging.DEBUG]
     assert any("ac4-cancel" in r.getMessage() for r in debug_records)
 
-    # Direct-invocation proof: call the callback again on the already-done,
-    # already-cancelled task. A swapped ordering would call task.exception()
-    # first, which re-raises CancelledError on a cancelled task -- catching
-    # BaseException (not Exception) here is deliberate, since CancelledError
-    # derives from BaseException, and a regression must not be misread as
-    # cancellation of this test's own task.
     try:
         tasks._on_task_done(task)
     except BaseException as exc:
@@ -124,7 +106,6 @@ async def test_discard_happens_before_logging_even_if_logging_raises(monkeypatch
     assert tasks._background_tasks == set()
 
 
-# --- Spec 036: cancel_all() ---------------------------------------------------
 
 
 async def _swallow_n_cancels(n: int) -> None:
@@ -175,7 +156,7 @@ async def test_cancel_all_drains_a_pending_task_and_empties_the_registry():
         await asyncio.sleep(30)
 
     task = tasks.spawn_background_task(_sleep_forever(), name="drain-me")
-    await asyncio.sleep(0)  # let it actually start running
+    await asyncio.sleep(0)
 
     stragglers = await tasks.cancel_all()
 
@@ -199,8 +180,6 @@ async def test_cancel_all_abandons_an_uncancellable_task_within_the_budget(caplo
         elapsed = asyncio.get_running_loop().time() - start
 
     assert stragglers == ["stubborn"]
-    # Generous bound against a 1.0s budget on purpose: a tight assertion here
-    # would be flaky on a loaded CI runner without catching anything extra.
     assert elapsed < 2.0
     assert not task.done()
 
@@ -306,15 +285,8 @@ async def test_drain_reaches_the_active_load_created_by_real_ensure_local_ready(
     from app.stt import local_setup
     from app.stt.config import STTSettings
 
-    # A threading.Event, not an asyncio one: _get_model runs on a real worker
-    # thread via asyncio.to_thread and, exactly as in production, survives the
-    # task cancellation -- the test must release it explicitly.
     release = threading.Event()
     loop = asyncio.get_running_loop()
-    # Set from the worker thread the moment the load is actually running.
-    # `_active_load` is assigned before `_run_get_model` reaches to_thread
-    # (local_setup.py:369), so this event firing proves peek_active_load() is
-    # populated -- deterministic, no polling.
     entered_load = asyncio.Event()
 
     class _BlockingProvider:
@@ -333,7 +305,6 @@ async def test_drain_reaches_the_active_load_created_by_real_ensure_local_ready(
     monkeypatch.setattr(app.stt, "peek_local_provider", lambda: provider)
 
     # background-task-ok: test fixture standing in for the prewarm caller;
-    # retired by _drain_leftover below.
     waiter = asyncio.create_task(
         local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL)),
         name="real-prewarm-caller",
@@ -364,7 +335,6 @@ async def test_drain_resets_the_prewarm_crash_guard_counter(monkeypatch, tmp_pat
     from app.stt import local_setup
     from app.stt.config import STTSettings
 
-    # Patched on the source, since _crash_guard_path() imports it lazily.
     monkeypatch.setattr("app.core.app_paths.resolve_app_data_root", lambda: tmp_path)
 
     started = asyncio.Event()
@@ -389,7 +359,6 @@ async def test_drain_resets_the_prewarm_crash_guard_counter(monkeypatch, tmp_pat
     assert local_setup._read_consecutive_incomplete_prewarms() == 0
 
 
-# --- Spec 036: lifespan() teardown ordering -----------------------------------
 
 
 @pytest.fixture
@@ -476,8 +445,6 @@ async def test_lifespan_still_clears_caches_when_the_drain_times_out(
             start = loop.time()
     elapsed = loop.time() - start
 
-    # Generous bound against the real 1.0s budget: a tight assertion would be
-    # flaky on a loaded runner without catching anything a loose one misses.
     assert elapsed < 2.0
     assert teardown_probe == [
         "clear_stt",
@@ -537,7 +504,6 @@ async def test_lifespan_cancels_the_active_load_with_no_registered_task(teardown
 
     async with lifespan(fastapi_app):
         # background-task-ok: test fixture mirroring local_setup's own bare
-        # create_task; drained by the teardown under test.
         load_task = asyncio.create_task(_load(), name="fake-prewarm-load")
         local_setup._active_load = (object(), load_task)
         await asyncio.sleep(0.01)
@@ -552,7 +518,6 @@ async def test_lifespan_cancels_the_active_load_with_no_registered_task(teardown
     assert load_task.done()
 
 
-# --- AC 9-11: the AST invariant scan ------------------------------------------
 
 _APP_DIR = Path(__file__).resolve().parent.parent / "app"
 _DEFINER = "core/tasks.py"

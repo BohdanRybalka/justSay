@@ -39,7 +39,7 @@ def _isolated_history(tmp_path, monkeypatch):
 
 @pytest.fixture
 def sample_wav(tmp_path) -> Path:
-    audio = np.random.uniform(-0.1, 0.1, 16000).astype(np.float32)  # 1s mono 16kHz
+    audio = np.random.uniform(-0.1, 0.1, 16000).astype(np.float32)
     path = tmp_path / "sample.wav"
     sf.write(str(path), audio, 16000)
     return path
@@ -103,11 +103,6 @@ def _make_stt_mock(text: str = "hello world", tokens: int | None = None):
     stt = MagicMock()
     stt.transcribe = AsyncMock(return_value=TranscriptionResult(text=text, tokens_used=tokens))
     stt.model_name = "mock/provider"
-    # Spec 028 Item 2 / ADR 018: is_local_provider() reads this attribute
-    # directly (getattr(provider, "is_local", False)) -- a bare MagicMock's
-    # auto-created child attribute is truthy by default, which would make
-    # every one of these cloud-route test doubles spuriously trip the
-    # readiness barrier. These mocks stand in for cloud providers.
     stt.is_local = False
     return stt
 
@@ -164,7 +159,6 @@ async def test_pipeline_clipboard_failure_is_graceful(
 
     assert result.text == "text"
     assert result.copied_to_clipboard is False
-    # Even when clipboard fails, the entry must still be saved.
     assert save_mock.call_count == 1
     assert save_mock.call_args.kwargs["text"] == "text"
 
@@ -249,7 +243,7 @@ async def test_pipeline_propagates_stt_failure(
     stt = MagicMock()
     stt.transcribe = AsyncMock(side_effect=RuntimeError("groq down"))
     stt.model_name = "mock/provider"
-    stt.is_local = False  # cloud-route test double -- see _make_stt_mock
+    stt.is_local = False
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         with pytest.raises(RuntimeError, match="groq down"):
@@ -276,22 +270,9 @@ async def test_pipeline_concurrent_invocations_save_independently(
         m = MagicMock()
         m.transcribe = AsyncMock(return_value=TranscriptionResult(text=f"text-{idx}", tokens_used=None))
         m.model_name = "mock/provider"
-        m.is_local = False  # cloud-route test double -- see _make_stt_mock
+        m.is_local = False
         return m
 
-    # spec 029, AC 32: process_audio now awaits `asyncio.to_thread(analyze_silence,
-    # ...)` before get_routed_provider is called, which is a genuine yield
-    # point that didn't exist before. Five overlapping per-task
-    # `with patch(...)` blocks (each entering/exiting `get_routed_provider`
-    # independently) are not safe across that yield -- unittest.mock.patch
-    # saves/restores a single module attribute, so interleaved enter/exit
-    # across concurrently-gathered coroutines corrupts each other's
-    # "original value" bookkeeping and can leak the real (unpatched)
-    # get_routed_provider into one of the calls. Fixed by patching ONCE for
-    # the whole gather(), with a side_effect that hands out one mock per
-    # call -- get_routed_provider itself is still called synchronously (no
-    # internal await), so `mocks.pop(0)` cannot be interrupted mid-call on
-    # this single-threaded event loop.
     mocks = [make_stt(i) for i in range(5)]
 
     def _route(*args, **kwargs):
@@ -308,7 +289,6 @@ async def test_pipeline_concurrent_invocations_save_independently(
     assert save_mock.call_count == 5
 
 
-# --- Latency isolation (spec 003) -------------------------------------------
 
 @pytest.mark.asyncio
 async def test_pipeline_schedules_embedding_via_background_tasks_not_awaited(
@@ -358,9 +338,9 @@ async def test_pipeline_omits_background_task_when_none_provided(
     stt = _make_stt_mock("hello world")
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(sample_wav, style="normal")  # no background_tasks
+        result = await process_audio(sample_wav, style="normal")
 
-    assert result.text == "hello world"  # must not raise
+    assert result.text == "hello world"
 
 
 @pytest.mark.background_indexer
@@ -397,8 +377,6 @@ async def test_pipeline_survives_embedding_provider_outage(
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         result = await process_audio(sample_wav, style="normal", background_tasks=bt)
 
-    # process_audio already returned successfully; the background task has
-    # not run yet at this point.
     assert result.text == "hello world"
     assert result.copied_to_clipboard is True
     assert save_mock.call_count == 1
@@ -410,14 +388,12 @@ async def test_pipeline_survives_embedding_provider_outage(
         ),
         patch("app.core.history._vec_available", True),
     ):
-        await bt()  # must not raise — embed_entry_background swallows it
+        await bt()
 
-    # process_audio's earlier return value / saved entry are unaffected.
     assert result.text == "hello world"
     assert save_mock.call_args.kwargs["text"] == "hello world"
 
 
-# --- Silence guard (spec 029) ------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -425,7 +401,7 @@ async def test_pipeline_silence_guard_skips_stt_call(
     silent_wav, cloud_mode, _isolate_side_effects
 ):
     """AC-5: on a silent input, stt.transcribe is never called at all."""
-    stt = _make_stt_mock("Дякую за перегляд")  # the reported hallucination
+    stt = _make_stt_mock("Дякую за перегляд")
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         result = await process_audio(silent_wav, language="uk", style="normal")
@@ -472,7 +448,7 @@ async def test_pipeline_silence_guard_does_not_raise(
     stt = _make_stt_mock("Дякую за перегляд")
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(silent_wav, style="normal")  # must not raise
+        result = await process_audio(silent_wav, style="normal")
 
     assert result.discarded_reason == "silence"
 
@@ -529,7 +505,7 @@ async def test_pipeline_silence_guard_does_not_block_event_loop(
     real_analyze_silence = analysis_module.analyze_silence
 
     def _slow_analyze_silence(*args, **kwargs):
-        time.sleep(0.2)  # stand-in for a slow synchronous analysis
+        time.sleep(0.2)
         return real_analyze_silence(*args, **kwargs)
 
     monkeypatch.setattr("app.pipeline.service.analyze_silence", _slow_analyze_silence)
@@ -558,7 +534,6 @@ async def test_pipeline_silence_guard_does_not_block_event_loop(
     assert result.discarded_reason == "silence"
 
 
-# --- Spec 028 Item 2: Local STT readiness barrier ---------------------------
 
 
 @pytest.fixture
@@ -641,7 +616,7 @@ async def test_process_audio_raises_clear_error_when_readiness_wait_times_out(
     from app.stt.local import LocalSTTProvider
 
     def _stuck_get_model(self):
-        time.sleep(0.3)  # far longer than the barrier's own timeout below
+        time.sleep(0.3)
 
     monkeypatch.setattr(LocalSTTProvider, "_get_model", _stuck_get_model)
     monkeypatch.setattr("app.stt.local_setup._READY_TIMEOUT", 0.05)
@@ -669,7 +644,7 @@ async def test_process_audio_proceeds_to_transcribe_when_barrier_returns_not_rea
     _, save_mock = _isolate_side_effects
 
     async def _fake_await_local_ready(stt_settings, timeout=None):
-        return False  # not ready, but NOT a timeout
+        return False
 
     monkeypatch.setattr(
         "app.stt.local_setup.await_local_ready", _fake_await_local_ready
@@ -689,7 +664,6 @@ async def test_process_audio_proceeds_to_transcribe_when_barrier_returns_not_rea
     assert save_mock.call_count == 1
 
 
-# --- Detected-language substitution (spec 029) -------------------------------
 
 
 @pytest.mark.asyncio
@@ -703,7 +677,7 @@ async def test_pipeline_auto_language_substitutes_detected_language(
         return_value=TranscriptionResult(text="привіт", tokens_used=None, detected_language="uk")
     )
     stt.model_name = "mock/provider"
-    stt.is_local = False  # cloud-route test double -- see _make_stt_mock
+    stt.is_local = False
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         await process_audio(sample_wav, language="auto", style="normal")
@@ -723,7 +697,7 @@ async def test_pipeline_explicit_language_never_overridden_by_detection(
         return_value=TranscriptionResult(text="hello", tokens_used=None, detected_language="en")
     )
     stt.model_name = "mock/provider"
-    stt.is_local = False  # cloud-route test double -- see _make_stt_mock
+    stt.is_local = False
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         await process_audio(sample_wav, language="uk", style="normal")
@@ -738,7 +712,7 @@ async def test_pipeline_auto_language_falls_back_to_auto_sentinel_when_provider_
     """AC-22: language="auto" + provider reports nothing -> saved language
     stays the literal "auto" sentinel -- current behaviour, no regression."""
     _, save_mock = _isolate_side_effects
-    stt = _make_stt_mock("ok")  # detected_language defaults to None
+    stt = _make_stt_mock("ok")
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         await process_audio(sample_wav, language="auto", style="normal")
@@ -746,12 +720,6 @@ async def test_pipeline_auto_language_falls_back_to_auto_sentinel_when_provider_
     assert save_mock.call_args.kwargs["language"] == "auto"
 
 
-# --- Spec 033: three-layer no-speech defence -------------------------------
-#
-# The pre-model gate now has a three-way decision (VAD verdict / VAD absent /
-# VAD disabled) instead of one boolean, so it gets an explicit matrix. Every
-# test here patches BOTH detectors, so the suite is deterministic on machines
-# with and without the vendored TEN VAD binary (AC 8).
 
 
 def _silence_analysis(is_silent: bool):
@@ -1095,7 +1063,6 @@ async def test_vad_runs_off_the_event_loop(sample_wav, cloud_mode, _isolate_side
     assert ticks["n"] > 1, "event loop was blocked during analyze_vad()"
 
 
-# --- Layer 3: post-model provider no-speech metadata (AC 19) --------------
 
 
 def _stt_mock_with_no_speech(text: str, no_speech_prob):

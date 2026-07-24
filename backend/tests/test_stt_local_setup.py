@@ -19,20 +19,10 @@ from app.stt.local_setup import (
     install_local_packages,
 )
 
-# Captured at module-collection time, before any test's autouse fixture has
-# had a chance to monkeypatch `app.stt.local_factory.get_local_provider_class`
-# / `app.stt.local_setup.get_local_provider_kind` -- the only reliable way to
-# get "the real, unpatched function" back inside a test that needs to
-# deliberately undo the `_force_faster_whisper_for_local` autouse fixture
-# (see `test_check_status_probes_gpu_at_most_once_through_the_real_unmocked_provider_class_path`
-# below). A fresh `from app.stt.local_factory import ...` done inside a test
-# body would just re-read whatever the fixture already patched the module
-# attribute to.
 from app.stt.local_factory import get_local_provider_class as _real_get_local_provider_class
 from app.stt.local_factory import get_local_provider_kind as _real_get_local_provider_kind
 
 
-# --- check_status ---
 
 
 def _patches(installed: bool, gpu: tuple[bool, str | None, str]):
@@ -64,9 +54,9 @@ def test_check_status_reports_installed_package():
 
     assert isinstance(status, LocalSttStatus)
     assert status.package_installed is True
-    assert status.model_loaded is False  # nothing loaded in tests
-    assert status.last_error is None     # no failure yet
-    assert status.model_ram_mb is None   # not loaded → no RAM
+    assert status.model_loaded is False
+    assert status.last_error is None
+    assert status.model_ram_mb is None
     assert status.model_name == "large-v3-turbo"
     assert status.gpu_available is False
     assert status.gpu_name is None
@@ -105,7 +95,7 @@ def test_check_status_reports_missing_package():
         status = check_status(settings)
 
     assert status.package_installed is False
-    assert status.model_loaded is False  # short-circuited because package missing
+    assert status.model_loaded is False
 
 
 def test_check_status_reports_amd_gpu_name_and_vendor_but_not_available():
@@ -119,7 +109,7 @@ def test_check_status_reports_amd_gpu_name_and_vendor_but_not_available():
     assert status.gpu_available is False
     assert status.gpu_vendor == "amd"
     assert status.gpu_name == "AMD Radeon RX 5700 XT"
-    assert status.device == "cpu"  # auto + not available -> cpu
+    assert status.device == "cpu"
 
 
 def test_check_status_surfaces_last_load_error():
@@ -129,7 +119,6 @@ def test_check_status_surfaces_last_load_error():
 
     clear_stt_cache()
     settings = STTSettings()
-    # Force-create provider, then set its instance-level error.
     from app.stt import _get_local
 
     provider = _get_local(settings)
@@ -151,7 +140,6 @@ def test_get_local_load_error_returns_none_before_provider_instantiation():
     assert get_local_load_error(settings) is None
 
 
-# --- _check_package_installed ---
 
 
 def test_check_package_installed_true(monkeypatch):
@@ -174,7 +162,6 @@ def test_check_package_installed_false(monkeypatch):
     assert _check_package_installed() is False
 
 
-# --- _detect_gpu ---
 
 
 def test_detect_gpu_returns_false_when_probe_reports_none(monkeypatch):
@@ -222,7 +209,6 @@ def test_detect_gpu_reports_amd_name_and_vendor_but_not_available(monkeypatch):
     assert vendor == "amd"
 
 
-# --- sse_event formatting ---
 
 
 def test_sse_format_is_event_plus_data():
@@ -232,7 +218,6 @@ def test_sse_format_is_event_plus_data():
     assert out.endswith("\n\n")
 
 
-# --- install_local_packages ---
 
 
 @pytest.mark.asyncio
@@ -295,7 +280,6 @@ async def test_install_refused_in_frozen_binary(monkeypatch):
     assert "not supported in the packaged build" in events[0]
 
 
-# --- macOS arm64 platform path (Plan 019) ---
 
 
 def test_local_extras_returns_local_on_non_mac():
@@ -383,15 +367,11 @@ def test_check_status_macos_arm64_reports_mlx_device_and_bfloat16(monkeypatch):
     assert status.gpu_vendor == "apple"
 
 
-# --- WHISPER_CPP_VULKAN kind (spec 018) ---
 
 
 def _stub_vulkan_kind(monkeypatch) -> None:
     from app.stt.local_factory import LocalProviderKind
 
-    # Accepts (and ignores) an optional positional `vendor` arg -- since the
-    # GitHub review fix (PR #21, iteration 1, issue #2), check_status() calls
-    # the real get_local_provider_kind() with an already-resolved vendor.
     monkeypatch.setattr(
         local_setup,
         "get_local_provider_kind",
@@ -570,7 +550,6 @@ async def test_ensure_local_ready_vulkan_kind_sets_actionable_error_when_binary_
     assert "whisper-server binary not found" in local_setup._prewarm_error
 
 
-# --- check_status merges _prewarm_error (spec 015) ---
 
 
 def test_check_status_surfaces_prewarm_error_when_no_provider_level_error():
@@ -623,7 +602,7 @@ def test_check_status_merge_is_deterministic_when_package_missing_and_provider_e
     provider._last_load_error = "provider-level load error"
     local_setup._prewarm_error = "install-level prewarm error"
     try:
-        with _apply(_patches(False, (False, None, "none"))):  # package MISSING
+        with _apply(_patches(False, (False, None, "none"))):
             status = check_status(settings)
         assert status.last_error == "provider-level load error"
         assert status.package_installed is False
@@ -633,7 +612,6 @@ def test_check_status_merge_is_deterministic_when_package_missing_and_provider_e
         clear_stt_cache()
 
 
-# --- ensure_local_ready / maybe_prewarm_local (spec 015) ---
 
 
 class _FakePrewarmProvider:
@@ -701,7 +679,7 @@ def test_maybe_prewarm_local_is_noop_for_cloud_mode(monkeypatch):
 
     monkeypatch.setattr(local_setup, "ensure_local_ready", _spy)
     settings = STTSettings(mode=ProviderMode.CLOUD)
-    local_setup.maybe_prewarm_local(settings)  # must not raise (no event loop here)
+    local_setup.maybe_prewarm_local(settings)
     assert called["n"] == 0
 
 
@@ -720,7 +698,7 @@ async def test_maybe_prewarm_local_schedules_ensure_local_ready_for_local_mode(m
     settings = STTSettings(mode=ProviderMode.LOCAL)
     local_setup.maybe_prewarm_local(settings)
     pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    await asyncio.gather(*pending)  # let the scheduled fire-and-forget task run
+    await asyncio.gather(*pending)
     assert called["n"] == 1
 
 
@@ -766,7 +744,7 @@ async def test_ensure_local_ready_noop_when_mode_not_local_at_entry(monkeypatch)
 
     monkeypatch.setattr("app.stt.get_provider", _boom)
     settings = STTSettings(mode=ProviderMode.CLOUD)
-    await local_setup.ensure_local_ready(settings)  # must not raise
+    await local_setup.ensure_local_ready(settings)
 
 
 @pytest.mark.asyncio
@@ -789,9 +767,6 @@ async def test_ensure_local_ready_fast_path_when_already_loaded(monkeypatch):
 async def test_ensure_local_ready_installs_then_loads_on_success(monkeypatch):
     provider = _FakePrewarmProvider()
     monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    # The mid-install/mid-load rechecks compare against peek_local_provider(),
-    # not stt_settings.mode — must reflect what get_provider() returns so the
-    # identity check reads "still cached", not "orphaned" (spec 015, RED-1).
     monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
     monkeypatch.setattr(local_setup, "_run_pip_install", lambda: (0, "ok"))
@@ -837,7 +812,7 @@ async def test_ensure_local_ready_aborts_load_if_mode_changes_during_install(mon
 
     def _install_and_flip_mode():
         settings.mode = ProviderMode.CLOUD
-        cache["current"] = None  # clear_cache() evicts the provider
+        cache["current"] = None
         return (0, "ok")
 
     monkeypatch.setattr(local_setup, "_run_pip_install", _install_and_flip_mode)
@@ -860,7 +835,7 @@ async def test_ensure_local_ready_cleans_up_orphan_after_mode_change_mid_load(mo
 
     def _flip_mode_during_load(self_provider):
         settings.mode = ProviderMode.CLOUD
-        cache["current"] = None  # clear_cache() evicts the provider
+        cache["current"] = None
         self_provider.is_loaded = True
 
     provider = _FakePrewarmProvider(get_model=_flip_mode_during_load)
@@ -889,7 +864,7 @@ async def test_ensure_local_ready_swallows_get_model_exception_without_cleanup(m
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
 
     settings = STTSettings(mode=ProviderMode.LOCAL)
-    await local_setup.ensure_local_ready(settings)  # must not raise
+    await local_setup.ensure_local_ready(settings)
 
     assert provider.get_model_calls == 1
     assert provider.cleanup_calls == 0
@@ -908,7 +883,7 @@ async def test_prewarm_lock_serialises_concurrent_ensure_local_ready(monkeypatch
 
         def _get_model(self):
             call_count["n"] += 1
-            time.sleep(0.05)  # force an overlap window
+            time.sleep(0.05)
             self.is_loaded = True
 
         def cleanup(self):
@@ -948,8 +923,8 @@ async def test_ensure_local_ready_cleans_up_orphan_when_cache_cleared_without_a_
     created: list[_FakePrewarmProvider] = []
 
     def _clear_cache_mid_load(self_provider):
-        time.sleep(0.05)  # let call #2 actually reach and block on _prewarm_lock
-        cache["current"] = None  # like an external clear_cache() — mode is untouched
+        time.sleep(0.05)
+        cache["current"] = None
         self_provider.is_loaded = True
 
     def _fake_get_provider(mode, s):
@@ -969,17 +944,16 @@ async def test_ensure_local_ready_cleans_up_orphan_when_cache_cleared_without_a_
         local_setup.ensure_local_ready(settings),
     )
 
-    assert settings.mode == ProviderMode.LOCAL  # mode never flipped, unlike the test above
+    assert settings.mode == ProviderMode.LOCAL
     provider_a, provider_b = created
     assert provider_a is not provider_b
     assert provider_a.get_model_calls == 1
-    assert provider_a.cleanup_calls == 1  # RED-1: the leak is fixed
+    assert provider_a.cleanup_calls == 1
     assert provider_b.get_model_calls == 1
-    assert provider_b.cleanup_calls == 0  # provider B is the one left cached
+    assert provider_b.cleanup_calls == 0
     assert cache["current"] is provider_b
 
 
-# --- crash-loop guard for the startup prewarm (spec 023) ---
 
 
 @pytest.fixture
@@ -1030,7 +1004,7 @@ def test_maybe_prewarm_local_at_startup_noop_for_cloud_mode(
 
     monkeypatch.setattr(local_setup, "ensure_local_ready", _spy)
     settings = STTSettings(mode=ProviderMode.CLOUD)
-    local_setup.maybe_prewarm_local_at_startup(settings)  # must not raise (no event loop here)
+    local_setup.maybe_prewarm_local_at_startup(settings)
 
     assert called["n"] == 0
     assert list(_isolated_crash_guard_root.iterdir()) == []
@@ -1113,7 +1087,7 @@ def test_maybe_prewarm_local_at_startup_skips_after_max_consecutive_crashes(
     settings = STTSettings(mode=ProviderMode.LOCAL)
 
     with caplog.at_level(logging.WARNING, logger="app.stt.local_setup"):
-        local_setup.maybe_prewarm_local_at_startup(settings)  # must not raise (no event loop here)
+        local_setup.maybe_prewarm_local_at_startup(settings)
 
     assert (
         local_setup._read_consecutive_incomplete_prewarms()
@@ -1149,7 +1123,6 @@ async def test_maybe_prewarm_local_resets_crash_guard_counter_on_explicit_trigge
     await asyncio.gather(*pending)
 
 
-# --- await_local_ready() (spec 028 Item 2) ----------------------------------
 
 
 @pytest.mark.asyncio
@@ -1229,7 +1202,7 @@ async def test_await_local_ready_raises_typed_timeout_on_stuck_load(monkeypatch)
             self.is_loaded = False
 
         def _get_model(self):
-            time.sleep(0.3)  # far longer than this test's own timeout budget
+            time.sleep(0.3)
             self.is_loaded = True
 
         def cleanup(self):
@@ -1265,7 +1238,7 @@ async def test_await_local_ready_returns_false_not_raises_when_mode_changes_mid_
 
     def _install_and_flip_mode():
         settings.mode = ProviderMode.CLOUD
-        cache["current"] = None  # like clear_cache() evicting the provider
+        cache["current"] = None
         return (0, "ok")
 
     monkeypatch.setattr(local_setup, "_run_pip_install", _install_and_flip_mode)
@@ -1287,7 +1260,7 @@ async def test_await_local_ready_returns_false_not_raises_when_cache_moves_on_mi
     cache: dict[str, _FakePrewarmProvider | None] = {"current": None}
 
     def _flip_cache_during_load(self_provider):
-        cache["current"] = None  # like an external clear_cache()
+        cache["current"] = None
         self_provider.is_loaded = True
 
     provider = _FakePrewarmProvider(get_model=_flip_cache_during_load)
@@ -1298,12 +1271,11 @@ async def test_await_local_ready_returns_false_not_raises_when_cache_moves_on_mi
 
     result = await local_setup.await_local_ready(settings, timeout=5.0)
 
-    assert result is False  # peek_local_provider() now resolves to None
+    assert result is False
     assert provider.get_model_calls == 1
     assert provider.cleanup_calls == 1
 
 
-# --- double-load window on timeout (Stage 5 GitHub review, PR #34, finding 1) --
 
 
 @pytest.mark.asyncio
@@ -1347,19 +1319,12 @@ async def test_timeout_then_retry_joins_in_flight_load_instead_of_starting_a_sec
 
     settings = STTSettings(mode=ProviderMode.LOCAL)
 
-    # First call: its own timeout fires long before the load actually
-    # finishes (release is not set yet) -- the load is genuinely still
-    # running in its worker thread when this raises.
     with pytest.raises(local_setup.LocalReadinessTimeout):
         await local_setup.await_local_ready(settings, timeout=0.05)
 
     assert await asyncio.to_thread(started.wait, 2), "the worker thread never started"
     assert call_count["n"] == 1
 
-    # Second call (the user's retry): the original attempt's thread is
-    # STILL blocked on `release`. Release it shortly after this call starts
-    # waiting, so a correct implementation joins the SAME in-flight attempt
-    # and succeeds well within its own generous timeout.
     async def _release_soon():
         await asyncio.sleep(0.1)
         release.set()

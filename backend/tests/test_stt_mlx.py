@@ -21,9 +21,6 @@ import pytest
 pytestmark = pytest.mark.mlx
 
 
-# --------------------------------------------------------------------------- #
-# mlx-whisper module stubs                                                    #
-# --------------------------------------------------------------------------- #
 
 
 class _FakeModelHolder:
@@ -59,7 +56,6 @@ def _install_mlx_whisper_stub(monkeypatch, *, load_model=None, transcribe=None):
     monkeypatch.setitem(sys.modules, "mlx_whisper.transcribe", transcribe_mod)
     monkeypatch.setitem(sys.modules, "mlx_whisper.load_models", load_models_mod)
 
-    # mlx.core for cleanup()'s mx.metal.clear_cache call.
     mx_metal = types.ModuleType("mlx.core.metal")
     mx_metal.clear_cache = MagicMock()
     mx_core = types.ModuleType("mlx.core")
@@ -84,9 +80,6 @@ def _clean_env(monkeypatch):
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
 
 
-# --------------------------------------------------------------------------- #
-# MLX_REPO_BY_SIZE mapping correctness                                        #
-# --------------------------------------------------------------------------- #
 
 
 def test_repo_map_has_all_seven_supported_sizes():
@@ -119,9 +112,6 @@ def test_repo_id_unknown_size_raises_value_error():
         provider._get_repo_id()
 
 
-# --------------------------------------------------------------------------- #
-# _get_model: load, error latching, short-circuit, env-var toggle             #
-# --------------------------------------------------------------------------- #
 
 
 def test_get_model_unknown_size_latches_error_into_last_load_error(monkeypatch):
@@ -172,7 +162,7 @@ def test_get_model_does_not_short_circuit_when_cached_repo_differs(monkeypatch):
     load_model_spy = MagicMock()
     _install_mlx_whisper_stub(monkeypatch, load_model=load_model_spy)
     _FakeModelHolder.model = object()
-    _FakeModelHolder.model_path = "mlx-community/whisper-large-v3-mlx"  # different repo
+    _FakeModelHolder.model_path = "mlx-community/whisper-large-v3-mlx"
 
     from app.stt.local_mlx import MLXWhisperSTTProvider
 
@@ -204,7 +194,6 @@ def test_get_model_sets_hf_hub_offline_when_cache_present(monkeypatch):
     _clean_env(monkeypatch)
 
     def _load_model(repo_id):
-        # Capture the env value at the moment load_model is invoked.
         _load_model.observed = os.environ.get("HF_HUB_OFFLINE")
 
     _load_model.observed = None
@@ -242,7 +231,6 @@ def test_get_model_does_not_set_hf_hub_offline_when_cache_empty(monkeypatch):
 
     provider = MLXWhisperSTTProvider(_settings("large-v3-turbo"))
     provider._get_model()
-    # Cache absent → flag must NOT be set (so first download can talk to HF).
     assert _load_model.observed is None
 
 
@@ -253,14 +241,13 @@ def test_get_model_pops_hf_hub_offline_when_switching_to_uncached_model(monkeypa
     first download of B fails with OfflineModeIsEnabled.
     """
     _clean_env(monkeypatch)
-    os.environ["HF_HUB_OFFLINE"] = "1"  # simulate prior cached load
+    os.environ["HF_HUB_OFFLINE"] = "1"
 
     def _load_model(repo_id):
         _load_model.observed = os.environ.get("HF_HUB_OFFLINE")
 
     _load_model.observed = "untouched"
     _install_mlx_whisper_stub(monkeypatch, load_model=_load_model)
-    # Cache is empty for model B (the size we're switching to).
     monkeypatch.setattr(
         "app.stt.local_mlx.scan_cache_dir",
         MagicMock(return_value=MagicMock(repos=[])),
@@ -268,14 +255,11 @@ def test_get_model_pops_hf_hub_offline_when_switching_to_uncached_model(monkeypa
 
     from app.stt.local_mlx import MLXWhisperSTTProvider
 
-    provider = MLXWhisperSTTProvider(_settings("large-v3"))  # different size
+    provider = MLXWhisperSTTProvider(_settings("large-v3"))
     provider._get_model()
-    assert _load_model.observed is None  # flag was popped before load_model
+    assert _load_model.observed is None
 
 
-# --------------------------------------------------------------------------- #
-# Lock semantics                                                               #
-# --------------------------------------------------------------------------- #
 
 
 def test_load_lock_serialises_concurrent_get_model(monkeypatch):
@@ -286,7 +270,7 @@ def test_load_lock_serialises_concurrent_get_model(monkeypatch):
 
     def _load_model(repo_id):
         call_count["n"] += 1
-        time.sleep(0.05)  # force overlap window
+        time.sleep(0.05)
         _FakeModelHolder.model = object()
         _FakeModelHolder.model_path = repo_id
 
@@ -306,13 +290,9 @@ def test_load_lock_serialises_concurrent_get_model(monkeypatch):
     for t in threads:
         t.join()
 
-    # Second caller finds ModelHolder already warm and short-circuits.
     assert call_count["n"] == 1
 
 
-# --------------------------------------------------------------------------- #
-# is_loaded / cleanup / transcribe                                            #
-# --------------------------------------------------------------------------- #
 
 
 def test_is_loaded_starts_false(monkeypatch):
@@ -417,13 +397,10 @@ def test_cleanup_returns_promptly_without_deadlock_when_load_lock_held(monkeypat
     holder.join(timeout=2)
 
     assert elapsed < 1.0, f"cleanup() blocked for {elapsed:.2f}s while the lock was held"
-    assert _FakeModelHolder.model is not None  # untouched — cleanup bailed out
-    assert provider.is_loaded is True  # untouched — cleanup bailed out
+    assert _FakeModelHolder.model is not None
+    assert provider.is_loaded is True
 
 
-# --------------------------------------------------------------------------- #
-# transcribe kwargs                                                            #
-# --------------------------------------------------------------------------- #
 
 
 def test_short_audio_kwargs_temperature_zero_no_vad_no_ngram(monkeypatch, tmp_path):
@@ -454,7 +431,6 @@ def test_short_audio_kwargs_temperature_zero_no_vad_no_ngram(monkeypatch, tmp_pa
     assert captured_kwargs["beam_size"] == 1
     assert captured_kwargs["condition_on_previous_text"] is False
     assert captured_kwargs["temperature"] == 0.0
-    # MUST NOT be in kwargs — mlx-whisper rejects these via DecodingOptions.
     assert "no_repeat_ngram_size" not in captured_kwargs
     assert "vad_filter" not in captured_kwargs
 
@@ -485,7 +461,6 @@ def test_long_audio_kwargs_no_temperature_pin(monkeypatch, tmp_path):
 
     assert captured_kwargs["beam_size"] == 5
     assert captured_kwargs["condition_on_previous_text"] is True
-    # Long path leaves temperature at the upstream default for fallback rescue.
     assert "temperature" not in captured_kwargs
 
 
@@ -525,12 +500,9 @@ def test_transcribe_lock_serialises_concurrent_calls(monkeypatch, tmp_path):
         )
 
     asyncio.run(_both())
-    assert active["max"] == 1  # asyncio.Lock kept us serial
+    assert active["max"] == 1
 
 
-# --------------------------------------------------------------------------- #
-# STT auto-detect (spec 019)                                                  #
-# --------------------------------------------------------------------------- #
 
 
 def test_explicit_language_passed_through_unchanged(monkeypatch, tmp_path):
@@ -663,7 +635,6 @@ def test_event_loop_not_blocked_during_get_model(monkeypatch, tmp_path):
     ticks = {"n": 0}
 
     async def _tick():
-        # If the event loop was blocked, we'd see ticks <= 1.
         for _ in range(20):
             await asyncio.sleep(0.005)
             ticks["n"] += 1
@@ -675,4 +646,4 @@ def test_event_loop_not_blocked_during_get_model(monkeypatch, tmp_path):
         )
 
     asyncio.run(_both())
-    assert ticks["n"] >= 10  # plenty of loop iterations happened concurrently
+    assert ticks["n"] >= 10

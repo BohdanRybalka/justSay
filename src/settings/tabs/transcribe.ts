@@ -56,7 +56,6 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
 
   let busy = false;
 
-  // --- File picker ---
   pickBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     if (!busy) fileInput.click();
@@ -80,7 +79,6 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
     fileInput.value = "";
   });
 
-  // --- Drag & drop (HTML5 fallback) ---
   ["dragenter", "dragover"].forEach((evt) => {
     dropzone.addEventListener(evt, (e) => {
       e.preventDefault();
@@ -101,13 +99,11 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
     if (file) {
       await handleFile(file);
     } else {
-      // Tauri may pass an OS path through dataTransfer in some configs.
       const path = e.dataTransfer?.getData("text/plain");
       if (path) showError("Drag-drop received a path instead of a file. Use the picker instead.");
     }
   });
 
-  // --- Tauri OS-level file drop (when webview ignores HTML drop) ---
   let unlistenDrop: (() => void) | null = null;
   (async () => {
     try {
@@ -121,11 +117,9 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
       });
       unlistenDrop = () => { void off(); };
     } catch {
-      // not in Tauri — HTML drop above handles browser
     }
   })();
 
-  // --- Result actions ---
   copyBtn.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(resultText.textContent || "");
@@ -212,8 +206,6 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
 
     let bytes: Uint8Array;
     try {
-      // Plugin types are not bundled in the dev dependency tree on every machine;
-      // resolve at runtime and let Tauri provide the implementation.
       // @ts-ignore - optional Tauri plugin imported lazily
       const fs: any = await import(/* @vite-ignore */ "@tauri-apps/plugin-fs");
       bytes = await fs.readFile(absolutePath);
@@ -225,7 +217,6 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
       showError(`File too large (${(bytes.byteLength / (1024 * 1024)).toFixed(1)} MB > 25 MB limit)`);
       return;
     }
-    // Copy into a fresh ArrayBuffer to satisfy strict typing across SAB boundaries.
     const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
     await transcribe(buf, filename);
   }
@@ -246,7 +237,7 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
 
   return () => {
     if (unlistenDrop) {
-      try { unlistenDrop(); } catch { /* ignore */ }
+      try { unlistenDrop(); } catch {}
     }
   };
 }

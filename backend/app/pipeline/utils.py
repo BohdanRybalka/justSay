@@ -17,6 +17,6 @@ def detect_duration(audio_path: Path) -> float | None:
 
         info = sf.info(str(audio_path))
         return float(info.duration)
-    except Exception as e:  # corrupt file, unsupported container, soundfile missing
+    except Exception as e:
         log.warning("Duration detection failed for %s: %s", audio_path, e)
         return None

@@ -26,12 +26,10 @@ from fastapi import HTTPException
 from app.core.constants import ALLOWED_AUDIO_EXTENSIONS, MIME_BY_AUDIO_EXTENSION
 
 
-# Maps a detected MIME (from magic bytes) → the set of extensions that
-# can legitimately appear with that container.
 _DETECTED_MIME_TO_EXTS: dict[str, frozenset[str]] = {
     "audio/wav":      frozenset({".wav"}),
     "audio/mpeg":     frozenset({".mp3"}),
-    "audio/ogg":      frozenset({".ogg", ".oga", ".opus"}),  # Opus payload inside OggS
+    "audio/ogg":      frozenset({".ogg", ".oga", ".opus"}),
     "audio/flac":     frozenset({".flac"}),
     "audio/mp4":      frozenset({".m4a", ".mp4"}),
     "audio/webm":     frozenset({".webm"}),
@@ -39,12 +37,8 @@ _DETECTED_MIME_TO_EXTS: dict[str, frozenset[str]] = {
     "audio/x-ms-wma": frozenset({".wma"}),
 }
 
-# Extensions whose magic bytes we deliberately can't verify uniquely
-# (ADTS frame sync conflicts with MP3 frame sync; the heuristic would
-# produce false rejects). Listed so the gap is visible.
 _TRUSTED_EXTENSIONS: frozenset[str] = frozenset({".aac"})
 
-# Minimum bytes required to even attempt detection.
 _MIN_MAGIC_BYTES: int = 16
 
 
@@ -57,38 +51,29 @@ def detect_audio_mime(content: bytes) -> str | None:
     if len(content) < _MIN_MAGIC_BYTES:
         return None
 
-    # WAV (RIFF....WAVE)
     if content[:4] == b"RIFF" and content[8:12] == b"WAVE":
         return "audio/wav"
 
-    # MP3 — ID3v2 tagged or raw frame sync.
-    # 0xFFFB / 0xFFF3 / 0xFFE3 / 0xFFF2 — MPEG-1/2 Layer III sync.
     if content[:3] == b"ID3":
         return "audio/mpeg"
     if content[0] == 0xFF and content[1] in (0xFB, 0xF3, 0xE3, 0xF2):
         return "audio/mpeg"
 
-    # OGG container (used for .ogg / .oga / .opus).
     if content[:4] == b"OggS":
         return "audio/ogg"
 
-    # FLAC
     if content[:4] == b"fLaC":
         return "audio/flac"
 
-    # ISO Base Media (MP4 / M4A) — `ftyp` box starts at offset 4.
     if content[4:8] == b"ftyp":
         return "audio/mp4"
 
-    # Matroska / WebM (EBML header).
     if content[:4] == b"\x1a\x45\xdf\xa3":
         return "audio/webm"
 
-    # AIFF / AIFC — FORM....AIFF or AIFC.
     if content[:4] == b"FORM" and content[8:12] in (b"AIFF", b"AIFC"):
         return "audio/aiff"
 
-    # Windows Media Audio (ASF container).
     if content[:4] == b"\x30\x26\xb2\x75":
         return "audio/x-ms-wma"
 
@@ -115,20 +100,13 @@ def validate_audio_upload(content: bytes, filename: str | None) -> str:
 
     expected_mime = MIME_BY_AUDIO_EXTENSION.get(ext)
     if expected_mime is None:
-        # Should be unreachable — every extension in ALLOWED_AUDIO_EXTENSIONS
-        # must be in MIME_BY_AUDIO_EXTENSION (covered by test). Defend anyway.
         raise HTTPException(status_code=400, detail="Unsupported audio format")
 
     if ext in _TRUSTED_EXTENSIONS:
-        # ADTS / raw AAC frames cannot be uniquely disambiguated from MP3 in
-        # 16 bytes. Trust the extension; the STT provider validates further.
         return expected_mime
 
     detected = detect_audio_mime(content)
     if detected is None:
-        # Magic bytes don't match any known audio container. With a non-trusted
-        # extension this means the content is almost certainly not what it
-        # claims to be.
         raise HTTPException(
             status_code=400,
             detail=(
