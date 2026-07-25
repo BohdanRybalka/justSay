@@ -39,6 +39,25 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _metadata_block(body: str) -> str:
+    """The `- **Field:**` lines directly under the heading, and nothing after.
+
+    Scanning the whole entry would let the prose rewrite its own metadata: a
+    body quoting `**Status:** todo` parses as that status under a last-match-
+    wins dict, and a `blocked` entry then stops being asked to name its
+    obstacle. This file exists so an entry cannot rest on unfalsifiable prose,
+    so the parser must not be steerable by prose either.
+    """
+    lines = []
+    for line in body.lstrip("\n").splitlines():
+        if not line.strip():
+            break
+        if not line.startswith("- **"):
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _entries(filename: str) -> list[dict]:
     """Every `### JS-N — Title` block in one file, with its metadata fields."""
     text = (TASKS_DIR / filename).read_text(encoding="utf-8")
@@ -47,7 +66,9 @@ def _entries(filename: str) -> list[dict]:
     for index, match in enumerate(headings):
         end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
         body = text[match.end() : end]
-        fields = {key: value.strip() for key, value in _FIELD_RE.findall(body)}
+        fields = {
+            key: value.strip() for key, value in _FIELD_RE.findall(_metadata_block(body))
+        }
         parsed.append(
             {
                 "id": int(match.group(1)),
@@ -163,7 +184,7 @@ def test_updated_never_precedes_created():
     assert not offenders, f"Updated is earlier than Created: {offenders}"
 
 
-def test_no_live_id_is_at_or_above_the_next_free_number():
+def test_no_live_id_is_already_taken_by_a_spec_directory():
     """Ids and spec directories draw from one counter, so a live entry can never
     hold a number a spec has already taken."""
     spec_numbers = {
@@ -175,3 +196,31 @@ def test_no_live_id_is_at_or_above_the_next_free_number():
         f"These ids are held by both a live entry and a specs/ directory: {clashes}. "
         "One counter, allocated once (docs/tasks/README.md → Ids)."
     )
+
+
+def test_prose_cannot_rewrite_an_entrys_own_metadata(tmp_path, monkeypatch):
+    """The hole this parser shipped with, pinned.
+
+    A `blocked` entry whose body happens to contain the words `**Status:** todo`
+    -- quoting a sibling entry, for instance -- used to parse as `todo` under a
+    last-match-wins scan of the whole body, and silently stopped being required
+    to name its obstacle. The metadata block ends at the first line that is not
+    a `- **` field, so prose below it cannot reach the parser.
+    """
+    (tmp_path / "backlog.md").write_text(
+        "# Backlog\n\n"
+        "### JS-999 — An entry that quotes a status in its prose\n\n"
+        "- **Status:** blocked · **Created:** 2026-07-25 · **Updated:** 2026-07-25\n"
+        "- **Blocked by:** something real\n\n"
+        "Prose that mentions **Status:** todo while quoting another entry.\n",
+        encoding="utf-8",
+    )
+    for name in ("bugs.md", "tech-debt.md"):
+        (tmp_path / name).write_text("# Empty\n", encoding="utf-8")
+
+    monkeypatch.setattr("tests.test_task_files.TASKS_DIR", tmp_path)
+
+    entry = _entries("backlog.md")[0]
+
+    assert entry["fields"]["Status"] == "blocked"
+    assert entry["fields"]["Blocked by"] == "something real"
