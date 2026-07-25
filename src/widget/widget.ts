@@ -1,3 +1,10 @@
+import {
+  DEFAULT_SHORTCUT,
+  detectShortcutPlatform,
+  formatAccelerator,
+  shortcutFailureMessage,
+  shouldReapplyShortcut,
+} from "../accelerator";
 import { api } from "../api";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
 import { computeDoneStatus } from "./done-status";
@@ -23,8 +30,9 @@ let durationInterval: ReturnType<typeof setInterval> | null = null;
 let iconFlashTimer: ReturnType<typeof setTimeout> | null = null;
 let connectionState: ConnectionCheckState = { offline: false, firstCheckDone: false };
 
-let currentShortcut = "Ctrl+Alt+KeyV";
+let currentShortcut = DEFAULT_SHORTCUT;
 let currentLanguage = "uk";
+const shortcutPlatform = detectShortcutPlatform(navigator);
 
 const AUTO_REVERT_MS = 3000;
 
@@ -209,31 +217,156 @@ widget.addEventListener("mouseleave", () => {
 });
 
 
+type GlobalShortcutPlugin = typeof import("@tauri-apps/plugin-global-shortcut");
+type ShortcutOutcome =
+  | { ok: true; applied: boolean }
+  | { ok: false; reason: string; stillActive: string | null };
+type RequestedShortcutResult = {
+  outcome: ShortcutOutcome;
+  persisted: boolean | null;
+  writeError: string | null;
+};
+
 let unregisterFn: (() => Promise<void>) | null = null;
+let activeShortcut: string | null = null;
+let shortcutFailureNotified: string | null = null;
+let shortcutQueue: Promise<unknown> = Promise.resolve();
 
-async function setupGlobalShortcut(shortcut: string) {
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function onShortcutEvent(event: { state: "Pressed" | "Released" }) {
+  if (event.state === "Pressed") {
+    startRecording();
+  } else if (event.state === "Released") {
+    stopAndProcess();
+  }
+}
+
+async function releaseActiveShortcut() {
+  if (unregisterFn) {
+    try {
+      await unregisterFn();
+    } catch {}
+  }
+  unregisterFn = null;
+  activeShortcut = null;
+}
+
+async function registerShortcut(
+  plugin: GlobalShortcutPlugin,
+  shortcut: string,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
   try {
-    const { register, unregister } = await import("@tauri-apps/plugin-global-shortcut");
+    await plugin.register(shortcut, onShortcutEvent);
+  } catch (e) {
+    return { ok: false, reason: errorText(e) };
+  }
 
-    if (unregisterFn) {
-      try {
-        await unregisterFn();
-      } catch {}
+  unregisterFn = () => plugin.unregister(shortcut);
+  activeShortcut = shortcut;
+  console.log(`Global shortcut registered: ${shortcut}`);
+  return { ok: true };
+}
+
+async function runApplyShortcut(next: string, force: boolean): Promise<ShortcutOutcome> {
+  try {
+    const plugin = await import("@tauri-apps/plugin-global-shortcut");
+
+    if (!force && !shouldReapplyShortcut(next, activeShortcut, await plugin.isRegistered(next))) {
+      return { ok: true, applied: false };
     }
 
-    await register(shortcut, (event) => {
-      if (event.state === "Pressed") {
-        startRecording();
-      } else if (event.state === "Released") {
-        stopAndProcess();
-      }
-    });
+    const previous = activeShortcut;
+    await releaseActiveShortcut();
 
-    unregisterFn = () => unregister(shortcut);
-    console.log(`Global shortcut registered: ${shortcut}`);
+    const attempt = await registerShortcut(plugin, next);
+    if (attempt.ok) return { ok: true, applied: true };
+
+    if (previous && previous !== next && (await registerShortcut(plugin, previous)).ok) {
+      return { ok: false, reason: attempt.reason, stillActive: previous };
+    }
+    return { ok: false, reason: attempt.reason, stillActive: null };
   } catch (e) {
-    console.warn("Global shortcut not available:", e);
+    return { ok: false, reason: errorText(e), stillActive: activeShortcut };
   }
+}
+
+function enqueueShortcutJob<T>(job: () => Promise<T>): Promise<T> {
+  const queued = shortcutQueue.then(job);
+  shortcutQueue = queued.catch(() => {});
+  return queued;
+}
+
+function applyShortcut(next: string, options: { force: boolean }): Promise<ShortcutOutcome> {
+  return enqueueShortcutJob(() => runApplyShortcut(next, options.force));
+}
+
+function reportShortcutOutcome(shortcut: string, outcome: ShortcutOutcome) {
+  if (outcome.ok) {
+    shortcutFailureNotified = null;
+    widget.removeAttribute("title");
+    return;
+  }
+
+  const message = shortcutFailureMessage(
+    formatAccelerator(shortcut, shortcutPlatform),
+    outcome.reason,
+    outcome.stillActive ? formatAccelerator(outcome.stillActive, shortcutPlatform) : null,
+  );
+  widget.title = message;
+  if (shortcutFailureNotified !== shortcut) {
+    shortcutFailureNotified = shortcut;
+    notifyError(message);
+  }
+}
+
+async function announceShortcutOutcome(
+  shortcut: string,
+  outcome: ShortcutOutcome,
+  persisted: boolean | null,
+  writeError: string | null,
+) {
+  try {
+    const { emit } = await import("@tauri-apps/api/event");
+    await emit("shortcut-applied", {
+      shortcut,
+      ok: outcome.ok,
+      reason: outcome.ok ? writeError : outcome.reason,
+      persisted,
+      stillActive: outcome.ok ? shortcut : outcome.stillActive,
+    });
+  } catch {}
+}
+
+async function applyAndReportShortcut(shortcut: string) {
+  const outcome = await applyShortcut(shortcut, { force: false });
+  if (outcome.ok && !outcome.applied) return;
+  reportShortcutOutcome(shortcut, outcome);
+  await announceShortcutOutcome(shortcut, outcome, null, null);
+}
+
+async function runRequestedShortcut(shortcut: string): Promise<RequestedShortcutResult> {
+  const outcome = await runApplyShortcut(shortcut, true);
+  if (!outcome.ok) return { outcome, persisted: null, writeError: null };
+
+  try {
+    await api.updateSettings({ shortcut });
+    currentShortcut = shortcut;
+    return { outcome, persisted: true, writeError: null };
+  } catch (e) {
+    console.error("Failed to store the registered shortcut:", e);
+    return { outcome, persisted: false, writeError: errorText(e) };
+  }
+}
+
+async function applyRequestedShortcut(shortcut: string) {
+  const { outcome, persisted, writeError } = await enqueueShortcutJob(() =>
+    runRequestedShortcut(shortcut),
+  );
+  reportShortcutOutcome(shortcut, outcome);
+  await announceShortcutOutcome(shortcut, outcome, persisted, writeError);
 }
 
 
@@ -241,13 +374,11 @@ async function loadSettings() {
   try {
     const settings = await api.getSettings();
     currentLanguage = settings.language;
-    if (settings.shortcut !== currentShortcut) {
-      currentShortcut = settings.shortcut;
-      await setupGlobalShortcut(currentShortcut);
-    }
+    currentShortcut = settings.shortcut;
   } catch (e) {
     console.warn("Failed to load settings:", e);
   }
+  await applyAndReportShortcut(currentShortcut);
 }
 
 
@@ -256,6 +387,9 @@ async function listenForSettingsChanges() {
     const { listen } = await import("@tauri-apps/api/event");
     await listen("settings-changed", async () => {
       await loadSettings();
+    });
+    await listen<{ shortcut: string }>("shortcut-requested", async ({ payload }) => {
+      await applyRequestedShortcut(payload.shortcut);
     });
   } catch {
   }
@@ -286,7 +420,6 @@ async function init() {
   setInterval(checkConnection, 5000);
 
   await loadSettings();
-  await setupGlobalShortcut(currentShortcut);
   await listenForSettingsChanges();
 
   try {

@@ -28,6 +28,10 @@ vi.mock("../api", async (importOriginal) => {
   };
 });
 
+vi.mock("./tabs/models", () => ({
+  renderModels: vi.fn(() => () => {}),
+}));
+
 function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
   return {
     language: "uk",
@@ -132,6 +136,32 @@ describe("loadSettings — a later re-call's cloud-status refetch failure also r
       gemini_key_set: false,
       groq_key_set: true,
     });
+  });
+});
+
+
+describe("a shortcut the widget stored while this window was open", () => {
+  it("survives a tab switch instead of the General tab redrawing the one loaded at open", async () => {
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" });
+    apiMock.getSettings.mockResolvedValue(buildSettings({ shortcut: "Ctrl+Alt+KeyV" }));
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
+    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+
+    const settingsModule = await import("./settings");
+
+    await vi.waitFor(() => {
+      expect(document.getElementById("shortcut-btn")).not.toBeNull();
+    });
+    expect(document.getElementById("shortcut-btn")!.textContent).toBe("Ctrl + Alt + V");
+
+    settingsModule.cachePersistedShortcut("Ctrl+Alt+KeyB");
+
+    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.click();
+    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="general"]')!.click();
+
+    expect(document.getElementById("shortcut-btn")!.textContent).toBe("Ctrl + Alt + B");
+    expect(settingsModule.getSettings()!.shortcut).toBe("Ctrl+Alt+KeyB");
+    expect(apiMock.getSettings).toHaveBeenCalledTimes(1);
   });
 });
 

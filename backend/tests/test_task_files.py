@@ -29,7 +29,7 @@ ARCHIVE_FILE = "done.md"
 STATUSES = {"todo", "in-progress", "blocked", "deferred", "wontfix", "done"}
 
 _HEADING_RE = re.compile(r"^### JS-(\d+) — (.+)$", re.M)
-_FIELD_RE = re.compile(r"\*\*(Status|Created|Updated|Trigger|Blocked by):\*\*\s*([^·\n]+)")
+_FIELD_RE = re.compile(r"\*\*(Status|Created|Updated|Trigger|Blocked by|Spec):\*\*\s*([^·\n]+)")
 _ARCHIVE_ID_RE = re.compile(r"^- \[x\] \*\*JS-(\d+)\*\*", re.M)
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -184,17 +184,47 @@ def test_updated_never_precedes_created():
     assert not offenders, f"Updated is earlier than Created: {offenders}"
 
 
-def test_no_live_id_is_already_taken_by_a_spec_directory():
+def _spec_numbers() -> set[int]:
+    return {int(p.name[:3]) for p in SPECS_DIR.iterdir() if p.is_dir() and p.name[:3].isdigit()}
+
+
+def _owns_its_spec(entry: dict) -> bool:
+    """True when this entry is the open cycle for the spec holding its number.
+
+    `in-progress` means "a branch or spec is open" (docs/tasks/README.md →
+    Statuses) and the id rule keeps one number from backlog line to merged PR,
+    so JS-71 and `specs/071-*` are the same work by construction. Naming the
+    directory is what separates that from a genuine collision, and it is a fact
+    a reader can check rather than a status anyone may claim.
+    """
+    return entry["fields"].get("Status") == "in-progress" and (
+        f"specs/{entry['id']:03d}-" in entry["fields"].get("Spec", "")
+    )
+
+
+def test_no_live_id_is_already_taken_by_an_unrelated_spec_directory():
     """Ids and spec directories draw from one counter, so a live entry can never
-    hold a number a spec has already taken."""
-    spec_numbers = {
-        int(p.name[:3]) for p in SPECS_DIR.iterdir() if p.is_dir() and p.name[:3].isdigit()
-    }
-    clashes = sorted(entry["id"] for entry in _live_entries() if entry["id"] in spec_numbers)
+    hold a number an *unrelated* spec has already taken.
+
+    An entry sharing its number with its own open spec is the expected state
+    for the whole length of a cycle -- not an error. Requiring otherwise made
+    the three rules in docs/tasks/README.md mutually unsatisfiable: `Ids` says
+    the number survives into the spec, `Statuses` says `in-progress` is for
+    exactly that window, and this test used to reject the combination. Spec 071
+    was the first cycle to run after the tracker existed and turned the suite
+    red on its own.
+    """
+    spec_numbers = _spec_numbers()
+    clashes = sorted(
+        entry["id"]
+        for entry in _live_entries()
+        if entry["id"] in spec_numbers and not _owns_its_spec(entry)
+    )
 
     assert not clashes, (
         f"These ids are held by both a live entry and a specs/ directory: {clashes}. "
-        "One counter, allocated once (docs/tasks/README.md → Ids)."
+        "One counter, allocated once (docs/tasks/README.md → Ids). An entry whose own "
+        "cycle is open must say so: **Status:** in-progress plus **Spec:** `specs/NNN-…/`."
     )
 
 

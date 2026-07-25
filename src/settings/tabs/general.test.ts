@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_SHORTCUT } from "../../accelerator";
 import type { UserSettings } from "../../api";
 
 const apiMock = {
@@ -8,6 +9,7 @@ const apiMock = {
   audioStatus: vi.fn(),
   audioStart: vi.fn(),
   cleanupTemp: vi.fn(),
+  updateSettings: vi.fn(),
 };
 
 vi.mock("../../api", () => ({
@@ -17,10 +19,12 @@ vi.mock("../../api", () => ({
 
 const saveSettingsMock = vi.fn();
 const getCloudKeyStatusMock = vi.fn();
+const cachePersistedShortcutMock = vi.fn();
 
 vi.mock("../settings", () => ({
   saveSettings: saveSettingsMock,
   getCloudKeyStatus: getCloudKeyStatusMock,
+  cachePersistedShortcut: cachePersistedShortcutMock,
 }));
 
 vi.mock("./keys", () => ({
@@ -32,9 +36,24 @@ vi.mock("../../notify", () => ({
   notifyError: notifyErrorMock,
 }));
 
+interface ShortcutAppliedEvent {
+  payload: {
+    shortcut: string;
+    ok: boolean;
+    reason: string | null;
+    persisted: boolean | null;
+    stillActive: string | null;
+  };
+}
+
 const emitMock = vi.fn();
+const unlistenMock = vi.fn();
+const listenMock = vi.fn(
+  async (_event: string, _handler: (event: ShortcutAppliedEvent) => void) => unlistenMock,
+);
 vi.mock("@tauri-apps/api/event", () => ({
   emit: emitMock,
+  listen: listenMock,
 }));
 
 const { renderGeneral } = await import("./general");
@@ -42,7 +61,7 @@ const { renderGeneral } = await import("./general");
 function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
   return {
     language: "uk",
-    shortcut: "Ctrl+Alt+KeyV",
+    shortcut: DEFAULT_SHORTCUT,
     output_dir: "C:/fake",
     stt_mode: "cloud",
     llm_mode: "cloud",
@@ -100,6 +119,288 @@ describe("renderGeneral — Dictation Language change (Bug 3)", () => {
       expect(notifyErrorMock).toHaveBeenCalled();
     });
     expect(emitMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
+  function withPlatform(value: string, run: () => void) {
+    Object.defineProperty(navigator, "platform", { value, configurable: true });
+    try {
+      run();
+    } finally {
+      delete (navigator as { platform?: string }).platform;
+    }
+  }
+
+  function capture(container: HTMLElement, init: KeyboardEventInit) {
+    container.querySelector<HTMLButtonElement>("#shortcut-btn")!.click();
+    document.dispatchEvent(new KeyboardEvent("keydown", init));
+  }
+
+  function hintOf(container: HTMLElement): HTMLElement {
+    return container.querySelector<HTMLElement>("#shortcut-hint")!;
+  }
+
+  it("labels the button with the stored accelerator in the host platform's form", () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+
+    expect(container.querySelector("#shortcut-btn")!.textContent).toBe("Ctrl + Alt + V");
+  });
+
+  it("labels the button with Apple glyphs on a Mac navigator", () => {
+    withPlatform("MacIntel", () => {
+      const container = document.createElement("div");
+      renderGeneral(container, buildSettings({ shortcut: "Super+Alt+KeyV" }));
+
+      expect(container.querySelector("#shortcut-btn")!.textContent).toBe("⌥⌘V");
+    });
+  });
+
+  it("requests the captured combination and never claims a restart is needed", async () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+    capture(container, { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
+
+    expect(hintOf(container).textContent).toBe("Applying…");
+    await vi.waitFor(() => {
+      expect(emitMock).toHaveBeenCalledWith("shortcut-requested", { shortcut: "Ctrl+Alt+KeyB" });
+    });
+    expect(hintOf(container).textContent).not.toMatch(/restart/i);
+  });
+
+  it("writes nothing on the capture path — the widget persists only after it registers", async () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+    capture(container, { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
+
+    await vi.waitFor(() => {
+      expect(emitMock).toHaveBeenCalledWith("shortcut-requested", { shortcut: "Ctrl+Alt+KeyB" });
+    });
+    expect(apiMock.updateSettings).not.toHaveBeenCalled();
+    expect(saveSettingsMock).not.toHaveBeenCalled();
+    expect(emitMock).not.toHaveBeenCalledWith("settings-changed");
+  });
+
+  it("reports a failed request instead of leaving a success claim on screen", async () => {
+    emitMock.mockRejectedValueOnce(new Error("bridge down"));
+
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+    capture(container, { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
+
+    await vi.waitFor(() => {
+      expect(notifyErrorMock).toHaveBeenCalledWith("bridge down");
+    });
+    expect(hintOf(container).textContent).toBe("Could not apply the shortcut: bridge down");
+    expect(container.querySelector("#shortcut-btn")!.textContent).toBe("Ctrl + Alt + V");
+  });
+
+  it("names the host platform's modifiers when none was held", () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+    capture(container, { key: "b", code: "KeyB" });
+
+    expect(hintOf(container).textContent).toBe("Must include at least one modifier (Ctrl, Alt, Shift, Win)");
+    expect(emitMock).not.toHaveBeenCalled();
+  });
+
+  it("replaces the hint with the outcome the widget reports", async () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+
+    await vi.waitFor(() => {
+      expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
+    });
+    const handler = listenMock.mock.calls[0][1];
+
+    handler({
+      payload: {
+        shortcut: "Ctrl+Alt+KeyB",
+        ok: true,
+        reason: null,
+        persisted: true,
+        stillActive: "Ctrl+Alt+KeyB",
+      },
+    });
+    expect(hintOf(container).textContent).toBe("Ctrl + Alt + B is active now.");
+
+    handler({
+      payload: {
+        shortcut: "Ctrl+Alt+KeyB",
+        ok: false,
+        reason: "already in use",
+        persisted: null,
+        stillActive: DEFAULT_SHORTCUT,
+      },
+    });
+    expect(hintOf(container).textContent).toBe("Ctrl + Alt + B was not accepted: already in use");
+  });
+
+  it("puts the button label back to the combination that is still firing after a refusal", async () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+    capture(container, { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
+
+    expect(container.querySelector("#shortcut-btn")!.textContent).toBe("Ctrl + Alt + B");
+    await vi.waitFor(() => {
+      expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
+    });
+
+    listenMock.mock.calls[0][1]({
+      payload: {
+        shortcut: "Ctrl+Alt+KeyB",
+        ok: false,
+        reason: "already in use",
+        persisted: null,
+        stillActive: DEFAULT_SHORTCUT,
+      },
+    });
+
+    expect(container.querySelector("#shortcut-btn")!.textContent).toBe("Ctrl + Alt + V");
+  });
+
+  it("says the shortcut is live but unsaved when the widget could not store it", async () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+
+    await vi.waitFor(() => {
+      expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
+    });
+
+    listenMock.mock.calls[0][1]({
+      payload: {
+        shortcut: "Ctrl+Alt+KeyB",
+        ok: true,
+        reason: "backend down",
+        persisted: false,
+        stillActive: "Ctrl+Alt+KeyB",
+      },
+    });
+
+    expect(hintOf(container).textContent).toBe(
+      "Ctrl + Alt + B is active now, but could not be saved: backend down",
+    );
+  });
+
+  it("refreshes the cached settings with the shortcut the widget stored", async () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+
+    await vi.waitFor(() => {
+      expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
+    });
+    const handler = listenMock.mock.calls[0][1];
+
+    handler({
+      payload: {
+        shortcut: "Ctrl+Alt+KeyB",
+        ok: true,
+        reason: null,
+        persisted: true,
+        stillActive: "Ctrl+Alt+KeyB",
+      },
+    });
+
+    expect(cachePersistedShortcutMock).toHaveBeenCalledWith("Ctrl+Alt+KeyB");
+  });
+
+  it("leaves the cached settings alone when the widget could not store the shortcut", async () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+
+    await vi.waitFor(() => {
+      expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
+    });
+    const handler = listenMock.mock.calls[0][1];
+
+    handler({
+      payload: {
+        shortcut: "Ctrl+Alt+KeyB",
+        ok: true,
+        reason: "backend down",
+        persisted: false,
+        stillActive: "Ctrl+Alt+KeyB",
+      },
+    });
+    handler({
+      payload: {
+        shortcut: "Ctrl+Alt+KeyB",
+        ok: false,
+        reason: "already in use",
+        persisted: null,
+        stillActive: DEFAULT_SHORTCUT,
+      },
+    });
+
+    expect(cachePersistedShortcutMock).not.toHaveBeenCalled();
+  });
+
+  it("removes the very keydown listener it registered for the capture", () => {
+    const addSpy = vi.spyOn(document, "addEventListener");
+    const removeSpy = vi.spyOn(document, "removeEventListener");
+
+    const container = document.createElement("div");
+    const destroy = renderGeneral(container, buildSettings());
+    container.querySelector<HTMLButtonElement>("#shortcut-btn")!.click();
+
+    const added = addSpy.mock.calls.filter(([type]) => type === "keydown");
+    expect(added).toHaveLength(1);
+
+    destroy();
+
+    const removed = removeSpy.mock.calls.filter(([type]) => type === "keydown");
+    expect(removed).toHaveLength(1);
+    expect(removed[0][1]).toBe(added[0][1]);
+    expect(removed[0][2]).toBe(added[0][2]);
+
+    addSpy.mockRestore();
+    removeSpy.mockRestore();
+  });
+
+  it("a keydown already dispatched into the capture handler does nothing after destroy", async () => {
+    const addSpy = vi.spyOn(document, "addEventListener");
+
+    const container = document.createElement("div");
+    const destroy = renderGeneral(container, buildSettings());
+    container.querySelector<HTMLButtonElement>("#shortcut-btn")!.click();
+
+    const registered = addSpy.mock.calls.find(([type]) => type === "keydown")!;
+    const handler = registered[1] as (event: KeyboardEvent) => void;
+    addSpy.mockRestore();
+
+    destroy();
+    handler(new KeyboardEvent("keydown", { key: "b", code: "KeyB", ctrlKey: true, altKey: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(emitMock).not.toHaveBeenCalled();
+    expect(container.querySelector("#shortcut-btn")!.textContent).toBe("Press keys...");
+  });
+
+  it("an abandoned capture leaves no keydown handler behind after destroy", async () => {
+    const container = document.createElement("div");
+    const destroy = renderGeneral(container, buildSettings());
+
+    container.querySelector<HTMLButtonElement>("#shortcut-btn")!.click();
+    destroy();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "f", code: "KeyF", ctrlKey: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(emitMock).not.toHaveBeenCalled();
+    expect(apiMock.updateSettings).not.toHaveBeenCalled();
+    expect(saveSettingsMock).not.toHaveBeenCalled();
+  });
+
+  it("releases the shortcut-applied listener when the tab is destroyed", async () => {
+    const container = document.createElement("div");
+    const destroy = renderGeneral(container, buildSettings());
+
+    await vi.waitFor(() => {
+      expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
+    });
+    destroy();
+
+    expect(unlistenMock).toHaveBeenCalledTimes(1);
   });
 });
 
