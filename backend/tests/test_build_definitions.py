@@ -148,6 +148,24 @@ def test_the_sidecar_pip_install_line_is_unchanged():
     assert 'pip install -e ".[cloud,audio]"' in _release_workflow_text()
 
 
+def test_pyproject_names_the_shipped_package_explicitly():
+    """Without this, setuptools auto-discovers top-level packages and finds two
+    as soon as `backend/vendor/` exists — which it does on any machine that has
+    built the local whisper.cpp engine. `release.yml` installs this project with
+    `pip install -e ".[cloud,audio]"` into the PyInstaller environment, so what
+    setuptools includes is a build input, not just a dev convenience.
+    """
+    text = PYPROJECT.read_text(encoding="utf-8")
+    section = re.search(r"^\[tool\.setuptools\]$(.*?)(?=^\[|\Z)", text, re.MULTILINE | re.DOTALL)
+
+    assert section is not None, (
+        "[tool.setuptools] is missing; a flat-layout scan will pick up vendor/"
+    )
+    assert re.search(r'^packages = \["app"\]$', section.group(1), re.MULTILINE), (
+        "packages must name 'app' alone -- vendor/ holds built binaries, not a Python package"
+    )
+
+
 def test_pyproject_declares_no_apple_specific_extra():
     """The macOS engine is a bundled binary, so no extra installs it.
 
