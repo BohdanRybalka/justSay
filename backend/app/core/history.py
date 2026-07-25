@@ -60,6 +60,12 @@ class RelocateResult(str, Enum):
     FAILED = "failed"
 
 
+class ConsolidateResult(str, Enum):
+    CONSOLIDATED = "consolidated"
+    NOT_NEEDED = "not_needed"
+    FAILED = "failed"
+
+
 class HistoryEntry(BaseModel):
     id: str
     timestamp: str
@@ -340,6 +346,111 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
             log.exception("Relocate failed: %s", e)
             return RelocateResult.FAILED, f"Move failed: {e}"
 
+
+_ENTRY_COLUMNS = (
+    "id",
+    "ts",
+    "language",
+    "style",
+    "raw_text",
+    "cleaned_text",
+    "duration_ms",
+    "audio_duration_seconds",
+    "word_count",
+    "model_name",
+    "tokens_used",
+)
+
+
+def _premigration_path(target_dir: Path) -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    candidate = target_dir / f"{HISTORY_FILENAME}.premigration-{stamp}"
+    suffix = 2
+    while candidate.exists():
+        candidate = target_dir / f"{HISTORY_FILENAME}.premigration-{stamp}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateResult, str | None]:
+    """Merge ``source_dir``'s history into ``target_dir`` and move the source aside.
+
+    Used once, at startup, when ``output_dir`` was found inside the scratch
+    directory (ADR 033). Deliberately NOT ``relocate()``: that returns
+    ``NEW_ALREADY_HAS_FILE`` and adopts the target whenever a file exists
+    there, which in the case this exists to repair is an *empty* database --
+    it would hide every row behind a zero-row file. Merging by row makes an
+    empty target harmless.
+
+    Rows are copied with ``INSERT OR IGNORE`` on the existing
+    ``id TEXT PRIMARY KEY``, so a repeated run is a no-op and no row is ever
+    overwritten. Only columns present in *both* databases are copied, so an
+    older source schema degrades to NULLs instead of raising. ``entry_fts``
+    is filled by the ``entries_ai`` trigger and embeddings by
+    ``run_background_indexer``, so no index is rebuilt here.
+
+    The source file is renamed aside, never deleted. Pure with respect to
+    module state: it opens its own connections and touches neither ``_conn``
+    nor ``_output_dir``, so the caller must run it before ``bootstrap``.
+    """
+    source_path = source_dir / HISTORY_FILENAME
+    target_path = target_dir / HISTORY_FILENAME
+
+    if not source_path.exists():
+        return ConsolidateResult.NOT_NEEDED, None
+
+    try:
+        same = source_dir.resolve() == target_dir.resolve()
+    except OSError:
+        same = False
+    if same:
+        return ConsolidateResult.NOT_NEEDED, None
+
+    conn: sqlite3.Connection | None = None
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        conn = _connect(target_path)
+        _init_schema(conn)
+        conn.execute("ATTACH DATABASE ? AS source", (str(source_path),))
+        source_columns = {row[1] for row in conn.execute("PRAGMA source.table_info(entries)")}
+        if "id" not in source_columns:
+            return ConsolidateResult.FAILED, "Source database has no entries table"
+
+        shared = [name for name in _ENTRY_COLUMNS if name in source_columns]
+        column_list = ", ".join(shared)
+        conn.execute("BEGIN")
+        cursor = conn.execute(
+            f"INSERT OR IGNORE INTO entries ({column_list}) "
+            f"SELECT {column_list} FROM source.entries"
+        )
+        copied = cursor.rowcount
+        conn.execute("COMMIT")
+        conn.execute("DETACH DATABASE source")
+    except (OSError, sqlite3.Error) as e:
+        if conn is not None:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+        log.exception("History consolidation failed: %s", e)
+        return ConsolidateResult.FAILED, f"Consolidation failed: {e}"
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+    try:
+        kept = _premigration_path(target_dir)
+        source_path.rename(kept)
+    except OSError as e:
+        log.warning("History merged but the source file could not be moved aside: %s", e)
+        return ConsolidateResult.CONSOLIDATED, f"Source left in place: {e}"
+
+    log.info("Consolidated %d history entries %s → %s; source kept at %s",
+             copied, source_path, target_path, kept)
+    return ConsolidateResult.CONSOLIDATED, None
 
 
 def save_entry(

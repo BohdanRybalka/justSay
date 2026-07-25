@@ -3,13 +3,13 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.core.app_paths import resolve_app_data_root
+from app.core.app_paths import resolve_temp_dir
 
 
 class AudioSettings(BaseSettings):
     sample_rate: int = Field(default=16000, gt=0)
     channels: int = Field(default=1, gt=0)
-    temp_dir: Path = Field(default_factory=lambda: resolve_app_data_root() / "tmp")
+    temp_dir: Path = Field(default_factory=resolve_temp_dir)
 
     silence_peak_dbfs: float = Field(default=-45.0)
     silence_frame_dbfs: float = Field(default=-50.0)

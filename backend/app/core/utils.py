@@ -1,7 +1,6 @@
 """Shared utilities used across routers and setup modules."""
 
 import json
-from pathlib import Path
 
 from fastapi import HTTPException, UploadFile
 
@@ -35,10 +34,3 @@ def bytes_to_mb(b: int) -> int:
 
 def bytes_to_gb(b: int) -> float:
     return round(b / (1024**3), 2)
-
-
-def compute_dir_size(path: Path) -> int:
-    """Recursive sum of file sizes under ``path``. Returns 0 if path is missing."""
-    if not path.exists():
-        return 0
-    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())

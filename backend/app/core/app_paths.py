@@ -17,6 +17,7 @@ _FORCE_DEV_ENV_VAR = "JUSTSAY_FORCE_DEV_DATA_DIR"
 
 PROD_DIR_NAME = ".justsay"
 DEV_DIR_NAME = ".justsay-dev"
+TEMP_DIR_NAME = "tmp"
 
 
 def resolve_app_data_root() -> Path:
@@ -43,3 +44,14 @@ def resolve_app_data_root() -> Path:
     if is_frozen and not forced_dev:
         return Path.home() / PROD_DIR_NAME
     return Path.home() / DEV_DIR_NAME
+
+
+def resolve_temp_dir() -> Path:
+    """The scratch directory for recorded and uploaded audio.
+
+    The single definition of that path. ``AudioSettings.temp_dir`` and the
+    ``output_dir`` validator both read it, so the directory the cleanup
+    endpoint empties and the directory the validator refuses to store
+    history in cannot drift apart (ADR 033).
+    """
+    return resolve_app_data_root() / TEMP_DIR_NAME

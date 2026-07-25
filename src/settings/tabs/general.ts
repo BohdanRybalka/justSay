@@ -56,15 +56,20 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     </div>
 
     <div class="setting-group">
-      <div class="setting-label">Files</div>
+      <div class="setting-label">History location</div>
       <div class="setting-row">
         <span class="label" style="flex: 1;">
           <input type="text" id="output-dir" value="${escapeHtml(settings.output_dir)}" style="width: 100%;" />
         </span>
         <button class="btn btn-secondary" id="btn-browse" style="margin-left: 8px;">Browse</button>
       </div>
-      <div class="setting-hint">If you point this at a sync folder (Dropbox / iCloud / OneDrive), large history moves may take a while.</div>
+      <div class="setting-hint">Where your transcript history is stored. If you point this at a sync folder (Dropbox / iCloud / OneDrive), large history moves may take a while.</div>
       <div id="output-dir-status" class="setting-hint" style="display: none;"></div>
+    </div>
+
+    <div class="setting-group">
+      <div class="setting-label">Recorded audio</div>
+      <div class="setting-hint">Temporary voice files kept after each dictation. Your history is never stored here and is not affected.</div>
       <div class="setting-row">
         <div>
           <span class="label">Size</span>

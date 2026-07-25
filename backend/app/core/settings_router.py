@@ -1,6 +1,7 @@
 """Settings endpoints — CRUD for user preferences."""
 
-import shutil
+import logging
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -12,7 +13,8 @@ from app.core.user_settings import (
     sync_to_runtime,
     update_user_settings,
 )
-from app.core.utils import compute_dir_size
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
@@ -86,17 +88,52 @@ async def cloud_key_status():
     )
 
 
+_SCRATCH_PREFIXES = ("rec_", "pipeline_")
+
+
+def _scratch_files(tmp_dir: Path) -> list[Path]:
+    """Files in the scratch directory that this app wrote (ADR 033).
+
+    ``rec_*`` comes from the microphone recorder, ``pipeline_*`` from the
+    upload path -- the only two producers. Deletion is scoped by ownership
+    rather than by location, so anything else found there survives because
+    it was never in scope, not because it was added to an exception list.
+    A user's ``history.db`` is the case that made this necessary.
+    """
+    if not tmp_dir.is_dir():
+        return []
+    return [
+        entry
+        for entry in tmp_dir.iterdir()
+        if entry.is_file() and entry.name.startswith(_SCRATCH_PREFIXES)
+    ]
+
+
+def _scratch_size(tmp_dir: Path) -> int:
+    total = 0
+    for entry in _scratch_files(tmp_dir):
+        try:
+            total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 @router.get("/storage", response_model=StorageInfo)
 async def get_storage_info():
-    tmp_dir = runtime_settings.audio.temp_dir
-    return StorageInfo(temp_size_bytes=compute_dir_size(tmp_dir))
+    return StorageInfo(temp_size_bytes=_scratch_size(runtime_settings.audio.temp_dir))
 
 
 @router.post("/cleanup", response_model=CleanupResult)
 async def cleanup_temp():
     tmp_dir = runtime_settings.audio.temp_dir
-    freed = compute_dir_size(tmp_dir)
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+    freed = 0
+    for entry in _scratch_files(tmp_dir):
+        try:
+            size = entry.stat().st_size
+            entry.unlink()
+        except OSError:
+            log.warning("Could not remove scratch file %s", entry, exc_info=True)
+            continue
+        freed += size
     return CleanupResult(freed_bytes=freed)

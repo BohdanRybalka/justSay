@@ -16,7 +16,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.core import history
-from app.core.app_paths import resolve_app_data_root
+from app.core.app_paths import resolve_app_data_root, resolve_temp_dir
 
 
 def _settings_dir() -> Path:
@@ -138,6 +138,71 @@ def _validate_whisper_model_size(value: object) -> None:
         )
 
 
+def _is_inside_scratch(candidate: Path) -> bool:
+    """Whether ``candidate`` would put history.db inside the scratch tree.
+
+    The rule is one-way on purpose (ADR 033). In the default layout the
+    scratch directory sits *inside* ``output_dir`` -- app-data root holds
+    ``history.db`` next to ``tmp/`` -- so a symmetric "these must not nest"
+    check would reject every healthy install. What must never happen is the
+    reverse: history living under the directory the cleanup endpoint empties.
+    """
+    try:
+        scratch = resolve_temp_dir().resolve(strict=False)
+        return candidate == scratch or candidate.is_relative_to(scratch)
+    except (ValueError, OSError):
+        return False
+
+
+def _reject_scratch_directory(candidate: Path) -> None:
+    """Raise if ``candidate`` is the scratch directory or lives inside it."""
+    if _is_inside_scratch(candidate):
+        raise ValueError(
+            f"output_dir cannot be inside the temporary audio directory "
+            f"({resolve_temp_dir()}); files there are deleted by Clear Temp Files"
+        )
+
+
+def repair_scratch_output_dir() -> Path:
+    """Startup repair for history that already lives inside the scratch tree.
+
+    Returns the directory history should be opened from. A healthy
+    configuration is returned untouched and nothing is written.
+
+    On a broken one the rows are merged into the app-data root, the stored
+    ``output_dir`` is rewritten so the repair runs once, and the old file is
+    kept aside by ``consolidate_into``. If the merge fails the *old*
+    directory is returned deliberately: serving the user's real rows from a
+    risky location beats serving an empty database from a safe one, and the
+    ownership-scoped cleanup (ADR 033) already stops that location from
+    being emptied.
+
+    Must run before ``history.bootstrap`` -- bootstrap opens the connection,
+    so a later repair would already have served the wrong file.
+    """
+    current = Path(get_user_settings().output_dir)
+    if not _is_inside_scratch(current):
+        return current
+
+    safe = resolve_app_data_root()
+    result, reason = history.consolidate_into(current, safe)
+    if result == history.ConsolidateResult.FAILED:
+        log.error(
+            "History sits inside the scratch directory (%s) and could not be moved out: %s. "
+            "Continuing from the old location; Clear Temp Files will not touch it.",
+            current, reason,
+        )
+        return current
+
+    with _lock:
+        global _settings
+        merged = get_user_settings().model_copy(update={"output_dir": str(safe)})
+        _save(merged)
+        _settings = merged
+    log.warning("Moved history out of the scratch directory: %s → %s", current, safe)
+    return safe
+
+
 def _validate_output_dir(value: object) -> Path:
     """Validate a candidate output_dir. Raises ValueError on rejection."""
     if not isinstance(value, str) or not value.strip():
@@ -157,6 +222,8 @@ def _validate_output_dir(value: object) -> Path:
             continue
         if inside:
             raise ValueError(f"output_dir is inside a system directory: {forbidden}")
+
+    _reject_scratch_directory(candidate)
 
     if candidate.exists():
         if not candidate.is_dir():
