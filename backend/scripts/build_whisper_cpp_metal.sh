@@ -114,12 +114,14 @@ chmod +x "$VENDOR_DIR/whisper-server"
 # find them -- there is no cmake --install step and no @loader_path fixup, so
 # the result runs from this clone and breaks the moment it is bundled into
 # JustSay.app. Stopping now costs one build; shipping it costs a release.
-shopt -s nullglob
-emitted_dylibs=("$BIN_DIR"/*.dylib)
-shopt -u nullglob
-if [ ${#emitted_dylibs[@]} -gt 0 ]; then
+# `find` rather than a glob into an array on purpose: stock macOS bash is
+# 3.2, where an empty array under `set -u` is a known footgun, and this
+# script is run by hand on a user's Mac with no CI to catch a regression in
+# it. A string is version-proof and needs no nullglob toggling.
+emitted_dylibs="$(find "$BIN_DIR" -maxdepth 1 -name '*.dylib' | sort)"
+if [ -n "$emitted_dylibs" ]; then
     echo "ERROR: the build emitted shared libraries, so -DBUILD_SHARED_LIBS=OFF did not take effect:" >&2
-    for dylib in "${emitted_dylibs[@]}"; do
+    echo "$emitted_dylibs" | while IFS= read -r dylib; do
         echo "         $(basename "$dylib")" >&2
     done
     echo "       A binary linked this way only runs from this build tree and would break once" >&2
