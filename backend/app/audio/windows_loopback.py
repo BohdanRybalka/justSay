@@ -16,13 +16,12 @@ import logging
 import threading
 import time
 
-import numpy as np
 import pyaudiowpatch as pyaudio
 
 from app.audio.config import AudioSettings
 from app.audio.endpoint_selection import resolve_loopback_device
 from app.audio.system_source import BlockSink, SystemAudioSource, SystemAudioUnavailableError
-from app.audio.timeline import to_mono
+from app.audio.timeline import interleaved_buffer_to_mono
 from app.audio.windows_endpoints import render_endpoint_names
 
 log = logging.getLogger(__name__)
@@ -119,10 +118,7 @@ class WindowsLoopbackSource(SystemAudioSource):
         with self._lock:
             sink = self._on_block
         if sink is not None and in_data:
-            interleaved = np.frombuffer(in_data, dtype=np.float32)
-            if self._channels > 1:
-                interleaved = interleaved.reshape(-1, self._channels)
-            sink(arrival, to_mono(interleaved))
+            sink(arrival, interleaved_buffer_to_mono(in_data, self._channels, "<f4"))
         return (None, pyaudio.paContinue)
 
     def start(self, on_block: BlockSink) -> None:

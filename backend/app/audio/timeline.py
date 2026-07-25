@@ -193,6 +193,21 @@ def to_mono(block: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(array, dtype=np.float32)
 
 
+def interleaved_buffer_to_mono(buffer: bytes, channels: int, dtype: str) -> np.ndarray:
+    """Read a raw interleaved capture buffer and downmix it to mono float32.
+
+    Both system-audio sources arrive at this same shape from different places —
+    a PortAudio callback on Windows, a pipe read from the macOS helper — and
+    differ only in dtype spelling. Keeping the deinterleave in one function is
+    what stops the two platforms drifting into different channel handling,
+    which would be inaudible in tests and obvious in a recording.
+    """
+    interleaved = np.frombuffer(buffer, dtype=dtype)
+    if channels > 1:
+        interleaved = interleaved.reshape(-1, channels)
+    return to_mono(interleaved)
+
+
 def mix_and_normalize(microphone: np.ndarray, system: np.ndarray) -> np.ndarray:
     """Sum the two timelines, scaling down only if the sum clips.
 

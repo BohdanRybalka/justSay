@@ -35,11 +35,9 @@ import threading
 import time
 from pathlib import Path
 
-import numpy as np
-
 from app.audio.config import AudioSettings
 from app.audio.system_source import BlockSink, SystemAudioSource, SystemAudioUnavailableError
-from app.audio.timeline import to_mono
+from app.audio.timeline import interleaved_buffer_to_mono
 
 log = logging.getLogger(__name__)
 
@@ -190,10 +188,7 @@ class MacOSTapSource(SystemAudioSource):
                 sink = self._on_block
             if sink is None:
                 break
-            interleaved = np.frombuffer(chunk, dtype="<f4")
-            if self._channels > 1:
-                interleaved = interleaved.reshape(-1, self._channels)
-            sink(time.monotonic(), to_mono(interleaved))
+            sink(time.monotonic(), interleaved_buffer_to_mono(chunk, self._channels, "<f4"))
 
         code = process.poll()
         if code is not None and code != 0:
