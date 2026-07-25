@@ -15,14 +15,13 @@ import logging
 import threading
 import time
 import uuid
-import wave
 from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
 
 from app.audio.analysis import rms_dbfs
-from app.audio.base import AudioRecorder
+from app.audio.base import AudioRecorder, write_wav
 from app.audio.config import AudioSettings
 from app.audio.system_source import (
     SystemAudioSource,
@@ -180,14 +179,7 @@ class MeetingRecorder(AudioRecorder):
         filename = f"meeting_{uuid.uuid4().hex[:12]}.wav"
         output_path = self._settings.temp_dir / filename
 
-        audio_16bit = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16)
-        with wave.open(str(output_path), "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(self._settings.sample_rate)
-            wf.writeframes(audio_16bit.tobytes())
-
-        return output_path
+        return write_wav(output_path, audio_data, self._settings.sample_rate, channels=1)
 
     def _release(self) -> None:
         stream = self._stream
