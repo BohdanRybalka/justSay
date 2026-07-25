@@ -146,10 +146,17 @@ def _is_inside_scratch(candidate: Path) -> bool:
     ``history.db`` next to ``tmp/`` -- so a symmetric "these must not nest"
     check would reject every healthy install. What must never happen is the
     reverse: history living under the directory the cleanup endpoint empties.
+
+    Both sides are resolved here rather than at the call site. ``output_dir``
+    arrives from settings.json exactly as it was written, so a redirected
+    Windows profile or a stray ``..`` segment would otherwise compare unequal
+    to a path it in fact denotes -- and the startup repair would return
+    "healthy" for a database sitting in the scratch tree.
     """
     try:
         scratch = resolve_temp_dir().resolve(strict=False)
-        return candidate == scratch or candidate.is_relative_to(scratch)
+        resolved = candidate.expanduser().resolve(strict=False)
+        return resolved == scratch or resolved.is_relative_to(scratch)
     except (ValueError, OSError):
         return False
 

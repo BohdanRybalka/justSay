@@ -386,3 +386,28 @@ def test_repair_preserves_the_source_database_on_disk(isolated, monkeypatch):
     kept = list(settings_dir.glob("history.db.premigration-*"))
     assert len(kept) == 1
     assert _entry_count(kept[0]) == 4
+
+
+def test_repair_fires_when_output_dir_is_stored_non_canonically(isolated, monkeypatch):
+    """settings.json holds whatever was written into it, not a normalised path.
+
+    A redirected Windows profile or a stray `..` segment denotes the scratch
+    directory without comparing equal to it, and the repair returning
+    "healthy" there would leave real history inside the tree Clear Temp Files
+    operates on -- failing silently in the one path that exists to prevent
+    exactly that.
+    """
+    settings_dir = isolated["settings_dir"]
+    scratch = settings_dir / "tmp"
+    _seed_history(scratch, 6)
+
+    non_canonical = settings_dir / ".." / settings_dir.name / "tmp"
+    assert non_canonical != scratch
+    assert non_canonical.resolve() == scratch.resolve()
+
+    monkeypatch.setattr(
+        user_settings, "_settings", user_settings.UserSettings(output_dir=str(non_canonical))
+    )
+
+    assert user_settings.repair_scratch_output_dir() == settings_dir
+    assert _entry_count(settings_dir / "history.db") == 6
