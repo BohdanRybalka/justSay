@@ -195,14 +195,18 @@ _EXPECTED_APP_DATA_CONSUMERS: dict[str, str] = {
     "stt/local_vulkan_cmd.py": "exception",
 }
 
-_RESOLVE_CALL_RE = re.compile(r"\bresolve_app_data_root\s*\(")
+_RESOLVE_CALL_RE = re.compile(r"\bresolve_app_data_root\s*\(|\bresolve_temp_dir\b")
 _PATH_HOME_RE = re.compile(r"\bPath\.home\s*\(")
 
 
 def _scan_app_data_consumers() -> set[str]:
     """Every backend/app/**/*.py file (excluding app_paths.py, the definer)
-    that references `resolve_app_data_root()` or a literal `Path.home()` --
-    the two ways a module can resolve an app-data path."""
+    that references `resolve_app_data_root()`, `resolve_temp_dir` or a literal
+    `Path.home()` -- the three ways a module can resolve an app-data path.
+
+    `resolve_temp_dir` matches without a call-parenthesis because
+    `audio/config.py` passes it as a `default_factory` rather than calling it
+    (ADR 033); requiring `(` there would silently drop a real consumer."""
     found: set[str] = set()
     for path in _APP_DIR.rglob("*.py"):
         if path.name == "app_paths.py":

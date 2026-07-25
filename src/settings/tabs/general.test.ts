@@ -102,3 +102,31 @@ describe("renderGeneral — Dictation Language change (Bug 3)", () => {
     expect(emitMock).not.toHaveBeenCalled();
   });
 });
+
+describe("renderGeneral — history path is separated from temp cleanup (spec 054)", () => {
+  function groupOf(container: HTMLElement, selector: string): HTMLElement {
+    return container.querySelector<HTMLElement>(selector)!.closest(".setting-group")!;
+  }
+
+  it("the history path and the Clear Temp Files button live in different groups", () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+
+    const pathGroup = groupOf(container, "#output-dir");
+    const cleanupGroup = groupOf(container, "#btn-cleanup");
+
+    expect(pathGroup).not.toBe(cleanupGroup);
+  });
+
+  it("each group carries its own label so neither reads as the other's directory", () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+
+    const pathLabel = groupOf(container, "#output-dir").querySelector(".setting-label")!;
+    const cleanupLabel = groupOf(container, "#btn-cleanup").querySelector(".setting-label")!;
+
+    expect(pathLabel.textContent).not.toBe(cleanupLabel.textContent);
+    expect(pathLabel.textContent).toMatch(/history/i);
+    expect(cleanupLabel.textContent).toMatch(/audio/i);
+  });
+});

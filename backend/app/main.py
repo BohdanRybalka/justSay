@@ -43,16 +43,18 @@ async def _warm_gpu_probe_cache() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from pathlib import Path
-
     from app.core import history
-    from app.core.user_settings import get_user_settings, sync_to_runtime
+    from app.core.user_settings import (
+        get_user_settings,
+        repair_scratch_output_dir,
+        sync_to_runtime,
+    )
 
     log.info("Backend startup: version=%s port=%s", __version__, settings.port)
     settings.audio.temp_dir.mkdir(parents=True, exist_ok=True)
 
+    history.bootstrap(repair_scratch_output_dir())
     us = get_user_settings()
-    history.bootstrap(Path(us.output_dir))
     log.info("Data root: %s", history.history_path().parent)
     sync_to_runtime(us)
     from app.stt.local_setup import maybe_prewarm_local_at_startup
