@@ -1,5 +1,11 @@
+import {
+  acceleratorFromKeyEvent,
+  detectShortcutPlatform,
+  formatAccelerator,
+  modifierHint,
+} from "../../accelerator";
 import { api, levelStream, type UserSettings } from "../../api";
-import { saveSettings, getCloudKeyStatus } from "../settings";
+import { saveSettings, getCloudKeyStatus, cachePersistedShortcut } from "../settings";
 import { escapeHtml } from "../html";
 import { renderKeys } from "./keys";
 import { notifyError } from "../../notify";
@@ -15,7 +21,17 @@ const LANGUAGES = [
   { code: "zh", label: "Chinese" },
 ];
 
+interface ShortcutApplied {
+  shortcut: string;
+  ok: boolean;
+  reason: string | null;
+  persisted: boolean | null;
+  stillActive: string | null;
+}
+
 export function renderGeneral(container: HTMLElement, settings: UserSettings): () => void {
+  const platform = detectShortcutPlatform(navigator);
+
   container.innerHTML = `
     <h2 class="tab-title">General</h2>
 
@@ -35,7 +51,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
       <div class="setting-label">Global Shortcut</div>
       <div class="setting-row">
         <span class="label">Push-to-talk</span>
-        <button class="btn btn-secondary" id="shortcut-btn">${formatShortcut(settings.shortcut)}</button>
+        <button class="btn btn-secondary" id="shortcut-btn">${escapeHtml(formatAccelerator(settings.shortcut, platform))}</button>
       </div>
       <div class="value" id="shortcut-hint" style="padding: 4px 16px; font-size: 11px; color: var(--text-muted);">Click to change. Press new key combination, then release.</div>
     </div>
@@ -329,6 +345,27 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     }
   });
 
+  async function requestShortcut(shortcut: string) {
+    try {
+      const { emit } = await loadEventApi();
+      await emit("shortcut-requested", { shortcut });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (!destroyed) shortcutHint.textContent = `Could not apply the shortcut: ${message}`;
+      notifyError(message);
+    }
+  }
+
+  let captureHandler: ((e: KeyboardEvent) => void) | null = null;
+
+  function stopCapture() {
+    if (captureHandler) {
+      document.removeEventListener("keydown", captureHandler, true);
+      captureHandler = null;
+    }
+    recording = false;
+  }
+
   shortcutBtn.addEventListener("click", () => {
     if (recording) return;
     recording = true;
@@ -337,47 +374,65 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     shortcutBtn.classList.remove("btn-secondary");
     shortcutHint.textContent = "Press your desired key combination...";
 
-    const handler = (e: KeyboardEvent) => {
+    captureHandler = (e: KeyboardEvent) => {
+      if (destroyed) return;
       e.preventDefault();
       e.stopPropagation();
 
-      if (["Control", "Shift", "Alt", "Meta"].includes(e.key)) return;
-
-      const parts: string[] = [];
-      if (e.ctrlKey) parts.push("Ctrl");
-      if (e.altKey) parts.push("Alt");
-      if (e.shiftKey) parts.push("Shift");
-      if (e.metaKey) parts.push("Super");
-
-      if (parts.length === 0) {
-        shortcutHint.textContent = "Must include at least one modifier (Ctrl, Alt, Shift)";
+      const captured = acceleratorFromKeyEvent(e);
+      if (!captured.ok) {
+        if (captured.reason === "no-modifier") shortcutHint.textContent = modifierHint(platform);
         return;
       }
 
-      parts.push(e.code);
-      const shortcut = parts.join("+");
-
-      recording = false;
-      shortcutBtn.textContent = formatShortcut(shortcut);
+      stopCapture();
+      shortcutBtn.textContent = formatAccelerator(captured.accelerator, platform);
       shortcutBtn.classList.remove("btn-primary");
       shortcutBtn.classList.add("btn-secondary");
-      shortcutHint.textContent = "Shortcut saved. Restart app to apply.";
+      shortcutHint.textContent = "Applying…";
 
-      document.removeEventListener("keydown", handler, true);
-      saveSettings({ shortcut });
-      emitSettingsChanged();
+      void requestShortcut(captured.accelerator);
     };
 
-    document.addEventListener("keydown", handler, true);
+    document.addEventListener("keydown", captureHandler, true);
   });
 
+  let unlistenShortcutApplied: (() => void) | null = null;
+  void (async () => {
+    try {
+      const { listen } = await loadEventApi();
+      const unlisten = await listen<ShortcutApplied>("shortcut-applied", ({ payload }) => {
+        if (destroyed) return;
+        const label = formatAccelerator(payload.shortcut, platform);
+        if (!payload.ok) {
+          shortcutHint.textContent = `${label} was not accepted: ${payload.reason ?? "unknown reason"}`;
+          shortcutBtn.textContent = payload.stillActive
+            ? formatAccelerator(payload.stillActive, platform)
+            : "Not set";
+          return;
+        }
+        if (payload.persisted === true) cachePersistedShortcut(payload.shortcut);
+        shortcutHint.textContent =
+          payload.persisted === false
+            ? `${label} is active now, but could not be saved: ${payload.reason ?? "unknown reason"}`
+            : `${label} is active now.`;
+      });
+      if (destroyed) unlisten();
+      else unlistenShortcutApplied = unlisten;
+    } catch {}
+  })();
+
   return () => {
-    recording = false;
     destroyed = true;
+    stopCapture();
     if (debounceTimer) clearTimeout(debounceTimer);
     stopLevelStream();
     if (isRecording) {
       api.audioStop().catch(() => {});
+    }
+    if (unlistenShortcutApplied) {
+      unlistenShortcutApplied();
+      unlistenShortcutApplied = null;
     }
     destroyKeys();
   };
@@ -400,16 +455,21 @@ function formatBytes(bytes: number): string {
   return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
 }
 
-function formatShortcut(shortcut: string): string {
-  return shortcut
-    .replace("Key", "")
-    .replace("Digit", "")
-    .replace(/\+/g, " + ");
+let eventApi: Promise<typeof import("@tauri-apps/api/event")> | null = null;
+
+function loadEventApi(): Promise<typeof import("@tauri-apps/api/event")> {
+  if (!eventApi) {
+    eventApi = import("@tauri-apps/api/event").catch((e) => {
+      eventApi = null;
+      throw e;
+    });
+  }
+  return eventApi;
 }
 
 async function emitSettingsChanged() {
   try {
-    const { emit } = await import("@tauri-apps/api/event");
+    const { emit } = await loadEventApi();
     await emit("settings-changed");
   } catch {
   }

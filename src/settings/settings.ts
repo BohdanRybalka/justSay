@@ -131,6 +131,10 @@ export function getSettings(): UserSettings | null {
   return settings;
 }
 
+export function cachePersistedShortcut(shortcut: string): void {
+  if (settings) settings = { ...settings, shortcut };
+}
+
 export function getCloudKeyStatus(): CloudKeyStatus | null {
   return cloudStatus;
 }
