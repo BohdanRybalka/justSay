@@ -148,6 +148,39 @@ def test_resolve_model_path_is_pure_path_arithmetic():
     assert path == Path.home() / ".justsay" / "models" / "whisper-cpp" / "ggml-large-v3-turbo.bin"
 
 
+def test_model_cache_stays_shared_between_dev_and_production():
+    """The one app-data consumer that deliberately ignores the dev/prod split.
+
+    ADR 012 settled this: downloaded GGML weights are multi-GB, identical
+    across roots, and carry no personal data, so dev runs share the production
+    cache instead of re-downloading into `~/.justsay-dev`. ADR 014's consumer
+    inventory tags it `exception` for the same reason.
+
+    This asserts the decision rather than the arithmetic the sibling test
+    covers. The session already points `resolve_app_data_root()` at a tmp
+    directory, so "the model path is not under the app-data root" is exactly
+    the property that distinguishes the exception from every other consumer --
+    and it holds without naming any real directory. Routing
+    `resolve_model_path` through `resolve_app_data_root()` reads like a
+    tidy-up and would silently orphan every already-downloaded model, so it
+    fails here naming the ADR instead of as an unexplained path mismatch.
+    """
+    from app.core.app_paths import resolve_app_data_root
+
+    app_data_root = resolve_app_data_root()
+
+    path = resolve_model_path("tiny")
+
+    assert not path.is_relative_to(app_data_root), (
+        f"resolve_model_path now follows the app-data root ({app_data_root}). "
+        "That bypass is a deliberate ADR 012 exception, not an oversight -- "
+        "changing it relocates multi-GB GGML models and orphans existing "
+        "downloads. Amend ADR 012, ADR 014's consumer inventory and "
+        "test_data_isolation's inventory tag together, or revert."
+    )
+    assert path == Path.home() / ".justsay" / "models" / "whisper-cpp" / "ggml-tiny.bin"
+
+
 def test_resolve_model_path_does_not_touch_filesystem():
     path = resolve_model_path("tiny")
     assert path.name == "ggml-tiny.bin"
