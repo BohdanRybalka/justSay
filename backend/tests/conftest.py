@@ -329,20 +329,21 @@ def _clear_dependency_overrides():
 @pytest.fixture(autouse=True)
 def _force_faster_whisper_for_local(monkeypatch, request):
     """Pin the local STT provider class to `LocalSTTProvider` for tests that
-    are not specifically exercising the MLX path.
+    are not specifically exercising a platform branch of the factory.
 
     On macOS Apple Silicon `get_local_provider_class()` returns
-    `MLXWhisperSTTProvider`, which would break `isinstance(p, LocalSTTProvider)`
-    assertions in `test_stt.py`, `test_stt_routing.py`, and `test_factories.py`.
-    Patching the factory keeps those tests platform-agnostic. Tests that need
-    the MLX path opt out via `@pytest.mark.mlx`.
+    `WhisperCppServerSTTProvider`, which would break
+    `isinstance(p, LocalSTTProvider)` assertions in `test_stt.py`,
+    `test_stt_routing.py`, and `test_factories.py`. Patching the factory keeps
+    those tests platform-agnostic. Tests that need a real platform branch opt
+    out via `@pytest.mark.no_factory_stub`.
 
     Also pins `get_local_provider_kind()` (spec 018) to `FASTER_WHISPER`:
     `local_setup.py`'s readiness-check functions (`_check_package_installed`,
     `ensure_local_ready`, `check_status`, `_estimate_model_ram_mb`) now call
     it directly, not only through `get_local_provider_class()`. This
     project's own dev machine has a real AMD GPU (spec 018) — the unpatched
-    function would route those calls to `WHISPER_CPP_VULKAN` on THIS
+    function would route those calls to `WHISPER_CPP_SERVER` on THIS
     machine specifically, breaking the platform-agnostic guarantee this
     fixture already exists to provide. The stub accepts (and ignores) an
     optional positional `vendor` arg — `check_status()` (GitHub review on PR
@@ -359,17 +360,15 @@ def _force_faster_whisper_for_local(monkeypatch, request):
     already imported its name from, un-patching this fixture for every test
     that runs after that one in the same session.
 
-    Also opts out via `@pytest.mark.no_factory_stub` (spec 028 iteration-2
-    review, RED 2): this fixture stubs `get_local_provider_class` itself, so
-    any test asserting on the *cost* of calling it (e.g. "a Cloud request
+    `@pytest.mark.no_factory_stub` (spec 028 iteration-2 review, RED 2) is
+    the single opt-out marker: this fixture stubs `get_local_provider_class`
+    itself, so any test asserting on the *cost* of calling it (e.g. "a Cloud request
     must trigger zero calls to the local factory / GPU probe") is worthless
     while this fixture is active -- it stubs the exact call under test,
     which is why the 574-test suite was structurally blind to the
     ~126 ms-per-Cloud-request probe regression ADR 018 documents.
     """
-    if request.node.get_closest_marker("mlx") or request.node.get_closest_marker(
-        "no_factory_stub"
-    ):
+    if request.node.get_closest_marker("no_factory_stub"):
         return
     from app.stt import local
     from app.stt.local_factory import LocalProviderKind

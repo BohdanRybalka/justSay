@@ -236,8 +236,9 @@ export interface LocalSttStatus {
   gpu_name: string | null;
   /** "apple" on macOS arm64, else the detected vendor ("nvidia"/"amd"/"intel"/"none").
    *  Populated even when gpu_available is false (e.g. an explicit CPU device
-   *  override) — AMD/Intel Windows is Vulkan-accelerated (whisper.cpp),
-   *  NVIDIA/Apple Silicon use their own dedicated providers. */
+   *  override) — AMD/Intel Windows and Apple Silicon both run the same
+   *  whisper.cpp server provider, accelerated by Vulkan and Metal
+   *  respectively; NVIDIA and CPU-only hosts use faster-whisper. */
   gpu_vendor: string;
   device: string;
   compute_type: string;

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import pathlib
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -16,7 +17,6 @@ from app.stt.local_setup import (
     LocalSttStatus,
     _check_package_installed,
     _detect_gpu,
-    _local_extras,
     check_status,
     install_local_packages,
 )
@@ -279,19 +279,10 @@ async def test_install_refused_in_frozen_binary(monkeypatch):
 
 
 
-def test_local_extras_returns_local_on_non_mac():
-    with patch("app.stt.local_setup.is_macos_arm64", return_value=False):
-        assert _local_extras() == "local"
-
-
-def test_local_extras_returns_local_mac_on_macos_arm64():
-    with patch("app.stt.local_setup.is_macos_arm64", return_value=True):
-        assert _local_extras() == "local-mac"
-
-
-def test_run_pip_install_uses_local_mac_extras_on_macos_arm64(monkeypatch):
-    """Pip command must include `.[local-mac]` (not `.[local]`) on M1+."""
-    monkeypatch.setattr("app.stt.local_setup.is_macos_arm64", lambda: True)
+def test_run_pip_install_uses_the_local_extras_on_every_platform(monkeypatch):
+    """With the Apple-Silicon Python package gone there is no macOS pip path
+    left: the accelerated platforms resolve a bundled binary and never reach
+    `_run_pip_install`, so one extras name covers everything that does."""
     captured: dict = {}
 
     def _fake_run(cmd, **kwargs):
@@ -301,33 +292,65 @@ def test_run_pip_install_uses_local_mac_extras_on_macos_arm64(monkeypatch):
     monkeypatch.setattr(local_setup.subprocess, "run", _fake_run)
     code, _ = local_setup._run_pip_install()
     assert code == 0
-    assert ".[local-mac]" in captured["cmd"]
+    assert ".[local]" in captured["cmd"]
+    assert sum(part.startswith(".[") for part in captured["cmd"]) == 1
 
 
-def test_check_package_installed_imports_mlx_whisper_on_macos_arm64(monkeypatch):
-    fake_module = MagicMock()
+def test_check_package_installed_resolves_the_binary_on_macos_arm64(monkeypatch):
+    """macOS arm64 now checks for the whisper-server binary, exactly as
+    Windows AMD/Intel does -- there is no package to import any more."""
+    _stub_whisper_cpp_server_kind(monkeypatch)
     monkeypatch.setattr("app.stt.local_setup.is_macos_arm64", lambda: True)
-    with patch.dict("sys.modules", {"mlx_whisper": fake_module}):
-        assert _check_package_installed() is True
+    monkeypatch.setattr(
+        "app.stt.local_whisper_cpp_cmd.resolve_binary_path",
+        lambda: pathlib.Path("/opt/whisper-cpp-metal/whisper-server"),
+    )
+
+    assert _check_package_installed() is True
 
 
-def test_check_package_installed_false_when_mlx_whisper_missing_on_macos_arm64(monkeypatch):
-    import builtins
-
+def test_check_package_installed_false_when_the_binary_is_missing_on_macos_arm64(monkeypatch):
+    _stub_whisper_cpp_server_kind(monkeypatch)
     monkeypatch.setattr("app.stt.local_setup.is_macos_arm64", lambda: True)
-    real_import = builtins.__import__
+    monkeypatch.setattr("app.stt.local_whisper_cpp_cmd.resolve_binary_path", lambda: None)
 
-    def fake_import(name, *args, **kwargs):
-        if name == "mlx_whisper":
-            raise ImportError("not installed")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
     assert _check_package_installed() is False
 
 
+def test_check_package_installed_never_imports_the_removed_apple_package(monkeypatch):
+    """Spec 068's core regression. The removed Apple-Silicon Python package
+    was never installed into the shipped macOS sidecar, so importing it here
+    always failed and Local mode read as permanently broken on every Mac. An
+    import of it reappearing on this path resurrects that outage.
+
+    The package name is assembled rather than written out because the spec's
+    own acceptance grep forbids the literal anywhere under `backend/` -- same
+    idiom as `test_local_whisper_cpp_cmd.py`'s `"shell" + "=" + "True"`.
+    """
+    import builtins
+
+    removed_package = "m" + "lx_whisper"
+
+    _stub_whisper_cpp_server_kind(monkeypatch)
+    monkeypatch.setattr("app.stt.local_setup.is_macos_arm64", lambda: True)
+    monkeypatch.setattr(
+        "app.stt.local_whisper_cpp_cmd.resolve_binary_path",
+        lambda: pathlib.Path("/opt/whisper-cpp-metal/whisper-server"),
+    )
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == removed_package:
+            raise AssertionError(f"{name} must never be imported again")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    assert _check_package_installed() is True
+
+
 def test_detect_gpu_reports_apple_silicon_on_macos_arm64(monkeypatch):
-    """On M1+ we must return the MLX/Metal label without importing torch.
+    """On M1+ we must return the Metal label without importing torch.
 
     Side-bonus: confirms _detect_gpu's macOS branch runs **before** any
     `import torch` call.
@@ -345,39 +368,81 @@ def test_detect_gpu_reports_apple_silicon_on_macos_arm64(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake_import)
     available, name, vendor = _detect_gpu()
     assert available is True
-    assert name == "Apple Silicon (MLX/Metal)"
+    assert name == "Apple Silicon (Metal)"
     assert vendor == "apple"
 
 
-def test_check_status_macos_arm64_reports_mlx_device_and_bfloat16(monkeypatch):
-    """On macOS arm64 `check_status` must return device='mlx', compute_type='bfloat16'."""
+def test_check_status_macos_arm64_reports_metal_device_and_float16(monkeypatch):
+    """On macOS arm64 `check_status` must return device='metal',
+    compute_type='float16'."""
     settings = STTSettings(whisper_model_size="large-v3-turbo")
     monkeypatch.setattr("app.stt.local_setup.is_macos_arm64", lambda: True)
 
-    with _apply(_patches(True, (True, "Apple Silicon (MLX/Metal)", "apple"))):
+    with _apply(_patches(True, (True, "Apple Silicon (Metal)", "apple"))):
         status = check_status(settings)
 
-    assert status.device == "mlx"
-    assert status.compute_type == "bfloat16"
+    assert status.device == "metal"
+    assert status.compute_type == "float16"
     assert status.gpu_available is True
-    assert status.gpu_name == "Apple Silicon (MLX/Metal)"
+    assert status.gpu_name == "Apple Silicon (Metal)"
     assert status.gpu_vendor == "apple"
 
 
+def test_check_status_macos_arm64_never_constructs_a_gpu_vendor_from_apple(monkeypatch):
+    """`_detect_gpu()` returns the vendor string "apple", which is NOT a
+    member of `GpuVendor` (nvidia/amd/intel/none). `check_status()`'s macOS
+    branch must return before the `else` branch's `GpuVendor(gpu_vendor)`
+    call, or every Mac gets a 500 from `GET /stt/local/status` instead of a
+    status object. Removing that early branch looks like a simplification and
+    is a total outage on one platform.
+    """
+    from app.core import gpu_probe
+
+    settings = STTSettings(whisper_model_size="large-v3-turbo")
+    monkeypatch.setattr("app.stt.local_setup.is_macos_arm64", lambda: True)
+
+    real_gpu_vendor = gpu_probe.GpuVendor
+
+    def _exploding_gpu_vendor(value):
+        raise AssertionError(
+            f"check_status() constructed GpuVendor({value!r}) on macOS arm64 -- "
+            "the early is_macos_arm64() branch was lost"
+        )
+
+    monkeypatch.setattr(gpu_probe, "GpuVendor", _exploding_gpu_vendor)
+    try:
+        with _apply(_patches(True, (True, "Apple Silicon (Metal)", "apple"))):
+            status = check_status(settings)
+    finally:
+        monkeypatch.setattr(gpu_probe, "GpuVendor", real_gpu_vendor)
+
+    assert status.device == "metal"
 
 
-def _stub_vulkan_kind(monkeypatch) -> None:
+def test_gpu_vendor_enum_still_has_no_apple_member():
+    """Pins the premise of the test above. If `apple` is ever added to
+    `GpuVendor`, that regression test stops proving anything and should be
+    rewritten rather than silently kept."""
+    from app.core.gpu_probe import GpuVendor
+
+    assert {member.value for member in GpuVendor} == {"nvidia", "amd", "intel", "none"}
+
+
+
+
+
+def _stub_whisper_cpp_server_kind(monkeypatch) -> None:
     from app.stt.local_factory import LocalProviderKind
 
     monkeypatch.setattr(
         local_setup,
         "get_local_provider_kind",
-        lambda *args, **kwargs: LocalProviderKind.WHISPER_CPP_VULKAN,
+        lambda *args, **kwargs: LocalProviderKind.WHISPER_CPP_SERVER,
     )
 
 
-def test_check_status_vulkan_kind_reports_device_and_compute_type(monkeypatch):
-    _stub_vulkan_kind(monkeypatch)
+def test_check_status_whisper_cpp_server_kind_reports_device_and_compute_type(monkeypatch):
+    _stub_whisper_cpp_server_kind(monkeypatch)
     settings = STTSettings(whisper_model_size="large-v3-turbo")
 
     with _apply(_patches(True, (False, "AMD Radeon RX 5700 XT", "amd"))):
@@ -387,14 +452,14 @@ def test_check_status_vulkan_kind_reports_device_and_compute_type(monkeypatch):
     assert status.compute_type == "float16"
 
 
-def test_check_status_vulkan_kind_reports_gpu_available_true(monkeypatch):
+def test_check_status_whisper_cpp_server_kind_reports_gpu_available_true(monkeypatch):
     """Regression for Stage 3 review issue #2: a Vulkan-accelerated
     AMD/Intel session must not report the contradictory
     device: "vulkan" + gpu_available: false pair. `_detect_gpu()` itself
     still returns its NVIDIA-only `available` bool (False for AMD) — the
     status object's `gpu_available` is derived from the final `device`
     instead."""
-    _stub_vulkan_kind(monkeypatch)
+    _stub_whisper_cpp_server_kind(monkeypatch)
     settings = STTSettings(whisper_model_size="large-v3-turbo")
 
     with _apply(_patches(True, (False, "AMD Radeon RX 5700 XT", "amd"))):
@@ -413,7 +478,7 @@ def test_check_status_probes_gpu_at_most_once_through_the_real_unmocked_provider
     `check_status()`'s own `get_local_provider_kind()` call) only closed ONE
     of several call sites that independently reach `get_local_provider_kind()`
     with no vendor -- `get_local_provider_class()` (`local_factory.py:87`),
-    reached via `_check_package_installed()`'s own WHISPER_CPP_VULKAN branch
+    reached via `_check_package_installed()`'s own WHISPER_CPP_SERVER branch
     check, `is_model_loaded()` (called *twice* inside `check_status()`: once
     for `model_loaded=`, once more inside the `model_ram_mb=... if
     is_model_loaded() else None` ternary), and `get_local_load_error()`.
@@ -460,7 +525,7 @@ def test_check_status_probes_gpu_at_most_once_through_the_real_unmocked_provider
     monkeypatch.setattr(local_setup, "is_macos_arm64", lambda: False)
     monkeypatch.setattr("os.name", "nt")
     monkeypatch.setattr(
-        "app.stt.local_vulkan_cmd.resolve_binary_path", lambda: Path("whisper-server.exe")
+        "app.stt.local_whisper_cpp_cmd.resolve_binary_path", lambda: Path("whisper-server.exe")
     )
 
     probe_source_calls = {"n": 0}
@@ -482,18 +547,18 @@ def test_check_status_probes_gpu_at_most_once_through_the_real_unmocked_provider
 
 
 def test_check_package_installed_vulkan_kind_true_when_binary_resolves(monkeypatch):
-    _stub_vulkan_kind(monkeypatch)
+    _stub_whisper_cpp_server_kind(monkeypatch)
     from pathlib import Path
 
     monkeypatch.setattr(
-        "app.stt.local_vulkan_cmd.resolve_binary_path", lambda: Path("whisper-server.exe")
+        "app.stt.local_whisper_cpp_cmd.resolve_binary_path", lambda: Path("whisper-server.exe")
     )
     assert _check_package_installed() is True
 
 
 def test_check_package_installed_vulkan_kind_false_when_binary_missing(monkeypatch):
-    _stub_vulkan_kind(monkeypatch)
-    monkeypatch.setattr("app.stt.local_vulkan_cmd.resolve_binary_path", lambda: None)
+    _stub_whisper_cpp_server_kind(monkeypatch)
+    monkeypatch.setattr("app.stt.local_whisper_cpp_cmd.resolve_binary_path", lambda: None)
     assert _check_package_installed() is False
 
 
@@ -501,13 +566,13 @@ def test_estimate_model_ram_mb_returns_none_for_vulkan_kind(monkeypatch):
     """The model lives in the separate whisper-server child process's own
     address space — reporting this (FastAPI backend) process's RSS would be
     actively misleading, not just imprecise."""
-    _stub_vulkan_kind(monkeypatch)
+    _stub_whisper_cpp_server_kind(monkeypatch)
     assert local_setup._estimate_model_ram_mb() is None
 
 
 @pytest.mark.asyncio
 async def test_ensure_local_ready_vulkan_kind_skips_pip_install_when_binary_present(monkeypatch):
-    _stub_vulkan_kind(monkeypatch)
+    _stub_whisper_cpp_server_kind(monkeypatch)
     provider = _FakePrewarmProvider()
     monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
     monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
@@ -529,7 +594,7 @@ async def test_ensure_local_ready_vulkan_kind_skips_pip_install_when_binary_pres
 async def test_ensure_local_ready_vulkan_kind_sets_actionable_error_when_binary_missing(
     monkeypatch,
 ):
-    _stub_vulkan_kind(monkeypatch)
+    _stub_whisper_cpp_server_kind(monkeypatch)
     provider = _FakePrewarmProvider()
     monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)

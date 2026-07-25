@@ -192,7 +192,7 @@ _EXPECTED_APP_DATA_CONSUMERS: dict[str, str] = {
     "core/logging_config.py": "lazy",
     "core/user_settings.py": "lazy",
     "stt/local_setup.py": "lazy",
-    "stt/local_vulkan_cmd.py": "exception",
+    "stt/local_whisper_cpp_cmd.py": "exception",
 }
 
 _RESOLVE_CALL_RE = re.compile(r"\bresolve_app_data_root\s*\(|\bresolve_temp_dir\b")

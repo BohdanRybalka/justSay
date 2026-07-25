@@ -167,8 +167,10 @@ jobs:
           cp -r "backend/dist/justsay-backend" "src-tauri/resources/"
 
       # --- whisper.cpp + Vulkan (spec 018) — Windows AMD/Intel STT accel ---
-      # Windows-only: macOS Apple Silicon uses MLX/Metal, no Vulkan involved
-      # (this leg's steps below all carry `if: runner.os == 'Windows'`).
+      # Windows-only: macOS Apple Silicon builds the same whisper-server with
+      # the Metal backend instead, in the macOS leg further below (spec 068).
+      # Both legs are gated — these steps all carry
+      # `if: runner.os == 'Windows'`, the Metal ones `== 'macOS'`.
       # Same pinned tag/-DGGML_VULKAN=ON recipe as
       # backend/scripts/build_whisper_cpp_vulkan.ps1's local dev build, so
       # CI and local verification never drift onto different whisper.cpp
@@ -201,6 +203,27 @@ jobs:
         run: |
           mkdir -p src-tauri/resources/whisper-cpp-vulkan
           cp backend/vendor/whisper-cpp-vulkan/* src-tauri/resources/whisper-cpp-vulkan/
+
+      # --- whisper.cpp + Metal (spec 068) — macOS Apple Silicon STT accel ---
+      # macOS-only counterpart to the Vulkan leg above. No SDK to install:
+      # the Metal framework ships with the Xcode Command Line Tools already
+      # present on the runner, and the script pins the same whisper.cpp tag
+      # as build_whisper_cpp_vulkan.ps1 (enforced by
+      # backend/tests/test_build_definitions.py). Before this leg existed the
+      # shipped macOS app had no Local-mode engine at all — see
+      # docs/adr/036-one-whisper-cpp-server-provider-for-both-platforms.md.
+      - name: Build whisper.cpp with Metal backend
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bash backend/scripts/build_whisper_cpp_metal.sh
+
+      - name: Copy whisper.cpp-Metal binary to Tauri resources
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p src-tauri/resources/whisper-cpp-metal
+          cp backend/vendor/whisper-cpp-metal/* src-tauri/resources/whisper-cpp-metal/
 
       - name: Install npm deps
         run: npm ci

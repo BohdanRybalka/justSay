@@ -35,8 +35,12 @@
     the repo; the source/build tree is disposable.
 
 .PARAMETER WhisperCppTag
-    Pinned whisper.cpp git tag. Must match .github/workflows/release.yml's
-    own pin -- do not change one without the other.
+    Pinned whisper.cpp git tag. backend/tests/test_build_definitions.py
+    reads this parameter's default literal below and compares it against
+    backend/scripts/build_whisper_cpp_metal.sh's WHISPER_CPP_TAG -- the two
+    platform build recipes must never drift onto different whisper.cpp
+    versions, and that test is what enforces it. Also mirrored by
+    .github/workflows/release.yml, which invokes this same script.
 
 .PARAMETER Clean
     Delete any existing build tree under %TEMP% first, forcing a full
@@ -172,7 +176,8 @@ if (-not (Test-Path (Join-Path $SrcDir ".git"))) {
 # The batch is written to a temp .bat with CRLF endings and run via `cmd /c
 # <file>`, NOT `cmd /c <multi-line-string>`. cmd.exe only treats CRLF (not a
 # bare LF) as a command separator, and this .ps1 can be checked out with LF
-# endings (the repo has no .gitattributes, so a CI runner gets the LF blob).
+# endings (.gitattributes pins `*.sh` only, so no rule forces CRLF on this
+# file and a CI runner gets the LF blob).
 # With LF, `cmd /c $string` ran ONLY the first line (`call vcvars`) and silently
 # skipped the cmake line -- a 0-exit no-op that produced no binary. A .bat file
 # with forced CRLF executes every line regardless of this script's own endings.

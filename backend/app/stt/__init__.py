@@ -13,8 +13,9 @@ Mode / conditions        Provider
 ======================  ========================================================
 LOCAL                    Platform-selected via
                          :func:`app.stt.local_factory.get_local_provider_class`:
-                         :class:`~app.stt.local_mlx.MLXWhisperSTTProvider` on
-                         macOS arm64, else :class:`~app.stt.local.LocalSTTProvider`
+                         :class:`~app.stt.local_whisper_cpp.WhisperCppServerSTTProvider`
+                         on macOS arm64 and on Windows AMD/Intel, else
+                         :class:`~app.stt.local.LocalSTTProvider`
 CLOUD + style=ai_prompt  :class:`~app.stt.cloud.GeminiSTTProvider`
 CLOUD + long audio       :class:`~app.stt.cloud.GeminiSTTProvider`
 CLOUD + short + normal   :class:`~app.stt.groq_whisper.GroqWhisperSTTProvider`

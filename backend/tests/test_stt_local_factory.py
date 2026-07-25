@@ -4,12 +4,12 @@ Platform branches are exercised by monkeypatching `sys.platform` and
 `platform.machine`. These tests call the factory directly without going
 through `_get_local`, so they must opt out of the autouse
 `_force_faster_whisper_for_local` fixture — done at the module level via
-`pytestmark = pytest.mark.mlx`.
+`pytestmark = pytest.mark.no_factory_stub`.
 """
 
 import pytest
 
-pytestmark = pytest.mark.mlx
+pytestmark = pytest.mark.no_factory_stub
 
 
 def _stub_platform(monkeypatch, sys_platform: str, machine: str) -> None:
@@ -98,18 +98,35 @@ def test_factory_returns_local_on_macos_intel(monkeypatch):
     assert get_local_provider_class() is LocalSTTProvider
 
 
-def test_factory_returns_mlx_on_macos_arm64(monkeypatch):
-    """On Apple Silicon the factory picks the MLX provider."""
+def test_factory_returns_whisper_cpp_server_on_macos_arm64(monkeypatch):
+    """On Apple Silicon the factory picks the Metal whisper.cpp provider --
+    this is the routing that Local mode on macOS depends on entirely."""
     _stub_platform(monkeypatch, "darwin", "arm64")
     from app.stt.local_factory import get_local_provider_class
+    from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
 
-    cls = get_local_provider_class()
-    assert cls.__name__ == "MLXWhisperSTTProvider"
-
-
+    assert get_local_provider_class() is WhisperCppServerSTTProvider
 
 
-def test_kind_is_apple_mlx_on_macos_arm64_regardless_of_os_name_or_vendor(monkeypatch):
+def test_macos_arm64_routing_never_probes_the_gpu(monkeypatch):
+    """Apple Silicon always has Metal, so the macOS branch must return before
+    any `probe_gpu()` call -- the probe is uncached and expensive, and its
+    `GpuVendor` enum has no `apple` member to describe the result with."""
+    _stub_platform(monkeypatch, "darwin", "arm64")
+    monkeypatch.setattr("os.name", "nt")
+
+    def _explode():
+        raise AssertionError("probe_gpu() must not run on the macOS arm64 path")
+
+    monkeypatch.setattr("app.core.gpu_probe.probe_gpu", _explode)
+    from app.stt.local_factory import LocalProviderKind, get_local_provider_kind
+
+    assert get_local_provider_kind() is LocalProviderKind.WHISPER_CPP_SERVER
+
+
+
+
+def test_kind_is_whisper_cpp_server_on_macos_arm64_regardless_of_os_name_or_vendor(monkeypatch):
     """macOS arm64 wins outright — `os.name`/vendor are irrelevant once
     `is_macos_arm64()` is true."""
     from app.core.gpu_probe import GpuVendor
@@ -119,47 +136,47 @@ def test_kind_is_apple_mlx_on_macos_arm64_regardless_of_os_name_or_vendor(monkey
     monkeypatch.setattr("os.name", "nt")
     _stub_vendor(monkeypatch, GpuVendor.AMD)
 
-    assert get_local_provider_kind() is LocalProviderKind.APPLE_MLX
+    assert get_local_provider_kind() is LocalProviderKind.WHISPER_CPP_SERVER
 
 
-def test_kind_is_vulkan_on_windows_amd(monkeypatch):
+def test_kind_is_whisper_cpp_server_on_windows_amd(monkeypatch):
     from app.core.gpu_probe import GpuVendor
     from app.stt.local_factory import (
         LocalProviderKind,
         get_local_provider_class,
         get_local_provider_kind,
     )
-    from app.stt.local_vulkan import WhisperCppVulkanSTTProvider
+    from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
 
     _stub_platform(monkeypatch, "win32", "AMD64")
     monkeypatch.setattr("os.name", "nt")
     _stub_vendor(monkeypatch, GpuVendor.AMD)
 
-    assert get_local_provider_kind() is LocalProviderKind.WHISPER_CPP_VULKAN
-    assert get_local_provider_class() is WhisperCppVulkanSTTProvider
+    assert get_local_provider_kind() is LocalProviderKind.WHISPER_CPP_SERVER
+    assert get_local_provider_class() is WhisperCppServerSTTProvider
 
 
-def test_kind_is_vulkan_on_windows_intel(monkeypatch):
+def test_kind_is_whisper_cpp_server_on_windows_intel(monkeypatch):
     from app.core.gpu_probe import GpuVendor
     from app.stt.local_factory import (
         LocalProviderKind,
         get_local_provider_class,
         get_local_provider_kind,
     )
-    from app.stt.local_vulkan import WhisperCppVulkanSTTProvider
+    from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
 
     _stub_platform(monkeypatch, "win32", "AMD64")
     monkeypatch.setattr("os.name", "nt")
     _stub_vendor(monkeypatch, GpuVendor.INTEL)
 
-    assert get_local_provider_kind() is LocalProviderKind.WHISPER_CPP_VULKAN
-    assert get_local_provider_class() is WhisperCppVulkanSTTProvider
+    assert get_local_provider_kind() is LocalProviderKind.WHISPER_CPP_SERVER
+    assert get_local_provider_class() is WhisperCppServerSTTProvider
 
 
 @pytest.mark.parametrize("vendor_name", ["NVIDIA", "NONE"])
 def test_kind_is_faster_whisper_on_windows_nvidia_or_none(monkeypatch, vendor_name):
     """Unchanged — explicit regression test: Windows + NVIDIA/no GPU never
-    routes onto the Vulkan path."""
+    routes onto the whisper.cpp-server path."""
     from app.core.gpu_probe import GpuVendor
     from app.stt.local import LocalSTTProvider
     from app.stt.local_factory import (
@@ -198,10 +215,11 @@ def test_kind_is_faster_whisper_on_non_windows_amd_or_intel(monkeypatch, vendor_
 
 
 def test_factory_module_imports_no_third_party_at_module_level():
-    """Importing the factory must not pull in mlx_whisper or faster_whisper.
+    """Importing the factory must not pull in faster_whisper or httpx-backed
+    provider modules.
 
-    Catches accidental top-level `import mlx_whisper` regressions that would
-    crash on platforms missing the package.
+    Catches accidental top-level `import faster_whisper` regressions that
+    would crash on platforms missing the package.
     """
     import importlib
     import sys
@@ -211,5 +229,5 @@ def test_factory_module_imports_no_third_party_at_module_level():
             del sys.modules[name]
     importlib.import_module("app.stt.local_factory")
     factory_mod = sys.modules["app.stt.local_factory"]
-    assert not hasattr(factory_mod, "mlx_whisper")
     assert not hasattr(factory_mod, "faster_whisper")
+    assert not hasattr(factory_mod, "local_whisper_cpp")

@@ -4,8 +4,8 @@
   "description": "Personal voice-processing OS with hybrid Cloud/Local AI architecture",
   "private": true,
   "scripts": {
-    "dev": "node -e \"require('fs').mkdirSync('src-tauri/resources/whisper-cpp-vulkan',{recursive:true})\" && vite",
-    "build": "node -e \"require('fs').mkdirSync('src-tauri/resources/whisper-cpp-vulkan',{recursive:true})\" && tsc && vite build",
+    "dev": "node -e \"const f=require('fs');for(const d of ['whisper-cpp-vulkan','whisper-cpp-metal'])f.mkdirSync('src-tauri/resources/'+d,{recursive:true})\" && vite",
+    "build": "node -e \"const f=require('fs');for(const d of ['whisper-cpp-vulkan','whisper-cpp-metal'])f.mkdirSync('src-tauri/resources/'+d,{recursive:true})\" && tsc && vite build",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:dev:frozen": "npm run sidecar:build && cross-env JUSTSAY_USE_FROZEN_SIDECAR=1 tauri dev",

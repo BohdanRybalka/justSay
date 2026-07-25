@@ -37,12 +37,6 @@ cloud = [
 local = [
     "faster-whisper>=1.1.0",
 ]
-local-mac = [
-    # macOS Apple Silicon (M1+): MLX/Metal-accelerated Whisper. Pulls torch
-    # (~2 GB) transitively for spectrogram preprocessing. <1.0 upper bound
-    # guards against private-API drift in mlx_whisper.transcribe.ModelHolder.
-    "mlx-whisper>=0.4.0,<1.0",
-]
 local-llm = [
     # Optional: the Ollama client for Local mode. The default audio pipeline
     # runs no LLM cleanup step; Ollama is used by the local embedding provider
@@ -69,10 +63,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
-    "mlx: tests for MLXWhisperSTTProvider (opt out of the autouse fixture that forces the LocalSTTProvider path)",
     "prewarm: tests for maybe_prewarm_local/ensure_local_ready dispatch (opt out of the autouse fixture that no-ops maybe_prewarm_local)",
     "background_indexer: tests for vector_store.run_background_indexer itself (opt out of the autouse fixture that no-ops it)",
-    "no_factory_stub: tests asserting on the cost of calling app.stt.local_factory (opt out of the autouse fixture that stubs get_local_provider_class/get_local_provider_kind)",
+    "no_factory_stub: tests that must see the real app.stt.local_factory — those asserting on the cost of calling it, and those exercising a platform branch of it (opt out of the autouse fixture that stubs get_local_provider_class/get_local_provider_kind)",
     "no_vad_stub: tests for the spec-033 neural VAD pipeline layer (opt out of the autouse fixture that pins analyze_vad to None)",
     "slow: multi-second tests — real train-audio-data/ sample sweeps, spec-033 lock-contention/concurrency pins, and spec-034 gate-latency pins (ADR 020). -m 'not slow' drops all three, including the regression pins, not just the sweeps",
 ]

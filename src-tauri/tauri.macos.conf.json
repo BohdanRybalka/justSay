@@ -1,0 +1,9 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "resources": {
+      "resources/justsay-backend": "justsay-backend",
+      "resources/whisper-cpp-metal": "whisper-cpp-metal"
+    }
+  }
+}
