@@ -1,4 +1,3 @@
-/* --- Bundled fonts (no Google Fonts CDN — keeps Local mode private) --- */
 @font-face {
   font-family: "Geist";
   src: url("/fonts/Geist-Variable.woff2") format("woff2-variations");
@@ -14,7 +13,6 @@
   font-display: swap;
 }
 
-/* --- Reset --- */
 * {
   margin: 0;
   padding: 0;
@@ -52,14 +50,10 @@ html, body {
   text-rendering: optimizeLegibility;
 }
 
-/* --- Layout --- */
-
 .app {
   display: flex;
   height: 100%;
 }
-
-/* --- Sidebar --- */
 
 .sidebar {
   width: 160px;
@@ -130,8 +124,6 @@ html, body {
   color: var(--text-muted);
 }
 
-/* --- Content --- */
-
 .content {
   flex: 1;
   display: flex;
@@ -147,7 +139,6 @@ html, body {
   scrollbar-color: rgba(108, 99, 255, 0.5) transparent;
 }
 
-/* Custom WebKit scrollbar — thicker, hover-aware, accent-coloured. */
 #tab-content::-webkit-scrollbar,
 .history-text::-webkit-scrollbar,
 #metrics-table-wrap::-webkit-scrollbar,
@@ -177,8 +168,6 @@ html, body {
   background: rgba(108, 99, 255, 0.7);
   background-clip: content-box;
 }
-
-/* --- Status bar --- */
 
 .status-bar {
   padding: 8px 24px;
@@ -214,14 +203,9 @@ html, body {
   color: var(--text-muted);
 }
 
-/* `error` (backend reachable but refusing us) shares the base red dot with
-   `offline`, so without its own text colour the two states are told apart only
-   by their label — and this badge exists to be read off a screenshot. */
 .status-indicator.error {
   color: var(--red);
 }
-
-/* --- Tab content shared styles --- */
 
 .tab-title {
   font-size: 18px;
@@ -279,8 +263,6 @@ html, body {
   color: var(--accent);
 }
 
-/* --- Inputs --- */
-
 select, input[type="text"], input[type="number"], input[type="password"] {
   background: var(--bg-input);
   border: 1px solid var(--border);
@@ -298,7 +280,6 @@ select, input[type="text"], input[type="number"], input[type="password"] {
   cursor: not-allowed;
 }
 
-/* Plan 022 — Keys tab actions row wraps when the panel is narrow. */
 .key-actions {
   display: flex;
   gap: 8px;
@@ -322,8 +303,6 @@ select:focus, input:focus {
 select {
   cursor: pointer;
 }
-
-/* --- Toggle --- */
 
 .toggle-group {
   display: flex;
@@ -356,8 +335,6 @@ select {
 .toggle-btn:hover:not(.active) {
   color: var(--text);
 }
-
-/* --- Buttons --- */
 
 .btn {
   padding: 8px 16px;
@@ -405,8 +382,6 @@ select {
   cursor: not-allowed;
 }
 
-/* --- Level meter --- */
-
 .level-meter {
   height: 8px;
   background: var(--bg-input);
@@ -422,8 +397,6 @@ select {
   transition: width 0.1s;
   width: 0%;
 }
-
-/* --- Status badge --- */
 
 .status-badge {
   display: inline-block;
@@ -447,8 +420,6 @@ select {
   background: rgba(255, 152, 0, 0.15);
   color: var(--orange);
 }
-
-/* --- History entries --- */
 
 .history-entry {
   background: var(--bg-card);
@@ -526,7 +497,6 @@ select {
   scrollbar-color: rgba(108, 99, 255, 0.4) transparent;
 }
 
-/* Plan 021 — match highlight in /history/search responses. */
 .history-text mark {
   background: rgba(240, 192, 64, 0.35);
   color: inherit;
@@ -545,14 +515,6 @@ select {
   padding: 5px 12px;
   font-size: 12px;
 }
-
-/* --- Universal status indicator (ADR 009) ---
- * Generic loading/ready/error badge — first consumer is the Local STT
- * toggle (#stt-local-indicator, spec 015); designed to be reused by a
- * future LLM Local-mode panel. renderIndicator() always appends a
- * --idle modifier class too; it stays hidden via the base rule's
- * `display: none` below, not because the class is absent. All animation
- * lives here, renderIndicator() only ever sets className/title. */
 
 .status-indicator-badge {
   display: none;
@@ -606,8 +568,6 @@ select {
 @keyframes status-indicator-spin {
   to { transform: rotate(360deg); }
 }
-
-/* --- Words tab --- */
 
 .word-cards {
   display: grid;
@@ -691,8 +651,6 @@ select {
   min-width: 60px;
   text-align: right;
 }
-
-/* --- Transcribe tab --- */
 
 .dropzone {
   background: var(--bg-card);

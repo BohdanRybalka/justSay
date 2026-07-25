@@ -19,11 +19,11 @@ export const DISCLOSURE_REQUIRED_MESSAGE =
 
 const DISCLOSURE_REQUIRED_STATUS = 403;
 
-export function describeFailure(error: unknown): string {
+function describeFailure(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function stopFailureMessage(error: unknown): string {
+function stopFailureMessage(error: unknown): string {
   return `The call is still being recorded — stopping it failed: ${describeFailure(error)}`;
 }
 

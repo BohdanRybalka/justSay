@@ -1,5 +1,7 @@
 """Audio module — microphone and system audio capture."""
 
+from typing import TypeVar
+
 from fastapi import Request
 
 from app.audio.base import AudioRecorder
@@ -19,6 +21,21 @@ __all__ = [
 ]
 
 
+Recorder = TypeVar("Recorder")
+
+
+def _require(recorder: Recorder | None, attribute: str, dependency: str) -> Recorder:
+    """The recorder, or a RuntimeError naming the override a test should set."""
+    if recorder is None:
+        raise RuntimeError(
+            f"app.state.{attribute} is not set — it is only created by "
+            f"main.py's lifespan startup. In tests, set "
+            f"app.dependency_overrides[{dependency}] instead of relying on "
+            f"the real recorder."
+        )
+    return recorder
+
+
 def get_recorder(request: Request) -> MicrophoneRecorder:
     """FastAPI dependency — the app-lifetime MicrophoneRecorder.
 
@@ -26,15 +43,7 @@ def get_recorder(request: Request) -> MicrophoneRecorder:
     app.state.recorder; this is the Depends() accessor routes use to reach
     it. See docs/adr/005-audio-recorder-di-lifespan.md.
     """
-    recorder = getattr(request.app.state, "recorder", None)
-    if recorder is None:
-        raise RuntimeError(
-            "app.state.recorder is not set — it is only created by main.py's "
-            "lifespan startup. In tests, set "
-            "app.dependency_overrides[get_recorder] instead of relying on "
-            "the real recorder."
-        )
-    return recorder
+    return _require(get_active_recorder(request), "recorder", "get_recorder")
 
 
 def get_meeting_recorder(request: Request) -> MeetingRecorder:
@@ -44,15 +53,9 @@ def get_meeting_recorder(request: Request) -> MeetingRecorder:
     lifespan startup, stored on app.state.meeting_recorder. See
     docs/adr/005-audio-recorder-di-lifespan.md.
     """
-    recorder = getattr(request.app.state, "meeting_recorder", None)
-    if recorder is None:
-        raise RuntimeError(
-            "app.state.meeting_recorder is not set — it is only created by "
-            "main.py's lifespan startup. In tests, set "
-            "app.dependency_overrides[get_meeting_recorder] instead of "
-            "relying on the real recorder."
-        )
-    return recorder
+    return _require(
+        get_active_meeting_recorder(request), "meeting_recorder", "get_meeting_recorder"
+    )
 
 
 def get_active_recorder(request: Request) -> MicrophoneRecorder | None:

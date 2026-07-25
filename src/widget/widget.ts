@@ -61,8 +61,7 @@ function isInteractive(): boolean {
 
 function setState(newState: WidgetState, message?: string, durationLabel?: string) {
   state = newState;
-  const meeting = widget.classList.contains(MEETING_STATE_CLASS);
-  widget.className = `widget ${state}${meeting ? ` ${MEETING_STATE_CLASS}` : ""}`;
+  widget.className = `widget ${state}${meetingActive ? ` ${MEETING_STATE_CLASS}` : ""}`;
 
   if (durationInterval && state !== "recording") {
     clearInterval(durationInterval);
@@ -207,9 +206,9 @@ function paintMeetingIndicator() {
   });
 }
 
-function beginMeetingIndicator() {
+function beginMeetingIndicator(startedAt = Date.now()) {
   meetingActive = true;
-  meetingStartedAt = Date.now();
+  meetingStartedAt = startedAt;
   paintMeetingIndicator();
   meetingTimer = setInterval(paintMeetingIndicator, MEETING_TICK_MS);
 }
@@ -264,9 +263,7 @@ async function syncMeetingIndicator() {
     const status = await api.getMeetingStatus();
     if (status.is_recording === meetingActive) return;
     if (status.is_recording) {
-      beginMeetingIndicator();
-      meetingStartedAt = Date.now() - status.duration_seconds * 1000;
-      paintMeetingIndicator();
+      beginMeetingIndicator(Date.now() - status.duration_seconds * 1000);
     } else {
       endMeetingIndicator();
     }
@@ -511,11 +508,7 @@ async function init() {
   await listenForSettingsChanges();
   await syncMeetingIndicator();
 
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("widget_ready");
-  } catch {
-  }
+  await invokeShell("widget_ready");
 }
 
 init();

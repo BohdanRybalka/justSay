@@ -5,8 +5,9 @@ file it produces enters the pipeline through the same door and nothing
 downstream has to know a meeting was recorded. `MicrophoneRecorder` itself is
 deliberately untouched by this module: the dictation path must not move.
 
-Phase 1 ships with no UI — see
-docs/adr/039-meeting-recording-ships-dark-until-macos-lands.md.
+System audio arrives through `app.audio.system_source`, which is the only
+place that knows which platform it is running on — see
+docs/adr/037-system-audio-capture-is-a-per-platform-source.md.
 """
 
 from __future__ import annotations
@@ -48,7 +49,6 @@ class MeetingRecorder(AudioRecorder):
         self._recording = False
         self._start_time: float = 0.0
         self._stop_time: float = 0.0
-        self._final_duration: float = 0.0
         self._current_level: float = float("-inf")
         self._system_level: float = float("-inf")
         self._endpoint_name: str | None = None
@@ -137,7 +137,6 @@ class MeetingRecorder(AudioRecorder):
             if not self._recording:
                 raise RuntimeError("Not recording")
             self._stop_time = time.monotonic()
-            self._final_duration = self._stop_time - self._start_time
             self._recording = False
 
         system_rate = (
@@ -240,11 +239,6 @@ class MeetingRecorder(AudioRecorder):
         """The output being captured, or None when nothing is being captured."""
         with self._lock:
             return self._endpoint_name
-
-    @property
-    def last_duration_seconds(self) -> float:
-        """Duration of the most recently completed recording, or 0.0 if never stopped."""
-        return self._final_duration
 
     @property
     def truncated(self) -> bool:
