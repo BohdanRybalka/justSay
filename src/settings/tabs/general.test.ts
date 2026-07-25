@@ -193,6 +193,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
       expect(notifyErrorMock).toHaveBeenCalledWith("bridge down");
     });
     expect(hintOf(container).textContent).toBe("Could not apply the shortcut: bridge down");
+    expect(container.querySelector("#shortcut-btn")!.textContent).toBe("Ctrl + Alt + V");
   });
 
   it("names the host platform's modifiers when none was held", () => {

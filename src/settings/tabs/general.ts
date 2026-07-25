@@ -345,13 +345,16 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     }
   });
 
-  async function requestShortcut(shortcut: string) {
+  async function requestShortcut(shortcut: string, revertLabelTo: string) {
     try {
       const { emit } = await loadEventApi();
       await emit("shortcut-requested", { shortcut });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      if (!destroyed) shortcutHint.textContent = `Could not apply the shortcut: ${message}`;
+      if (!destroyed) {
+        shortcutHint.textContent = `Could not apply the shortcut: ${message}`;
+        shortcutBtn.textContent = revertLabelTo;
+      }
       notifyError(message);
     }
   }
@@ -385,13 +388,15 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
         return;
       }
 
+      const activeLabel = formatAccelerator(settings.shortcut, platform);
+
       stopCapture();
       shortcutBtn.textContent = formatAccelerator(captured.accelerator, platform);
       shortcutBtn.classList.remove("btn-primary");
       shortcutBtn.classList.add("btn-secondary");
       shortcutHint.textContent = "Applying…";
 
-      void requestShortcut(captured.accelerator);
+      void requestShortcut(captured.accelerator, activeLabel);
     };
 
     document.addEventListener("keydown", captureHandler, true);
