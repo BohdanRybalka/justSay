@@ -6,7 +6,7 @@ import {
 } from "../../accelerator";
 import { api, levelStream, type UserSettings } from "../../api";
 import { saveSettings, getCloudKeyStatus, cachePersistedShortcut } from "../settings";
-import { escapeHtml } from "../html";
+import { escapeHtml, meetingDisclosureHtml } from "../html";
 import { renderKeys } from "./keys";
 import { notifyError } from "../../notify";
 
@@ -54,6 +54,10 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
         <button class="btn btn-secondary" id="shortcut-btn">${escapeHtml(formatAccelerator(settings.shortcut, platform))}</button>
       </div>
       <div class="value" id="shortcut-hint" style="padding: 4px 16px; font-size: 11px; color: var(--text-muted);">Click to change. Press new key combination, then release.</div>
+    </div>
+
+    <div class="setting-group" id="meeting-consent-group">
+      ${meetingDisclosureHtml(settings.meeting_consent_acknowledged)}
     </div>
 
     <div id="api-keys-section"></div>
@@ -194,6 +198,23 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let destroyed = false;
   loadFilesInfo(tempSize, () => destroyed);
+
+  const consentGroup = container.querySelector<HTMLElement>("#meeting-consent-group")!;
+  consentGroup
+    .querySelector<HTMLButtonElement>("#btn-meeting-consent")!
+    .addEventListener("click", async (event) => {
+      const button = event.currentTarget as HTMLButtonElement;
+      button.disabled = true;
+      try {
+        await saveSettings({ meeting_consent_acknowledged: true });
+        if (destroyed) return;
+        consentGroup.innerHTML = meetingDisclosureHtml(true);
+      } catch (e) {
+        if (destroyed) return;
+        button.disabled = false;
+        notifyError(e instanceof Error ? e.message : String(e));
+      }
+    });
 
   function showStatus(text: string, kind: "warning" | "error" | "ok") {
     outputStatus.style.display = "block";

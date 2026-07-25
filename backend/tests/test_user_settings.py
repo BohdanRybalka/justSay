@@ -227,6 +227,54 @@ def test_api_keys_round_trip(tmp_path):
     assert loaded.groq_api_key == "gsk-test"
 
 
+def test_a_settings_file_written_before_meeting_recording_still_loads(isolated):
+    """Spec 074 AC: an existing settings.json has no meeting key, and must load
+    with every pre-existing field intact and the new one defaulting to False."""
+    import json
+
+    settings_path = isolated["settings_dir"] / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "language": "en",
+                "shortcut": "Ctrl+Alt+KeyQ",
+                "stt_mode": "local",
+                "ollama_model": "qwen3:1.7b",
+            }
+        ),
+        encoding="utf-8",
+    )
+    user_settings._settings = None
+
+    loaded = user_settings.get_user_settings()
+
+    assert loaded.meeting_consent_acknowledged is False
+    assert loaded.language == "en"
+    assert loaded.shortcut == "Ctrl+Alt+KeyQ"
+    assert loaded.stt_mode == "local"
+
+
+def test_the_meeting_acknowledgement_round_trips_to_disk(isolated):
+    """AC: the key is present in the file after the next save, and survives a
+    reload — the disclosure must not reappear on every launch."""
+    import json
+
+    settings_path = isolated["settings_dir"] / "settings.json"
+
+    user_settings.update_user_settings({"meeting_consent_acknowledged": True})
+
+    assert json.loads(settings_path.read_text(encoding="utf-8"))[
+        "meeting_consent_acknowledged"
+    ] is True
+
+    user_settings._settings = None
+    assert user_settings.get_user_settings().meeting_consent_acknowledged is True
+
+
+def test_the_meeting_acknowledgement_defaults_to_not_given():
+    assert user_settings.UserSettings().meeting_consent_acknowledged is False
+
+
 def test_sync_to_runtime_propagates_keys(monkeypatch):
     """sync_to_runtime pushes non-empty keys into runtime STT and LLM configs."""
     from app.core.config import settings as runtime_settings

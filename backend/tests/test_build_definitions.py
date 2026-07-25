@@ -31,6 +31,11 @@ PLATFORM_CONFS = {
     "darwin": TAURI_MACOS_CONF,
 }
 
+AUDIO_TAP_SCRIPT = REPO_ROOT / "backend" / "scripts" / "build_macos_audio_tap.sh"
+AUDIO_TAP_PACKAGE = REPO_ROOT / "macos" / "JustSayAudioTap" / "Package.swift"
+
+_NON_ENGINE_RESOURCES = {"resources/justsay-backend", "resources/justsay-audiotap"}
+
 
 def _bundle_resources(config_path: Path) -> dict[str, str]:
     config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -86,7 +91,7 @@ def test_vendor_dir_names_match_what_the_tauri_configs_declare():
         platform: [
             value
             for key, value in _bundle_resources(config_path).items()
-            if key != "resources/justsay-backend"
+            if key not in _NON_ENGINE_RESOURCES
         ]
         for platform, config_path in PLATFORM_CONFS.items()
     }
@@ -139,6 +144,120 @@ def test_the_metal_steps_name_the_metal_script_and_vendor_directory():
     assert "backend/scripts/build_whisper_cpp_metal.sh" in build
     assert "backend/vendor/whisper-cpp-metal/" in copy
     assert "src-tauri/resources/whisper-cpp-metal" in copy
+
+
+@pytest.mark.parametrize(
+    "step_fragment",
+    [
+        "Build macOS system-audio tap helper",
+        "Copy system-audio tap helper to Tauri resources",
+        "Verify system-audio tap helper bundled",
+    ],
+)
+def test_each_audio_tap_step_is_gated_on_the_macos_runner(step_fragment):
+    """Spec 074: an ungated Swift build breaks the Windows release outright."""
+    block = _step_named(step_fragment)
+
+    assert "if: runner.os == 'macOS'" in block
+
+
+_FAILURE_SWALLOWING = {
+    "continue-on-error": r"continue-on-error",
+    "|| fallback": r"\|\|",
+    "set +e": r"set \+e",
+    "; true": r";\s*true\b",
+    "|: no-op pipe": r"\|\s*:\s*$",
+}
+
+
+def _failure_swallowing_constructs(block: str) -> list[str]:
+    return [
+        name
+        for name, pattern in _FAILURE_SWALLOWING.items()
+        if re.search(pattern, block, re.MULTILINE)
+    ]
+
+
+@pytest.mark.parametrize(
+    "step_fragment",
+    [
+        "Build macOS system-audio tap helper",
+        "Copy system-audio tap helper to Tauri resources",
+        "Verify system-audio tap helper bundled",
+    ],
+)
+def test_no_audio_tap_step_can_fail_without_failing_the_release(step_fragment):
+    """A tag push is the only place this Swift is ever compiled, so a tolerated
+    failure would ship a macOS bundle whose meeting recording is inert.
+
+    The previous version of this test listed the two literal spellings
+    `continue-on-error` and `|| true`, and an iteration-1 review disproved it by
+    appending `|| echo 'skipping helper'` and watching the suite stay green. So
+    the assertion is now on the *shape* — any construct that lets a failing
+    command leave the step green — rather than on two spellings of it.
+    """
+    block = _step_named(step_fragment)
+
+    assert _failure_swallowing_constructs(block) == []
+
+
+def test_the_audio_tap_steps_run_the_build_script_and_verify_its_output():
+    build = _step_named("Build macOS system-audio tap helper")
+    verify = _step_named("Verify system-audio tap helper bundled")
+
+    assert "backend/scripts/build_macos_audio_tap.sh" in build
+    assert "exit 1" in verify
+
+
+def test_the_failure_swallowing_detector_recognises_a_tolerated_build():
+    """The detector above is the whole guarantee, so it is checked against the
+    exact mutation that survived the previous test."""
+    tolerated = (
+        "- name: Build macOS system-audio tap helper\n"
+        "  run: bash backend/scripts/build_macos_audio_tap.sh || echo 'skipping helper'\n"
+    )
+
+    assert _failure_swallowing_constructs(tolerated) == ["|| fallback"]
+
+
+def test_the_audio_tap_build_script_is_a_strict_bash_script():
+    text = AUDIO_TAP_SCRIPT.read_text(encoding="utf-8")
+
+    assert text.startswith("#!/usr/bin/env bash\n")
+    assert "set -euo pipefail" in text
+
+
+def test_the_audio_tap_deployment_floor_matches_the_bundle_floor():
+    """The helper's Swift deployment target and the app's declared macOS floor
+    are the same number in two files; drift means a bundle that launches on a
+    Mac its own helper refuses to run on."""
+    package = AUDIO_TAP_PACKAGE.read_text(encoding="utf-8")
+    shared = json.loads(TAURI_SHARED_CONF.read_text(encoding="utf-8"))
+    floor = shared["bundle"]["macOS"]["minimumSystemVersion"]
+
+    assert f'.macOS("{floor}")' in package
+
+
+def test_the_macos_bundle_declares_the_narrow_audio_capture_permission():
+    """"System Audio Recording Only", not screen recording — the whole reason
+    ADR 041 chose a Core Audio tap over ScreenCaptureKit. Without the key the
+    tap is denied at runtime and meeting recording captures silence."""
+    macos = json.loads(TAURI_MACOS_CONF.read_text(encoding="utf-8"))
+    plist_name = macos["bundle"]["macOS"]["infoPlist"]
+    plist = (TAURI_MACOS_CONF.parent / plist_name).read_text(encoding="utf-8")
+
+    assert "NSAudioCaptureUsageDescription" in plist
+    assert "NSScreenCaptureUsageDescription" not in plist
+
+
+def test_only_the_macos_config_ships_the_audio_tap_helper():
+    """Naming it in the shared config would fail the Windows `tauri build` with
+    a missing resource source — the mistake ADR 011 already records once."""
+    assert (
+        _bundle_resources(TAURI_MACOS_CONF).get("resources/justsay-audiotap")
+        == "justsay-audiotap"
+    )
+    assert "resources/justsay-audiotap" not in _bundle_resources(TAURI_WINDOWS_CONF)
 
 
 def test_the_sidecar_pip_install_line_is_unchanged():

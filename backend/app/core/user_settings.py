@@ -62,6 +62,8 @@ class UserSettings(BaseModel):
     gemini_api_key: str = ""
     groq_api_key: str = ""
 
+    meeting_consent_acknowledged: bool = False
+
 
 @dataclass
 class UpdateOutcome:

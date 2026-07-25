@@ -3,7 +3,7 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
     webview::WebviewWindowBuilder,
-    AppHandle, Manager, RunEvent, WebviewUrl, WindowEvent,
+    AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WindowEvent, Wry,
 };
 
 mod backend;
@@ -41,6 +41,38 @@ fn get_backend_token() -> String {
     backend::api_token().to_string()
 }
 
+
+/// The tray's meeting-recording item, kept so its label can follow the actual
+/// recording state. Held in Tauri's managed state rather than a static: the
+/// item is created inside `setup`, and the command that relabels it runs later
+/// on whichever thread the WebView's IPC lands on.
+struct MeetingMenuItem(MenuItem<Wry>);
+
+/// Relabel the tray item after the widget has started or stopped a meeting
+/// recording. HTTP stays in TypeScript and Rust stays a system-events layer,
+/// which is why the widget calls the backend and then tells the shell.
+#[tauri::command]
+fn set_meeting_recording(app: AppHandle, active: bool) {
+    if let Some(item) = app.try_state::<MeetingMenuItem>() {
+        let label = if active {
+            "Stop meeting recording"
+        } else {
+            "Start meeting recording"
+        };
+        let _ = item.0.set_text(label);
+    }
+}
+
+/// Bring the settings window up on the meeting disclosure. Called when the
+/// backend refuses to start a recording because it has not been acknowledged
+/// (docs/adr/040-recording-other-people-is-not-covered-by-zero-leak.md).
+#[tauri::command]
+fn show_settings_window(app: AppHandle) {
+    if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
 
 #[tauri::command]
 fn widget_ready(app: AppHandle) {
@@ -111,10 +143,18 @@ pub fn run() {
             .shadow(false)
             .build()?;
 
+            let meeting_item = MenuItem::with_id(
+                app,
+                "meeting",
+                "Start meeting recording",
+                true,
+                None::<&str>,
+            )?;
             let settings_item =
                 MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit JustSay", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&settings_item, &quit])?;
+            let menu = Menu::with_items(app, &[&meeting_item, &settings_item, &quit])?;
+            app.manage(MeetingMenuItem(meeting_item));
 
             let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
 
@@ -132,6 +172,9 @@ pub fn run() {
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
+                    }
+                    "meeting" => {
+                        let _ = app_handle.emit("meeting-toggle", ());
                     }
                     _ => {}
                 })
@@ -153,7 +196,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             widget_ready,
-            get_backend_token
+            get_backend_token,
+            set_meeting_recording,
+            show_settings_window
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

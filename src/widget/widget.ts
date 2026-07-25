@@ -9,6 +9,8 @@ import { api } from "../api";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
 import { computeDoneStatus } from "./done-status";
 import { dictationErrorLabel } from "./error-label";
+import { MEETING_STATE_CLASS, renderMeetingIndicator } from "./meeting-indicator";
+import { type MeetingToggleActions, runMeetingToggle } from "./meeting-toggle";
 
 
 type WidgetState = "idle" | "recording" | "processing" | "done" | "error";
@@ -59,7 +61,8 @@ function isInteractive(): boolean {
 
 function setState(newState: WidgetState, message?: string, durationLabel?: string) {
   state = newState;
-  widget.className = `widget ${state}`;
+  const meeting = widget.classList.contains(MEETING_STATE_CLASS);
+  widget.className = `widget ${state}${meeting ? ` ${MEETING_STATE_CLASS}` : ""}`;
 
   if (durationInterval && state !== "recording") {
     clearInterval(durationInterval);
@@ -190,9 +193,91 @@ function showRouteBadge(result: { model_name?: string; duration_ms: number; fall
   setTimeout(() => badge.classList.remove("visible"), 4000);
 }
 
-async function toggleRecording() {
-  if (isTransitioning) return;
+let meetingActive = false;
+let meetingStartedAt = 0;
+let meetingTimer: ReturnType<typeof setInterval> | null = null;
+let meetingBusy = false;
 
+const MEETING_TICK_MS = 500;
+
+function paintMeetingIndicator() {
+  renderMeetingIndicator(widget, durationEl, {
+    active: meetingActive,
+    elapsedSeconds: (Date.now() - meetingStartedAt) / 1000,
+  });
+}
+
+function beginMeetingIndicator() {
+  meetingActive = true;
+  meetingStartedAt = Date.now();
+  paintMeetingIndicator();
+  meetingTimer = setInterval(paintMeetingIndicator, MEETING_TICK_MS);
+}
+
+function endMeetingIndicator() {
+  meetingActive = false;
+  if (meetingTimer) {
+    clearInterval(meetingTimer);
+    meetingTimer = null;
+  }
+  paintMeetingIndicator();
+}
+
+async function invokeShell(command: string, args?: Record<string, unknown>) {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke(command, args);
+  } catch (e) {
+    console.warn(`Shell command ${command} failed:`, e);
+  }
+}
+
+const meetingToggleActions: MeetingToggleActions = {
+  isRecording: () => meetingActive,
+  startRecording: () => api.startMeetingRecording(),
+  stopRecording: () => api.stopMeetingRecording(),
+  showIndicator: beginMeetingIndicator,
+  hideIndicator: endMeetingIndicator,
+  setTrayRecording: (active) => invokeShell("set_meeting_recording", { active }),
+  openDisclosure: () => invokeShell("show_settings_window"),
+  reportError: (message) => {
+    console.error("Meeting recording:", message);
+    notifyError(message);
+  },
+};
+
+async function toggleMeetingRecording() {
+  if (meetingBusy) return;
+  meetingBusy = true;
+  try {
+    await runMeetingToggle(meetingToggleActions);
+  } finally {
+    meetingBusy = false;
+  }
+}
+
+/** The widget window can be reloaded while a recording is running, and the
+ *  indicator is the only thing telling the room a call is being captured — so
+ *  it is restored from the backend rather than from this window's memory. */
+async function syncMeetingIndicator() {
+  try {
+    const status = await api.getMeetingStatus();
+    if (status.is_recording === meetingActive) return;
+    if (status.is_recording) {
+      beginMeetingIndicator();
+      meetingStartedAt = Date.now() - status.duration_seconds * 1000;
+      paintMeetingIndicator();
+    } else {
+      endMeetingIndicator();
+    }
+    await invokeShell("set_meeting_recording", { active: status.is_recording });
+  } catch (e) {
+    console.warn("Could not read the meeting recording status:", e);
+  }
+}
+
+async function toggleRecording() {
+  if (meetingActive || isTransitioning) return;
   if (state === "recording") {
     await stopAndProcess();
   } else if (state === "idle" || state === "done" || state === "error") {
@@ -391,6 +476,9 @@ async function listenForSettingsChanges() {
     await listen<{ shortcut: string }>("shortcut-requested", async ({ payload }) => {
       await applyRequestedShortcut(payload.shortcut);
     });
+    await listen("meeting-toggle", async () => {
+      await toggleMeetingRecording();
+    });
   } catch {
   }
 }
@@ -421,6 +509,7 @@ async function init() {
 
   await loadSettings();
   await listenForSettingsChanges();
+  await syncMeetingIndicator();
 
   try {
     const { invoke } = await import("@tauri-apps/api/core");

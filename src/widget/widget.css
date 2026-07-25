@@ -302,6 +302,44 @@ html, body {
   flex-shrink: 0;
 }
 
+.widget.meeting {
+  background: rgba(48, 12, 12, 0.92);
+  border-color: rgba(255, 94, 94, 0.35);
+}
+
+.widget-meeting {
+  display: none;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  color: #ff8a8a;
+}
+
+.widget.meeting .widget-meeting {
+  display: inline-flex;
+}
+
+.widget-meeting-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ff4d4d;
+  animation: js-meeting-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes js-meeting-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .widget-meeting-dot { animation: none; opacity: 1; }
+}
+
 /* --- Route badge — fades in for 4 s after a successful dictation --- */
 
 .widget-route {

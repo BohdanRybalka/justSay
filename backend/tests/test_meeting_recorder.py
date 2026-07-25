@@ -8,6 +8,7 @@ block-handling logic is exercised against a fake module injected into
 
 from __future__ import annotations
 
+import importlib
 import sys
 import time
 import types
@@ -39,8 +40,9 @@ def audio_settings(tmp_path):
 class FakeSystemAudioSource(SystemAudioSource):
     """A system source that delivers exactly the blocks a test hands it."""
 
-    def __init__(self, rate: int = 48000):
+    def __init__(self, rate: int = 48000, endpoint_name: str = "Headset [Loopback]"):
         self._rate = rate
+        self._endpoint_name = endpoint_name
         self.on_block = None
         self.started = False
         self.stopped = False
@@ -48,6 +50,10 @@ class FakeSystemAudioSource(SystemAudioSource):
     @property
     def native_sample_rate(self) -> int:
         return self._rate
+
+    @property
+    def endpoint_name(self) -> str:
+        return self._endpoint_name
 
     def start(self, on_block) -> None:
         self.on_block = on_block
@@ -271,9 +277,9 @@ async def test_an_unwritable_scratch_directory_releases_the_system_source_too(
 
 
 
-def test_factory_returns_none_off_windows(monkeypatch):
-    """AC: no system-audio source on ubuntu CI or macOS in this phase."""
-    monkeypatch.setattr(sys, "platform", "darwin")
+def test_factory_returns_none_on_a_platform_with_no_implementation(monkeypatch):
+    """AC: no system-audio source on the ubuntu CI runner."""
+    monkeypatch.setattr(sys, "platform", "linux")
 
     assert create_system_audio_source(AudioSettings()) is None
 
@@ -362,8 +368,27 @@ def fake_pyaudiowpatch(monkeypatch):
     return module
 
 
+@pytest.fixture
+def render_endpoints(fake_pyaudiowpatch, monkeypatch):
+    """Stand in for the COM lookup, which cannot run off Windows.
+
+    Returns the mutable role→name map the source will see, so a test can point
+    the two roles at different endpoints.
+
+    `importlib.import_module`, not `from app.audio import windows_loopback`:
+    `fake_pyaudiowpatch` drops the module from `sys.modules` but cannot drop
+    the attribute the package still holds, so the `from ... import` form hands
+    back the stale module object and the patch lands on nothing.
+    """
+    module = importlib.import_module("app.audio.windows_loopback")
+
+    names = {"communications": "Speakers", "console": "Speakers"}
+    monkeypatch.setattr(module, "render_endpoint_names", lambda: dict(names))
+    return names
+
+
 def test_windows_source_opens_the_loopback_endpoint_at_its_native_format(
-    fake_pyaudiowpatch,
+    fake_pyaudiowpatch, render_endpoints
 ):
     from app.audio.windows_loopback import WindowsLoopbackSource
 
@@ -381,7 +406,9 @@ def test_windows_source_opens_the_loopback_endpoint_at_its_native_format(
     assert kwargs["format"] == fake_pyaudiowpatch.paFloat32
 
 
-def test_windows_source_downmixes_interleaved_stereo_to_mono(fake_pyaudiowpatch):
+def test_windows_source_downmixes_interleaved_stereo_to_mono(
+    fake_pyaudiowpatch, render_endpoints
+):
     """The only work the realtime callback does — and it must average the
     channels, not read one and discard the other."""
     from app.audio.windows_loopback import WindowsLoopbackSource
@@ -397,7 +424,7 @@ def test_windows_source_downmixes_interleaved_stereo_to_mono(fake_pyaudiowpatch)
     assert received[0].tolist() == pytest.approx([0.5, 0.5, 0.0])
 
 
-def test_windows_source_delivers_nothing_after_stop(fake_pyaudiowpatch):
+def test_windows_source_delivers_nothing_after_stop(fake_pyaudiowpatch, render_endpoints):
     from app.audio.windows_loopback import WindowsLoopbackSource
 
     source = WindowsLoopbackSource(AudioSettings())
@@ -411,32 +438,75 @@ def test_windows_source_delivers_nothing_after_stop(fake_pyaudiowpatch):
     assert fake_pyaudiowpatch.PyAudio.instances[-1].terminated is True
 
 
-def test_windows_source_falls_back_to_the_loopback_generator(fake_pyaudiowpatch):
-    """`get_default_wasapi_loopback()` returning nothing is not the end of the
-    search — another endpoint may still expose a loopback analogue."""
+def test_windows_source_captures_the_communications_endpoint(
+    fake_pyaudiowpatch, render_endpoints
+):
+    """AC: a headset set as the Default Communication Device is what a Teams
+    call plays through, and it is what gets captured."""
     from app.audio.windows_loopback import WindowsLoopbackSource
 
-    other_endpoint = {
-        "index": 11,
-        "name": "Headphones (loopback)",
-        "defaultSampleRate": 44100.0,
-        "maxInputChannels": 2,
-    }
-    fake_pyaudiowpatch.PyAudio.get_default_wasapi_loopback = lambda self: None
+    render_endpoints["communications"] = "Headset"
+    render_endpoints["console"] = "Speakers"
     fake_pyaudiowpatch.PyAudio.get_loopback_device_info_generator = lambda self: iter(
-        [other_endpoint]
+        [
+            {
+                "index": 7,
+                "name": "Speakers [Loopback]",
+                "defaultSampleRate": 48000.0,
+                "maxInputChannels": 2,
+            },
+            {
+                "index": 11,
+                "name": "Headset [Loopback]",
+                "defaultSampleRate": 44100.0,
+                "maxInputChannels": 2,
+            },
+        ]
     )
 
     source = WindowsLoopbackSource(AudioSettings())
 
+    assert source.endpoint_name == "Headset [Loopback]"
     assert source.native_sample_rate == 44100
 
 
-def test_windows_source_raises_and_releases_when_no_loopback_exists(fake_pyaudiowpatch):
+def test_windows_source_honours_the_configured_role_preference(
+    fake_pyaudiowpatch, render_endpoints
+):
+    """The escape hatch for a conferencing app that renders to the console
+    endpoint is a configuration key, not a code change."""
+    from app.audio.windows_loopback import WindowsLoopbackSource
+
+    render_endpoints["communications"] = "Headset"
+    render_endpoints["console"] = "Speakers"
+    fake_pyaudiowpatch.PyAudio.get_loopback_device_info_generator = lambda self: iter(
+        [
+            {
+                "index": 7,
+                "name": "Speakers [Loopback]",
+                "defaultSampleRate": 48000.0,
+                "maxInputChannels": 2,
+            },
+            {
+                "index": 11,
+                "name": "Headset [Loopback]",
+                "defaultSampleRate": 44100.0,
+                "maxInputChannels": 2,
+            },
+        ]
+    )
+
+    source = WindowsLoopbackSource(AudioSettings(meeting_system_endpoint_role="console"))
+
+    assert source.endpoint_name == "Speakers [Loopback]"
+
+
+def test_windows_source_raises_and_releases_when_no_loopback_exists(
+    fake_pyaudiowpatch, render_endpoints
+):
     """A machine with no loopback endpoint must not leak a PyAudio instance."""
     from app.audio.windows_loopback import WindowsLoopbackSource
 
-    fake_pyaudiowpatch.PyAudio.get_default_wasapi_loopback = lambda self: None
     fake_pyaudiowpatch.PyAudio.get_loopback_device_info_generator = lambda self: iter(())
 
     with pytest.raises(SystemAudioUnavailableError):
@@ -445,6 +515,32 @@ def test_windows_source_raises_and_releases_when_no_loopback_exists(fake_pyaudio
     assert fake_pyaudiowpatch.PyAudio.instances[-1].terminated is True
 
 
+def test_windows_source_releases_pyaudio_when_the_com_lookup_fails(
+    fake_pyaudiowpatch, monkeypatch
+):
+    """A COM failure must not leave a PortAudio instance holding the device."""
+    windows_loopback = importlib.import_module("app.audio.windows_loopback")
+
+    def _explode():
+        raise SystemAudioUnavailableError("CoInitializeEx failed with 0x80004005")
+
+    monkeypatch.setattr(windows_loopback, "render_endpoint_names", _explode)
+
+    with pytest.raises(SystemAudioUnavailableError):
+        windows_loopback.WindowsLoopbackSource(AudioSettings())
+
+    assert fake_pyaudiowpatch.PyAudio.instances[-1].terminated is True
+
+
+
+
+@pytest.fixture(autouse=True)
+def acknowledged_meeting_consent():
+    """The disclosure is a first-run gate, not the subject of most of these
+    tests — the ones that are unset it explicitly."""
+    from app.core import user_settings
+
+    user_settings.update_user_settings({"meeting_consent_acknowledged": True})
 
 
 class _StubRecorder:
@@ -452,6 +548,8 @@ class _StubRecorder:
         self.is_recording = is_recording
         self.duration_seconds = 0.0
         self.level_db = float("-inf")
+        self.system_level_db = float("-inf")
+        self.system_endpoint = None
         self.truncated = False
         self.started = False
 
@@ -587,3 +685,118 @@ async def test_instant_prompt_stop_response_has_no_meeting_fields(client, tmp_pa
 
     assert resp.status_code == 200
     assert set(resp.json()) == {"filename", "duration_seconds"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("path", ["/audio/status", "/audio/start"])
+async def test_the_dictation_status_shape_did_not_move(client, path):
+    """AC: RecordingStatus has exactly the fields it has today."""
+    from app.audio import get_recorder
+
+    app.dependency_overrides[get_recorder] = lambda: _StubRecorder()
+
+    resp = await client.request("POST" if path == "/audio/start" else "GET", path)
+
+    assert resp.status_code == 200
+    assert set(resp.json()) == {"is_recording", "duration_seconds", "level_db"}
+
+
+@pytest.mark.anyio
+async def test_the_meeting_status_reports_the_endpoint_and_the_system_level(client):
+    """AC: the meeting responses grew by exactly two fields."""
+    recorder = _StubRecorder()
+    recorder.system_endpoint = "Headset [Loopback]"
+    recorder.system_level_db = -21.5
+    app.dependency_overrides[get_meeting_recorder] = lambda: recorder
+
+    resp = await client.get("/audio/meeting/status")
+
+    assert resp.status_code == 200
+    assert set(resp.json()) == {
+        "is_recording",
+        "duration_seconds",
+        "level_db",
+        "system_endpoint",
+        "system_level_db",
+    }
+    assert resp.json()["system_endpoint"] == "Headset [Loopback]"
+    assert resp.json()["system_level_db"] == -21.5
+
+
+
+
+@pytest.mark.anyio
+async def test_meeting_start_is_403_until_the_disclosure_is_acknowledged(client):
+    """AC: the 403 is what makes the dialog impossible to drive around with
+    curl, and no capture source is created."""
+    from app.core import user_settings
+
+    user_settings.update_user_settings({"meeting_consent_acknowledged": False})
+    recorder = _StubRecorder()
+    app.dependency_overrides[get_meeting_recorder] = lambda: recorder
+
+    with patch("app.audio.meeting_recorder.create_system_audio_source") as factory:
+        resp = await client.post("/audio/meeting/start")
+
+    assert resp.status_code == 403
+    assert recorder.started is False
+    factory.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_meeting_start_is_never_403_once_acknowledged(client):
+    app.dependency_overrides[get_meeting_recorder] = lambda: _StubRecorder()
+
+    resp = await client.post("/audio/meeting/start")
+
+    assert resp.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_meeting_stop_and_status_are_not_behind_the_consent_gate(client):
+    """A recording already running must always be stoppable and visible."""
+    from app.core import user_settings
+
+    user_settings.update_user_settings({"meeting_consent_acknowledged": False})
+    app.dependency_overrides[get_meeting_recorder] = lambda: _StubRecorder()
+
+    assert (await client.get("/audio/meeting/status")).status_code == 200
+    assert (await client.post("/audio/meeting/stop")).status_code == 409
+
+
+
+
+@pytest.mark.asyncio
+async def test_the_system_half_gets_its_own_level_meter(
+    audio_settings, fake_system_source, fake_microphone_stream
+):
+    """AC: a meeting recording that captured only the microphone looks
+    identical from outside to one that works — this is what separates them."""
+    recorder = MeetingRecorder(audio_settings)
+
+    await recorder.start()
+    assert recorder.system_level_db == float("-inf")
+
+    fake_system_source.deliver(recorder._start_time, fill=0.5)
+
+    assert recorder.system_level_db > -12.0
+    assert recorder.level_db == float("-inf")
+
+    recorder.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_the_recorder_reports_the_endpoint_the_source_chose(
+    audio_settings, fake_system_source, fake_microphone_stream
+):
+    recorder = MeetingRecorder(audio_settings)
+
+    assert recorder.system_endpoint is None
+
+    await recorder.start()
+
+    assert recorder.system_endpoint == "Headset [Loopback]"
+
+    recorder.cleanup()
+
+    assert recorder.system_endpoint is None
