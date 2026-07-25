@@ -72,6 +72,7 @@ class WindowsLoopbackSource(SystemAudioSource):
         self._native_sample_rate = int(device["defaultSampleRate"])
         self._stream: object | None = None
         self._on_block: BlockSink | None = None
+        self._status_reported = False
         self._lock = threading.Lock()
         log.info(
             "WASAPI loopback endpoint: %s (%d Hz, %d ch)",
@@ -84,8 +85,32 @@ class WindowsLoopbackSource(SystemAudioSource):
     def native_sample_rate(self) -> int:
         return self._native_sample_rate
 
+    def _report_stream_status(self, status: int) -> None:
+        """Log a non-zero PortAudio status flag once per recording.
+
+        Silence arriving from this callback has two very different causes:
+        PortAudio substituting zeros on input underflow, which raises
+        `paInputUnderflow` here, or WASAPI genuinely handing over a silent
+        mix. They are indistinguishable in the samples themselves and this
+        flag is the only thing that separates them — discarding it cost a
+        full diagnosis pass during spec 066.
+        """
+        with self._lock:
+            already = self._status_reported
+            self._status_reported = True
+        if not already:
+            log.warning(
+                "WASAPI loopback stream reported PortAudio status %d "
+                "(paInputUnderflow=%d) — any silence in this recording may be "
+                "substituted rather than captured",
+                int(status),
+                pyaudio.paInputUnderflow,
+            )
+
     def _stream_callback(self, in_data, frame_count, time_info, status):
         arrival = time.monotonic()
+        if status:
+            self._report_stream_status(status)
         with self._lock:
             sink = self._on_block
         if sink is not None and in_data:
