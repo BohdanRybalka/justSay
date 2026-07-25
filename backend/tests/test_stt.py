@@ -695,13 +695,11 @@ def test_concrete_stt_providers_declare_the_expected_is_local():
     from app.stt.cloud import GeminiSTTProvider
     from app.stt.groq_whisper import GroqWhisperSTTProvider
     from app.stt.local import LocalSTTProvider as _Local
-    from app.stt.local_mlx import MLXWhisperSTTProvider
-    from app.stt.local_vulkan import WhisperCppVulkanSTTProvider
+    from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
 
     expected_local = {
         _Local: True,
-        MLXWhisperSTTProvider: True,
-        WhisperCppVulkanSTTProvider: True,
+        WhisperCppServerSTTProvider: True,
         GeminiSTTProvider: False,
         GroqWhisperSTTProvider: False,
     }

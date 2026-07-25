@@ -67,13 +67,13 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
     cuda_probe_available, gpu_name, gpu_vendor = _detect_gpu()
 
     if is_macos_arm64():
-        device = "mlx"
-        compute_type = "bfloat16"
+        device = "metal"
+        compute_type = "float16"
     else:
         from app.core.gpu_probe import GpuVendor
 
         kind = get_local_provider_kind(GpuVendor(gpu_vendor))
-        if kind == LocalProviderKind.WHISPER_CPP_VULKAN:
+        if kind == LocalProviderKind.WHISPER_CPP_SERVER:
             device = "vulkan"
             compute_type = "float16"
         else:
@@ -82,7 +82,7 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
                 device = "cuda" if cuda_probe_available else "cpu"
             compute_type = "float16" if device == "cuda" else "int8"
 
-    gpu_available = device in ("cuda", "vulkan", "mlx")
+    gpu_available = device in ("cuda", "vulkan", "metal")
 
     from app.stt import get_local_load_error, is_model_loaded
 
@@ -285,11 +285,10 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
             return
 
         if not _check_package_installed():
-            if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_VULKAN:
-                _prewarm_error = (
-                    "whisper-server binary not found. Set JUSTSAY_WHISPER_CPP_BIN, "
-                    "or run backend/scripts/build_whisper_cpp_vulkan.ps1 for local dev."
-                )
+            if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
+                from app.stt.local_whisper_cpp_cmd import binary_not_found_message
+
+                _prewarm_error = binary_not_found_message()
                 return
             _prewarm_error = None
             exit_code, output = await asyncio.to_thread(_run_pip_install)
@@ -335,8 +334,8 @@ async def await_local_ready(
     away from LOCAL, or the cache moving on to a different provider instance
     -- while this call was queued on ``_prewarm_lock``. Those are NOT
     failures: the caller must not treat a plain ``False`` as fatal, only a
-    raised ``LocalReadinessTimeoutError``. `LocalSTTProvider.transcribe()` (and its
-    Vulkan/MLX siblings) retain their own lazy ``_get_model()`` fallback, so a
+    raised ``LocalReadinessTimeoutError``. `LocalSTTProvider.transcribe()` (and
+    `WhisperCppServerSTTProvider`'s) retain their own lazy ``_get_model()`` fallback, so a
     plain ``False`` return here is never fatal to the caller.
 
     This is a trade, not a guarantee that nothing changes (Stage 5 GitHub
@@ -359,7 +358,7 @@ async def await_local_ready(
     function-definition time -- the latter would freeze the value at import
     time, defeating tests (and any future runtime override) that patch
     ``_READY_TIMEOUT`` directly, mirroring this module's own
-    ``_HEALTH_POLL_MAX_ATTEMPTS``-style convention in ``local_vulkan.py``.
+    ``_HEALTH_POLL_MAX_ATTEMPTS``-style convention in ``local_whisper_cpp.py``.
     """
     if timeout is None:
         timeout = _READY_TIMEOUT
@@ -382,12 +381,13 @@ def _estimate_model_ram_mb() -> int | None:
     Returns the current process RSS in MB — coarse but informative; the user
     sees "the backend is holding ~700 MB" rather than no number at all.
 
-    Returns `None` for the Vulkan kind: the actual model memory lives in the
-    separate `whisper-server` child process's own address space, not this
-    (the FastAPI backend's) process's RSS — reporting the wrong process's
-    RSS would be actively misleading rather than merely imprecise.
+    Returns `None` for the whisper.cpp-server kind: the actual model memory
+    lives in the separate `whisper-server` child process's own address
+    space, not this (the FastAPI backend's) process's RSS — reporting the
+    wrong process's RSS would be actively misleading rather than merely
+    imprecise. True on both platforms that kind covers.
     """
-    if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_VULKAN:
+    if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
         return None
     try:
         import os
@@ -400,33 +400,19 @@ def _estimate_model_ram_mb() -> int | None:
         return None
 
 
-def _local_extras() -> str:
-    """Return the `pip install .[<extra>]` extras name for the current platform."""
-    return "local-mac" if is_macos_arm64() else "local"
-
-
 def _check_package_installed() -> bool:
     """Check if the platform/kind-appropriate local STT dependency is present.
 
-    macOS arm64 checks for the importable `mlx_whisper` package. Windows
-    AMD/Intel checks whether the whisper.cpp `whisper-server` binary can be
-    resolved (bundled resource dir, dev-vendor dir, or env override) —
-    there's nothing to `pip install` for that kind, the binary is either
-    bundled or it isn't. Everywhere else checks for the importable
-    `faster_whisper` package.
+    macOS Apple Silicon and Windows AMD/Intel both check whether the
+    whisper.cpp `whisper-server` binary can be resolved (bundled resource
+    dir, dev-vendor dir, or env override) — there's nothing to `pip install`
+    for that kind, the binary is either bundled or it isn't. Everywhere else
+    checks for the importable `faster_whisper` package.
     """
-    if is_macos_arm64():
-        try:
-            import mlx_whisper  # noqa: F401
+    if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
+        from app.stt import local_whisper_cpp_cmd
 
-            return True
-        except ImportError:
-            return False
-
-    if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_VULKAN:
-        from app.stt import local_vulkan_cmd
-
-        return local_vulkan_cmd.resolve_binary_path() is not None
+        return local_whisper_cpp_cmd.resolve_binary_path() is not None
 
     try:
         import faster_whisper  # noqa: F401
@@ -478,12 +464,16 @@ async def install_local_packages() -> AsyncIterator[str]:
 
 
 def _run_pip_install() -> tuple[int, str]:
-    """Run pip install .[<extras>] synchronously. Returns (exit_code, output)."""
+    """Run pip install .[local] synchronously. Returns (exit_code, output).
+
+    One extras name for every platform that has a pip path at all: the
+    accelerated platforms resolve a bundled binary instead and never reach
+    here.
+    """
     backend_dir = _get_backend_dir()
-    extras = _local_extras()
 
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--no-input", f".[{extras}]"],
+        [sys.executable, "-m", "pip", "install", "--no-input", ".[local]"],
         cwd=str(backend_dir),
         capture_output=True,
         text=True,
@@ -515,8 +505,8 @@ def _detect_gpu() -> tuple[bool, str | None, str]:
     """Detect GPU availability, a human-readable device name, and vendor.
 
     On macOS arm64 returns the Apple-Silicon/Metal label without importing
-    torch or probing hardware — the MLX path is the accelerator here.
-    Everywhere else, delegates to `app.core.gpu_probe.probe_gpu()`. The
+    torch or probing hardware — the Metal whisper.cpp binary is the
+    accelerator here. Everywhere else, delegates to `app.core.gpu_probe.probe_gpu()`. The
     returned `available` bool stays NVIDIA/CUDA-only (faster-whisper/
     CTranslate2 has no AMD/Intel backend) — it feeds only `check_status()`'s
     "auto" -> cuda/cpu decision for that provider, not the status object's
@@ -529,7 +519,7 @@ def _detect_gpu() -> tuple[bool, str | None, str]:
     Returns (available, device_name_or_none, vendor).
     """
     if is_macos_arm64():
-        return True, "Apple Silicon (MLX/Metal)", "apple"
+        return True, "Apple Silicon (Metal)", "apple"
 
     from app.core.gpu_probe import GpuVendor, probe_gpu
 

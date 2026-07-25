@@ -1,11 +1,13 @@
-"""whisper.cpp + Vulkan local STT provider -- Windows AMD/Intel GPU acceleration.
+"""whisper.cpp `whisper-server` local STT provider -- one class, two GPU backends.
 
 Selected by `app.stt.local_factory.get_local_provider_class()` on Windows
-when `app.core.gpu_probe.probe_gpu()` reports AMD or Intel -- faster-whisper
-(CTranslate2, `LocalSTTProvider`) has no AMD backend at all, and
-whisper.cpp's Vulkan backend runs on NVIDIA/AMD/Intel through the same
-Vulkan API with no per-vendor code path. Full design rationale in
-`docs/adr/011-whisper-cpp-vulkan-stt-provider.md`.
+when `app.core.gpu_probe.probe_gpu()` reports AMD or Intel (Vulkan-backed
+binary), and on macOS Apple Silicon unconditionally (Metal-backed binary).
+faster-whisper (CTranslate2, `LocalSTTProvider`) has no AMD/Intel backend at
+all, and the GPU backend here is a property of the compiled binary rather
+than of this driver code, so both platforms share every line below. Full
+design rationale in `docs/adr/011-whisper-cpp-vulkan-stt-provider.md` and
+`docs/adr/036-one-whisper-cpp-server-provider-for-both-platforms.md`.
 
 Runs whisper.cpp's `whisper-server` binary as a **persistent** local HTTP
 child process (never spawned per-request -- a one-shot `whisper-cli`
@@ -35,7 +37,13 @@ from app.stt.base import (
     normalize_detected_language,
 )
 from app.stt.config import STTSettings
-from app.stt.local_vulkan_cmd import build_server_argv, resolve_binary_path, resolve_model_path
+from app.stt.local_whisper_cpp_cmd import (
+    binary_not_found_message,
+    build_server_argv,
+    resolve_binary_path,
+    resolve_model_path,
+    vendor_dir_name,
+)
 
 log = logging.getLogger(__name__)
 
@@ -243,14 +251,15 @@ def _assign_to_job_object(process: subprocess.Popen) -> None:
         )
 
 
-class WhisperCppVulkanSTTProvider(STTProvider):
-    """whisper.cpp + Vulkan -- Windows AMD/Intel local privacy-first STT provider.
+class WhisperCppServerSTTProvider(STTProvider):
+    """whisper.cpp `whisper-server` -- local privacy-first STT on Windows
+    AMD/Intel (Vulkan) and macOS Apple Silicon (Metal).
 
     Model is auto-downloaded on first use (GGML format, ~1.6 GB for
     large-v3-turbo) into ``~/.justsay/models/whisper-cpp/``. The
-    ``whisper-server`` binary is bundled with the app (Windows release) or
-    resolved from a local dev-vendor directory -- see
-    ``local_vulkan_cmd.resolve_binary_path()``.
+    ``whisper-server`` binary is bundled with the app (both platform
+    releases) or resolved from a local dev-vendor directory -- see
+    ``local_whisper_cpp_cmd.resolve_binary_path()``.
     """
 
     is_local = True
@@ -264,7 +273,18 @@ class WhisperCppVulkanSTTProvider(STTProvider):
 
     @property
     def model_name(self) -> str:
-        return f"whisper-cpp-vulkan/{self._settings.whisper_model_size}"
+        """Derived from the platform's vendor directory so Windows keeps
+        emitting the byte-identical ``whisper-cpp-vulkan/<size>`` it has
+        always emitted: this value is persisted into every history row
+        (``app/pipeline/service.py``), and a neutral rename would split
+        existing Windows history across two labels for one engine.
+
+        The fallback covers a platform with no vendor directory. The factory
+        never builds this provider there, but the value is persisted rather
+        than displayed, so a literal ``"None/<size>"`` would outlive the
+        mistake in the user's history.
+        """
+        return f"{vendor_dir_name() or 'whisper-cpp'}/{self._settings.whisper_model_size}"
 
     @property
     def is_loaded(self) -> bool:
@@ -294,10 +314,7 @@ class WhisperCppVulkanSTTProvider(STTProvider):
             try:
                 binary_path = resolve_binary_path()
                 if binary_path is None:
-                    raise RuntimeError(
-                        "whisper-server binary not found. Set JUSTSAY_WHISPER_CPP_BIN, "
-                        "or run backend/scripts/build_whisper_cpp_vulkan.ps1 for local dev."
-                    )
+                    raise RuntimeError(binary_not_found_message())
                 model_path = resolve_model_path(self._settings.whisper_model_size)
                 if not model_path.is_file():
                     self._download_model(model_path)
@@ -499,8 +516,8 @@ class WhisperCppVulkanSTTProvider(STTProvider):
     def cleanup(self) -> None:
         """Terminate the whisper-server child.
 
-        Mirrors `LocalSTTProvider.cleanup()`/`MLXWhisperSTTProvider.cleanup()`'s
-        established non-blocking-lock-guard shape exactly: `cleanup()` is
+        Mirrors `LocalSTTProvider.cleanup()`'s established
+        non-blocking-lock-guard shape exactly: `cleanup()` is
         reachable synchronously from `PUT /stt/mode`'s `clear_cache()` on the
         FastAPI event-loop thread, so it must never block on `_load_lock`
         for the duration of a multi-minute first-run download/spawn. If the

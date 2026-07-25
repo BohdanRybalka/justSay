@@ -68,7 +68,7 @@ def min_no_speech_prob(segments) -> float | None:
     """Minimum ``no_speech_prob`` across ``segments``, or ``None``.
 
     Shared by the two providers that read this off a ``verbose_json``
-    payload (`WhisperCppVulkanSTTProvider`, `GroqWhisperSTTProvider`) — one
+    payload (`WhisperCppServerSTTProvider`, `GroqWhisperSTTProvider`) — one
     defensive reader rather than two drifting copies.
 
     Deliberately total: ``None``/non-sequence input, an empty list, segments
@@ -128,10 +128,10 @@ class STTProvider(ABC):
                   ``Omit`` default).
                 - ``GeminiSTTProvider``: swaps the prompt's language clause
                   for an instruction to detect the spoken language itself.
-                - ``LocalSTTProvider`` / ``MLXWhisperSTTProvider``: translate
-                  ``"auto"`` to ``language=None``, both providers' own native
-                  auto-detect sentinel (faster-whisper / mlx-whisper).
-                - ``WhisperCppVulkanSTTProvider``: forwards the literal string
+                - ``LocalSTTProvider``: translates ``"auto"`` to
+                  ``language=None``, faster-whisper's own native auto-detect
+                  sentinel.
+                - ``WhisperCppServerSTTProvider``: forwards the literal string
                   ``"auto"`` unchanged — whisper.cpp's core library treats it
                   as its own native auto-detect sentinel, so no translation
                   is needed.
@@ -147,11 +147,10 @@ class STTProvider(ABC):
             TranscriptionResult with text, optional token count, and
             ``detected_language`` (normalized ISO-639-1 code or ``None``).
             Providers populate ``detected_language`` unevenly:
-                - ``LocalSTTProvider`` / ``MLXWhisperSTTProvider``: always,
-                  from the underlying whisper model's own language field
-                  (`TranscriptionInfo.language` / result ``"language"`` key)
+                - ``LocalSTTProvider``: always, from the underlying whisper
+                  model's own language field (`TranscriptionInfo.language`)
                   — populated whether or not ``language`` was ``"auto"``.
-                - ``WhisperCppVulkanSTTProvider`` / ``GroqWhisperSTTProvider``:
+                - ``WhisperCppServerSTTProvider`` / ``GroqWhisperSTTProvider``:
                   only when ``language == "auto"`` — both escalate to a
                   richer wire format (``verbose_json``) on that path only,
                   keeping their current format/parsing unchanged for
@@ -163,16 +162,13 @@ class STTProvider(ABC):
             unevenly, and for the same wire-format reasons:
                 - ``LocalSTTProvider``: always — faster-whisper's
                   ``Segment.no_speech_prob`` is on every segment.
-                - ``WhisperCppVulkanSTTProvider`` / ``GroqWhisperSTTProvider``:
+                - ``WhisperCppServerSTTProvider`` / ``GroqWhisperSTTProvider``:
                   only when ``language == "auto"`` (the only path that uses
                   ``verbose_json``), and read defensively there — whisper.cpp
                   builds vary in whether the field carries a live value, and a
                   missing/stubbed field yields ``None``, never an exception.
                 - ``GeminiSTTProvider``: always ``None`` — no structured
                   no-speech signal at any setting (ADR 016).
-                - ``MLXWhisperSTTProvider``: always ``None`` in this spec —
-                  the signal exists upstream but no macOS hardware exists to
-                  verify it against (spec 033, Cuts).
         """
 
     def cleanup(self) -> None:

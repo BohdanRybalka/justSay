@@ -26,7 +26,7 @@ def resolve_app_data_root() -> Path:
     1. ``JUSTSAY_DATA_DIR`` env override -- an explicit full-path escape hatch.
     2. ``sys.frozen`` (the PyInstaller bootloader flag, already used in this
        codebase by ``app.stt.local_setup`` and
-       ``app.stt.local_vulkan_cmd::resolve_binary_path`` for the identical
+       ``app.stt.local_whisper_cpp_cmd::resolve_binary_path`` for the identical
        "packaged binary vs. running from source" distinction) is ``True``
        **and** ``JUSTSAY_FORCE_DEV_DATA_DIR`` is not set -> ``~/.justsay``
        (production, byte-identical to today's default).

@@ -1,7 +1,7 @@
 """Tests for `app.core.app_paths.resolve_app_data_root` -- the resolution
 order documented in docs/adr/012-dev-mode-data-directory-isolation.md.
 
-Mirrors test_local_vulkan_cmd.py's monkeypatch.setattr(sys, "frozen", ...) /
+Mirrors test_local_whisper_cpp_cmd.py's monkeypatch.setattr(sys, "frozen", ...) /
 monkeypatch.delattr(sys, "frozen", raising=False) / monkeypatch.setenv/delenv
 conventions for simulating the PyInstaller-frozen bootloader flag.
 """

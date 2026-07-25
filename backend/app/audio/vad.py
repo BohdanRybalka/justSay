@@ -64,7 +64,7 @@ def _platform_lib_name() -> str:
 def resolve_ten_vad_lib() -> Path | None:
     """Locate the TEN VAD shared library, or ``None`` when unavailable.
 
-    Degrade-only chain mirroring `local_vulkan_cmd.resolve_binary_path()`:
+    Degrade-only chain mirroring `local_whisper_cpp_cmd.resolve_binary_path()`:
     env override -> frozen bundle -> dev vendor dir -> ``None``. Each source
     is accepted only when the resolved file actually EXISTS, so a stale env
     var pointing at a deleted file falls through to the next source instead

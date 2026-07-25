@@ -1,8 +1,9 @@
 """Local STT provider — Faster-Whisper Large-v3.
 
 Selected by `app.stt.local_factory.get_local_provider_class()` on
-Windows / Linux / macOS-Intel. On macOS Apple Silicon the factory returns
-`MLXWhisperSTTProvider` instead, which is Metal-accelerated via mlx-whisper.
+Windows NVIDIA/no-GPU, Linux and macOS-Intel. On macOS Apple Silicon and on
+Windows AMD/Intel the factory returns `WhisperCppServerSTTProvider` instead,
+which drives a GPU-accelerated whisper.cpp `whisper-server` child process.
 """
 
 import asyncio

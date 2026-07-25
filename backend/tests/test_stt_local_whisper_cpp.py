@@ -1,4 +1,4 @@
-"""Tests for `app.stt.local_vulkan.WhisperCppVulkanSTTProvider`.
+"""Tests for `app.stt.local_whisper_cpp.WhisperCppServerSTTProvider`.
 
 `subprocess.Popen` and `httpx.Client` are fully mocked -- no real process is
 spawned and no real network call is made. `resolve_binary_path`/
@@ -14,9 +14,9 @@ from ctypes import wintypes
 
 import pytest
 
-import app.stt.local_vulkan as local_vulkan_module
+import app.stt.local_whisper_cpp as local_whisper_cpp_module
 from app.stt.config import STTSettings
-from app.stt.local_vulkan import WhisperCppVulkanSTTProvider
+from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
 
 _requires_windows = pytest.mark.skipif(
     sys.platform != "win32",
@@ -34,9 +34,9 @@ def _reset_orphan_registry():
     real interpreter exits -- causing the atexit reaper to fire against a
     stale fake object, including logging into an already-closed stream
     during pytest's own teardown."""
-    local_vulkan_module._live_children.clear()
+    local_whisper_cpp_module._live_children.clear()
     yield
-    local_vulkan_module._live_children.clear()
+    local_whisper_cpp_module._live_children.clear()
 
 
 
@@ -137,7 +137,7 @@ def _install_fake_httpx(monkeypatch, *, get_impl=None, post_impl=None, stream_im
         get_impl = lambda url: _FakeResponse(200)  # noqa: E731
 
     monkeypatch.setattr(
-        local_vulkan_module.httpx,
+        local_whisper_cpp_module.httpx,
         "Client",
         lambda *a, **kw: _FakeHttpxClient(
             get_impl=get_impl, post_impl=post_impl, stream_impl=stream_impl
@@ -153,36 +153,55 @@ def _install_fake_popen(monkeypatch, *, exit_after_terminate: bool = True):
         calls.append(argv)
         return process
 
-    monkeypatch.setattr(local_vulkan_module.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(local_whisper_cpp_module.subprocess, "Popen", _fake_popen)
     return calls, process
 
 
 def _make_provider(
     tmp_path, monkeypatch, *, model_exists: bool = True
-) -> WhisperCppVulkanSTTProvider:
+) -> WhisperCppServerSTTProvider:
     binary_path = tmp_path / "whisper-server.exe"
     binary_path.write_bytes(b"")
     model_path = tmp_path / "ggml-large-v3-turbo.bin"
     if model_exists:
         model_path.write_bytes(b"fake-ggml-weights")
 
-    monkeypatch.setattr(local_vulkan_module, "resolve_binary_path", lambda: binary_path)
-    monkeypatch.setattr(local_vulkan_module, "resolve_model_path", lambda size: model_path)
+    monkeypatch.setattr(local_whisper_cpp_module, "resolve_binary_path", lambda: binary_path)
+    monkeypatch.setattr(local_whisper_cpp_module, "resolve_model_path", lambda size: model_path)
 
     settings = STTSettings(whisper_model_size="large-v3-turbo")
-    return WhisperCppVulkanSTTProvider(settings), model_path
+    return WhisperCppServerSTTProvider(settings), model_path
 
 
 
 
-def test_model_name_reflects_settings():
+@pytest.mark.parametrize(
+    "platform,expected",
+    [
+        ("win32", "whisper-cpp-vulkan/large-v3-turbo"),
+        ("darwin", "whisper-cpp-metal/large-v3-turbo"),
+        ("linux", "whisper-cpp/large-v3-turbo"),
+    ],
+)
+def test_model_name_reflects_settings_and_platform(monkeypatch, platform, expected):
+    """`model_name` is persisted into every history row
+    (`app/pipeline/service.py`). The Windows value must stay byte-identical to
+    what shipped builds have always written, or one engine's history splits
+    across two labels. `sys.platform` is pinned because CI runs on Linux,
+    where the resolver has no vendor directory at all.
+
+    The `linux` case pins the no-vendor-directory fallback: the factory never
+    builds this provider there, but the label is persisted rather than
+    displayed, so it must never be the literal string `"None/<size>"`.
+    """
+    monkeypatch.setattr(sys, "platform", platform)
     settings = STTSettings(whisper_model_size="large-v3-turbo")
-    provider = WhisperCppVulkanSTTProvider(settings)
-    assert provider.model_name == "whisper-cpp-vulkan/large-v3-turbo"
+    provider = WhisperCppServerSTTProvider(settings)
+    assert provider.model_name == expected
 
 
 def test_is_loaded_false_and_last_load_error_none_initially():
-    provider = WhisperCppVulkanSTTProvider(STTSettings())
+    provider = WhisperCppServerSTTProvider(STTSettings())
     assert provider.is_loaded is False
     assert provider.last_load_error is None
 
@@ -197,11 +216,11 @@ def test_contract_shape_via_get_or_create(monkeypatch):
 
     monkeypatch.setattr(
         "app.stt.local_factory.get_local_provider_class",
-        lambda: WhisperCppVulkanSTTProvider,
+        lambda: WhisperCppServerSTTProvider,
     )
 
     settings = STTSettings()
-    provider = _get_or_create(WhisperCppVulkanSTTProvider, settings)
+    provider = _get_or_create(WhisperCppServerSTTProvider, settings)
 
     assert is_model_loaded() is False
     assert get_local_load_error(settings) is None
@@ -218,8 +237,8 @@ def test_contract_shape_via_get_or_create(monkeypatch):
 
 
 def test_get_model_raises_and_latches_error_when_binary_missing(monkeypatch):
-    monkeypatch.setattr(local_vulkan_module, "resolve_binary_path", lambda: None)
-    provider = WhisperCppVulkanSTTProvider(STTSettings())
+    monkeypatch.setattr(local_whisper_cpp_module, "resolve_binary_path", lambda: None)
+    provider = WhisperCppServerSTTProvider(STTSettings())
 
     with pytest.raises(RuntimeError):
         provider._get_model()
@@ -285,8 +304,8 @@ def test_get_model_latches_error_on_health_poll_timeout(monkeypatch, tmp_path):
     _install_fake_httpx(monkeypatch, get_impl=lambda url: _FakeResponse(503))
     _install_fake_popen(monkeypatch)
 
-    monkeypatch.setattr(local_vulkan_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
-    monkeypatch.setattr(local_vulkan_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(local_whisper_cpp_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
 
     with pytest.raises(RuntimeError, match="did not become healthy"):
         provider._get_model()
@@ -308,8 +327,8 @@ def test_get_model_terminates_orphaned_process_after_health_poll_timeout_then_re
     _install_fake_httpx(monkeypatch, get_impl=lambda url: _FakeResponse(503))
     popen_calls, first_process = _install_fake_popen(monkeypatch)
 
-    monkeypatch.setattr(local_vulkan_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
-    monkeypatch.setattr(local_vulkan_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(local_whisper_cpp_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
 
     with pytest.raises(RuntimeError, match="did not become healthy"):
         provider._get_model()
@@ -326,7 +345,7 @@ def test_get_model_terminates_orphaned_process_after_health_poll_timeout_then_re
         popen_calls.append(argv)
         return second_process
 
-    monkeypatch.setattr(local_vulkan_module.subprocess, "Popen", _fake_popen_2)
+    monkeypatch.setattr(local_whisper_cpp_module.subprocess, "Popen", _fake_popen_2)
 
     provider._get_model()
 
@@ -466,7 +485,7 @@ async def test_transcribe_sends_language_and_response_format(monkeypatch, tmp_pa
 async def test_transcribe_sends_auto_language_unchanged(monkeypatch, tmp_path):
     """Regression for spec 019: whisper.cpp's core library treats the literal
     string "auto" as its own native auto-detect sentinel, so unlike
-    LocalSTTProvider/MLXWhisperSTTProvider this provider must NOT translate
+    LocalSTTProvider this provider must NOT translate
     it to None -- whisper-server's multipart form parsing would likely turn
     a None into a broken empty-string field, not a no-op."""
     provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
@@ -573,12 +592,12 @@ def _wait_until(predicate, timeout: float = 2.0, interval: float = 0.01) -> bool
 
 
 def test_cleanup_returns_promptly_without_deadlock_when_load_lock_held():
-    """Mirrors `LocalSTTProvider`'s/`MLXWhisperSTTProvider`'s established
+    """Mirrors `LocalSTTProvider`'s established
     non-blocking-lock-guard test: `cleanup()` is reachable synchronously from
     `PUT /stt/mode`'s `clear_cache()` on the FastAPI event-loop thread, so it
     must never block on `_load_lock` for the duration of an in-flight load.
     """
-    provider = WhisperCppVulkanSTTProvider(STTSettings())
+    provider = WhisperCppServerSTTProvider(STTSettings())
     sentinel_process = _FakeProcess()
     provider._process = sentinel_process
     provider._server_ready = True
@@ -612,7 +631,7 @@ def test_cleanup_returns_immediately_and_terminates_in_background_when_lock_is_f
     FastAPI event loop for the grace-poll duration -- the bookkeeping
     (`_server_ready`, clearing `self._process`) stays synchronous, but the
     actual `.terminate()` call runs on a background daemon thread."""
-    provider = WhisperCppVulkanSTTProvider(STTSettings())
+    provider = WhisperCppServerSTTProvider(STTSettings())
     process = _FakeProcess(exit_after_terminate=True)
     provider._process = process
     provider._server_ready = True
@@ -632,13 +651,13 @@ def test_cleanup_returns_immediately_and_terminates_in_background_when_lock_is_f
 
 
 def test_cleanup_kills_process_in_background_when_terminate_does_not_exit_in_time(monkeypatch):
-    provider = WhisperCppVulkanSTTProvider(STTSettings())
+    provider = WhisperCppServerSTTProvider(STTSettings())
     process = _FakeProcess(exit_after_terminate=False)
     provider._process = process
     provider._server_ready = True
 
-    monkeypatch.setattr(local_vulkan_module, "_GRACE_POLL_MAX_ATTEMPTS", 2)
-    monkeypatch.setattr(local_vulkan_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(local_whisper_cpp_module, "_GRACE_POLL_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
 
     provider.cleanup()
 
@@ -656,13 +675,13 @@ def test_cleanup_returns_immediately_even_though_terminate_sequence_would_block(
     underlying terminate() -> grace-poll -> kill() sequence actually takes --
     proof the sequence really runs off the calling thread, not just that the
     mocked sleep was skipped."""
-    provider = WhisperCppVulkanSTTProvider(STTSettings())
+    provider = WhisperCppServerSTTProvider(STTSettings())
     process = _FakeProcess(exit_after_terminate=False)
     provider._process = process
     provider._server_ready = True
 
-    monkeypatch.setattr(local_vulkan_module, "_GRACE_POLL_MAX_ATTEMPTS", 5)
-    monkeypatch.setattr(local_vulkan_module, "_GRACE_POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(local_whisper_cpp_module, "_GRACE_POLL_MAX_ATTEMPTS", 5)
+    monkeypatch.setattr(local_whisper_cpp_module, "_GRACE_POLL_INTERVAL", 0.05)
     grace_window = 5 * 0.05
 
     start = time.monotonic()
@@ -680,7 +699,7 @@ def test_cleanup_returns_immediately_even_though_terminate_sequence_would_block(
 
 
 def test_cleanup_is_a_noop_when_nothing_was_ever_spawned():
-    provider = WhisperCppVulkanSTTProvider(STTSettings())
+    provider = WhisperCppServerSTTProvider(STTSettings())
     provider.cleanup()
     assert provider._process is None
 
@@ -692,11 +711,11 @@ def test_terminate_process_does_not_raise_when_kill_fallback_wait_times_out(monk
     still alive after both `.terminate()` and `.kill()` -- the `.kill()`
     fallback's `wait(timeout=3.0)` can raise `subprocess.TimeoutExpired`,
     which must be logged, not propagated."""
-    provider = WhisperCppVulkanSTTProvider(STTSettings())
+    provider = WhisperCppServerSTTProvider(STTSettings())
     process = _FakeProcess(exit_after_terminate=False, wait_raises_timeout=True)
 
-    monkeypatch.setattr(local_vulkan_module, "_GRACE_POLL_MAX_ATTEMPTS", 2)
-    monkeypatch.setattr(local_vulkan_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(local_whisper_cpp_module, "_GRACE_POLL_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
 
     provider._terminate_process(process)
 
@@ -723,10 +742,10 @@ def test_get_model_except_branch_reraises_original_error_not_timeout_expired(
     def _fake_popen(argv, **kwargs):
         return process
 
-    monkeypatch.setattr(local_vulkan_module.subprocess, "Popen", _fake_popen)
-    monkeypatch.setattr(local_vulkan_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
-    monkeypatch.setattr(local_vulkan_module, "_GRACE_POLL_MAX_ATTEMPTS", 2)
-    monkeypatch.setattr(local_vulkan_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(local_whisper_cpp_module.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(local_whisper_cpp_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(local_whisper_cpp_module, "_GRACE_POLL_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
 
     with pytest.raises(RuntimeError, match="did not become healthy") as exc_info:
         provider._get_model()
@@ -770,7 +789,7 @@ def test_port_lock_blocks_second_providers_spawn_until_first_providers_terminate
     release_terminate = threading.Event()
 
     old_process = _BlockingTerminateProcess(terminate_started, release_terminate)
-    provider1 = WhisperCppVulkanSTTProvider(STTSettings())
+    provider1 = WhisperCppServerSTTProvider(STTSettings())
 
     terminate_thread = threading.Thread(
         target=provider1._terminate_process, args=(old_process,)
@@ -838,7 +857,7 @@ def test_download_lock_serializes_concurrent_downloads_and_second_skips_redownlo
     """Regression for the exact reported race: Spec 015's eager pre-warm
     starts a multi-GB download on a Local-mode switch; if the user switches
     away and back to Local within that window, `clear_cache()` hands out a
-    second, independent `WhisperCppVulkanSTTProvider` instance whose own
+    second, independent `WhisperCppServerSTTProvider` instance whose own
     `_get_model()` sees the same model file missing and calls
     `_download_model()` too. `_download_lock` must serialize the two calls so
     neither writes to the shared `.part` file while the other is mid-stream,
@@ -850,12 +869,12 @@ def test_download_lock_serializes_concurrent_downloads_and_second_skips_redownlo
     model_path = tmp_path / "ggml-large-v3-turbo.bin"
     part_path = model_path.with_name(model_path.name + ".part")
 
-    monkeypatch.setattr(local_vulkan_module, "resolve_binary_path", lambda: binary_path)
-    monkeypatch.setattr(local_vulkan_module, "resolve_model_path", lambda size: model_path)
+    monkeypatch.setattr(local_whisper_cpp_module, "resolve_binary_path", lambda: binary_path)
+    monkeypatch.setattr(local_whisper_cpp_module, "resolve_model_path", lambda size: model_path)
 
     settings = STTSettings(whisper_model_size="large-v3-turbo")
-    provider1 = WhisperCppVulkanSTTProvider(settings)
-    provider2 = WhisperCppVulkanSTTProvider(settings)
+    provider1 = WhisperCppServerSTTProvider(settings)
+    provider2 = WhisperCppServerSTTProvider(settings)
 
     download_started = threading.Event()
     release_download = threading.Event()
@@ -910,7 +929,7 @@ def test_spawn_server_registers_child_in_live_children_registry(monkeypatch, tmp
 
     provider._get_model()
 
-    assert local_vulkan_module._live_children.get(process.pid) is process
+    assert local_whisper_cpp_module._live_children.get(process.pid) is process
 
 
 def test_terminate_process_deregisters_child_from_registry(monkeypatch, tmp_path):
@@ -919,11 +938,11 @@ def test_terminate_process_deregisters_child_from_registry(monkeypatch, tmp_path
     _popen_calls, process = _install_fake_popen(monkeypatch)
 
     provider._get_model()
-    assert process.pid in local_vulkan_module._live_children
+    assert process.pid in local_whisper_cpp_module._live_children
 
     provider._terminate_process(process)
 
-    assert process.pid not in local_vulkan_module._live_children
+    assert process.pid not in local_whisper_cpp_module._live_children
 
 
 def test_terminate_process_deregisters_even_when_process_already_exited():
@@ -932,12 +951,12 @@ def test_terminate_process_deregisters_even_when_process_already_exited():
     spawn and teardown would linger in the registry forever."""
     process = _FakeProcess()
     process.returncode = 0
-    local_vulkan_module._register_child(process)
+    local_whisper_cpp_module._register_child(process)
 
-    provider = WhisperCppVulkanSTTProvider(STTSettings())
+    provider = WhisperCppServerSTTProvider(STTSettings())
     provider._terminate_process(process)
 
-    assert process.pid not in local_vulkan_module._live_children
+    assert process.pid not in local_whisper_cpp_module._live_children
 
 
 def test_reap_orphans_terminates_and_clears_registered_still_live_process():
@@ -946,23 +965,23 @@ def test_reap_orphans_terminates_and_clears_registered_still_live_process():
     the reaper terminates the recorded pid, using a fake/stub process, never
     a real whisper-server.exe spawn."""
     process = _FakeProcess(exit_after_terminate=True)
-    local_vulkan_module._register_child(process)
+    local_whisper_cpp_module._register_child(process)
 
-    local_vulkan_module._reap_orphans()
+    local_whisper_cpp_module._reap_orphans()
 
     assert process.terminate_calls == 1
-    assert local_vulkan_module._live_children == {}
+    assert local_whisper_cpp_module._live_children == {}
 
 
 def test_reap_orphans_skips_process_that_already_exited():
     process = _FakeProcess()
     process.returncode = 0
-    local_vulkan_module._register_child(process)
+    local_whisper_cpp_module._register_child(process)
 
-    local_vulkan_module._reap_orphans()
+    local_whisper_cpp_module._reap_orphans()
 
     assert process.terminate_calls == 0
-    assert local_vulkan_module._live_children == {}
+    assert local_whisper_cpp_module._live_children == {}
 
 
 def test_reap_orphans_never_raises_when_terminate_itself_fails():
@@ -971,16 +990,16 @@ def test_reap_orphans_never_raises_when_terminate_itself_fails():
             raise OSError("access denied")
 
     process = _BoomOnTerminate()
-    local_vulkan_module._register_child(process)
+    local_whisper_cpp_module._register_child(process)
 
-    local_vulkan_module._reap_orphans()
+    local_whisper_cpp_module._reap_orphans()
 
-    assert local_vulkan_module._live_children == {}
+    assert local_whisper_cpp_module._live_children == {}
 
 
 def test_reap_orphans_is_a_noop_when_registry_is_empty():
-    local_vulkan_module._reap_orphans()
-    assert local_vulkan_module._live_children == {}
+    local_whisper_cpp_module._reap_orphans()
+    assert local_whisper_cpp_module._live_children == {}
 
 
 
@@ -1023,21 +1042,21 @@ def _reset_job_object_state(monkeypatch):
     reset per test so each test's fake kernel32 mock is actually consulted
     instead of a previous test's cached handle/DLL short-circuiting
     `_get_or_create_job_object()`/`_kernel32()`."""
-    monkeypatch.setattr(local_vulkan_module, "_job_object_handle", None)
-    monkeypatch.setattr(local_vulkan_module, "_job_object_init_failed", False)
-    monkeypatch.setattr(local_vulkan_module, "_kernel32_dll", None)
+    monkeypatch.setattr(local_whisper_cpp_module, "_job_object_handle", None)
+    monkeypatch.setattr(local_whisper_cpp_module, "_job_object_init_failed", False)
+    monkeypatch.setattr(local_whisper_cpp_module, "_kernel32_dll", None)
 
 
 @_requires_windows
 def test_assign_to_job_object_creates_job_once_and_assigns_process(monkeypatch):
     fake_kernel32 = _FakeKernel32()
-    monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
-    monkeypatch.setattr(local_vulkan_module.sys, "platform", "win32")
+    monkeypatch.setattr(local_whisper_cpp_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
+    monkeypatch.setattr(local_whisper_cpp_module.sys, "platform", "win32")
 
     process = _FakeProcess()
     process._handle = 777
 
-    local_vulkan_module._assign_to_job_object(process)
+    local_whisper_cpp_module._assign_to_job_object(process)
 
     assert fake_kernel32.create_calls == 1
     assert fake_kernel32.set_info_calls == 1
@@ -1047,16 +1066,16 @@ def test_assign_to_job_object_creates_job_once_and_assigns_process(monkeypatch):
 @_requires_windows
 def test_assign_to_job_object_reuses_cached_job_across_calls(monkeypatch):
     fake_kernel32 = _FakeKernel32()
-    monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
-    monkeypatch.setattr(local_vulkan_module.sys, "platform", "win32")
+    monkeypatch.setattr(local_whisper_cpp_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
+    monkeypatch.setattr(local_whisper_cpp_module.sys, "platform", "win32")
 
     process1 = _FakeProcess()
     process1._handle = 111
     process2 = _FakeProcess()
     process2._handle = 222
 
-    local_vulkan_module._assign_to_job_object(process1)
-    local_vulkan_module._assign_to_job_object(process2)
+    local_whisper_cpp_module._assign_to_job_object(process1)
+    local_whisper_cpp_module._assign_to_job_object(process2)
 
     assert fake_kernel32.create_calls == 1
     assert fake_kernel32.assign_calls == [(4242, 111), (4242, 222)]
@@ -1064,27 +1083,27 @@ def test_assign_to_job_object_reuses_cached_job_across_calls(monkeypatch):
 
 @_requires_windows
 def test_assign_to_job_object_is_noop_on_non_windows(monkeypatch):
-    monkeypatch.setattr(local_vulkan_module.sys, "platform", "linux")
+    monkeypatch.setattr(local_whisper_cpp_module.sys, "platform", "linux")
 
     def _boom(*a, **kw):
         raise AssertionError("ctypes.WinDLL must not be touched on non-Windows")
 
-    monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", _boom)
+    monkeypatch.setattr(local_whisper_cpp_module.ctypes, "WinDLL", _boom)
 
     process = _FakeProcess()
-    local_vulkan_module._assign_to_job_object(process)
+    local_whisper_cpp_module._assign_to_job_object(process)
 
 
 @_requires_windows
 def test_assign_to_job_object_swallows_create_job_failure(monkeypatch):
     fake_kernel32 = _FakeKernel32(create_job_ok=False)
-    monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
-    monkeypatch.setattr(local_vulkan_module.sys, "platform", "win32")
+    monkeypatch.setattr(local_whisper_cpp_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
+    monkeypatch.setattr(local_whisper_cpp_module.sys, "platform", "win32")
 
     process = _FakeProcess()
     process._handle = 777
 
-    local_vulkan_module._assign_to_job_object(process)
+    local_whisper_cpp_module._assign_to_job_object(process)
 
     assert fake_kernel32.assign_calls == []
 
@@ -1092,13 +1111,13 @@ def test_assign_to_job_object_swallows_create_job_failure(monkeypatch):
 @_requires_windows
 def test_assign_to_job_object_swallows_assign_failure(monkeypatch):
     fake_kernel32 = _FakeKernel32(assign_ok=False)
-    monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
-    monkeypatch.setattr(local_vulkan_module.sys, "platform", "win32")
+    monkeypatch.setattr(local_whisper_cpp_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
+    monkeypatch.setattr(local_whisper_cpp_module.sys, "platform", "win32")
 
     process = _FakeProcess()
     process._handle = 777
 
-    local_vulkan_module._assign_to_job_object(process)
+    local_whisper_cpp_module._assign_to_job_object(process)
 
 
 @_requires_windows
@@ -1107,12 +1126,12 @@ def test_assign_to_job_object_swallows_missing_handle_attribute(monkeypatch):
     `_FakeProcess`, or a platform where Popen doesn't expose it) must not
     crash `_get_model()`'s success path."""
     fake_kernel32 = _FakeKernel32()
-    monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
-    monkeypatch.setattr(local_vulkan_module.sys, "platform", "win32")
+    monkeypatch.setattr(local_whisper_cpp_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
+    monkeypatch.setattr(local_whisper_cpp_module.sys, "platform", "win32")
 
     process = _FakeProcess()
 
-    local_vulkan_module._assign_to_job_object(process)
+    local_whisper_cpp_module._assign_to_job_object(process)
 
     assert fake_kernel32.assign_calls == []
 
@@ -1125,7 +1144,7 @@ def test_kernel32_prototypes_declare_restype_and_argtypes():
     values for a young process are small (observed 368/372 in review), which
     is luck, not a contract. Calls the real (unmocked) `_kernel32()` -- this
     just loads kernel32.dll, no Job Object functions are actually invoked."""
-    kernel32 = local_vulkan_module._kernel32()
+    kernel32 = local_whisper_cpp_module._kernel32()
 
     assert kernel32.CreateJobObjectW.restype == wintypes.HANDLE
     assert kernel32.CreateJobObjectW.argtypes == [wintypes.LPVOID, wintypes.LPCWSTR]
@@ -1147,8 +1166,8 @@ def test_get_model_success_path_still_works_when_job_object_creation_fails(monke
     """AC 15's wrapper contract: a Job Object failure must degrade to the
     atexit registry, never break STT itself."""
     fake_kernel32 = _FakeKernel32(create_job_ok=False)
-    monkeypatch.setattr(local_vulkan_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
-    monkeypatch.setattr(local_vulkan_module.sys, "platform", "win32")
+    monkeypatch.setattr(local_whisper_cpp_module.ctypes, "WinDLL", lambda *a, **kw: fake_kernel32)
+    monkeypatch.setattr(local_whisper_cpp_module.sys, "platform", "win32")
 
     provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
     _install_fake_httpx(monkeypatch)

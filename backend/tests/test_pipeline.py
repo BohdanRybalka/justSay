@@ -498,8 +498,8 @@ async def test_pipeline_silence_guard_does_not_block_event_loop(
 ):
     """AC-32: analyze_silence runs via asyncio.to_thread -- a slow (real,
     time.sleep-based) analysis must not stall the event loop, mirroring the
-    established pattern already used for local.py's _transcribe /
-    local_mlx.py's _run_mlx (Stage 3 review YELLOW finding)."""
+    established pattern already used for local.py's _transcribe (Stage 3
+    review YELLOW finding)."""
     import time
 
     from app.audio import analysis as analysis_module
