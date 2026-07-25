@@ -49,8 +49,8 @@ audio = [
     "numpy>=1.26.0",
 ]
 
-[tool.setuptools]
-packages = ["app"]
+[tool.setuptools.packages.find]
+include = ["app*"]
 
 [tool.ruff]
 target-version = "py310"

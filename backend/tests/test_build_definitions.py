@@ -148,21 +148,53 @@ def test_the_sidecar_pip_install_line_is_unchanged():
     assert 'pip install -e ".[cloud,audio]"' in _release_workflow_text()
 
 
-def test_pyproject_names_the_shipped_package_explicitly():
-    """Without this, setuptools auto-discovers top-level packages and finds two
-    as soon as `backend/vendor/` exists — which it does on any machine that has
-    built the local whisper.cpp engine. `release.yml` installs this project with
-    `pip install -e ".[cloud,audio]"` into the PyInstaller environment, so what
-    setuptools includes is a build input, not just a dev convenience.
+def test_pyproject_scopes_package_discovery_without_disabling_it():
+    """Discovery must be *narrowed* to `app`, never replaced by a literal list.
+
+    Unscoped, setuptools scans the whole directory and finds two top-level
+    packages the moment `backend/vendor/` exists -- which it does on any machine
+    that has built the local whisper.cpp engine -- and refuses to build. The
+    obvious fix, `[tool.setuptools] packages = ["app"]`, is worse than the bug:
+    an explicit list does not recurse, so it silently drops every subpackage.
+    Measured on a clean worktree, wheel contents: unscoped 54 `app` files and
+    all six subpackages; `packages = ["app"]` **2 files and none**;
+    `packages.find include = ["app*"]` 54 files again, with `vendor` excluded.
+
+    Editable installs mask the difference, and every install this repo performs
+    is editable -- so nothing else here would catch the regression. `release.yml`
+    installs this manifest into the PyInstaller environment, which is why it is
+    worth a test at all.
     """
     text = PYPROJECT.read_text(encoding="utf-8")
-    section = re.search(r"^\[tool\.setuptools\]$(.*?)(?=^\[|\Z)", text, re.MULTILINE | re.DOTALL)
 
-    assert section is not None, (
-        "[tool.setuptools] is missing; a flat-layout scan will pick up vendor/"
+    assert re.search(r"^\[tool\.setuptools\.packages\.find\]$", text, re.MULTILINE), (
+        "[tool.setuptools.packages.find] is missing; an unscoped scan picks up vendor/"
     )
-    assert re.search(r'^packages = \["app"\]$', section.group(1), re.MULTILINE), (
-        "packages must name 'app' alone -- vendor/ holds built binaries, not a Python package"
+    section = re.search(
+        r"^\[tool\.setuptools\.packages\.find\]$(.*?)(?=^\[|\Z)", text, re.MULTILINE | re.DOTALL
+    )
+    assert re.search(r'^include = \["app\*"\]$', section.group(1), re.MULTILINE), (
+        "include must be the glob 'app*', so subpackages are discovered, not just 'app'"
+    )
+    assert not re.search(r"^\[tool\.setuptools\]\s*$", text, re.MULTILINE), (
+        "a bare [tool.setuptools] table risks a literal `packages` list, which does not recurse"
+    )
+
+
+def test_every_app_subpackage_on_disk_is_covered_by_the_discovery_glob():
+    """The glob above is only correct while every package lives under `app/`.
+
+    Pairs with it deliberately: that test pins the declaration, this one pins
+    the assumption the declaration rests on, so a package added outside `app/`
+    fails here instead of going missing from a built wheel.
+    """
+    backend_root = PYPROJECT.parent
+    roots = {p.relative_to(backend_root).parts[0] for p in backend_root.glob("*/__init__.py")}
+
+    assert roots == {"app", "tests"}, (
+        f"top-level Python packages are {sorted(roots)}; the discovery glob only covers 'app*'. "
+        "'tests' is expected and never shipped -- setuptools excludes it by default, which is "
+        "why an unscoped scan tolerated it and still choked on 'vendor'."
     )
 
 
