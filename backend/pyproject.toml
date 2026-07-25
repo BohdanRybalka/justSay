@@ -47,6 +47,8 @@ audio = [
     "sounddevice>=0.5.0",
     "soundfile>=0.12.0",
     "numpy>=1.26.0",
+    "soxr>=0.5.0",
+    "pyaudiowpatch>=0.2.12.8; sys_platform == 'win32'",
 ]
 
 [tool.setuptools.packages.find]
@@ -76,6 +78,7 @@ markers = [
 [tool.vulture]
 paths = ["app"]
 min_confidence = 100
-# Unused sounddevice audio-callback params — the callback signature is fixed by
-# sounddevice (positional), so these names must stay even though we read neither.
-ignore_names = ["time_info", "status"]
+# Unused audio-callback params. Both sounddevice and pyaudiowpatch fix their
+# callback signatures positionally, so these names must stay even though the
+# callbacks read none of them.
+ignore_names = ["time_info", "status", "frame_count"]

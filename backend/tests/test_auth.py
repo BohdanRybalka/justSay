@@ -88,6 +88,37 @@ async def test_wrong_token_returns_401(client, _token):
 
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("post", "/audio/meeting/start"),
+        ("post", "/audio/meeting/stop"),
+        ("get", "/audio/meeting/status"),
+    ],
+)
+async def test_meeting_endpoints_are_not_auth_exempt(client, _token, method, path):
+    """Spec 066 AC: the three meeting endpoints require the token.
+
+    Meeting recording captures people who never installed JustSay
+    (docs/adr/040-recording-other-people-is-not-covered-by-zero-leak.md), so
+    an unauthenticated caller on the loopback interface must not be able to
+    start one. The 401 also proves the route body never ran — the ASGI client
+    skips the lifespan, so app.state.meeting_recorder does not exist and any
+    request that reached the route would have failed differently.
+    """
+    resp = await getattr(client, method)(path)
+
+    assert resp.status_code == 401
+
+
+def test_meeting_endpoints_are_absent_from_the_exempt_set():
+    """The mechanism behind the test above, asserted directly against
+    `_EXEMPT_PATHS` rather than only through a response code."""
+    for path in ("/audio/meeting/start", "/audio/meeting/stop", "/audio/meeting/status"):
+        assert path not in _EXEMPT_PATHS
+
+
 def test_exempt_paths_are_exactly_health():
     """The exempt-path set is duplicated in the frontend as TOKEN_EXEMPT_PATHS
     (src/api.ts), which uses it to decide that a 2xx from such a path proves

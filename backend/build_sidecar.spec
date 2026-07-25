@@ -49,6 +49,26 @@ datas = (
 # We try anyway; if empty, pipeline falls back to Gemini for unknown-length audio.
 binaries = collect_dynamic_libs("soundfile")
 
+# Spec 066 meeting recording. Both of these carry compiled extensions that
+# PyInstaller's static analysis does not fully follow:
+#
+#   soxr        — band-limited resampling for the meeting timeline (ADR 038).
+#                 Ships a compiled _soxr extension plus a bundled libsoxr;
+#                 collect_dynamic_libs picks up the .dll/.dylib next to it.
+#   pyaudiowpatch — WASAPI loopback capture (ADR 037). Bundles its OWN patched
+#                 PortAudio DLL as package data, separate from the one
+#                 sounddevice carries. Windows-only: the wheel does not exist
+#                 for macOS, so this must stay behind a sys.platform check or
+#                 the macOS leg of release.yml fails at Analysis time.
+#
+# Unverifiable locally either way — a frozen-build failure only surfaces on a
+# tag push, which is why both are collected defensively rather than trusted to
+# hook discovery.
+binaries += collect_dynamic_libs("soxr")
+if sys.platform == "win32":
+    binaries += collect_dynamic_libs("pyaudiowpatch")
+    datas += collect_data_files("pyaudiowpatch")
+
 # TEN VAD neural silence gate (spec 033 / docs/adr/019-ten-vad-neural-silence-gate.md).
 # Loaded INTO this process via ctypes (not spawned as a child like
 # whisper-server), so its natural home is inside the PyInstaller bundle
@@ -107,6 +127,12 @@ hiddenimports = [
     # Audio extras
     "soundfile",
     "sounddevice",
+    # Meeting recording (spec 066). soxr is imported at module scope by
+    # app.audio.timeline on every platform; pyaudiowpatch is imported only
+    # from app.audio.windows_loopback, itself imported only under
+    # sys.platform == "win32" — declaring it unconditionally would make the
+    # macOS build fail on a module that cannot exist there.
+    "soxr",
     # numpy is pulled in via sounddevice / soundfile but PyInstaller may miss
     # its C extension hooks under certain Python builds; declare explicitly.
     "numpy",
@@ -118,6 +144,9 @@ hiddenimports = [
     # System monitoring
     "psutil",
 ]
+
+if sys.platform == "win32":
+    hiddenimports += ["pyaudiowpatch"]
 
 # faster-whisper / ctranslate2 are large; they ship as ``[local]`` and only
 # matter when the user actually clicks Local mode. Exclude from default sidecar
