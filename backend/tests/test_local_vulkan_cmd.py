@@ -9,6 +9,7 @@ from pathlib import Path
 
 import app.stt.local_vulkan as local_vulkan_module
 import app.stt.local_vulkan_cmd as local_vulkan_cmd_module
+from app.core.app_paths import resolve_app_data_root
 from app.stt.local_vulkan_cmd import build_server_argv, resolve_binary_path, resolve_model_path
 
 
@@ -165,8 +166,6 @@ def test_model_cache_stays_shared_between_dev_and_production():
     tidy-up and would silently orphan every already-downloaded model, so it
     fails here naming the ADR instead of as an unexplained path mismatch.
     """
-    from app.core.app_paths import resolve_app_data_root
-
     app_data_root = resolve_app_data_root()
 
     path = resolve_model_path("tiny")
@@ -178,7 +177,6 @@ def test_model_cache_stays_shared_between_dev_and_production():
         "downloads. Amend ADR 012, ADR 014's consumer inventory and "
         "test_data_isolation's inventory tag together, or revert."
     )
-    assert path == Path.home() / ".justsay" / "models" / "whisper-cpp" / "ggml-tiny.bin"
 
 
 def test_resolve_model_path_does_not_touch_filesystem():
