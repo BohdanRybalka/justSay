@@ -22,6 +22,7 @@ TAURI_MACOS_CONF = REPO_ROOT / "src-tauri" / "tauri.macos.conf.json"
 TAURI_SHARED_CONF = REPO_ROOT / "src-tauri" / "tauri.conf.json"
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 PACKAGE_JSON = REPO_ROOT / "package.json"
+PYPROJECT = REPO_ROOT / "backend" / "pyproject.toml"
 VULKAN_BUILD_SCRIPT = REPO_ROOT / "backend" / "scripts" / "build_whisper_cpp_vulkan.ps1"
 METAL_BUILD_SCRIPT = REPO_ROOT / "backend" / "scripts" / "build_whisper_cpp_metal.sh"
 
@@ -145,6 +146,28 @@ def test_the_sidecar_pip_install_line_is_unchanged():
     extra here would pull a multi-GB dependency into the shipped sidecar for
     nothing."""
     assert 'pip install -e ".[cloud,audio]"' in _release_workflow_text()
+
+
+def test_pyproject_declares_no_apple_specific_extra():
+    """The macOS engine is a bundled binary, so no extra installs it.
+
+    Spec 068's own AC tried to prove this with `pip install -e ".[local-mac]"`
+    failing. It does not fail: pip 23.0.1 warns `does not provide the extra`
+    and exits 0, so that check could never have caught a reintroduction. Nor
+    would the AC's grep have — its paths cover `backend/app`, `backend/tests`,
+    `.github`, `src-tauri` and `package.json`, but not this file, which is the
+    one place the extra ever lived. Hence a test that reads it directly.
+    """
+    text = PYPROJECT.read_text(encoding="utf-8")
+    section = text.split("[project.optional-dependencies]", 1)[1].split("\n[", 1)[0]
+    declared = set(re.findall(r"^([a-z][a-z-]*) = \[", section, re.MULTILINE))
+
+    assert declared == {"dev", "cloud", "local", "local-llm", "audio"}, (
+        f"pyproject extras changed: {sorted(declared)}. An Apple-specific extra "
+        "would mean the macOS engine is a Python package again, which spec 068 "
+        "and ADR 036 removed."
+    )
+    assert not re.search(r"\bmlx\b|mlx[-_]whisper", text, re.IGNORECASE)
 
 
 @pytest.mark.parametrize("vendor_dir", sorted(VENDOR_DIR_NAMES.values()))
