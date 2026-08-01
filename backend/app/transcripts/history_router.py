@@ -15,6 +15,7 @@ from app.transcripts.history import (
     get_count,
     get_entries,
 )
+from app.transcripts.store_errors import store_busy_as_503
 from app.transcripts.words import HistorySearchHit
 
 router = APIRouter(prefix="/history", tags=["History"])
@@ -34,8 +35,8 @@ class ClearResult(BaseModel):
     deleted: int
 
 
-def _busy_to_503(detail: str = "Storage busy"):
-    return HTTPException(status_code=503, detail=detail, headers={"Retry-After": "1"})
+class DeleteResult(BaseModel):
+    deleted: bool
 
 
 _FTS_QUERY_ERROR_MARKERS = (
@@ -55,26 +56,18 @@ def _is_fts_syntax_error(e: sqlite3.OperationalError) -> bool:
 
 @router.get("", response_model=HistoryListResponse)
 async def list_history(limit: int = 50, offset: int = 0):
-    try:
+    with store_busy_as_503():
         return HistoryListResponse(
             entries=get_entries(limit=limit, offset=offset),
             total=get_count(),
         )
-    except sqlite3.OperationalError as e:
-        if "locked" in str(e).lower():
-            raise _busy_to_503("History store busy") from e
-        raise
 
 
 @router.get("/stats", response_model=HistoryStats)
 async def history_stats():
     """Aggregate word counts (today / week / lifetime, by language and model)."""
-    try:
+    with store_busy_as_503():
         return compute_stats()
-    except sqlite3.OperationalError as e:
-        if "locked" in str(e).lower():
-            raise _busy_to_503("Stats store busy") from e
-        raise
 
 
 @router.get("/search", response_model=HistorySearchResponse)
@@ -100,35 +93,25 @@ async def history_search(
     ``search_history_hybrid`` — never surfaced as an HTTP error here.
     """
     try:
-        entries = await words_service.search_history_hybrid(q, limit=limit)
+        with store_busy_as_503():
+            entries = await words_service.search_history_hybrid(q, limit=limit)
     except sqlite3.OperationalError as e:
-        msg = str(e).lower()
-        if "locked" in msg:
-            raise _busy_to_503("History store busy") from e
         if _is_fts_syntax_error(e):
             raise HTTPException(status_code=400, detail="Invalid search query") from e
         raise
     return HistorySearchResponse(entries=entries, total=len(entries))
 
 
-@router.delete("/{entry_id}")
+@router.delete("/{entry_id}", response_model=DeleteResult)
 async def remove_entry(entry_id: str):
-    try:
+    with store_busy_as_503():
         if not delete_entry(entry_id):
             raise HTTPException(status_code=404, detail="Entry not found")
-    except sqlite3.OperationalError as e:
-        if "locked" in str(e).lower():
-            raise _busy_to_503("History store busy") from e
-        raise
-    return {"deleted": True}
+    return DeleteResult(deleted=True)
 
 
 @router.delete("", response_model=ClearResult)
 async def clear_history():
-    try:
+    with store_busy_as_503():
         count = clear_all()
-    except sqlite3.OperationalError as e:
-        if "locked" in str(e).lower():
-            raise _busy_to_503("History store busy") from e
-        raise
     return ClearResult(deleted=count)

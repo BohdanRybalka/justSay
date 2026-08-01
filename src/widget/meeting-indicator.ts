@@ -9,19 +9,13 @@
  * the whole widget.
  */
 
+import { formatElapsedClock } from "../format";
+
 export const MEETING_STATE_CLASS = "meeting";
 
 export interface MeetingIndicatorState {
   active: boolean;
   elapsedSeconds: number;
-}
-
-/** `m:ss`, counting up for as long as the recording runs. */
-export function formatMeetingElapsed(seconds: number): string {
-  const total = Math.max(0, Math.floor(seconds));
-  const minutes = Math.floor(total / 60);
-  const remainder = total % 60;
-  return `${minutes}:${remainder.toString().padStart(2, "0")}`;
 }
 
 export function renderMeetingIndicator(
@@ -31,7 +25,7 @@ export function renderMeetingIndicator(
 ): void {
   if (state.active) {
     root.classList.add(MEETING_STATE_CLASS);
-    durationEl.textContent = formatMeetingElapsed(state.elapsedSeconds);
+    durationEl.textContent = formatElapsedClock(state.elapsedSeconds);
     return;
   }
   root.classList.remove(MEETING_STATE_CLASS);

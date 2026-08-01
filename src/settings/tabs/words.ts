@@ -3,6 +3,7 @@ import {
   type HistoryStats,
   type TopWordsResponse,
 } from "../../api";
+import { formatCoarseDuration } from "../../format";
 import { escapeHtml } from "../html";
 
 const LANGUAGE_LABELS: Record<string, string> = {
@@ -103,7 +104,7 @@ export function renderWords(container: HTMLElement): () => void {
       setText("words-stat-today", stats.today_words.toLocaleString("uk-UA"));
       setText("words-stat-week", stats.week_words.toLocaleString("uk-UA"));
       setText("words-stat-lifetime", stats.total_words.toLocaleString("uk-UA"));
-      setText("words-stat-audio", formatDuration(stats.total_audio_seconds));
+      setText("words-stat-audio", formatCoarseDuration(stats.total_audio_seconds));
       setText("words-stat-entries", stats.total_entries.toLocaleString("uk-UA"));
 
       if (top) {
@@ -195,7 +196,7 @@ function renderStatsCards(s: HistoryStats): string {
   const audioBlock = `
     <div class="setting-row" style="margin-top:16px;">
       <span class="label">Total audio time</span>
-      <span class="value" id="words-stat-audio">${formatDuration(s.total_audio_seconds)}</span>
+      <span class="value" id="words-stat-audio">${formatCoarseDuration(s.total_audio_seconds)}</span>
     </div>
     <div class="setting-row">
       <span class="label">Transcriptions</span>
@@ -298,13 +299,4 @@ function renderBucket(
   `;
 }
 
-function formatDuration(seconds: number): string {
-  if (!seconds || seconds < 0) return "0 m";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  if (h > 0) return `${h} h ${m} m`;
-  if (m > 0) return `${m} m ${s} s`;
-  return `${s} s`;
-}
 

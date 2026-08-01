@@ -14,6 +14,8 @@ from dataclasses import dataclass
 import numpy as np
 import soxr
 
+from app.audio.analysis import to_mono
+
 
 @dataclass(frozen=True)
 class CapturedBlock:
@@ -179,17 +181,6 @@ def resample_to(samples: np.ndarray, source_rate: float, target_rate: int) -> np
     if source.size == 0 or abs(source_rate - target_rate) < 1e-9:
         return source
     return np.asarray(soxr.resample(source, source_rate, target_rate), dtype=np.float32)
-
-
-def to_mono(block: np.ndarray) -> np.ndarray:
-    """Downmix an interleaved capture block to mono float32.
-
-    The only work done in a realtime capture callback.
-    """
-    array = np.asarray(block, dtype=np.float32)
-    if array.ndim > 1:
-        array = array.mean(axis=1)
-    return np.ascontiguousarray(array, dtype=np.float32)
 
 
 def interleaved_buffer_to_mono(buffer: bytes, channels: int, dtype: str) -> np.ndarray:
