@@ -21,7 +21,7 @@ from app.main import app
 
 def _wav_bytes(payload_size: int = 1024) -> bytes:
     """Synthesise a minimal RIFF/WAVE header + payload (mirrors
-    test_audio_validation.py's helper — validate_audio_upload() requires a
+    test_audio_formats.py's helper — validate_audio_upload() requires a
     real-looking WAV container, not arbitrary bytes)."""
     return b"RIFF" + (b"\x00" * 4) + b"WAVE" + (b"\x00" * 4) + (b"\x00" * payload_size)
 

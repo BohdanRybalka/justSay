@@ -1,6 +1,6 @@
 """Audio DSP helpers: dBFS level calculation and streaming silence analysis.
 
-The project's first audio-DSP module — `app.core.audio_validation` is
+The project's first audio-DSP module — `app.core.audio_formats` is
 magic-bytes-only. Deliberately numpy-only: the backend ships as a frozen
 PyInstaller sidecar (`backend/build_sidecar.spec`) whose venv contains only
 numpy, soundfile and sounddevice. Real VAD libraries (`webrtcvad`,

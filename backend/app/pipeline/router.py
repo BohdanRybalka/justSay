@@ -8,11 +8,11 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFi
 from pydantic import BaseModel
 
 from app.audio import MicrophoneRecorder, get_recorder
-from app.core.audio_validation import validate_audio_upload
 from app.core.config import settings
 from app.core.constants import MAX_UPLOAD_SIZE
 from app.core.utils import read_upload_with_limit
 from app.pipeline.service import process_audio
+from app.pipeline.upload_validation import validate_audio_upload
 
 log = logging.getLogger(__name__)
 router = APIRouter()
