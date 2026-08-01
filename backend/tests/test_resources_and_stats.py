@@ -4,9 +4,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.core import history
 from app.core import router as core_router
 from app.core.gpu_probe import GpuProbeResult, GpuVendor
+from app.transcripts import history
 
 
 @pytest.mark.asyncio

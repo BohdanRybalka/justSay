@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from app.core.config import settings
 from app.core.types import ProviderMode
-from app.core.user_settings import update_user_settings
+from app.preferences.user_settings import update_user_settings
 from app.stt import clear_cache, get_provider
 from app.stt.local_setup import (
     LocalSttStatus,

@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.core.config import settings as runtime_settings
-from app.core.user_settings import (
+from app.preferences.user_settings import (
     UserSettings,
     get_user_settings,
     sync_to_runtime,

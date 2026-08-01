@@ -538,7 +538,7 @@ def test_windows_source_releases_pyaudio_when_the_com_lookup_fails(
 def acknowledged_meeting_consent():
     """The disclosure is a first-run gate, not the subject of most of these
     tests — the ones that are unset it explicitly."""
-    from app.core import user_settings
+    from app.preferences import user_settings
 
     user_settings.update_user_settings({"meeting_consent_acknowledged": True})
 
@@ -729,7 +729,7 @@ async def test_the_meeting_status_reports_the_endpoint_and_the_system_level(clie
 async def test_meeting_start_is_403_until_the_disclosure_is_acknowledged(client):
     """AC: the 403 is what makes the dialog impossible to drive around with
     curl, and no capture source is created."""
-    from app.core import user_settings
+    from app.preferences import user_settings
 
     user_settings.update_user_settings({"meeting_consent_acknowledged": False})
     recorder = _StubRecorder()
@@ -755,7 +755,7 @@ async def test_meeting_start_is_never_403_once_acknowledged(client):
 @pytest.mark.anyio
 async def test_meeting_stop_and_status_are_not_behind_the_consent_gate(client):
     """A recording already running must always be stoppable and visible."""
-    from app.core import user_settings
+    from app.preferences import user_settings
 
     user_settings.update_user_settings({"meeting_consent_acknowledged": False})
     app.dependency_overrides[get_meeting_recorder] = lambda: _StubRecorder()

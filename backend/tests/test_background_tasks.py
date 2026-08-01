@@ -626,9 +626,10 @@ def test_scanner_detects_a_bare_imported_create_task_call():
 
 
 def test_scanner_ignores_docstring_mention_in_vector_store():
-    """AC 11: `core/vector_store.py`'s docstring mentions `asyncio.create_task`
-    in prose -- an AST walk must not treat that as a call."""
-    path = _APP_DIR / "core" / "vector_store.py"
+    """AC 11: `transcripts/vector_store.py`'s docstring mentions
+    `asyncio.create_task` in prose -- an AST walk must not treat that as a
+    call."""
+    path = _APP_DIR / "transcripts" / "vector_store.py"
     source = path.read_text(encoding="utf-8")
-    findings = _find_unmarked_create_task_calls(source, "core/vector_store.py")
+    findings = _find_unmarked_create_task_calls(source, "transcripts/vector_store.py")
     assert findings == []

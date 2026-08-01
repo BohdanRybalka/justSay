@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.core import history, vector_store, words
-from app.core.stopwords_en import STOPWORDS_EN
-from app.core.stopwords_uk import STOPWORDS_UK
+from app.transcripts import history, vector_store, words
+from app.transcripts.stopwords_en import STOPWORDS_EN
+from app.transcripts.stopwords_uk import STOPWORDS_UK
 
 
 @pytest.fixture(autouse=True)
@@ -335,7 +335,7 @@ def test_search_history_does_not_log_query(caplog):
     """Privacy: only ``len(q)`` may appear in logs — never ``q`` and never
     ``len(sanitized_q)``."""
     history.save_entry(text="something", duration_ms=1)
-    with caplog.at_level(logging.DEBUG, logger="app.core.words"):
+    with caplog.at_level(logging.DEBUG, logger="app.transcripts.words"):
         words.search_history("secretpassword12345", limit=5)
     joined = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "secretpassword" not in joined
@@ -489,8 +489,8 @@ async def test_search_history_hybrid_runs_lanes_concurrently():
         return []
 
     with (
-        patch("app.core.words.search_history", side_effect=slow_search_history),
-        patch("app.core.words._semantic_lane", side_effect=slow_semantic_lane),
+        patch("app.transcripts.words.search_history", side_effect=slow_search_history),
+        patch("app.transcripts.words._semantic_lane", side_effect=slow_semantic_lane),
     ):
         start = time.monotonic()
         await words.search_history_hybrid("anything", limit=10)
@@ -513,7 +513,7 @@ async def test_search_history_hybrid_empty_query_returns_empty_without_calling_e
     patching both to raise if invoked."""
     with (
         patch(
-            "app.core.words.search_history",
+            "app.transcripts.words.search_history",
             side_effect=AssertionError("search_history must not be called for an empty query"),
         ),
         patch(

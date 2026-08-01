@@ -16,9 +16,9 @@ from fastapi import BackgroundTasks
 from app.audio.analysis import analyze_silence
 from app.audio.vad import analyze_vad
 from app.core.config import settings
-from app.core.history import save_entry
 from app.pipeline.utils import detect_duration
 from app.stt import get_routed_provider, is_local_provider
+from app.transcripts.history import save_entry
 
 log = logging.getLogger(__name__)
 
@@ -177,7 +177,7 @@ async def process_audio(
             word_count=word_count,
         )
         if background_tasks is not None and text:
-            from app.core import vector_store
+            from app.transcripts import vector_store
 
             background_tasks.add_task(vector_store.embed_entry_background, entry.id, text)
             background_tasks.add_task(vector_store.run_background_indexer)

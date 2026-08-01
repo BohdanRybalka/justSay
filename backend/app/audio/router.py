@@ -13,8 +13,8 @@ from app.audio import (
     get_recorder,
 )
 from app.audio.system_source import SystemAudioUnavailableError
-from app.core.user_settings import get_user_settings
 from app.core.utils import sse_event
+from app.preferences.user_settings import get_user_settings
 
 router = APIRouter()
 

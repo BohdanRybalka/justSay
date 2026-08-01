@@ -11,21 +11,32 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
-from app.core.audio_validation import (
+from app.core.audio_formats import (
+    ALLOWED_AUDIO_EXTENSIONS,
+    DETECTED_MIME_TO_EXTENSIONS,
+    TRUSTED_EXTENSIONS,
     detect_audio_mime,
     mime_for_extension,
-    validate_audio_upload,
 )
-from app.core.constants import ALLOWED_AUDIO_EXTENSIONS, MIME_BY_AUDIO_EXTENSION
+from app.pipeline.upload_validation import validate_audio_upload
 
 
-def test_every_allowed_extension_has_a_mime():
-    """If a new container is added to ALLOWED_AUDIO_EXTENSIONS, the MIME map
-    must grow with it — else the Gemini call falls back to ``audio/wav`` and
-    silently mangles the upload."""
-    missing = ALLOWED_AUDIO_EXTENSIONS - MIME_BY_AUDIO_EXTENSION.keys()
-    assert missing == set(), f"Extensions without MIME mapping: {missing}"
+def test_every_allowed_extension_is_detectable_or_trusted():
+    """An accepted extension the detector cannot recognise is rejected on every
+    upload: `validate_audio_upload` demands a magic-bytes match unless the
+    extension is explicitly trusted. Adding one to the MIME map without doing
+    either makes that format permanently unusable."""
+    detectable = {ext for exts in DETECTED_MIME_TO_EXTENSIONS.values() for ext in exts}
+    unreachable = ALLOWED_AUDIO_EXTENSIONS - detectable - TRUSTED_EXTENSIONS
+    assert unreachable == set(), f"Extensions no upload can satisfy: {unreachable}"
 
+
+def test_detected_mime_map_names_only_allowed_extensions():
+    """The reverse guard: a detector family naming an extension the MIME map
+    does not carry would accept a file `mime_for_extension` then mislabels."""
+    detectable = {ext for exts in DETECTED_MIME_TO_EXTENSIONS.values() for ext in exts}
+    unknown = detectable - ALLOWED_AUDIO_EXTENSIONS
+    assert unknown == set(), f"Detector names unknown extensions: {unknown}"
 
 
 def test_detect_wav_riff_header():

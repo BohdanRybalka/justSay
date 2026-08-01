@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-from app.core import user_settings
 from app.core.auth_middleware import _EXEMPT_PATHS
 from app.core.config import settings
+from app.preferences import user_settings
 
 
 @pytest.mark.anyio

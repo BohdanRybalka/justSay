@@ -7,7 +7,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.core import words
+from app.transcripts import words
 
 router = APIRouter(prefix="/words", tags=["Words"])
 

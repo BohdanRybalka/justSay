@@ -176,7 +176,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         Also re-run v3 DDL (IF NOT EXISTS) so a partial migration that left
         user_version=3 but the embeddings tables missing self-heals too.
     """
-    from app.core import vector_store
+    from app.transcripts import vector_store
 
     conn.executescript(_DDL_V1)
     current = conn.execute("PRAGMA user_version").fetchone()[0]

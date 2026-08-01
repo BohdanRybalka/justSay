@@ -8,8 +8,10 @@ import asyncio
 import logging
 from pathlib import Path
 
+from app.core.audio_formats import mime_for_extension
 from app.stt.base import STTProvider, TranscriptionResult
 from app.stt.config import STTSettings
+from app.stt.languages import LANGUAGE_NAMES
 
 log = logging.getLogger(__name__)
 
@@ -59,8 +61,6 @@ class GeminiSTTProvider(STTProvider):
     async def transcribe(
         self, audio_path: Path, language: str = "uk", **kwargs
     ) -> TranscriptionResult:
-        from app.core.audio_validation import mime_for_extension
-
         client = self._get_client()
         audio_bytes = audio_path.read_bytes()
 
@@ -98,8 +98,6 @@ class GeminiSTTProvider(STTProvider):
 
     @staticmethod
     def _build_prompt(language: str, style: str, glossary: str | None = None) -> str:
-        from app.pipeline.prompts import LANGUAGE_NAMES
-
         if language == "auto":
             lang_clause = "Automatically detect the spoken language from the audio."
             lang_ref = "the detected language"

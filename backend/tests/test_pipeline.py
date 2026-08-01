@@ -8,11 +8,11 @@ import pytest
 import soundfile as sf
 from fastapi import BackgroundTasks
 
-from app.core import history
 from app.core.config import settings
 from app.core.types import ProviderMode
 from app.pipeline.service import process_audio
 from app.stt.base import TranscriptionResult
+from app.transcripts import history
 
 
 @pytest.fixture(autouse=True)
@@ -319,7 +319,7 @@ async def test_pipeline_schedules_embedding_via_background_tasks_not_awaited(
     assert result.text == "hello world"
     assert add_task_mock.call_count == 2
 
-    from app.core import vector_store
+    from app.transcripts import vector_store
 
     embed_call, indexer_call = add_task_mock.call_args_list
 
@@ -388,7 +388,7 @@ async def test_pipeline_survives_embedding_provider_outage(
             "app.embeddings.resolve_embedding_provider",
             new=AsyncMock(side_effect=RuntimeError("embedding provider outage")),
         ),
-        patch("app.core.history._vec_available", True),
+        patch("app.transcripts.history._vec_available", True),
     ):
         await bt()
 
