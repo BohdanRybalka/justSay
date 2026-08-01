@@ -6,6 +6,14 @@ import {
   shouldReapplyShortcut,
 } from "../accelerator";
 import { api } from "../api";
+import {
+  EVENT_MEETING_TOGGLE,
+  EVENT_SETTINGS_CHANGED,
+  EVENT_SHORTCUT_APPLIED,
+  EVENT_SHORTCUT_REQUESTED,
+  type ShortcutApplied,
+  type ShortcutRequested,
+} from "../contracts";
 import { formatStopwatch } from "../format";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
 import { computeDoneStatus } from "./done-status";
@@ -405,13 +413,14 @@ async function announceShortcutOutcome(
 ) {
   try {
     const { emit } = await import("@tauri-apps/api/event");
-    await emit("shortcut-applied", {
+    const applied: ShortcutApplied = {
       shortcut,
       ok: outcome.ok,
       reason: outcome.ok ? writeError : outcome.reason,
       persisted,
       stillActive: outcome.ok ? shortcut : outcome.stillActive,
-    });
+    };
+    await emit(EVENT_SHORTCUT_APPLIED, applied);
   } catch {}
 }
 
@@ -460,13 +469,13 @@ async function loadSettings() {
 async function listenForSettingsChanges() {
   try {
     const { listen } = await import("@tauri-apps/api/event");
-    await listen("settings-changed", async () => {
+    await listen(EVENT_SETTINGS_CHANGED, async () => {
       await loadSettings();
     });
-    await listen<{ shortcut: string }>("shortcut-requested", async ({ payload }) => {
+    await listen<ShortcutRequested>(EVENT_SHORTCUT_REQUESTED, async ({ payload }) => {
       await applyRequestedShortcut(payload.shortcut);
     });
-    await listen("meeting-toggle", async () => {
+    await listen(EVENT_MEETING_TOGGLE, async () => {
       await toggleMeetingRecording();
     });
   } catch {

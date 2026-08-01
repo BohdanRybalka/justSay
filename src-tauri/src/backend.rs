@@ -417,7 +417,7 @@ fn resolve_sidecar(app: &AppHandle) -> Option<PathBuf> {
 /// On Windows, the previous `tauri dev` / installed-app session may have
 /// orphaned its sidecar — `tauri-plugin-shell` does not create a Job
 /// Object, so a parent crash or a failed in-process `CommandChild::kill()`
-/// can leave `justsay-backend.exe` running and squatting on 9377. If we
+/// can leave `justsay-backend.exe` running and squatting on `PORT`. If we
 /// detect an orphan that's clearly ours, reap it and retry instead of
 /// punishing the user with a startup error.
 fn check_port_available() -> Result<(), String> {
@@ -482,7 +482,7 @@ fn reap_orphan_sidecar() -> bool {
 /// job handle and never closes it. When the parent dies by ANY means —
 /// `taskkill /F`, Task Manager "End Task", a hard crash, `TerminateProcess` —
 /// the OS closes that last handle and the kernel terminates every process still
-/// in the job, freeing port 9377 for the next launch. This is the one backstop
+/// in the job, freeing `PORT` for the next launch. This is the one backstop
 /// that survives a kill running no in-process code (the panic hook, console
 /// handler, `RunEvent::Exit` and the next-launch reap are all in-process) — see
 /// `docs/adr/023-force-kill-orphaned-backend.md`.

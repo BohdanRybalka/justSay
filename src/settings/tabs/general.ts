@@ -5,6 +5,13 @@ import {
   modifierHint,
 } from "../../accelerator";
 import { api, levelStream, type UserSettings } from "../../api";
+import {
+  EVENT_SETTINGS_CHANGED,
+  EVENT_SHORTCUT_APPLIED,
+  EVENT_SHORTCUT_REQUESTED,
+  type ShortcutApplied,
+  type ShortcutRequested,
+} from "../../contracts";
 import { saveSettings, getCloudKeyStatus, cachePersistedShortcut } from "../settings";
 import { escapeHtml, meetingDisclosureHtml } from "../html";
 import { renderKeys } from "./keys";
@@ -20,14 +27,6 @@ const LANGUAGES = [
   { code: "ja", label: "Japanese" },
   { code: "zh", label: "Chinese" },
 ];
-
-interface ShortcutApplied {
-  shortcut: string;
-  ok: boolean;
-  reason: string | null;
-  persisted: boolean | null;
-  stillActive: string | null;
-}
 
 export function renderGeneral(container: HTMLElement, settings: UserSettings): () => void {
   const platform = detectShortcutPlatform(navigator);
@@ -369,7 +368,8 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   async function requestShortcut(shortcut: string, revertLabelTo: string) {
     try {
       const { emit } = await loadEventApi();
-      await emit("shortcut-requested", { shortcut });
+      const requested: ShortcutRequested = { shortcut };
+      await emit(EVENT_SHORTCUT_REQUESTED, requested);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       if (!destroyed) {
@@ -427,7 +427,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   void (async () => {
     try {
       const { listen } = await loadEventApi();
-      const unlisten = await listen<ShortcutApplied>("shortcut-applied", ({ payload }) => {
+      const unlisten = await listen<ShortcutApplied>(EVENT_SHORTCUT_APPLIED, ({ payload }) => {
         if (destroyed) return;
         const label = formatAccelerator(payload.shortcut, platform);
         if (!payload.ok) {
@@ -496,7 +496,7 @@ function loadEventApi(): Promise<typeof import("@tauri-apps/api/event")> {
 async function emitSettingsChanged() {
   try {
     const { emit } = await loadEventApi();
-    await emit("settings-changed");
+    await emit(EVENT_SETTINGS_CHANGED);
   } catch {
   }
 }

@@ -29,10 +29,19 @@ async def test_disallowed_host_is_rejected_with_400_before_the_route(client):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.1:9377", "localhost", "localhost:9377"])
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.1",
+        f"127.0.0.1:{settings.port}",
+        "localhost",
+        f"localhost:{settings.port}",
+    ],
+)
 async def test_allowed_host_with_or_without_port_passes(client, host):
-    """An allowed Host (127.0.0.1 / localhost, with or without :9377) passes
-    the host check. No token is configured, so the request completes normally."""
+    """An allowed Host (127.0.0.1 / localhost, with or without the backend port)
+    passes the host check. No token is configured, so the request completes
+    normally."""
     resp = await client.get("/health", headers={"host": host})
     assert resp.status_code == 200
 

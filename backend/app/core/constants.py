@@ -8,3 +8,5 @@ their owning module.
 MAX_UPLOAD_SIZE: int = 25 * 1024 * 1024
 
 GROQ_TIMEOUT_SECONDS: float = 10.0
+
+MASKED_API_KEY: str = "***"
