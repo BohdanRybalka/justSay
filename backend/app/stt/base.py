@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
+from app.stt.languages import LANGUAGE_NAMES
+
 
 @dataclass
 class TranscriptionResult:
@@ -20,7 +22,7 @@ def normalize_detected_language(raw: str | None) -> str | None:
       - An already-two-letter code, any case (``"EN"``) -> lowercased as-is.
       - A region-tagged code (``"en-US"``, ``"pt_BR"``) -> the primary subtag.
       - A full English language name (``"english"``, ``"Ukrainian"``) ->
-        looked up against `app.pipeline.prompts.LANGUAGE_NAMES`, reversed —
+        looked up against `app.stt.languages.LANGUAGE_NAMES`, reversed —
         covers at minimum the codes in that table.
 
     Never passes an unrecognised value through — a garbage code reaching
@@ -38,8 +40,6 @@ def normalize_detected_language(raw: str | None) -> str | None:
 
     if len(primary) == 2 and primary.isalpha():
         return primary
-
-    from app.pipeline.prompts import LANGUAGE_NAMES
 
     name_to_code = {name.lower(): code for code, name in LANGUAGE_NAMES.items()}
     return name_to_code.get(candidate) or name_to_code.get(primary)

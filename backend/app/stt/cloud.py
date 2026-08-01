@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.stt.base import STTProvider, TranscriptionResult
 from app.stt.config import STTSettings
+from app.stt.languages import LANGUAGE_NAMES
 
 log = logging.getLogger(__name__)
 
@@ -98,8 +99,6 @@ class GeminiSTTProvider(STTProvider):
 
     @staticmethod
     def _build_prompt(language: str, style: str, glossary: str | None = None) -> str:
-        from app.pipeline.prompts import LANGUAGE_NAMES
-
         if language == "auto":
             lang_clause = "Automatically detect the spoken language from the audio."
             lang_ref = "the detected language"
