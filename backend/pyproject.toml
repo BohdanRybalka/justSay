@@ -15,10 +15,6 @@ dependencies = [
     "python-multipart>=0.0.9",
     "pyperclip>=1.9.0",
     "psutil>=5.9.0",
-    # Pinned exact (not floor-only): sqlite-vec's KNN query syntax
-    # (`WHERE embedding MATCH ? AND k = ?`) is version-sensitive across its
-    # own releases — verified against 0.1.9 specifically at implementation
-    # time (see ADR 001 / spec 003 Risks).
     "sqlite-vec==0.1.9",
 ]
 
@@ -38,9 +34,6 @@ local = [
     "faster-whisper>=1.1.0",
 ]
 local-llm = [
-    # Optional: the Ollama client for Local mode. The default audio pipeline
-    # runs no LLM cleanup step; Ollama is used by the local embedding provider
-    # (nomic-embed-text) for semantic search.
     "ollama>=0.6.1",
 ]
 audio = [
@@ -78,7 +71,4 @@ markers = [
 [tool.vulture]
 paths = ["app"]
 min_confidence = 100
-# Unused audio-callback params. Both sounddevice and pyaudiowpatch fix their
-# callback signatures positionally, so these names must stay even though the
-# callbacks read none of them.
 ignore_names = ["time_info", "status", "frame_count"]

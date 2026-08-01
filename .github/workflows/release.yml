@@ -225,6 +225,40 @@ jobs:
           mkdir -p src-tauri/resources/whisper-cpp-metal
           cp backend/vendor/whisper-cpp-metal/* src-tauri/resources/whisper-cpp-metal/
 
+      # --- Core Audio system-audio tap (spec 074) — macOS meeting recording ---
+      # macOS has no input device that carries the system's own output, so
+      # meeting recording needs this native helper to hold the
+      # NSAudioCaptureUsageDescription permission and hand raw PCM back to the
+      # Python sidecar. No CI job compiles Swift — a tag push is the first and
+      # only place this builds, so the step is deliberately not tolerant: no
+      # `|| true`, no `continue-on-error`. A compile error must fail the release
+      # rather than ship a macOS bundle whose meeting recording is inert.
+      - name: Build macOS system-audio tap helper
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash backend/scripts/build_macos_audio_tap.sh
+
+      - name: Copy system-audio tap helper to Tauri resources
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p src-tauri/resources
+          cp macos/JustSayAudioTap/.build/release/justsay-audiotap src-tauri/resources/justsay-audiotap
+
+      # Mirrors the TEN VAD / sqlite-vec precedent: assert the shipped tree
+      # actually contains the helper, so a silently changed build output path
+      # fails here instead of producing a signed bundle that cannot record.
+      - name: Verify system-audio tap helper bundled
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          HELPER="src-tauri/resources/justsay-audiotap"
+          if [ ! -x "$HELPER" ]; then
+            echo "ERROR: $HELPER missing — the macOS build would ship without system-audio capture."
+            exit 1
+          fi
+          echo "OK: $HELPER present ($(wc -c < "$HELPER") bytes)"
+
       - name: Install npm deps
         run: npm ci
 

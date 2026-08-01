@@ -3,7 +3,11 @@
   "bundle": {
     "resources": {
       "resources/justsay-backend": "justsay-backend",
-      "resources/whisper-cpp-metal": "whisper-cpp-metal"
+      "resources/whisper-cpp-metal": "whisper-cpp-metal",
+      "resources/justsay-audiotap": "justsay-audiotap"
+    },
+    "macOS": {
+      "infoPlist": "Info.plist"
     }
   }
 }

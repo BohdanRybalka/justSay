@@ -13,6 +13,7 @@ from app.audio import (
     get_recorder,
 )
 from app.audio.system_source import SystemAudioUnavailableError
+from app.core.user_settings import get_user_settings
 from app.core.utils import sse_event
 
 router = APIRouter()
@@ -40,6 +41,36 @@ class MeetingStopResponse(BaseModel):
     filename: str
     duration_seconds: float
     truncated: bool
+
+
+class MeetingStatus(BaseModel):
+    """Separate from RecordingStatus for the reason MeetingStopResponse is.
+
+    The dictation contract must not move, and the meeting path has to report
+    which output it is capturing and whether sound is arriving from it.
+    """
+
+    is_recording: bool
+    duration_seconds: float
+    level_db: float
+    system_endpoint: str | None
+    system_level_db: float
+
+
+_CONSENT_REQUIRED_DETAIL = (
+    "Meeting recording has not been acknowledged — open Settings → General and "
+    "confirm you are responsible for obtaining the participants' consent"
+)
+
+
+def _meeting_status(recorder: MeetingRecorder) -> MeetingStatus:
+    return MeetingStatus(
+        is_recording=recorder.is_recording,
+        duration_seconds=recorder.duration_seconds,
+        level_db=recorder.level_db,
+        system_endpoint=recorder.system_endpoint,
+        system_level_db=recorder.system_level_db,
+    )
 
 
 @router.post("/start", response_model=RecordingStatus)
@@ -80,17 +111,21 @@ async def recording_status(recorder: MicrophoneRecorder = Depends(get_recorder))
     )
 
 
-@router.post("/meeting/start", response_model=RecordingStatus)
+@router.post("/meeting/start", response_model=MeetingStatus)
 async def start_meeting_recording(
     recorder: MeetingRecorder = Depends(get_meeting_recorder),
     dictation_recorder: MicrophoneRecorder | None = Depends(get_active_recorder),
 ):
     """Begin capturing the microphone and the system output together.
 
-    Undocumented and unreachable from the UI in phase 1 — see
-    docs/adr/039-meeting-recording-ships-dark-until-macos-lands.md. A platform
-    with no system-audio implementation answers 501 and opens no stream at all.
+    Answers 403 until the meeting disclosure has been acknowledged, which is
+    what makes the dialog impossible to drive around with curl — see
+    docs/adr/040-recording-other-people-is-not-covered-by-zero-leak.md. A
+    platform with no system-audio implementation answers 501 and opens no
+    stream at all.
     """
+    if not get_user_settings().meeting_consent_acknowledged:
+        raise HTTPException(status_code=403, detail=_CONSENT_REQUIRED_DETAIL)
     if dictation_recorder is not None and dictation_recorder.is_recording:
         raise HTTPException(status_code=409, detail="A dictation recording is in progress")
     if recorder.is_recording:
@@ -99,11 +134,7 @@ async def start_meeting_recording(
         await recorder.start()
     except SystemAudioUnavailableError as e:
         raise HTTPException(status_code=501, detail=str(e)) from e
-    return RecordingStatus(
-        is_recording=recorder.is_recording,
-        duration_seconds=recorder.duration_seconds,
-        level_db=recorder.level_db,
-    )
+    return _meeting_status(recorder)
 
 
 @router.post("/meeting/stop", response_model=MeetingStopResponse)
@@ -119,13 +150,9 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
     )
 
 
-@router.get("/meeting/status", response_model=RecordingStatus)
+@router.get("/meeting/status", response_model=MeetingStatus)
 async def meeting_recording_status(recorder: MeetingRecorder = Depends(get_meeting_recorder)):
-    return RecordingStatus(
-        is_recording=recorder.is_recording,
-        duration_seconds=recorder.duration_seconds,
-        level_db=recorder.level_db,
-    )
+    return _meeting_status(recorder)
 
 
 async def _level_stream(request: Request, recorder: MicrophoneRecorder):

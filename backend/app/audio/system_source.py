@@ -2,7 +2,8 @@
 
 One abstract class with one implementation per platform, in the same shape as
 the STT providers: nothing else in the audio package knows which OS it is
-running on. See docs/adr/037-system-audio-capture-is-a-per-platform-source.md.
+running on. See docs/adr/037-system-audio-capture-is-a-per-platform-source.md
+and docs/adr/041-macos-system-audio-comes-from-a-core-audio-tap.md.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import logging
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from pathlib import Path
 
 import numpy as np
 
@@ -41,25 +43,48 @@ class SystemAudioSource(ABC):
     def native_sample_rate(self) -> int:
         """The rate the device actually delivers at, before any resampling."""
 
+    @property
+    @abstractmethod
+    def endpoint_name(self) -> str:
+        """What is being captured, named the way the user would recognise it."""
 
-def create_system_audio_source(settings: AudioSettings) -> SystemAudioSource | None:
+
+def create_system_audio_source(
+    settings: AudioSettings, platform_name: str | None = None
+) -> SystemAudioSource | None:
     """The system-audio source for this platform, or None if there is none.
 
     Returns None rather than raising, so the caller decides what an absent
-    source means. `app.audio.windows_loopback` is imported here and nowhere
-    else, which keeps `pyaudiowpatch` — a Windows-only wheel — off the import
-    path on macOS and on the ubuntu CI runner entirely.
+    source means. Both platform modules are imported here and nowhere else:
+    `pyaudiowpatch` is a Windows-only wheel, and the macOS source reaches a
+    helper binary that exists only inside a macOS bundle.
+
+    `platform_name` is injectable so both branches are covered on the ubuntu
+    CI runner.
     """
-    if sys.platform != "win32":
-        return None
+    platform_name = sys.platform if platform_name is None else platform_name
 
     try:
-        from app.audio.windows_loopback import WindowsLoopbackSource
+        if platform_name == "win32":
+            from app.audio.windows_loopback import WindowsLoopbackSource
 
-        return WindowsLoopbackSource(settings)
+            return WindowsLoopbackSource(settings)
+
+        if platform_name == "darwin":
+            from app.audio.macos_tap import MacOSTapSource, resolve_audio_tap_path
+
+            return MacOSTapSource(
+                settings,
+                resolve_audio_tap_path(
+                    Path(sys.executable), settings.meeting_macos_tap_path
+                ),
+            )
     except Exception:
         log.warning(
-            "No WASAPI loopback source available — meeting recording is off on this machine",
+            "No system-audio source could be created — meeting recording is off "
+            "on this machine",
             exc_info=True,
         )
         return None
+
+    return None

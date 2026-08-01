@@ -175,11 +175,10 @@ def resample_to(samples: np.ndarray, source_rate: float, target_rate: int) -> np
     downsampling 48 kHz to 16 kHz without an anti-alias filter folds
     everything above 8 kHz back into the speech band.
     """
-    if samples.size == 0:
-        return samples.astype(np.float32)
-    if abs(source_rate - target_rate) < 1e-9:
-        return samples.astype(np.float32)
-    return soxr.resample(samples.astype(np.float32), source_rate, target_rate).astype(np.float32)
+    source = np.asarray(samples, dtype=np.float32)
+    if source.size == 0 or abs(source_rate - target_rate) < 1e-9:
+        return source
+    return np.asarray(soxr.resample(source, source_rate, target_rate), dtype=np.float32)
 
 
 def to_mono(block: np.ndarray) -> np.ndarray:
@@ -193,6 +192,21 @@ def to_mono(block: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(array, dtype=np.float32)
 
 
+def interleaved_buffer_to_mono(buffer: bytes, channels: int, dtype: str) -> np.ndarray:
+    """Read a raw interleaved capture buffer and downmix it to mono float32.
+
+    Both system-audio sources arrive at this same shape from different places —
+    a PortAudio callback on Windows, a pipe read from the macOS helper — and
+    differ only in dtype spelling. Keeping the deinterleave in one function is
+    what stops the two platforms drifting into different channel handling,
+    which would be inaudible in tests and obvious in a recording.
+    """
+    interleaved = np.frombuffer(buffer, dtype=dtype)
+    if channels > 1:
+        interleaved = interleaved.reshape(-1, channels)
+    return to_mono(interleaved)
+
+
 def mix_and_normalize(microphone: np.ndarray, system: np.ndarray) -> np.ndarray:
     """Sum the two timelines, scaling down only if the sum clips.
 
@@ -204,7 +218,7 @@ def mix_and_normalize(microphone: np.ndarray, system: np.ndarray) -> np.ndarray:
     mixed[: len(microphone)] += microphone
     mixed[: len(system)] += system
 
-    peak = float(np.max(np.abs(mixed))) if length else 0.0
+    peak = max(float(mixed.max()), -float(mixed.min())) if length else 0.0
     if peak > 1.0:
         mixed /= peak
     return mixed

@@ -16,35 +16,34 @@ import logging
 import threading
 import time
 
-import numpy as np
 import pyaudiowpatch as pyaudio
 
 from app.audio.config import AudioSettings
+from app.audio.endpoint_selection import resolve_loopback_device
 from app.audio.system_source import BlockSink, SystemAudioSource, SystemAudioUnavailableError
-from app.audio.timeline import to_mono
+from app.audio.timeline import interleaved_buffer_to_mono
+from app.audio.windows_endpoints import render_endpoint_names
 
 log = logging.getLogger(__name__)
 
 
-def _find_default_loopback(audio: pyaudio.PyAudio) -> dict:
-    """The loopback endpoint for whatever the machine is currently playing through.
+def _find_default_loopback(audio: pyaudio.PyAudio, settings: AudioSettings) -> dict:
+    """The loopback analogue of the render endpoint the meeting is playing through.
 
-    `get_default_wasapi_loopback()` is the direct answer; the generator is the
-    fallback for the case where no default render endpoint reports a loopback
-    analogue but some other endpoint does.
+    Teams and Zoom render to the communications endpoint, which is a different
+    default from the console one whenever a headset is configured for calls —
+    see docs/adr/042-loopback-follows-the-communications-endpoint.md.
     """
-    try:
-        device = audio.get_default_wasapi_loopback()
-    except Exception:
-        device = None
-
-    if device is None:
-        device = next(iter(audio.get_loopback_device_info_generator()), None)
-
+    role_names = render_endpoint_names()
+    device = resolve_loopback_device(
+        role_names,
+        list(audio.get_loopback_device_info_generator()),
+        settings.meeting_system_endpoint_role,
+    )
     if device is None:
         raise SystemAudioUnavailableError(
-            "No WASAPI loopback device found — the default output endpoint "
-            "exposes no loopback analogue"
+            f"No WASAPI loopback device found for the default render endpoints "
+            f"{role_names} — none of them exposes a loopback analogue"
         )
     return device
 
@@ -62,7 +61,7 @@ class WindowsLoopbackSource(SystemAudioSource):
         self._settings = settings
         self._audio = pyaudio.PyAudio()
         try:
-            device = _find_default_loopback(self._audio)
+            device = _find_default_loopback(self._audio, settings)
         except Exception:
             self._audio.terminate()
             raise
@@ -70,6 +69,7 @@ class WindowsLoopbackSource(SystemAudioSource):
         self._device_index = int(device["index"])
         self._channels = max(int(device["maxInputChannels"]), 1)
         self._native_sample_rate = int(device["defaultSampleRate"])
+        self._endpoint_name = str(device.get("name", "Unknown endpoint"))
         self._stream: object | None = None
         self._on_block: BlockSink | None = None
         self._status_reported = False
@@ -84,6 +84,10 @@ class WindowsLoopbackSource(SystemAudioSource):
     @property
     def native_sample_rate(self) -> int:
         return self._native_sample_rate
+
+    @property
+    def endpoint_name(self) -> str:
+        return self._endpoint_name
 
     def _report_stream_status(self, status: int) -> None:
         """Log a non-zero PortAudio status flag once per recording.
@@ -114,10 +118,7 @@ class WindowsLoopbackSource(SystemAudioSource):
         with self._lock:
             sink = self._on_block
         if sink is not None and in_data:
-            interleaved = np.frombuffer(in_data, dtype=np.float32)
-            if self._channels > 1:
-                interleaved = interleaved.reshape(-1, self._channels)
-            sink(arrival, to_mono(interleaved))
+            sink(arrival, interleaved_buffer_to_mono(in_data, self._channels, "<f4"))
         return (None, pyaudio.paContinue)
 
     def start(self, on_block: BlockSink) -> None:

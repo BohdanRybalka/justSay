@@ -144,13 +144,27 @@ function getToken(): Promise<string | null> {
   })());
 }
 
+/** Thrown on any non-401 failure, carrying the status so a caller can branch
+ *  on it. The meeting-recording flow needs `403` specifically: it means the
+ *  consent disclosure has not been acknowledged, which is a UI step rather
+ *  than an error to report. */
+export class ApiRequestError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+  }
+}
+
 async function responseError(resp: Response): Promise<Error> {
   const err = await resp.json().catch(() => ({ detail: resp.statusText }));
   const detail = err.detail || `HTTP ${resp.status}`;
   if (resp.status === 401) {
     return new ApiAuthError(detail, bridgeDiagnosis);
   }
-  return new Error(detail);
+  return new ApiRequestError(detail, resp.status);
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -183,6 +197,24 @@ export interface RecordingStatus {
   is_recording: boolean;
   duration_seconds: number;
   level_db: number;
+}
+
+/** The meeting endpoints' own response shape. Deliberately separate from
+ *  `RecordingStatus`: the dictation contract must not move, and a meeting
+ *  recording has to report which output it captures (`system_endpoint`) and
+ *  whether sound is arriving from it (`system_level_db`). */
+export interface MeetingStatus {
+  is_recording: boolean;
+  duration_seconds: number;
+  level_db: number;
+  system_endpoint: string | null;
+  system_level_db: number;
+}
+
+export interface MeetingStopResponse {
+  filename: string;
+  duration_seconds: number;
+  truncated: boolean;
 }
 
 export interface DictateResponse {
@@ -220,6 +252,9 @@ export interface UserSettings {
    *  Send the real key to set it; sending `"***"` is a no-op (backend ignores it). */
   gemini_api_key: string;
   groq_api_key: string;
+  /** Whether the user has acknowledged the meeting-recording disclosure. The
+   *  backend answers `403` to `POST /audio/meeting/start` until it is true. */
+  meeting_consent_acknowledged: boolean;
 }
 
 export interface CloudKeyStatus {
@@ -335,6 +370,12 @@ export const api = {
   audioStop: () => request<{ filename: string; duration_seconds: number }>("POST", "/audio/stop"),
 
   audioStatus: () => request<RecordingStatus>("GET", "/audio/status"),
+
+  startMeetingRecording: () => request<MeetingStatus>("POST", "/audio/meeting/start"),
+
+  stopMeetingRecording: () => request<MeetingStopResponse>("POST", "/audio/meeting/stop"),
+
+  getMeetingStatus: () => request<MeetingStatus>("GET", "/audio/meeting/status"),
 
   dictate: (language = "uk") =>
     request<DictateResponse>("POST", `/pipeline/dictate?language=${language}`),

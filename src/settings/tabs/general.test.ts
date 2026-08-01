@@ -74,6 +74,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     initial_prompt: "",
     gemini_api_key: "",
     groq_api_key: "",
+    meeting_consent_acknowledged: false,
     ...overrides,
   };
 }
@@ -401,6 +402,107 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
     destroy();
 
     expect(unlistenMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("renderGeneral — meeting recording disclosure (spec 074, ADR 040)", () => {
+  function group(container: HTMLElement): HTMLElement {
+    return container.querySelector<HTMLElement>("#meeting-consent-group")!;
+  }
+
+  it("states that the user carries the consent obligation", () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+
+    const text = group(container).querySelector("#meeting-consent-responsibility")!.textContent!;
+
+    expect(text).toMatch(/responsible/i);
+    expect(text).toMatch(/consent/i);
+  });
+
+  it("states that Cloud mode sends the other participants' audio to the provider", () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+
+    const text = group(container).querySelector("#meeting-consent-cloud")!.textContent!;
+
+    expect(text).toMatch(/cloud/i);
+    expect(text).toMatch(/participants/i);
+    expect(text).toMatch(/provider/i);
+  });
+
+  it("offers the acknowledgement while it has not been given", () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings({ meeting_consent_acknowledged: false }));
+
+    const button = group(container).querySelector<HTMLButtonElement>("#btn-meeting-consent")!;
+
+    expect(button.disabled).toBe(false);
+    expect(group(container).querySelector("#meeting-consent-state")!.textContent).toMatch(
+      /acknowledge/i,
+    );
+  });
+
+  it("shows the already-acknowledged state instead of asking again", () => {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings({ meeting_consent_acknowledged: true }));
+
+    const button = group(container).querySelector<HTMLButtonElement>("#btn-meeting-consent")!;
+
+    expect(button.disabled).toBe(true);
+    expect(group(container).querySelector("#meeting-consent-state")!.textContent).toMatch(
+      /already/i,
+    );
+  });
+
+  it("persists the acknowledgement and repaints into the acknowledged state", async () => {
+    saveSettingsMock.mockResolvedValue({
+      settings: buildSettings({ meeting_consent_acknowledged: true }),
+      warning: null,
+    });
+
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+    group(container).querySelector<HTMLButtonElement>("#btn-meeting-consent")!.click();
+
+    await vi.waitFor(() => {
+      expect(saveSettingsMock).toHaveBeenCalledWith({ meeting_consent_acknowledged: true });
+    });
+    await vi.waitFor(() => {
+      expect(
+        group(container).querySelector<HTMLButtonElement>("#btn-meeting-consent")!.disabled,
+      ).toBe(true);
+    });
+  });
+
+  it("re-enables the acknowledgement when it could not be saved", async () => {
+    saveSettingsMock.mockRejectedValue(new Error("backend down"));
+
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+    const button = group(container).querySelector<HTMLButtonElement>("#btn-meeting-consent")!;
+    button.click();
+
+    await vi.waitFor(() => {
+      expect(notifyErrorMock).toHaveBeenCalledWith("backend down");
+    });
+    expect(button.disabled).toBe(false);
+  });
+
+  it("both required statements survive into the acknowledged state", async () => {
+    saveSettingsMock.mockResolvedValue({
+      settings: buildSettings({ meeting_consent_acknowledged: true }),
+      warning: null,
+    });
+
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+    group(container).querySelector<HTMLButtonElement>("#btn-meeting-consent")!.click();
+
+    await vi.waitFor(() => {
+      expect(group(container).querySelector("#meeting-consent-cloud")).not.toBeNull();
+    });
+    expect(group(container).querySelector("#meeting-consent-responsibility")).not.toBeNull();
   });
 });
 

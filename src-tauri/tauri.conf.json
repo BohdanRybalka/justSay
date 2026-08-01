@@ -35,6 +35,9 @@
     "resources": {
       "resources/justsay-backend": "justsay-backend"
     },
+    "macOS": {
+      "minimumSystemVersion": "14.4"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

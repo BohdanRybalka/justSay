@@ -5,8 +5,9 @@ file it produces enters the pipeline through the same door and nothing
 downstream has to know a meeting was recorded. `MicrophoneRecorder` itself is
 deliberately untouched by this module: the dictation path must not move.
 
-Phase 1 ships with no UI — see
-docs/adr/039-meeting-recording-ships-dark-until-macos-lands.md.
+System audio arrives through `app.audio.system_source`, which is the only
+place that knows which platform it is running on — see
+docs/adr/037-system-audio-capture-is-a-per-platform-source.md.
 """
 
 from __future__ import annotations
@@ -48,8 +49,9 @@ class MeetingRecorder(AudioRecorder):
         self._recording = False
         self._start_time: float = 0.0
         self._stop_time: float = 0.0
-        self._final_duration: float = 0.0
         self._current_level: float = float("-inf")
+        self._system_level: float = float("-inf")
+        self._endpoint_name: str | None = None
 
     def _store(self, blocks: list[CapturedBlock], arrival: float, mono: np.ndarray) -> bool:
         """Append under the lock unless the raw-store cap is already reached.
@@ -84,7 +86,9 @@ class MeetingRecorder(AudioRecorder):
                 self._current_level = rms_dbfs(mono)
 
     def _system_callback(self, arrival: float, mono: np.ndarray) -> None:
-        self._store(self._system_blocks, arrival, mono)
+        if self._store(self._system_blocks, arrival, mono):
+            with self._lock:
+                self._system_level = rms_dbfs(mono)
 
     async def start(self) -> None:
         with self._lock:
@@ -95,7 +99,7 @@ class MeetingRecorder(AudioRecorder):
         if source is None:
             raise SystemAudioUnavailableError(
                 "System audio capture is not available on this platform — "
-                "meeting recording currently requires Windows"
+                "meeting recording requires Windows or macOS"
             )
 
         with self._lock:
@@ -104,6 +108,8 @@ class MeetingRecorder(AudioRecorder):
             self._raw_bytes = 0
             self._truncated = False
             self._current_level = float("-inf")
+            self._system_level = float("-inf")
+            self._endpoint_name = source.endpoint_name
             self._recording = True
 
         self._system_source = source
@@ -131,7 +137,6 @@ class MeetingRecorder(AudioRecorder):
             if not self._recording:
                 raise RuntimeError("Not recording")
             self._stop_time = time.monotonic()
-            self._final_duration = self._stop_time - self._start_time
             self._recording = False
 
         system_rate = (
@@ -199,6 +204,9 @@ class MeetingRecorder(AudioRecorder):
             except Exception:
                 log.warning("Closing the system audio source failed", exc_info=True)
 
+        with self._lock:
+            self._endpoint_name = None
+
     @property
     def is_recording(self) -> bool:
         return self._recording
@@ -211,18 +219,26 @@ class MeetingRecorder(AudioRecorder):
 
     @property
     def level_db(self) -> float:
-        """The microphone level, identical in meaning to the dictation path's.
-
-        The system half deliberately has no meter in phase 1 — there is no UI
-        to show one to.
-        """
+        """The microphone level, identical in meaning to the dictation path's."""
         with self._lock:
             return self._current_level
 
     @property
-    def last_duration_seconds(self) -> float:
-        """Duration of the most recently completed recording, or 0.0 if never stopped."""
-        return self._final_duration
+    def system_level_db(self) -> float:
+        """The system half's level, so a silent far side is visible while it happens.
+
+        A meeting recording that captured only the microphone is indistinguishable
+        from a working one until someone plays the file back; this is what makes
+        the difference visible at the machine.
+        """
+        with self._lock:
+            return self._system_level
+
+    @property
+    def system_endpoint(self) -> str | None:
+        """The output being captured, or None when nothing is being captured."""
+        with self._lock:
+            return self._endpoint_name
 
     @property
     def truncated(self) -> bool:

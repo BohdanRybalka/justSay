@@ -3,6 +3,7 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.audio.endpoint_selection import EndpointRole
 from app.core.app_paths import resolve_temp_dir
 
 
@@ -25,5 +26,8 @@ class AudioSettings(BaseSettings):
     meeting_max_raw_bytes: int = Field(default=700_000_000, gt=0)
     meeting_gap_tolerance_blocks: float = Field(default=1.5, gt=1.0)
     meeting_rate_tolerance: float = Field(default=0.05, gt=0.0, lt=1.0)
+
+    meeting_system_endpoint_role: EndpointRole = Field(default="communications")
+    meeting_macos_tap_path: Path | None = Field(default=None)
 
     model_config = SettingsConfigDict(env_prefix="JUSTSAY_AUDIO_", env_file=".env", extra="ignore")
