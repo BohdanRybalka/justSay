@@ -42,7 +42,10 @@ async function renderWith(total: number): Promise<HTMLElement> {
   const container = document.createElement("div");
   renderHistory(container);
   await vi.waitFor(() => {
-    expect(container.querySelector("#history-count")!.textContent).toBe(`${total} transcripts`);
+    const plural = total !== 1 ? "s" : "";
+    expect(container.querySelector("#history-count")!.textContent).toBe(
+      `${total} transcript${plural}`
+    );
   });
   return container;
 }

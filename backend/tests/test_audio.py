@@ -103,7 +103,7 @@ async def test_a_recorder_recovers_after_a_failed_start(audio_settings, mock_str
         with pytest.raises(OSError):
             await recorder.start()
 
-    mock_cls, stream_instance = mock_stream
+    _, stream_instance = mock_stream
     await recorder.start()
 
     assert recorder.is_recording is True
