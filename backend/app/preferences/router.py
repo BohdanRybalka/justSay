@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.core.config import settings as runtime_settings
+from app.core.constants import MASKED_API_KEY
 from app.preferences.user_settings import (
     UserSettings,
     get_user_settings,
@@ -19,13 +20,12 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
 _KEY_FIELDS = {"gemini_api_key", "groq_api_key"}
-_MASKED_PLACEHOLDER = "***"
 
 
 def _mask_keys(s: UserSettings) -> UserSettings:
     """Return a copy of s with key fields replaced by the masked placeholder or empty string."""
     return s.model_copy(update={
-        f: (_MASKED_PLACEHOLDER if getattr(s, f) else "")
+        f: (MASKED_API_KEY if getattr(s, f) else "")
         for f in _KEY_FIELDS
     })
 
@@ -54,7 +54,7 @@ async def put_settings(updates: dict):
     filtered = {
         k: v for k, v in updates.items()
         if k in allowed_fields
-        and not (k in _KEY_FIELDS and v == _MASKED_PLACEHOLDER)
+        and not (k in _KEY_FIELDS and v == MASKED_API_KEY)
     }
     try:
         outcome = update_user_settings(filtered)

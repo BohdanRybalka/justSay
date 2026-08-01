@@ -2,7 +2,7 @@
  * HTTP client for JustSay Python backend.
  */
 
-const BASE_URL = "http://127.0.0.1:9377";
+import { BACKEND_BASE_URL } from "./contracts";
 
 /** Why the per-launch token could not be obtained, retained so the UI can name
  *  the failing layer instead of presenting as a dead window (ADR 028).
@@ -177,7 +177,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   if (body) {
     opts.body = JSON.stringify(body);
   }
-  const resp = await fetch(`${BASE_URL}${path}`, opts);
+  const resp = await fetch(`${BACKEND_BASE_URL}${path}`, opts);
   recordAuthOutcome(path, resp);
   if (!resp.ok) {
     throw await responseError(resp);
@@ -248,8 +248,9 @@ export interface UserSettings {
    *  Python `STTSettings.initial_prompt` docstring for per-provider semantics.
    *  Backend enforces a 500-char ceiling. */
   initial_prompt: string;
-  /** Cloud API keys. Always returned as `"***"` (set) or `""` (not set) by GET/PUT.
-   *  Send the real key to set it; sending `"***"` is a no-op (backend ignores it). */
+  /** Cloud API keys. Always returned as `MASKED_API_KEY` (set) or `""` (not set)
+   *  by GET/PUT. Send the real key to set it; sending `MASKED_API_KEY` back is a
+   *  no-op (backend ignores it). */
   gemini_api_key: string;
   groq_api_key: string;
   /** Whether the user has acknowledged the meeting-recording disclosure. The
@@ -398,7 +399,7 @@ export const api = {
     if (token) {
       headers["X-JustSay-Token"] = token;
     }
-    const resp = await fetch(`${BASE_URL}${path}`, { method: "POST", body: form, headers });
+    const resp = await fetch(`${BACKEND_BASE_URL}${path}`, { method: "POST", body: form, headers });
     recordAuthOutcome(path, resp);
     if (!resp.ok) {
       throw await responseError(resp);
@@ -471,7 +472,7 @@ export function levelStream(
       if (token) {
         headers["X-JustSay-Token"] = token;
       }
-      return fetch(`${BASE_URL}${LEVEL_STREAM_PATH}`, {
+      return fetch(`${BACKEND_BASE_URL}${LEVEL_STREAM_PATH}`, {
         method: "GET",
         signal: controller.signal,
         headers,

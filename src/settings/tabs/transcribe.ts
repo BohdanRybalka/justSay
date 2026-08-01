@@ -1,11 +1,9 @@
 import { api, type DictateResponse, type UserSettings } from "../../api";
+import { ACCEPTED_AUDIO_EXTENSIONS, MAX_UPLOAD_BYTES } from "../../contracts";
 
-const ACCEPTED_EXTENSIONS = [
-  ".wav", ".mp3", ".ogg", ".oga", ".webm", ".flac",
-  ".m4a", ".mp4", ".aac", ".opus", ".wma", ".aiff", ".aif",
-];
-const ACCEPT_ATTR = ACCEPTED_EXTENSIONS.join(",");
-const MAX_BYTES = 25 * 1024 * 1024;
+const ACCEPT_ATTR = ACCEPTED_AUDIO_EXTENSIONS.join(",");
+const BYTES_PER_MB = 1024 * 1024;
+const MAX_MB = MAX_UPLOAD_BYTES / BYTES_PER_MB;
 
 type TranscribeUiState = "idle" | "loading" | "transcribing" | "done" | "error";
 
@@ -26,7 +24,7 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
         <div class="dropzone-title">Drop audio here</div>
         <div class="dropzone-sub">
           or <button type="button" class="link-btn" id="pick-btn">choose a file</button>
-          — wav · mp3 · m4a · mp4 · ogg · flac · webm · aac · opus · aiff · wma (≤ 25 MB)
+          — wav · mp3 · m4a · mp4 · ogg · flac · webm · aac · opus · aiff · wma (≤ ${MAX_MB} MB)
         </div>
         <input type="file" id="file-input" accept="${ACCEPT_ATTR}" hidden />
       </div>
@@ -179,12 +177,12 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
       showError("Empty file");
       return;
     }
-    if (file.size > MAX_BYTES) {
-      showError(`File too large (${(file.size / (1024 * 1024)).toFixed(1)} MB > 25 MB limit)`);
+    if (file.size > MAX_UPLOAD_BYTES) {
+      showError(`File too large (${(file.size / BYTES_PER_MB).toFixed(1)} MB > ${MAX_MB} MB limit)`);
       return;
     }
 
-    setUiState("loading", `Reading ${file.name} (${(file.size / (1024 * 1024)).toFixed(1)} MB)...`);
+    setUiState("loading", `Reading ${file.name} (${(file.size / BYTES_PER_MB).toFixed(1)} MB)...`);
     let buf: ArrayBuffer;
     try {
       buf = await file.arrayBuffer();
@@ -213,8 +211,8 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
       showError(`Cannot read file from disk: ${(e as Error).message}`);
       return;
     }
-    if (bytes.byteLength > MAX_BYTES) {
-      showError(`File too large (${(bytes.byteLength / (1024 * 1024)).toFixed(1)} MB > 25 MB limit)`);
+    if (bytes.byteLength > MAX_UPLOAD_BYTES) {
+      showError(`File too large (${(bytes.byteLength / BYTES_PER_MB).toFixed(1)} MB > ${MAX_MB} MB limit)`);
       return;
     }
     const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
@@ -246,5 +244,5 @@ function validateExtension(filename: string): boolean {
   const dot = filename.lastIndexOf(".");
   if (dot < 0) return false;
   const ext = filename.slice(dot).toLowerCase();
-  return ACCEPTED_EXTENSIONS.includes(ext);
+  return ACCEPTED_AUDIO_EXTENSIONS.includes(ext);
 }

@@ -1,4 +1,5 @@
 import { type CloudKeyStatus, type UserSettings } from "../../api";
+import { MASKED_API_KEY } from "../../contracts";
 import { saveSettings, getCloudKeyStatus } from "../settings";
 
 type KeyField = "gemini_api_key" | "groq_api_key";
@@ -46,7 +47,7 @@ function cloudFlag(cloud: CloudKeyStatus, field: KeyField): boolean {
 }
 
 function rowState(settings: UserSettings, field: KeyField, cloud: CloudKeyStatus | null): KeyRowState {
-  if (settings[field] === "***") return "stored";
+  if (settings[field] === MASKED_API_KEY) return "stored";
   if (cloud === null) return "unknown";
   return cloudFlag(cloud, field) ? "env" : "unset";
 }
