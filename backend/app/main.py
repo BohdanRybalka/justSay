@@ -20,8 +20,8 @@ SHUTDOWN_CONNECTION_DRAIN_SECONDS = 2.0
 try:
     from app.audio.router import router as audio_router
     from app.core.router import router as core_router
-    from app.core.settings_router import router as settings_router
     from app.pipeline.router import router as pipeline_router
+    from app.preferences.router import router as settings_router
     from app.stt.router import router as stt_router
     from app.transcripts.history_router import router as history_router
     from app.transcripts.words_router import router as words_router
@@ -43,7 +43,7 @@ async def _warm_gpu_probe_cache() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from app.core.user_settings import (
+    from app.preferences.user_settings import (
         get_user_settings,
         repair_scratch_output_dir,
         sync_to_runtime,

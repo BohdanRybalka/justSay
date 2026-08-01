@@ -5,9 +5,9 @@ from __future__ import annotations
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.core import user_settings
 from app.core.config import settings as runtime_settings
 from app.main import app
+from app.preferences import user_settings
 
 
 @pytest.fixture
