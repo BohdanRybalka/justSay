@@ -1,3 +1,4 @@
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { api, type HistoryEntry } from "../../api";
 import { escapeHtml } from "../html";
 
@@ -202,6 +203,14 @@ export function renderHistory(container: HTMLElement): () => void {
   btnClear.addEventListener("click", async () => {
     if (total === 0) return;
     btnClear.disabled = true;
+    const ok = await confirm(
+      `Delete all ${total} transcript${total !== 1 ? "s" : ""}? History and Metrics share the same data — both tabs will be cleared.`,
+      { title: "Clear History", kind: "warning" }
+    );
+    if (!ok) {
+      btnClear.disabled = false;
+      return;
+    }
     btnClear.textContent = "Clearing...";
     try {
       await api.clearHistory();
