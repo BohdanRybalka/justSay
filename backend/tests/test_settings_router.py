@@ -257,6 +257,29 @@ async def test_cleanup_never_deletes_a_history_database_it_finds(client, _isolat
 
 
 @pytest.mark.anyio
+async def test_a_meeting_wav_is_counted_and_cleaned_like_any_other_scratch_file(
+    client, _isolated_temp_dir
+):
+    """Spec 066 added a third producer into the scratch directory, and ADR 033
+    scopes deletion by ownership — so the meeting recorder registers its own
+    prefix rather than being caught by a location rule. A file matching no
+    prefix still survives both.
+    """
+    (_isolated_temp_dir / "meeting_abc123.wav").write_bytes(b"m" * 4321)
+    history_db = _isolated_temp_dir / "history.db"
+    history_db.write_bytes(b"SQLite format 3\x00" + b"z" * 500)
+
+    assert (await client.get("/settings/storage")).json()["temp_size_bytes"] == 4321
+
+    resp = await client.post("/settings/cleanup")
+
+    assert resp.status_code == 200
+    assert resp.json()["freed_bytes"] == 4321
+    assert not (_isolated_temp_dir / "meeting_abc123.wav").exists()
+    assert history_db.exists()
+
+
+@pytest.mark.anyio
 async def test_reported_size_equals_bytes_cleanup_frees(client, _isolated_temp_dir):
     """Shown and freed come from one helper, so a foreign file cannot inflate
     the number the user is asked to act on."""

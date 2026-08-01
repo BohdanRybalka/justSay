@@ -1,3 +1,4 @@
+import hashlib
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -183,6 +184,77 @@ async def test_cleanup_twice_is_noop_on_second_call(audio_settings, mock_stream)
     assert recorder.is_recording is False
 
 
+
+
+_INSTANT_PROMPT_WAV_SHA256 = "1ea56e02eab045bac62debc0a03f936fc08c7a239b9fe7ad8117e0d54fdb11df"
+
+
+def _seeded_instant_prompt_blocks() -> list[np.ndarray]:
+    """The fixed input of the Instant Prompt byte-identity pin.
+
+    Seeded so the block sequence is reproducible on any machine and any
+    platform: numpy's `default_rng` is a documented, versioned bit generator,
+    so the same seed yields the same float32 samples everywhere.
+    """
+    rng = np.random.default_rng(66066)
+    return [rng.uniform(-0.5, 0.5, (1024, 1)).astype(np.float32) for _ in range(24)]
+
+
+@pytest.mark.asyncio
+async def test_microphone_wav_bytes_unchanged(audio_settings, mock_stream):
+    """Spec 066 AC: Instant Prompt is byte-identical.
+
+    The expected digest was captured by running this exact generator against
+    `master` (ede926d), before spec 066 wrote a single line of product code.
+    Spec 066 adds a second recorder alongside `MicrophoneRecorder` and must
+    not move the dictation path by one byte; anything that changes the block
+    handling, the int16 conversion or the WAV header turns this red.
+    """
+    _, _ = mock_stream
+    recorder = MicrophoneRecorder(audio_settings)
+
+    await recorder.start()
+    for block in _seeded_instant_prompt_blocks():
+        recorder._audio_callback(block, 1024, None, MagicMock())
+    audio_path = await recorder.stop()
+
+    digest = hashlib.sha256(audio_path.read_bytes()).hexdigest()
+    assert digest == _INSTANT_PROMPT_WAV_SHA256
+
+
+@pytest.mark.anyio
+async def test_instant_prompt_opens_no_system_audio_source(client, monkeypatch, tmp_path):
+    """Spec 066 AC: Instant Prompt opens no system-audio source.
+
+    A meeting recording captures other people's voices. The dictation path
+    must not touch that machinery even once — so this makes the factory
+    itself fatal and drives POST /audio/start through it.
+    """
+    from app.audio import get_recorder
+    from app.audio import system_source as system_source_module
+    from app.main import app as fastapi_app
+
+    def _boom(settings):
+        raise AssertionError(
+            "the Instant Prompt path called create_system_audio_source()"
+        )
+
+    monkeypatch.setattr(system_source_module, "create_system_audio_source", _boom)
+    monkeypatch.setattr(
+        "app.audio.meeting_recorder.create_system_audio_source", _boom
+    )
+
+    settings = AudioSettings(sample_rate=16000, channels=1, temp_dir=tmp_path / "tmp")
+    with patch("app.audio.recorder.sd.InputStream") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        recorder = MicrophoneRecorder(settings)
+        fastapi_app.dependency_overrides[get_recorder] = lambda: recorder
+
+        resp = await client.post("/audio/start")
+
+    assert resp.status_code == 200
+    assert recorder.is_recording is True
+    recorder.cleanup()
 
 
 def test_config_rejects_negative_sample_rate():

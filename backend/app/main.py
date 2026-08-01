@@ -62,8 +62,9 @@ async def lifespan(app: FastAPI):
     tasks.spawn_background_task(_warm_gpu_probe_cache(), name="gpu-probe-warmup")
     from app.core import vector_store
     tasks.spawn_background_task(vector_store.run_background_indexer(), name="vector-store-indexer")
-    from app.audio import MicrophoneRecorder
+    from app.audio import MeetingRecorder, MicrophoneRecorder
     app.state.recorder = MicrophoneRecorder(settings.audio)
+    app.state.meeting_recorder = MeetingRecorder(settings.audio)
     yield
     log.info("Backend shutdown: draining background tasks")
     from app.stt.local_setup import peek_active_load
@@ -77,6 +78,7 @@ async def lifespan(app: FastAPI):
             ("STT cache", clear_stt),
             ("embeddings cache", clear_embeddings),
             ("audio recorder", app.state.recorder.cleanup),
+            ("meeting recorder", app.state.meeting_recorder.cleanup),
         ):
             try:
                 step()

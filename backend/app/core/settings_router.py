@@ -88,17 +88,19 @@ async def cloud_key_status():
     )
 
 
-_SCRATCH_PREFIXES = ("rec_", "pipeline_")
+_SCRATCH_PREFIXES = ("rec_", "pipeline_", "meeting_")
 
 
 def _scratch_files(tmp_dir: Path) -> list[Path]:
     """Files in the scratch directory that this app wrote (ADR 033).
 
     ``rec_*`` comes from the microphone recorder, ``pipeline_*`` from the
-    upload path -- the only two producers. Deletion is scoped by ownership
-    rather than by location, so anything else found there survives because
-    it was never in scope, not because it was added to an exception list.
-    A user's ``history.db`` is the case that made this necessary.
+    upload path and ``meeting_*`` from the meeting recorder. Deletion is
+    scoped by ownership rather than by location, so anything else found there
+    survives because it was never in scope, not because it was added to an
+    exception list. A user's ``history.db`` is the case that made this
+    necessary, and each new producer registers its own prefix here rather
+    than widening the rule.
     """
     if not tmp_dir.is_dir():
         return []
