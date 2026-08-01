@@ -44,15 +44,19 @@ class MicrophoneRecorder(AudioRecorder):
             self._current_level = float("-inf")
             self._recording = True
 
-        self._settings.temp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._settings.temp_dir.mkdir(parents=True, exist_ok=True)
+            self._stream = sd.InputStream(
+                samplerate=self._settings.sample_rate,
+                channels=self._settings.channels,
+                dtype="float32",
+                callback=self._audio_callback,
+            )
+            self._stream.start()
+        except Exception:
+            self.cleanup()
+            raise
 
-        self._stream = sd.InputStream(
-            samplerate=self._settings.sample_rate,
-            channels=self._settings.channels,
-            dtype="float32",
-            callback=self._audio_callback,
-        )
-        self._stream.start()
         self._start_time = time.monotonic()
 
     async def stop(self) -> Path:
@@ -106,7 +110,8 @@ class MicrophoneRecorder(AudioRecorder):
     def cleanup(self) -> None:
         """Release the audio stream if one is open. Safe to call any time,
         including when never started. Discards buffered frames without writing
-        a WAV — call on app shutdown, not as a substitute for stop()."""
+        a WAV — call on app shutdown, or to roll a failed start() back to a
+        stopped state, but never as a substitute for stop()."""
         with self._lock:
             stream = self._stream
             self._stream = None

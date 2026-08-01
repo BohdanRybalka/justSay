@@ -60,6 +60,57 @@ async def test_start_idempotent(audio_settings, mock_stream):
 
 
 @pytest.mark.asyncio
+async def test_a_failing_stream_constructor_leaves_the_recorder_stopped(audio_settings):
+    """A half-started recorder reports `is_recording: true` with nothing to stop.
+
+    `stop()` would then raise "Not recording" forever and `start()` would return
+    early, so only a backend restart clears it. MeetingRecorder.start already
+    rolls this back; see test_meeting_recorder.py.
+    """
+    recorder = MicrophoneRecorder(audio_settings)
+
+    with patch("app.audio.recorder.sd.InputStream", side_effect=OSError("no mic")):
+        with pytest.raises(OSError):
+            await recorder.start()
+
+    assert recorder.is_recording is False
+    assert recorder.duration_seconds == 0.0
+
+    with pytest.raises(RuntimeError, match="Not recording"):
+        await recorder.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_stream_start_closes_the_half_open_device(audio_settings, mock_stream):
+    """The constructor succeeded, so the device stays held until it is closed."""
+    _, stream_instance = mock_stream
+    stream_instance.start.side_effect = OSError("device busy")
+    recorder = MicrophoneRecorder(audio_settings)
+
+    with pytest.raises(OSError):
+        await recorder.start()
+
+    assert recorder.is_recording is False
+    stream_instance.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_recorder_recovers_after_a_failed_start(audio_settings, mock_stream):
+    """The point of the rollback: the next start works instead of returning early."""
+    recorder = MicrophoneRecorder(audio_settings)
+
+    with patch("app.audio.recorder.sd.InputStream", side_effect=OSError("no mic")):
+        with pytest.raises(OSError):
+            await recorder.start()
+
+    mock_cls, stream_instance = mock_stream
+    await recorder.start()
+
+    assert recorder.is_recording is True
+    stream_instance.start.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_stop_returns_wav_file(audio_settings, mock_stream):
     _, stream_instance = mock_stream
     recorder = MicrophoneRecorder(audio_settings)
