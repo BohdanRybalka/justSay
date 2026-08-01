@@ -17,7 +17,7 @@ async def client(tmp_path, monkeypatch):
     settings_dir = home / ".justsay"
     settings_dir.mkdir()
 
-    from app.core import history
+    from app.transcripts import history
 
     monkeypatch.setenv("JUSTSAY_DATA_DIR", str(settings_dir))
     monkeypatch.setattr(user_settings, "_settings", None)
@@ -28,7 +28,7 @@ async def client(tmp_path, monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
 
-    from app.core.history import _close_conn_locked, _lock
+    from app.transcripts.history import _close_conn_locked, _lock
     with _lock:
         _close_conn_locked()
 

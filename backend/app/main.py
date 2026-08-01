@@ -19,12 +19,12 @@ SHUTDOWN_CONNECTION_DRAIN_SECONDS = 2.0
 
 try:
     from app.audio.router import router as audio_router
-    from app.core.history_router import router as history_router
     from app.core.router import router as core_router
     from app.core.settings_router import router as settings_router
-    from app.core.words_router import router as words_router
     from app.pipeline.router import router as pipeline_router
     from app.stt.router import router as stt_router
+    from app.transcripts.history_router import router as history_router
+    from app.transcripts.words_router import router as words_router
 except Exception as e:
     log.critical("Router import failed — sidecar will exit: %s", e, exc_info=True)
     raise
@@ -43,12 +43,12 @@ async def _warm_gpu_probe_cache() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from app.core import history
     from app.core.user_settings import (
         get_user_settings,
         repair_scratch_output_dir,
         sync_to_runtime,
     )
+    from app.transcripts import history
 
     log.info("Backend startup: version=%s port=%s", __version__, settings.port)
     settings.audio.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI):
     from app.stt.local_setup import maybe_prewarm_local_at_startup
     maybe_prewarm_local_at_startup(settings.stt)
     tasks.spawn_background_task(_warm_gpu_probe_cache(), name="gpu-probe-warmup")
-    from app.core import vector_store
+    from app.transcripts import vector_store
     tasks.spawn_background_task(vector_store.run_background_indexer(), name="vector-store-indexer")
     from app.audio import MeetingRecorder, MicrophoneRecorder
     app.state.recorder = MicrophoneRecorder(settings.audio)
@@ -148,7 +148,7 @@ def _cli() -> None:
     args = parser.parse_args()
 
     if args.selftest_sqlite_vec:
-        from app.core import vector_store
+        from app.transcripts import vector_store
 
         ok, msg = vector_store.selftest()
         if ok:

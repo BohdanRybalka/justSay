@@ -15,8 +15,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.core import history
 from app.core.app_paths import resolve_app_data_root, resolve_temp_dir
+from app.transcripts import history
 
 
 def _settings_dir() -> Path:

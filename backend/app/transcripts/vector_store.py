@@ -5,7 +5,7 @@ Lives next to ``history.py`` (not ``app/embeddings/``) because it shares its
 scoped and delegates provider selection to
 ``app.embeddings.resolve_embedding_provider``.
 
-Import direction: this module imports ``app.core.history`` at module level
+Import direction: this module imports ``app.transcripts.history`` at module level
 (needs ``_lock``/``_ensure_conn_locked``). ``history.py`` imports THIS
 module back, but only via a lazy import inside ``_init_schema`` (function
 body, not module top) — that keeps both modules importable in either order
@@ -24,7 +24,7 @@ import time
 import sqlite_vec
 from pydantic import BaseModel
 
-from app.core import history
+from app.transcripts import history
 
 log = logging.getLogger(__name__)
 

@@ -7,8 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from app.core import history, user_settings
+from app.core import user_settings
 from app.core.config import AppSettings
+from app.transcripts import history
 
 
 @pytest.fixture(autouse=True)

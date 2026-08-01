@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.core import history, vector_store
+from app.transcripts import history, vector_store
 
 
 @pytest.fixture(autouse=True)
@@ -348,7 +348,7 @@ def test_operational_error_mapped_to_503(isolated_storage, tmp_path):
 
     with TestClient(app) as client:
         with patch(
-            "app.core.history_router.compute_stats",
+            "app.transcripts.history_router.compute_stats",
             side_effect=sqlite3.OperationalError("database is locked"),
         ):
             resp = client.get("/history/stats")
@@ -626,7 +626,7 @@ def test_crash_before_v3_user_version_pragma_retries(isolated_storage, tmp_path)
     ran (embeddings tables exist), the next boot's migrator must succeed
     idempotently — mirrors test_crash_before_user_version_pragma_retries
     for v1->v2 above."""
-    from app.core import vector_store
+    from app.transcripts import vector_store
 
     db_path = tmp_path / "history.db"
     raw = sqlite3.connect(db_path)
@@ -763,7 +763,7 @@ def test_search_lock_error_returns_503(isolated_storage, tmp_path):
     with TestClient(app) as client:
         history.save_entry(text="anything", duration_ms=1)
         with patch(
-            "app.core.words.search_history",
+            "app.transcripts.words.search_history",
             side_effect=sqlite3.OperationalError("database is locked"),
         ):
             resp = client.get("/history/search?q=anything")
@@ -917,7 +917,7 @@ def test_concurrent_save_and_search_serialised(isolated_storage, tmp_path):
     documents that guarantee. Not a race-condition test: partial reads
     are physically impossible under a single Python mutex around a single
     connection."""
-    from app.core import words as words_service
+    from app.transcripts import words as words_service
 
     target = tmp_path / "target"
     history.bootstrap(target)

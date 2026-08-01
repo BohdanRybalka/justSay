@@ -12,10 +12,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.core import history, vector_store
-from app.core import words as words_module
 from app.core.config import settings
 from app.core.types import ProviderMode
+from app.transcripts import history, vector_store
+from app.transcripts import words as words_module
 
 
 @pytest.fixture(autouse=True)
@@ -554,7 +554,7 @@ async def test_run_background_indexer_swallows_backfill_exception(caplog):
     history.save_entry(text="x", duration_ms=1)
     with (
         patch.object(vector_store, "backfill_batch", side_effect=RuntimeError("boom")),
-        caplog.at_level(logging.WARNING, logger="app.core.vector_store"),
+        caplog.at_level(logging.WARNING, logger="app.transcripts.vector_store"),
     ):
         await vector_store.run_background_indexer()
 

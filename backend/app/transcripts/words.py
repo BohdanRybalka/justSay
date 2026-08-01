@@ -26,9 +26,9 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from app.core import history
-from app.core.stopwords_en import STOPWORDS_EN
-from app.core.stopwords_uk import STOPWORDS_UK
+from app.transcripts import history
+from app.transcripts.stopwords_en import STOPWORDS_EN
+from app.transcripts.stopwords_uk import STOPWORDS_UK
 
 log = logging.getLogger(__name__)
 
@@ -281,9 +281,9 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
     spans — relevance here isn't token-based, so there's no single matched
     span to highlight.
     """
-    from app.core import vector_store
     from app.core.config import settings
     from app.embeddings import resolve_embedding_provider
+    from app.transcripts import vector_store
 
     clamped_limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
 
@@ -328,7 +328,7 @@ async def _semantic_lane(q: str, limit: int) -> list[HistorySearchHit]:
     structurally closes the exception-leak bug: there is no response path
     left that can carry an embedding-provider error string to the client.
     """
-    from app.core import vector_store
+    from app.transcripts import vector_store
 
     try:
         return await search_history_semantic(q, limit=limit)

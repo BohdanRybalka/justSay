@@ -18,12 +18,13 @@ from pathlib import Path
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.core import history, user_settings
+from app.core import user_settings
 from app.core.app_paths import DEV_DIR_NAME, PROD_DIR_NAME
 from app.core.config import settings
 from app.core.gpu_probe import clear_cache as clear_gpu_probe_cache
 from app.main import app
 from app.stt import clear_cache as clear_stt_cache
+from app.transcripts import history
 
 
 @pytest.fixture
@@ -435,7 +436,7 @@ def _no_background_indexer_by_default(monkeypatch, request):
     sweep against whatever `~/.justsay/history.db` and API keys exist on the
     machine running the suite -- see ADR 010 / spec 017 review RED #1.
     """
-    from app.core import vector_store
+    from app.transcripts import vector_store
 
     async def _noop() -> None:
         return None

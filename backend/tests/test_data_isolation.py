@@ -16,8 +16,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.core import history, user_settings
+from app.core import user_settings
 from app.main import app
+from app.transcripts import history
 from tests.conftest import _cleanup_data_dir, _paths_under_real_root, _snapshot_real_roots
 
 
@@ -188,11 +189,11 @@ _APP_DIR = Path(__file__).resolve().parent.parent / "app"
 
 _EXPECTED_APP_DATA_CONSUMERS: dict[str, str] = {
     "audio/config.py": "frozen-at-import",
-    "core/history.py": "lazy",
     "core/logging_config.py": "lazy",
     "core/user_settings.py": "lazy",
     "stt/local_setup.py": "lazy",
     "stt/local_whisper_cpp_cmd.py": "exception",
+    "transcripts/history.py": "lazy",
 }
 
 _RESOLVE_CALL_RE = re.compile(r"\bresolve_app_data_root\s*\(|\bresolve_temp_dir\b")

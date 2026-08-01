@@ -5,8 +5,8 @@ import sqlite3
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from app.core import words as words_service
-from app.core.history import (
+from app.transcripts import words as words_service
+from app.transcripts.history import (
     HistoryEntry,
     HistoryStats,
     clear_all,
@@ -15,7 +15,7 @@ from app.core.history import (
     get_count,
     get_entries,
 )
-from app.core.words import HistorySearchHit
+from app.transcripts.words import HistorySearchHit
 
 router = APIRouter(prefix="/history", tags=["History"])
 

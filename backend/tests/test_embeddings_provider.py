@@ -313,7 +313,7 @@ async def test_embed_entry_background_noop_when_disabled():
     must be a no-op that never imports/instantiates CloudEmbeddingProvider —
     closes the 'silent fallback to cloud' failure mode explicitly, not just
     by absence of a code path."""
-    from app.core import history, vector_store
+    from app.transcripts import history, vector_store
 
     with (
         patch.object(history, "_vec_available", True),
@@ -332,7 +332,7 @@ async def test_embed_entry_background_noop_when_disabled():
 async def test_embed_entry_background_noop_when_vec_unavailable():
     """If the sqlite-vec extension failed to load, embed_entry_background
     must not even attempt to resolve a provider."""
-    from app.core import history, vector_store
+    from app.transcripts import history, vector_store
 
     with (
         patch.object(history, "_vec_available", False),
