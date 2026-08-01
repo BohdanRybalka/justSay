@@ -10,6 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from app.audio.analysis import to_mono
 from app.audio.config import AudioSettings
 from app.audio.timeline import (
     CapturedBlock,
@@ -19,7 +20,6 @@ from app.audio.timeline import (
     resample_to,
     segment_blocks,
     segment_effective_rate,
-    to_mono,
 )
 
 TARGET_RATE = 16000

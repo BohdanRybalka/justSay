@@ -24,6 +24,8 @@ _FRAME_SECONDS = 0.030
 
 _MIN_SPEECH_UNITS_FLOOR = 2
 
+_DBFS_FLOOR = 1e-10
+
 
 def required_speech_units(total_unit_count: int, *, cap: int, ratio: float) -> int:
     """How many "speech" units a clip of ``total_unit_count`` units must show.
@@ -48,17 +50,40 @@ def required_speech_units(total_unit_count: int, *, cap: int, ratio: float) -> i
     return min(cap, max(_MIN_SPEECH_UNITS_FLOOR, math.ceil(total_unit_count * ratio)))
 
 
+def to_mono(block: np.ndarray) -> np.ndarray:
+    """Downmix an interleaved capture block to mono float32.
+
+    The one implementation, called from a realtime capture callback, from the
+    meeting timeline assembly and from both silence detectors. It lives in this
+    numpy-only module rather than beside the timeline code so that the
+    detectors can reach it without acquiring ``soxr``.
+    """
+    array = np.asarray(block, dtype=np.float32)
+    if array.ndim > 1:
+        array = array.mean(axis=1)
+    return np.ascontiguousarray(array, dtype=np.float32)
+
+
+def to_dbfs(amplitude: float) -> float:
+    """One amplitude in 0..1 expressed in dBFS.
+
+    Every dBFS answer in the codebase comes through here: the RMS level below,
+    and the peak measured by ``analyze_silence``. The ``_DBFS_FLOOR`` avoids
+    ``log10(0)`` on true digital silence.
+    """
+    return float(20 * np.log10(max(amplitude, _DBFS_FLOOR)))
+
+
 def rms_dbfs(samples: np.ndarray) -> float:
     """RMS level of ``samples`` in dBFS.
 
     The formula previously lived inline in
     ``MicrophoneRecorder._audio_callback`` (recorder.py) — lifted here
     verbatim so the guard and the Mic Test level meter share one
-    implementation and can't drift apart on what "level" means. The
-    ``1e-10`` floor avoids ``log10(0)`` on true digital silence.
+    implementation and can't drift apart on what "level" means.
     """
     rms = float(np.sqrt(np.mean(np.asarray(samples, dtype=np.float64) ** 2)))
-    return float(20 * np.log10(max(rms, 1e-10)))
+    return to_dbfs(rms)
 
 
 @dataclass(frozen=True)
@@ -143,7 +168,7 @@ def analyze_silence(audio_path: Path, settings: AudioSettings) -> SilenceAnalysi
         for block in sf.blocks(
             str(audio_path), blocksize=frame_len, dtype="float32", always_2d=True
         ):
-            mono = block.mean(axis=1)
+            mono = to_mono(block)
             total_samples_decoded += mono.size
             if mono.size:
                 peak = max(peak, float(np.max(np.abs(mono))))
@@ -166,7 +191,7 @@ def analyze_silence(audio_path: Path, settings: AudioSettings) -> SilenceAnalysi
         )
         return None
 
-    peak_dbfs = float(20 * np.log10(max(peak, 1e-10)))
+    peak_dbfs = to_dbfs(peak)
     required_speech_frames = _required_speech_frames(total_frame_count, settings)
     is_silent = bool(
         peak_dbfs < settings.silence_peak_dbfs

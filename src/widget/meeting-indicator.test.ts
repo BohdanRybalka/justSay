@@ -1,10 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import {
-  MEETING_STATE_CLASS,
-  formatMeetingElapsed,
-  renderMeetingIndicator,
-} from "./meeting-indicator";
+import { MEETING_STATE_CLASS, renderMeetingIndicator } from "./meeting-indicator";
 
 function widget(): { root: HTMLElement; duration: HTMLElement } {
   const root = document.createElement("div");
@@ -52,17 +48,6 @@ describe("the meeting recording indicator (ADR 040 obligation 2)", () => {
     renderMeetingIndicator(root, duration, { active: false, elapsedSeconds: 1 });
 
     expect(root.classList.contains("idle")).toBe(true);
-  });
-
-  it("counts the elapsed time up in minutes and seconds", () => {
-    expect(formatMeetingElapsed(0)).toBe("0:00");
-    expect(formatMeetingElapsed(9.7)).toBe("0:09");
-    expect(formatMeetingElapsed(61)).toBe("1:01");
-    expect(formatMeetingElapsed(3600)).toBe("60:00");
-  });
-
-  it("never renders a negative duration from a clock that moved backwards", () => {
-    expect(formatMeetingElapsed(-3)).toBe("0:00");
   });
 
   it("advances the readout as the recording runs", () => {

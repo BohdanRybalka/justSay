@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
-from app.audio.analysis import rms_dbfs
+from app.audio.analysis import rms_dbfs, to_mono
 from app.audio.base import AudioRecorder, write_wav
 from app.audio.config import AudioSettings
 from app.audio.system_source import (
@@ -29,7 +29,7 @@ from app.audio.system_source import (
     SystemAudioUnavailableError,
     create_system_audio_source,
 )
-from app.audio.timeline import CapturedBlock, mix_and_normalize, place_on_timeline, to_mono
+from app.audio.timeline import CapturedBlock, mix_and_normalize, place_on_timeline
 
 log = logging.getLogger(__name__)
 

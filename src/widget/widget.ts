@@ -6,6 +6,7 @@ import {
   shouldReapplyShortcut,
 } from "../accelerator";
 import { api } from "../api";
+import { formatStopwatch } from "../format";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
 import { computeDoneStatus } from "./done-status";
 import { dictationErrorLabel } from "./error-label";
@@ -116,18 +117,10 @@ function startDurationTimer() {
   const start = Date.now();
   const update = () => {
     const elapsed = (Date.now() - start) / 1000;
-    durationEl.textContent = formatDuration(elapsed);
+    durationEl.textContent = formatStopwatch(elapsed);
   };
   update();
   durationInterval = setInterval(update, 100);
-}
-
-function formatDuration(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  const ms = Math.floor((seconds % 1) * 10);
-  if (m > 0) return `${m}:${s.toString().padStart(2, "0")}.${ms}`;
-  return `${s}.${ms}s`;
 }
 
 
@@ -158,7 +151,7 @@ async function stopAndProcess() {
     const result = await api.dictate(currentLanguage);
     const outcome = computeDoneStatus(result);
     if (outcome) {
-      setState("done", outcome.label, formatDuration(outcome.elapsedSeconds));
+      setState("done", outcome.label, formatStopwatch(outcome.elapsedSeconds));
       if (result.discarded_reason !== "silence") {
         showRouteBadge(result);
       }

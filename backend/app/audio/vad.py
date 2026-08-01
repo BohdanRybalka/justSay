@@ -245,9 +245,9 @@ def _to_mono_16k(block: np.ndarray, samplerate: int) -> np.ndarray:
     path, which is already 16 kHz), but it means the caller's carry buffer
     stitches approximately-continuous audio, not sample-exact audio.
     """
-    mono = block.mean(axis=1) if block.ndim > 1 else block
+    mono = analysis.to_mono(block)
     if samplerate == _VAD_SAMPLE_RATE or mono.size == 0:
-        return mono.astype(np.float32)
+        return mono
 
     n_target = int(round(mono.size * _VAD_SAMPLE_RATE / samplerate))
     if n_target <= 0:
