@@ -1,11 +1,7 @@
 """Local embedding provider — Ollama ``nomic-embed-text``.
 
 ``is_model_available`` is a thin wrapper over
-``app.llm.local_setup._list_models``, a private (underscore-prefixed)
-helper. This is a documented internal-API boundary crossing
-(``app.embeddings.local`` → ``app.llm.local_setup``), accepted per the
-plan's Risks section rather than promoted to a public helper — a residual
-maintenance risk if ``local_setup.py``'s internals shift later.
+``app.embeddings.ollama_models.list_models``.
 """
 
 import asyncio
@@ -13,8 +9,8 @@ import logging
 
 import httpx
 
+from app.embeddings.ollama_models import CONNECT_TIMEOUT, READ_TIMEOUT, list_models
 from app.llm.config import LLMSettings
-from app.llm.local_setup import _CONNECT_TIMEOUT, _READ_TIMEOUT, _list_models
 
 log = logging.getLogger(__name__)
 
@@ -27,11 +23,11 @@ async def is_model_available(llm: LLMSettings, model: str) -> bool:
     feature gracefully, not to distinguish failure modes here.
     """
     timeout = httpx.Timeout(
-        connect=_CONNECT_TIMEOUT, read=_READ_TIMEOUT, write=_READ_TIMEOUT, pool=_READ_TIMEOUT
+        connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=READ_TIMEOUT
     )
     try:
         async with httpx.AsyncClient(base_url=llm.ollama_host, timeout=timeout) as client:
-            _, downloaded, _ = await _list_models(client, model)
+            _, downloaded, _ = await list_models(client, model)
             return downloaded
     except Exception:
         return False

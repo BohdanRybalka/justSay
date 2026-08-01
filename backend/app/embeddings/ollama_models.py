@@ -1,6 +1,6 @@
 """Ollama model-listing helpers used by the local embedding availability probe.
 
-``_list_models``/``_model_matches``/``OllamaModel`` are consumed by
+``list_models``/``model_matches``/``OllamaModel`` are consumed by
 ``app.embeddings.local.is_model_available`` to check whether Ollama reports a
 given model pulled. The Ollama-management surface (health/version/pull/start/
 load/unload, ``LocalLlmStatus``, GPU hints) was removed in Spec 045 / ADR 029
@@ -14,8 +14,8 @@ from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
 
-_CONNECT_TIMEOUT = 3.0
-_READ_TIMEOUT = 5.0
+CONNECT_TIMEOUT = 3.0
+READ_TIMEOUT = 5.0
 
 
 class OllamaModel(BaseModel):
@@ -24,7 +24,7 @@ class OllamaModel(BaseModel):
     parameter_size: str | None = None
 
 
-async def _list_models(
+async def list_models(
     client: httpx.AsyncClient, target_model: str
 ) -> tuple[list[OllamaModel], bool, int | None]:
     """GET /api/tags -> {"models": [{"name": "gemma3:4b", "size": ..., "details": {...}}]}.
@@ -50,14 +50,14 @@ async def _list_models(
         details = m.get("details") or {}
         parameter_size = details.get("parameter_size")
         models.append(OllamaModel(name=name, size_bytes=size, parameter_size=parameter_size))
-        if _model_matches(name, target_model):
+        if model_matches(name, target_model):
             downloaded = True
             target_size = size
 
     return models, downloaded, target_size
 
 
-def _model_matches(actual: str, target: str) -> bool:
+def model_matches(actual: str, target: str) -> bool:
     """Compare Ollama model names tolerating a missing tag on either side.
 
     Rules:
