@@ -15,6 +15,7 @@
     "fs:allow-read-file",
     "updater:default",
     "shell:default",
+    "process:default",
     {
       "identifier": "fs:scope",
       "allow": [
