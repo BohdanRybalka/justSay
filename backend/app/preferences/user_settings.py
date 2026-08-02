@@ -290,8 +290,10 @@ def _load() -> UserSettings:
     try:
         data = json.loads(settings_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        log.warning("Could not read %s; starting from defaults", settings_path, exc_info=True)
         return UserSettings()
     if not isinstance(data, dict):
+        log.warning("%s does not hold an object; starting from defaults", settings_path)
         return UserSettings()
     try:
         return UserSettings.model_validate(data)
@@ -314,6 +316,7 @@ def _load_without_rejected_fields(data: dict, failure: ValidationError) -> UserS
     try:
         return UserSettings.model_validate(kept)
     except ValidationError:
+        log.warning("Stored settings could not be salvaged; starting from defaults", exc_info=True)
         return UserSettings()
 
 

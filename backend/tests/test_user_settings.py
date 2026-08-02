@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -521,3 +522,18 @@ def test_an_unreadable_settings_file_still_falls_back_to_defaults(isolated, monk
     monkeypatch.setattr(user_settings, "_settings", None)
 
     assert user_settings.get_user_settings().language == "uk"
+
+
+def test_falling_back_to_defaults_is_never_silent(isolated, monkeypatch, caplog):
+    """Every path that discards stored settings says so (JS-94).
+
+    The defect this file's other cases cover was a silent discard. Widening
+    the read to catch ``OSError`` added a second silent one, so both now log.
+    """
+    (isolated["settings_dir"] / "settings.json").write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(user_settings, "_settings", None)
+
+    with caplog.at_level(logging.WARNING, logger="app.preferences.user_settings"):
+        assert user_settings.get_user_settings().language == "uk"
+
+    assert "starting from defaults" in caplog.text
