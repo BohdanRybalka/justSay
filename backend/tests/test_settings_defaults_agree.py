@@ -54,6 +54,32 @@ _NON_DEFAULT_VALUES = {
 }
 
 
+@pytest.fixture
+def restored_runtime_settings():
+    """Hand the process-wide runtime settings back exactly as they were found.
+
+    ``sync_to_runtime`` writes straight onto the shared ``settings`` object, so
+    ``monkeypatch`` cannot intercept the assignment -- a test that drives it has
+    to put the values back itself. Leaving them mutated poisons any later test
+    whose expectations depend on a field this file did not think to reset, and
+    which file that is changes whenever a test filename changes the collection
+    order.
+    """
+    from app.core.config import settings as runtime_settings
+
+    holders = {_STT: runtime_settings.stt, _LLM: runtime_settings.llm}
+    saved = {
+        (package, name): getattr(holders[package], name)
+        for package in holders
+        for name in ("mode", *(runtime for _, pkg, runtime in _SHARED_FIELDS if pkg == package))
+    }
+
+    yield runtime_settings
+
+    for (package, name), value in saved.items():
+        setattr(holders[package], name, value)
+
+
 @pytest.mark.parametrize(("stored_name", "package", "runtime_name"), _SHARED_FIELDS)
 def test_the_stored_default_matches_the_runtime_default(stored_name, package, runtime_name):
     stored = UserSettings.model_fields[stored_name]
@@ -76,13 +102,13 @@ def test_the_stored_constraints_match_the_runtime_constraints(stored_name, packa
     assert repr(stored.metadata) == repr(runtime.metadata)
 
 
-def test_every_shared_field_reaches_the_runtime_object(monkeypatch):
+def test_every_shared_field_reaches_the_runtime_object(monkeypatch, restored_runtime_settings):
     """``sync_to_runtime`` must not drop a field the two models both declare.
 
     This is the third spelling: a field can be added to both models and left
     out of the assignment block, and nothing else notices.
     """
-    from app.core.config import settings as runtime_settings
+    runtime_settings = restored_runtime_settings
 
     monkeypatch.setattr("app.stt.clear_cache", lambda: None)
     monkeypatch.setattr("app.embeddings.clear_cache", lambda: None)
