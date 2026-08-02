@@ -1,5 +1,8 @@
+import asyncio
 import hashlib
 import sys
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +14,7 @@ from pydantic import ValidationError
 from app.audio.analysis import SilenceAnalysis, analyze_silence, rms_dbfs
 from app.audio.config import AudioSettings
 from app.audio.recorder import MicrophoneRecorder
+from app.audio.system_source import SystemAudioUnavailableError
 
 
 @pytest.fixture
@@ -775,3 +779,104 @@ def test_analyze_silence_short_speech_bearing_windows_zero_false_positives(
         f"{len(false_positives)}/80 false positives at {duration_ms}ms/{attenuation_db}dB "
         f"(window indices: {false_positives})"
     )
+
+
+class _StalledHelper:
+    """A spawned macOS helper that never writes its header line."""
+
+    def __init__(self):
+        self.stdout = _NeverReadyStream()
+        self.terminated = False
+        self.returncode = None
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = 0
+
+    def kill(self):
+        self.terminated = True
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        return 0
+
+    def poll(self):
+        return self.returncode
+
+
+class _NeverReadyStream:
+    def __init__(self):
+        self._released = threading.Event()
+
+    def readline(self):
+        self._released.wait()
+        return b""
+
+    def close(self):
+        self._released.set()
+
+
+def test_a_stalled_macos_helper_fails_instead_of_blocking_forever(monkeypatch):
+    """JS-82: a helper that spawns and never answers used to hang the backend.
+
+    `MacOSTapSource.start` is reached from an `async def`, so an unbounded
+    `readline()` blocks every endpoint, not just meeting recording.
+    """
+    from app.audio import macos_tap
+
+    monkeypatch.setattr(macos_tap, "_HEADER_TIMEOUT_SECONDS", 0.2)
+    stalled = _StalledHelper()
+
+    started = time.monotonic()
+    with pytest.raises(SystemAudioUnavailableError, match="did not answer"):
+        macos_tap._read_header(stalled)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0
+    stalled.stdout.close()
+
+
+def test_a_helper_that_answers_in_time_is_read_normally():
+    from app.audio import macos_tap
+
+    class _Prompt:
+        stdout = _ImmediateStream(b'{"sample_rate":48000}\n')
+
+    assert macos_tap._read_header(_Prompt()) == b'{"sample_rate":48000}\n'
+
+
+class _ImmediateStream:
+    def __init__(self, line: bytes):
+        self._line = line
+
+    def readline(self):
+        return self._line
+
+
+@pytest.mark.asyncio
+async def test_dictation_stop_leaves_the_event_loop_free(tmp_path):
+    """JS-81: the concatenate and wave write must not run on the loop.
+
+    Asserted by having a competing coroutine tick while `stop()` is awaited --
+    inline work would starve it completely.
+    """
+    settings = AudioSettings(temp_dir=tmp_path)
+    recorder = MicrophoneRecorder(settings)
+    recorder._recording = True
+    recorder._frames = [np.zeros((settings.sample_rate * 3, settings.channels), dtype=np.float32)]
+    recorder._stream = MagicMock()
+
+    ticks = 0
+
+    async def competitor():
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    race = asyncio.ensure_future(competitor())
+    written = await recorder.stop()
+    race.cancel()
+
+    assert written.exists()
+    assert ticks > 0

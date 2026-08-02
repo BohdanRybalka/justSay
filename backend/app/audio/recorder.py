@@ -1,5 +1,6 @@
 """Microphone recorder using sounddevice."""
 
+import asyncio
 import threading
 import time
 import uuid
@@ -79,12 +80,23 @@ class MicrophoneRecorder(AudioRecorder):
         if not frames:
             raise RuntimeError("No audio data captured")
 
-        audio_data = np.concatenate(frames, axis=0)
         filename = f"rec_{uuid.uuid4().hex[:12]}.wav"
         output_path = self._settings.temp_dir / filename
 
+        return await asyncio.to_thread(self._concatenate_and_write, frames, output_path)
+
+    def _concatenate_and_write(self, frames: list[np.ndarray], output_path: Path) -> Path:
+        """The dictation counterpart of the meeting recorder's off-loop write.
+
+        Smaller -- a dictation clip is seconds, not a 45-minute call -- but the
+        same shape, reached from the same `async def`, so a long recording
+        stalls every other endpoint for the length of the write.
+        """
         return write_wav(
-            output_path, audio_data, self._settings.sample_rate, self._settings.channels
+            output_path,
+            np.concatenate(frames, axis=0),
+            self._settings.sample_rate,
+            self._settings.channels,
         )
 
     @property
