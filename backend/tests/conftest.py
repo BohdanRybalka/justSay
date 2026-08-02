@@ -354,7 +354,7 @@ def _force_faster_whisper_for_local(monkeypatch, request):
 
     Patched on `app.stt.local_setup`'s own already-bound name (mirroring
     `is_macos_arm64`'s existing import style), NOT on `app.stt.local_factory`
-    directly — `test_stt_local_factory.py`'s
+    directly — `test_local_factory.py`'s
     `test_factory_module_imports_no_third_party_at_module_level` deletes and
     re-imports `app.stt.local_factory` from `sys.modules`, which would
     silently split the patched module object from the one `local_setup.py`
@@ -401,7 +401,7 @@ def _no_prewarm_by_default(monkeypatch, request):
     crash-guard marker or spawn a real background load during the suite.
 
     Also resets `_active_load` (Stage 5 GitHub review, PR #34, finding 1)
-    after every test, suite-wide -- not just within test_stt_local_setup.py,
+    after every test, suite-wide -- not just within test_local_setup.py,
     since `test_pipeline.py`'s readiness-barrier tests exercise the real
     `ensure_local_ready`/`await_local_ready` too. It holds an `asyncio.Task`
     bound to the test's own event loop; left stale, a later test could try

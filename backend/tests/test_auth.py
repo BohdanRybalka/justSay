@@ -49,26 +49,26 @@ async def test_allowed_host_with_or_without_port_passes(client, host):
 
 
 @pytest.fixture
-def _token(monkeypatch):
+def token(monkeypatch):
     """Configure a per-launch token on the runtime settings singleton."""
     monkeypatch.setattr(settings, "api_token", "test-secret-token")
     return "test-secret-token"
 
 
 @pytest.mark.anyio
-async def test_protected_get_without_token_returns_401(client, _token):
+async def test_protected_get_without_token_returns_401(client, token):
     resp = await client.get("/history")
     assert resp.status_code == 401
 
 
 @pytest.mark.anyio
-async def test_protected_get_with_correct_token_returns_2xx(client, _token):
-    resp = await client.get("/history", headers={"X-JustSay-Token": _token})
+async def test_protected_get_with_correct_token_returns_2xx(client, token):
+    resp = await client.get("/history", headers={"X-JustSay-Token": token})
     assert resp.status_code == 200
 
 
 @pytest.mark.anyio
-async def test_protected_post_without_token_returns_401_and_route_never_runs(client, _token):
+async def test_protected_post_without_token_returns_401_and_route_never_runs(client, token):
     """POST /audio/start without the token is rejected by the middleware before
     the route runs -- so no recorder is touched (the ASGI client never ran the
     lifespan that creates app.state.recorder; a 401 proves the route body was
@@ -78,7 +78,7 @@ async def test_protected_post_without_token_returns_401_and_route_never_runs(cli
 
 
 @pytest.mark.anyio
-async def test_put_settings_without_token_does_not_mutate(client, _token):
+async def test_put_settings_without_token_does_not_mutate(client, token):
     """PUT /settings without the token returns 401 and the side effect (a
     settings mutation) does not occur."""
     before = user_settings.get_user_settings().shortcut
@@ -90,7 +90,7 @@ async def test_put_settings_without_token_does_not_mutate(client, _token):
 
 
 @pytest.mark.anyio
-async def test_wrong_token_returns_401(client, _token):
+async def test_wrong_token_returns_401(client, token):
     resp = await client.get("/history", headers={"X-JustSay-Token": "wrong"})
     assert resp.status_code == 401
 
@@ -106,7 +106,7 @@ async def test_wrong_token_returns_401(client, _token):
         ("get", "/audio/meeting/status"),
     ],
 )
-async def test_meeting_endpoints_are_not_auth_exempt(client, _token, method, path):
+async def test_meeting_endpoints_are_not_auth_exempt(client, token, method, path):
     """Spec 066 AC: the three meeting endpoints require the token.
 
     Meeting recording captures people who never installed JustSay
@@ -139,7 +139,7 @@ def test_exempt_paths_are_exactly_health():
 
 
 @pytest.mark.anyio
-async def test_health_is_exempt_from_the_token_check(client, _token):
+async def test_health_is_exempt_from_the_token_check(client, token):
     """GET /health returns 200 without any token even when one is configured,
     so the Rust watchdog's readiness poll keeps working."""
     resp = await client.get("/health")
@@ -147,7 +147,7 @@ async def test_health_is_exempt_from_the_token_check(client, _token):
 
 
 @pytest.mark.anyio
-async def test_options_preflight_is_not_rejected_by_the_token_check(client, _token):
+async def test_options_preflight_is_not_rejected_by_the_token_check(client, token):
     """An OPTIONS preflight to a protected endpoint is not 401'd -- it receives
     the CORS preflight response so the WebView's cross-origin requests complete."""
     resp = await client.options(

@@ -118,7 +118,7 @@ def test_the_default_role_preference_is_communications():
 
 
 
-class FakeOle32:
+class _FakeOle32:
     """Just the two entry points `com_initialized` uses."""
 
     def __init__(self, hresult: int):
@@ -167,7 +167,7 @@ def test_com_is_uninitialised_only_when_this_caller_initialised_it(
     hresult, expected_uninitialize_calls
 ):
     """A thread whose COM we did not initialise is not ours to tear down."""
-    ole32 = FakeOle32(hresult)
+    ole32 = _FakeOle32(hresult)
 
     with com_initialized(ole32):
         pass
@@ -176,7 +176,7 @@ def test_com_is_uninitialised_only_when_this_caller_initialised_it(
 
 
 def test_a_failed_com_initialisation_is_an_unavailable_source():
-    ole32 = FakeOle32(_ARBITRARY_FAILURE)
+    ole32 = _FakeOle32(_ARBITRARY_FAILURE)
 
     with pytest.raises(SystemAudioUnavailableError, match="80004005"):
         with com_initialized(ole32):
@@ -194,7 +194,7 @@ def test_a_signed_negative_hresult_is_classified_the_same_as_its_unsigned_form()
 
 
 def test_com_is_released_even_when_the_block_raises():
-    ole32 = FakeOle32(S_OK)
+    ole32 = _FakeOle32(S_OK)
 
     with pytest.raises(RuntimeError, match="boom"):
         with com_initialized(ole32):

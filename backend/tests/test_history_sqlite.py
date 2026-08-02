@@ -256,7 +256,7 @@ def test_relocate_moved_branch(isolated_storage, tmp_path):
 
     new_dir = tmp_path / "new"
     res, reason = history.relocate(new_dir)
-    assert res == history.RelocateResult.MOVED
+    assert res == history.RelocateOutcome.MOVED
     assert reason is None
     assert (new_dir / "history.db").exists()
     assert not (target / "history.db").exists()
@@ -271,7 +271,7 @@ def test_relocate_no_old_file_branch(isolated_storage, tmp_path):
 
     new_dir = tmp_path / "new"
     res, _ = history.relocate(new_dir)
-    assert res == history.RelocateResult.NO_OLD_FILE
+    assert res == history.RelocateOutcome.NO_OLD_FILE
 
 
 def test_relocate_new_already_has_file_branch(isolated_storage, tmp_path):
@@ -286,7 +286,7 @@ def test_relocate_new_already_has_file_branch(isolated_storage, tmp_path):
     history.bootstrap(target)
 
     res, _ = history.relocate(new_dir)
-    assert res == history.RelocateResult.NEW_ALREADY_HAS_FILE
+    assert res == history.RelocateOutcome.NEW_ALREADY_HAS_FILE
     assert (new_dir / "history.db").exists()
 
 
@@ -303,7 +303,7 @@ def test_relocate_failed_on_copy_oserror(isolated_storage, tmp_path, monkeypatch
     monkeypatch.setattr(history.shutil, "copy2", boom)
 
     res, reason = history.relocate(new_dir)
-    assert res == history.RelocateResult.FAILED
+    assert res == history.RelocateOutcome.FAILED
     assert reason and "simulated copy failure" in reason
     assert (target / "history.db").exists()
 
@@ -549,7 +549,7 @@ def test_relocate_rebuilds_fts(isolated_storage, tmp_path):
 
     new_dir = tmp_path / "new"
     res, _ = history.relocate(new_dir)
-    assert res == history.RelocateResult.MOVED
+    assert res == history.RelocateOutcome.MOVED
 
     with history._lock:
         conn = history._ensure_conn_locked()

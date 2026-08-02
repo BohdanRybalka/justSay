@@ -83,7 +83,7 @@ class _FakeResponse:
         return self._json_data
 
 
-class _FakeStreamCtx:
+class _FakeStreamContext:
     def __init__(self, chunks, status_code=200):
         self._chunks = chunks
         self.status_code = status_code
@@ -253,7 +253,7 @@ def test_get_model_downloads_missing_model_then_spawns_and_polls_healthy(monkeyp
 
     def _stream_impl(method, url):
         assert method == "GET"
-        return _FakeStreamCtx([b"fake", b"-ggml-", b"weights"])
+        return _FakeStreamContext([b"fake", b"-ggml-", b"weights"])
 
     _install_fake_httpx(monkeypatch, stream_impl=_stream_impl)
     popen_calls, _process = _install_fake_popen(monkeypatch)
@@ -285,7 +285,7 @@ def test_get_model_latches_error_on_download_failure(monkeypatch, tmp_path):
     provider, model_path = _make_provider(tmp_path, monkeypatch, model_exists=False)
 
     def _stream_impl(method, url):
-        return _FakeStreamCtx([], status_code=404)
+        return _FakeStreamContext([], status_code=404)
 
     _install_fake_httpx(monkeypatch, stream_impl=_stream_impl)
     _install_fake_popen(monkeypatch)
@@ -825,7 +825,7 @@ def test_port_lock_blocks_second_providers_spawn_until_first_providers_terminate
 
 
 class _BlockingStreamCtx:
-    """A `_FakeStreamCtx` whose `iter_bytes()` blocks on a `threading.Event`
+    """A `_FakeStreamContext` whose `iter_bytes()` blocks on a `threading.Event`
     before yielding -- lets a test hold `_download_model()` inside its
     `_download_lock`-guarded section for as long as the test needs, mirroring
     `_BlockingTerminateProcess`'s Event-based approach for `_port_lock`

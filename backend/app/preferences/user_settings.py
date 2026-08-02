@@ -101,9 +101,9 @@ def update_user_settings(updates: dict) -> UpdateOutcome:
 
             if new_dir != Path(current.output_dir):
                 result, reason = history.relocate(new_dir)
-                if result == history.RelocateResult.FAILED:
+                if result == history.RelocateOutcome.FAILED:
                     raise RuntimeError(reason or "History relocate failed")
-                if result == history.RelocateResult.NEW_ALREADY_HAS_FILE:
+                if result == history.RelocateOutcome.NEW_ALREADY_HAS_FILE:
                     warning = (
                         "Existing history file at the new location was preserved; "
                         "previous history was not migrated."
@@ -195,7 +195,7 @@ def repair_scratch_output_dir() -> Path:
 
     safe = resolve_app_data_root()
     result, reason = history.consolidate_into(current, safe)
-    if result == history.ConsolidateResult.FAILED:
+    if result == history.ConsolidateOutcome.FAILED:
         log.error(
             "History sits inside the scratch directory (%s) and could not be moved out: %s. "
             "Continuing from the old location; Clear Temp Files will not touch it.",

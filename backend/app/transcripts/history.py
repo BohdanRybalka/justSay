@@ -53,14 +53,14 @@ _vec_available: bool = False
 _vec_load_warned = False
 
 
-class RelocateResult(str, Enum):
+class RelocateOutcome(str, Enum):
     MOVED = "moved"
     NEW_ALREADY_HAS_FILE = "new_already_has_file"
     NO_OLD_FILE = "no_old_file"
     FAILED = "failed"
 
 
-class ConsolidateResult(str, Enum):
+class ConsolidateOutcome(str, Enum):
     CONSOLIDATED = "consolidated"
     NOT_NEEDED = "not_needed"
     FAILED = "failed"
@@ -252,7 +252,7 @@ def _epoch_ms_to_iso(ms: int) -> str:
 
 
 
-def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
+def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
     """Move history.db to new_dir. Mutates _output_dir + closes/reopens
     connection inside the lock so a concurrent save_entry never sees a
     torn intermediate. Always invalidates _stats_cache.
@@ -283,14 +283,14 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
 
         if same:
             _stats_cache = None
-            return RelocateResult.NO_OLD_FILE, None
+            return RelocateOutcome.NO_OLD_FILE, None
 
         new_path = new_dir / HISTORY_FILENAME
 
         try:
             new_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            return RelocateResult.FAILED, f"Could not create target directory: {e}"
+            return RelocateOutcome.FAILED, f"Could not create target directory: {e}"
 
         if new_path.exists():
             _close_conn_locked()
@@ -298,7 +298,7 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
             _conn = _connect(new_path)
             _init_schema(_conn)
             _stats_cache = None
-            return RelocateResult.NEW_ALREADY_HAS_FILE, None
+            return RelocateOutcome.NEW_ALREADY_HAS_FILE, None
 
         if not old_path.exists():
             _close_conn_locked()
@@ -306,7 +306,7 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
             _conn = _connect(new_path)
             _init_schema(_conn)
             _stats_cache = None
-            return RelocateResult.NO_OLD_FILE, None
+            return RelocateOutcome.NO_OLD_FILE, None
 
         _close_conn_locked()
         new_conn: sqlite3.Connection | None = None
@@ -317,7 +317,7 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
                 _conn = _connect(old_path)
                 _init_schema(_conn)
                 _stats_cache = None
-                return RelocateResult.FAILED, "Verification failed: entry count mismatch"
+                return RelocateOutcome.FAILED, "Verification failed: entry count mismatch"
 
             new_conn = _connect(new_path)
             _init_schema(new_conn)
@@ -329,7 +329,7 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
             new_conn = None
             _stats_cache = None
             log.info("Relocated history %s → %s", old_path, new_path)
-            return RelocateResult.MOVED, None
+            return RelocateOutcome.MOVED, None
         except (OSError, sqlite3.Error) as e:
             if new_conn is not None:
                 try:
@@ -344,7 +344,7 @@ def relocate(new_dir: Path) -> tuple[RelocateResult, str | None]:
                 _conn = None
             _stats_cache = None
             log.exception("Relocate failed: %s", e)
-            return RelocateResult.FAILED, f"Move failed: {e}"
+            return RelocateOutcome.FAILED, f"Move failed: {e}"
 
 
 _ENTRY_COLUMNS = (
@@ -372,7 +372,7 @@ def _premigration_path(target_dir: Path) -> Path:
     return candidate
 
 
-def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateResult, str | None]:
+def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateOutcome, str | None]:
     """Merge ``source_dir``'s history into ``target_dir`` and move the source aside.
 
     Used once, at startup, when ``output_dir`` was found inside the scratch
@@ -397,14 +397,14 @@ def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateRes
     target_path = target_dir / HISTORY_FILENAME
 
     if not source_path.exists():
-        return ConsolidateResult.NOT_NEEDED, None
+        return ConsolidateOutcome.NOT_NEEDED, None
 
     try:
         same = source_dir.resolve() == target_dir.resolve()
     except OSError:
         same = False
     if same:
-        return ConsolidateResult.NOT_NEEDED, None
+        return ConsolidateOutcome.NOT_NEEDED, None
 
     conn: sqlite3.Connection | None = None
     try:
@@ -414,7 +414,7 @@ def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateRes
         conn.execute("ATTACH DATABASE ? AS source", (str(source_path),))
         source_columns = {row[1] for row in conn.execute("PRAGMA source.table_info(entries)")}
         if "id" not in source_columns:
-            return ConsolidateResult.FAILED, "Source database has no entries table"
+            return ConsolidateOutcome.FAILED, "Source database has no entries table"
 
         shared = [name for name in _ENTRY_COLUMNS if name in source_columns]
         column_list = ", ".join(shared)
@@ -433,7 +433,7 @@ def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateRes
             except sqlite3.Error:
                 pass
         log.exception("History consolidation failed: %s", e)
-        return ConsolidateResult.FAILED, f"Consolidation failed: {e}"
+        return ConsolidateOutcome.FAILED, f"Consolidation failed: {e}"
     finally:
         if conn is not None:
             try:
@@ -446,11 +446,11 @@ def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateRes
         source_path.rename(kept)
     except OSError as e:
         log.warning("History merged but the source file could not be moved aside: %s", e)
-        return ConsolidateResult.CONSOLIDATED, f"Source left in place: {e}"
+        return ConsolidateOutcome.CONSOLIDATED, f"Source left in place: {e}"
 
     log.info("Consolidated %d history entries %s → %s; source kept at %s",
              copied, source_path, target_path, kept)
-    return ConsolidateResult.CONSOLIDATED, None
+    return ConsolidateOutcome.CONSOLIDATED, None
 
 
 def save_entry(

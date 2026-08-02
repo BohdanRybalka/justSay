@@ -321,7 +321,7 @@ def test_config_rejects_zero_channels():
 
 
 @pytest.fixture
-def _isolated_home_and_env(tmp_path, monkeypatch):
+def isolated_home_and_env(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
@@ -332,20 +332,20 @@ def _isolated_home_and_env(tmp_path, monkeypatch):
     return home
 
 
-def test_temp_dir_defaults_to_dev_data_root_when_not_frozen(_isolated_home_and_env):
-    home = _isolated_home_and_env
+def test_temp_dir_defaults_to_dev_data_root_when_not_frozen(isolated_home_and_env):
+    home = isolated_home_and_env
     assert AudioSettings().temp_dir == home / ".justsay-dev" / "tmp"
 
 
-def test_temp_dir_resolves_to_prod_data_root_when_frozen(_isolated_home_and_env, monkeypatch):
-    home = _isolated_home_and_env
+def test_temp_dir_resolves_to_prod_data_root_when_frozen(isolated_home_and_env, monkeypatch):
+    home = isolated_home_and_env
     monkeypatch.setattr(sys, "frozen", True, raising=False)
 
     assert AudioSettings().temp_dir == home / ".justsay" / "tmp"
 
 
 def test_temp_dir_env_override_wins_over_default_factory(
-    _isolated_home_and_env, monkeypatch, tmp_path
+    isolated_home_and_env, monkeypatch, tmp_path
 ):
     override = tmp_path / "custom-audio-tmp"
     monkeypatch.setenv("JUSTSAY_AUDIO_TEMP_DIR", str(override))
@@ -517,7 +517,7 @@ def _resample_to_16k_mono(data: np.ndarray, orig_sr: int) -> np.ndarray:
 
 
 @pytest.fixture(scope="module")
-def _real_speech_16k_mono() -> np.ndarray | None:
+def real_speech_16k_mono() -> np.ndarray | None:
     if not _TRAIN_AUDIO_MP3.exists():
         return None
     data, sr = sf.read(str(_TRAIN_AUDIO_MP3), dtype="float32")
@@ -530,11 +530,11 @@ def _real_speech_16k_mono() -> np.ndarray | None:
 )
 @pytest.mark.parametrize("attenuation_db", [0.0, -12.0, -20.0, -30.0])
 def test_analyze_silence_does_not_discard_quiet_real_speech(
-    tmp_path, _real_speech_16k_mono, attenuation_db
+    tmp_path, real_speech_16k_mono, attenuation_db
 ):
     """AC-8, the load-bearing false-positive test: the real sample converted
     to 16kHz mono, at 0/-12/-20/-30 dB gain, must never be discarded."""
-    attenuated = (_real_speech_16k_mono * (10 ** (attenuation_db / 20))).astype(np.float32)
+    attenuated = (real_speech_16k_mono * (10 ** (attenuation_db / 20))).astype(np.float32)
     path = _write_wav(tmp_path / f"speech_{attenuation_db}dB.wav", attenuated)
 
     result = analyze_silence(path, AudioSettings())
@@ -708,14 +708,14 @@ def test_analyze_silence_returns_none_for_truncated_wav_with_valid_header(tmp_pa
     not _TRAIN_AUDIO_MP3.exists(),
     reason="train-audio-data/ is gitignored and not present in this checkout",
 )
-def test_analyze_silence_pinned_reviewer_counterexample(tmp_path, _real_speech_16k_mono):
+def test_analyze_silence_pinned_reviewer_counterexample(tmp_path, real_speech_16k_mono):
     """AC-26: the Stage 3 reviewer's exact counterexample, pinned as a
     regression test. The 200ms window starting at 30.0s of the real sample,
     at 0dB gain, is loud, unattenuated real speech that the iteration-1
     absolute frame-count rule discarded (is_silent=True); the revised
     proportional rule must not."""
     start = int(30.0 * 16000)
-    window = _real_speech_16k_mono[start:start + int(16000 * 0.200)]
+    window = real_speech_16k_mono[start:start + int(16000 * 0.200)]
     path = tmp_path / "reviewer_counterexample.wav"
     sf.write(str(path), window, 16000)
 
@@ -735,7 +735,7 @@ def test_analyze_silence_pinned_reviewer_counterexample(tmp_path, _real_speech_1
 @pytest.mark.parametrize("duration_ms", [200, 300, 500, 1000])
 @pytest.mark.parametrize("attenuation_db", [0.0, -12.0])
 def test_analyze_silence_short_speech_bearing_windows_zero_false_positives(
-    tmp_path, _real_speech_16k_mono, duration_ms, attenuation_db
+    tmp_path, real_speech_16k_mono, duration_ms, attenuation_db
 ):
     """AC-25, the new load-bearing false-positive test. 80 deterministically
     (rng seed 7) sliced windows per cell — accepted only when they
@@ -746,7 +746,7 @@ def test_analyze_silence_short_speech_bearing_windows_zero_false_positives(
     rule failed (measured 3/80 at 200ms/0dB, 24-28/80 at 200ms/-12dB,
     11/80 at 300ms/-12dB before this fix)."""
     rng = np.random.default_rng(7)
-    audio = _real_speech_16k_mono
+    audio = real_speech_16k_mono
     win_len = int(16000 * duration_ms / 1000)
 
     windows: list[np.ndarray] = []
