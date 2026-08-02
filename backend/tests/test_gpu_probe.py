@@ -29,7 +29,7 @@ def _clear_env_override(monkeypatch):
 def test_module_imports_no_third_party_at_module_level():
     """Importing gpu_probe must not pull in torch or winreg.
 
-    Same style as `test_stt_local_factory.py`'s equivalent module-level
+    Same style as `test_local_factory.py`'s equivalent module-level
     import-hygiene test.
     """
     import importlib

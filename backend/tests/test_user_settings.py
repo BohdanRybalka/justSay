@@ -97,7 +97,7 @@ def test_update_output_dir_triggers_history_relocate(tmp_path, monkeypatch):
 
     def fake_relocate(target: Path):
         calls.append(target)
-        return history.RelocateResult.MOVED, None
+        return history.RelocateOutcome.MOVED, None
 
     monkeypatch.setattr(history, "relocate", fake_relocate)
 

@@ -381,7 +381,7 @@ def teardown_probe(monkeypatch):
     async def _noop_probe() -> None:
         return None
 
-    class _StubRecorder:
+    class _FakeRecorder:
         def __init__(self, audio_settings) -> None:
             pass
 
@@ -389,7 +389,7 @@ def teardown_probe(monkeypatch):
             order.append("recorder_cleanup")
 
     monkeypatch.setattr(app.main, "_warm_gpu_probe_cache", _noop_probe)
-    monkeypatch.setattr(app.audio, "MicrophoneRecorder", _StubRecorder)
+    monkeypatch.setattr(app.audio, "MicrophoneRecorder", _FakeRecorder)
     monkeypatch.setattr(app.stt, "clear_cache", lambda: order.append("clear_stt"))
     monkeypatch.setattr(
         app.embeddings, "clear_cache", lambda: order.append("clear_embeddings")

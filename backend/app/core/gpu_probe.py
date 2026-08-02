@@ -20,7 +20,7 @@ from enum import Enum
 
 log = logging.getLogger(__name__)
 
-_ENV_VAR = "JUSTSAY_GPU_VENDOR"
+_GPU_VENDOR_ENV_VAR = "JUSTSAY_GPU_VENDOR"
 
 _DISPLAY_ADAPTER_CLASS_KEY = (
     r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
@@ -101,14 +101,14 @@ def _probe_env_override() -> GpuProbeResult | None:
     """Manual escape hatch for when auto-detect is wrong, and a clean seam
     for tests that need a real end-to-end `probe_gpu()` call without mocking.
     """
-    raw = os.environ.get(_ENV_VAR)
+    raw = os.environ.get(_GPU_VENDOR_ENV_VAR)
     if not raw:
         return None
 
     try:
         vendor = GpuVendor(raw.strip().lower())
     except ValueError:
-        log.warning("%s=%r is not a valid GPU vendor — ignoring", _ENV_VAR, raw)
+        log.warning("%s=%r is not a valid GPU vendor — ignoring", _GPU_VENDOR_ENV_VAR, raw)
         return None
 
     return GpuProbeResult(vendor=vendor)

@@ -37,7 +37,7 @@ def audio_settings(tmp_path):
     return AudioSettings(sample_rate=16000, channels=1, temp_dir=tmp_path / "tmp")
 
 
-class FakeSystemAudioSource(SystemAudioSource):
+class _FakeSystemAudioSource(SystemAudioSource):
     """A system source that delivers exactly the blocks a test hands it."""
 
     def __init__(self, rate: int = 48000, endpoint_name: str = "Headset [Loopback]"):
@@ -68,7 +68,7 @@ class FakeSystemAudioSource(SystemAudioSource):
 
 @pytest.fixture
 def fake_system_source():
-    source = FakeSystemAudioSource()
+    source = _FakeSystemAudioSource()
     with patch("app.audio.meeting_recorder.create_system_audio_source", return_value=source):
         yield source
 
@@ -535,7 +535,7 @@ def test_windows_source_releases_pyaudio_when_the_com_lookup_fails(
 
 
 @pytest.fixture(autouse=True)
-def acknowledged_meeting_consent():
+def _acknowledged_meeting_consent():
     """The disclosure is a first-run gate, not the subject of most of these
     tests — the ones that are unset it explicitly."""
     from app.preferences import user_settings
@@ -543,7 +543,7 @@ def acknowledged_meeting_consent():
     user_settings.update_user_settings({"meeting_consent_acknowledged": True})
 
 
-class _StubRecorder:
+class _FakeRecorder:
     def __init__(self, is_recording: bool = False):
         self.is_recording = is_recording
         self.duration_seconds = 0.0
@@ -566,7 +566,7 @@ class _StubRecorder:
 async def test_meeting_start_returns_501_where_no_system_source_exists(client):
     """AC: the endpoint answers 501 naming the platform limitation."""
 
-    class _Unavailable(_StubRecorder):
+    class _Unavailable(_FakeRecorder):
         async def start(self):
             raise SystemAudioUnavailableError(
                 "System audio capture is not available on this platform"
@@ -583,9 +583,9 @@ async def test_meeting_start_returns_501_where_no_system_source_exists(client):
 @pytest.mark.anyio
 async def test_meeting_start_is_409_while_dictation_is_recording(client):
     """AC: the microphone is never opened twice."""
-    meeting = _StubRecorder()
+    meeting = _FakeRecorder()
     app.dependency_overrides[get_meeting_recorder] = lambda: meeting
-    app.dependency_overrides[get_active_recorder] = lambda: _StubRecorder(is_recording=True)
+    app.dependency_overrides[get_active_recorder] = lambda: _FakeRecorder(is_recording=True)
 
     resp = await client.post("/audio/meeting/start")
 
@@ -598,9 +598,9 @@ async def test_audio_start_is_409_while_a_meeting_is_recording(client):
     """AC: the mirror-image guard."""
     from app.audio import get_active_meeting_recorder, get_recorder
 
-    dictation = _StubRecorder()
+    dictation = _FakeRecorder()
     app.dependency_overrides[get_recorder] = lambda: dictation
-    app.dependency_overrides[get_active_meeting_recorder] = lambda: _StubRecorder(
+    app.dependency_overrides[get_active_meeting_recorder] = lambda: _FakeRecorder(
         is_recording=True
     )
 
@@ -612,7 +612,7 @@ async def test_audio_start_is_409_while_a_meeting_is_recording(client):
 
 @pytest.mark.anyio
 async def test_meeting_start_is_409_when_already_recording(client):
-    app.dependency_overrides[get_meeting_recorder] = lambda: _StubRecorder(is_recording=True)
+    app.dependency_overrides[get_meeting_recorder] = lambda: _FakeRecorder(is_recording=True)
 
     resp = await client.post("/audio/meeting/start")
 
@@ -621,7 +621,7 @@ async def test_meeting_start_is_409_when_already_recording(client):
 
 @pytest.mark.anyio
 async def test_meeting_stop_without_start_is_409(client):
-    app.dependency_overrides[get_meeting_recorder] = lambda: _StubRecorder()
+    app.dependency_overrides[get_meeting_recorder] = lambda: _FakeRecorder()
 
     resp = await client.post("/audio/meeting/stop")
 
@@ -630,7 +630,7 @@ async def test_meeting_stop_without_start_is_409(client):
 
 @pytest.mark.anyio
 async def test_meeting_status_reports_idle(client):
-    app.dependency_overrides[get_meeting_recorder] = lambda: _StubRecorder()
+    app.dependency_overrides[get_meeting_recorder] = lambda: _FakeRecorder()
 
     resp = await client.get("/audio/meeting/status")
 
@@ -640,7 +640,7 @@ async def test_meeting_status_reports_idle(client):
 
 @pytest.mark.anyio
 async def test_meeting_stop_reports_the_filename_and_truncation(client, tmp_path):
-    class _Stopping(_StubRecorder):
+    class _Stopping(_FakeRecorder):
         def __init__(self):
             super().__init__(is_recording=True)
             self.truncated = True
@@ -669,7 +669,7 @@ async def test_instant_prompt_stop_response_has_no_meeting_fields(client, tmp_pa
     frontend parses it, and spec 066 ships no frontend change."""
     from app.audio import get_recorder
 
-    class _Stopping(_StubRecorder):
+    class _Stopping(_FakeRecorder):
         def __init__(self):
             super().__init__(is_recording=True)
 
@@ -693,7 +693,7 @@ async def test_the_dictation_status_shape_did_not_move(client, path):
     """AC: RecordingStatus has exactly the fields it has today."""
     from app.audio import get_recorder
 
-    app.dependency_overrides[get_recorder] = lambda: _StubRecorder()
+    app.dependency_overrides[get_recorder] = lambda: _FakeRecorder()
 
     resp = await client.request("POST" if path == "/audio/start" else "GET", path)
 
@@ -704,7 +704,7 @@ async def test_the_dictation_status_shape_did_not_move(client, path):
 @pytest.mark.anyio
 async def test_the_meeting_status_reports_the_endpoint_and_the_system_level(client):
     """AC: the meeting responses grew by exactly two fields."""
-    recorder = _StubRecorder()
+    recorder = _FakeRecorder()
     recorder.system_endpoint = "Headset [Loopback]"
     recorder.system_level_db = -21.5
     app.dependency_overrides[get_meeting_recorder] = lambda: recorder
@@ -732,7 +732,7 @@ async def test_meeting_start_is_403_until_the_disclosure_is_acknowledged(client)
     from app.preferences import user_settings
 
     user_settings.update_user_settings({"meeting_consent_acknowledged": False})
-    recorder = _StubRecorder()
+    recorder = _FakeRecorder()
     app.dependency_overrides[get_meeting_recorder] = lambda: recorder
 
     with patch("app.audio.meeting_recorder.create_system_audio_source") as factory:
@@ -745,7 +745,7 @@ async def test_meeting_start_is_403_until_the_disclosure_is_acknowledged(client)
 
 @pytest.mark.anyio
 async def test_meeting_start_is_never_403_once_acknowledged(client):
-    app.dependency_overrides[get_meeting_recorder] = lambda: _StubRecorder()
+    app.dependency_overrides[get_meeting_recorder] = lambda: _FakeRecorder()
 
     resp = await client.post("/audio/meeting/start")
 
@@ -758,7 +758,7 @@ async def test_meeting_stop_and_status_are_not_behind_the_consent_gate(client):
     from app.preferences import user_settings
 
     user_settings.update_user_settings({"meeting_consent_acknowledged": False})
-    app.dependency_overrides[get_meeting_recorder] = lambda: _StubRecorder()
+    app.dependency_overrides[get_meeting_recorder] = lambda: _FakeRecorder()
 
     assert (await client.get("/audio/meeting/status")).status_code == 200
     assert (await client.post("/audio/meeting/stop")).status_code == 409

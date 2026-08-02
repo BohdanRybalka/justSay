@@ -19,7 +19,7 @@ from app.transcripts import words as words_module
 
 
 @pytest.fixture(autouse=True)
-def isolated_storage(tmp_path, monkeypatch):
+def _isolated_storage(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
@@ -366,7 +366,7 @@ def test_relocate_preserves_embeddings_and_semantic_search(tmp_path):
 
     new_dir = tmp_path / "new"
     res, _ = history.relocate(new_dir)
-    assert res == history.RelocateResult.MOVED
+    assert res == history.RelocateOutcome.MOVED
 
     with history._lock:
         conn = history._ensure_conn_locked()

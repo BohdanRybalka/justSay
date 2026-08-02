@@ -19,7 +19,7 @@ import os
 import sys
 from pathlib import Path
 
-_ENV_VAR = "JUSTSAY_WHISPER_CPP_BIN"
+_WHISPER_CPP_BIN_ENV_VAR = "JUSTSAY_WHISPER_CPP_BIN"
 
 VENDOR_DIR_NAMES: dict[str, str] = {
     "win32": "whisper-cpp-vulkan",
@@ -88,7 +88,7 @@ def resolve_binary_path() -> Path | None:
     ``VENDOR_DIR_NAMES`` degrades to ``None`` after the env override rather
     than constructing a directory name that means nothing there.
     """
-    override = os.environ.get(_ENV_VAR)
+    override = os.environ.get(_WHISPER_CPP_BIN_ENV_VAR)
     if override:
         candidate = Path(override)
         if candidate.is_file():

@@ -1019,7 +1019,7 @@ async def test_ensure_local_ready_cleans_up_orphan_when_cache_cleared_without_a_
 
 
 @pytest.fixture
-def _isolated_crash_guard_root(tmp_path, monkeypatch):
+def isolated_crash_guard_root(tmp_path, monkeypatch):
     """Points `_crash_guard_path()` at a per-test `tmp_path` instead of the
     real `~/.justsay-dev`, mirroring test_app_paths.py's existing isolation
     pattern. Patched on the source (`app.core.app_paths.resolve_app_data_root`)
@@ -1037,9 +1037,9 @@ def test_should_skip_prewarm_pure_function():
 
 
 def test_read_consecutive_incomplete_prewarms_fails_open_on_corrupt_file(
-    _isolated_crash_guard_root,
+    isolated_crash_guard_root,
 ):
-    guard_path = _isolated_crash_guard_root / local_setup._CRASH_GUARD_FILENAME
+    guard_path = isolated_crash_guard_root / local_setup._CRASH_GUARD_FILENAME
     guard_path.write_bytes(b"not json {{{")
 
     assert local_setup._read_consecutive_incomplete_prewarms() == 0
@@ -1047,7 +1047,7 @@ def test_read_consecutive_incomplete_prewarms_fails_open_on_corrupt_file(
 
 @pytest.mark.prewarm
 def test_maybe_prewarm_local_at_startup_noop_for_cloud_mode(
-    _isolated_crash_guard_root, monkeypatch
+    isolated_crash_guard_root, monkeypatch
 ):
     """No-ops immediately for CLOUD mode without touching the filesystem at
     all -- no guard file is created under the monkeypatched, empty tmp_path
@@ -1069,13 +1069,13 @@ def test_maybe_prewarm_local_at_startup_noop_for_cloud_mode(
     local_setup.maybe_prewarm_local_at_startup(settings)
 
     assert called["n"] == 0
-    assert list(_isolated_crash_guard_root.iterdir()) == []
+    assert list(isolated_crash_guard_root.iterdir()) == []
 
 
 @pytest.mark.prewarm
 @pytest.mark.asyncio
 async def test_maybe_prewarm_local_at_startup_marks_dirty_then_clears_on_completion(
-    _isolated_crash_guard_root, monkeypatch
+    isolated_crash_guard_root, monkeypatch
 ):
     """The on-disk counter reads 1 immediately after
     `maybe_prewarm_local_at_startup()` returns (written synchronously, before
@@ -1103,7 +1103,7 @@ async def test_maybe_prewarm_local_at_startup_marks_dirty_then_clears_on_complet
 @pytest.mark.prewarm
 @pytest.mark.asyncio
 async def test_maybe_prewarm_local_at_startup_routes_through_spawn_background_task(
-    _isolated_crash_guard_root, monkeypatch, spawn_spy
+    isolated_crash_guard_root, monkeypatch, spawn_spy
 ):
     """AC 8 (Spec 032): maybe_prewarm_local_at_startup() must schedule its
     _prewarm_then_clear_crash_guard() call through
@@ -1130,7 +1130,7 @@ async def test_maybe_prewarm_local_at_startup_routes_through_spawn_background_ta
 
 @pytest.mark.prewarm
 def test_maybe_prewarm_local_at_startup_skips_after_max_consecutive_crashes(
-    _isolated_crash_guard_root, monkeypatch, caplog
+    isolated_crash_guard_root, monkeypatch, caplog
 ):
     """Once the on-disk counter reaches MAX_CONSECUTIVE_INCOMPLETE_PREWARMS,
     ensure_local_ready() is never scheduled, the counter is left unchanged,
@@ -1162,7 +1162,7 @@ def test_maybe_prewarm_local_at_startup_skips_after_max_consecutive_crashes(
 @pytest.mark.prewarm
 @pytest.mark.asyncio
 async def test_maybe_prewarm_local_resets_crash_guard_counter_on_explicit_trigger(
-    _isolated_crash_guard_root, monkeypatch
+    isolated_crash_guard_root, monkeypatch
 ):
     """A deliberate, user-initiated prewarm trigger (mode switch, settings
     edit, manual retry endpoint -- all routed through maybe_prewarm_local())

@@ -57,7 +57,7 @@ def header_line(
     )
 
 
-class FakeTapProcess:
+class _FakeTapProcess:
     """A helper process whose whole life is a byte string on stdout."""
 
     def __init__(self, stdout: bytes, returncode: int = 0, stderr: bytes = b""):
@@ -85,7 +85,7 @@ def tap_stdout(blocks: int, channels: int = 2, fill: float = 0.25, **header) -> 
     return header_line(channels=channels, **header) + frames.tobytes()
 
 
-def run_source(settings: AudioSettings, process: FakeTapProcess) -> list[np.ndarray]:
+def run_source(settings: AudioSettings, process: _FakeTapProcess) -> list[np.ndarray]:
     source = MacOSTapSource(settings, Path("/nonexistent/justsay-audiotap"))
     received: list[np.ndarray] = []
     with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
@@ -101,7 +101,7 @@ def test_the_header_is_parsed_rather_than_assumed(tap_settings):
     """AC: `native_sample_rate` comes back as 48000 — a value that appears
     nowhere in AudioSettings, so it cannot have come from the config."""
     source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
-    process = FakeTapProcess(tap_stdout(blocks=3))
+    process = _FakeTapProcess(tap_stdout(blocks=3))
 
     with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
         source.start(lambda arrival, mono: None)
@@ -114,7 +114,7 @@ def test_the_header_is_parsed_rather_than_assumed(tap_settings):
 
 def test_k_frames_of_stdout_become_exactly_k_over_block_frames_mono_blocks(tap_settings):
     """AC: block count and block length both follow from the header."""
-    received = run_source(tap_settings, FakeTapProcess(tap_stdout(blocks=5)))
+    received = run_source(tap_settings, _FakeTapProcess(tap_stdout(blocks=5)))
 
     assert len(received) == 5
     assert {len(block) for block in received} == {BLOCK_FRAMES}
@@ -123,7 +123,7 @@ def test_k_frames_of_stdout_become_exactly_k_over_block_frames_mono_blocks(tap_s
 def test_a_trailing_partial_block_is_dropped_rather_than_padded(tap_settings):
     stdout = tap_stdout(blocks=2) + np.full(BLOCK_FRAMES, 0.1, dtype="<f4").tobytes()
 
-    received = run_source(tap_settings, FakeTapProcess(stdout))
+    received = run_source(tap_settings, _FakeTapProcess(stdout))
 
     assert len(received) == 2
 
@@ -132,7 +132,7 @@ def test_interleaved_stereo_is_downmixed_to_mono(tap_settings):
     frames = np.tile(
         np.array([1.0, 0.0], dtype="<f4"), BLOCK_FRAMES
     )
-    process = FakeTapProcess(header_line(channels=2) + frames.tobytes())
+    process = _FakeTapProcess(header_line(channels=2) + frames.tobytes())
 
     received = run_source(tap_settings, process)
 
@@ -141,7 +141,7 @@ def test_interleaved_stereo_is_downmixed_to_mono(tap_settings):
 
 
 def test_a_mono_helper_stream_is_passed_through(tap_settings):
-    received = run_source(tap_settings, FakeTapProcess(tap_stdout(blocks=2, channels=1)))
+    received = run_source(tap_settings, _FakeTapProcess(tap_stdout(blocks=2, channels=1)))
 
     assert len(received) == 2
     assert {len(block) for block in received} == {BLOCK_FRAMES}
@@ -178,7 +178,7 @@ def test_the_endpoint_is_named_for_the_status_response(tap_settings):
 def test_a_malformed_or_missing_header_is_an_unavailable_source(tap_settings, stdout):
     """AC: never a crash, and never a source that silently delivers nothing."""
     source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
-    process = FakeTapProcess(stdout)
+    process = _FakeTapProcess(stdout)
 
     with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
         with pytest.raises(SystemAudioUnavailableError):
@@ -209,7 +209,7 @@ def test_a_header_without_the_tap_stream_index_is_refused(tap_settings):
     )
     source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
 
-    with patch("app.audio.macos_tap.subprocess.Popen", return_value=FakeTapProcess(stdout)):
+    with patch("app.audio.macos_tap.subprocess.Popen", return_value=_FakeTapProcess(stdout)):
         with pytest.raises(SystemAudioUnavailableError, match="which input buffer"):
             source.start(lambda arrival, mono: None)
 
@@ -222,7 +222,7 @@ def test_a_non_zero_tap_stream_index_is_accepted():
 
 def test_the_helper_is_launched_with_the_configured_block_size(tap_settings):
     source = MacOSTapSource(tap_settings, Path("/opt/justsay/justsay-audiotap"))
-    process = FakeTapProcess(tap_stdout(blocks=1))
+    process = _FakeTapProcess(tap_stdout(blocks=1))
 
     with patch("app.audio.macos_tap.subprocess.Popen", return_value=process) as popen:
         source.start(lambda arrival, mono: None)
@@ -242,7 +242,7 @@ async def test_a_helper_that_dies_mid_capture_leaves_a_wav_and_a_prompt_stop(tap
     """AC: `stop()` returns in under 2 s and the WAV holds the blocks that did
     arrive, within one block of what the helper managed to write."""
     delivered_blocks = 6
-    process = FakeTapProcess(
+    process = _FakeTapProcess(
         tap_stdout(blocks=delivered_blocks), returncode=3, stderr=b"tap died\n"
     )
     source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
@@ -276,7 +276,7 @@ def test_stop_is_safe_before_start(tap_settings):
 
 def test_stop_terminates_the_helper(tap_settings):
     source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
-    process = FakeTapProcess(tap_stdout(blocks=1))
+    process = _FakeTapProcess(tap_stdout(blocks=1))
 
     with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
         source.start(lambda arrival, mono: None)

@@ -40,13 +40,13 @@ def _rust_duration_from_millis_const(name: str) -> float:
 
 
 @pytest.fixture
-def _token(monkeypatch):
+def token(monkeypatch):
     monkeypatch.setattr(settings, "api_token", "test-secret-token")
     return "test-secret-token"
 
 
 @pytest.fixture
-def _stop_signal_spy(monkeypatch):
+def stop_signal_spy(monkeypatch):
     calls: list[None] = []
     monkeypatch.setattr(core_router, "_raise_stop_signal", lambda: calls.append(None))
     return calls
@@ -54,53 +54,53 @@ def _stop_signal_spy(monkeypatch):
 
 @pytest.mark.anyio
 async def test_shutdown_with_valid_token_returns_202_and_raises_signal_once(
-    client, _token, _stop_signal_spy
+    client, token, stop_signal_spy
 ):
-    resp = await client.post("/shutdown", headers={"X-JustSay-Token": _token})
+    resp = await client.post("/shutdown", headers={"X-JustSay-Token": token})
     assert resp.status_code == 202
     assert resp.json() == {"status": "stopping"}
-    assert len(_stop_signal_spy) == 1
+    assert len(stop_signal_spy) == 1
 
 
 @pytest.mark.anyio
 async def test_shutdown_without_token_header_returns_401_and_route_never_ran(
-    client, _token, _stop_signal_spy
+    client, token, stop_signal_spy
 ):
     resp = await client.post("/shutdown")
     assert resp.status_code == 401
-    assert _stop_signal_spy == []
+    assert stop_signal_spy == []
 
 
 @pytest.mark.anyio
 async def test_shutdown_with_wrong_token_returns_401_and_route_never_ran(
-    client, _token, _stop_signal_spy
+    client, token, stop_signal_spy
 ):
     resp = await client.post("/shutdown", headers={"X-JustSay-Token": "wrong"})
     assert resp.status_code == 401
-    assert _stop_signal_spy == []
+    assert stop_signal_spy == []
 
 
 @pytest.mark.anyio
 async def test_shutdown_with_disallowed_host_returns_400_and_route_never_ran(
-    client, _token, _stop_signal_spy
+    client, token, stop_signal_spy
 ):
     resp = await client.post(
         "/shutdown",
-        headers={"X-JustSay-Token": _token, "host": "attacker.example"},
+        headers={"X-JustSay-Token": token, "host": "attacker.example"},
     )
     assert resp.status_code == 400
-    assert _stop_signal_spy == []
+    assert stop_signal_spy == []
 
 
 @pytest.mark.anyio
 async def test_shutdown_with_no_token_configured_returns_503_and_other_routes_unaffected(
-    client, _stop_signal_spy
+    client, stop_signal_spy
 ):
     assert settings.api_token == ""
 
     resp = await client.post("/shutdown")
     assert resp.status_code == 503
-    assert _stop_signal_spy == []
+    assert stop_signal_spy == []
 
     resp = await client.get("/history")
     assert resp.status_code == 200
