@@ -1,5 +1,7 @@
-import { confirm } from "@tauri-apps/plugin-dialog";
-import { api, type HistoryEntry } from "../../api";
+import { type HistoryEntry } from "../../api";
+import { createHistoryList } from "../history-list";
+
+const PAGE_SIZE = 50;
 
 export function renderMetrics(container: HTMLElement): () => void {
   container.innerHTML = `
@@ -37,41 +39,27 @@ export function renderMetrics(container: HTMLElement): () => void {
   const btnLoadMore = container.querySelector<HTMLButtonElement>("#btn-load-more-metrics")!;
   const btnClear = container.querySelector<HTMLButtonElement>("#btn-clear-metrics")!;
 
-  let offset = 0;
-  let total = 0;
-  const LIMIT = 50;
+  let destroyed = false;
 
-  async function loadEntries(append = false) {
-    try {
-      const resp = await api.getHistory(LIMIT, offset);
-      total = resp.total;
-      countEl.textContent = `${total} entr${total !== 1 ? "ies" : "y"}`;
+  const list = createHistoryList({
+    pageSize: PAGE_SIZE,
+    noun: { singular: "entry", plural: "entries" },
+    elements: {
+      count: countEl,
+      rows: tbody,
+      loadMoreWrapper: loadMoreWrap,
+      loadMoreButton: btnLoadMore,
+      clearButton: btnClear,
+    },
+    createRow: createRowElement,
+    renderEmptyState: (isEmpty) => {
+      emptyEl.style.display = isEmpty ? "block" : "none";
+      tableWrap.style.display = isEmpty ? "none" : "block";
+    },
+    isDestroyed: () => destroyed,
+  });
 
-      if (!append) {
-        tbody.innerHTML = "";
-      }
-
-      if (resp.entries.length === 0 && !append) {
-        emptyEl.style.display = "block";
-        tableWrap.style.display = "none";
-      } else {
-        emptyEl.style.display = "none";
-        tableWrap.style.display = "block";
-      }
-
-      for (const entry of resp.entries) {
-        tbody.appendChild(createRowEl(entry));
-      }
-
-      offset += resp.entries.length;
-      loadMoreWrap.style.display = offset < total ? "block" : "none";
-    } catch (e) {
-      countEl.textContent = "Failed to load";
-      console.error(e);
-    }
-  }
-
-  function createRowEl(entry: HistoryEntry): HTMLElement {
+  function createRowElement(entry: HistoryEntry): HTMLElement {
     const tr = document.createElement("tr");
     tr.style.borderBottom = "1px solid var(--border)";
 
@@ -102,38 +90,9 @@ export function renderMetrics(container: HTMLElement): () => void {
     return tr;
   }
 
-  btnLoadMore.addEventListener("click", () => loadEntries(true));
+  list.load();
 
-  btnClear.addEventListener("click", async () => {
-    if (total === 0) return;
-    btnClear.disabled = true;
-    const ok = await confirm(
-      `Delete all ${total} entr${total !== 1 ? "ies" : "y"}? Metrics and History share the same data — both tabs will be cleared.`,
-      { title: "Clear History", kind: "warning" }
-    );
-    if (!ok) {
-      btnClear.disabled = false;
-      return;
-    }
-    btnClear.textContent = "Clearing...";
-    try {
-      await api.clearHistory();
-      offset = 0;
-      total = 0;
-      tbody.innerHTML = "";
-      emptyEl.style.display = "block";
-      tableWrap.style.display = "none";
-      countEl.textContent = "0 entries";
-      loadMoreWrap.style.display = "none";
-    } catch (e) {
-      console.error(e);
-    } finally {
-      btnClear.disabled = false;
-      btnClear.textContent = "Clear All";
-    }
-  });
-
-  loadEntries();
-
-  return () => {};
+  return () => {
+    destroyed = true;
+  };
 }

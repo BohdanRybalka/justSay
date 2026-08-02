@@ -1,18 +1,20 @@
-import { confirm } from "@tauri-apps/plugin-dialog";
 import { api, type HistoryEntry } from "../../api";
+import { createHistoryList } from "../history-list";
 import { escapeHtml } from "../html";
 
-const DATE_FMT = new Intl.DateTimeFormat("uk-UA", {
+const DATE_FORMATTER = new Intl.DateTimeFormat("uk-UA", {
   day: "2-digit",
   month: "short",
 });
-const TIME_FMT = new Intl.DateTimeFormat("uk-UA", {
+const TIME_FORMATTER = new Intl.DateTimeFormat("uk-UA", {
   hour: "2-digit",
   minute: "2-digit",
   hour12: false,
 });
 
 const SEARCH_DEBOUNCE_MS = 300;
+const PAGE_SIZE = 30;
+const EMPTY_HTML = `<div style="color: var(--text-muted); padding: 32px; text-align: center;">No transcripts yet</div>`;
 
 export function renderHistory(container: HTMLElement): () => void {
   container.innerHTML = `
@@ -44,40 +46,36 @@ export function renderHistory(container: HTMLElement): () => void {
   const btnLoadMore = container.querySelector<HTMLButtonElement>("#btn-load-more")!;
   const btnClear = container.querySelector<HTMLButtonElement>("#btn-clear-history")!;
 
-  let offset = 0;
-  let total = 0;
-  const LIMIT = 30;
   let inSearchMode = false;
   let debounceTimer: number | null = null;
   let searchSeq = 0;
   let destroyed = false;
 
-  async function loadEntries(append = false) {
+  const list = createHistoryList({
+    pageSize: PAGE_SIZE,
+    noun: { singular: "transcript", plural: "transcripts" },
+    elements: {
+      count: countEl,
+      rows: listEl,
+      loadMoreWrapper: loadMoreWrap,
+      loadMoreButton: btnLoadMore,
+      clearButton: btnClear,
+    },
+    createRow: createEntryElement,
+    renderEmptyState: (isEmpty) => {
+      if (isEmpty) listEl.innerHTML = EMPTY_HTML;
+    },
+    isDestroyed: () => destroyed,
+    onCleared: () => {
+      searchInput.value = "";
+      inSearchMode = false;
+    },
+  });
+
+  function loadEntries(): Promise<void> {
     inSearchMode = false;
     ++searchSeq;
-    try {
-      const resp = await api.getHistory(LIMIT, offset);
-      total = resp.total;
-      countEl.textContent = `${total} transcript${total !== 1 ? "s" : ""}`;
-
-      if (!append) {
-        listEl.innerHTML = "";
-      }
-
-      if (resp.entries.length === 0 && !append) {
-        listEl.innerHTML = `<div style="color: var(--text-muted); padding: 32px; text-align: center;">No transcripts yet</div>`;
-      }
-
-      for (const entry of resp.entries) {
-        listEl.appendChild(createEntryEl(entry));
-      }
-
-      offset += resp.entries.length;
-      loadMoreWrap.style.display = offset < total ? "block" : "none";
-    } catch (e) {
-      countEl.textContent = "Failed to load";
-      console.error(e);
-    }
+    return list.load();
   }
 
   async function runSearch(q: string) {
@@ -85,17 +83,17 @@ export function renderHistory(container: HTMLElement): () => void {
     const seq = ++searchSeq;
     searchHint.textContent = "Searching...";
     try {
-      const resp = await api.searchHistory(q, LIMIT);
+      const resp = await api.searchHistory(q, PAGE_SIZE);
       if (seq !== searchSeq) return;
       listEl.innerHTML = "";
-      countEl.textContent = `${resp.total} match${resp.total !== 1 ? "es" : ""}`;
+      list.renderCount(`${resp.total} match${resp.total !== 1 ? "es" : ""}`);
       if (resp.entries.length === 0) {
         listEl.innerHTML = `<div style="color: var(--text-muted); padding: 32px; text-align: center;">No matches</div>`;
       }
       for (const entry of resp.entries) {
-        listEl.appendChild(createEntryEl(entry));
+        listEl.appendChild(createEntryElement(entry));
       }
-      loadMoreWrap.style.display = "none";
+      list.renderLoadMore(false);
       searchHint.textContent = "";
     } catch (e) {
       if (seq !== searchSeq) return;
@@ -124,16 +122,15 @@ export function renderHistory(container: HTMLElement): () => void {
     debounceTimer = window.setTimeout(() => {
       debounceTimer = null;
       if (!value) {
-        offset = 0;
         searchHint.textContent = "";
-        loadEntries(false);
+        loadEntries();
       } else {
         runSearch(value);
       }
     }, SEARCH_DEBOUNCE_MS);
   });
 
-  function createEntryEl(entry: HistoryEntry): HTMLElement {
+  function createEntryElement(entry: HistoryEntry): HTMLElement {
     const el = document.createElement("div");
     el.className = "history-entry";
     el.dataset.id = entry.id;
@@ -160,8 +157,8 @@ export function renderHistory(container: HTMLElement): () => void {
     el.innerHTML = `
       <div class="history-entry-header">
         <div class="history-stamp">
-          <span class="history-stamp-date">${DATE_FMT.format(date)}</span>
-          <span class="history-stamp-time">${TIME_FMT.format(date)}</span>
+          <span class="history-stamp-date">${DATE_FORMATTER.format(date)}</span>
+          <span class="history-stamp-time">${TIME_FORMATTER.format(date)}</span>
         </div>
         <div class="history-badges">${badges.join("")}</div>
       </div>
@@ -186,8 +183,7 @@ export function renderHistory(container: HTMLElement): () => void {
           await api.deleteHistoryEntry(entry.id);
           el.remove();
           if (!inSearchMode) {
-            total--;
-            countEl.textContent = `${total} transcript${total !== 1 ? "s" : ""}`;
+            list.entryRemoved();
           }
         } catch (err) {
           console.error(err);
@@ -198,37 +194,6 @@ export function renderHistory(container: HTMLElement): () => void {
     return el;
   }
 
-  btnLoadMore.addEventListener("click", () => loadEntries(true));
-
-  btnClear.addEventListener("click", async () => {
-    if (total === 0) return;
-    btnClear.disabled = true;
-    const ok = await confirm(
-      `Delete all ${total} transcript${total !== 1 ? "s" : ""}? History and Metrics share the same data — both tabs will be cleared.`,
-      { title: "Clear History", kind: "warning" }
-    );
-    if (!ok) {
-      btnClear.disabled = false;
-      return;
-    }
-    btnClear.textContent = "Clearing...";
-    try {
-      await api.clearHistory();
-      offset = 0;
-      total = 0;
-      searchInput.value = "";
-      inSearchMode = false;
-      listEl.innerHTML = `<div style="color: var(--text-muted); padding: 32px; text-align: center;">No transcripts yet</div>`;
-      countEl.textContent = "0 transcripts";
-      loadMoreWrap.style.display = "none";
-    } catch (e) {
-      console.error(e);
-    } finally {
-      btnClear.disabled = false;
-      btnClear.textContent = "Clear All";
-    }
-  });
-
   loadEntries();
 
   return () => {
@@ -236,4 +201,3 @@ export function renderHistory(container: HTMLElement): () => void {
     if (debounceTimer !== null) window.clearTimeout(debounceTimer);
   };
 }
-

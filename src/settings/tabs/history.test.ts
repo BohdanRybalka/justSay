@@ -50,12 +50,82 @@ async function renderWith(total: number): Promise<HTMLElement> {
   return container;
 }
 
+async function renderPaged(total: number): Promise<HTMLElement> {
+  const all = Array.from({ length: total }, (_, index) => buildEntry(String(index + 1)));
+  apiMock.getHistory.mockImplementation(async (limit: number, offset: number) => ({
+    entries: all.slice(offset, offset + limit),
+    total,
+  }));
+  const container = document.createElement("div");
+  renderHistory(container);
+  await vi.waitFor(() => {
+    expect(container.querySelector("#history-count")!.textContent).not.toBe("Loading...");
+  });
+  return container;
+}
+
 function clearButton(container: HTMLElement): HTMLButtonElement {
   return container.querySelector<HTMLButtonElement>("#btn-clear-history")!;
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("renderHistory — paging over the history endpoint", () => {
+  it("asks for 30 transcripts on the first paint", async () => {
+    const container = await renderPaged(40);
+
+    expect(apiMock.getHistory.mock.calls[0]).toEqual([30, 0]);
+    expect(container.querySelectorAll(".history-entry")).toHaveLength(30);
+    expect(container.querySelector<HTMLElement>("#history-load-more")!.style.display).toBe("block");
+  });
+
+  it("one Load more click brings in the rest and hides the wrapper", async () => {
+    const container = await renderPaged(40);
+
+    container.querySelector<HTMLButtonElement>("#btn-load-more")!.click();
+
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll(".history-entry")).toHaveLength(40);
+    });
+    expect(apiMock.getHistory.mock.calls[1]).toEqual([30, 30]);
+    expect(container.querySelector<HTMLElement>("#history-load-more")!.style.display).toBe("none");
+  });
+});
+
+describe("renderHistory — the count names transcripts", () => {
+  it("reads '1 transcript' for a single entry", async () => {
+    const container = await renderWith(1);
+    expect(container.querySelector("#history-count")!.textContent).toBe("1 transcript");
+  });
+
+  it("reads '2 transcripts' for two entries", async () => {
+    const container = await renderWith(2);
+    expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
+  });
+});
+
+describe("renderHistory — teardown", () => {
+  it("a response arriving after teardown writes nothing", async () => {
+    let release: (value: { entries: HistoryEntry[]; total: number }) => void = () => {};
+    apiMock.getHistory.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      })
+    );
+    const container = document.createElement("div");
+    const teardown = renderHistory(container);
+
+    const before = container.querySelector("#history-count")!.textContent;
+    teardown();
+    release({ entries: [buildEntry("1")], total: 1 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(container.querySelector("#history-count")!.textContent).toBe(before);
+    expect(container.querySelectorAll(".history-entry")).toHaveLength(0);
+  });
 });
 
 describe("renderHistory — Clear All asks before deleting everything", () => {
