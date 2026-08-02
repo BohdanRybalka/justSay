@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import sys
 from pathlib import Path
 
@@ -460,3 +462,78 @@ def test_repair_fires_when_output_dir_is_stored_non_canonically(isolated, monkey
 
     assert user_settings.repair_scratch_output_dir() == settings_dir
     assert _entry_count(settings_dir / "history.db") == 6
+
+
+def test_update_rejects_a_value_the_reload_would_refuse(isolated):
+    """The write path enforces what the read path enforces (JS-94).
+
+    ``model_copy(update=...)`` does not validate, so every ``Field``
+    constraint on ``UserSettings`` used to be decorative on this path: a
+    value could be accepted here and refused on the next load.
+    """
+    with pytest.raises(ValueError):
+        user_settings.update_user_settings({"initial_prompt": "x" * 501})
+
+    assert not (isolated["settings_dir"] / "settings.json").exists()
+
+
+def test_update_rejects_a_non_positive_routing_threshold(isolated):
+    with pytest.raises(ValueError):
+        user_settings.update_user_settings({"cloud_routing_threshold": 0})
+
+
+def test_a_rejected_stored_field_does_not_reset_the_other_settings(isolated, monkeypatch):
+    """One bad value costs that field, not the whole file (JS-94).
+
+    A single out-of-range entry used to send ``_load`` down its
+    ``except ValueError: pass`` branch, which returned ``UserSettings()`` --
+    discarding language, shortcut, output directory and both API keys with
+    no message.
+    """
+    settings_dir = isolated["settings_dir"]
+    user_settings.update_user_settings(
+        {
+            "language": "en",
+            "shortcut": "Ctrl+Shift+KeyZ",
+            "gemini_api_key": "AIza-real-key",
+            "groq_api_key": "gsk-real-key",
+        }
+    )
+
+    stored = json.loads((settings_dir / "settings.json").read_text(encoding="utf-8"))
+    stored["initial_prompt"] = "x" * 5000
+    stored["cloud_routing_threshold"] = -5.0
+    (settings_dir / "settings.json").write_text(json.dumps(stored), encoding="utf-8")
+
+    monkeypatch.setattr(user_settings, "_settings", None)
+    reloaded = user_settings.get_user_settings()
+
+    assert reloaded.language == "en"
+    assert reloaded.shortcut == "Ctrl+Shift+KeyZ"
+    assert reloaded.gemini_api_key == "AIza-real-key"
+    assert reloaded.groq_api_key == "gsk-real-key"
+    assert reloaded.initial_prompt == ""
+    assert reloaded.cloud_routing_threshold == 30.0
+
+
+def test_an_unreadable_settings_file_still_falls_back_to_defaults(isolated, monkeypatch):
+    (isolated["settings_dir"] / "settings.json").write_text("{not json", encoding="utf-8")
+
+    monkeypatch.setattr(user_settings, "_settings", None)
+
+    assert user_settings.get_user_settings().language == "uk"
+
+
+def test_falling_back_to_defaults_is_never_silent(isolated, monkeypatch, caplog):
+    """Every path that discards stored settings says so (JS-94).
+
+    The defect this file's other cases cover was a silent discard. Widening
+    the read to catch ``OSError`` added a second silent one, so both now log.
+    """
+    (isolated["settings_dir"] / "settings.json").write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(user_settings, "_settings", None)
+
+    with caplog.at_level(logging.WARNING, logger="app.preferences.user_settings"):
+        assert user_settings.get_user_settings().language == "uk"
+
+    assert "starting from defaults" in caplog.text
