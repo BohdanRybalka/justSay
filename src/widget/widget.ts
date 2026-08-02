@@ -201,7 +201,7 @@ let meetingBusy = false;
 const MEETING_TICK_MS = 500;
 
 function renderMeetingIndicatorFromState() {
-  renderMeetingIndicator(widget, durationEl, {
+  renderMeetingIndicator(widget, {
     active: meetingActive,
     elapsedSeconds: (Date.now() - meetingStartedAt) / 1000,
   });

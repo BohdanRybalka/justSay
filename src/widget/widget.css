@@ -272,6 +272,10 @@ html, body {
   flex-shrink: 0;
 }
 
+.widget-meeting-duration {
+  color: rgba(255, 138, 138, 0.9);
+}
+
 .widget.meeting {
   background: rgba(48, 12, 12, 0.92);
   border-color: rgba(255, 94, 94, 0.35);
