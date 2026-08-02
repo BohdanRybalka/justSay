@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.core.app_paths import resolve_app_data_root, resolve_temp_dir
 from app.transcripts import history
@@ -55,7 +55,7 @@ class UserSettings(BaseModel):
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "qwen3:1.7b"
 
-    cloud_routing_threshold: float = 30.0
+    cloud_routing_threshold: float = Field(default=30.0, gt=0)
 
     initial_prompt: str = Field(default="", max_length=500)
 
@@ -114,7 +114,7 @@ def update_user_settings(updates: dict) -> UpdateOutcome:
         if "whisper_model_size" in updates:
             _validate_whisper_model_size(updates["whisper_model_size"])
 
-        merged = current.model_copy(update=updates)
+        merged = UserSettings.model_validate({**current.model_dump(), **updates})
         _save(merged)
         global _settings
         _settings = merged
@@ -285,13 +285,36 @@ _FORBIDDEN_PARENTS = _forbidden_parents()
 def _load() -> UserSettings:
     """Load from disk or return defaults."""
     settings_path = _settings_path()
-    if settings_path.exists():
-        try:
-            data = json.loads(settings_path.read_text(encoding="utf-8"))
-            return UserSettings.model_validate(data)
-        except (json.JSONDecodeError, ValueError):
-            pass
-    return UserSettings()
+    if not settings_path.exists():
+        return UserSettings()
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return UserSettings()
+    if not isinstance(data, dict):
+        return UserSettings()
+    try:
+        return UserSettings.model_validate(data)
+    except ValidationError as failure:
+        return _load_without_rejected_fields(data, failure)
+
+
+def _load_without_rejected_fields(data: dict, failure: ValidationError) -> UserSettings:
+    """Keep every stored field that validates when one of them does not.
+
+    A single out-of-range value used to discard the entire file -- language,
+    shortcut, output directory and both API keys -- because the caller could
+    see only that validation had failed, not which field caused it. Each
+    rejected field falls back to its own default and the rest survive.
+    """
+    rejected = {str(error["loc"][0]) for error in failure.errors() if error["loc"]}
+    log.warning("Ignoring invalid stored settings, falling back to defaults for: %s",
+                ", ".join(sorted(rejected)))
+    kept = {name: value for name, value in data.items() if name not in rejected}
+    try:
+        return UserSettings.model_validate(kept)
+    except ValidationError:
+        return UserSettings()
 
 
 def sync_to_runtime(us: UserSettings) -> bool:
