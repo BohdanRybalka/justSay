@@ -284,15 +284,20 @@ def test_factory_returns_none_on_a_platform_with_no_implementation(monkeypatch):
     assert create_system_audio_source(AudioSettings()) is None
 
 
-def test_factory_returns_none_when_the_windows_device_lookup_fails(monkeypatch):
-    """The factory answers None rather than raising, so the caller decides
-    what an absent source means."""
+def test_factory_reports_why_the_windows_device_lookup_failed(monkeypatch):
+    """A Windows machine with no usable loopback device says so (JS-78).
+
+    None is reserved for a platform with no capture path at all. This case
+    asserted the opposite until JS-78: the reason was swallowed and the caller
+    told a Windows user that meeting recording requires Windows.
+    """
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setitem(
         sys.modules, "app.audio.windows_loopback", _module_raising_on_construction()
     )
 
-    assert create_system_audio_source(AudioSettings()) is None
+    with pytest.raises(SystemAudioUnavailableError, match="no loopback endpoint"):
+        create_system_audio_source(AudioSettings())
 
 
 def _module_raising_on_construction() -> types.ModuleType:
@@ -800,3 +805,44 @@ async def test_the_recorder_reports_the_endpoint_the_source_chose(
     recorder.cleanup()
 
     assert recorder.system_endpoint is None
+
+
+@pytest.mark.asyncio
+async def test_start_surfaces_the_real_device_failure(audio_settings, fake_microphone_stream):
+    """JS-78: a device that failed says why, instead of naming the platform.
+
+    The factory used to swallow every construction failure into None, so the
+    caller's "requires Windows or macOS" reached a user already on Windows --
+    a message that is both false and unactionable.
+    """
+    recorder = MeetingRecorder(audio_settings)
+    failure = SystemAudioUnavailableError("no loopback device on the default render endpoint")
+
+    with patch("app.audio.meeting_recorder.create_system_audio_source", side_effect=failure):
+        with pytest.raises(SystemAudioUnavailableError, match="default render endpoint"):
+            await recorder.start()
+
+    assert recorder.is_recording is False
+    fake_microphone_stream.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_meeting_start_501_carries_the_device_reason(client):
+    """The 501 body is what the user actually reads (JS-78)."""
+
+    class _Broken:
+        is_recording = False
+
+        async def start(self):
+            raise SystemAudioUnavailableError(
+                "System audio capture could not be opened on this machine: "
+                "no loopback device on the default render endpoint"
+            )
+
+    app.dependency_overrides[get_meeting_recorder] = lambda: _Broken()
+
+    resp = await client.post("/audio/meeting/start")
+
+    assert resp.status_code == 501
+    assert "default render endpoint" in resp.json()["detail"]
+    assert "requires Windows or macOS" not in resp.json()["detail"]

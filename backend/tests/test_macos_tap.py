@@ -337,9 +337,16 @@ def test_the_factory_returns_none_on_a_platform_with_no_source(tap_settings):
     assert create_system_audio_source(tap_settings, platform_name="linux") is None
 
 
-def test_the_factory_swallows_a_construction_failure_into_none(tap_settings):
+def test_the_factory_reports_why_a_construction_failed(tap_settings):
+    """A darwin machine that cannot open its tap is not an unsupported platform.
+
+    This case asserted the failure was swallowed into None until JS-78, which
+    is how the caller came to tell a macOS user that meeting recording
+    requires macOS.
+    """
     with patch("app.audio.macos_tap.MacOSTapSource", side_effect=RuntimeError("boom")):
-        assert create_system_audio_source(tap_settings, platform_name="darwin") is None
+        with pytest.raises(SystemAudioUnavailableError, match="boom"):
+            create_system_audio_source(tap_settings, platform_name="darwin")
 
 
 def test_the_factory_reads_sys_platform_when_none_is_injected(monkeypatch, tap_settings):

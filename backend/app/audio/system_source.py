@@ -52,12 +52,19 @@ class SystemAudioSource(ABC):
 def create_system_audio_source(
     settings: AudioSettings, platform_name: str | None = None
 ) -> SystemAudioSource | None:
-    """The system-audio source for this platform, or None if there is none.
+    """The system-audio source for this platform.
 
-    Returns None rather than raising, so the caller decides what an absent
-    source means. Both platform modules are imported here and nowhere else:
-    `pyaudiowpatch` is a Windows-only wheel, and the macOS source reaches a
-    helper binary that exists only inside a macOS bundle.
+    Returns None only when this platform has no capture path at all, which is
+    a fact about the operating system and the same on every machine running
+    it. A platform that *has* one and could not open it raises
+    ``SystemAudioUnavailableError`` carrying the reason, because that is a
+    fact about this machine and the user is the only person who can act on
+    it. Collapsing the two into None is what made the caller tell a Windows
+    user that meeting recording requires Windows.
+
+    Both platform modules are imported here and nowhere else: `pyaudiowpatch`
+    is a Windows-only wheel, and the macOS source reaches a helper binary that
+    exists only inside a macOS bundle.
 
     `platform_name` is injectable so both branches are covered on the ubuntu
     CI runner.
@@ -79,12 +86,14 @@ def create_system_audio_source(
                     Path(sys.executable), settings.meeting_macos_tap_path
                 ),
             )
-    except Exception:
+    except SystemAudioUnavailableError:
+        raise
+    except Exception as failure:
         log.warning(
-            "No system-audio source could be created — meeting recording is off "
-            "on this machine",
-            exc_info=True,
+            "System-audio capture could not be opened on %s", platform_name, exc_info=True
         )
-        return None
+        raise SystemAudioUnavailableError(
+            f"System audio capture could not be opened on this machine: {failure}"
+        ) from failure
 
     return None

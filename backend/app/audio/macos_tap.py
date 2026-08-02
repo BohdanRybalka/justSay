@@ -49,6 +49,7 @@ ENDPOINT_NAME = "macOS system audio"
 _TERMINATE_TIMEOUT_SECONDS = 0.5
 _KILL_TIMEOUT_SECONDS = 0.5
 _READER_JOIN_TIMEOUT_SECONDS = 0.5
+_HEADER_TIMEOUT_SECONDS = 5.0
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _DEV_TAP_PATH = (
@@ -69,6 +70,33 @@ def resolve_audio_tap_path(executable: Path, override: Path | None) -> Path:
     if executable.parent.name == SIDECAR_DIRECTORY_NAME:
         return executable.parent.parent / TAP_EXECUTABLE_NAME
     return _DEV_TAP_PATH
+
+
+def _read_header(process: subprocess.Popen) -> bytes:
+    """The helper's first line, bounded, or a raise saying it never arrived.
+
+    The helper writes its header only after both `AudioHardwareCreateProcessTap`
+    and the aggregate device succeed. Spawned but stalled before that -- a
+    permission prompt being the obvious candidate -- a plain `readline()` never
+    returns, and `MacOSTapSource.start` is reached from an `async def`, so it
+    takes the whole backend with it rather than just meeting recording. Every
+    other blocking call in this module is already bounded; this was the one
+    that was not, and the Windows loopback source has no equivalent.
+    """
+    line: list[bytes] = []
+    reader = threading.Thread(
+        target=lambda: line.append(process.stdout.readline()),
+        name="macos-audio-tap-header",
+        daemon=True,
+    )
+    reader.start()
+    reader.join(timeout=_HEADER_TIMEOUT_SECONDS)
+    if not line:
+        raise SystemAudioUnavailableError(
+            f"The macOS audio helper did not answer within {_HEADER_TIMEOUT_SECONDS:.0f}s. "
+            "It may be waiting on a system-audio recording permission that was never granted."
+        )
+    return line[0]
 
 
 def parse_tap_header(line: bytes) -> tuple[int, int]:
@@ -146,7 +174,7 @@ class MacOSTapSource(SystemAudioSource):
         process = self._spawn()
         try:
             self._native_sample_rate, self._channels = parse_tap_header(
-                process.stdout.readline()
+                _read_header(process)
             )
         except Exception:
             self._terminate(process)

@@ -12,6 +12,7 @@ docs/adr/037-system-audio-capture-is-a-per-platform-source.md.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -156,6 +157,23 @@ class MeetingRecorder(AudioRecorder):
         if not microphone_blocks and not system_blocks:
             raise RuntimeError("No audio data captured")
 
+        return await asyncio.to_thread(
+            self._assemble_and_write, microphone_blocks, system_blocks, system_rate
+        )
+
+    def _assemble_and_write(
+        self,
+        microphone_blocks: list[CapturedBlock],
+        system_blocks: list[CapturedBlock],
+        system_rate: int,
+    ) -> Path:
+        """Two resamples, a mix and a synchronous wave write, off the event loop.
+
+        A 45-minute call is tens of millions of samples and ~86 MB to disk.
+        Run inline this blocked every other endpoint for the whole write --
+        including `/health` and the meeting status the widget polls twice a
+        second, which is the moment the user is waiting on their transcript.
+        """
         return self._write_wav(
             self._assemble(microphone_blocks, system_blocks, system_rate)
         )
