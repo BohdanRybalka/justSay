@@ -2,7 +2,7 @@
 default and its upload-content validation.
 
 Dedicated router-test file, split from the service-level `test_pipeline.py`
-the same way `test_settings_router.py` is split from `test_user_settings.py`
+the same way `test_preferences_router.py` is split from `test_user_settings.py`
 (spec 019). `app.pipeline.router.process_audio` is patched so no real STT
 call, history write, or clipboard access happens — this file only asserts
 what the router forwards to `process_audio`.

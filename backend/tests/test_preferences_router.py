@@ -1,4 +1,4 @@
-"""Settings router — API key masking and cloud-status endpoint."""
+"""Preferences router — API key masking and cloud-status endpoint."""
 
 from __future__ import annotations
 
