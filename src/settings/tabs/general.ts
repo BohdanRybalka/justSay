@@ -50,7 +50,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
       <div class="setting-label">Global Shortcut</div>
       <div class="setting-row">
         <span class="label">Push-to-talk</span>
-        <button class="btn btn-secondary" id="shortcut-btn">${escapeHtml(formatAccelerator(settings.shortcut, platform))}</button>
+        <button class="btn btn-secondary" id="btn-shortcut">${escapeHtml(formatAccelerator(settings.shortcut, platform))}</button>
       </div>
       <div class="value" id="shortcut-hint" style="padding: 4px 16px; font-size: 11px; color: var(--text-muted);">Click to change. Press new key combination, then release.</div>
     </div>
@@ -106,7 +106,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
       </div>
       <div class="setting-row">
         <span class="label">Updates</span>
-        <button class="btn btn-secondary" id="check-updates-btn">Check for updates</button>
+        <button class="btn btn-secondary" id="btn-check-updates">Check for updates</button>
       </div>
       <div class="value" id="updates-status" style="padding: 4px 16px; font-size: 11px; color: var(--text-muted);">Last checked: never.</div>
     </div>
@@ -183,7 +183,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     }
   });
 
-  const shortcutBtn = container.querySelector<HTMLButtonElement>("#shortcut-btn")!;
+  const shortcutBtn = container.querySelector<HTMLButtonElement>("#btn-shortcut")!;
   const shortcutHint = container.querySelector<HTMLElement>("#shortcut-hint")!;
   let recording = false;
 
@@ -215,7 +215,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
       }
     });
 
-  function showStatus(text: string, kind: "warning" | "error" | "ok") {
+  function renderStatus(text: string, kind: "warning" | "error" | "ok") {
     outputStatus.style.display = "block";
     outputStatus.textContent = text;
     outputStatus.style.color =
@@ -235,7 +235,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
       if (destroyed) return;
       lastOutputDir = value;
       if (warning) {
-        showStatus(warning, "warning");
+        renderStatus(warning, "warning");
       } else {
         clearStatus();
       }
@@ -243,7 +243,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     } catch (e) {
       if (destroyed) return;
       const msg = e instanceof Error ? e.message : String(e);
-      showStatus(msg, "error");
+      renderStatus(msg, "error");
       outputDir.value = lastOutputDir;
     }
   }
@@ -290,7 +290,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   });
 
   const versionEl = container.querySelector<HTMLElement>("#app-version")!;
-  const updatesBtn = container.querySelector<HTMLButtonElement>("#check-updates-btn")!;
+  const updatesBtn = container.querySelector<HTMLButtonElement>("#btn-check-updates")!;
   const updatesStatus = container.querySelector<HTMLElement>("#updates-status")!;
 
   void (async () => {

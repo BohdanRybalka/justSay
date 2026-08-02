@@ -140,7 +140,7 @@ export function getCloudKeyStatus(): CloudKeyStatus | null {
 }
 
 
-function paintBackendStatus(reachable: boolean) {
+function renderBackendStatus(reachable: boolean) {
   if (!reachable) {
     backendStatus.textContent = "Backend offline";
     backendStatus.className = "status-indicator offline";
@@ -167,7 +167,7 @@ async function checkBackend() {
   } catch {
     backendReachable = false;
   }
-  paintBackendStatus(backendReachable);
+  renderBackendStatus(backendReachable);
 }
 
 async function initAppVersion() {
@@ -203,7 +203,7 @@ async function init() {
   } catch (e) {
     settingsError = settingsUnavailableMessage(e, backendReachable);
     renderSettingsUnavailable(tabContent);
-    paintBackendStatus(backendReachable);
+    renderBackendStatus(backendReachable);
     console.error("Failed to load settings:", e);
   }
 }

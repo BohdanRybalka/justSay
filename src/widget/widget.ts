@@ -54,7 +54,7 @@ const text = document.getElementById("widget-text")!;
 const durationEl = document.getElementById("widget-duration")!;
 
 
-function updateIcon(next: IconState) {
+function renderIcon(next: IconState) {
   const keep = [...iconEl.classList].filter(
     (c) =>
       c.startsWith("js-widget--") &&
@@ -86,25 +86,25 @@ function setState(newState: WidgetState, message?: string, durationLabel?: strin
     case "idle":
       text.textContent = "JustSay";
       durationEl.textContent = "";
-      updateIcon(isHovered ? "hover" : "idle");
+      renderIcon(isHovered ? "hover" : "idle");
       break;
     case "recording":
       text.textContent = "Recording";
       startDurationTimer();
-      updateIcon("recording");
+      renderIcon("recording");
       break;
     case "processing":
       text.textContent = "Processing";
       durationEl.textContent = "";
-      updateIcon("processing");
+      renderIcon("processing");
       break;
     case "done":
       text.textContent = message || "Done";
       durationEl.textContent = durationLabel || "";
-      updateIcon("done");
+      renderIcon("done");
       iconFlashTimer = setTimeout(() => {
         iconFlashTimer = null;
-        if (state === "done") updateIcon(isHovered ? "hover" : "idle");
+        if (state === "done") renderIcon(isHovered ? "hover" : "idle");
       }, 700);
       setTimeout(() => {
         if (state === "done") setState("idle");
@@ -113,7 +113,7 @@ function setState(newState: WidgetState, message?: string, durationLabel?: strin
     case "error":
       text.textContent = message || "Error";
       durationEl.textContent = "";
-      updateIcon("error");
+      renderIcon("error");
       setTimeout(() => {
         if (state === "error") setState("idle");
       }, AUTO_REVERT_MS);
@@ -161,7 +161,7 @@ async function stopAndProcess() {
     if (outcome) {
       setState("done", outcome.label, formatStopwatch(outcome.elapsedSeconds));
       if (result.discarded_reason !== "silence") {
-        showRouteBadge(result);
+        renderRouteBadge(result);
       }
     } else {
       setState("idle");
@@ -176,7 +176,7 @@ async function stopAndProcess() {
   }
 }
 
-function showRouteBadge(result: { model_name?: string; duration_ms: number; fallback_reason?: string | null }) {
+function renderRouteBadge(result: { model_name?: string; duration_ms: number; fallback_reason?: string | null }) {
   const badge = document.getElementById("widget-route");
   if (!badge) return;
 
@@ -200,7 +200,7 @@ let meetingBusy = false;
 
 const MEETING_TICK_MS = 500;
 
-function paintMeetingIndicator() {
+function renderMeetingIndicatorFromState() {
   renderMeetingIndicator(widget, durationEl, {
     active: meetingActive,
     elapsedSeconds: (Date.now() - meetingStartedAt) / 1000,
@@ -210,8 +210,8 @@ function paintMeetingIndicator() {
 function beginMeetingIndicator(startedAt = Date.now()) {
   meetingActive = true;
   meetingStartedAt = startedAt;
-  paintMeetingIndicator();
-  meetingTimer = setInterval(paintMeetingIndicator, MEETING_TICK_MS);
+  renderMeetingIndicatorFromState();
+  meetingTimer = setInterval(renderMeetingIndicatorFromState, MEETING_TICK_MS);
 }
 
 function endMeetingIndicator() {
@@ -220,7 +220,7 @@ function endMeetingIndicator() {
     clearInterval(meetingTimer);
     meetingTimer = null;
   }
-  paintMeetingIndicator();
+  renderMeetingIndicatorFromState();
 }
 
 async function invokeShell(command: string, args?: Record<string, unknown>) {
@@ -291,12 +291,12 @@ widget.addEventListener("click", () => {
 
 widget.addEventListener("mouseenter", () => {
   isHovered = true;
-  if (isInteractive()) updateIcon("hover");
+  if (isInteractive()) renderIcon("hover");
 });
 
 widget.addEventListener("mouseleave", () => {
   isHovered = false;
-  if (isInteractive()) updateIcon("idle");
+  if (isInteractive()) renderIcon("idle");
 });
 
 
