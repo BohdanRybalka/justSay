@@ -101,11 +101,11 @@ export function renderWords(container: HTMLElement): () => void {
       const top = await fetchTop();
       if (cancelled) return;
 
-      setText("words-stat-today", stats.today_words.toLocaleString("uk-UA"));
-      setText("words-stat-week", stats.week_words.toLocaleString("uk-UA"));
-      setText("words-stat-lifetime", stats.total_words.toLocaleString("uk-UA"));
-      setText("words-stat-audio", formatCoarseDuration(stats.total_audio_seconds));
-      setText("words-stat-entries", stats.total_entries.toLocaleString("uk-UA"));
+      renderText("words-stat-today", stats.today_words.toLocaleString("uk-UA"));
+      renderText("words-stat-week", stats.week_words.toLocaleString("uk-UA"));
+      renderText("words-stat-lifetime", stats.total_words.toLocaleString("uk-UA"));
+      renderText("words-stat-audio", formatCoarseDuration(stats.total_audio_seconds));
+      renderText("words-stat-entries", stats.total_entries.toLocaleString("uk-UA"));
 
       if (top) {
         const topEl = document.getElementById("words-top");
@@ -126,7 +126,7 @@ export function renderWords(container: HTMLElement): () => void {
     }
   }
 
-  function setText(id: string, value: string) {
+  function renderText(id: string, value: string) {
     const el = document.getElementById(id);
     if (el) el.textContent = value;
   }

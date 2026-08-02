@@ -23,7 +23,7 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
         </div>
         <div class="dropzone-title">Drop audio here</div>
         <div class="dropzone-sub">
-          or <button type="button" class="link-btn" id="pick-btn">choose a file</button>
+          or <button type="button" class="link-btn" id="btn-pick">choose a file</button>
           — wav · mp3 · m4a · mp4 · ogg · flac · webm · aac · opus · aiff · wma (≤ ${MAX_MB} MB)
         </div>
         <input type="file" id="file-input" accept="${ACCEPT_ATTR}" hidden />
@@ -36,8 +36,8 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
         <div class="result-status" id="result-status"></div>
         <div class="result-text" id="result-text"></div>
         <div class="result-actions">
-          <button class="btn btn-secondary btn-sm" id="copy-btn">Copy</button>
-          <button class="btn btn-secondary btn-sm" id="reset-btn">Clear</button>
+          <button class="btn btn-secondary btn-sm" id="btn-copy">Copy</button>
+          <button class="btn btn-secondary btn-sm" id="btn-reset">Clear</button>
         </div>
       </div>
     </div>
@@ -45,12 +45,12 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
 
   const dropzone = container.querySelector<HTMLDivElement>("#dropzone")!;
   const fileInput = container.querySelector<HTMLInputElement>("#file-input")!;
-  const pickBtn = container.querySelector<HTMLButtonElement>("#pick-btn")!;
+  const pickBtn = container.querySelector<HTMLButtonElement>("#btn-pick")!;
   const resultGroup = container.querySelector<HTMLElement>("#result-group")!;
   const resultStatus = container.querySelector<HTMLElement>("#result-status")!;
   const resultText = container.querySelector<HTMLElement>("#result-text")!;
-  const copyBtn = container.querySelector<HTMLButtonElement>("#copy-btn")!;
-  const resetBtn = container.querySelector<HTMLButtonElement>("#reset-btn")!;
+  const copyBtn = container.querySelector<HTMLButtonElement>("#btn-copy")!;
+  const resetBtn = container.querySelector<HTMLButtonElement>("#btn-reset")!;
 
   let busy = false;
 
@@ -98,7 +98,7 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
       await handleFile(file);
     } else {
       const path = e.dataTransfer?.getData("text/plain");
-      if (path) showError("Drag-drop received a path instead of a file. Use the picker instead.");
+      if (path) renderError("Drag-drop received a path instead of a file. Use the picker instead.");
     }
   });
 
@@ -128,11 +128,11 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
     }
   });
   resetBtn.addEventListener("click", () => {
-    setUiState("idle");
+    renderUiState("idle");
     resultGroup.style.display = "none";
   });
 
-  function setUiState(state: TranscribeUiState, message?: string) {
+  function renderUiState(state: TranscribeUiState, message?: string) {
     dropzone.classList.toggle("busy", state === "loading" || state === "transcribing");
     busy = state === "loading" || state === "transcribing";
 
@@ -164,30 +164,30 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
     }
   }
 
-  function showError(msg: string) {
-    setUiState("error", msg);
+  function renderError(msg: string) {
+    renderUiState("error", msg);
   }
 
   async function handleFile(file: File) {
     if (!validateExtension(file.name)) {
-      showError(`Unsupported format: ${file.name.split(".").pop()}`);
+      renderError(`Unsupported format: ${file.name.split(".").pop()}`);
       return;
     }
     if (file.size === 0) {
-      showError("Empty file");
+      renderError("Empty file");
       return;
     }
     if (file.size > MAX_UPLOAD_BYTES) {
-      showError(`File too large (${(file.size / BYTES_PER_MB).toFixed(1)} MB > ${MAX_MB} MB limit)`);
+      renderError(`File too large (${(file.size / BYTES_PER_MB).toFixed(1)} MB > ${MAX_MB} MB limit)`);
       return;
     }
 
-    setUiState("loading", `Reading ${file.name} (${(file.size / BYTES_PER_MB).toFixed(1)} MB)...`);
+    renderUiState("loading", `Reading ${file.name} (${(file.size / BYTES_PER_MB).toFixed(1)} MB)...`);
     let buf: ArrayBuffer;
     try {
       buf = await file.arrayBuffer();
     } catch (e) {
-      showError(`Failed to read file: ${(e as Error).message}`);
+      renderError(`Failed to read file: ${(e as Error).message}`);
       return;
     }
 
@@ -197,10 +197,10 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
   async function handlePath(absolutePath: string) {
     const filename = absolutePath.split(/[\\/]/).pop() || "audio";
     if (!validateExtension(filename)) {
-      showError(`Unsupported format: ${filename.split(".").pop()}`);
+      renderError(`Unsupported format: ${filename.split(".").pop()}`);
       return;
     }
-    setUiState("loading", `Reading ${filename}...`);
+    renderUiState("loading", `Reading ${filename}...`);
 
     let bytes: Uint8Array;
     try {
@@ -208,11 +208,11 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
       const fs: any = await import(/* @vite-ignore */ "@tauri-apps/plugin-fs");
       bytes = await fs.readFile(absolutePath);
     } catch (e) {
-      showError(`Cannot read file from disk: ${(e as Error).message}`);
+      renderError(`Cannot read file from disk: ${(e as Error).message}`);
       return;
     }
     if (bytes.byteLength > MAX_UPLOAD_BYTES) {
-      showError(`File too large (${(bytes.byteLength / BYTES_PER_MB).toFixed(1)} MB > ${MAX_MB} MB limit)`);
+      renderError(`File too large (${(bytes.byteLength / BYTES_PER_MB).toFixed(1)} MB > ${MAX_MB} MB limit)`);
       return;
     }
     const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
@@ -220,16 +220,16 @@ export function renderTranscribe(container: HTMLElement, settings: UserSettings)
   }
 
   async function transcribe(bytes: ArrayBuffer, filename: string) {
-    setUiState("transcribing", `Transcribing ${filename}...`);
+    renderUiState("transcribing", `Transcribing ${filename}...`);
     try {
       const result: DictateResponse = await api.processFile(bytes, filename);
       const text = result.text || "";
       resultText.textContent = text || "(empty result)";
       const seconds = (result.duration_ms / 1000).toFixed(2);
       const copied = result.copied_to_clipboard ? " · copied to clipboard" : "";
-      setUiState("done", `Done in ${seconds}s${copied}`);
+      renderUiState("done", `Done in ${seconds}s${copied}`);
     } catch (e) {
-      showError((e as Error).message);
+      renderError((e as Error).message);
     }
   }
 

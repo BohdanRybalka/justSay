@@ -151,16 +151,16 @@ describe("a shortcut the widget stored while this window was open", () => {
     const settingsModule = await import("./settings");
 
     await vi.waitFor(() => {
-      expect(document.getElementById("shortcut-btn")).not.toBeNull();
+      expect(document.getElementById("btn-shortcut")).not.toBeNull();
     });
-    expect(document.getElementById("shortcut-btn")!.textContent).toBe("Ctrl + Alt + V");
+    expect(document.getElementById("btn-shortcut")!.textContent).toBe("Ctrl + Alt + V");
 
     settingsModule.cachePersistedShortcut("Ctrl+Alt+KeyB");
 
     document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.click();
     document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="general"]')!.click();
 
-    expect(document.getElementById("shortcut-btn")!.textContent).toBe("Ctrl + Alt + B");
+    expect(document.getElementById("btn-shortcut")!.textContent).toBe("Ctrl + Alt + B");
     expect(settingsModule.getSettings()!.shortcut).toBe("Ctrl+Alt+KeyB");
     expect(apiMock.getSettings).toHaveBeenCalledTimes(1);
   });

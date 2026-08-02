@@ -134,7 +134,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
   }
 
   function capture(container: HTMLElement, init: KeyboardEventInit) {
-    container.querySelector<HTMLButtonElement>("#shortcut-btn")!.click();
+    container.querySelector<HTMLButtonElement>("#btn-shortcut")!.click();
     document.dispatchEvent(new KeyboardEvent("keydown", init));
   }
 
@@ -146,7 +146,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
     const container = document.createElement("div");
     renderGeneral(container, buildSettings());
 
-    expect(container.querySelector("#shortcut-btn")!.textContent).toBe("Ctrl + Alt + V");
+    expect(container.querySelector("#btn-shortcut")!.textContent).toBe("Ctrl + Alt + V");
   });
 
   it("labels the button with Apple glyphs on a Mac navigator", () => {
@@ -154,7 +154,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
       const container = document.createElement("div");
       renderGeneral(container, buildSettings({ shortcut: "Super+Alt+KeyV" }));
 
-      expect(container.querySelector("#shortcut-btn")!.textContent).toBe("⌥⌘V");
+      expect(container.querySelector("#btn-shortcut")!.textContent).toBe("⌥⌘V");
     });
   });
 
@@ -194,7 +194,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
       expect(notifyErrorMock).toHaveBeenCalledWith("bridge down");
     });
     expect(hintOf(container).textContent).toBe("Could not apply the shortcut: bridge down");
-    expect(container.querySelector("#shortcut-btn")!.textContent).toBe("Ctrl + Alt + V");
+    expect(container.querySelector("#btn-shortcut")!.textContent).toBe("Ctrl + Alt + V");
   });
 
   it("names the host platform's modifiers when none was held", () => {
@@ -243,7 +243,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
     renderGeneral(container, buildSettings());
     capture(container, { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
 
-    expect(container.querySelector("#shortcut-btn")!.textContent).toBe("Ctrl + Alt + B");
+    expect(container.querySelector("#btn-shortcut")!.textContent).toBe("Ctrl + Alt + B");
     await vi.waitFor(() => {
       expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
     });
@@ -258,7 +258,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
       },
     });
 
-    expect(container.querySelector("#shortcut-btn")!.textContent).toBe("Ctrl + Alt + V");
+    expect(container.querySelector("#btn-shortcut")!.textContent).toBe("Ctrl + Alt + V");
   });
 
   it("says the shortcut is live but unsaved when the widget could not store it", async () => {
@@ -343,7 +343,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
 
     const container = document.createElement("div");
     const destroy = renderGeneral(container, buildSettings());
-    container.querySelector<HTMLButtonElement>("#shortcut-btn")!.click();
+    container.querySelector<HTMLButtonElement>("#btn-shortcut")!.click();
 
     const added = addSpy.mock.calls.filter(([type]) => type === "keydown");
     expect(added).toHaveLength(1);
@@ -364,7 +364,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
 
     const container = document.createElement("div");
     const destroy = renderGeneral(container, buildSettings());
-    container.querySelector<HTMLButtonElement>("#shortcut-btn")!.click();
+    container.querySelector<HTMLButtonElement>("#btn-shortcut")!.click();
 
     const registered = addSpy.mock.calls.find(([type]) => type === "keydown")!;
     const handler = registered[1] as (event: KeyboardEvent) => void;
@@ -375,14 +375,14 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(emitMock).not.toHaveBeenCalled();
-    expect(container.querySelector("#shortcut-btn")!.textContent).toBe("Press keys...");
+    expect(container.querySelector("#btn-shortcut")!.textContent).toBe("Press keys...");
   });
 
   it("an abandoned capture leaves no keydown handler behind after destroy", async () => {
     const container = document.createElement("div");
     const destroy = renderGeneral(container, buildSettings());
 
-    container.querySelector<HTMLButtonElement>("#shortcut-btn")!.click();
+    container.querySelector<HTMLButtonElement>("#btn-shortcut")!.click();
     destroy();
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "f", code: "KeyF", ctrlKey: true }));
     await new Promise((resolve) => setTimeout(resolve, 0));
