@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { UserSettings } from "../../api";
 import { MAX_UPLOAD_BYTES } from "../../contracts";
 
 const apiMock = {
@@ -30,11 +29,9 @@ const { renderTranscribe } = await import("./transcribe");
 
 const writeText = vi.fn();
 
-const UNREAD_SETTINGS = {} as UserSettings;
-
 function render(): { container: HTMLElement; teardown: () => void } {
   const container = document.createElement("div");
-  const teardown = renderTranscribe(container, UNREAD_SETTINGS);
+  const teardown = renderTranscribe(container);
   return { container, teardown };
 }
 

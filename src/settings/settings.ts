@@ -32,7 +32,7 @@ const backendStatus = document.getElementById("backend-status")!;
 const tabs: Record<string, (container: HTMLElement, settings: UserSettings) => (() => void) | void> = {
   general: renderGeneral,
   models: renderModels,
-  transcribe: renderTranscribe,
+  transcribe: (container) => renderTranscribe(container),
   history: (container) => renderHistory(container),
   metrics: (container) => renderMetrics(container),
   words: (container) => renderWords(container),

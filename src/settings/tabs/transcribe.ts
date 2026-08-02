@@ -1,4 +1,4 @@
-import { api, type DictateResponse, type UserSettings } from "../../api";
+import { api, type DictateResponse } from "../../api";
 import { ACCEPTED_AUDIO_EXTENSIONS, MAX_UPLOAD_BYTES } from "../../contracts";
 
 const ACCEPT_ATTR = ACCEPTED_AUDIO_EXTENSIONS.join(",");
@@ -7,7 +7,7 @@ const MAX_MB = MAX_UPLOAD_BYTES / BYTES_PER_MB;
 
 type TranscribeUiState = "idle" | "loading" | "transcribing" | "done" | "error";
 
-export function renderTranscribe(container: HTMLElement, settings: UserSettings): () => void {
+export function renderTranscribe(container: HTMLElement): () => void {
   container.innerHTML = `
     <h2 class="tab-title">Transcribe File</h2>
 
