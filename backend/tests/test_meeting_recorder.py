@@ -8,6 +8,7 @@ block-handling logic is exercised against a fake module injected into
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 import time
@@ -846,3 +847,36 @@ async def test_meeting_start_501_carries_the_device_reason(client):
     assert resp.status_code == 501
     assert "default render endpoint" in resp.json()["detail"]
     assert "requires Windows or macOS" not in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_meeting_stop_leaves_the_event_loop_free(
+    audio_settings, fake_system_source, fake_microphone_stream
+):
+    """JS-81: two resamples, a mix and a wave write must not run on the loop.
+
+    This is the headline case -- a 45-minute call is ~86 MB written with every
+    other endpoint blocked behind it, including `/health` and the meeting
+    status the widget polls twice a second. Asserted by having a competing
+    coroutine tick while `stop()` is awaited; inline work starves it to zero.
+    """
+    recorder = MeetingRecorder(audio_settings)
+    await recorder.start()
+    _feed_microphone(recorder, 40)
+    for i in range(40):
+        fake_system_source.deliver(recorder._start_time + i * BLOCK_FRAMES / 48000)
+
+    ticks = 0
+
+    async def competitor():
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    race = asyncio.ensure_future(competitor())
+    audio_path = await recorder.stop()
+    race.cancel()
+
+    assert audio_path.exists()
+    assert ticks > 0
