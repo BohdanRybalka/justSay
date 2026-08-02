@@ -84,7 +84,7 @@ export function renderHistory(container: HTMLElement): () => void {
     searchHint.textContent = "Searching...";
     try {
       const resp = await api.searchHistory(q, PAGE_SIZE);
-      if (seq !== searchSeq) return;
+      if (destroyed || seq !== searchSeq) return;
       listEl.innerHTML = "";
       list.renderCount(`${resp.total} match${resp.total !== 1 ? "es" : ""}`);
       if (resp.entries.length === 0) {
@@ -96,7 +96,7 @@ export function renderHistory(container: HTMLElement): () => void {
       list.renderLoadMore(false);
       searchHint.textContent = "";
     } catch (e) {
-      if (seq !== searchSeq) return;
+      if (destroyed || seq !== searchSeq) return;
       const msg = (e as Error).message || "Search failed";
       const lower = msg.toLowerCase();
       const sidecarTooOld =

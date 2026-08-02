@@ -126,6 +126,38 @@ describe("renderHistory — teardown", () => {
     expect(container.querySelector("#history-count")!.textContent).toBe(before);
     expect(container.querySelectorAll(".history-entry")).toHaveLength(0);
   });
+
+  it("a search resolving after teardown writes nothing", async () => {
+    let release: (value: { entries: HistoryEntry[]; total: number }) => void = () => {};
+    apiMock.searchHistory.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      })
+    );
+    const entries = [buildEntry("1"), buildEntry("2")];
+    apiMock.getHistory.mockResolvedValue({ entries, total: 2 });
+    const container = document.createElement("div");
+    const teardown = renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
+    });
+
+    const search = container.querySelector<HTMLInputElement>("#history-search")!;
+    search.value = "hello";
+    search.dispatchEvent(new Event("input"));
+    await vi.waitFor(() => {
+      expect(apiMock.searchHistory).toHaveBeenCalledTimes(1);
+    });
+
+    const countBefore = container.querySelector("#history-count")!.textContent;
+    teardown();
+    release({ entries: [buildEntry("9")], total: 1 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(container.querySelector("#history-count")!.textContent).toBe(countBefore);
+    expect(container.querySelectorAll(".history-entry")).toHaveLength(2);
+  });
 });
 
 describe("renderHistory — Clear All asks before deleting everything", () => {
