@@ -11,11 +11,19 @@ vi.mock("../../api", () => ({
   api: apiMock,
 }));
 
+type ShellDragDropListener = (event: { payload: { type: string; paths?: string[] } }) => void;
+
 const unlisten = vi.fn();
-const onDragDropEvent = vi.fn(async () => unlisten);
+const onDragDropEvent = vi.fn(async (listener: ShellDragDropListener) => unlisten);
 
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({ onDragDropEvent }),
+}));
+
+const readFile = vi.fn();
+
+vi.mock("@tauri-apps/plugin-fs", () => ({
+  readFile,
 }));
 
 const { renderTranscribe } = await import("./transcribe");
@@ -231,5 +239,57 @@ describe("renderTranscribe — the drop zone", () => {
     teardown();
 
     expect(unlisten).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("renderTranscribe — a file dropped onto the shell rather than the page", () => {
+  async function dropPath(absolutePath: string): Promise<void> {
+    await vi.waitFor(() => {
+      expect(onDragDropEvent).toHaveBeenCalledTimes(1);
+    });
+    const listener = onDragDropEvent.mock.calls[0][0];
+    listener({ payload: { type: "drop", paths: [absolutePath] } });
+  }
+
+  it("the file is read from disk and sent under the name the path ends with", async () => {
+    readFile.mockResolvedValue(new Uint8Array([1, 2, 3, 4]));
+    apiMock.processFile.mockResolvedValue({
+      text: "from disk",
+      duration_ms: 2000,
+      copied_to_clipboard: false,
+    });
+    const { container } = render();
+
+    await dropPath("C:\\Users\\me\\Recordings\\meeting.wav");
+
+    await vi.waitFor(() => {
+      expect(resultText(container).textContent).toBe("from disk");
+    });
+    expect(apiMock.processFile).toHaveBeenCalledTimes(1);
+    expect(apiMock.processFile.mock.calls[0][1]).toBe("meeting.wav");
+  });
+
+  it("an extension the backend does not accept is refused without reading the disk", async () => {
+    const { container } = render();
+
+    await dropPath("/home/me/notes.txt");
+
+    await vi.waitFor(() => {
+      expect(status(container).textContent).toBe("Unsupported format: txt");
+    });
+    expect(readFile).not.toHaveBeenCalled();
+    expect(apiMock.processFile).not.toHaveBeenCalled();
+  });
+
+  it("a disk that refuses the read says so instead of failing silently", async () => {
+    readFile.mockRejectedValue(new Error("Access is denied"));
+    const { container } = render();
+
+    await dropPath("/home/me/locked.wav");
+
+    await vi.waitFor(() => {
+      expect(status(container).textContent).toBe("Cannot read file from disk: Access is denied");
+    });
+    expect(apiMock.processFile).not.toHaveBeenCalled();
   });
 });
