@@ -27,4 +27,12 @@ describe("the widget markup the indicator and dictation share", () => {
 
     expect(meeting).not.toBe(dictation);
   });
+
+  it("keeps the meeting readout inside the root the indicator is handed", () => {
+    const document = widgetMarkup();
+
+    const root = document.getElementById("widget")!;
+
+    expect(root.querySelector(`#${MEETING_DURATION_ID}`)).not.toBeNull();
+  });
 });

@@ -32,7 +32,14 @@ export function renderMeetingIndicator(root: HTMLElement, state: MeetingIndicato
 
   if (state.active) {
     root.classList.add(MEETING_STATE_CLASS);
-    if (readout) readout.textContent = formatElapsedClock(state.elapsedSeconds);
+    if (!readout) {
+      console.error(
+        `The meeting recording indicator has no #${MEETING_DURATION_ID} to write to, so the ` +
+          "elapsed time ADR 040 obligation 2 requires is not being shown."
+      );
+      return;
+    }
+    readout.textContent = formatElapsedClock(state.elapsedSeconds);
     return;
   }
   root.classList.remove(MEETING_STATE_CLASS);

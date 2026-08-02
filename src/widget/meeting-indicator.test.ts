@@ -88,9 +88,19 @@ describe("the meeting recording indicator (ADR 040 obligation 2)", () => {
     expect(dictation.textContent).toBe("0:07");
   });
 
-  it("does not throw when the root has no readout of its own", () => {
+  it("says so rather than going quiet when its readout is missing", () => {
     const root = document.createElement("div");
+    const reported: unknown[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => reported.push(args);
 
-    expect(() => renderMeetingIndicator(root, { active: true, elapsedSeconds: 1 })).not.toThrow();
+    try {
+      expect(() => renderMeetingIndicator(root, { active: true, elapsedSeconds: 1 })).not.toThrow();
+    } finally {
+      console.error = original;
+    }
+
+    expect(reported).toHaveLength(1);
+    expect(root.classList.contains(MEETING_STATE_CLASS)).toBe(true);
   });
 });
