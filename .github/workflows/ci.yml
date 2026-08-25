@@ -141,3 +141,14 @@ jobs:
 
       - name: Run backend tests (pytest, not slow)
         run: npm run test -- -m "not slow"
+
+      # Order-independence gate (JS-96). The suite was green only because
+      # alphabetical collection happened to put test_api.py after
+      # test_data_isolation.py, whose TestClient(app) lifespan populates
+      # app.state.recorder; renaming any test file would have turned master red.
+      # pytest-randomly is pinned OFF by default in pyproject.toml so the run
+      # above stays deterministic and so does everyone's local run -- it is
+      # re-enabled here only, and the seed it picks is printed in the header of
+      # this step's log, which is what makes a failure here reproducible.
+      - name: Run backend tests in a randomised order
+        run: cd backend && python -m pytest tests/ -q -m "not slow" -p randomly

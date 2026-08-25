@@ -375,6 +375,40 @@ def _clear_dependency_overrides():
     app.dependency_overrides.clear()
 
 
+def assert_module_binds_no_third_party(module_name: str, forbidden: tuple[str, ...]) -> None:
+    """Import `module_name` in a fresh interpreter and assert none of
+    `forbidden` ended up bound in its namespace.
+
+    A subprocess rather than `del sys.modules[...]` plus a re-import. That
+    in-process trick binds a NEW module object, and restoring only the
+    `sys.modules` entry is worse than leaving it: the parent package's
+    attribute still points at the replacement, so a `monkeypatch.setattr`
+    given a dotted path patches one object while a
+    `from app.x.y import z` inside the code under test reads the other.
+    That is what made four local-STT tests resolve the real,
+    unpatched provider routing -- whisper.cpp on this AMD dev box instead of
+    the faster-whisper the fixture pins -- and it is why this check touches
+    no global state at all.
+
+    A fresh interpreter is also a stricter reading of the question these
+    checks ask, which is whether importing the module on a machine without
+    the optional extras installed would crash.
+    """
+    import subprocess
+    import sys
+
+    checks = " and ".join(f"not hasattr(m, {name!r})" for name in forbidden)
+    result = subprocess.run(
+        [sys.executable, "-c", f"import {module_name} as m; assert {checks}"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"importing {module_name} in a fresh interpreter bound one of {forbidden} "
+        f"at module level:\n{result.stderr}"
+    )
+
+
 _LIFESPAN_APP_STATE_ATTRIBUTES = ("recorder", "meeting_recorder")
 
 

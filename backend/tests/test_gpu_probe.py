@@ -12,6 +12,7 @@ import pytest
 
 from app.core import gpu_probe
 from app.core.gpu_probe import GpuProbeResult, GpuVendor
+from tests.conftest import assert_module_binds_no_third_party
 
 _requires_windows = pytest.mark.skipif(
     sys.platform != "win32",
@@ -30,18 +31,11 @@ def test_module_imports_no_third_party_at_module_level():
     """Importing gpu_probe must not pull in torch or winreg.
 
     Same style as `test_local_factory.py`'s equivalent module-level
-    import-hygiene test.
+    import-hygiene test. Both run the import in a fresh interpreter -- see
+    `assert_module_binds_no_third_party` for why deleting the module from
+    `sys.modules` in-process was worse than not isolating at all.
     """
-    import importlib
-    import sys
-
-    for name in list(sys.modules):
-        if name == "app.core.gpu_probe":
-            del sys.modules[name]
-    importlib.import_module("app.core.gpu_probe")
-    mod = sys.modules["app.core.gpu_probe"]
-    assert not hasattr(mod, "torch")
-    assert not hasattr(mod, "winreg")
+    assert_module_binds_no_third_party("app.core.gpu_probe", ("torch", "winreg"))
 
 
 
