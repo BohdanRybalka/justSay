@@ -148,7 +148,9 @@ jobs:
       # app.state.recorder; renaming any test file would have turned master red.
       # pytest-randomly is pinned OFF by default in pyproject.toml so the run
       # above stays deterministic and so does everyone's local run -- it is
-      # re-enabled here only, and the seed it picks is printed in the header of
-      # this step's log, which is what makes a failure here reproducible.
+      # re-enabled here only. No -q: that suppresses pytest's header, and the
+      # header is where the chosen seed is printed. The first run of this gate
+      # failed without recording its seed for exactly that reason, which made
+      # the failure it caught non-reproducible.
       - name: Run backend tests in a randomised order
-        run: cd backend && python -m pytest tests/ -q -m "not slow" -p randomly
+        run: cd backend && python -m pytest tests/ -m "not slow" -p randomly
