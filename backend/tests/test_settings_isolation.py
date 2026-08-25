@@ -75,12 +75,20 @@ def test_restore_list_covers_every_field_sync_to_runtime_writes():
         child: set(fields)
         for child, fields in RUNTIME_SETTINGS_FIELDS_WRITTEN_BY_SYNC.items()
     }
+    written_not_restored = {
+        child: sorted(fields - restored.get(child, set()))
+        for child, fields in assigned.items()
+        if fields - restored.get(child, set())
+    }
+    restored_not_written = {
+        child: sorted(fields - assigned.get(child, set()))
+        for child, fields in restored.items()
+        if fields - assigned.get(child, set())
+    }
     assert assigned == restored, (
-        "sync_to_runtime writes fields the conftest restore list does not cover "
-        "(or vice versa). Writes but not restored: "
-        f"{ {c: sorted(f - restored.get(c, set())) for c, f in assigned.items() if f - restored.get(c, set())} }. "
-        "Restored but not written: "
-        f"{ {c: sorted(f - assigned.get(c, set())) for c, f in restored.items() if f - assigned.get(c, set())} }"
+        "sync_to_runtime and the conftest restore list disagree. "
+        f"Written but not restored: {written_not_restored}. "
+        f"Restored but not written: {restored_not_written}"
     )
 
 
