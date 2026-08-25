@@ -300,9 +300,59 @@ def _snapshot_real_roots_backstop(_real_app_data_roots):
     )
 
 
+RUNTIME_SETTINGS_FIELDS_WRITTEN_BY_SYNC: dict[str, tuple[str, ...]] = {
+    "stt": (
+        "mode",
+        "whisper_model_size",
+        "whisper_device",
+        "cloud_routing_threshold",
+        "engine",
+        "initial_prompt",
+        "gemini_api_key",
+        "groq_api_key",
+    ),
+    "llm": (
+        "mode",
+        "ollama_model",
+        "ollama_host",
+        "groq_api_key",
+    ),
+}
+
+
+def snapshot_runtime_settings() -> dict[tuple[str, str], object]:
+    """Current value of every field `user_settings.sync_to_runtime()` writes
+    onto the process-wide `settings` object.
+
+    `sync_to_runtime` is the one function that mutates process-global state
+    `monkeypatch` cannot intercept, which is why a test driving it has to
+    restore the values itself -- a constraint
+    `docs/OPTIMISATION-STATUS.md` already records. Keyed by
+    `(child_settings_name, field_name)` so a failing restore names the field.
+    """
+    return {
+        (child, field): getattr(getattr(settings, child), field)
+        for child, fields in RUNTIME_SETTINGS_FIELDS_WRITTEN_BY_SYNC.items()
+        for field in fields
+    }
+
+
+def restore_runtime_settings(snapshot: dict[tuple[str, str], object]) -> None:
+    """Write a `snapshot_runtime_settings()` result back onto `settings`."""
+    for (child, field), value in snapshot.items():
+        setattr(getattr(settings, child), field, value)
+
+
 @pytest.fixture(autouse=True)
 def _reset_settings():
     """Reset settings and provider caches to defaults after each test.
+
+    Restores every field `sync_to_runtime()` writes, not only the two modes.
+    It wrote twelve while this fixture restored two, so ten survived into the
+    next test -- including `initial_prompt`, `whisper_model_size` and both
+    cloud API keys. `test_conftest_settings_isolation.py` pins the field list
+    against `sync_to_runtime`'s own source, so a field added there fails
+    until it is added here.
 
     Also busts `gpu_probe`'s process-lifetime cache (added as part of the
     Spec 018 GitHub-review follow-up fix) so a test that exercises the real,
@@ -310,11 +360,9 @@ def _reset_settings():
     deliberately restores the real `get_local_provider_kind()` path) never
     leaks a cached result into the next test.
     """
-    original_stt_mode = settings.stt.mode
-    original_llm_mode = settings.llm.mode
+    snapshot = snapshot_runtime_settings()
     yield
-    settings.stt.mode = original_stt_mode
-    settings.llm.mode = original_llm_mode
+    restore_runtime_settings(snapshot)
     clear_stt_cache()
     clear_gpu_probe_cache()
 
@@ -325,6 +373,33 @@ def _clear_dependency_overrides():
     one test can never leak into the next."""
     yield
     app.dependency_overrides.clear()
+
+
+_LIFESPAN_APP_STATE_ATTRIBUTES = ("recorder", "meeting_recorder")
+
+
+@pytest.fixture(autouse=True)
+def _clear_lifespan_app_state():
+    """Remove the app.state attributes `main.lifespan()` creates, so a test
+    that ran the real lifespan cannot leave them set for the next test.
+
+    The `client` fixture's ASGITransport does not run the lifespan, so
+    "unset" is the state every test is written against -- `test_api.py`'s
+    `test_get_recorder_raises_when_app_state_unset` asserts exactly that
+    guard fires. Any test constructing `TestClient(app)` as a context
+    manager (`test_data_isolation.py` does) runs the real lifespan and
+    populates both attributes permanently, because nothing else clears them.
+
+    Before this fixture the suite passed only because alphabetical collection
+    happened to order `test_api.py` after `test_data_isolation.py`; running
+    the two in the other order failed with `DID NOT RAISE`. This is the same
+    class of leak `_clear_dependency_overrides` above and
+    `_no_prewarm_by_default`'s `_prewarm_error` reset already cover.
+    """
+    yield
+    for attribute in _LIFESPAN_APP_STATE_ATTRIBUTES:
+        if hasattr(app.state, attribute):
+            delattr(app.state, attribute)
 
 
 @pytest.fixture(autouse=True)
