@@ -701,22 +701,17 @@ def _reset_prewarm_state():
     """Every test in this module runs against a clean `_prewarm_error` latch,
     regardless of what backend/tests/conftest.py's autouse fixture does.
 
-    Also rebinds `_prewarm_lock` to a fresh `asyncio.Lock()` before each test.
-    pytest-asyncio gives every test function its own event loop, but a plain
-    `asyncio.Lock()` only binds itself to *a* loop lazily, on its first
-    genuinely-contended `acquire()` (the uncontended fast path never touches
-    the loop at all) — so once one test creates real contention on the
-    module-level singleton, it stays bound to that test's (now-closed) loop
-    forever, and the next test that also contends the same lock in its own
-    (different) loop blows up with "bound to a different event loop". A
-    fresh Lock per test sidesteps that entirely.
+    `_prewarm_lock` used to be rebound here too, which made this module the one
+    place in the suite safe from the closed-event-loop trap described in
+    `conftest._reset_event_loop_bound_locks`. That is exactly how JS-110 hid:
+    the barrier test in `test_pipeline.py` contends the same singleton and had
+    no such reset. The reset is suite-wide now and this module inherits it.
 
     `_active_load` (Stage 5 GitHub review, PR #34, finding 1) holds an
     `asyncio.Task` -- the same closed-event-loop hazard applies, so it is
     reset to `None` here too, before each test.
     """
     local_setup._prewarm_error = None
-    local_setup._prewarm_lock = asyncio.Lock()
     local_setup._active_load = None
     yield
     local_setup._prewarm_error = None
