@@ -390,6 +390,82 @@ describe("backend unreachable from the first poll", () => {
     consoleError.mockRestore();
   });
 
+  it("a second retry while one is in flight does not start a second load", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    apiMock.health.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    apiMock.getSettings.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    apiMock.cloudKeyStatus.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+    await import("./settings");
+    const tabContent = document.getElementById("tab-content")!;
+
+    await vi.waitFor(() => {
+      expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(
+        false,
+      );
+    });
+
+    apiMock.health.mockResolvedValue({
+      status: "ok",
+      version: "0.0.0",
+      stt_mode: "cloud",
+      llm_mode: "cloud",
+    });
+    let release!: (settings: UserSettings) => void;
+    apiMock.getSettings.mockReturnValue(
+      new Promise<UserSettings>((resolve) => (release = resolve)),
+    );
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: true, groq_key_set: true });
+    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+
+    tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
+    await vi.waitFor(() => {
+      expect(apiMock.getSettings).toHaveBeenCalledTimes(2);
+    });
+
+    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.click();
+    const repainted = tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!;
+    expect(repainted.disabled).toBe(true);
+    repainted.click();
+
+    release(buildSettings());
+    await vi.waitFor(() => {
+      expect(tabContent.textContent).not.toContain("Cannot load settings");
+    });
+    expect(apiMock.getSettings).toHaveBeenCalledTimes(2);
+
+    consoleError.mockRestore();
+  });
+
+  it("a backend that accepts the connection and never answers still offers a way out", async () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    apiMock.health.mockResolvedValue({
+      status: "ok",
+      version: "0.0.0",
+      stt_mode: "cloud",
+      llm_mode: "cloud",
+    });
+    apiMock.getSettings.mockReturnValue(new Promise(() => {}));
+    apiMock.cloudKeyStatus.mockReturnValue(new Promise(() => {}));
+
+    await import("./settings");
+    const tabContent = document.getElementById("tab-content")!;
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tabContent.textContent).toContain("Loading settings");
+    expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(41_000);
+
+    expect(tabContent.textContent).toContain("Cannot load settings");
+    expect(tabContent.textContent).toContain("did not answer within");
+    expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(false);
+
+    vi.useRealTimers();
+    consoleError.mockRestore();
+  });
+
   it("a retry that fails again leaves the button usable rather than stuck", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));

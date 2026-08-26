@@ -43,7 +43,6 @@ let connectionState: ConnectionCheckState = { offline: false, firstCheckDone: fa
 
 let currentShortcut = DEFAULT_SHORTCUT;
 let currentLanguage = "uk";
-let settingsLoaded = false;
 const shortcutPlatform = detectShortcutPlatform(navigator);
 
 const AUTO_REVERT_MS = 3000;
@@ -460,7 +459,6 @@ async function loadSettings() {
     const settings = await api.getSettings();
     currentLanguage = settings.language;
     currentShortcut = settings.shortcut;
-    settingsLoaded = true;
   } catch (e) {
     console.warn("Failed to load settings:", e);
   }
@@ -497,7 +495,6 @@ async function checkConnection() {
 
   if (healthOk) {
     if (state === "idle" && text.textContent === "Offline") text.textContent = "JustSay";
-    if (!settingsLoaded) await loadSettings();
   } else {
     if (state === "idle") text.textContent = "Offline";
     if (result.shouldNotify) notifyError("JustSay backend is unreachable.");
@@ -509,7 +506,7 @@ async function init() {
   await checkConnection();
   setInterval(checkConnection, 5000);
 
-  if (!settingsLoaded) await loadSettings();
+  await loadSettings();
   await listenForSettingsChanges();
   await syncMeetingIndicator();
 

@@ -22,6 +22,9 @@ let cloudStatus: CloudKeyStatus | null = null;
 let destroyFn: (() => void) | null = null;
 let settingsError: string | null = null;
 let backendReachable = true;
+let settingsLoadInFlight = false;
+
+const SETTINGS_LOAD_TIMEOUT_MS = 40_000;
 
 
 const tabContent = document.getElementById("tab-content")!;
@@ -67,6 +70,10 @@ function settingsUnavailableMessage(error: unknown, reachable: boolean): string 
  * the whole app.
  */
 function renderSettingsUnavailable(container: HTMLElement) {
+  if (destroyFn) {
+    destroyFn();
+    destroyFn = null;
+  }
   container.innerHTML = "";
 
   const loading = settingsError === null;
@@ -82,12 +89,12 @@ function renderSettingsUnavailable(container: HTMLElement) {
     : settingsError;
 
   container.append(title, explanation);
-  if (loading) return;
 
   const retry = document.createElement("button");
   retry.className = "btn btn-secondary";
   retry.id = "btn-retry-settings";
   retry.textContent = "Try again";
+  retry.disabled = loading || settingsLoadInFlight;
   retry.addEventListener("click", () => {
     retry.disabled = true;
     retry.textContent = "Retrying…";
@@ -96,18 +103,47 @@ function renderSettingsUnavailable(container: HTMLElement) {
   container.append(retry);
 }
 
+/**
+ * The one place settings are loaded into the window, and the only way back out
+ * of the failure screen.
+ *
+ * Serialized on `settingsLoadInFlight` because the retry button is reachable
+ * from the loading screen too: two overlapping loads could otherwise finish out
+ * of order, and the loser's failure repaint would erase a tab the winner had
+ * already rendered.
+ *
+ * `api.request()` has no timeout, so a backend that accepts the connection and
+ * never answers would leave this pending forever with nothing on screen but
+ * "Loading settings...". The race below turns that hang into the same failure
+ * screen a rejection produces.
+ */
 async function loadSettingsIntoUi(): Promise<void> {
-  await checkBackend();
+  if (settingsLoadInFlight) return;
+  settingsLoadInFlight = true;
   try {
-    await loadSettings();
+    await checkBackend();
+    await withSettingsLoadTimeout(loadSettings());
     settingsError = null;
+    settingsLoadInFlight = false;
     switchTab(currentTab);
   } catch (e) {
     settingsError = settingsUnavailableMessage(e, backendReachable);
+    settingsLoadInFlight = false;
     renderSettingsUnavailable(tabContent);
     renderBackendStatus(backendReachable);
     console.error("Failed to load settings:", e);
   }
+}
+
+function withSettingsLoadTimeout<T>(work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const expiry = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`the backend did not answer within ${SETTINGS_LOAD_TIMEOUT_MS / 1000} seconds`)),
+      SETTINGS_LOAD_TIMEOUT_MS,
+    );
+  });
+  return Promise.race([work, expiry]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
 function switchTab(tabName: string) {

@@ -32,8 +32,12 @@ interface PendingUpdate {
  * The two recognised shapes both mean "the release exists but the manifest is
  * not usable yet", which reads as a broken app unless it is named.
  */
+function describeFailure(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 function describeUpdateCheckFailure(err: unknown): string {
-  const raw = (err as Error).message ?? String(err);
+  const raw = describeFailure(err);
   const lower = raw.toLowerCase();
   if (
     lower.includes("did not respond with a successful status code") ||
@@ -354,11 +358,23 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     updatesStatus.textContent = "Downloading and installing update…";
     try {
       await update.downloadAndInstall();
+    } catch (err) {
+      if (destroyed) return;
+      updatesStatus.textContent = `Install failed: ${describeFailure(err)}`;
+      armUpdatesButton("Retry install");
+      return;
+    }
+
+    try {
       const { relaunch } = await import("@tauri-apps/plugin-process");
       await relaunch();
     } catch (err) {
-      updatesStatus.textContent = `Install failed: ${(err as Error).message ?? err}`;
-      armUpdatesButton("Retry install");
+      if (destroyed) return;
+      pendingUpdate = null;
+      updatesStatus.textContent =
+        `The update is installed. Restarting JustSay failed: ${describeFailure(err)}. ` +
+        "Close and reopen the app to finish.";
+      armUpdatesButton(UPDATES_CHECK_LABEL);
     }
   }
 
@@ -368,6 +384,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     try {
       const { check } = await import("@tauri-apps/plugin-updater");
       const found = await check();
+      if (destroyed) return;
       if (!found) {
         updatesStatus.textContent = "You are up to date.";
         armUpdatesButton(UPDATES_CHECK_LABEL);
@@ -377,6 +394,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
       updatesStatus.textContent = `Update available: ${found.version} (current ${found.currentVersion}).`;
       armUpdatesButton("Install & Restart");
     } catch (err) {
+      if (destroyed) return;
       updatesStatus.textContent = describeUpdateCheckFailure(err);
       armUpdatesButton(UPDATES_CHECK_LABEL);
     }

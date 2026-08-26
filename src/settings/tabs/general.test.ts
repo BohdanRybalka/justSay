@@ -94,7 +94,8 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  listenMock.mockImplementation(async () => unlistenMock);
   apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 });
 
@@ -206,6 +207,44 @@ describe("renderGeneral — the updates button", () => {
     await vi.waitFor(() => {
       expect(checkMock).toHaveBeenCalledTimes(2);
     });
+  });
+
+  it("a relaunch failure does not report the finished install as failed", async () => {
+    const downloadAndInstall = vi.fn(async () => {});
+    checkMock.mockResolvedValue(buildUpdate(downloadAndInstall));
+    relaunchMock.mockRejectedValue(new Error("process:allow-restart denied"));
+    const { button, status } = renderUpdates();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(button.textContent).toBe("Install & Restart");
+    });
+    button.click();
+    await vi.waitFor(() => {
+      expect(button.textContent).toBe("Check for updates");
+    });
+
+    expect(status.textContent).toContain("The update is installed");
+    expect(status.textContent).not.toContain("Install failed");
+    expect(button.disabled).toBe(false);
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(checkMock).toHaveBeenCalledTimes(2);
+    });
+    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it("a check that rejects with a non-Error still re-arms the button", async () => {
+    checkMock.mockRejectedValue(null);
+    const { button } = renderUpdates();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(button.textContent).toBe("Check for updates");
+    });
+
+    expect(button.disabled).toBe(false);
   });
 
   it("the button is usable again after a check that failed", async () => {

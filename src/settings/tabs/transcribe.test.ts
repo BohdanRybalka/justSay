@@ -256,6 +256,28 @@ describe("renderTranscribe — the drop zone", () => {
     });
   });
 
+  it("a transcription already in flight at teardown writes nothing back", async () => {
+    readFile.mockResolvedValue(new Uint8Array([1, 2, 3, 4]));
+    let finish!: (result: unknown) => void;
+    apiMock.processFile.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    const { container, teardown } = render();
+    await vi.waitFor(() => {
+      expect(onDragDropEvent).toHaveBeenCalledTimes(1);
+    });
+    const listener = onDragDropEvent.mock.calls[0][0];
+
+    listener({ payload: { type: "drop", paths: ["/home/me/inflight.wav"] } });
+    await vi.waitFor(() => {
+      expect(apiMock.processFile).toHaveBeenCalledTimes(1);
+    });
+
+    teardown();
+    finish({ text: "landed after teardown", duration_ms: 1000, copied_to_clipboard: true });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(resultText(container).textContent).not.toBe("landed after teardown");
+  });
+
   it("a drop delivered after teardown transcribes nothing", async () => {
     readFile.mockResolvedValue(new Uint8Array([1, 2, 3, 4]));
     apiMock.processFile.mockResolvedValue({
