@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 import tempfile
 
 _SESSION_DATA_DIR = tempfile.mkdtemp(prefix="justsay-pytest-")
@@ -300,9 +301,59 @@ def _snapshot_real_roots_backstop(_real_app_data_roots):
     )
 
 
+RUNTIME_SETTINGS_FIELDS_WRITTEN_BY_SYNC: dict[str, tuple[str, ...]] = {
+    "stt": (
+        "mode",
+        "whisper_model_size",
+        "whisper_device",
+        "cloud_routing_threshold",
+        "engine",
+        "initial_prompt",
+        "gemini_api_key",
+        "groq_api_key",
+    ),
+    "llm": (
+        "mode",
+        "ollama_model",
+        "ollama_host",
+        "groq_api_key",
+    ),
+}
+
+
+def snapshot_runtime_settings() -> dict[tuple[str, str], object]:
+    """Current value of every field `user_settings.sync_to_runtime()` writes
+    onto the process-wide `settings` object.
+
+    `sync_to_runtime` is the one function that mutates process-global state
+    `monkeypatch` cannot intercept, which is why a test driving it has to
+    restore the values itself -- a constraint
+    `docs/OPTIMISATION-STATUS.md` already records. Keyed by
+    `(child_settings_name, field_name)` so a failing restore names the field.
+    """
+    return {
+        (child, field): getattr(getattr(settings, child), field)
+        for child, fields in RUNTIME_SETTINGS_FIELDS_WRITTEN_BY_SYNC.items()
+        for field in fields
+    }
+
+
+def restore_runtime_settings(snapshot: dict[tuple[str, str], object]) -> None:
+    """Write a `snapshot_runtime_settings()` result back onto `settings`."""
+    for (child, field), value in snapshot.items():
+        setattr(getattr(settings, child), field, value)
+
+
 @pytest.fixture(autouse=True)
 def _reset_settings():
     """Reset settings and provider caches to defaults after each test.
+
+    Restores every field `sync_to_runtime()` writes, not only the two modes.
+    It wrote twelve while this fixture restored two, so ten survived into the
+    next test -- including `initial_prompt`, `whisper_model_size` and both
+    cloud API keys. `test_conftest_settings_isolation.py` pins the field list
+    against `sync_to_runtime`'s own source, so a field added there fails
+    until it is added here.
 
     Also busts `gpu_probe`'s process-lifetime cache (added as part of the
     Spec 018 GitHub-review follow-up fix) so a test that exercises the real,
@@ -310,11 +361,9 @@ def _reset_settings():
     deliberately restores the real `get_local_provider_kind()` path) never
     leaks a cached result into the next test.
     """
-    original_stt_mode = settings.stt.mode
-    original_llm_mode = settings.llm.mode
+    snapshot = snapshot_runtime_settings()
     yield
-    settings.stt.mode = original_stt_mode
-    settings.llm.mode = original_llm_mode
+    restore_runtime_settings(snapshot)
     clear_stt_cache()
     clear_gpu_probe_cache()
 
@@ -325,6 +374,67 @@ def _clear_dependency_overrides():
     one test can never leak into the next."""
     yield
     app.dependency_overrides.clear()
+
+
+def assert_module_binds_no_third_party(module_name: str, forbidden: tuple[str, ...]) -> None:
+    """Import `module_name` in a fresh interpreter and assert none of
+    `forbidden` ended up bound in its namespace.
+
+    A subprocess rather than `del sys.modules[...]` plus a re-import. That
+    in-process trick binds a NEW module object, and restoring only the
+    `sys.modules` entry is worse than leaving it: the parent package's
+    attribute still points at the replacement, so a `monkeypatch.setattr`
+    given a dotted path patches one object while a
+    `from app.x.y import z` inside the code under test reads the other.
+    That is what made four local-STT tests resolve the real,
+    unpatched provider routing -- whisper.cpp on this AMD dev box instead of
+    the faster-whisper the fixture pins -- and it is why this check touches
+    no global state at all.
+
+    A fresh interpreter is also a stricter reading of the question these
+    checks ask, which is whether importing the module on a machine without
+    the optional extras installed would crash.
+    """
+    import subprocess
+    import sys
+
+    checks = " and ".join(f"not hasattr(m, {name!r})" for name in forbidden)
+    result = subprocess.run(
+        [sys.executable, "-c", f"import {module_name} as m; assert {checks}"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"importing {module_name} in a fresh interpreter bound one of {forbidden} "
+        f"at module level:\n{result.stderr}"
+    )
+
+
+_LIFESPAN_APP_STATE_ATTRIBUTES = ("recorder", "meeting_recorder")
+
+
+@pytest.fixture(autouse=True)
+def _clear_lifespan_app_state():
+    """Remove the app.state attributes `main.lifespan()` creates, so a test
+    that ran the real lifespan cannot leave them set for the next test.
+
+    The `client` fixture's ASGITransport does not run the lifespan, so
+    "unset" is the state every test is written against -- `test_api.py`'s
+    `test_get_recorder_raises_when_app_state_unset` asserts exactly that
+    guard fires. Any test constructing `TestClient(app)` as a context
+    manager (`test_data_isolation.py` does) runs the real lifespan and
+    populates both attributes permanently, because nothing else clears them.
+
+    Before this fixture the suite passed only because alphabetical collection
+    happened to order `test_api.py` after `test_data_isolation.py`; running
+    the two in the other order failed with `DID NOT RAISE`. This is the same
+    class of leak `_clear_dependency_overrides` above and
+    `_no_prewarm_by_default`'s `_prewarm_error` reset already cover.
+    """
+    yield
+    for attribute in _LIFESPAN_APP_STATE_ATTRIBUTES:
+        if hasattr(app.state, attribute):
+            delattr(app.state, attribute)
 
 
 @pytest.fixture(autouse=True)
@@ -423,6 +533,52 @@ def _no_prewarm_by_default(monkeypatch, request):
     local_setup._prewarm_error = None
     local_setup._active_load = None
     tasks._background_tasks.clear()
+
+
+EVENT_LOOP_BOUND_LOCKS: tuple[tuple[str, str], ...] = (
+    ("app.embeddings", "_local_reprobe_lock"),
+    ("app.stt.local_setup", "_install_lock"),
+    ("app.stt.local_setup", "_prewarm_lock"),
+    ("app.transcripts.vector_store", "_indexer_lock"),
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_event_loop_bound_locks():
+    """Rebind every module-level `asyncio.Lock` in `app/` to a fresh one after
+    each test, suite-wide.
+
+    A plain `asyncio.Lock()` binds itself to an event loop lazily, on its first
+    genuinely contended `acquire()` -- the uncontended fast path returns before
+    `_get_loop()` is ever reached. pytest-asyncio gives every test its own loop,
+    so the first test to contend a module-level lock binds that singleton to a
+    loop closed moments later, and the next test to contend the same lock dies
+    with `RuntimeError: ... is bound to a different event loop`.
+
+    That is not hypothetical. `test_local_setup.py` carried a module-local
+    version of this reset, so its own concurrency tests were safe, while the
+    readiness-barrier test in `test_pipeline.py` contended the same
+    `_prewarm_lock` with no reset of its own. It passed only because
+    `test_local_setup.py` sorts first and happened to leave a fresh, still
+    unbound lock behind it; under a random order it failed on CI (JS-110).
+    Running `test_prewarm_lock_serialises_concurrent_ensure_local_ready` and
+    then the barrier test reproduces it with no seed and no randomisation.
+
+    Rebinding the module attribute is safe because every one of these locks is
+    read as a module global at use time (`async with _prewarm_lock:`, inside
+    the module that defines it) and nothing imports one by value -- so there is
+    no split-object hazard of the kind `tests/test_sys_modules_hygiene.py`
+    exists to prevent.
+
+    `tests/test_event_loop_bound_locks.py` pins `EVENT_LOOP_BOUND_LOCKS`
+    against an AST scan of `app/`, so a lock added there fails the suite until
+    it is listed here.
+    """
+    yield
+    for module_name, attribute in EVENT_LOOP_BOUND_LOCKS:
+        module = sys.modules.get(module_name)
+        if module is not None:
+            setattr(module, attribute, asyncio.Lock())
 
 
 @pytest.fixture(autouse=True)

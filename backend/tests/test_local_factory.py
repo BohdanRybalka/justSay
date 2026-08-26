@@ -221,13 +221,8 @@ def test_factory_module_imports_no_third_party_at_module_level():
     Catches accidental top-level `import faster_whisper` regressions that
     would crash on platforms missing the package.
     """
-    import importlib
-    import sys
+    from tests.conftest import assert_module_binds_no_third_party
 
-    for name in list(sys.modules):
-        if name == "app.stt.local_factory":
-            del sys.modules[name]
-    importlib.import_module("app.stt.local_factory")
-    factory_mod = sys.modules["app.stt.local_factory"]
-    assert not hasattr(factory_mod, "faster_whisper")
-    assert not hasattr(factory_mod, "local_whisper_cpp")
+    assert_module_binds_no_third_party(
+        "app.stt.local_factory", ("faster_whisper", "local_whisper_cpp")
+    )
