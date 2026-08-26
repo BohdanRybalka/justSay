@@ -20,6 +20,8 @@ import { computeDoneStatus } from "./done-status";
 import { dictationErrorLabel } from "./error-label";
 import { MEETING_STATE_CLASS, renderMeetingIndicator } from "./meeting-indicator";
 import { type MeetingToggleActions, runMeetingToggle } from "./meeting-toggle";
+import { createRecordingIntentQueue } from "./recording-intent";
+import { createSettingsRetry } from "./settings-retry";
 
 
 type WidgetState = "idle" | "recording" | "processing" | "done" | "error";
@@ -35,7 +37,6 @@ const ICON_STATE_MODIFIERS: ReadonlySet<IconState> = new Set<IconState>([
 ]);
 
 let state: WidgetState = "idle";
-let isTransitioning = false;
 let isHovered = false;
 let durationInterval: ReturnType<typeof setInterval> | null = null;
 let iconFlashTimer: ReturnType<typeof setTimeout> | null = null;
@@ -133,9 +134,8 @@ function startDurationTimer() {
 
 
 async function startRecording() {
-  if (state === "recording" || state === "processing" || isTransitioning) return;
+  if (state === "recording" || state === "processing") return;
 
-  isTransitioning = true;
   setState("recording");
 
   try {
@@ -144,15 +144,12 @@ async function startRecording() {
     setState("error", "Start failed");
     notifyError("Couldn't start recording — try again.");
     console.error("Start recording failed:", e);
-  } finally {
-    isTransitioning = false;
   }
 }
 
 async function stopAndProcess() {
-  if (state !== "recording" || isTransitioning) return;
+  if (state !== "recording") return;
 
-  isTransitioning = true;
   setState("processing");
 
   try {
@@ -171,10 +168,15 @@ async function stopAndProcess() {
     setState("error", label);
     notifyError(toast);
     console.error("Pipeline failed:", e);
-  } finally {
-    isTransitioning = false;
   }
 }
+
+const recordingIntent = createRecordingIntentQueue({
+  isRecording: () => state === "recording",
+  startRecording,
+  stopRecording: stopAndProcess,
+  reportError: (e) => console.error("Recording transition failed:", e),
+});
 
 function renderRouteBadge(result: { model_name?: string; duration_ms: number; fallback_reason?: string | null }) {
   const badge = document.getElementById("widget-route");
@@ -274,18 +276,9 @@ async function syncMeetingIndicator() {
   }
 }
 
-async function toggleRecording() {
-  if (meetingActive || isTransitioning) return;
-  if (state === "recording") {
-    await stopAndProcess();
-  } else if (state === "idle" || state === "done" || state === "error") {
-    await startRecording();
-  }
-}
-
-
 widget.addEventListener("click", () => {
-  toggleRecording();
+  if (meetingActive) return;
+  void recordingIntent.request("toggle");
 });
 
 
@@ -320,11 +313,7 @@ function errorText(e: unknown): string {
 }
 
 function onShortcutEvent(event: { state: "Pressed" | "Released" }) {
-  if (event.state === "Pressed") {
-    startRecording();
-  } else if (event.state === "Released") {
-    stopAndProcess();
-  }
+  void recordingIntent.request(event.state === "Pressed" ? "start" : "stop");
 }
 
 async function releaseActiveShortcut() {
@@ -454,23 +443,29 @@ async function applyRequestedShortcut(shortcut: string) {
 }
 
 
-async function loadSettings() {
-  try {
-    const settings = await api.getSettings();
+const settingsRetry = createSettingsRetry({
+  now: () => performance.now(),
+  fetchSettings: () => api.getSettings(),
+  applySettings: async (settings) => {
     currentLanguage = settings.language;
     currentShortcut = settings.shortcut;
-  } catch (e) {
-    console.warn("Failed to load settings:", e);
-  }
-  await applyAndReportShortcut(currentShortcut);
-}
+    await applyAndReportShortcut(currentShortcut);
+  },
+  applyFallbackShortcut: () => applyAndReportShortcut(currentShortcut),
+  reportAttemptFailed: (e) => console.warn("Failed to load settings:", e),
+  reportGaveUp: () =>
+    notifyError(
+      "JustSay could not read your settings — the default language and shortcut are in use. " +
+        "Save your settings or restart the app to apply them.",
+    ),
+});
 
 
 async function listenForSettingsChanges() {
   try {
     const { listen } = await import("@tauri-apps/api/event");
     await listen(EVENT_SETTINGS_CHANGED, async () => {
-      await loadSettings();
+      await settingsRetry.load();
     });
     await listen<ShortcutRequested>(EVENT_SHORTCUT_REQUESTED, async ({ payload }) => {
       await applyRequestedShortcut(payload.shortcut);
@@ -495,6 +490,7 @@ async function checkConnection() {
 
   if (healthOk) {
     if (state === "idle" && text.textContent === "Offline") text.textContent = "JustSay";
+    await settingsRetry.retryIfDue();
   } else {
     if (state === "idle") text.textContent = "Offline";
     if (result.shouldNotify) notifyError("JustSay backend is unreachable.");
@@ -506,7 +502,7 @@ async function init() {
   await checkConnection();
   setInterval(checkConnection, 5000);
 
-  await loadSettings();
+  await settingsRetry.load();
   await listenForSettingsChanges();
   await syncMeetingIndicator();
 
