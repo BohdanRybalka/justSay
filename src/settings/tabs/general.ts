@@ -17,6 +17,48 @@ import { escapeHtml, meetingDisclosureHtml } from "../html";
 import { renderKeys } from "./keys";
 import { notifyError } from "../../notify";
 
+const UPDATES_CHECK_LABEL = "Check for updates";
+
+/** The subset of the updater plugin's `Update` this module actually uses. */
+interface PendingUpdate {
+  version: string;
+  currentVersion: string;
+  downloadAndInstall: () => Promise<unknown>;
+}
+
+/**
+ * Turn an updater `check()` rejection into something a user can act on.
+ *
+ * The two recognised shapes both mean "the release exists but the manifest is
+ * not usable yet", which reads as a broken app unless it is named.
+ */
+function describeFailure(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function describeUpdateCheckFailure(err: unknown): string {
+  const raw = describeFailure(err);
+  const lower = raw.toLowerCase();
+  if (
+    lower.includes("did not respond with a successful status code") ||
+    lower.includes("could not fetch a valid release json") ||
+    lower.includes("couldn't fetch a valid release json") ||
+    lower.includes("couldnt fetch a valid release json")
+  ) {
+    return (
+      "Check failed: the release manifest is not published yet. " +
+      "Make sure the latest GitHub release is no longer marked as Draft."
+    );
+  }
+  if (lower.includes("signature") || lower.includes("pubkey")) {
+    return (
+      "Check failed: the release manifest is not signed with the key this " +
+      "build trusts. Re-run the release workflow with TAURI_SIGNING_PRIVATE_KEY set."
+    );
+  }
+  return `Check failed: ${raw}`;
+}
+
 const LANGUAGES = [
   { code: "uk", label: "Ukrainian" },
   { code: "en", label: "English" },
@@ -303,66 +345,67 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   })();
 
   let updatesBusy = false;
-  updatesBtn.addEventListener("click", async () => {
+  let pendingUpdate: PendingUpdate | null = null;
+
+  function armUpdatesButton(label: string) {
+    updatesBtn.textContent = label;
+    updatesBtn.disabled = false;
+    updatesBusy = false;
+  }
+
+  async function installPendingUpdate(update: PendingUpdate) {
+    updatesBtn.textContent = "Installing…";
+    updatesStatus.textContent = "Downloading and installing update…";
+    try {
+      await update.downloadAndInstall();
+    } catch (err) {
+      if (destroyed) return;
+      updatesStatus.textContent = `Install failed: ${describeFailure(err)}`;
+      armUpdatesButton("Retry install");
+      return;
+    }
+
+    try {
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } catch (err) {
+      if (destroyed) return;
+      pendingUpdate = null;
+      updatesStatus.textContent =
+        `The update is installed. Restarting JustSay failed: ${describeFailure(err)}. ` +
+        "Close and reopen the app to finish.";
+      armUpdatesButton(UPDATES_CHECK_LABEL);
+    }
+  }
+
+  async function checkForUpdate() {
+    updatesBtn.textContent = "Checking…";
+    updatesStatus.textContent = "Contacting update server…";
+    try {
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const found = await check();
+      if (destroyed) return;
+      if (!found) {
+        updatesStatus.textContent = "You are up to date.";
+        armUpdatesButton(UPDATES_CHECK_LABEL);
+        return;
+      }
+      pendingUpdate = found;
+      updatesStatus.textContent = `Update available: ${found.version} (current ${found.currentVersion}).`;
+      armUpdatesButton("Install & Restart");
+    } catch (err) {
+      if (destroyed) return;
+      updatesStatus.textContent = describeUpdateCheckFailure(err);
+      armUpdatesButton(UPDATES_CHECK_LABEL);
+    }
+  }
+
+  updatesBtn.addEventListener("click", () => {
     if (updatesBusy) return;
     updatesBusy = true;
     updatesBtn.disabled = true;
-    updatesBtn.textContent = "Checking…";
-    updatesStatus.textContent = "Contacting update server…";
-
-    try {
-      const { check } = await import("@tauri-apps/plugin-updater");
-      const update = await check();
-      if (!update) {
-        updatesStatus.textContent = "You are up to date.";
-        updatesBtn.textContent = "Check for updates";
-        return;
-      }
-      updatesStatus.textContent = `Update available: ${update.version} (current ${update.currentVersion}).`;
-      updatesBtn.textContent = "Install & Restart";
-      updatesBtn.disabled = false;
-      updatesBtn.onclick = async () => {
-        updatesBtn.disabled = true;
-        updatesBtn.textContent = "Installing…";
-        updatesStatus.textContent = "Downloading and installing update…";
-        try {
-          await update.downloadAndInstall();
-          const { relaunch } = await import("@tauri-apps/plugin-process");
-          await relaunch();
-        } catch (err) {
-          updatesStatus.textContent = `Install failed: ${(err as Error).message ?? err}`;
-          updatesBtn.textContent = "Retry install";
-          updatesBtn.disabled = false;
-          updatesBusy = false;
-        }
-      };
-    } catch (err) {
-      const raw = (err as Error).message ?? String(err);
-      const lower = raw.toLowerCase();
-      let friendly = `Check failed: ${raw}`;
-      if (
-        lower.includes("did not respond with a successful status code") ||
-        lower.includes("could not fetch a valid release json") ||
-        lower.includes("couldn't fetch a valid release json") ||
-        lower.includes("couldnt fetch a valid release json")
-      ) {
-        friendly =
-          "Check failed: the release manifest is not published yet. " +
-          "Make sure the latest GitHub release is no longer marked as Draft.";
-      } else if (lower.includes("signature") || lower.includes("pubkey")) {
-        friendly =
-          "Check failed: the release manifest is not signed with the key this " +
-          "build trusts. Re-run the release workflow with TAURI_SIGNING_PRIVATE_KEY set.";
-      }
-      updatesStatus.textContent = friendly;
-      updatesBtn.textContent = "Check for updates";
-    } finally {
-      updatesBusy = false;
-      if (updatesBtn.textContent === "Checking…") {
-        updatesBtn.disabled = false;
-        updatesBtn.textContent = "Check for updates";
-      }
-    }
+    const update = pendingUpdate;
+    void (update ? installPendingUpdate(update) : checkForUpdate());
   });
 
   async function requestShortcut(shortcut: string, revertLabelTo: string) {

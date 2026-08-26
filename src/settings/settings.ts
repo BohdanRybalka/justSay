@@ -22,6 +22,9 @@ let cloudStatus: CloudKeyStatus | null = null;
 let destroyFn: (() => void) | null = null;
 let settingsError: string | null = null;
 let backendReachable = true;
+let settingsLoadInFlight = false;
+
+const SETTINGS_LOAD_TIMEOUT_MS = 40_000;
 
 
 const tabContent = document.getElementById("tab-content")!;
@@ -49,15 +52,28 @@ function bridgeDiagnosisText(diagnosis: BridgeDiagnosis): string {
 
 function settingsUnavailableMessage(error: unknown, reachable: boolean): string {
   if (error instanceof ApiAuthError) {
-    return `JustSay could not authenticate to its own backend, so it is refusing every request (401). Tauri bridge: ${bridgeDiagnosisText(error.diagnosis)}. Restart JustSay to try again.`;
+    return `JustSay could not authenticate to its own backend, so it is refusing every request (401). Tauri bridge: ${bridgeDiagnosisText(error.diagnosis)}.`;
   }
   if (!reachable) {
-    return "The backend was not responding when this window loaded its settings. Make sure it is running, then restart JustSay.";
+    return "The backend was not responding when this window loaded its settings. Make sure it is running, then try again.";
   }
-  return `The backend answered, but loading settings failed: ${error instanceof Error ? error.message : String(error)}. Restart JustSay to try again.`;
+  return `The backend answered, but loading settings failed: ${error instanceof Error ? error.message : String(error)}.`;
 }
 
+/**
+ * The failure screen, with the way out of it.
+ *
+ * `init()` races the sidecar, which the Rust side budgets thirty seconds for,
+ * so this screen is reached on an ordinary cold start. Closing the window does
+ * not reload the webview -- `src-tauri/src/lib.rs` intercepts CloseRequested
+ * and hides it instead -- so without a retry the only recovery is restarting
+ * the whole app.
+ */
 function renderSettingsUnavailable(container: HTMLElement) {
+  if (destroyFn) {
+    destroyFn();
+    destroyFn = null;
+  }
   container.innerHTML = "";
 
   const loading = settingsError === null;
@@ -73,6 +89,61 @@ function renderSettingsUnavailable(container: HTMLElement) {
     : settingsError;
 
   container.append(title, explanation);
+
+  const retry = document.createElement("button");
+  retry.className = "btn btn-secondary";
+  retry.id = "btn-retry-settings";
+  retry.textContent = "Try again";
+  retry.disabled = loading || settingsLoadInFlight;
+  retry.addEventListener("click", () => {
+    retry.disabled = true;
+    retry.textContent = "Retrying…";
+    void loadSettingsIntoUi();
+  });
+  container.append(retry);
+}
+
+/**
+ * The one place settings are loaded into the window, and the only way back out
+ * of the failure screen.
+ *
+ * Serialized on `settingsLoadInFlight` because the retry button is reachable
+ * from the loading screen too: two overlapping loads could otherwise finish out
+ * of order, and the loser's failure repaint would erase a tab the winner had
+ * already rendered.
+ *
+ * `api.request()` has no timeout, so a backend that accepts the connection and
+ * never answers would leave this pending forever with nothing on screen but
+ * "Loading settings...". The race below turns that hang into the same failure
+ * screen a rejection produces.
+ */
+async function loadSettingsIntoUi(): Promise<void> {
+  if (settingsLoadInFlight) return;
+  settingsLoadInFlight = true;
+  try {
+    await checkBackend();
+    await withSettingsLoadTimeout(loadSettings());
+    settingsError = null;
+    settingsLoadInFlight = false;
+    switchTab(currentTab);
+  } catch (e) {
+    settingsError = settingsUnavailableMessage(e, backendReachable);
+    settingsLoadInFlight = false;
+    renderSettingsUnavailable(tabContent);
+    renderBackendStatus(backendReachable);
+    console.error("Failed to load settings:", e);
+  }
+}
+
+function withSettingsLoadTimeout<T>(work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const expiry = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`the backend did not answer within ${SETTINGS_LOAD_TIMEOUT_MS / 1000} seconds`)),
+      SETTINGS_LOAD_TIMEOUT_MS,
+    );
+  });
+  return Promise.race([work, expiry]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
 function switchTab(tabName: string) {
@@ -194,18 +265,8 @@ navButtons.forEach((btn) => {
 async function init() {
   void initAppVersion();
   renderSettingsUnavailable(tabContent);
-  await checkBackend();
   setInterval(checkBackend, 5000);
-  try {
-    await loadSettings();
-    settingsError = null;
-    switchTab(currentTab);
-  } catch (e) {
-    settingsError = settingsUnavailableMessage(e, backendReachable);
-    renderSettingsUnavailable(tabContent);
-    renderBackendStatus(backendReachable);
-    console.error("Failed to load settings:", e);
-  }
+  await loadSettingsIntoUi();
 }
 
 init();

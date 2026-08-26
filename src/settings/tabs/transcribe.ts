@@ -53,6 +53,7 @@ export function renderTranscribe(container: HTMLElement): () => void {
   const resetBtn = container.querySelector<HTMLButtonElement>("#btn-reset")!;
 
   let busy = false;
+  let destroyed = false;
 
   pickBtn.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -108,12 +109,14 @@ export function renderTranscribe(container: HTMLElement): () => void {
       const { getCurrentWebview } = await import("@tauri-apps/api/webview");
       const wv = getCurrentWebview();
       const off = await wv.onDragDropEvent((event) => {
-        if (busy) return;
+        if (destroyed || busy) return;
         if (event.payload.type === "drop" && event.payload.paths?.length) {
           handlePath(event.payload.paths[0]);
         }
       });
-      unlistenDrop = () => { void off(); };
+      const unlisten = () => { void off(); };
+      if (destroyed) unlisten();
+      else unlistenDrop = unlisten;
     } catch {
     }
   })();
@@ -187,9 +190,11 @@ export function renderTranscribe(container: HTMLElement): () => void {
     try {
       buf = await file.arrayBuffer();
     } catch (e) {
+      if (destroyed) return;
       renderError(`Failed to read file: ${(e as Error).message}`);
       return;
     }
+    if (destroyed) return;
 
     await transcribe(buf, file.name);
   }
@@ -208,9 +213,11 @@ export function renderTranscribe(container: HTMLElement): () => void {
       const fs: any = await import(/* @vite-ignore */ "@tauri-apps/plugin-fs");
       bytes = await fs.readFile(absolutePath);
     } catch (e) {
+      if (destroyed) return;
       renderError(`Cannot read file from disk: ${(e as Error).message}`);
       return;
     }
+    if (destroyed) return;
     if (bytes.byteLength > MAX_UPLOAD_BYTES) {
       renderError(`File too large (${(bytes.byteLength / BYTES_PER_MB).toFixed(1)} MB > ${MAX_MB} MB limit)`);
       return;
@@ -220,22 +227,27 @@ export function renderTranscribe(container: HTMLElement): () => void {
   }
 
   async function transcribe(bytes: ArrayBuffer, filename: string) {
+    if (destroyed) return;
     renderUiState("transcribing", `Transcribing ${filename}...`);
     try {
       const result: DictateResponse = await api.processFile(bytes, filename);
+      if (destroyed) return;
       const text = result.text || "";
       resultText.textContent = text || "(empty result)";
       const seconds = (result.duration_ms / 1000).toFixed(2);
       const copied = result.copied_to_clipboard ? " · copied to clipboard" : "";
       renderUiState("done", `Done in ${seconds}s${copied}`);
     } catch (e) {
+      if (destroyed) return;
       renderError((e as Error).message);
     }
   }
 
   return () => {
+    destroyed = true;
     if (unlistenDrop) {
       try { unlistenDrop(); } catch {}
+      unlistenDrop = null;
     }
   };
 }

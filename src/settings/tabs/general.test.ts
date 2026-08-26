@@ -56,6 +56,20 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: listenMock,
 }));
 
+const checkMock = vi.fn();
+vi.mock("@tauri-apps/plugin-updater", () => ({
+  check: checkMock,
+}));
+
+const relaunchMock = vi.fn();
+vi.mock("@tauri-apps/plugin-process", () => ({
+  relaunch: relaunchMock,
+}));
+
+vi.mock("@tauri-apps/api/app", () => ({
+  getVersion: vi.fn(async () => "0.13.0"),
+}));
+
 const { renderGeneral } = await import("./general");
 
 function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
@@ -80,8 +94,176 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  listenMock.mockImplementation(async () => unlistenMock);
   apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+});
+
+describe("renderGeneral — the updates button", () => {
+  function renderUpdates(): {
+    button: HTMLButtonElement;
+    status: HTMLElement;
+  } {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+    return {
+      button: container.querySelector<HTMLButtonElement>("#btn-check-updates")!,
+      status: container.querySelector<HTMLElement>("#updates-status")!,
+    };
+  }
+
+  function buildUpdate(downloadAndInstall = vi.fn(async () => {})) {
+    return { version: "0.14.0", currentVersion: "0.13.0", downloadAndInstall };
+  }
+
+  it("one click on Install & Restart installs once and checks nothing", async () => {
+    const downloadAndInstall = vi.fn(async () => {});
+    checkMock.mockResolvedValue(buildUpdate(downloadAndInstall));
+    const { button } = renderUpdates();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(button.textContent).toBe("Install & Restart");
+    });
+    expect(checkMock).toHaveBeenCalledTimes(1);
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(relaunchMock).toHaveBeenCalledTimes(1);
+    });
+
+    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(checkMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("the button stays disabled for the whole install", async () => {
+    let finishInstall!: () => void;
+    const downloadAndInstall = vi.fn(
+      () => new Promise<void>((resolve) => (finishInstall = resolve)),
+    );
+    checkMock.mockResolvedValue(buildUpdate(downloadAndInstall));
+    const { button } = renderUpdates();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(button.textContent).toBe("Install & Restart");
+    });
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(button.textContent).toBe("Installing…");
+    });
+    expect(button.disabled).toBe(true);
+
+    button.click();
+    finishInstall();
+    await vi.waitFor(() => {
+      expect(relaunchMock).toHaveBeenCalledTimes(1);
+    });
+    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(checkMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed install re-arms the button for a retry that installs, not checks", async () => {
+    const downloadAndInstall = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("disk full"))
+      .mockResolvedValueOnce(undefined);
+    checkMock.mockResolvedValue(buildUpdate(downloadAndInstall));
+    const { button, status } = renderUpdates();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(button.textContent).toBe("Install & Restart");
+    });
+    button.click();
+    await vi.waitFor(() => {
+      expect(button.textContent).toBe("Retry install");
+    });
+
+    expect(status.textContent).toContain("disk full");
+    expect(button.disabled).toBe(false);
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(downloadAndInstall).toHaveBeenCalledTimes(2);
+    });
+    expect(checkMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("the button is usable again after a check that found nothing", async () => {
+    checkMock.mockResolvedValue(null);
+    const { button, status } = renderUpdates();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(status.textContent).toBe("You are up to date.");
+    });
+
+    expect(button.disabled).toBe(false);
+    expect(button.textContent).toBe("Check for updates");
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(checkMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("a relaunch failure does not report the finished install as failed", async () => {
+    const downloadAndInstall = vi.fn(async () => {});
+    checkMock.mockResolvedValue(buildUpdate(downloadAndInstall));
+    relaunchMock.mockRejectedValue(new Error("process:allow-restart denied"));
+    const { button, status } = renderUpdates();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(button.textContent).toBe("Install & Restart");
+    });
+    button.click();
+    await vi.waitFor(() => {
+      expect(button.textContent).toBe("Check for updates");
+    });
+
+    expect(status.textContent).toContain("The update is installed");
+    expect(status.textContent).not.toContain("Install failed");
+    expect(button.disabled).toBe(false);
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(checkMock).toHaveBeenCalledTimes(2);
+    });
+    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it("a check that rejects with a non-Error still re-arms the button", async () => {
+    checkMock.mockRejectedValue(null);
+    const { button } = renderUpdates();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(button.textContent).toBe("Check for updates");
+    });
+
+    expect(button.disabled).toBe(false);
+  });
+
+  it("the button is usable again after a check that failed", async () => {
+    checkMock.mockRejectedValue(new Error("could not fetch a valid release json"));
+    const { button, status } = renderUpdates();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(status.textContent).toContain("not published yet");
+    });
+
+    expect(button.disabled).toBe(false);
+    expect(button.textContent).toBe("Check for updates");
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(checkMock).toHaveBeenCalledTimes(2);
+    });
+  });
 });
 
 describe("renderGeneral — Dictation Language change (Bug 3)", () => {
