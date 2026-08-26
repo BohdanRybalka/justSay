@@ -857,14 +857,27 @@ async def test_meeting_stop_leaves_the_event_loop_free(
 
     This is the headline case -- a 45-minute call is ~86 MB written with every
     other endpoint blocked behind it, including `/health` and the meeting
-    status the widget polls twice a second. Asserted by having a competing
-    coroutine tick while `stop()` is awaited; inline work starves it to zero.
+    status the widget polls twice a second.
+
+    The assemble is slowed by a known interval and the floor set proportional
+    to it. The original `ticks > 0` was satisfied by a single bare
+    `await asyncio.sleep(0)` in front of the inline call, which leaves every
+    millisecond of the write on the loop -- JS-97.
     """
     recorder = MeetingRecorder(audio_settings)
     await recorder.start()
     _feed_microphone(recorder, 40)
     for i in range(40):
         fake_system_source.deliver(recorder._start_time + i * BLOCK_FRAMES / 48000)
+
+    blocked_seconds = 0.2
+    assemble_and_write = recorder._assemble_and_write
+
+    def slow_assemble_and_write(*args):
+        time.sleep(blocked_seconds)
+        return assemble_and_write(*args)
+
+    recorder._assemble_and_write = slow_assemble_and_write
 
     ticks = 0
 
@@ -879,4 +892,90 @@ async def test_meeting_stop_leaves_the_event_loop_free(
     race.cancel()
 
     assert audio_path.exists()
-    assert ticks > 0
+    assert ticks > 100, (
+        f"the loop ticked {ticks} times while stop() blocked for "
+        f"{blocked_seconds}s -- the assemble and write are still on the event loop"
+    )
+
+
+@pytest.mark.asyncio
+async def test_meeting_start_leaves_the_event_loop_free(audio_settings, fake_microphone_stream):
+    """JS-99: endpoint enumeration and the device open must not run on the loop.
+
+    Windows enumerates render endpoints through COM and macOS waits up to five
+    seconds for the tap helper's header, so a start that runs inline is the
+    whole app frozen for that long -- `/health` included, and the meeting status
+    the widget polls twice a second.
+
+    The floor is proportional to the blocked interval rather than `ticks > 0`,
+    which a single bare `await asyncio.sleep(0)` in front of inline work
+    satisfies while leaving every millisecond of it on the loop.
+    """
+    blocked_seconds = 0.2
+    source = _FakeSystemAudioSource()
+    original_start = source.start
+
+    def slow_start(on_block):
+        time.sleep(blocked_seconds)
+        original_start(on_block)
+
+    source.start = slow_start
+    recorder = MeetingRecorder(audio_settings)
+
+    ticks = 0
+
+    async def competitor():
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    race = asyncio.ensure_future(competitor())
+    with patch("app.audio.meeting_recorder.create_system_audio_source", return_value=source):
+        await recorder.start()
+    race.cancel()
+
+    assert recorder.is_recording is True
+    assert source.started is True
+    assert ticks > 100, (
+        f"the loop ticked {ticks} times while start() blocked for "
+        f"{blocked_seconds}s -- the open is still running on the event loop"
+    )
+
+
+@pytest.mark.asyncio
+async def test_meeting_start_claims_the_slot_before_it_opens_anything(
+    audio_settings, fake_microphone_stream
+):
+    """The idempotence guard and the flag it guards share one lock hold.
+
+    Releasing between them let two concurrent starts both pass the check and
+    both open devices, the second overwriting the first's stream and source with
+    nothing left holding a reference to close them.
+    """
+    sources = []
+
+    def make_source(_settings):
+        source = _FakeSystemAudioSource()
+        sources.append(source)
+        return source
+
+    recorder = MeetingRecorder(audio_settings)
+    with patch("app.audio.meeting_recorder.create_system_audio_source", make_source):
+        await asyncio.gather(recorder.start(), recorder.start())
+
+    assert len(sources) == 1
+    assert fake_microphone_stream.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_meeting_start_reports_the_endpoint_once_the_open_returns(
+    audio_settings, fake_system_source, fake_microphone_stream
+):
+    """Moving the open into a worker thread must not lose the endpoint name the
+    status endpoint reports -- `POST /audio/meeting/start` reads it straight
+    after awaiting this."""
+    recorder = MeetingRecorder(audio_settings)
+    await recorder.start()
+
+    assert recorder.system_endpoint == "Headset [Loopback]"

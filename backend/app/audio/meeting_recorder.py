@@ -92,10 +92,45 @@ class MeetingRecorder(AudioRecorder):
                 self._system_level = rms_dbfs(mono)
 
     async def start(self) -> None:
+        """Claim the recording slot, then open both captures off the event loop.
+
+        The check and the flag share one lock hold, the way
+        `MicrophoneRecorder.start()` does it: releasing between them let two
+        concurrent starts both open devices, the second overwriting the first's
+        stream and source with nothing left holding a reference to close them.
+        """
         with self._lock:
             if self._recording:
                 return
+            self._microphone_blocks = []
+            self._system_blocks = []
+            self._raw_bytes = 0
+            self._truncated = False
+            self._current_level = float("-inf")
+            self._system_level = float("-inf")
+            self._endpoint_name = None
+            self._recording = True
 
+        self._start_time = time.monotonic()
+
+        try:
+            await asyncio.to_thread(self._open_capture)
+        except BaseException:
+            self._release()
+            with self._lock:
+                self._recording = False
+            raise
+
+    def _open_capture(self) -> None:
+        """Device open, endpoint enumeration and the helper handshake, off the loop.
+
+        Windows enumerates render endpoints through COM and macOS waits up to
+        five seconds for the tap helper's header. Run inline this blocked every
+        other endpoint for the whole start -- including `/health` and the
+        meeting status the widget polls twice a second, which is the moment the
+        user is waiting to see the recording begin. Same reasoning as
+        `_assemble_and_write`, which JS-81 moved off the loop for `stop()`.
+        """
         source = create_system_audio_source(self._settings)
         if source is None:
             raise SystemAudioUnavailableError(
@@ -103,35 +138,20 @@ class MeetingRecorder(AudioRecorder):
                 "meeting recording requires Windows or macOS"
             )
 
-        with self._lock:
-            self._microphone_blocks = []
-            self._system_blocks = []
-            self._raw_bytes = 0
-            self._truncated = False
-            self._current_level = float("-inf")
-            self._system_level = float("-inf")
-            self._endpoint_name = source.endpoint_name
-            self._recording = True
-
         self._system_source = source
-        self._start_time = time.monotonic()
+        with self._lock:
+            self._endpoint_name = source.endpoint_name
 
-        try:
-            self._settings.temp_dir.mkdir(parents=True, exist_ok=True)
-            source.start(self._system_callback)
-            self._stream = sd.InputStream(
-                samplerate=self._settings.sample_rate,
-                channels=self._settings.channels,
-                dtype="float32",
-                blocksize=self._settings.meeting_block_frames,
-                callback=self._microphone_callback,
-            )
-            self._stream.start()
-        except Exception:
-            self._release()
-            with self._lock:
-                self._recording = False
-            raise
+        self._settings.temp_dir.mkdir(parents=True, exist_ok=True)
+        source.start(self._system_callback)
+        self._stream = sd.InputStream(
+            samplerate=self._settings.sample_rate,
+            channels=self._settings.channels,
+            dtype="float32",
+            blocksize=self._settings.meeting_block_frames,
+            callback=self._microphone_callback,
+        )
+        self._stream.start()
 
     async def stop(self) -> Path:
         with self._lock:

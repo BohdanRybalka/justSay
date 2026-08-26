@@ -282,6 +282,7 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
 
         provider = get_provider(ProviderMode.LOCAL, stt_settings)
         if provider.is_loaded:
+            _prewarm_error = None
             return
 
         if not _check_package_installed():
@@ -310,6 +311,9 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
         load_task = _active_load[1]
 
         await asyncio.shield(load_task)
+
+        if provider.is_loaded:
+            _prewarm_error = None
 
 
 async def await_local_ready(

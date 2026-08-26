@@ -612,6 +612,77 @@ async def test_ensure_local_ready_vulkan_kind_sets_actionable_error_when_binary_
     assert "whisper-server binary not found" in local_setup._prewarm_error
 
 
+@pytest.mark.asyncio
+async def test_ensure_local_ready_clears_a_stale_error_once_the_load_succeeds(monkeypatch):
+    """The latch is written on failure and must be un-written on success, the way
+    `LocalSTTProvider._get_model` and `WhisperCppServerSTTProvider._ensure_server`
+    already un-write their own. Without this, `GET /stt/local/status` keeps
+    reporting a fixed problem until the backend restarts."""
+    _stub_whisper_cpp_server_kind(monkeypatch)
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    await local_setup.ensure_local_ready(settings)
+    assert local_setup._prewarm_error is not None
+
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+    await local_setup.ensure_local_ready(settings)
+
+    assert provider.is_loaded is True
+    assert local_setup._prewarm_error is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_ready_clears_a_stale_error_when_the_provider_is_already_loaded(
+    monkeypatch,
+):
+    """The already-loaded early return is the second success path, and the one a
+    retry click reaches once a prewarm already finished elsewhere."""
+    _stub_whisper_cpp_server_kind(monkeypatch)
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    await local_setup.ensure_local_ready(settings)
+    assert local_setup._prewarm_error is not None
+
+    provider.is_loaded = True
+    await local_setup.ensure_local_ready(settings)
+
+    assert provider.get_model_calls == 0
+    assert local_setup._prewarm_error is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_ready_keeps_the_error_when_the_load_itself_fails(monkeypatch):
+    """The clear is conditional on the load actually having loaded. A load that
+    raises leaves the provider unloaded, and the latch must survive to be reported."""
+    _stub_whisper_cpp_server_kind(monkeypatch)
+
+    def _fail(p):
+        raise RuntimeError("model load exploded")
+
+    provider = _FakePrewarmProvider(get_model=_fail)
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    await local_setup.ensure_local_ready(settings)
+    assert local_setup._prewarm_error is not None
+
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+    await local_setup.ensure_local_ready(settings)
+
+    assert provider.is_loaded is False
+    assert local_setup._prewarm_error is not None
+
+
 
 
 def test_check_status_surfaces_prewarm_error_when_no_provider_level_error():

@@ -857,14 +857,25 @@ class _ImmediateStream:
 async def test_dictation_stop_leaves_the_event_loop_free(tmp_path):
     """JS-81: the concatenate and wave write must not run on the loop.
 
-    Asserted by having a competing coroutine tick while `stop()` is awaited --
-    inline work would starve it completely.
+    The write is slowed by a known interval and the floor set proportional to
+    it. The original `ticks > 0` was satisfied by a single bare
+    `await asyncio.sleep(0)` in front of the inline call, which leaves every
+    millisecond of the write on the loop -- JS-97.
     """
     settings = AudioSettings(temp_dir=tmp_path)
     recorder = MicrophoneRecorder(settings)
     recorder._recording = True
     recorder._frames = [np.zeros((settings.sample_rate * 3, settings.channels), dtype=np.float32)]
     recorder._stream = MagicMock()
+
+    blocked_seconds = 0.2
+    concatenate_and_write = recorder._concatenate_and_write
+
+    def slow_concatenate_and_write(*args):
+        time.sleep(blocked_seconds)
+        return concatenate_and_write(*args)
+
+    recorder._concatenate_and_write = slow_concatenate_and_write
 
     ticks = 0
 
@@ -879,4 +890,7 @@ async def test_dictation_stop_leaves_the_event_loop_free(tmp_path):
     race.cancel()
 
     assert written.exists()
-    assert ticks > 0
+    assert ticks > 100, (
+        f"the loop ticked {ticks} times while stop() blocked for "
+        f"{blocked_seconds}s -- the concatenate and write are still on the event loop"
+    )
