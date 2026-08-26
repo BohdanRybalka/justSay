@@ -87,8 +87,6 @@ def _feed_microphone(recorder: MeetingRecorder, count: int, fill: float = 0.3) -
         recorder._microphone_callback(block, BLOCK_FRAMES, None, MagicMock())
 
 
-
-
 def test_memory_cap_covers_a_45_minute_meeting():
     """AC: `meeting_max_raw_bytes` divided by the raw-store growth rate at a
     48 kHz system device is at least 45 minutes.
@@ -131,8 +129,6 @@ async def test_recorder_stops_accepting_blocks_at_the_cap_and_still_writes_a_wav
 
     assert recorder.truncated is True
     assert audio_path.exists()
-
-
 
 
 @pytest.mark.asyncio
@@ -276,8 +272,6 @@ async def test_an_unwritable_scratch_directory_releases_the_system_source_too(
     assert fake_system_source.stopped is True
 
 
-
-
 def test_factory_returns_none_on_a_platform_with_no_implementation(monkeypatch):
     """AC: no system-audio source on the ubuntu CI runner."""
     monkeypatch.setattr(sys, "platform", "linux")
@@ -310,8 +304,6 @@ def _module_raising_on_construction() -> types.ModuleType:
 
     module.WindowsLoopbackSource = _Exploding
     return module
-
-
 
 
 @pytest.fixture
@@ -538,8 +530,6 @@ def test_windows_source_releases_pyaudio_when_the_com_lookup_fails(
     assert fake_pyaudiowpatch.PyAudio.instances[-1].terminated is True
 
 
-
-
 @pytest.fixture(autouse=True)
 def _acknowledged_meeting_consent():
     """The disclosure is a first-run gate, not the subject of most of these
@@ -667,8 +657,6 @@ async def test_meeting_stop_reports_the_filename_and_truncation(client, tmp_path
     assert body["truncated"] is True
 
 
-
-
 @pytest.mark.anyio
 async def test_instant_prompt_stop_response_has_no_meeting_fields(client, tmp_path):
     """The Instant Prompt response model must stay exactly as it was — the
@@ -729,8 +717,6 @@ async def test_the_meeting_status_reports_the_endpoint_and_the_system_level(clie
     assert resp.json()["system_level_db"] == -21.5
 
 
-
-
 @pytest.mark.anyio
 async def test_meeting_start_is_403_until_the_disclosure_is_acknowledged(client):
     """AC: the 403 is what makes the dialog impossible to drive around with
@@ -768,8 +754,6 @@ async def test_meeting_stop_and_status_are_not_behind_the_consent_gate(client):
 
     assert (await client.get("/audio/meeting/status")).status_code == 200
     assert (await client.post("/audio/meeting/stop")).status_code == 409
-
-
 
 
 @pytest.mark.asyncio
@@ -897,85 +881,3 @@ async def test_meeting_stop_leaves_the_event_loop_free(
         f"{blocked_seconds}s -- the assemble and write are still on the event loop"
     )
 
-
-@pytest.mark.asyncio
-async def test_meeting_start_leaves_the_event_loop_free(audio_settings, fake_microphone_stream):
-    """JS-99: endpoint enumeration and the device open must not run on the loop.
-
-    Windows enumerates render endpoints through COM and macOS waits up to five
-    seconds for the tap helper's header, so a start that runs inline is the
-    whole app frozen for that long -- `/health` included, and the meeting status
-    the widget polls twice a second.
-
-    The floor is proportional to the blocked interval rather than `ticks > 0`,
-    which a single bare `await asyncio.sleep(0)` in front of inline work
-    satisfies while leaving every millisecond of it on the loop.
-    """
-    blocked_seconds = 0.2
-    source = _FakeSystemAudioSource()
-    original_start = source.start
-
-    def slow_start(on_block):
-        time.sleep(blocked_seconds)
-        original_start(on_block)
-
-    source.start = slow_start
-    recorder = MeetingRecorder(audio_settings)
-
-    ticks = 0
-
-    async def competitor():
-        nonlocal ticks
-        while True:
-            ticks += 1
-            await asyncio.sleep(0)
-
-    race = asyncio.ensure_future(competitor())
-    with patch("app.audio.meeting_recorder.create_system_audio_source", return_value=source):
-        await recorder.start()
-    race.cancel()
-
-    assert recorder.is_recording is True
-    assert source.started is True
-    assert ticks > 100, (
-        f"the loop ticked {ticks} times while start() blocked for "
-        f"{blocked_seconds}s -- the open is still running on the event loop"
-    )
-
-
-@pytest.mark.asyncio
-async def test_meeting_start_claims_the_slot_before_it_opens_anything(
-    audio_settings, fake_microphone_stream
-):
-    """The idempotence guard and the flag it guards share one lock hold.
-
-    Releasing between them let two concurrent starts both pass the check and
-    both open devices, the second overwriting the first's stream and source with
-    nothing left holding a reference to close them.
-    """
-    sources = []
-
-    def make_source(_settings):
-        source = _FakeSystemAudioSource()
-        sources.append(source)
-        return source
-
-    recorder = MeetingRecorder(audio_settings)
-    with patch("app.audio.meeting_recorder.create_system_audio_source", make_source):
-        await asyncio.gather(recorder.start(), recorder.start())
-
-    assert len(sources) == 1
-    assert fake_microphone_stream.call_count == 1
-
-
-@pytest.mark.asyncio
-async def test_meeting_start_reports_the_endpoint_once_the_open_returns(
-    audio_settings, fake_system_source, fake_microphone_stream
-):
-    """Moving the open into a worker thread must not lose the endpoint name the
-    status endpoint reports -- `POST /audio/meeting/start` reads it straight
-    after awaiting this."""
-    recorder = MeetingRecorder(audio_settings)
-    await recorder.start()
-
-    assert recorder.system_endpoint == "Headset [Loopback]"

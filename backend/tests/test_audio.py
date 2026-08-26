@@ -38,8 +38,6 @@ def _simulate_audio_callback(recorder: MicrophoneRecorder, num_blocks: int = 5):
         recorder._audio_callback(fake_audio, 1024, None, MagicMock())
 
 
-
-
 @pytest.mark.asyncio
 async def test_start_recording(audio_settings, mock_stream):
     mock_cls, stream_instance = mock_stream
@@ -153,8 +151,6 @@ async def test_double_stop_raises(audio_settings, mock_stream):
         await recorder.stop()
 
 
-
-
 @pytest.mark.asyncio
 async def test_level_db_updates_during_recording(audio_settings, mock_stream):
     _, _ = mock_stream
@@ -197,8 +193,6 @@ async def test_last_duration_persists_after_stop(audio_settings, mock_stream):
     assert recorder.last_duration_seconds > 7.0
 
 
-
-
 @pytest.mark.asyncio
 async def test_cleanup_stops_and_closes_open_stream(audio_settings, mock_stream):
     _, stream_instance = mock_stream
@@ -237,8 +231,6 @@ async def test_cleanup_twice_is_noop_on_second_call(audio_settings, mock_stream)
     stream_instance.stop.assert_called_once()
     stream_instance.close.assert_called_once()
     assert recorder.is_recording is False
-
-
 
 
 _INSTANT_PROMPT_WAV_SHA256 = "1ea56e02eab045bac62debc0a03f936fc08c7a239b9fe7ad8117e0d54fdb11df"
@@ -322,8 +314,6 @@ def test_config_rejects_zero_channels():
         AudioSettings(sample_rate=16000, channels=0)
 
 
-
-
 @pytest.fixture
 def isolated_home_and_env(tmp_path, monkeypatch):
     home = tmp_path / "home"
@@ -357,8 +347,6 @@ def test_temp_dir_env_override_wins_over_default_factory(
     assert AudioSettings().temp_dir == override
 
 
-
-
 def test_rms_dbfs_matches_manual_formula():
     samples = np.random.uniform(-0.3, 0.3, 2048).astype(np.float32)
     expected = 20 * np.log10(max(np.sqrt(np.mean(samples.astype(np.float64) ** 2)), 1e-10))
@@ -385,8 +373,6 @@ async def test_recorder_level_db_matches_pre_extraction_formula(audio_settings, 
     expected_dbfs = 20 * np.log10(max(rms, 1e-10))
 
     assert recorder.level_db == pytest.approx(expected_dbfs)
-
-
 
 
 def _write_wav(path: Path, data: np.ndarray, sr: int = 16000) -> Path:
@@ -495,7 +481,6 @@ def test_silence_settings_overridable_via_env_var(monkeypatch):
     assert settings.silence_min_speech_frames == 1
 
 
-
 _TRAIN_AUDIO_MP3 = (
     Path(__file__).resolve().parents[2]
     / "train-audio-data"
@@ -549,8 +534,6 @@ def test_analyze_silence_does_not_discard_quiet_real_speech(
         f"(peak={result.peak_dbfs:.1f} dBFS, "
         f"speech_frames={result.speech_frame_count}/{result.total_frame_count})"
     )
-
-
 
 
 def test_rms_dbfs_returns_native_python_float():
