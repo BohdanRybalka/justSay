@@ -212,11 +212,21 @@ async def _run_get_model(provider) -> None:
     coroutine awaited in place, which a cancellation unwinds immediately.
     Same swallow-and-latch / orphan-cleanup contract ``ensure_local_ready``
     always had.
+
+    The ``_prewarm_error`` latch is written here rather than in
+    ``ensure_local_ready`` because this task runs to completion regardless of
+    who is watching it. A caller cancelled by ``await_local_ready``'s own
+    ``wait_for`` timeout never reaches the code after its ``shield()``, so a
+    clear written there is skipped for exactly the load that then succeeds --
+    which is the stale-error symptom JS-98 exists to remove.
     """
+    global _prewarm_error
     try:
         await asyncio.to_thread(provider._get_model)
-    except Exception:
-        pass
+    except Exception as e:
+        _prewarm_error = f"{type(e).__name__}: {e}"
+    else:
+        _prewarm_error = None
     finally:
         from app.stt import peek_local_provider
 
@@ -282,6 +292,7 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
 
         provider = get_provider(ProviderMode.LOCAL, stt_settings)
         if provider.is_loaded:
+            _prewarm_error = None
             return
 
         if not _check_package_installed():

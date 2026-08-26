@@ -13,6 +13,7 @@ from app.stt.cloud import GeminiSTTProvider
 from app.stt.config import STTSettings
 from app.stt.groq_whisper import GroqWhisperSTTProvider
 from app.stt.local import LocalSTTProvider
+from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
 
 
 @pytest.fixture(autouse=True)
@@ -33,9 +34,9 @@ def _cloud_settings(**overrides) -> STTSettings:
     return STTSettings(**defaults)
 
 
-
-
 def test_local_mode_always_returns_local():
+    """Proves only that LOCAL does not reach a cloud provider — see the marked
+    test at the end of this file for the platform-routing pin (JS-97)."""
     s = STTSettings(mode=ProviderMode.LOCAL)
     p, fallback = get_routed_provider(s, audio_duration=5.0, style="normal")
     assert isinstance(p, LocalSTTProvider)
@@ -48,6 +49,20 @@ def test_local_mode_ignores_style_and_duration():
     assert isinstance(p, LocalSTTProvider)
 
 
+@pytest.mark.no_factory_stub
+@pytest.mark.parametrize("duration,style", [(5.0, "normal"), (600.0, "ai_prompt")])
+def test_local_mode_routes_to_this_platforms_local_provider(monkeypatch, duration, style):
+    """Neither unmarked sibling can say this: the autouse
+    `_force_faster_whisper_for_local` fixture pins the class they assert."""
+    monkeypatch.setattr(
+        "app.stt.local_factory.get_local_provider_class",
+        lambda: WhisperCppServerSTTProvider,
+    )
+    clear_cache()
+    s = STTSettings(mode=ProviderMode.LOCAL)
+    p, fallback = get_routed_provider(s, audio_duration=duration, style=style)
+    assert type(p) is WhisperCppServerSTTProvider
+    assert fallback is None
 
 
 def test_short_normal_goes_to_groq():
@@ -75,16 +90,12 @@ def test_unknown_duration_falls_back_to_gemini():
     assert isinstance(p, GeminiSTTProvider)
 
 
-
-
 def test_ai_prompt_always_goes_to_gemini_regardless_of_duration():
     s = _cloud_settings()
     short, _ = get_routed_provider(s, audio_duration=5.0, style="ai_prompt")
     long, _ = get_routed_provider(s, audio_duration=120.0, style="ai_prompt")
     assert isinstance(short, GeminiSTTProvider)
     assert isinstance(long, GeminiSTTProvider)
-
-
 
 
 def test_webm_short_normal_falls_back_to_gemini():
@@ -105,8 +116,6 @@ def test_format_supports_sets_are_consistent():
     assert ".wav" in GROQ_SUPPORTED_FORMATS
     assert ".webm" not in GROQ_SUPPORTED_FORMATS
     assert ".webm" in GEMINI_SUPPORTED_FORMATS
-
-
 
 
 def test_same_provider_is_cached_across_calls():
@@ -134,8 +143,6 @@ def test_clear_cache_triggers_cleanup_on_all():
         clear_cache()
         gc_mock.assert_called_once()
         gm_mock.assert_called_once()
-
-
 
 
 def test_engine_pin_groq_overrides_long_audio():
@@ -168,16 +175,12 @@ def test_engine_pin_gemini_overrides_short_audio():
     assert fallback is None
 
 
-
-
 def test_cloud_routing_threshold_must_be_positive():
     with pytest.raises(ValueError):
         STTSettings(cloud_routing_threshold=0)
 
     with pytest.raises(ValueError):
         STTSettings(cloud_routing_threshold=-5)
-
-
 
 
 def test_detect_duration_returns_none_for_missing_file(tmp_path):

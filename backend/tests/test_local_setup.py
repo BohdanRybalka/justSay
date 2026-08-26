@@ -137,8 +137,6 @@ def test_get_local_load_error_returns_none_before_provider_instantiation():
     assert get_local_load_error(settings) is None
 
 
-
-
 def test_check_package_installed_true(monkeypatch):
     fake_module = MagicMock()
     with patch.dict("sys.modules", {"faster_whisper": fake_module}):
@@ -157,8 +155,6 @@ def test_check_package_installed_false(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
     assert _check_package_installed() is False
-
-
 
 
 def test_detect_gpu_returns_false_when_probe_reports_none(monkeypatch):
@@ -206,15 +202,11 @@ def test_detect_gpu_reports_amd_name_and_vendor_but_not_available(monkeypatch):
     assert vendor == "amd"
 
 
-
-
 def test_sse_format_is_event_plus_data():
     out = sse_event("progress", {"status": "downloading"})
     assert out.startswith("event: progress\n")
     assert 'data: {"status": "downloading"}' in out
     assert out.endswith("\n\n")
-
-
 
 
 @pytest.mark.asyncio
@@ -275,8 +267,6 @@ async def test_install_refused_in_frozen_binary(monkeypatch):
     assert len(events) == 1
     assert "event: error" in events[0]
     assert "not supported in the packaged build" in events[0]
-
-
 
 
 def test_run_pip_install_uses_the_local_extras_on_every_platform(monkeypatch):
@@ -426,9 +416,6 @@ def test_gpu_vendor_enum_still_has_no_apple_member():
     from app.core.gpu_probe import GpuVendor
 
     assert {member.value for member in GpuVendor} == {"nvidia", "amd", "intel", "none"}
-
-
-
 
 
 def _stub_whisper_cpp_server_kind(monkeypatch) -> None:
@@ -612,6 +599,121 @@ async def test_ensure_local_ready_vulkan_kind_sets_actionable_error_when_binary_
     assert "whisper-server binary not found" in local_setup._prewarm_error
 
 
+@pytest.mark.asyncio
+async def test_ensure_local_ready_clears_a_stale_error_once_the_load_succeeds(monkeypatch):
+    """The latch is written on failure and must be un-written on success, the way
+    `LocalSTTProvider._get_model` and `WhisperCppServerSTTProvider._ensure_server`
+    already un-write their own. Without this, `GET /stt/local/status` keeps
+    reporting a fixed problem until the backend restarts."""
+    _stub_whisper_cpp_server_kind(monkeypatch)
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    await local_setup.ensure_local_ready(settings)
+    assert local_setup._prewarm_error is not None
+
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+    await local_setup.ensure_local_ready(settings)
+
+    assert provider.is_loaded is True
+    assert local_setup._prewarm_error is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_ready_clears_a_stale_error_when_the_provider_is_already_loaded(
+    monkeypatch,
+):
+    """The already-loaded early return is the second success path, and the one a
+    retry click reaches once a prewarm already finished elsewhere."""
+    _stub_whisper_cpp_server_kind(monkeypatch)
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    await local_setup.ensure_local_ready(settings)
+    assert local_setup._prewarm_error is not None
+
+    provider.is_loaded = True
+    await local_setup.ensure_local_ready(settings)
+
+    assert provider.get_model_calls == 0
+    assert local_setup._prewarm_error is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_ready_replaces_a_stale_error_when_the_load_itself_fails(monkeypatch):
+    """A failed load must report *its own* cause, not the one before it.
+
+    Asserting only "an error is still latched" would pass while the message
+    told the user to install a binary that is already installed -- the same
+    wrong-diagnosis shape JS-98 exists to remove.
+    """
+    _stub_whisper_cpp_server_kind(monkeypatch)
+
+    def _fail(p):
+        raise RuntimeError("model load exploded")
+
+    provider = _FakePrewarmProvider(get_model=_fail)
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    await local_setup.ensure_local_ready(settings)
+    assert "whisper-server binary not found" in local_setup._prewarm_error
+
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+    await local_setup.ensure_local_ready(settings)
+
+    assert provider.is_loaded is False
+    assert local_setup._prewarm_error == "RuntimeError: model load exploded"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_caller_still_gets_the_error_cleared_by_the_load_it_started(monkeypatch):
+    """`await_local_ready` wraps this in `wait_for`, so the request path's own
+    timeout cancels the caller while the load task keeps running and succeeds.
+
+    Anything written after `await asyncio.shield(load_task)` is skipped on that
+    path -- which is why the latch is written inside `_run_get_model` instead.
+    Without that, `GET /stt/local/status` reports a pip failure against a fully
+    loaded model until something else re-triggers a prewarm, and status polling
+    never does.
+    """
+    _stub_whisper_cpp_server_kind(monkeypatch)
+    release = asyncio.Event()
+
+    def _slow(p):
+        asyncio.run_coroutine_threadsafe(_noop(), loop).result()
+        p.is_loaded = True
+
+    async def _noop():
+        await release.wait()
+
+    loop = asyncio.get_running_loop()
+    provider = _FakePrewarmProvider(get_model=_slow)
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+    local_setup._prewarm_error = "pip install failed"
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+
+    caller = asyncio.ensure_future(local_setup.ensure_local_ready(settings))
+    await asyncio.sleep(0.05)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    release.set()
+    await asyncio.wait_for(local_setup._active_load[1], timeout=5)
+
+    assert provider.is_loaded is True
+    assert local_setup._prewarm_error is None
 
 
 def test_check_status_surfaces_prewarm_error_when_no_provider_level_error():
@@ -672,8 +774,6 @@ def test_check_status_merge_is_deterministic_when_package_missing_and_provider_e
     finally:
         local_setup._prewarm_error = None
         clear_stt_cache()
-
-
 
 
 class _FakePrewarmProvider:
@@ -1011,8 +1111,6 @@ async def test_ensure_local_ready_cleans_up_orphan_when_cache_cleared_without_a_
     assert cache["current"] is provider_b
 
 
-
-
 @pytest.fixture
 def isolated_crash_guard_root(tmp_path, monkeypatch):
     """Points `_crash_guard_path()` at a per-test `tmp_path` instead of the
@@ -1180,8 +1278,6 @@ async def test_maybe_prewarm_local_resets_crash_guard_counter_on_explicit_trigge
     await asyncio.gather(*pending)
 
 
-
-
 @pytest.mark.asyncio
 async def test_await_local_ready_fast_path_when_already_loaded(monkeypatch):
     provider = _FakePrewarmProvider()
@@ -1331,8 +1427,6 @@ async def test_await_local_ready_returns_false_not_raises_when_cache_moves_on_mi
     assert result is False
     assert provider.get_model_calls == 1
     assert provider.cleanup_calls == 1
-
-
 
 
 @pytest.mark.asyncio

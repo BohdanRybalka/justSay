@@ -87,8 +87,6 @@ def _feed_microphone(recorder: MeetingRecorder, count: int, fill: float = 0.3) -
         recorder._microphone_callback(block, BLOCK_FRAMES, None, MagicMock())
 
 
-
-
 def test_memory_cap_covers_a_45_minute_meeting():
     """AC: `meeting_max_raw_bytes` divided by the raw-store growth rate at a
     48 kHz system device is at least 45 minutes.
@@ -131,8 +129,6 @@ async def test_recorder_stops_accepting_blocks_at_the_cap_and_still_writes_a_wav
 
     assert recorder.truncated is True
     assert audio_path.exists()
-
-
 
 
 @pytest.mark.asyncio
@@ -276,8 +272,6 @@ async def test_an_unwritable_scratch_directory_releases_the_system_source_too(
     assert fake_system_source.stopped is True
 
 
-
-
 def test_factory_returns_none_on_a_platform_with_no_implementation(monkeypatch):
     """AC: no system-audio source on the ubuntu CI runner."""
     monkeypatch.setattr(sys, "platform", "linux")
@@ -310,8 +304,6 @@ def _module_raising_on_construction() -> types.ModuleType:
 
     module.WindowsLoopbackSource = _Exploding
     return module
-
-
 
 
 @pytest.fixture
@@ -538,8 +530,6 @@ def test_windows_source_releases_pyaudio_when_the_com_lookup_fails(
     assert fake_pyaudiowpatch.PyAudio.instances[-1].terminated is True
 
 
-
-
 @pytest.fixture(autouse=True)
 def _acknowledged_meeting_consent():
     """The disclosure is a first-run gate, not the subject of most of these
@@ -667,8 +657,6 @@ async def test_meeting_stop_reports_the_filename_and_truncation(client, tmp_path
     assert body["truncated"] is True
 
 
-
-
 @pytest.mark.anyio
 async def test_instant_prompt_stop_response_has_no_meeting_fields(client, tmp_path):
     """The Instant Prompt response model must stay exactly as it was — the
@@ -729,8 +717,6 @@ async def test_the_meeting_status_reports_the_endpoint_and_the_system_level(clie
     assert resp.json()["system_level_db"] == -21.5
 
 
-
-
 @pytest.mark.anyio
 async def test_meeting_start_is_403_until_the_disclosure_is_acknowledged(client):
     """AC: the 403 is what makes the dialog impossible to drive around with
@@ -768,8 +754,6 @@ async def test_meeting_stop_and_status_are_not_behind_the_consent_gate(client):
 
     assert (await client.get("/audio/meeting/status")).status_code == 200
     assert (await client.post("/audio/meeting/stop")).status_code == 409
-
-
 
 
 @pytest.mark.asyncio
@@ -857,14 +841,27 @@ async def test_meeting_stop_leaves_the_event_loop_free(
 
     This is the headline case -- a 45-minute call is ~86 MB written with every
     other endpoint blocked behind it, including `/health` and the meeting
-    status the widget polls twice a second. Asserted by having a competing
-    coroutine tick while `stop()` is awaited; inline work starves it to zero.
+    status the widget polls twice a second.
+
+    The assemble is slowed by a known interval and the floor set proportional
+    to it. The original `ticks > 0` was satisfied by a single bare
+    `await asyncio.sleep(0)` in front of the inline call, which leaves every
+    millisecond of the write on the loop -- JS-97.
     """
     recorder = MeetingRecorder(audio_settings)
     await recorder.start()
     _feed_microphone(recorder, 40)
     for i in range(40):
         fake_system_source.deliver(recorder._start_time + i * BLOCK_FRAMES / 48000)
+
+    blocked_seconds = 0.2
+    assemble_and_write = recorder._assemble_and_write
+
+    def slow_assemble_and_write(*args):
+        time.sleep(blocked_seconds)
+        return assemble_and_write(*args)
+
+    recorder._assemble_and_write = slow_assemble_and_write
 
     ticks = 0
 
@@ -879,4 +876,8 @@ async def test_meeting_stop_leaves_the_event_loop_free(
     race.cancel()
 
     assert audio_path.exists()
-    assert ticks > 0
+    assert ticks > 100, (
+        f"the loop ticked {ticks} times while stop() blocked for "
+        f"{blocked_seconds}s -- the assemble and write are still on the event loop"
+    )
+
