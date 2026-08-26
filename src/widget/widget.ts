@@ -173,6 +173,7 @@ async function stopAndProcess() {
 
 const recordingIntent = createRecordingIntentQueue({
   isRecording: () => state === "recording",
+  isBusy: () => state === "processing",
   startRecording,
   stopRecording: stopAndProcess,
   reportError: (e) => console.error("Recording transition failed:", e),
@@ -445,6 +446,7 @@ async function applyRequestedShortcut(shortcut: string) {
 
 const settingsRetry = createSettingsRetry({
   now: () => performance.now(),
+  isBusy: () => state === "recording" || state === "processing",
   fetchSettings: () => api.getSettings(),
   applySettings: async (settings) => {
     currentLanguage = settings.language;

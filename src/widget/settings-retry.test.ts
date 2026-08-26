@@ -3,6 +3,7 @@ import { TOKEN_CALL_REUSE_MS } from "../api";
 import {
   createSettingsRetry,
   SETTINGS_RETRY_DELAYS_MS,
+  SETTINGS_RETRY_TIMEOUT_MS,
   type SettingsRetryActions,
   type WidgetSettings,
 } from "./settings-retry";
@@ -34,6 +35,7 @@ function deferred<T>() {
 function actions(overrides: Partial<SettingsRetryActions> = {}) {
   const spies = {
     now: vi.fn(() => 0),
+    isBusy: vi.fn(() => false),
     fetchSettings: vi.fn(async () => FETCHED),
     applySettings: vi.fn(async () => {}),
     applyFallbackShortcut: vi.fn(async () => {}),
@@ -198,5 +200,128 @@ describe("the bounded settings retry", () => {
     await retry.load();
 
     expect(deps.fetchSettings).toHaveBeenCalledTimes(7);
+  });
+  it("counts an attempt the backend never answers as a failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const time = clock();
+      const deps = actions({
+        now: time.now,
+        fetchSettings: vi.fn(() => new Promise<WidgetSettings>(() => {})),
+      });
+      const retry = createSettingsRetry(deps);
+
+      const hung = retry.load();
+      await vi.advanceTimersByTimeAsync(SETTINGS_RETRY_TIMEOUT_MS);
+      await hung;
+
+      expect(deps.reportAttemptFailed).toHaveBeenCalledOnce();
+
+      time.advance(SETTINGS_RETRY_DELAYS_MS[0]);
+      const second = retry.retryIfDue();
+
+      expect(deps.fetchSettings).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(SETTINGS_RETRY_TIMEOUT_MS);
+      await second;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the schedule running when the fallback shortcut cannot be applied", async () => {
+    const time = clock();
+    const deps = actions({
+      now: time.now,
+      fetchSettings: vi.fn(async () => {
+        throw refused();
+      }),
+      applyFallbackShortcut: vi.fn(async () => {
+        throw new Error("the shortcut could not be registered");
+      }),
+    });
+    const retry = createSettingsRetry(deps);
+
+    await expect(retry.load()).resolves.toBeUndefined();
+    time.advance(SETTINGS_RETRY_DELAYS_MS[0]);
+    await expect(retry.retryIfDue()).resolves.toBeUndefined();
+
+    expect(deps.fetchSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits out every gap in the schedule in turn", async () => {
+    const time = clock();
+    const deps = alwaysRefused(time);
+    const retry = createSettingsRetry(deps);
+
+    await retry.load();
+
+    for (let index = 0; index < SETTINGS_RETRY_DELAYS_MS.length; index += 1) {
+      const attemptsSoFar = deps.fetchSettings.mock.calls.length;
+      time.advance(SETTINGS_RETRY_DELAYS_MS[index] - 1);
+      await retry.retryIfDue();
+      expect(deps.fetchSettings).toHaveBeenCalledTimes(attemptsSoFar);
+      time.advance(1);
+      await retry.retryIfDue();
+      expect(deps.fetchSettings).toHaveBeenCalledTimes(attemptsSoFar + 1);
+    }
+  });
+
+  it("starts no second fetch when a load overlaps one already in flight", async () => {
+    const time = clock();
+    const gate = deferred<WidgetSettings>();
+    const deps = actions({
+      now: time.now,
+      fetchSettings: vi.fn(() => gate.promise),
+    });
+    const retry = createSettingsRetry(deps);
+
+    const first = retry.load();
+    const overlapping = retry.load();
+    gate.resolve(FETCHED);
+    await Promise.all([first, overlapping]);
+
+    expect(deps.fetchSettings).toHaveBeenCalledOnce();
+  });
+
+  it("retries a load that fails after an earlier load succeeded", async () => {
+    const time = clock();
+    const deps = actions({
+      now: time.now,
+      fetchSettings: vi.fn().mockResolvedValueOnce(FETCHED).mockRejectedValue(refused()),
+    });
+    const retry = createSettingsRetry(deps);
+
+    await retry.load();
+    await retry.load();
+    time.advance(SETTINGS_RETRY_DELAYS_MS[0]);
+    await retry.retryIfDue();
+
+    expect(deps.fetchSettings).toHaveBeenCalledTimes(3);
+    expect(deps.reportAttemptFailed).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips a retry while the widget is busy without consuming an attempt", async () => {
+    const time = clock();
+    let busy = true;
+    const deps = alwaysRefused(time);
+    deps.isBusy = vi.fn(() => busy);
+    const retry = createSettingsRetry(deps);
+
+    await retry.load();
+    time.advance(SETTINGS_RETRY_DELAYS_MS[0]);
+    await retry.retryIfDue();
+
+    expect(deps.fetchSettings).toHaveBeenCalledOnce();
+
+    busy = false;
+    await retry.retryIfDue();
+
+    expect(deps.fetchSettings).toHaveBeenCalledTimes(2);
+
+    time.advance(SETTINGS_RETRY_DELAYS_MS[1] - 1);
+    await retry.retryIfDue();
+
+    expect(deps.fetchSettings).toHaveBeenCalledTimes(2);
   });
 });

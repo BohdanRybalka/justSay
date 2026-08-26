@@ -16,7 +16,15 @@
  * from one burst of taps, the second of them empty. Its symmetric consequence
  * is deliberate too — a press arriving during processing is applied once
  * processing settles, so a held key starts a recording late instead of not at
- * all.
+ * all. A `"toggle"` is the exception and is dropped while the widget is busy:
+ * a click is an instantaneous action rather than a sustained one, so queueing
+ * it would start a whole new dictation the moment the previous one finished
+ * processing — which is not what the click meant.
+ *
+ * "Never dropped" also covers the failing action: if the injected start or stop
+ * rejects, the error is reported once and any intent that arrived while it was
+ * in flight is still served. Throwing that intent away is JS-103 in its
+ * original shape — a release lost because the start it raced never answered.
  */
 
 export type RecordingIntent = "start" | "stop" | "toggle";
@@ -25,6 +33,7 @@ export type RecordingIntent = "start" | "stop" | "toggle";
  *  without a DOM, a backend or a Tauri bridge. */
 export interface RecordingIntentActions {
   isRecording(): boolean;
+  isBusy(): boolean;
   startRecording(): Promise<unknown>;
   stopRecording(): Promise<unknown>;
   reportError(error: unknown): void;
@@ -56,8 +65,6 @@ export function createRecordingIntentQueue(
         await (target ? actions.startRecording() : actions.stopRecording());
       } catch (e) {
         actions.reportError(e);
-        desired = null;
-        return;
       }
       if (desired === target) desired = null;
     }
@@ -65,6 +72,7 @@ export function createRecordingIntentQueue(
 
   return {
     request(intent: RecordingIntent): Promise<void> {
+      if (intent === "toggle" && actions.isBusy()) return Promise.resolve();
       desired = desiredStateAfter(intent, desired ?? actions.isRecording());
       if (draining) return draining;
       draining = drain().finally(() => {

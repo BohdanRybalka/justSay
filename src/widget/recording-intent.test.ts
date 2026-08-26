@@ -15,6 +15,7 @@ function deferred() {
 function actions(recorder: { recording: boolean }, overrides: Partial<RecordingIntentActions> = {}) {
   const spies = {
     isRecording: vi.fn(() => recorder.recording),
+    isBusy: vi.fn(() => false),
     startRecording: vi.fn(async () => {
       recorder.recording = true;
     }),
@@ -164,5 +165,60 @@ describe("the recording intent queue", () => {
     expect(deps.stopRecording).not.toHaveBeenCalled();
     expect(deps.startRecording).not.toHaveBeenCalled();
     expect(deps.reportError).not.toHaveBeenCalled();
+  });
+  it("serves an intent that arrived while a failing action was in flight", async () => {
+    const recorder = { recording: false };
+    const started = deferred();
+    const deps = actions(recorder, {
+      startRecording: vi.fn(async () => {
+        recorder.recording = true;
+        await started.promise;
+        throw new Error("the backend refused the start");
+      }),
+    });
+    const queue = createRecordingIntentQueue(deps);
+
+    const pressed = queue.request("start");
+    const released = queue.request("stop");
+    started.resolve();
+    await Promise.all([pressed, released]);
+
+    expect(deps.reportError).toHaveBeenCalledOnce();
+    expect(deps.stopRecording).toHaveBeenCalledOnce();
+    expect(recorder.recording).toBe(false);
+  });
+
+  it("ignores a click that arrives while a dictation is being processed", async () => {
+    const recorder = { recording: false };
+    const deps = actions(recorder, { isBusy: vi.fn(() => true) });
+
+    await createRecordingIntentQueue(deps).request("toggle");
+
+    expect(deps.startRecording).not.toHaveBeenCalled();
+    expect(deps.stopRecording).not.toHaveBeenCalled();
+  });
+
+  it("still applies a hotkey press that arrives while a dictation is being processed", async () => {
+    const recorder = { recording: true };
+    const processed = deferred();
+    let busy = false;
+    const deps = actions(recorder, {
+      isBusy: vi.fn(() => busy),
+      stopRecording: vi.fn(async () => {
+        recorder.recording = false;
+        busy = true;
+        await processed.promise;
+        busy = false;
+      }),
+    });
+    const queue = createRecordingIntentQueue(deps);
+
+    const released = queue.request("stop");
+    const pressed = queue.request("start");
+    processed.resolve();
+    await Promise.all([released, pressed]);
+
+    expect(deps.startRecording).toHaveBeenCalledOnce();
+    expect(recorder.recording).toBe(true);
   });
 });
