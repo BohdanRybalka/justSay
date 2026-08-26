@@ -25,6 +25,14 @@
  * rejects, the error is reported once and any intent that arrived while it was
  * in flight is still served. Throwing that intent away is JS-103 in its
  * original shape — a release lost because the start it raced never answered.
+ *
+ * What "never dropped" means precisely is: never dropped for arriving at an
+ * inconvenient moment. It is not a liveness guarantee. An injected action that
+ * neither resolves nor rejects — a request the backend accepts and abandons —
+ * leaves the drain awaiting it forever, and every later intent then joins that
+ * same unsettled promise. The queue serializes intents; it does not bound the
+ * transport underneath them, and the boolean guard it replaced wedged on
+ * exactly the same failure.
  */
 
 export type RecordingIntent = "start" | "stop" | "toggle";

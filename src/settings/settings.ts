@@ -8,6 +8,7 @@ import {
   type CloudKeyStatus,
   type UserSettings,
 } from "../api";
+import { withTimeout } from "../timeout";
 import { renderGeneral } from "./tabs/general";
 import { renderModels } from "./tabs/models";
 import { renderHistory } from "./tabs/history";
@@ -122,7 +123,7 @@ async function loadSettingsIntoUi(): Promise<void> {
   settingsLoadInFlight = true;
   try {
     await checkBackend();
-    await withSettingsLoadTimeout(loadSettings());
+    await withTimeout(loadSettings(), SETTINGS_LOAD_TIMEOUT_MS);
     settingsError = null;
     settingsLoadInFlight = false;
     switchTab(currentTab);
@@ -133,17 +134,6 @@ async function loadSettingsIntoUi(): Promise<void> {
     renderBackendStatus(backendReachable);
     console.error("Failed to load settings:", e);
   }
-}
-
-function withSettingsLoadTimeout<T>(work: Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  const expiry = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`the backend did not answer within ${SETTINGS_LOAD_TIMEOUT_MS / 1000} seconds`)),
-      SETTINGS_LOAD_TIMEOUT_MS,
-    );
-  });
-  return Promise.race([work, expiry]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
 function switchTab(tabName: string) {

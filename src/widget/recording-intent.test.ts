@@ -188,6 +188,27 @@ describe("the recording intent queue", () => {
     expect(recorder.recording).toBe(false);
   });
 
+  it("calls nothing further when a start that swallows its own failure leaves nothing recording", async () => {
+    const recorder = { recording: false };
+    const started = deferred();
+    const deps = actions(recorder, {
+      startRecording: vi.fn(async () => {
+        await started.promise;
+      }),
+    });
+    const queue = createRecordingIntentQueue(deps);
+
+    const pressed = queue.request("start");
+    const released = queue.request("stop");
+    started.resolve();
+    await Promise.all([pressed, released]);
+
+    expect(deps.startRecording).toHaveBeenCalledOnce();
+    expect(deps.stopRecording).not.toHaveBeenCalled();
+    expect(deps.reportError).not.toHaveBeenCalled();
+    expect(recorder.recording).toBe(false);
+  });
+
   it("ignores a click that arrives while a dictation is being processed", async () => {
     const recorder = { recording: false };
     const deps = actions(recorder, { isBusy: vi.fn(() => true) });

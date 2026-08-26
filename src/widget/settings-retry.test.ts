@@ -3,6 +3,7 @@ import { TOKEN_CALL_REUSE_MS } from "../api";
 import {
   createSettingsRetry,
   SETTINGS_RETRY_DELAYS_MS,
+  SETTINGS_RETRY_DUE_TOLERANCE_MS,
   SETTINGS_RETRY_TIMEOUT_MS,
   type SettingsRetryActions,
   type WidgetSettings,
@@ -40,6 +41,7 @@ function actions(overrides: Partial<SettingsRetryActions> = {}) {
     applySettings: vi.fn(async () => {}),
     applyFallbackShortcut: vi.fn(async () => {}),
     reportAttemptFailed: vi.fn(),
+    reportFallbackFailed: vi.fn(),
     reportGaveUp: vi.fn(),
   };
   return Object.assign(spies, overrides);
@@ -109,7 +111,7 @@ describe("the bounded settings retry", () => {
     const retry = createSettingsRetry(deps);
 
     await retry.load();
-    time.advance(SETTINGS_RETRY_DELAYS_MS[0] - 1);
+    time.advance(SETTINGS_RETRY_DELAYS_MS[0] - SETTINGS_RETRY_DUE_TOLERANCE_MS - 1);
     await retry.retryIfDue();
 
     expect(deps.fetchSettings).toHaveBeenCalledOnce();
@@ -229,6 +231,24 @@ describe("the bounded settings retry", () => {
     }
   });
 
+  it("reports a failed fallback shortcut separately from a failed settings load", async () => {
+    const time = clock();
+    const deps = actions({
+      now: time.now,
+      fetchSettings: vi.fn(async () => {
+        throw refused();
+      }),
+      applyFallbackShortcut: vi.fn(async () => {
+        throw new Error("the shortcut could not be registered");
+      }),
+    });
+
+    await createSettingsRetry(deps).load();
+
+    expect(deps.reportAttemptFailed).toHaveBeenCalledOnce();
+    expect(deps.reportFallbackFailed).toHaveBeenCalledOnce();
+  });
+
   it("keeps the schedule running when the fallback shortcut cannot be applied", async () => {
     const time = clock();
     const deps = actions({
@@ -258,7 +278,7 @@ describe("the bounded settings retry", () => {
 
     for (let index = 0; index < SETTINGS_RETRY_DELAYS_MS.length; index += 1) {
       const attemptsSoFar = deps.fetchSettings.mock.calls.length;
-      time.advance(SETTINGS_RETRY_DELAYS_MS[index] - 1);
+      time.advance(SETTINGS_RETRY_DELAYS_MS[index] - SETTINGS_RETRY_DUE_TOLERANCE_MS - 1);
       await retry.retryIfDue();
       expect(deps.fetchSettings).toHaveBeenCalledTimes(attemptsSoFar);
       time.advance(1);
@@ -267,12 +287,13 @@ describe("the bounded settings retry", () => {
     }
   });
 
-  it("starts no second fetch when a load overlaps one already in flight", async () => {
+  it("serves a settings change that arrives while a load is already running", async () => {
     const time = clock();
     const gate = deferred<WidgetSettings>();
+    const changed: WidgetSettings = { language: "en", shortcut: "Alt+Space" };
     const deps = actions({
       now: time.now,
-      fetchSettings: vi.fn(() => gate.promise),
+      fetchSettings: vi.fn().mockImplementationOnce(() => gate.promise).mockResolvedValue(changed),
     });
     const retry = createSettingsRetry(deps);
 
@@ -281,7 +302,86 @@ describe("the bounded settings retry", () => {
     gate.resolve(FETCHED);
     await Promise.all([first, overlapping]);
 
+    expect(deps.fetchSettings).toHaveBeenCalledTimes(2);
+    expect(deps.applySettings).toHaveBeenNthCalledWith(1, FETCHED);
+    expect(deps.applySettings).toHaveBeenNthCalledWith(2, changed);
+  });
+
+  it("counts an attempt whose apply never answers as a failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const time = clock();
+      const deps = actions({
+        now: time.now,
+        applySettings: vi.fn(() => new Promise<void>(() => {})),
+      });
+      const retry = createSettingsRetry(deps);
+
+      const hung = retry.load();
+      await vi.advanceTimersByTimeAsync(SETTINGS_RETRY_TIMEOUT_MS);
+      await hung;
+
+      expect(deps.reportAttemptFailed).toHaveBeenCalledOnce();
+
+      time.advance(SETTINGS_RETRY_DELAYS_MS[0]);
+      const second = retry.retryIfDue();
+
+      expect(deps.fetchSettings).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(SETTINGS_RETRY_TIMEOUT_MS);
+      await second;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds settings fetched into a busy widget and applies them on a later tick", async () => {
+    const time = clock();
+    let busy = true;
+    const deps = actions({ now: time.now });
+    deps.isBusy = vi.fn(() => busy);
+    const retry = createSettingsRetry(deps);
+
+    await retry.load();
+
     expect(deps.fetchSettings).toHaveBeenCalledOnce();
+    expect(deps.applySettings).not.toHaveBeenCalled();
+    expect(deps.reportAttemptFailed).not.toHaveBeenCalled();
+    expect(deps.reportGaveUp).not.toHaveBeenCalled();
+
+    busy = false;
+    await retry.retryIfDue();
+
+    expect(deps.applySettings).toHaveBeenCalledWith(FETCHED);
+    expect(deps.fetchSettings).toHaveBeenCalledOnce();
+
+    await retry.retryIfDue();
+
+    expect(deps.applySettings).toHaveBeenCalledOnce();
+  });
+
+  it("measures the next gap from the end of a slow attempt, not from its start", async () => {
+    const time = clock();
+    const gate = deferred<WidgetSettings>();
+    const deps = actions({
+      now: time.now,
+      fetchSettings: vi
+        .fn()
+        .mockRejectedValueOnce(refused())
+        .mockImplementationOnce(() => gate.promise.then(() => Promise.reject(refused()))),
+    });
+    const retry = createSettingsRetry(deps);
+
+    await retry.load();
+    time.advance(SETTINGS_RETRY_DELAYS_MS[0]);
+    const slow = retry.retryIfDue();
+    time.advance(100_000);
+    gate.resolve(FETCHED);
+    await slow;
+
+    await retry.retryIfDue();
+
+    expect(deps.fetchSettings).toHaveBeenCalledTimes(2);
   });
 
   it("retries a load that fails after an earlier load succeeded", async () => {
@@ -319,7 +419,7 @@ describe("the bounded settings retry", () => {
 
     expect(deps.fetchSettings).toHaveBeenCalledTimes(2);
 
-    time.advance(SETTINGS_RETRY_DELAYS_MS[1] - 1);
+    time.advance(SETTINGS_RETRY_DELAYS_MS[1] - SETTINGS_RETRY_DUE_TOLERANCE_MS - 1);
     await retry.retryIfDue();
 
     expect(deps.fetchSettings).toHaveBeenCalledTimes(2);

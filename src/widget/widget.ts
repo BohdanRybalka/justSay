@@ -21,7 +21,7 @@ import { dictationErrorLabel } from "./error-label";
 import { MEETING_STATE_CLASS, renderMeetingIndicator } from "./meeting-indicator";
 import { type MeetingToggleActions, runMeetingToggle } from "./meeting-toggle";
 import { createRecordingIntentQueue } from "./recording-intent";
-import { createSettingsRetry } from "./settings-retry";
+import { CONNECTION_POLL_MS, createSettingsRetry } from "./settings-retry";
 
 
 type WidgetState = "idle" | "recording" | "processing" | "done" | "error";
@@ -314,6 +314,7 @@ function errorText(e: unknown): string {
 }
 
 function onShortcutEvent(event: { state: "Pressed" | "Released" }) {
+  if (meetingActive && event.state === "Pressed") return;
   void recordingIntent.request(event.state === "Pressed" ? "start" : "stop");
 }
 
@@ -455,10 +456,11 @@ const settingsRetry = createSettingsRetry({
   },
   applyFallbackShortcut: () => applyAndReportShortcut(currentShortcut),
   reportAttemptFailed: (e) => console.warn("Failed to load settings:", e),
+  reportFallbackFailed: (e) => console.warn("Failed to apply the fallback shortcut:", e),
   reportGaveUp: () =>
     notifyError(
       "JustSay could not read your settings — the default language and shortcut are in use. " +
-        "Save your settings or restart the app to apply them.",
+        "Restart the app to apply them.",
     ),
 });
 
@@ -502,9 +504,9 @@ async function checkConnection() {
 
 async function init() {
   await checkConnection();
-  setInterval(checkConnection, 5000);
+  setInterval(checkConnection, CONNECTION_POLL_MS);
 
-  await settingsRetry.load();
+  void settingsRetry.load();
   await listenForSettingsChanges();
   await syncMeetingIndicator();
 
