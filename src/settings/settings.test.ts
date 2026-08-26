@@ -337,7 +337,7 @@ describe("backend unreachable from the first poll", () => {
     expect(tabContent.textContent!.trim()).not.toBe("");
     expect(tabContent.textContent).toContain("Cannot load settings");
     expect(tabContent.textContent).toContain("was not responding");
-    expect(tabContent.textContent).toContain("restart JustSay");
+    expect(tabContent.querySelector("#btn-retry-settings")).not.toBeNull();
     expect(backendStatusEl().textContent).toBe("Backend offline");
     expect(backendStatusEl().className).toBe("status-indicator offline");
     expect(apiMock.getSettings).toHaveBeenCalledTimes(1);
@@ -353,6 +353,66 @@ describe("backend unreachable from the first poll", () => {
     expect(tabContent.textContent).toContain("was not responding");
 
     vi.useRealTimers();
+    consoleError.mockRestore();
+  });
+
+  it("the retry button loads the settings without restarting the app", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    apiMock.health.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    apiMock.getSettings.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    apiMock.cloudKeyStatus.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+    await import("./settings");
+    const tabContent = document.getElementById("tab-content")!;
+
+    await vi.waitFor(() => {
+      expect(tabContent.querySelector("#btn-retry-settings")).not.toBeNull();
+    });
+
+    apiMock.health.mockResolvedValue({
+      status: "ok",
+      version: "0.0.0",
+      stt_mode: "cloud",
+      llm_mode: "cloud",
+    });
+    apiMock.getSettings.mockResolvedValue(buildSettings());
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: true, groq_key_set: true });
+    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+
+    tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
+
+    await vi.waitFor(() => {
+      expect(tabContent.textContent).not.toContain("Cannot load settings");
+    });
+    expect(document.getElementById("lang-select")).not.toBeNull();
+    expect(backendStatusEl().className).toBe("status-indicator online");
+
+    consoleError.mockRestore();
+  });
+
+  it("a retry that fails again leaves the button usable rather than stuck", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+    apiMock.getSettings.mockRejectedValue(new TypeError("Failed to fetch"));
+    apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await import("./settings");
+    const tabContent = document.getElementById("tab-content")!;
+
+    await vi.waitFor(() => {
+      expect(tabContent.querySelector("#btn-retry-settings")).not.toBeNull();
+    });
+    tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
+
+    await vi.waitFor(() => {
+      expect(apiMock.getSettings).toHaveBeenCalledTimes(2);
+    });
+    await vi.waitFor(() => {
+      const again = tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!;
+      expect(again.disabled).toBe(false);
+      expect(again.textContent).toBe("Try again");
+    });
+
     consoleError.mockRestore();
   });
 });

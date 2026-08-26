@@ -49,14 +49,23 @@ function bridgeDiagnosisText(diagnosis: BridgeDiagnosis): string {
 
 function settingsUnavailableMessage(error: unknown, reachable: boolean): string {
   if (error instanceof ApiAuthError) {
-    return `JustSay could not authenticate to its own backend, so it is refusing every request (401). Tauri bridge: ${bridgeDiagnosisText(error.diagnosis)}. Restart JustSay to try again.`;
+    return `JustSay could not authenticate to its own backend, so it is refusing every request (401). Tauri bridge: ${bridgeDiagnosisText(error.diagnosis)}.`;
   }
   if (!reachable) {
-    return "The backend was not responding when this window loaded its settings. Make sure it is running, then restart JustSay.";
+    return "The backend was not responding when this window loaded its settings. Make sure it is running, then try again.";
   }
-  return `The backend answered, but loading settings failed: ${error instanceof Error ? error.message : String(error)}. Restart JustSay to try again.`;
+  return `The backend answered, but loading settings failed: ${error instanceof Error ? error.message : String(error)}.`;
 }
 
+/**
+ * The failure screen, with the way out of it.
+ *
+ * `init()` races the sidecar, which the Rust side budgets thirty seconds for,
+ * so this screen is reached on an ordinary cold start. Closing the window does
+ * not reload the webview -- `src-tauri/src/lib.rs` intercepts CloseRequested
+ * and hides it instead -- so without a retry the only recovery is restarting
+ * the whole app.
+ */
 function renderSettingsUnavailable(container: HTMLElement) {
   container.innerHTML = "";
 
@@ -73,6 +82,32 @@ function renderSettingsUnavailable(container: HTMLElement) {
     : settingsError;
 
   container.append(title, explanation);
+  if (loading) return;
+
+  const retry = document.createElement("button");
+  retry.className = "btn btn-secondary";
+  retry.id = "btn-retry-settings";
+  retry.textContent = "Try again";
+  retry.addEventListener("click", () => {
+    retry.disabled = true;
+    retry.textContent = "Retrying…";
+    void loadSettingsIntoUi();
+  });
+  container.append(retry);
+}
+
+async function loadSettingsIntoUi(): Promise<void> {
+  await checkBackend();
+  try {
+    await loadSettings();
+    settingsError = null;
+    switchTab(currentTab);
+  } catch (e) {
+    settingsError = settingsUnavailableMessage(e, backendReachable);
+    renderSettingsUnavailable(tabContent);
+    renderBackendStatus(backendReachable);
+    console.error("Failed to load settings:", e);
+  }
 }
 
 function switchTab(tabName: string) {
@@ -194,18 +229,8 @@ navButtons.forEach((btn) => {
 async function init() {
   void initAppVersion();
   renderSettingsUnavailable(tabContent);
-  await checkBackend();
   setInterval(checkBackend, 5000);
-  try {
-    await loadSettings();
-    settingsError = null;
-    switchTab(currentTab);
-  } catch (e) {
-    settingsError = settingsUnavailableMessage(e, backendReachable);
-    renderSettingsUnavailable(tabContent);
-    renderBackendStatus(backendReachable);
-    console.error("Failed to load settings:", e);
-  }
+  await loadSettingsIntoUi();
 }
 
 init();

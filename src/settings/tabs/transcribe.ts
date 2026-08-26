@@ -102,18 +102,21 @@ export function renderTranscribe(container: HTMLElement): () => void {
     }
   });
 
+  let destroyed = false;
   let unlistenDrop: (() => void) | null = null;
   (async () => {
     try {
       const { getCurrentWebview } = await import("@tauri-apps/api/webview");
       const wv = getCurrentWebview();
       const off = await wv.onDragDropEvent((event) => {
-        if (busy) return;
+        if (destroyed || busy) return;
         if (event.payload.type === "drop" && event.payload.paths?.length) {
           handlePath(event.payload.paths[0]);
         }
       });
-      unlistenDrop = () => { void off(); };
+      const unlisten = () => { void off(); };
+      if (destroyed) unlisten();
+      else unlistenDrop = unlisten;
     } catch {
     }
   })();
@@ -234,8 +237,10 @@ export function renderTranscribe(container: HTMLElement): () => void {
   }
 
   return () => {
+    destroyed = true;
     if (unlistenDrop) {
       try { unlistenDrop(); } catch {}
+      unlistenDrop = null;
     }
   };
 }

@@ -237,6 +237,51 @@ describe("renderTranscribe — the drop zone", () => {
 
     expect(unlisten).toHaveBeenCalledTimes(1);
   });
+
+  it("a teardown that beats the registration still unsubscribes it", async () => {
+    let arrive!: (off: typeof unlisten) => void;
+    onDragDropEvent.mockImplementationOnce(
+      () => new Promise<typeof unlisten>((resolve) => (arrive = resolve)),
+    );
+    const { teardown } = render();
+    await vi.waitFor(() => {
+      expect(onDragDropEvent).toHaveBeenCalledTimes(1);
+    });
+
+    teardown();
+    arrive(unlisten);
+
+    await vi.waitFor(() => {
+      expect(unlisten).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("a drop delivered after teardown transcribes nothing", async () => {
+    readFile.mockResolvedValue(new Uint8Array([1, 2, 3, 4]));
+    apiMock.processFile.mockResolvedValue({
+      text: "before",
+      duration_ms: 1000,
+      copied_to_clipboard: true,
+    });
+    const { teardown } = render();
+    await vi.waitFor(() => {
+      expect(onDragDropEvent).toHaveBeenCalledTimes(1);
+    });
+    const listener = onDragDropEvent.mock.calls[0][0];
+
+    listener({ payload: { type: "drop", paths: ["/home/me/before.wav"] } });
+    await vi.waitFor(() => {
+      expect(apiMock.processFile).toHaveBeenCalledTimes(1);
+    });
+
+    teardown();
+    listener({ payload: { type: "drop", paths: ["/home/me/after.wav"] } });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(readFile).toHaveBeenCalledTimes(1);
+    expect(apiMock.processFile).toHaveBeenCalledTimes(1);
+    expect(apiMock.processFile.mock.calls[0][1]).toBe("before.wav");
+  });
 });
 
 describe("renderTranscribe — a file dropped onto the shell rather than the page", () => {
