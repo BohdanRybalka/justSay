@@ -36,7 +36,7 @@ const TOKEN_TIMED_OUT = Symbol("token-timed-out");
  *  wedge — one dropped response on an otherwise live transport — into a
  *  permanent one, because a call that never settles would be raced forever and
  *  no new `invoke()` would ever be attempted. */
-const TOKEN_CALL_REUSE_MS = 60_000;
+export const TOKEN_CALL_REUSE_MS = 60_000;
 
 let cachedToken: string | null = null;
 let tokenPromise: Promise<string | null> | null = null;
