@@ -66,6 +66,10 @@ class _GatedStdout(io.BytesIO):
     helper's audio arrives over the length of a call; an ungated BytesIO
     hands every block a near-identical arrival, which is not what a call
     looks like on the timeline.
+
+    The wait's result is asserted rather than discarded: a gate that is never
+    opened has to fail the test that forgot to open it, not delay every read
+    by the timeout and then hand the body over anyway.
     """
 
     def __init__(self, data: bytes):
@@ -73,7 +77,7 @@ class _GatedStdout(io.BytesIO):
         self.gate = threading.Event()
 
     def read(self, size: int = -1) -> bytes:
-        self.gate.wait(timeout=5.0)
+        assert self.gate.wait(timeout=5.0), "the test never opened the stdout gate"
         return super().read(size)
 
 

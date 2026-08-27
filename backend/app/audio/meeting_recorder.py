@@ -317,16 +317,30 @@ class MeetingRecorder(AudioRecorder):
         time_info: object,
         status: sd.CallbackFlags,
     ) -> None:
+        """Keep the block, then publish its level if the session still exists.
+
+        The keep and the level write are two separate lock holds, and a stop
+        can complete in the gap between them, so the token is checked again
+        in the second one. Without that check a callback preempted mid-way
+        republishes an ended meeting's level after `_end_capture` cleared it.
+        """
         arrival = time.monotonic()
         mono = to_mono(indata)
         if self._store(token, self._microphone_blocks, arrival, mono):
             with self._lock:
-                self._current_level = rms_dbfs(mono)
+                if self._session_token == token:
+                    self._current_level = rms_dbfs(mono)
 
     def _system_callback(self, token: int, arrival: float, mono: np.ndarray) -> None:
+        """The far side's half of `_microphone_callback`, with the same re-check.
+
+        The level write is a second lock hold here too, so a stop landing in
+        the gap must not be followed by the ended meeting's far-side level.
+        """
         if self._store(token, self._system_blocks, arrival, mono):
             with self._lock:
-                self._system_level = rms_dbfs(mono)
+                if self._session_token == token:
+                    self._system_level = rms_dbfs(mono)
 
     async def start(self) -> None:
         """Send the owner thread a start command and wait for its answer.
@@ -360,11 +374,16 @@ class MeetingRecorder(AudioRecorder):
         There is no publish check: nothing can happen between the open and
         the publish, because they are one callable on the only thread that
         writes the state. The token is claimed in the first lock hold, so the
-        two callbacks are admitted from the moment their devices are live;
-        `_start_time` is published the instant the system source starts, so
-        the microphone open contributes no leading silence and drops no
-        far-side audio, and the recorder reports itself recording for the
-        rest of the open rather than only once both devices are up.
+        two callbacks are admitted from the moment their devices are live.
+
+        `capture_start` is read immediately before the system source starts,
+        which is the earliest instant a far-side block can arrive, so a block
+        delivered while `start()` is still returning lands at a non-negative
+        offset instead of being trimmed by `place_on_timeline`. It is
+        published the moment that call returns, before the microphone opens,
+        so the microphone open contributes no leading silence and the
+        recorder reports itself recording for the rest of that open rather
+        than only once both devices are up.
         """
         with self._lock:
             if self._state is not MeetingState.IDLE:
@@ -389,8 +408,8 @@ class MeetingRecorder(AudioRecorder):
                     "meeting recording requires Windows or macOS"
                 )
             self._settings.temp_dir.mkdir(parents=True, exist_ok=True)
-            source.start(functools.partial(self._system_callback, token))
             capture_start = time.monotonic()
+            source.start(functools.partial(self._system_callback, token))
             with self._lock:
                 self._start_time = capture_start
                 self._endpoint_name = source.endpoint_name

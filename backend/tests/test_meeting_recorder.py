@@ -3007,3 +3007,132 @@ def test_a_failed_write_carries_the_cause_and_not_a_second_sentence(audio_settin
         )
     finally:
         recorder.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("side", ["microphone", "system"])
+async def test_a_stop_landing_between_the_two_lock_holds_leaves_the_meter_silent(
+    audio_settings, fake_system_source, fake_microphone_stream, side
+):
+    """GitHub review iteration 9, finding 1.
+
+    A callback keeps its block under one lock hold and publishes its level
+    under a second one. `test_a_completed_stop_clears_both_level_meters`
+    drives the callback from the test thread, so the gap between those two
+    holds never opens. Here the callback really is parked inside it, on its
+    own thread, while the stop harvests and clears everything — which is the
+    interleaving PortAudio produces when it preempts the callback thread.
+    """
+    recorder = MeetingRecorder(audio_settings)
+    reached_the_gap = threading.Event()
+    stop_completed = threading.Event()
+    real_store = recorder._store
+
+    def _park_between_the_holds(token, blocks, arrival, mono):
+        kept = real_store(token, blocks, arrival, mono)
+        if kept:
+            reached_the_gap.set()
+            assert stop_completed.wait(timeout=5.0), "the stop never completed"
+        return kept
+
+    try:
+        await recorder.start()
+        _wait_for_devices(recorder)
+        _feed_microphone(recorder, 3)
+        _deliver_over_a_real_span(recorder, fake_system_source, 3)
+        time.sleep(0.05)
+
+        token = recorder._session_token
+        block = np.full(BLOCK_FRAMES, 0.4, dtype=np.float32)
+        if side == "microphone":
+            racing = functools.partial(
+                recorder._microphone_callback,
+                token,
+                block.reshape(BLOCK_FRAMES, 1),
+                BLOCK_FRAMES,
+                None,
+                MagicMock(),
+            )
+        else:
+            racing = functools.partial(
+                recorder._system_callback, token, time.monotonic(), block
+            )
+
+        recorder._store = _park_between_the_holds
+        callback_thread = threading.Thread(target=racing, name="parked-callback")
+        callback_thread.start()
+        assert reached_the_gap.wait(timeout=5.0), "the callback never kept its block"
+
+        await recorder.stop()
+        _wait_for_writes(recorder)
+
+        stop_completed.set()
+        callback_thread.join(timeout=5.0)
+        assert not callback_thread.is_alive()
+
+        assert recorder.is_recording is False
+        assert recorder.system_endpoint is None
+        assert recorder.level_db == float("-inf"), (
+            "a callback resuming after the stop republished the ended meeting's "
+            "microphone level beside system_endpoint: null"
+        )
+        assert recorder.system_level_db == float("-inf"), (
+            "a callback resuming after the stop republished the ended meeting's "
+            "far-side level beside system_endpoint: null"
+        )
+    finally:
+        stop_completed.set()
+        recorder.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_far_side_audio_arriving_during_the_open_is_not_trimmed_away(
+    audio_settings, fake_microphone_stream
+):
+    """GitHub review iteration 9, finding 2.
+
+    The macOS helper streams continuously once its header is out, so the pipe
+    can already hold a block by the time `source.start()` returns. If the
+    recording anchor is read after that return, every such block carries
+    `arrival < recording_start` and `place_on_timeline` trims it off the
+    front. The anchor is taken before the start, so the audio survives.
+    """
+    source = _FakeSystemAudioSource()
+    open_duration = 0.06
+    delivered = 8
+    first_arrival: list[float] = []
+
+    def _start(on_block):
+        source.on_block = on_block
+        source.started = True
+        first_arrival.append(time.monotonic())
+        on_block(first_arrival[0], np.full(BLOCK_FRAMES, 0.5, dtype=np.float32))
+        time.sleep(open_duration)
+
+    source.start = _start
+    recorder = MeetingRecorder(audio_settings)
+
+    try:
+        with patch(
+            "app.audio.meeting_recorder.create_system_audio_source", lambda _: source
+        ):
+            await recorder.start()
+        _wait_for_devices(recorder)
+
+        for index in range(1, delivered):
+            source.deliver(first_arrival[0] + index * BLOCK_FRAMES / SYSTEM_RATE)
+        time.sleep(0.25)
+
+        audio_path = (await recorder.stop()).path
+        _wait_for_writes(recorder)
+
+        with wave.open(str(audio_path), "rb") as wf:
+            samples = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+
+        block_samples = BLOCK_FRAMES * audio_settings.sample_rate // SYSTEM_RATE
+        assert int(np.count_nonzero(samples)) >= (delivered - 1) * block_samples, (
+            "the far-side audio delivered while the source was still starting "
+            "was trimmed off the front of the recording"
+        )
+    finally:
+        recorder.cleanup()
