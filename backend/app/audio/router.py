@@ -70,12 +70,21 @@ _CONSENT_REQUIRED_DETAIL = (
 
 
 def _meeting_status(recorder: MeetingRecorder) -> MeetingStatus:
+    """Build the response from one snapshot rather than five property reads.
+
+    Read one at a time, the device thread can finish a stop between two of
+    them and the response describes two different moments — a live meeting
+    with no elapsed time and no endpoint. `syncMeetingIndicator` runs once at
+    widget load and nothing polls after it, so such a response leaves a
+    ticking indicator up for a call that has already ended.
+    """
+    snapshot = recorder.status_snapshot()
     return MeetingStatus(
-        is_recording=recorder.is_recording,
-        duration_seconds=recorder.duration_seconds,
-        level_db=recorder.level_db,
-        system_endpoint=recorder.system_endpoint,
-        system_level_db=recorder.system_level_db,
+        is_recording=snapshot.is_recording,
+        duration_seconds=snapshot.duration_seconds,
+        level_db=snapshot.level_db,
+        system_endpoint=snapshot.system_endpoint,
+        system_level_db=snapshot.system_level_db,
     )
 
 

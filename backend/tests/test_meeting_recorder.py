@@ -36,6 +36,7 @@ from app.audio.meeting_recorder import (
     MeetingRecorder,
     MeetingRecording,
     MeetingState,
+    MeetingStatusSnapshot,
     MeetingWriteFailedError,
     _CapturedMeeting,
     _release_devices,
@@ -807,6 +808,15 @@ class _FakeRecorder:
         self.system_level_db = float("-inf")
         self.system_endpoint = None
         self.started = False
+
+    def status_snapshot(self):
+        return MeetingStatusSnapshot(
+            is_recording=self.is_recording,
+            duration_seconds=self.duration_seconds,
+            level_db=self.level_db,
+            system_endpoint=self.system_endpoint,
+            system_level_db=self.system_level_db,
+        )
 
     async def start(self):
         self.started = True
@@ -3133,6 +3143,196 @@ async def test_far_side_audio_arriving_during_the_open_is_not_trimmed_away(
         assert int(np.count_nonzero(samples)) >= (delivered - 1) * block_samples, (
             "the far-side audio delivered while the source was still starting "
             "was trimmed off the front of the recording"
+        )
+    finally:
+        recorder.cleanup()
+
+
+class _ExplodingRateSource(_FakeSystemAudioSource):
+    """A source whose `native_sample_rate` raises once the test arms it.
+
+    The property is read inside `_end_capture`'s harvest lock hold, and it is
+    a property on a live device object rather than a stored number — on
+    Windows it comes off the PyAudio device dict, on macOS off the helper's
+    header — so a raise there is the realistic shape of the failure this
+    pins, not an injected one.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.armed = False
+
+    @property
+    def native_sample_rate(self) -> int:
+        if self.armed:
+            raise RuntimeError("the device went away mid-harvest")
+        return super().native_sample_rate
+
+
+@pytest.mark.asyncio
+async def test_a_raise_inside_the_harvest_leaves_no_handle_behind(
+    audio_settings, fake_microphone_stream
+):
+    """GitHub review iteration 10, finding 1.
+
+    The two halves of one invariant — the recorder is idle if and only if it
+    holds no device handle — are both in `_end_capture`'s `finally`. This
+    drives a raise inside the harvest lock hold itself, not a failing
+    release, and asserts the handles are gone rather than only that the
+    state is: an `IDLE` recorder still holding an open microphone stream and
+    an open loopback source passes `is_busy`, and the next start opens a
+    second pair on top of a first nothing can reach.
+    """
+    source = _ExplodingRateSource()
+    recorder = MeetingRecorder(audio_settings)
+
+    try:
+        with patch(
+            "app.audio.meeting_recorder.create_system_audio_source", lambda _: source
+        ):
+            await recorder.start()
+        _wait_for_devices(recorder)
+        stream = fake_microphone_stream.return_value
+        source.armed = True
+
+        with pytest.raises(RuntimeError, match="the device went away mid-harvest"):
+            await recorder.stop()
+        _wait_for_devices(recorder)
+
+        assert recorder._stream is None and recorder._system_source is None, (
+            "the raise left both handles in the recorder's fields, and the next "
+            "start overwrites them with a second pair"
+        )
+        assert source.stopped is True, (
+            "the loopback source is still open and nothing holds a reference to it"
+        )
+        stream.close.assert_called_once_with()
+        assert recorder.is_busy is False
+        assert recorder._state is MeetingState.IDLE
+    finally:
+        recorder.cleanup()
+
+
+class _StopOnFirstRelease:
+    """A lock that runs a whole stop the first time the reader lets go of it.
+
+    Wraps the recorder's real lock. The status read is the reader; the stop
+    runs on the recorder's own device thread, which is the thread that
+    really competes with it. Reading the five reported facts one property at
+    a time releases the lock four times before the response is built, and
+    this fires in the first of those gaps — the interleaving no sequential
+    call can produce, because from one thread the stop can only run before
+    the read or after it.
+    """
+
+    def __init__(self, lock, run_the_stop):
+        self._lock = lock
+        self._run_the_stop = run_the_stop
+        self._fired = False
+        self.reader_ident: int | None = None
+
+    def __enter__(self):
+        return self._lock.__enter__()
+
+    def __exit__(self, *exc_info):
+        released = self._lock.__exit__(*exc_info)
+        if not self._fired and threading.get_ident() == self.reader_ident:
+            self._fired = True
+            self._run_the_stop()
+        return released
+
+
+@pytest.mark.anyio
+async def test_a_stop_landing_between_two_status_reads_cannot_tear_the_response(
+    audio_settings, fake_system_source, fake_microphone_stream, client
+):
+    """GitHub review iteration 10, finding 2.
+
+    `GET /audio/meeting/status` is served on the event loop while the device
+    thread is free to finish `_end_capture`. Assembled one property at a
+    time the response can say `is_recording: true` next to
+    `duration_seconds: 0.0` and `system_endpoint: null`; `syncMeetingIndicator`
+    runs once at widget load and nothing polls after it, so the widget then
+    shows a ticking indicator and a lit tray for a call that has ended.
+    """
+    recorder = MeetingRecorder(audio_settings)
+    app.dependency_overrides[get_meeting_recorder] = lambda: recorder
+
+    def _stop_on_the_device_thread():
+        recorder._submit_on_devices(recorder._end_capture).result(timeout=5.0)
+
+    try:
+        await recorder.start()
+        _wait_for_devices(recorder)
+        _feed_microphone(recorder, 3)
+        _deliver_over_a_real_span(recorder, fake_system_source, 3)
+        time.sleep(0.05)
+
+        racing_lock = _StopOnFirstRelease(recorder._lock, _stop_on_the_device_thread)
+        racing_lock.reader_ident = threading.get_ident()
+        recorder._lock = racing_lock
+
+        body = (await client.get("/audio/meeting/status")).json()
+
+        assert racing_lock._fired is True, "the stop never raced the status read"
+        assert recorder.is_recording is False
+        assert body["is_recording"] is True
+        assert body["system_endpoint"] == "Headset [Loopback]", (
+            "the status announces a live meeting with no endpoint — the widget "
+            "raises a ticking indicator for a call that has already ended"
+        )
+        assert body["duration_seconds"] > 0.0, (
+            "the status announces a live meeting of zero length — the widget "
+            "starts its timer from the moment the call ended"
+        )
+    finally:
+        _wait_for_devices(recorder)
+        _wait_for_writes(recorder)
+        recorder.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_a_far_side_block_kept_during_the_open_is_already_reported_recording(
+    audio_settings, fake_microphone_stream
+):
+    """GitHub review iteration 10, finding 3.
+
+    `WindowsLoopbackSource.start` hands PyAudio a `stream_callback` and
+    PyAudio starts the stream inside `open()`, so far-side blocks are stored
+    before `start()` returns. Moving the device open off the event loop made
+    that window reachable by an HTTP request for the first time, and a widget
+    loading in it takes `syncMeetingIndicator`'s early return and never
+    raises the indicator for the rest of the call.
+    """
+    source = _FakeSystemAudioSource(endpoint_name="Speakers [Loopback]")
+    recorder = MeetingRecorder(audio_settings)
+    observed: dict[str, object] = {}
+
+    def _start(on_block):
+        source.on_block = on_block
+        source.started = True
+        on_block(time.monotonic(), np.full(BLOCK_FRAMES, 0.5, dtype=np.float32))
+        observed["kept"] = len(recorder._system_blocks)
+        snapshot = recorder.status_snapshot()
+        observed["is_recording"] = snapshot.is_recording
+        observed["endpoint"] = snapshot.system_endpoint
+
+    source.start = _start
+
+    try:
+        with patch(
+            "app.audio.meeting_recorder.create_system_audio_source", lambda _: source
+        ):
+            await recorder.start()
+        _wait_for_devices(recorder)
+
+        assert observed["kept"] == 1, "the block the open delivered was not kept"
+        assert observed["is_recording"] is True, (
+            "the status answers is_recording: false while the recording already "
+            "holds far-side audio, and a widget loading here never lights up"
+        )
+        assert observed["endpoint"] == "Speakers [Loopback]", (
+            "the status cannot name the output whose audio it is already keeping"
         )
     finally:
         recorder.cleanup()

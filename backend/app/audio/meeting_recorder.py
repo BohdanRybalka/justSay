@@ -156,6 +156,25 @@ class MeetingRecording(NamedTuple):
     truncated: bool
 
 
+class MeetingStatusSnapshot(NamedTuple):
+    """The five reported facts as they stood in one lock hold.
+
+    Exists because reading the five properties one after another does not
+    describe one moment: each takes its own lock hold, and the owner thread
+    is free to finish `_end_capture` between any two of them, which produced
+    `{is_recording: true, duration_seconds: 0.0, system_endpoint: null}` —
+    the combination the harvest's single write hold exists to make
+    impossible. The properties stay for the callers that want one fact; a
+    status that reports several of them at once takes this instead.
+    """
+
+    is_recording: bool
+    duration_seconds: float
+    level_db: float
+    system_endpoint: str | None
+    system_level_db: float
+
+
 def _release_devices(
     stream: sd.InputStream | None, source: SystemAudioSource | None
 ) -> None:
@@ -376,14 +395,19 @@ class MeetingRecorder(AudioRecorder):
         writes the state. The token is claimed in the first lock hold, so the
         two callbacks are admitted from the moment their devices are live.
 
-        `capture_start` is read immediately before the system source starts,
+        `_start_time` is read immediately before the system source starts,
         which is the earliest instant a far-side block can arrive, so a block
         delivered while `start()` is still returning lands at a non-negative
         offset instead of being trimmed by `place_on_timeline`. It is
-        published the moment that call returns, before the microphone opens,
-        so the microphone open contributes no leading silence and the
-        recorder reports itself recording for the rest of that open rather
-        than only once both devices are up.
+        published in that same lock hold, i.e. before that call rather than
+        after it: `WindowsLoopbackSource.start` hands PyAudio a
+        `stream_callback` and PyAudio starts the stream inside `open()`, so
+        far-side blocks are already being kept while `start()` has not
+        returned. Publishing afterwards left that window answering
+        `is_recording: false` for audio the recording already contains. Both
+        sources resolve `endpoint_name` in their constructor, so the name is
+        publishable at the same instant and no window can report a live
+        meeting it cannot name.
         """
         with self._lock:
             if self._state is not MeetingState.IDLE:
@@ -408,11 +432,10 @@ class MeetingRecorder(AudioRecorder):
                     "meeting recording requires Windows or macOS"
                 )
             self._settings.temp_dir.mkdir(parents=True, exist_ok=True)
-            capture_start = time.monotonic()
-            source.start(functools.partial(self._system_callback, token))
             with self._lock:
-                self._start_time = capture_start
+                self._start_time = time.monotonic()
                 self._endpoint_name = source.endpoint_name
+            source.start(functools.partial(self._system_callback, token))
             stream = sd.InputStream(
                 samplerate=self._settings.sample_rate,
                 channels=self._settings.channels,
@@ -470,13 +493,24 @@ class MeetingRecorder(AudioRecorder):
     def _end_capture(self) -> Future[MeetingRecording]:
         """Harvest, release, submit the write and return its future.
 
-        The return to `IDLE` is in a `finally` because the loop-side task
-        awaiting this may be cancelled — FastAPI cancels the endpoint task
-        when a client disconnects — and the recorder must not be left
-        reporting itself busy with both handles already closed. Submitting
-        the write here, as the last act on the owner thread, is what puts the
-        recording out of that cancellation's reach: the `_CapturedMeeting`
-        never crosses back to the loop.
+        The release and the return to `IDLE` are both in the `finally`, and
+        they hold the two halves of one invariant: the recorder is idle if
+        and only if it holds no device handle. The transition is there
+        because the loop-side task awaiting this may be cancelled — FastAPI
+        cancels the endpoint task when a client disconnects — and the
+        recorder must not be left reporting itself busy with both handles
+        already closed. The release is there because the mirror state is just
+        as reachable: the handles are taken out of the fields in the first
+        statements of the harvest hold, so anything that raises later in it —
+        `native_sample_rate`, which is a property on a live device object,
+        or the tuple build itself — would otherwise reach an `IDLE` recorder
+        holding an open microphone stream and an open loopback source that no
+        reference path survives to, and the next start would open a second
+        pair on top of them. `_release_devices` never raises, so it cannot
+        cost the transition behind it. Submitting the write here, as the last
+        act on the owner thread, is what puts the recording out of the
+        cancellation's reach: the `_CapturedMeeting` never crosses back to
+        the loop.
 
         The truncation flag is harvested in the same lock hold as the blocks
         and travels inside the `_CapturedMeeting`, because it describes this
@@ -492,11 +526,17 @@ class MeetingRecorder(AudioRecorder):
                 raise MeetingCaptureAbortedError("Not recording")
         self._transition(MeetingState.STOPPING)
 
+        stream: sd.InputStream | None = None
+        source: SystemAudioSource | None = None
         try:
             with self._lock:
+                stream = self._stream
+                source = self._system_source
+                self._stream = None
+                self._system_source = None
                 system_rate = self._settings.sample_rate
-                if self._system_source is not None:
-                    system_rate = self._system_source.native_sample_rate
+                if source is not None:
+                    system_rate = source.native_sample_rate
                 captured = _CapturedMeeting(
                     microphone_blocks=self._microphone_blocks,
                     system_blocks=self._system_blocks,
@@ -505,10 +545,6 @@ class MeetingRecorder(AudioRecorder):
                     recording_stop=time.monotonic(),
                     truncated=self._truncated,
                 )
-                stream = self._stream
-                source = self._system_source
-                self._stream = None
-                self._system_source = None
                 self._microphone_blocks = []
                 self._system_blocks = []
                 self._raw_bytes = 0
@@ -517,8 +553,8 @@ class MeetingRecorder(AudioRecorder):
                 self._start_time = None
                 self._current_level = float("-inf")
                 self._system_level = float("-inf")
-            _release_devices(stream, source)
         finally:
+            _release_devices(stream, source)
             self._transition(MeetingState.IDLE)
 
         if not captured.microphone_blocks and not captured.system_blocks:
@@ -649,12 +685,12 @@ class MeetingRecorder(AudioRecorder):
     def is_recording(self) -> bool:
         """Whether audio is arriving right now.
 
-        True from the instant the system source starts, which is inside
+        True from before the system source is asked to start, which is inside
         `STARTING` and seconds before the microphone stream is up: far-side
-        audio is kept from that moment, so this is what the widget's
-        indicator must follow. `_start_time` carries both this answer and
-        `duration_seconds`, so a status that reports a live meeting always
-        reports the elapsed time of that same meeting.
+        audio is kept from the moment that call is made, and on Windows from
+        inside it, so this is what the widget's indicator must follow.
+        `_start_time` carries both this answer and `duration_seconds`, and
+        `status_snapshot` is what reads the two together.
         """
         with self._lock:
             return self._start_time is not None
@@ -700,11 +736,32 @@ class MeetingRecorder(AudioRecorder):
         """The output being captured, or None when nothing is being captured.
 
         Published in the same lock hold as the clock `is_recording` reads and
-        cleared in the same one, so a status that reports a live meeting can
-        always name what that meeting is capturing.
+        cleared in the same one. That makes the two consistent at any single
+        instant; a report that names both has to read them at one instant
+        too, which is `status_snapshot`.
         """
         with self._lock:
             return self._endpoint_name
+
+    def status_snapshot(self) -> MeetingStatusSnapshot:
+        """Read every reported fact in one lock hold.
+
+        The writes are already atomic — the harvest publishes and clears the
+        clock, the endpoint name and both meters together — and this is the
+        matching read, so what the caller reports describes one moment of
+        the recorder rather than up to five.
+        """
+        with self._lock:
+            start_time = self._start_time
+            return MeetingStatusSnapshot(
+                is_recording=start_time is not None,
+                duration_seconds=(
+                    0.0 if start_time is None else time.monotonic() - start_time
+                ),
+                level_db=self._current_level,
+                system_endpoint=self._endpoint_name,
+                system_level_db=self._system_level,
+            )
 
     def cleanup(self) -> None:
         """Send the owner thread one last command, then retire it.
