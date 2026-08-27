@@ -393,6 +393,7 @@ class MeetingRecorder(AudioRecorder):
             capture_start = time.monotonic()
             with self._lock:
                 self._start_time = capture_start
+                self._endpoint_name = source.endpoint_name
             stream = sd.InputStream(
                 samplerate=self._settings.sample_rate,
                 channels=self._settings.channels,
@@ -411,13 +412,13 @@ class MeetingRecorder(AudioRecorder):
                 self._current_level = float("-inf")
                 self._system_level = float("-inf")
                 self._start_time = None
+                self._endpoint_name = None
             self._transition(MeetingState.IDLE)
             raise
 
         with self._lock:
             self._system_source = source
             self._stream = stream
-            self._endpoint_name = source.endpoint_name
         self._transition(MeetingState.RECORDING)
 
     async def stop(self) -> MeetingRecording:
@@ -461,6 +462,11 @@ class MeetingRecorder(AudioRecorder):
         The truncation flag is harvested in the same lock hold as the blocks
         and travels inside the `_CapturedMeeting`, because it describes this
         capture while the live copy belongs to whichever meeting starts next.
+
+        Both level meters are cleared with the rest of the capture's identity,
+        the same way the abandoned-start path clears them, so a status read
+        between a stop and the next start cannot report the ended meeting's
+        levels next to `system_endpoint: null`.
         """
         with self._lock:
             if self._state is not MeetingState.RECORDING:
@@ -490,6 +496,8 @@ class MeetingRecorder(AudioRecorder):
                 self._endpoint_name = None
                 self._session_token = None
                 self._start_time = None
+                self._current_level = float("-inf")
+                self._system_level = float("-inf")
             _release_devices(stream, source)
         finally:
             self._transition(MeetingState.IDLE)
@@ -520,9 +528,7 @@ class MeetingRecorder(AudioRecorder):
             )
         except Exception as e:
             log.error("Writing the meeting recording failed", exc_info=True)
-            raise MeetingWriteFailedError(
-                f"The call ended but its recording could not be written: {e}"
-            ) from e
+            raise MeetingWriteFailedError(str(e) or type(e).__name__) from e
         log.info("Meeting recording written to %s", output_path)
         return MeetingRecording(
             path=output_path,
@@ -672,7 +678,12 @@ class MeetingRecorder(AudioRecorder):
 
     @property
     def system_endpoint(self) -> str | None:
-        """The output being captured, or None when nothing is being captured."""
+        """The output being captured, or None when nothing is being captured.
+
+        Published in the same lock hold as the clock `is_recording` reads and
+        cleared in the same one, so a status that reports a live meeting can
+        always name what that meeting is capturing.
+        """
         with self._lock:
             return self._endpoint_name
 

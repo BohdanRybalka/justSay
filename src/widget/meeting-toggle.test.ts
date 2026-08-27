@@ -155,10 +155,7 @@ describe("the meeting recording toggle", () => {
     const deps = actions({
       isRecording: vi.fn(() => true),
       stopRecording: vi.fn(async () => {
-        throw new ApiRequestError(
-          "The call ended but its recording could not be written: [Errno 2] No such file or directory",
-          507
-        );
+        throw new ApiRequestError("[Errno 2] No such file or directory", 507);
       }),
     });
 
@@ -167,7 +164,9 @@ describe("the meeting recording toggle", () => {
     expect(deps.hideIndicator).toHaveBeenCalledOnce();
     expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
     expect(deps.reportError).toHaveBeenCalledOnce();
-    expect(deps.reportError.mock.calls[0][0]).toContain("could not be saved");
+    expect(deps.reportError.mock.calls[0][0]).toBe(
+      "The call ended but its recording could not be saved: [Errno 2] No such file or directory"
+    );
     expect(deps.reportError.mock.calls[0][0]).not.toContain("still being recorded");
     expect(deps.reportError.mock.calls[0][0]).not.toContain("already stopped");
     expect(deps.reportError.mock.calls[0][0]).not.toContain("with no audio");

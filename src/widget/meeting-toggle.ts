@@ -27,6 +27,10 @@
  * the three and must not be described as either of the others. The backend
  * answers 507 rather than the 500 a failed write used to raise precisely so
  * this branch can tell it apart from a backend that never answered.
+ *
+ * The sentence a user reads is written here and the backend detail is appended
+ * to it as its cause, which is why the 507 detail carries the write error alone
+ * and not a second sentence of its own.
  */
 
 import { ApiRequestError } from "../api";

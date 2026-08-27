@@ -2260,7 +2260,12 @@ async def test_a_meeting_whose_file_cannot_be_written_answers_507_and_is_already
         resp = await client.post("/audio/meeting/stop")
 
         assert resp.status_code == 507
-        assert "could not be written" in resp.json()["detail"]
+        detail = resp.json()["detail"]
+        assert detail, "the 507 answer names no cause at all"
+        assert "The call ended" not in detail, (
+            "the widget writes the sentence the user reads and appends this "
+            f"detail as its cause, so the two are read twice: {detail}"
+        )
         assert recorder.is_busy is False
         assert recorder.is_recording is False
         assert fake_system_source.stopped is True
@@ -2893,3 +2898,112 @@ async def test_a_second_cleanup_returns_and_a_later_request_is_refused_not_a_500
         await recorder.start()
     with pytest.raises(MeetingCaptureAbortedError):
         await recorder.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_completed_stop_clears_both_level_meters(
+    audio_settings, fake_system_source, fake_microphone_stream
+):
+    """GitHub review iteration 8, finding 1.
+
+    The abandoned-start and failed-start paths both return the meters to
+    silence, and `_discard_capture`'s docstring gives the reason: a status
+    read cannot report a session's levels next to `system_endpoint: null`.
+    A normal stop is the fourth path to that same state and must agree.
+    """
+    recorder = MeetingRecorder(audio_settings)
+
+    try:
+        await recorder.start()
+        _wait_for_devices(recorder)
+        _feed_microphone(recorder, 5)
+        _deliver_over_a_real_span(recorder, fake_system_source, 5)
+
+        assert recorder.level_db > float("-inf")
+        assert recorder.system_level_db > float("-inf")
+
+        await recorder.stop()
+
+        assert recorder.is_recording is False
+        assert recorder.system_endpoint is None
+        assert recorder.level_db == float("-inf"), (
+            "the status reports the ended meeting's microphone level beside "
+            "system_endpoint: null"
+        )
+        assert recorder.system_level_db == float("-inf"), (
+            "the status reports the ended meeting's far-side level beside "
+            "system_endpoint: null"
+        )
+    finally:
+        recorder.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_a_status_during_the_microphone_open_names_what_it_is_capturing(
+    audio_settings
+):
+    """GitHub review iteration 8, finding 2.
+
+    `is_recording` goes true the instant the system source starts, seconds
+    before the microphone stream is up on Windows. `system_endpoint` is
+    published in that same lock hold, so the window in which the status
+    announces a live meeting it cannot name does not exist.
+    """
+    source = _FakeSystemAudioSource(endpoint_name="Speakers [Loopback]")
+    recorder = MeetingRecorder(audio_settings)
+    observed: dict[str, object] = {}
+
+    def _open(**kwargs):
+        observed["is_recording"] = recorder.is_recording
+        observed["endpoint"] = recorder.system_endpoint
+        return MagicMock()
+
+    try:
+        with patch(
+            "app.audio.meeting_recorder.create_system_audio_source", lambda _: source
+        ), patch("app.audio.meeting_recorder.sd.InputStream", _open):
+            await recorder.start()
+
+        assert observed["is_recording"] is True
+        assert observed["endpoint"] == "Speakers [Loopback]", (
+            "the status announces a live meeting whose capture target is null "
+            "for the whole microphone open"
+        )
+    finally:
+        recorder.cleanup()
+
+
+def test_a_failed_write_carries_the_cause_and_not_a_second_sentence(audio_settings):
+    """GitHub review iteration 8, finding 3.
+
+    `src/widget/meeting-toggle.ts` writes the sentence the user reads and
+    appends this message as its cause. A message that is itself a sentence
+    reaches the user as the same statement twice.
+    """
+    recorder = MeetingRecorder(audio_settings)
+    captured = _CapturedMeeting(
+        microphone_blocks=[],
+        system_blocks=[],
+        system_rate=SYSTEM_RATE,
+        recording_start=0.0,
+        recording_stop=1.0,
+        truncated=False,
+    )
+
+    try:
+        with patch.object(
+            recorder, "_assemble_and_write", side_effect=OSError("No space left on device")
+        ):
+            with pytest.raises(MeetingWriteFailedError) as raised:
+                recorder._write_captured_meeting(captured)
+        assert str(raised.value) == "No space left on device"
+
+        with patch.object(recorder, "_assemble_and_write", side_effect=OSError()):
+            with pytest.raises(MeetingWriteFailedError) as unnamed:
+                recorder._write_captured_meeting(captured)
+        assert str(unnamed.value) == "OSError", (
+            "the user is told the recording could not be saved and given "
+            "nothing after the colon"
+        )
+    finally:
+        recorder.cleanup()
