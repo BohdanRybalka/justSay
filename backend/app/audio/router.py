@@ -12,6 +12,7 @@ from app.audio import (
     get_meeting_recorder,
     get_recorder,
 )
+from app.audio.meeting_recorder import MeetingCaptureAbortedError
 from app.audio.system_source import SystemAudioUnavailableError
 from app.core.utils import sse_event
 from app.preferences.user_settings import get_user_settings
@@ -78,7 +79,7 @@ async def start_recording(
     recorder: MicrophoneRecorder = Depends(get_recorder),
     meeting_recorder: MeetingRecorder | None = Depends(get_active_meeting_recorder),
 ):
-    if meeting_recorder is not None and meeting_recorder.is_recording:
+    if meeting_recorder is not None and meeting_recorder.is_busy:
         raise HTTPException(status_code=409, detail="A meeting recording is in progress")
     if recorder.is_recording:
         raise HTTPException(status_code=409, detail="Already recording")
@@ -128,25 +129,42 @@ async def start_meeting_recording(
         raise HTTPException(status_code=403, detail=_CONSENT_REQUIRED_DETAIL)
     if dictation_recorder is not None and dictation_recorder.is_recording:
         raise HTTPException(status_code=409, detail="A dictation recording is in progress")
-    if recorder.is_recording:
+    if recorder.is_busy:
         raise HTTPException(status_code=409, detail="Already recording")
     try:
         await recorder.start()
     except SystemAudioUnavailableError as e:
         raise HTTPException(status_code=501, detail=str(e)) from e
+    except MeetingCaptureAbortedError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     return _meeting_status(recorder)
 
 
 @router.post("/meeting/stop", response_model=MeetingStopResponse)
 async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting_recorder)):
-    if not recorder.is_recording:
+    """End the recording and return the written file.
+
+    The guard is `is_busy`, not `is_recording`, so a stop that arrives while
+    the devices are still opening reaches `recorder.stop()` and cancels that
+    start instead of being refused before it can release anything. Such a
+    stop has no file to return and answers 409.
+
+    Both `duration_seconds` and `truncated` are read before the await for the
+    same reason `stop()` harvests early: a start claiming the recorder during
+    the device release would otherwise reset them.
+    """
+    if not recorder.is_busy:
         raise HTTPException(status_code=409, detail="Not recording")
     duration = recorder.duration_seconds
-    audio_path = await recorder.stop()
+    truncated = recorder.truncated
+    try:
+        audio_path = await recorder.stop()
+    except MeetingCaptureAbortedError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     return MeetingStopResponse(
         filename=audio_path.name,
         duration_seconds=duration,
-        truncated=recorder.truncated,
+        truncated=truncated,
     )
 
 
