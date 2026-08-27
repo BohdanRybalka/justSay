@@ -66,10 +66,13 @@ class MeetingState(str, Enum):
     """The four states a meeting recorder can be in.
 
     `STARTING` exists because opening the two devices takes seconds on both
-    platforms, and during that window the devices are spoken for while no
-    audio is arriving yet. Collapsing that window into a single boolean is
-    what let a stop or a cleanup reach handles the opening thread had not
-    created yet.
+    platforms, and during that window the devices are spoken for while the
+    second of them is not open yet. Collapsing that window into a single
+    boolean is what let a stop or a cleanup reach handles the opening thread
+    had not created yet. It is not a window in which nothing is captured:
+    the system source is started first and its audio is kept from that
+    moment, which is why `_start_time` rather than the state is what says
+    whether a recording is under way.
 
     `STOPPING` is the mirror window: the capture has ended but both handles
     are still open while the release runs, which on macOS budgets up to
@@ -165,7 +168,7 @@ class MeetingRecorder(AudioRecorder):
         self._stream: sd.InputStream | None = None
         self._system_source: SystemAudioSource | None = None
         self._state = MeetingState.IDLE
-        self._start_time: float = 0.0
+        self._start_time: float | None = None
         self._current_level: float = float("-inf")
         self._system_level: float = float("-inf")
         self._endpoint_name: str | None = None
@@ -305,9 +308,10 @@ class MeetingRecorder(AudioRecorder):
         the publish, because they are one callable on the only thread that
         writes the state. The token is claimed in the first lock hold, so the
         two callbacks are admitted from the moment their devices are live;
-        `_start_time` is sampled the instant the system source starts, so the
-        microphone open contributes no leading silence and drops no far-side
-        audio.
+        `_start_time` is published the instant the system source starts, so
+        the microphone open contributes no leading silence and drops no
+        far-side audio, and the recorder reports itself recording for the
+        rest of the open rather than only once both devices are up.
         """
         with self._lock:
             if self._state is not MeetingState.IDLE:
@@ -334,6 +338,8 @@ class MeetingRecorder(AudioRecorder):
             self._settings.temp_dir.mkdir(parents=True, exist_ok=True)
             source.start(functools.partial(self._system_callback, token))
             capture_start = time.monotonic()
+            with self._lock:
+                self._start_time = capture_start
             stream = sd.InputStream(
                 samplerate=self._settings.sample_rate,
                 channels=self._settings.channels,
@@ -351,6 +357,7 @@ class MeetingRecorder(AudioRecorder):
                 self._session_token = None
                 self._current_level = float("-inf")
                 self._system_level = float("-inf")
+                self._start_time = None
             self._transition(MeetingState.IDLE)
             raise
 
@@ -358,7 +365,6 @@ class MeetingRecorder(AudioRecorder):
             self._system_source = source
             self._stream = stream
             self._endpoint_name = source.endpoint_name
-            self._start_time = capture_start
         self._transition(MeetingState.RECORDING)
 
     async def stop(self) -> Path:
@@ -428,6 +434,7 @@ class MeetingRecorder(AudioRecorder):
                 self._raw_bytes = 0
                 self._endpoint_name = None
                 self._session_token = None
+                self._start_time = None
             _release_devices(stream, source)
         finally:
             self._transition(MeetingState.IDLE)
@@ -472,7 +479,13 @@ class MeetingRecorder(AudioRecorder):
         self._discard_capture()
 
     def _discard_capture(self) -> None:
-        """Release both handles and return to idle, writing no WAV."""
+        """Release both handles and return to idle, writing no WAV.
+
+        Leaves the recorder exactly as a start that failed on its devices
+        does: the same fields, including both level meters, so a status read
+        after an abandoned start cannot report the discarded session's
+        levels next to `system_endpoint: null`.
+        """
         with self._lock:
             stream = self._stream
             source = self._system_source
@@ -483,6 +496,9 @@ class MeetingRecorder(AudioRecorder):
             self._raw_bytes = 0
             self._endpoint_name = None
             self._session_token = None
+            self._start_time = None
+            self._current_level = float("-inf")
+            self._system_level = float("-inf")
         _release_devices(stream, source)
         self._transition(MeetingState.IDLE)
 
@@ -541,9 +557,17 @@ class MeetingRecorder(AudioRecorder):
 
     @property
     def is_recording(self) -> bool:
-        """Whether audio is arriving right now."""
+        """Whether audio is arriving right now.
+
+        True from the instant the system source starts, which is inside
+        `STARTING` and seconds before the microphone stream is up: far-side
+        audio is kept from that moment, so this is what the widget's
+        indicator must follow. `_start_time` carries both this answer and
+        `duration_seconds`, so a status that reports a live meeting always
+        reports the elapsed time of that same meeting.
+        """
         with self._lock:
-            return self._state is MeetingState.RECORDING
+            return self._start_time is not None
 
     @property
     def is_busy(self) -> bool:
@@ -560,7 +584,7 @@ class MeetingRecorder(AudioRecorder):
     @property
     def duration_seconds(self) -> float:
         with self._lock:
-            if self._state is not MeetingState.RECORDING:
+            if self._start_time is None:
                 return 0.0
             return time.monotonic() - self._start_time
 

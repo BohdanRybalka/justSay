@@ -2527,3 +2527,116 @@ async def test_an_abandoned_stop_does_not_promise_a_file(
     assert not any("still being written" in message for message in abandoned), (
         "the warning promises a file that this run never produced"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_status_read_during_the_open_raises_a_reloaded_widgets_indicator(
+    audio_settings, client
+):
+    """GitHub review iteration 5, finding 1.
+
+    `syncMeetingIndicator` runs once, at widget load, and returns early when
+    the status agrees with the window's own state (`src/widget/widget.ts`).
+    A widget loading during the multi-second device open therefore gets one
+    chance to raise the indicator ADR 040 obligation 2 requires, and this is
+    the status it gets — while far-side audio is already being kept.
+
+    The elapsed clock is the same answer read twice: the widget starts it at
+    `now - duration_seconds`, so a status reporting a live meeting with a
+    duration of `0.0` puts that meeting's start at the reload instant.
+    """
+    source = _FakeSystemAudioSource()
+    opening_started = threading.Event()
+    release_open = threading.Event()
+    system_started_at: list[float] = []
+    open_source = source.start
+
+    def start_and_note(on_block) -> None:
+        open_source(on_block)
+        system_started_at.append(time.monotonic())
+
+    source.start = start_and_note
+    recorder = MeetingRecorder(audio_settings)
+    app.dependency_overrides[get_meeting_recorder] = lambda: recorder
+
+    with patch("app.audio.meeting_recorder.create_system_audio_source", lambda _: source):
+        with patch(
+            "app.audio.meeting_recorder.sd.InputStream",
+            functools.partial(_BlockingMicrophoneStream, opening_started, release_open),
+        ):
+            starting = asyncio.ensure_future(recorder.start())
+            await asyncio.sleep(0)
+            assert opening_started.wait(timeout=5.0), "the microphone never opened"
+            source.deliver(time.monotonic(), fill=0.9)
+            await asyncio.sleep(0.2)
+
+            status = (await client.get("/audio/meeting/status")).json()
+            read_at = time.monotonic()
+
+            release_open.set()
+            await starting
+
+    await recorder.stop()
+    _wait_for_writes(recorder)
+
+    assert status["is_recording"] is True, (
+        "the widget reads is_recording: false, finds it already agrees with its own "
+        "inactive state and returns — the indicator stays dark for the whole meeting"
+    )
+    assert status["duration_seconds"] >= 0.1, (
+        "the widget would start the meeting's elapsed clock at the reload instant"
+    )
+    drift = read_at - status["duration_seconds"] - system_started_at[0]
+    assert abs(drift) < 0.05, (
+        f"the indicator's clock would start {drift:+.3f}s away from the instant the "
+        f"far side began being recorded"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_start_clears_both_level_meters(audio_settings):
+    """GitHub review iteration 5, finding 2.
+
+    `_discard_capture` is the sibling of the failed-open branch
+    `test_a_failed_start_clears_both_level_meters` pins, and it is reached
+    with real values on both meters: a start whose devices opened and took
+    blocks, then had its request cancelled. Either the two paths leave the
+    same recorder or the status answers a live far side beside
+    `system_endpoint: null`.
+    """
+    source = _FakeSystemAudioSource()
+    opening_started = threading.Event()
+    release_open = threading.Event()
+    recorder = MeetingRecorder(audio_settings)
+
+    with patch("app.audio.meeting_recorder.create_system_audio_source", lambda _: source):
+        with patch(
+            "app.audio.meeting_recorder.sd.InputStream",
+            functools.partial(_BlockingMicrophoneStream, opening_started, release_open),
+        ):
+            starting = asyncio.ensure_future(recorder.start())
+            await asyncio.sleep(0)
+            assert opening_started.wait(timeout=5.0), "the microphone never opened"
+            source.deliver(time.monotonic(), fill=0.9)
+            _feed_microphone(recorder, 1)
+
+            assert recorder.system_level_db > float("-inf")
+            assert recorder.level_db > float("-inf")
+
+            starting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await starting
+
+            release_open.set()
+            _wait_for_devices(recorder)
+
+    assert recorder.is_busy is False
+    assert recorder.is_recording is False
+    assert recorder.duration_seconds == 0.0
+    assert recorder.system_endpoint is None
+    assert recorder.system_level_db == float("-inf"), (
+        "the status reports the discarded session's far side beside a null endpoint"
+    )
+    assert recorder.level_db == float("-inf"), (
+        "the status reports the discarded session's microphone level"
+    )

@@ -167,9 +167,9 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
     outcomes, and the widget must not describe the second as a double click.
 
     `duration_seconds` and `truncated` come from the recorder's snapshot of
-    the capture that produced the file, not from its live state: a stop
-    accepted during the open would read a live duration of `0.0`, and a
-    meeting started while this file is still being written resets the live
+    the capture that produced the file, not from its live state: the harvest
+    clears the live clock, so reading it here answers `0.0`, and a meeting
+    started while this file is still being written resets the live
     truncation flag.
     """
     if not recorder.is_busy:
