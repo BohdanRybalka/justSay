@@ -13,6 +13,7 @@ from app.audio import (
     get_recorder,
 )
 from app.audio.meeting_recorder import (
+    MEETING_BUSY_DETAIL,
     MeetingCaptureAbortedError,
     MeetingCaptureEmptyError,
 )
@@ -138,7 +139,7 @@ async def start_meeting_recording(
     if dictation_recorder is not None and dictation_recorder.is_recording:
         raise HTTPException(status_code=409, detail="A dictation recording is in progress")
     if recorder.is_busy:
-        raise HTTPException(status_code=409, detail="Already recording")
+        raise HTTPException(status_code=409, detail=MEETING_BUSY_DETAIL)
     try:
         await recorder.start()
     except SystemAudioUnavailableError as e:
@@ -165,12 +166,14 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
     nothing recording and a meeting that captured nothing are different
     outcomes, and the widget must not describe the second as a double click.
 
-    `duration_seconds` is read before the await because it returns `0.0`
-    unless the recorder is still recording.
+    `duration_seconds` and `truncated` come from the recorder's snapshot of
+    the capture that produced the file, not from its live state: a stop
+    accepted during the open would read a live duration of `0.0`, and a
+    meeting started while this file is still being written resets the live
+    truncation flag.
     """
     if not recorder.is_busy:
         raise HTTPException(status_code=409, detail="Not recording")
-    duration = recorder.duration_seconds
     try:
         audio_path = await recorder.stop()
     except MeetingCaptureEmptyError as e:
@@ -179,8 +182,8 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
         raise HTTPException(status_code=409, detail=str(e)) from e
     return MeetingStopResponse(
         filename=audio_path.name,
-        duration_seconds=duration,
-        truncated=recorder.truncated,
+        duration_seconds=recorder.last_duration_seconds,
+        truncated=recorder.last_truncated,
     )
 
 

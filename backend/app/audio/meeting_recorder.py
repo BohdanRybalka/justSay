@@ -102,6 +102,12 @@ class MeetingCaptureEmptyError(MeetingCaptureAbortedError):
     """
 
 
+MEETING_BUSY_DETAIL = (
+    "The meeting recorder is busy — a previous recording is still "
+    "starting, recording or releasing its devices"
+)
+
+
 class _CapturedMeeting(NamedTuple):
     """Everything the WAV needs, taken out of the recorder in one lock hold."""
 
@@ -154,6 +160,8 @@ class MeetingRecorder(AudioRecorder):
         self._system_blocks: list[CapturedBlock] = []
         self._raw_bytes = 0
         self._truncated = False
+        self._last_duration_seconds: float = 0.0
+        self._last_truncated = False
         self._stream: sd.InputStream | None = None
         self._system_source: SystemAudioSource | None = None
         self._state = MeetingState.IDLE
@@ -272,12 +280,22 @@ class MeetingRecorder(AudioRecorder):
         answer. A failure — a device error or a cancelled await — sends an
         abandonment behind it, carrying the token that says which capture it
         is entitled to tear down.
+
+        The failure the caller sees is always the original one, cancellation
+        included: a `cleanup()` that retired the owner thread first makes the
+        abandonment unsendable, and that is logged rather than raised.
         """
         token = next(self._tokens)
         try:
             await self._run_on_devices(self._begin_capture, token)
         except BaseException:
-            self._submit_on_devices(self._abandon_capture, token)
+            try:
+                self._submit_on_devices(self._abandon_capture, token)
+            except RuntimeError:
+                log.warning(
+                    "The meeting recorder was retired before the abandoned start "
+                    "could be torn down"
+                )
             raise
 
     def _begin_capture(self, token: int) -> None:
@@ -293,10 +311,7 @@ class MeetingRecorder(AudioRecorder):
         """
         with self._lock:
             if self._state is not MeetingState.IDLE:
-                raise MeetingCaptureAbortedError(
-                    "The meeting recorder is busy — a previous recording is still "
-                    "starting, recording or releasing its devices"
-                )
+                raise MeetingCaptureAbortedError(MEETING_BUSY_DETAIL)
             self._session_token = token
             self._microphone_blocks = []
             self._system_blocks = []
@@ -334,6 +349,8 @@ class MeetingRecorder(AudioRecorder):
                 self._system_blocks = []
                 self._raw_bytes = 0
                 self._session_token = None
+                self._current_level = float("-inf")
+                self._system_level = float("-inf")
             self._transition(MeetingState.IDLE)
             raise
 
@@ -348,18 +365,21 @@ class MeetingRecorder(AudioRecorder):
         """End the capture on the owner thread and await the file it writes.
 
         Both awaits are detachable and neither of them owns the work behind
-        it: the write is already submitted by the time the loop is handed
-        anything, so a client disconnect costs the answer and never the
-        recording. The file that answer would have named is in the scratch
-        directory and its path is in the log either way.
+        it: once `_end_capture` has returned, the write is already submitted,
+        so a disconnect from that point on costs the answer and never the
+        recording, and the file's path reaches the log without it.
+
+        A cancellation that lands on the first await is different: the harvest
+        may not have run yet, and when it does it can still find both block
+        lists empty and produce no file at all.
         """
         try:
             writing = await self._run_on_devices(self._end_capture)
             return await self._detachable_result(writing)
         except asyncio.CancelledError:
             log.warning(
-                "The meeting stop request was abandoned — the recording is still "
-                "being written and its path is logged when it lands"
+                "The meeting stop request was abandoned — if the capture produced "
+                "a file, its path is in the log"
             )
             raise
 
@@ -373,6 +393,10 @@ class MeetingRecorder(AudioRecorder):
         the write here, as the last act on the owner thread, is what puts the
         recording out of that cancellation's reach: the `_CapturedMeeting`
         never crosses back to the loop.
+
+        The duration and the truncation flag are snapshotted in the same lock
+        hold that harvests the blocks, because they describe this capture and
+        the live copies belong to whichever meeting starts next.
         """
         with self._lock:
             if self._state is not MeetingState.RECORDING:
@@ -391,6 +415,10 @@ class MeetingRecorder(AudioRecorder):
                     recording_start=self._start_time,
                     recording_stop=time.monotonic(),
                 )
+                self._last_duration_seconds = (
+                    captured.recording_stop - captured.recording_start
+                )
+                self._last_truncated = self._truncated
                 stream = self._stream
                 source = self._system_source
                 self._stream = None
@@ -560,9 +588,27 @@ class MeetingRecorder(AudioRecorder):
             return self._endpoint_name
 
     @property
-    def truncated(self) -> bool:
-        """Whether the raw-store cap was reached and audio was dropped."""
-        return self._truncated
+    def last_duration_seconds(self) -> float:
+        """The span the most recently harvested capture covers, or 0.0 if never stopped.
+
+        Fixed when the capture is harvested rather than read off the live
+        clock, so it is the duration of the file `stop()` returns even when
+        the stop was accepted during the open or a second meeting has already
+        started by the time the answer is assembled.
+        """
+        with self._lock:
+            return self._last_duration_seconds
+
+    @property
+    def last_truncated(self) -> bool:
+        """Whether the most recently harvested capture dropped audio at the cap.
+
+        Snapshotted with the blocks for the reason `last_duration_seconds` is:
+        a start accepted while the file is still being written resets the live
+        flag, and the meeting that was truncated must still say so.
+        """
+        with self._lock:
+            return self._last_truncated
 
     def cleanup(self) -> None:
         """Send the owner thread one last command, then retire it.

@@ -27,6 +27,7 @@ import pytest
 from app.audio import get_active_recorder, get_meeting_recorder
 from app.audio.config import AudioSettings
 from app.audio.meeting_recorder import (
+    MEETING_BUSY_DETAIL,
     MeetingCaptureAbortedError,
     MeetingCaptureEmptyError,
     MeetingRecorder,
@@ -373,7 +374,7 @@ async def test_recorder_stops_accepting_blocks_at_the_cap_and_still_writes_a_wav
     _feed_microphone(recorder, 50)
     audio_path = await recorder.stop()
 
-    assert recorder.truncated is True
+    assert recorder.last_truncated is True
     assert audio_path.exists()
 
 
@@ -797,7 +798,8 @@ class _FakeRecorder:
         self.level_db = float("-inf")
         self.system_level_db = float("-inf")
         self.system_endpoint = None
-        self.truncated = False
+        self.last_truncated = False
+        self.last_duration_seconds = 0.0
         self.started = False
 
     async def start(self):
@@ -892,7 +894,7 @@ async def test_meeting_stop_reports_the_filename_and_truncation(client, tmp_path
     class _Stopping(_FakeRecorder):
         def __init__(self):
             super().__init__(is_recording=True)
-            self.truncated = True
+            self.last_truncated = True
 
         async def stop(self):
             self.is_recording = False
@@ -1906,7 +1908,7 @@ async def test_a_cap_hit_while_the_stop_is_queued_is_reported(client, tmp_path):
 
         async def stop(self):
             self.is_recording = False
-            self.truncated = True
+            self.last_truncated = True
             path = tmp_path / "meeting_capped.wav"
             path.write_bytes(b"")
             return path
@@ -2155,7 +2157,7 @@ async def test_a_finished_sessions_callback_cannot_charge_the_next_meeting(
         _wait_for_devices(recorder)
         _wait_for_writes(recorder)
 
-    assert recorder.truncated is False, (
+    assert recorder.last_truncated is False, (
         "a block from the finished meeting was charged to the running one, and "
         "its own next block found the cap already reached"
     )
@@ -2274,3 +2276,254 @@ async def test_far_side_audio_during_the_microphone_open_reaches_the_file(audio_
         f"audio was clipped off the front of the timeline"
     )
     assert len(signal) >= delivered_blocks * BLOCK_FRAMES * rate // SYSTEM_RATE
+
+
+@pytest.mark.asyncio
+async def test_a_start_that_fails_after_cleanup_reports_the_device_error(
+    audio_settings, fake_microphone_stream
+):
+    """GitHub review iteration 4, finding 1 — first half.
+
+    The abandonment `start()` sends behind a failed open is unsendable once
+    `cleanup()` has retired the owner thread, and the caller must still be
+    told what actually went wrong: a `/meeting/start` racing the lifespan
+    drain answers 501, not 500.
+    """
+    recorder = MeetingRecorder(audio_settings)
+
+    with patch("app.audio.meeting_recorder.create_system_audio_source", return_value=None):
+        gate = _hold_the_owner_thread(recorder)
+        starting = asyncio.ensure_future(recorder.start())
+        await asyncio.sleep(0)
+
+        recorder.cleanup()
+        gate.set()
+
+        with pytest.raises(SystemAudioUnavailableError):
+            await starting
+
+    _wait_for_devices(recorder)
+
+
+@pytest.mark.asyncio
+async def test_a_start_cancelled_after_cleanup_still_arrives_as_a_cancellation(
+    audio_settings, fake_microphone_stream
+):
+    """GitHub review iteration 4, finding 1 — second half.
+
+    A cancellation replaced by an ordinary exception stops the task being
+    treated as cancelled, which is the failure `_detachable_result` goes to
+    some length to avoid everywhere else in this module.
+    """
+    recorder = MeetingRecorder(audio_settings)
+
+    with patch("app.audio.meeting_recorder.create_system_audio_source", return_value=None):
+        gate = _hold_the_owner_thread(recorder)
+        starting = asyncio.ensure_future(recorder.start())
+        await asyncio.sleep(0)
+
+        recorder.cleanup()
+        starting.cancel()
+
+        outcome = "the start returned normally"
+        try:
+            await starting
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+        except BaseException as raised:
+            outcome = repr(raised)
+
+        gate.set()
+
+    assert outcome == "cancelled", (
+        f"the cancellation was replaced by {outcome}, so the task is no longer "
+        f"treated as cancelled"
+    )
+    _wait_for_devices(recorder)
+
+
+@pytest.mark.asyncio
+async def test_a_new_meeting_cannot_clear_the_previous_stops_truncation(
+    tmp_path, fake_system_source, fake_microphone_stream
+):
+    """GitHub review iteration 4, finding 2.
+
+    The write outlives `_end_capture`, so a second meeting can be accepted
+    while the first stop is still assembling its answer. The live flag is
+    that second meeting's; the answer belongs to the first.
+    """
+    settings = AudioSettings(
+        sample_rate=16000,
+        channels=1,
+        temp_dir=tmp_path / "tmp",
+        meeting_max_raw_bytes=BLOCK_FRAMES * 4 * 3,
+    )
+    recorder = MeetingRecorder(settings)
+
+    await recorder.start()
+    _feed_microphone(recorder, 50)
+    await asyncio.sleep(0.02)
+    await recorder.stop()
+    _wait_for_devices(recorder)
+    _wait_for_writes(recorder)
+
+    assert recorder.last_truncated is True
+
+    await recorder.start()
+
+    assert recorder._truncated is False, (
+        "the second meeting did not reset the live flag, so this proves nothing"
+    )
+    assert recorder.last_truncated is True, (
+        "a truncated recording stopped reporting its dropped audio as soon as "
+        "the next meeting started"
+    )
+    recorder.cleanup()
+    _wait_for_devices(recorder)
+
+
+@pytest.mark.anyio
+async def test_a_stop_accepted_during_the_open_reports_the_duration_it_captured(
+    client, audio_settings
+):
+    """GitHub review iteration 4, finding 3.
+
+    The stop guard is `is_busy`, so a stop issued during the microphone open
+    is queued behind it and harvests a real capture — the far side is already
+    live and `_store` admits it. The live duration is `0.0` for that whole
+    window, so the response cannot be built from it.
+    """
+    opening_started = threading.Event()
+    release_open = threading.Event()
+    source = _FakeSystemAudioSource()
+    recorder = MeetingRecorder(audio_settings)
+    app.dependency_overrides[get_meeting_recorder] = lambda: recorder
+
+    with patch(
+        "app.audio.meeting_recorder.create_system_audio_source", lambda _: source
+    ), patch(
+        "app.audio.meeting_recorder.sd.InputStream",
+        functools.partial(_BlockingMicrophoneStream, opening_started, release_open),
+    ):
+        starting = asyncio.ensure_future(recorder.start())
+        await asyncio.to_thread(opening_started.wait, 5.0)
+
+        assert recorder.duration_seconds == 0.0, (
+            "the open had already finished, so this proves nothing about the window"
+        )
+        for index in range(8):
+            source.deliver(time.monotonic() + index * BLOCK_FRAMES / SYSTEM_RATE)
+
+        stopping = asyncio.ensure_future(client.post("/audio/meeting/stop"))
+        await asyncio.sleep(0.3)
+        release_open.set()
+        await starting
+        resp = await stopping
+        _wait_for_writes(recorder)
+
+    reported = resp.json()["duration_seconds"]
+
+    assert resp.status_code == 200
+    assert reported > 0.25, (
+        f"a stop accepted during the open reported {reported}s for a capture "
+        f"that really ran"
+    )
+
+
+@pytest.mark.anyio
+async def test_a_start_refused_while_the_devices_are_busy_does_not_claim_a_recording(
+    client,
+):
+    """GitHub review iteration 4, finding 4.
+
+    `is_busy` covers `STARTING`, `STOPPING` and a merely queued command, and
+    the widget shows this detail verbatim. Telling the user a recording is in
+    progress while one is being torn down is the wrong half of the truth.
+    """
+    app.dependency_overrides[get_meeting_recorder] = lambda: _FakeRecorder(
+        is_recording=False, is_busy=True
+    )
+
+    resp = await client.post("/audio/meeting/start")
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == MEETING_BUSY_DETAIL
+    assert "releasing its devices" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_start_clears_both_level_meters(audio_settings):
+    """GitHub review iteration 4, finding 5.
+
+    `_store` admits blocks from the moment the token is claimed, so the far
+    side has usually written a real dBFS value by the time the microphone
+    open fails. A live `system_level_db` beside `is_recording: false` is the
+    single wrong answer that meter exists to prevent.
+    """
+    source = _FakeSystemAudioSource()
+
+    def _open_fails(**kwargs):
+        source.deliver(time.monotonic(), fill=0.5)
+        raise OSError("the microphone is in use by another application")
+
+    recorder = MeetingRecorder(audio_settings)
+
+    with patch(
+        "app.audio.meeting_recorder.create_system_audio_source", lambda _: source
+    ), patch("app.audio.meeting_recorder.sd.InputStream", _open_fails):
+        with pytest.raises(OSError):
+            await recorder.start()
+
+    _wait_for_devices(recorder)
+
+    assert recorder.is_recording is False
+    assert recorder.system_endpoint is None
+    assert recorder.system_level_db == float("-inf"), (
+        "the status reports a live far side while nothing is being captured"
+    )
+    assert recorder.level_db == float("-inf")
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_stop_does_not_promise_a_file(
+    audio_settings, fake_system_source, fake_microphone_stream, caplog
+):
+    """GitHub review iteration 4, finding 6.
+
+    A cancellation landing on the first await leaves the harvest still queued,
+    and the harvest can end in `MeetingCaptureEmptyError` with nothing
+    written. An operator chasing a missing meeting must not be sent looking
+    for a path that was never logged.
+    """
+    recorder = MeetingRecorder(audio_settings)
+
+    await recorder.start()
+    gate = _hold_the_owner_thread(recorder)
+    stopping = asyncio.ensure_future(recorder.stop())
+    await asyncio.sleep(0)
+    stopping.cancel()
+
+    with caplog.at_level(logging.WARNING):
+        try:
+            await stopping
+        except asyncio.CancelledError:
+            pass
+
+    gate.set()
+    _wait_for_devices(recorder)
+    _wait_for_writes(recorder)
+
+    abandoned = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING and "abandoned" in record.getMessage()
+    ]
+
+    assert list(audio_settings.temp_dir.glob("meeting_*.wav")) == [], (
+        "the capture produced a file, so this proves nothing about the promise"
+    )
+    assert abandoned, "the abandoned stop was not reported at all"
+    assert all("if the capture produced a file" in message for message in abandoned)
+    assert not any("still being written" in message for message in abandoned), (
+        "the warning promises a file that this run never produced"
+    )
