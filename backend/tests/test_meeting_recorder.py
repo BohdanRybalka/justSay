@@ -31,6 +31,8 @@ from app.audio.meeting_recorder import (
     MeetingCaptureAbortedError,
     MeetingCaptureEmptyError,
     MeetingRecorder,
+    MeetingRecording,
+    _release_devices,
 )
 from app.audio.system_source import (
     SystemAudioSource,
@@ -372,10 +374,10 @@ async def test_recorder_stops_accepting_blocks_at_the_cap_and_still_writes_a_wav
 
     await recorder.start()
     _feed_microphone(recorder, 50)
-    audio_path = await recorder.stop()
+    recording = await recorder.stop()
 
-    assert recorder.last_truncated is True
-    assert audio_path.exists()
+    assert recording.truncated is True
+    assert recording.path.exists()
 
 
 @pytest.mark.asyncio
@@ -390,7 +392,7 @@ async def test_stop_writes_exactly_one_file_inside_temp_dir(
     _feed_microphone(recorder, 8)
     for i in range(8):
         fake_system_source.deliver(recorder._start_time + i * BLOCK_FRAMES / 48000)
-    audio_path = await recorder.stop()
+    audio_path = (await recorder.stop()).path
 
     written = list(audio_settings.temp_dir.iterdir())
     assert written == [audio_path]
@@ -407,7 +409,7 @@ async def test_stop_writes_16khz_mono_16bit_like_the_dictation_path(
 
     await recorder.start()
     _feed_microphone(recorder, 8)
-    audio_path = await recorder.stop()
+    audio_path = (await recorder.stop()).path
 
     with wave.open(str(audio_path), "rb") as wf:
         assert wf.getnchannels() == 1
@@ -428,7 +430,7 @@ async def test_both_sources_are_audible_in_the_written_wav(
     for i in range(48):
         fake_system_source.deliver(start + i * BLOCK_FRAMES / 48000, fill=0.2)
     time.sleep(0.02)
-    audio_path = await recorder.stop()
+    audio_path = (await recorder.stop()).path
 
     with wave.open(str(audio_path), "rb") as wf:
         samples = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
@@ -798,8 +800,6 @@ class _FakeRecorder:
         self.level_db = float("-inf")
         self.system_level_db = float("-inf")
         self.system_endpoint = None
-        self.last_truncated = False
-        self.last_duration_seconds = 0.0
         self.started = False
 
     async def start(self):
@@ -892,17 +892,13 @@ async def test_meeting_status_reports_idle(client):
 @pytest.mark.anyio
 async def test_meeting_stop_reports_the_filename_and_truncation(client, tmp_path):
     class _Stopping(_FakeRecorder):
-        def __init__(self):
-            super().__init__(is_recording=True)
-            self.last_truncated = True
-
         async def stop(self):
             self.is_recording = False
             path = tmp_path / "meeting_abc123.wav"
             path.write_bytes(b"")
-            return path
+            return MeetingRecording(path=path, duration_seconds=12.5, truncated=True)
 
-    app.dependency_overrides[get_meeting_recorder] = lambda: _Stopping()
+    app.dependency_overrides[get_meeting_recorder] = lambda: _Stopping(is_recording=True)
 
     resp = await client.post("/audio/meeting/stop")
 
@@ -1129,7 +1125,7 @@ async def test_meeting_stop_leaves_the_event_loop_free(
             await asyncio.sleep(0)
 
     race = asyncio.ensure_future(competitor())
-    audio_path = await recorder.stop()
+    audio_path = (await recorder.stop()).path
     race.cancel()
 
     assert audio_path.exists()
@@ -1328,7 +1324,7 @@ async def test_a_slow_open_adds_no_leading_silence_to_the_wav(
         source.deliver(started_at + i * BLOCK_FRAMES / 48000, fill=0.5)
     time.sleep(0.55)
     stopped_at = time.monotonic()
-    audio_path = await recorder.stop()
+    audio_path = (await recorder.stop()).path
 
     measured_span = stopped_at - started_at
     with wave.open(str(audio_path), "rb") as wf:
@@ -1459,7 +1455,7 @@ async def test_a_start_arriving_during_the_release_cannot_take_the_recorder(
         await asyncio.sleep(0)
         source.release_close.set()
 
-        audio_path = await stopping
+        audio_path = (await stopping).path
         await racing
 
     recorder.cleanup()
@@ -1506,7 +1502,7 @@ async def test_a_cleanup_racing_the_release_does_not_cost_the_finished_meeting(
 
         recorder.cleanup()
         source.release_close.set()
-        audio_path = await stopping
+        audio_path = (await stopping).path
 
     _wait_for_devices(recorder)
 
@@ -1908,10 +1904,9 @@ async def test_a_cap_hit_while_the_stop_is_queued_is_reported(client, tmp_path):
 
         async def stop(self):
             self.is_recording = False
-            self.last_truncated = True
             path = tmp_path / "meeting_capped.wav"
             path.write_bytes(b"")
-            return path
+            return MeetingRecording(path=path, duration_seconds=3.0, truncated=True)
 
     app.dependency_overrides[get_meeting_recorder] = lambda: _TruncatingStop()
 
@@ -1999,7 +1994,7 @@ async def test_every_written_meeting_names_its_path_in_the_log(
         _feed_microphone(recorder, 4)
         _deliver_over_a_real_span(recorder, fake_system_source, 4)
         await asyncio.sleep(0.1)
-        answered = await recorder.stop()
+        answered = (await recorder.stop()).path
 
         await recorder.start()
         _feed_microphone(recorder, 4)
@@ -2153,15 +2148,15 @@ async def test_a_finished_sessions_callback_cannot_charge_the_next_meeting(
         finished_sink(time.monotonic(), np.zeros(BLOCK_FRAMES * 4, dtype=np.float32))
         _feed_microphone(recorder, 1)
         await asyncio.sleep(0.05)
-        second_path = await recorder.stop()
+        second = await recorder.stop()
         _wait_for_devices(recorder)
         _wait_for_writes(recorder)
 
-    assert recorder.last_truncated is False, (
+    assert second.truncated is False, (
         "a block from the finished meeting was charged to the running one, and "
         "its own next block found the cap already reached"
     )
-    assert second_path.exists()
+    assert second.path.exists()
 
 
 @pytest.mark.anyio
@@ -2262,7 +2257,7 @@ async def test_far_side_audio_during_the_microphone_open_reaches_the_file(audio_
         ):
             await recorder.start()
             deliverer.join(timeout=5.0)
-            audio_path = await recorder.stop()
+            audio_path = (await recorder.stop()).path
             _wait_for_writes(recorder)
 
     rate, signal = _wav_signal(audio_path)
@@ -2363,18 +2358,18 @@ async def test_a_new_meeting_cannot_clear_the_previous_stops_truncation(
     await recorder.start()
     _feed_microphone(recorder, 50)
     await asyncio.sleep(0.02)
-    await recorder.stop()
+    recording = await recorder.stop()
     _wait_for_devices(recorder)
     _wait_for_writes(recorder)
 
-    assert recorder.last_truncated is True
+    assert recording.truncated is True
 
     await recorder.start()
 
     assert recorder._truncated is False, (
         "the second meeting did not reset the live flag, so this proves nothing"
     )
-    assert recorder.last_truncated is True, (
+    assert recording.truncated is True, (
         "a truncated recording stopped reporting its dropped audio as soon as "
         "the next meeting started"
     )
@@ -2640,3 +2635,127 @@ async def test_an_abandoned_start_clears_both_level_meters(audio_settings):
     assert recorder.level_db == float("-inf"), (
         "the status reports the discarded session's microphone level"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_second_meeting_cannot_rewrite_what_the_first_stop_answers(
+    tmp_path, fake_system_source, fake_microphone_stream
+):
+    """The stop answer describes its own capture, not the recorder's live state.
+
+    The recorder stops being busy as soon as the harvest returns, so a whole
+    second meeting can start and finish while the first file is still being
+    written. This drives that interleaving for real: the first write is held
+    open until the second meeting's harvest has run, which is the moment any
+    value kept on the recorder would have been overwritten.
+    """
+    settings = AudioSettings(
+        sample_rate=16000,
+        channels=1,
+        temp_dir=tmp_path / "tmp",
+        meeting_max_raw_bytes=BLOCK_FRAMES * 4 * 3,
+    )
+    recorder = MeetingRecorder(settings)
+    write_started = threading.Event()
+    release_write = threading.Event()
+    write_the_wav = recorder._assemble_and_write
+
+    def held_open_write(*args):
+        if not write_started.is_set():
+            write_started.set()
+            release_write.wait(5.0)
+        return write_the_wav(*args)
+
+    recorder._assemble_and_write = held_open_write
+
+    await recorder.start()
+    _feed_microphone(recorder, 50)
+    _deliver_over_a_real_span(recorder, fake_system_source, 4)
+    await asyncio.sleep(0.3)
+    long_truncated_stop = asyncio.ensure_future(recorder.stop())
+    await asyncio.to_thread(write_started.wait, 5.0)
+
+    assert recorder.is_busy is False, (
+        "the recorder stayed busy through the write, so no second meeting could "
+        "reach the fields this test is about and it proves nothing"
+    )
+
+    await recorder.start()
+    _feed_microphone(recorder, 1)
+    _deliver_over_a_real_span(recorder, fake_system_source, 1)
+    short_clean_stop = asyncio.ensure_future(recorder.stop())
+    await asyncio.to_thread(_wait_for_devices, recorder)
+
+    release_write.set()
+    first = await long_truncated_stop
+    second = await short_clean_stop
+
+    assert first.truncated is True, (
+        "the 45-minute meeting that dropped audio at the cap answered "
+        "truncated=False, because the meeting that started during its write "
+        "reset the flag it was reading"
+    )
+    assert second.truncated is False
+    assert first.duration_seconds > second.duration_seconds, (
+        f"the first stop reported {first.duration_seconds:.3f}s against the "
+        f"second's {second.duration_seconds:.3f}s — it answered with the other "
+        "meeting's clock"
+    )
+    assert first.path != second.path
+    assert first.path.exists()
+
+
+def test_a_microphone_stream_whose_stop_raises_is_still_closed(caplog):
+    """A `stop()` that raises must not cost the `close()`.
+
+    Nothing else holds a reference by the time `_release_devices` runs and
+    `sounddevice._StreamBase` has no finalizer, so a skipped `close()` holds
+    that PortAudio stream for the life of the process — and every meeting
+    after it adds another.
+    """
+
+    class _UnpluggedStream:
+        def __init__(self):
+            self.closes = 0
+
+        def stop(self):
+            raise OSError("Device unavailable")
+
+        def close(self):
+            self.closes += 1
+
+    stream = _UnpluggedStream()
+
+    with caplog.at_level(logging.WARNING, logger="app.audio.meeting_recorder"):
+        _release_devices(stream, None)
+
+    assert stream.closes == 1, (
+        "the stream was never closed after its stop() raised — the microphone "
+        "stays claimed until the app restarts"
+    )
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Stopping the meeting microphone stream failed" in m for m in messages), (
+        f"the failing call is not identifiable from the log: {messages}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_second_cleanup_returns_and_a_later_request_is_refused_not_a_500(
+    audio_settings, fake_system_source, fake_microphone_stream
+):
+    """Shutdown answers in the endpoints' own vocabulary.
+
+    `cleanup()` retires the owner thread, and `main.py` may call it again;
+    a start or a stop landing in that window must reach the router as the
+    409 the widget handles rather than a bare executor error as a 500.
+    """
+    recorder = MeetingRecorder(audio_settings)
+
+    recorder.cleanup()
+    _wait_for_devices(recorder)
+    recorder.cleanup()
+
+    with pytest.raises(MeetingCaptureAbortedError):
+        await recorder.start()
+    with pytest.raises(MeetingCaptureAbortedError):
+        await recorder.stop()

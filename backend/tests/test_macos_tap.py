@@ -284,7 +284,7 @@ async def test_a_helper_that_dies_mid_capture_leaves_a_wav_and_a_prompt_stop(tap
         source._reader.join(timeout=2.0)
         time.sleep(0.05)
         started = time.monotonic()
-        audio_path = await recorder.stop()
+        audio_path = (await recorder.stop()).path
         elapsed = time.monotonic() - started
 
     assert elapsed < 2.0

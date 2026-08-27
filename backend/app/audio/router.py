@@ -166,24 +166,24 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
     nothing recording and a meeting that captured nothing are different
     outcomes, and the widget must not describe the second as a double click.
 
-    `duration_seconds` and `truncated` come from the recorder's snapshot of
-    the capture that produced the file, not from its live state: the harvest
-    clears the live clock, so reading it here answers `0.0`, and a meeting
-    started while this file is still being written resets the live
-    truncation flag.
+    `duration_seconds` and `truncated` arrive with the file, inside the
+    `MeetingRecording` the write produces, rather than being read off the
+    recorder: the harvest clears the live clock, so reading it here answers
+    `0.0`, and a meeting started while this file is still being written owns
+    the recorder's live truncation flag by then.
     """
     if not recorder.is_busy:
         raise HTTPException(status_code=409, detail="Not recording")
     try:
-        audio_path = await recorder.stop()
+        recording = await recorder.stop()
     except MeetingCaptureEmptyError as e:
         raise HTTPException(status_code=410, detail=str(e)) from e
     except MeetingCaptureAbortedError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     return MeetingStopResponse(
-        filename=audio_path.name,
-        duration_seconds=recorder.last_duration_seconds,
-        truncated=recorder.last_truncated,
+        filename=recording.path.name,
+        duration_seconds=recording.duration_seconds,
+        truncated=recording.truncated,
     )
 
 
