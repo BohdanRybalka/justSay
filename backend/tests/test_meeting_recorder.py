@@ -9,6 +9,7 @@ block-handling logic is exercised against a fake module injected into
 from __future__ import annotations
 
 import asyncio
+import gc
 import importlib
 import sys
 import threading
@@ -1688,3 +1689,150 @@ async def test_meeting_stop_during_the_open_is_409_not_500(client):
 
     assert resp.status_code == 409
     assert "opening its devices" in resp.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_a_stop_cancelled_while_still_queued_releases_the_devices_anyway(
+    audio_settings, fake_system_source, recording_microphone_stream
+):
+    """AC: an abandoned stop request still releases both devices.
+
+    Reloading the widget window is a client disconnect, and Starlette
+    cancels the endpoint task on one. A queued release that the cancel
+    withdraws leaves the microphone and the render endpoint open while the
+    recorder reports itself idle.
+    """
+    recorder = MeetingRecorder(audio_settings)
+    await recorder.start()
+    _feed_microphone(recorder, 4)
+    _deliver_over_a_real_span(recorder, fake_system_source, 4)
+    await asyncio.sleep(0.05)
+
+    gate = _hold_the_owner_thread(recorder)
+    stopping = asyncio.ensure_future(recorder.stop())
+    await asyncio.sleep(0)
+
+    assert fake_system_source.stopped is False, (
+        "the release ran before the cancel — this row is about a queued command"
+    )
+    assert recorder._devices_in_flight == 1
+
+    stopping.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    await asyncio.sleep(0.05)
+
+    gate.set()
+    _wait_for_devices(recorder)
+
+    assert fake_system_source.stopped is True
+    assert [stream.closes for stream in recording_microphone_stream.streams] == [1]
+    assert recorder.is_recording is False
+    assert recorder.is_busy is False
+    assert recorder._devices_in_flight == 0
+
+
+@pytest.mark.anyio
+async def test_a_start_cancelled_while_still_queued_opens_and_is_then_torn_down(
+    audio_settings, recording_microphone_stream
+):
+    """AC: no abandoned request leaves the recorder permanently spoken for.
+
+    A start whose command the cancel withdraws never decrements the
+    in-flight counter, and `is_busy` then answers every later recording
+    request with a 409 until the app restarts.
+    """
+    source = _FakeSystemAudioSource()
+    constructions: list[object] = []
+
+    def _construct(settings):
+        constructions.append(settings)
+        return source
+
+    recorder = MeetingRecorder(audio_settings)
+    with patch("app.audio.meeting_recorder.create_system_audio_source", _construct):
+        gate = _hold_the_owner_thread(recorder)
+        starting = asyncio.ensure_future(recorder.start())
+        await asyncio.sleep(0)
+
+        assert constructions == [], (
+            "the open ran before the cancel — this row is about a queued command"
+        )
+
+        starting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await starting
+        await asyncio.sleep(0.05)
+
+        gate.set()
+        _wait_for_devices(recorder)
+
+    assert len(constructions) == 1
+    assert source.stopped is True
+    assert [stream.closes for stream in recording_microphone_stream.streams] == [1]
+    assert recorder.is_busy is False
+    assert recorder._devices_in_flight == 0
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_command_that_fails_reaches_no_exception_handler(
+    audio_settings, fake_system_source, recording_microphone_stream
+):
+    """AC: a detached command that then fails puts nothing on the loop's
+    exception handler.
+
+    A stop cancelled at quit on a meeting that captured nothing raises
+    `MeetingCaptureAbortedError`, and a future whose exception nobody reads
+    reports itself at ERROR with a traceback once it is collected.
+    """
+    collected: list[dict] = []
+    asyncio.get_running_loop().set_exception_handler(
+        lambda loop, context: collected.append(context)
+    )
+    recorder = MeetingRecorder(audio_settings)
+    await recorder.start()
+
+    gate = _hold_the_owner_thread(recorder)
+    stopping = asyncio.ensure_future(recorder.stop())
+    await asyncio.sleep(0)
+    stopping.cancel()
+    try:
+        await stopping
+    except asyncio.CancelledError:
+        pass
+    await asyncio.sleep(0.05)
+
+    gate.set()
+    _wait_for_devices(recorder)
+    await asyncio.sleep(0.05)
+
+    del stopping
+    gc.collect()
+    await asyncio.sleep(0)
+
+    assert [context.get("message") for context in collected] == []
+    assert fake_system_source.stopped is True
+
+
+@pytest.mark.anyio
+async def test_a_cap_hit_while_the_stop_is_queued_is_reported(client, tmp_path):
+    """AC: a raw-store cap reached at any point before the capture ended is
+    reported, including in the window between the request and the release."""
+
+    class _TruncatingStop(_FakeRecorder):
+        def __init__(self):
+            super().__init__(is_recording=True)
+
+        async def stop(self):
+            self.is_recording = False
+            self.truncated = True
+            path = tmp_path / "meeting_capped.wav"
+            path.write_bytes(b"")
+            return path
+
+    app.dependency_overrides[get_meeting_recorder] = lambda: _TruncatingStop()
+
+    resp = await client.post("/audio/meeting/stop")
+
+    assert resp.status_code == 200
+    assert resp.json()["truncated"] is True

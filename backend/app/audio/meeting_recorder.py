@@ -48,6 +48,17 @@ log = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
+def _drop_outcome(pending: asyncio.Future[object]) -> None:
+    """Retrieve a finished future's exception so it is not reported unhandled.
+
+    A future nobody reads the exception of reaches the event loop's
+    exception handler as `Future exception was never retrieved`, with a
+    traceback, at ERROR level. Retrieving it here discards it instead.
+    """
+    if not pending.cancelled():
+        pending.exception()
+
+
 class MeetingState(str, Enum):
     """The four states a meeting recorder can be in.
 
@@ -164,8 +175,17 @@ class MeetingRecorder(AudioRecorder):
             raise
 
     async def _run_on_devices(self, fn: Callable[..., _T], *args: object) -> _T:
-        """Queue `fn` on the owner thread and await its result on the loop."""
-        return await asyncio.wrap_future(self._submit_on_devices(fn, *args))
+        """Queue `fn` on the owner thread and await its result on the loop.
+
+        The await is shielded: cancelling it detaches the awaiter from the
+        answer, and the command still runs on the owner thread.
+        """
+        pending = asyncio.wrap_future(self._submit_on_devices(fn, *args))
+        try:
+            return await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            pending.add_done_callback(_drop_outcome)
+            raise
 
     def _counted(self, fn: Callable[..., _T], *args: object) -> _T:
         try:

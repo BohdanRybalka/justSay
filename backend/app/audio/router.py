@@ -159,14 +159,12 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
     both devices are released — which is what lets the widget take its
     indicator down on one (`src/widget/meeting-toggle.ts`).
 
-    Both `duration_seconds` and `truncated` are read before the await
-    because the recorder returns to idle as part of stopping, and afterwards
-    both read as the idle values.
+    `duration_seconds` is read before the await because it returns `0.0`
+    unless the recorder is still recording.
     """
     if not recorder.is_busy:
         raise HTTPException(status_code=409, detail="Not recording")
     duration = recorder.duration_seconds
-    truncated = recorder.truncated
     try:
         audio_path = await recorder.stop()
     except MeetingCaptureAbortedError as e:
@@ -174,7 +172,7 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
     return MeetingStopResponse(
         filename=audio_path.name,
         duration_seconds=duration,
-        truncated=truncated,
+        truncated=recorder.truncated,
     )
 
 
