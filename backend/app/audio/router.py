@@ -124,6 +124,11 @@ async def start_meeting_recording(
     docs/adr/040-recording-other-people-is-not-covered-by-zero-leak.md. A
     platform with no system-audio implementation answers 501 and opens no
     stream at all.
+
+    The `is_busy` guard is a conservative filter, not a decision: it can only
+    refuse, never permit something the recorder would refuse, because the
+    recorder re-checks on the thread that owns the answer and raises
+    `MeetingCaptureAbortedError` — a 409 — when it declines.
     """
     if not get_user_settings().meeting_consent_acknowledged:
         raise HTTPException(status_code=403, detail=_CONSENT_REQUIRED_DETAIL)
@@ -145,13 +150,18 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
     """End the recording and return the written file.
 
     The guard is `is_busy`, not `is_recording`, so a stop that arrives while
-    the devices are still opening reaches `recorder.stop()` and cancels that
-    start instead of being refused before it can release anything. Such a
-    stop has no file to return and answers 409.
+    the devices are still opening reaches `recorder.stop()` and is answered
+    after that open rather than being refused before it. Like the other two
+    guards it can only refuse: the recorder decides on its own thread and
+    raises `MeetingCaptureAbortedError` when there is no file to return.
 
-    Both `duration_seconds` and `truncated` are read before the await for the
-    same reason `stop()` harvests early: a start claiming the recorder during
-    the device release would otherwise reset them.
+    Every 409 this endpoint can produce means nothing is being recorded and
+    both devices are released — which is what lets the widget take its
+    indicator down on one (`src/widget/meeting-toggle.ts`).
+
+    Both `duration_seconds` and `truncated` are read before the await
+    because the recorder returns to idle as part of stopping, and afterwards
+    both read as the idle values.
     """
     if not recorder.is_busy:
         raise HTTPException(status_code=409, detail="Not recording")

@@ -10,6 +10,12 @@
  * disappears while a recording continues, and clearing it would also make the
  * recording unstoppable — the next click would take the start branch and be
  * refused with 409, hiding the indicator again.
+ *
+ * The one exception is a stop refused with 409, which the backend uses only
+ * for "already stopped": every 409 it can answer a stop with means nothing is
+ * being recorded and both devices are released. Left in the general branch it
+ * lit the indicator forever — the next click took the stop branch, got the
+ * same 409, and only reloading the widget window cleared it.
  */
 
 import { ApiRequestError } from "../api";
@@ -18,6 +24,7 @@ export const DISCLOSURE_REQUIRED_MESSAGE =
   "Read the meeting-recording disclosure before recording a call.";
 
 const DISCLOSURE_REQUIRED_STATUS = 403;
+const ALREADY_STOPPED_STATUS = 409;
 
 function describeFailure(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -25,6 +32,10 @@ function describeFailure(error: unknown): string {
 
 function stopFailureMessage(error: unknown): string {
   return `The call is still being recorded — stopping it failed: ${describeFailure(error)}`;
+}
+
+function alreadyStoppedMessage(error: unknown): string {
+  return `The call was already stopped: ${describeFailure(error)}`;
 }
 
 /** Everything the toggle needs from the widget, so the decision can be driven
@@ -45,6 +56,12 @@ export async function runMeetingToggle(actions: MeetingToggleActions): Promise<v
     try {
       await actions.stopRecording();
     } catch (e) {
+      if (e instanceof ApiRequestError && e.status === ALREADY_STOPPED_STATUS) {
+        actions.hideIndicator();
+        await actions.setTrayRecording(false);
+        actions.reportError(alreadyStoppedMessage(e));
+        return;
+      }
       actions.reportError(stopFailureMessage(e));
       return;
     }

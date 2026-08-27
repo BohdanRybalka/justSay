@@ -207,6 +207,43 @@ def _wait_for_devices(recorder: MeetingRecorder, timeout: float = 5.0) -> None:
     recorder._devices.submit(lambda: None).result(timeout=timeout)
 
 
+def _hold_the_owner_thread(recorder: MeetingRecorder) -> threading.Event:
+    """Occupy the device thread until the returned event is set.
+
+    Submitted straight to the executor rather than through
+    `_submit_on_devices`, so the barrier itself never counts as a device
+    command in flight — that is the value under test in the row that uses it.
+
+    The wait is bounded: a failing assertion before the test opens the gate
+    would otherwise leave the worker parked forever, and the executor's
+    atexit join then hangs the whole interpreter rather than reporting the
+    failure.
+    """
+    gate = threading.Event()
+    recorder._devices.submit(gate.wait, 5.0)
+    return gate
+
+
+def _hold_the_owner_thread_until_queued(recorder: MeetingRecorder, expected: int) -> None:
+    """Occupy the device thread until `expected` counted commands are queued.
+
+    Releasing on the counter rather than on a timer keeps the sequence
+    deterministic: the hold ends exactly when the command under test has been
+    submitted and not a moment before, which is the window
+    `_devices_in_flight` exists to cover.
+    """
+
+    def hold() -> None:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            with recorder._lock:
+                if recorder._devices_in_flight >= expected:
+                    return
+            time.sleep(0.005)
+
+    recorder._devices.submit(hold)
+
+
 @pytest.fixture
 def blocking_system_source(request):
     source = _BlockingSystemAudioSource(block_on=getattr(request, "param", "construction"))
@@ -934,6 +971,7 @@ async def test_the_recorder_reports_the_endpoint_the_source_chose(
     assert recorder.system_endpoint == "Headset [Loopback]"
 
     recorder.cleanup()
+    _wait_for_devices(recorder)
 
     assert recorder.system_endpoint is None
 
@@ -1107,9 +1145,13 @@ async def test_a_stop_during_the_open_releases_what_the_open_created(
 ):
     """A stop arriving mid-open must not reach handles that do not exist yet.
 
-    On PR #80 it did: the release ran before `_open_capture` had assigned
-    anything, so `source.stop()` was observed before `source.start()` and the
+    On PR #80 it did: the release ran before the open had assigned anything,
+    so `source.stop()` was observed before `source.start()` and the
     microphone stream was left open with `is_recording` false.
+
+    The stop is a command on the same queue, so it is answered *after* the
+    open it arrived behind: the start succeeds, and the stop finds a capture
+    with no audio in it.
     """
     recorder = MeetingRecorder(audio_settings)
     starting = asyncio.ensure_future(recorder.start())
@@ -1119,10 +1161,9 @@ async def test_a_stop_during_the_open_releases_what_the_open_created(
     await asyncio.sleep(0)
 
     blocking_system_source.release_open.set()
-    with pytest.raises(MeetingCaptureAbortedError, match="still opening its devices"):
+    await starting
+    with pytest.raises(MeetingCaptureAbortedError, match="No audio data captured"):
         await stopping
-    with pytest.raises(MeetingCaptureAbortedError):
-        await starting
     _wait_for_devices(recorder)
 
     assert recorder.is_recording is False
@@ -1139,7 +1180,12 @@ async def test_cleanup_during_the_open_returns_at_once_and_leaks_nothing(
     audio_settings, blocking_system_source, recording_microphone_stream
 ):
     """`cleanup()` runs on the event loop from the lifespan drain, so it
-    submits the release and returns rather than waiting for it."""
+    submits the release and returns rather than waiting for it.
+
+    The discard is a command queued behind the open, so the start it raced
+    still completes — and is then torn down, which is what "leaks nothing"
+    means here.
+    """
     recorder = MeetingRecorder(audio_settings)
     starting = asyncio.ensure_future(recorder.start())
     await asyncio.to_thread(blocking_system_source.opening_started.wait, 5.0)
@@ -1149,8 +1195,7 @@ async def test_cleanup_during_the_open_returns_at_once_and_leaks_nothing(
     recorder.cleanup()
     elapsed = time.monotonic() - began
 
-    with pytest.raises(MeetingCaptureAbortedError):
-        await starting
+    await starting
     _wait_for_devices(recorder)
 
     assert elapsed < 0.1, (
@@ -1237,11 +1282,11 @@ async def test_a_slow_open_adds_no_leading_silence_to_the_wav(
 async def test_a_second_start_during_the_open_opens_nothing(
     audio_settings, recording_microphone_stream
 ):
-    """The slot is claimed in the same lock hold that checks it.
+    """Whether a start may proceed is answered on the thread that owns it.
 
-    `start()` now contains an `await`, so two callers can interleave between
-    the check and the claim — on `master` they could not, which is why the
-    audit's split-lock finding was latent rather than live.
+    Both starts are commands on one queue, so the second runs after the
+    first has published and is refused by the recorder itself rather than by
+    a check the loop made before submitting.
     """
     source = _BlockingSystemAudioSource()
     constructions = 0
@@ -1257,13 +1302,49 @@ async def test_a_second_start_during_the_open_opens_nothing(
         second = asyncio.ensure_future(recorder.start())
         await asyncio.to_thread(source.opening_started.wait, 5.0)
         source.release_open.set()
-        await asyncio.gather(first, second)
+        await first
+        with pytest.raises(MeetingCaptureAbortedError):
+            await second
 
     recorder.cleanup()
     _wait_for_devices(recorder)
 
     assert constructions == 1, f"{constructions} system sources were opened, not 1"
     assert len(recording_microphone_stream.streams) == 1
+
+
+def test_the_device_thread_runs_commands_in_submission_order(audio_settings):
+    """A command queued behind a running one never overtakes it.
+
+    ADR 048 names the executor's FIFO order a deliberate dependency rather
+    than an accident: every release that is submitted and not awaited is
+    correct only because it cannot run before the command already occupying
+    the worker. Nothing else in this suite fails when that stops being true —
+    the rows that describe the ordering are refused by a state guard first,
+    so they go red without ever reaching their order assertion.
+
+    Both commands are submitted straight to the executor: this pins the queue
+    itself, not any recorder state layered on top of it.
+    """
+    recorder = MeetingRecorder(audio_settings)
+    order: list[str] = []
+    occupying = threading.Event()
+    release = threading.Event()
+
+    def occupy_the_worker():
+        occupying.set()
+        release.wait(5.0)
+        order.append("queued first")
+
+    recorder._devices.submit(occupy_the_worker)
+    assert occupying.wait(5.0), "the device thread never picked up the first command"
+    recorder._devices.submit(order.append, "queued second")
+    release.set()
+    _wait_for_devices(recorder)
+
+    assert order == ["queued first", "queued second"], (
+        f"the device thread ran its commands as {order}, out of submission order"
+    )
 
 
 @pytest.mark.asyncio
@@ -1275,13 +1356,15 @@ async def test_a_start_arriving_during_the_release_cannot_take_the_recorder(
     `stop()` holds both handles for the whole release — up to 1.5 s on macOS.
     Reporting the recorder idle there let a second start pass the guard, reset
     both block lists and cost the caller the meeting that had just ended.
+
+    The racing start is not refused: it is queued behind the release and
+    opens its own devices after it. So the assertion is an *order*, taken
+    from the one list every device call on this source appends to — which is
+    what pins ADR 048's "one worker, therefore one order".
     """
     source = _BlockingSystemAudioSource(block_on="stop")
-    constructions = 0
 
     def counting_factory(settings):
-        nonlocal constructions
-        constructions += 1
         return source.construct(settings)
 
     source.release_open.set()
@@ -1310,8 +1393,17 @@ async def test_a_start_arriving_during_the_release_cannot_take_the_recorder(
     recorder.cleanup()
     _wait_for_devices(recorder)
 
-    assert constructions == 1, f"{constructions} system sources were opened, not 1"
-    assert len(recording_microphone_stream.streams) == 1
+    assert source.calls == [
+        "construct",
+        "start",
+        "stop",
+        "construct",
+        "start",
+        "stop",
+    ], (
+        f"the racing start's open interleaved with the release: {source.calls}"
+    )
+    assert [stream.closes for stream in recording_microphone_stream.streams] == [1, 1]
     with wave.open(str(audio_path), "rb") as wf:
         assert wf.getnframes() >= expected_frames
 
@@ -1355,49 +1447,192 @@ async def test_a_cleanup_racing_the_release_does_not_cost_the_finished_meeting(
     )
 
 
+
 @pytest.mark.asyncio
-async def test_an_abandoned_start_never_becomes_the_recording(
+async def test_every_state_transition_happens_on_the_device_thread(
+    audio_settings, blocking_system_source, recording_microphone_stream
+):
+    """ADR 048, amended: the owner thread owns the state, not only the handles.
+
+    Five of the six lifecycle transitions used to run on the event loop while
+    the handles they describe lived on another thread, and every defect three
+    review rounds produced sat on that seam. This is the alarm for a
+    transition drifting back onto the loop.
+    """
+    recorder = MeetingRecorder(audio_settings)
+    transition_idents: list[int] = []
+    transition = recorder._transition
+
+    def recording_transition(state):
+        transition_idents.append(threading.get_ident())
+        transition(state)
+
+    recorder._transition = recording_transition
+
+    blocking_system_source.release_open.set()
+    await recorder.start()
+    _feed_microphone(recorder, 4)
+    _deliver_over_a_real_span(recorder, blocking_system_source, 4)
+    await asyncio.sleep(0.05)
+    await recorder.stop()
+
+    blocking_system_source.opening_started.clear()
+    blocking_system_source.release_open.clear()
+    starting = asyncio.ensure_future(recorder.start())
+    await asyncio.to_thread(blocking_system_source.opening_started.wait, 5.0)
+    starting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+    blocking_system_source.release_open.set()
+    _wait_for_devices(recorder)
+
+    recorder.cleanup()
+    _wait_for_devices(recorder)
+
+    device_idents = set(blocking_system_source.idents) | set(
+        recording_microphone_stream.idents
+    )
+
+    assert len(set(transition_idents)) == 1, (
+        f"the lifecycle was written from {len(set(transition_idents))} threads"
+    )
+    assert set(transition_idents) == device_idents, (
+        "the state was written from a thread other than the one holding the devices"
+    )
+    assert threading.get_ident() not in set(transition_idents), (
+        "a lifecycle transition ran on the event-loop thread"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_recorder_is_busy_from_the_moment_a_start_is_submitted(
+    audio_settings, fake_system_source, fake_microphone_stream
+):
+    """A queued command leaves the state untouched, and `is_busy` must still
+    say so — `router.py`'s dictation guard is the caller that pays for a
+    false negative, with a second stream on the same microphone."""
+    recorder = MeetingRecorder(audio_settings)
+    gate = _hold_the_owner_thread(recorder)
+
+    starting = asyncio.ensure_future(recorder.start())
+    await asyncio.sleep(0)
+
+    assert recorder.is_busy is True, (
+        "the recorder reported itself free while a start was already queued"
+    )
+    assert recorder.is_recording is False
+
+    gate.set()
+    await starting
+    recorder.cleanup()
+    _wait_for_devices(recorder)
+
+    assert recorder.is_busy is False
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_start_cannot_tear_down_a_later_recording(
     audio_settings, recording_microphone_stream
 ):
-    """The publish check asks whether *this* start is still the one starting.
+    """An abandonment names the capture it may tear down.
 
-    An abandoned start whose slot a later start re-claims finds `STARTING`
-    when its open finally finishes. Without the generation it publishes its
-    own stale handles under the new claim, and what is left is a recorder
-    reporting a live meeting with no devices at all.
+    A start that fails sends its abandonment behind whatever is already
+    queued, so it can reach the recorder after a *different* start has
+    claimed and published it. The session token is what stops it there.
     """
-    source_a = _BlockingSystemAudioSource(endpoint_name="Abandoned [Loopback]")
     source_b = _FakeSystemAudioSource(endpoint_name="Second [Loopback]")
-    sources = [source_a.construct, lambda settings: source_b]
+    attempts = 0
 
     def factory(settings):
-        return sources.pop(0)(settings)
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("the first device is gone")
+        return source_b
 
     recorder = MeetingRecorder(audio_settings)
     with patch("app.audio.meeting_recorder.create_system_audio_source", factory):
         first = asyncio.ensure_future(recorder.start())
-        await asyncio.to_thread(source_a.opening_started.wait, 5.0)
-
-        with pytest.raises(MeetingCaptureAbortedError):
-            await recorder.stop()
-
         second = asyncio.ensure_future(recorder.start())
-        await asyncio.sleep(0)
-        source_a.release_open.set()
-
-        with pytest.raises(MeetingCaptureAbortedError):
+        with pytest.raises(OSError):
             await first
         await second
 
     _wait_for_devices(recorder)
-    await asyncio.sleep(0.05)
 
-    assert recorder.is_recording is True
+    assert recorder.is_recording is True, (
+        "the failed start's abandonment tore down the recording that replaced it"
+    )
     assert recorder.system_endpoint == "Second [Loopback]"
-    assert recorder.duration_seconds > 0.0
-    assert source_a.stopped is True
     assert source_b.stopped is False
-    assert [stream.closes for stream in recording_microphone_stream.streams] == [1, 0]
+    assert [stream.closes for stream in recording_microphone_stream.streams] == [0]
+
+    recorder.cleanup()
+    _wait_for_devices(recorder)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_stop_still_returns_the_recorder_to_idle(
+    audio_settings, recording_microphone_stream
+):
+    """FastAPI cancels the endpoint task when a client disconnects, and a
+    stop that never finishes returning to idle would leave every later start
+    answering 409 for the rest of the process."""
+    source = _BlockingSystemAudioSource(block_on="stop")
+    source.release_open.set()
+    recorder = MeetingRecorder(audio_settings)
+
+    with patch("app.audio.meeting_recorder.create_system_audio_source", source.construct):
+        await recorder.start()
+        _feed_microphone(recorder, 4)
+        _deliver_over_a_real_span(recorder, source, 4)
+        await asyncio.sleep(0.05)
+
+        stopping = asyncio.ensure_future(recorder.stop())
+        await asyncio.to_thread(source.closing_started.wait, 5.0)
+        stopping.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stopping
+
+        source.release_close.set()
+        _wait_for_devices(recorder)
+
+    assert recorder.is_busy is False, (
+        "the cancelled stop left the recorder permanently busy"
+    )
+    assert source.stopped is True
+    assert [stream.closes for stream in recording_microphone_stream.streams] == [1]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "outcome", ["router-not-recording", "recorder-not-recording", "no-audio"]
+)
+async def test_every_meeting_stop_409_leaves_nothing_recording(
+    client, audio_settings, fake_system_source, fake_microphone_stream, outcome
+):
+    """The widget takes its indicator down on a 409, so every 409 this
+    endpoint can answer a stop with has to mean exactly that.
+
+    Nothing links `src/widget/meeting-toggle.ts` to this router, which is why
+    the backend half of that contract is pinned here rather than left as
+    prose on the other side of a process boundary.
+    """
+    recorder = MeetingRecorder(audio_settings)
+    app.dependency_overrides[get_meeting_recorder] = lambda: recorder
+
+    if outcome == "recorder-not-recording":
+        _hold_the_owner_thread_until_queued(recorder, 2)
+        recorder._submit_on_devices(lambda: None)
+    elif outcome == "no-audio":
+        await recorder.start()
+
+    resp = await client.post("/audio/meeting/stop")
+
+    assert resp.status_code == 409, resp.json()
+    assert recorder.is_recording is False, (
+        f"the {outcome} 409 was answered while the recorder was still recording"
+    )
 
     recorder.cleanup()
     _wait_for_devices(recorder)

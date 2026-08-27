@@ -10,20 +10,25 @@ place that knows which platform it is running on — see
 docs/adr/037-system-audio-capture-is-a-per-platform-source.md.
 
 Every call that creates, starts, stops or destroys a device handle runs on
-the single worker of `self._devices`, never on the event loop — see
+the single worker of `self._devices`, and so does every lifecycle transition
+that describes one: the event loop submits commands and awaits results, and
+reads the state only in order to report it — see
 docs/adr/048-one-thread-owns-every-meeting-device-handle.md.
 """
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from enum import Enum
 from pathlib import Path
+from typing import NamedTuple, TypeVar
 
 import numpy as np
 import sounddevice as sd
@@ -40,6 +45,8 @@ from app.audio.timeline import CapturedBlock, mix_and_normalize, place_on_timeli
 
 log = logging.getLogger(__name__)
 
+_T = TypeVar("_T")
+
 
 class MeetingState(str, Enum):
     """The four states a meeting recorder can be in.
@@ -51,9 +58,9 @@ class MeetingState(str, Enum):
     created yet.
 
     `STOPPING` is the mirror window: the capture has ended but both handles
-    are still open while the release runs off the loop, which on macOS
-    budgets up to 1.5 s. Reporting the recorder as idle for that window let a
-    second start claim it and wipe the finished meeting's buffers.
+    are still open while the release runs, which on macOS budgets up to
+    1.5 s. Reporting the recorder as idle for that window let a second start
+    claim it and wipe the finished meeting's buffers.
     """
 
     IDLE = "idle"
@@ -65,11 +72,21 @@ class MeetingState(str, Enum):
 class MeetingCaptureAbortedError(RuntimeError):
     """No meeting file can be produced, and it is the caller's situation.
 
-    Covers a start that was cancelled by a competing stop, cleanup or task
-    cancellation, a stop with nothing recording, and a stop that captured no
-    audio. The router maps it to 409; subclassing `RuntimeError` keeps every
-    caller that only distinguishes "it failed" working unchanged.
+    Covers a start that found the recorder already spoken for, a stop with
+    nothing recording, and a stop that captured no audio. The router maps it
+    to 409; subclassing `RuntimeError` keeps every caller that only
+    distinguishes "it failed" working unchanged.
     """
+
+
+class _CapturedMeeting(NamedTuple):
+    """Everything the WAV needs, taken out of the recorder in one lock hold."""
+
+    microphone_blocks: list[CapturedBlock]
+    system_blocks: list[CapturedBlock]
+    system_rate: int
+    recording_start: float
+    recording_stop: float
 
 
 def _release_devices(
@@ -104,6 +121,9 @@ class MeetingRecorder(AudioRecorder):
         self._devices = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="meeting-devices"
         )
+        self._devices_in_flight = 0
+        self._tokens = itertools.count(1)
+        self._session_token: int | None = None
         self._microphone_blocks: list[CapturedBlock] = []
         self._system_blocks: list[CapturedBlock] = []
         self._raw_bytes = 0
@@ -111,11 +131,48 @@ class MeetingRecorder(AudioRecorder):
         self._stream: sd.InputStream | None = None
         self._system_source: SystemAudioSource | None = None
         self._state = MeetingState.IDLE
-        self._generation = 0
         self._start_time: float = 0.0
         self._current_level: float = float("-inf")
         self._system_level: float = float("-inf")
         self._endpoint_name: str | None = None
+
+    def _transition(self, state: MeetingState) -> None:
+        """Move the lifecycle to `state` — the only site that assigns it.
+
+        Called only from callables running on `self._devices`, so the thread
+        that owns the two handles is the thread that writes the state
+        describing them.
+        """
+        with self._lock:
+            self._state = state
+
+    def _submit_on_devices(self, fn: Callable[..., _T], *args: object) -> Future[_T]:
+        """Queue `fn` on the owner thread and count it as in flight at once.
+
+        The increment happens here, on the calling thread, before the submit:
+        a command that has been queued but not yet picked up leaves the state
+        untouched, and `is_busy` has to cover that window too or a dictation
+        start opens a second stream on a microphone this recorder still holds.
+        """
+        with self._lock:
+            self._devices_in_flight += 1
+        try:
+            return self._devices.submit(self._counted, fn, *args)
+        except BaseException:
+            with self._lock:
+                self._devices_in_flight -= 1
+            raise
+
+    async def _run_on_devices(self, fn: Callable[..., _T], *args: object) -> _T:
+        """Queue `fn` on the owner thread and await its result on the loop."""
+        return await asyncio.wrap_future(self._submit_on_devices(fn, *args))
+
+    def _counted(self, fn: Callable[..., _T], *args: object) -> _T:
+        try:
+            return fn(*args)
+        finally:
+            with self._lock:
+                self._devices_in_flight -= 1
 
     def _store(self, blocks: list[CapturedBlock], arrival: float, mono: np.ndarray) -> bool:
         """Append under the lock unless the raw-store cap is already reached.
@@ -124,8 +181,8 @@ class MeetingRecorder(AudioRecorder):
         once it is exhausted capture keeps running but stops accumulating, so
         `stop()` still returns a valid WAV of everything up to that point.
 
-        A block arriving before the capture is published is dropped: it
-        belongs to a start that may still be abandoned.
+        A block arriving outside `RECORDING` is dropped: it belongs to a
+        capture that is not published yet, or to one that has already ended.
         """
         with self._lock:
             if self._state is not MeetingState.RECORDING:
@@ -158,20 +215,36 @@ class MeetingRecorder(AudioRecorder):
                 self._system_level = rms_dbfs(mono)
 
     async def start(self) -> None:
-        """Claim the recorder in one lock hold, then open both devices off the loop.
+        """Send the owner thread a start command and wait for its answer.
 
-        The claim has to be atomic with the check, because the `await` below
-        is a yield point: two callers could otherwise both pass the check and
-        each open a pair of devices. The same hold stamps a generation on the
-        claim, which is what tells the open whether the `STARTING` it finds
-        when it finishes is still its own.
+        Reads no recorder state at all: whether this start may proceed is
+        answered by `_begin_capture`, on the only thread that can change the
+        answer. A failure — a device error or a cancelled await — sends an
+        abandonment behind it, carrying the token that says which capture it
+        is entitled to tear down.
+        """
+        token = next(self._tokens)
+        try:
+            await self._run_on_devices(self._begin_capture, token)
+        except BaseException:
+            self._submit_on_devices(self._abandon_capture, token)
+            raise
+
+    def _begin_capture(self, token: int) -> None:
+        """Open both devices and publish them, in one callable on the owner thread.
+
+        There is no publish check: nothing can happen between the open and
+        the publish, because they are one callable on the only thread that
+        writes the state. `_start_time` is sampled at the publish rather than
+        before the open, so a slow device open contributes no leading silence
+        to the written WAV.
         """
         with self._lock:
             if self._state is not MeetingState.IDLE:
-                return
-            self._state = MeetingState.STARTING
-            self._generation += 1
-            generation = self._generation
+                raise MeetingCaptureAbortedError(
+                    "The meeting recorder is busy — a previous recording is still "
+                    "starting, recording or releasing its devices"
+                )
             self._microphone_blocks = []
             self._system_blocks = []
             self._raw_bytes = 0
@@ -179,37 +252,17 @@ class MeetingRecorder(AudioRecorder):
             self._current_level = float("-inf")
             self._system_level = float("-inf")
             self._endpoint_name = None
+        self._transition(MeetingState.STARTING)
 
-        loop = asyncio.get_running_loop()
-        try:
-            published = await loop.run_in_executor(
-                self._devices, self._open_capture, generation
-            )
-        except BaseException:
-            self._abandon_start()
-            raise
-
-        if not published:
-            raise MeetingCaptureAbortedError(
-                "The meeting recording was cancelled while it was opening its devices"
-            )
-
-    def _open_capture(self, generation: int) -> bool:
-        """Open both devices on the owner thread and decide whether to publish them.
-
-        Runs entirely on `self._devices`. Returns whether the handles were
-        published; when they were not, they have already been released here,
-        on the thread that created them, so nothing else ever sees them.
-        """
-        source = create_system_audio_source(self._settings)
-        if source is None:
-            raise SystemAudioUnavailableError(
-                "System audio capture is not available on this platform — "
-                "meeting recording requires Windows or macOS"
-            )
-
+        source: SystemAudioSource | None = None
         stream: sd.InputStream | None = None
         try:
+            source = create_system_audio_source(self._settings)
+            if source is None:
+                raise SystemAudioUnavailableError(
+                    "System audio capture is not available on this platform — "
+                    "meeting recording requires Windows or macOS"
+                )
             self._settings.temp_dir.mkdir(parents=True, exist_ok=True)
             source.start(self._system_callback)
             stream = sd.InputStream(
@@ -220,124 +273,106 @@ class MeetingRecorder(AudioRecorder):
                 callback=self._microphone_callback,
             )
             stream.start()
-        except Exception:
+        except BaseException:
             _release_devices(stream, source)
+            self._transition(MeetingState.IDLE)
             raise
 
-        return self._publish_capture(source, stream, generation)
-
-    def _publish_capture(
-        self, source: SystemAudioSource, stream: sd.InputStream, generation: int
-    ) -> bool:
-        """Hand the open handles to the recorder, unless the start was abandoned.
-
-        `_start_time` is sampled here rather than before the open, so a slow
-        device open contributes no leading silence to the written WAV.
-
-        Both halves of the condition are load-bearing and neither implies the
-        other: the state check catches "nobody is starting", the generation
-        check catches "somebody else is starting" — an abandoned start whose
-        slot a later start has already re-claimed, whose publish would leave
-        a stale endpoint and a ticking duration on a recorder with no devices.
-        """
         with self._lock:
-            publishing = (
-                self._state is MeetingState.STARTING
-                and self._generation == generation
-            )
-            if publishing:
-                self._system_source = source
-                self._stream = stream
-                self._endpoint_name = source.endpoint_name
-                self._start_time = time.monotonic()
-                self._state = MeetingState.RECORDING
-
-        if not publishing:
-            _release_devices(stream, source)
-        return publishing
-
-    def _abandon_start(self) -> None:
-        """Drop back to idle and release anything the open may already have published.
-
-        The generation is deliberately not bumped. The state check is what
-        covers abandonment, and a release guarded by the generation would
-        skip the live handles of a start that published and was then
-        cancelled — a leak of both devices.
-        """
-        with self._lock:
-            self._state = MeetingState.IDLE
-            self._microphone_blocks = []
-            self._system_blocks = []
-            self._raw_bytes = 0
-            self._endpoint_name = None
-            stream = self._stream
-            source = self._system_source
-            self._stream = None
-            self._system_source = None
-        self._devices.submit(_release_devices, stream, source)
+            self._system_source = source
+            self._stream = stream
+            self._endpoint_name = source.endpoint_name
+            self._start_time = time.monotonic()
+            self._session_token = token
+        self._transition(MeetingState.RECORDING)
 
     async def stop(self) -> Path:
-        """End the capture and take everything the WAV needs in one lock hold.
+        """End the capture on the owner thread, then write the WAV off it.
 
-        No mutable recorder state is read after the first `await`: the
-        release is a yield point long enough for a second start to claim the
-        recorder, and a harvest on the far side of it would find that start's
-        empty buffers and its `_start_time` instead of this meeting's.
+        The assemble stays on `asyncio.to_thread` rather than moving to the
+        owner thread: a 45-minute call is ~86 MB of resampling, mixing and
+        wave writing, and on the owner thread that would block every device
+        command queued behind it for the whole write.
         """
-        system_rate = self._settings.sample_rate
-        stream: sd.InputStream | None = None
-        source: SystemAudioSource | None = None
-        microphone_blocks: list[CapturedBlock] = []
-        system_blocks: list[CapturedBlock] = []
-        recording_start = 0.0
-        recording_stop = 0.0
+        captured = await self._run_on_devices(self._end_capture)
+        return await asyncio.to_thread(
+            self._assemble_and_write,
+            captured.microphone_blocks,
+            captured.system_blocks,
+            captured.system_rate,
+            captured.recording_start,
+            captured.recording_stop,
+        )
+
+    def _end_capture(self) -> _CapturedMeeting:
+        """Harvest, release and return to idle, in one callable on the owner thread.
+
+        The return to `IDLE` is in a `finally` because the loop-side task
+        awaiting this may be cancelled — FastAPI cancels the endpoint task
+        when a client disconnects — and the recorder must not be left
+        reporting itself busy with both handles already closed.
+        """
         with self._lock:
-            state = self._state
-            if state is MeetingState.RECORDING:
-                recording_start = self._start_time
-                recording_stop = time.monotonic()
-                self._state = MeetingState.STOPPING
-                self._endpoint_name = None
+            if self._state is not MeetingState.RECORDING:
+                raise MeetingCaptureAbortedError("Not recording")
+        self._transition(MeetingState.STOPPING)
+
+        try:
+            with self._lock:
+                system_rate = self._settings.sample_rate
                 if self._system_source is not None:
                     system_rate = self._system_source.native_sample_rate
+                captured = _CapturedMeeting(
+                    microphone_blocks=self._microphone_blocks,
+                    system_blocks=self._system_blocks,
+                    system_rate=system_rate,
+                    recording_start=self._start_time,
+                    recording_stop=time.monotonic(),
+                )
                 stream = self._stream
                 source = self._system_source
                 self._stream = None
                 self._system_source = None
-                microphone_blocks = self._microphone_blocks
-                system_blocks = self._system_blocks
                 self._microphone_blocks = []
                 self._system_blocks = []
                 self._raw_bytes = 0
-
-        if state is MeetingState.STARTING:
-            self._abandon_start()
-            raise MeetingCaptureAbortedError(
-                "The meeting recording was still opening its devices — the start "
-                "was cancelled and nothing was captured"
-            )
-        if state is not MeetingState.RECORDING:
-            raise MeetingCaptureAbortedError("Not recording")
-
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(self._devices, _release_devices, stream, source)
+                self._endpoint_name = None
+                self._session_token = None
+            _release_devices(stream, source)
         finally:
-            with self._lock:
-                if self._state is MeetingState.STOPPING:
-                    self._state = MeetingState.IDLE
+            self._transition(MeetingState.IDLE)
 
-        if not microphone_blocks and not system_blocks:
+        if not captured.microphone_blocks and not captured.system_blocks:
             raise MeetingCaptureAbortedError("No audio data captured")
+        return captured
 
-        return await asyncio.to_thread(
-            self._assemble_and_write,
-            microphone_blocks,
-            system_blocks,
-            system_rate,
-            recording_start,
-            recording_stop,
-        )
+    def _abandon_capture(self, token: int) -> None:
+        """Tear down the capture `token` names, and only that one.
+
+        Runs behind the start it abandons, in submission order. A start that
+        failed before publishing owns no session, and a start whose slot a
+        later start has since taken does not match — either way this returns
+        without touching a recording that is not its own.
+        """
+        with self._lock:
+            if self._session_token != token:
+                return
+        self._discard_capture()
+
+    def _discard_capture(self) -> None:
+        """Release both handles and return to idle, writing no WAV."""
+        with self._lock:
+            stream = self._stream
+            source = self._system_source
+            self._stream = None
+            self._system_source = None
+            self._microphone_blocks = []
+            self._system_blocks = []
+            self._raw_bytes = 0
+            self._endpoint_name = None
+            self._session_token = None
+        _release_devices(stream, source)
+        self._transition(MeetingState.IDLE)
 
     def _assemble_and_write(
         self,
@@ -402,12 +437,13 @@ class MeetingRecorder(AudioRecorder):
     def is_busy(self) -> bool:
         """Whether the microphone and the render endpoint are spoken for.
 
-        Differs from `is_recording` for the whole length of the device open,
-        and that window is exactly what the mutual-exclusion guards have to
-        cover: the devices are claimed before any audio arrives.
+        Counts the device commands in flight as well as the lifecycle state,
+        because a command that has been submitted but not yet picked up
+        leaves the state untouched. Its only failure direction is refusing
+        something it could have allowed.
         """
         with self._lock:
-            return self._state is not MeetingState.IDLE
+            return self._state is not MeetingState.IDLE or self._devices_in_flight > 0
 
     @property
     def duration_seconds(self) -> float:
@@ -452,21 +488,14 @@ class MeetingRecorder(AudioRecorder):
         release to finish, the shape `LocalWhisperCppSTTProvider.cleanup()`
         already uses for a teardown reachable from the event-loop thread: the
         macOS release alone budgets up to 1.5 s of terminate, kill and reader
-        join. A recorder that never opened anything submits nothing, so a
-        session with no meeting in it spawns no worker at shutdown.
+        join. A recorder with nothing in flight and nothing open submits
+        nothing, so a session with no meeting in it spawns no worker at
+        shutdown.
         """
         with self._lock:
-            idle = self._state is MeetingState.IDLE
-            stream = self._stream
-            source = self._system_source
-            self._stream = None
-            self._system_source = None
-            self._state = MeetingState.IDLE
-            self._microphone_blocks = []
-            self._system_blocks = []
-            self._raw_bytes = 0
-            self._endpoint_name = None
+            idle = self._state is MeetingState.IDLE and self._devices_in_flight == 0
+            nothing_open = self._stream is None and self._system_source is None
 
-        if idle and stream is None and source is None:
+        if idle and nothing_open:
             return
-        self._devices.submit(_release_devices, stream, source)
+        self._submit_on_devices(self._discard_capture)

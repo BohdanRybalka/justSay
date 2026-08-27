@@ -96,6 +96,43 @@ describe("the meeting recording toggle", () => {
     expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
   });
 
+  it("clears the indicator when a stop is refused with 409, because nothing is recording", async () => {
+    const deps = actions({
+      isRecording: vi.fn(() => true),
+      stopRecording: vi.fn(async () => {
+        throw new ApiRequestError("No audio data captured", 409);
+      }),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.hideIndicator).toHaveBeenCalledOnce();
+    expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
+    expect(deps.reportError).toHaveBeenCalledOnce();
+    expect(deps.reportError.mock.calls[0][0]).toContain("No audio data captured");
+    expect(deps.reportError.mock.calls[0][0]).not.toContain("still being recorded");
+  });
+
+  it("puts the next click back on the start branch after a 409 stop", async () => {
+    let recording = true;
+    const deps = actions({
+      isRecording: vi.fn(() => recording),
+      stopRecording: vi.fn(async () => {
+        throw new ApiRequestError("Not recording", 409);
+      }),
+      hideIndicator: vi.fn(() => {
+        recording = false;
+      }),
+    });
+
+    await runMeetingToggle(deps);
+    await runMeetingToggle(deps);
+
+    expect(deps.stopRecording).toHaveBeenCalledOnce();
+    expect(deps.startRecording).toHaveBeenCalledOnce();
+    expect(deps.showIndicator).toHaveBeenCalledOnce();
+  });
+
   it("opens the disclosure when a start is refused with 403", async () => {
     const deps = actions({
       startRecording: vi.fn(async () => {
