@@ -11,11 +11,17 @@
  * recording unstoppable — the next click would take the start branch and be
  * refused with 409, hiding the indicator again.
  *
- * The one exception is a stop refused with 409, which the backend uses only
- * for "already stopped": every 409 it can answer a stop with means nothing is
- * being recorded and both devices are released. Left in the general branch it
- * lit the indicator forever — the next click took the stop branch, got the
- * same 409, and only reloading the widget window cleared it.
+ * A stop has three outcomes here. It succeeds, and the indicator comes down.
+ * It is refused with 409 or 410 — the two codes the backend answers only when
+ * nothing is being recorded and both devices are released — and the indicator
+ * comes down too, because left in the general branch a 409 lit it forever: the
+ * next click took the stop branch, got the same 409, and only reloading the
+ * widget window cleared it. Or it fails for any other reason, and the
+ * indicator stays up.
+ *
+ * The two refusals share a branch and not a message. 409 is a double click;
+ * 410 is a call that ran and captured nothing, which is news rather than a
+ * mistimed press, so it must not be described as already stopped.
  */
 
 import { ApiRequestError } from "../api";
@@ -25,6 +31,7 @@ export const DISCLOSURE_REQUIRED_MESSAGE =
 
 const DISCLOSURE_REQUIRED_STATUS = 403;
 const ALREADY_STOPPED_STATUS = 409;
+const NOTHING_CAPTURED_STATUS = 410;
 
 function describeFailure(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -36,6 +43,10 @@ function stopFailureMessage(error: unknown): string {
 
 function alreadyStoppedMessage(error: unknown): string {
   return `The call was already stopped: ${describeFailure(error)}`;
+}
+
+function nothingCapturedMessage(error: unknown): string {
+  return `The call ended with no audio and nothing was saved: ${describeFailure(error)}`;
 }
 
 /** Everything the toggle needs from the widget, so the decision can be driven
@@ -56,10 +67,17 @@ export async function runMeetingToggle(actions: MeetingToggleActions): Promise<v
     try {
       await actions.stopRecording();
     } catch (e) {
-      if (e instanceof ApiRequestError && e.status === ALREADY_STOPPED_STATUS) {
+      if (
+        e instanceof ApiRequestError &&
+        (e.status === ALREADY_STOPPED_STATUS || e.status === NOTHING_CAPTURED_STATUS)
+      ) {
         actions.hideIndicator();
         await actions.setTrayRecording(false);
-        actions.reportError(alreadyStoppedMessage(e));
+        actions.reportError(
+          e.status === NOTHING_CAPTURED_STATUS
+            ? nothingCapturedMessage(e)
+            : alreadyStoppedMessage(e)
+        );
         return;
       }
       actions.reportError(stopFailureMessage(e));

@@ -96,11 +96,11 @@ describe("the meeting recording toggle", () => {
     expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
   });
 
-  it("clears the indicator when a stop is refused with 409, because nothing is recording", async () => {
+  it("clears the indicator when a stop is refused with 410, and does not call it a double click", async () => {
     const deps = actions({
       isRecording: vi.fn(() => true),
       stopRecording: vi.fn(async () => {
-        throw new ApiRequestError("No audio data captured", 409);
+        throw new ApiRequestError("No audio data captured", 410);
       }),
     });
 
@@ -110,6 +110,24 @@ describe("the meeting recording toggle", () => {
     expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
     expect(deps.reportError).toHaveBeenCalledOnce();
     expect(deps.reportError.mock.calls[0][0]).toContain("No audio data captured");
+    expect(deps.reportError.mock.calls[0][0]).not.toContain("still being recorded");
+    expect(deps.reportError.mock.calls[0][0]).not.toContain("already stopped");
+  });
+
+  it("clears the indicator when a stop is refused with 409, and says the call was already stopped", async () => {
+    const deps = actions({
+      isRecording: vi.fn(() => true),
+      stopRecording: vi.fn(async () => {
+        throw new ApiRequestError("Not recording", 409);
+      }),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.hideIndicator).toHaveBeenCalledOnce();
+    expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
+    expect(deps.reportError).toHaveBeenCalledOnce();
+    expect(deps.reportError.mock.calls[0][0]).toContain("already stopped");
     expect(deps.reportError.mock.calls[0][0]).not.toContain("still being recorded");
   });
 

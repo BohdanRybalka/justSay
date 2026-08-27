@@ -12,7 +12,10 @@ from app.audio import (
     get_meeting_recorder,
     get_recorder,
 )
-from app.audio.meeting_recorder import MeetingCaptureAbortedError
+from app.audio.meeting_recorder import (
+    MeetingCaptureAbortedError,
+    MeetingCaptureEmptyError,
+)
 from app.audio.system_source import SystemAudioUnavailableError
 from app.core.utils import sse_event
 from app.preferences.user_settings import get_user_settings
@@ -155,9 +158,12 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
     guards it can only refuse: the recorder decides on its own thread and
     raises `MeetingCaptureAbortedError` when there is no file to return.
 
-    Every 409 this endpoint can produce means nothing is being recorded and
-    both devices are released — which is what lets the widget take its
-    indicator down on one (`src/widget/meeting-toggle.ts`).
+    Every 409 and the one 410 this endpoint can produce mean nothing is
+    being recorded and both devices are released — which is what lets the
+    widget take its indicator down on either (`src/widget/meeting-toggle.ts`).
+    They are two codes rather than two wordings because a stop that found
+    nothing recording and a meeting that captured nothing are different
+    outcomes, and the widget must not describe the second as a double click.
 
     `duration_seconds` is read before the await because it returns `0.0`
     unless the recorder is still recording.
@@ -167,6 +173,8 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
     duration = recorder.duration_seconds
     try:
         audio_path = await recorder.stop()
+    except MeetingCaptureEmptyError as e:
+        raise HTTPException(status_code=410, detail=str(e)) from e
     except MeetingCaptureAbortedError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     return MeetingStopResponse(

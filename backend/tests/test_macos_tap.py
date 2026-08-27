@@ -64,8 +64,8 @@ class _GatedStdout(io.BytesIO):
     The header still arrives immediately, which is what `MacOSTapSource.start`
     blocks on, but the blocks arrive only when the test says so. A real
     helper's audio arrives over the length of a call; an ungated BytesIO
-    delivers the whole capture during the device open, which is the one
-    window `MeetingRecorder` deliberately drops blocks in.
+    hands every block a near-identical arrival, which is not what a call
+    looks like on the timeline.
     """
 
     def __init__(self, data: bytes):
