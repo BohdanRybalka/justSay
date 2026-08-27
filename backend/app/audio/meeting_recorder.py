@@ -1,9 +1,13 @@
 """Meeting recorder — microphone plus system audio, mixed into one WAV.
 
-Implements the same `AudioRecorder` contract as `MicrophoneRecorder`, so the
-file it produces enters the pipeline through the same door and nothing
-downstream has to know a meeting was recorded. `MicrophoneRecorder` itself is
-deliberately untouched by this module: the dictation path must not move.
+Writes the same 16 kHz mono 16-bit WAV `MicrophoneRecorder` does, so the file
+enters the pipeline through the same door and nothing downstream has to know a
+meeting was recorded. The `AudioRecorder` contract it shares covers starting
+and reporting, not stopping: `stop()` here answers with a `MeetingRecording`
+rather than the dictation path's bare `Path`, which is why the base class
+declares no `stop()` at all — see `app.audio.base`. `MicrophoneRecorder`
+itself is deliberately untouched by this module: the dictation path must not
+move.
 
 System audio arrives through `app.audio.system_source`, which is the only
 place that knows which platform it is running on — see
@@ -102,6 +106,21 @@ class MeetingCaptureEmptyError(MeetingCaptureAbortedError):
     outcomes rather than different wordings: the router answers 410 for this
     one and 409 for a stop that found nothing recording, and the widget picks
     its message from the status rather than from the prose.
+    """
+
+
+class MeetingWriteFailedError(RuntimeError):
+    """The capture ended, both devices were released, and no file was written.
+
+    Deliberately outside the `MeetingCaptureAbortedError` hierarchy: those two
+    say a meeting never ran or captured nothing, and this one says a meeting
+    ran and its audio was lost on the way to disk — a full disk, a `temp_dir`
+    that vanished, a resample that failed. The router answers 507 for it, and
+    that status is the whole point of the class: by the time the write is
+    submitted `_end_capture` has already released both handles and returned
+    the recorder to `IDLE`, so the widget must take its indicator down. A bare
+    500 is indistinguishable from an unreachable backend, which may still be
+    recording, and left the indicator lit after the meeting had ended.
     """
 
 
@@ -499,9 +518,11 @@ class MeetingRecorder(AudioRecorder):
                 captured.recording_start,
                 captured.recording_stop,
             )
-        except Exception:
+        except Exception as e:
             log.error("Writing the meeting recording failed", exc_info=True)
-            raise
+            raise MeetingWriteFailedError(
+                f"The call ended but its recording could not be written: {e}"
+            ) from e
         log.info("Meeting recording written to %s", output_path)
         return MeetingRecording(
             path=output_path,

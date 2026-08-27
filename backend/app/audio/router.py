@@ -16,6 +16,7 @@ from app.audio.meeting_recorder import (
     MEETING_BUSY_DETAIL,
     MeetingCaptureAbortedError,
     MeetingCaptureEmptyError,
+    MeetingWriteFailedError,
 )
 from app.audio.system_source import SystemAudioUnavailableError
 from app.core.utils import sse_event
@@ -159,12 +160,16 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
     guards it can only refuse: the recorder decides on its own thread and
     raises `MeetingCaptureAbortedError` when there is no file to return.
 
-    Every 409 and the one 410 this endpoint can produce mean nothing is
-    being recorded and both devices are released — which is what lets the
-    widget take its indicator down on either (`src/widget/meeting-toggle.ts`).
-    They are two codes rather than two wordings because a stop that found
-    nothing recording and a meeting that captured nothing are different
-    outcomes, and the widget must not describe the second as a double click.
+    Every 409, the one 410 and the one 507 this endpoint can produce mean
+    nothing is being recorded and both devices are released — which is what
+    lets the widget take its indicator down on all three
+    (`src/widget/meeting-toggle.ts`). They are three codes rather than three
+    wordings because a stop that found nothing recording, a meeting that
+    captured nothing and a meeting whose audio was lost on the way to disk
+    are different outcomes, and the widget must not describe any of them as
+    a double click. 507 in particular replaces the 500 a failed write used to
+    raise: the recorder is idle by then, but a 500 is indistinguishable from
+    an unreachable backend, so the widget kept the indicator lit.
 
     `duration_seconds` and `truncated` arrive with the file, inside the
     `MeetingRecording` the write produces, rather than being read off the
@@ -176,6 +181,8 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
         raise HTTPException(status_code=409, detail="Not recording")
     try:
         recording = await recorder.stop()
+    except MeetingWriteFailedError as e:
+        raise HTTPException(status_code=507, detail=str(e)) from e
     except MeetingCaptureEmptyError as e:
         raise HTTPException(status_code=410, detail=str(e)) from e
     except MeetingCaptureAbortedError as e:

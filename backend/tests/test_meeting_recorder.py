@@ -13,10 +13,12 @@ import functools
 import gc
 import importlib
 import logging
+import shutil
 import sys
 import threading
 import time
 import types
+import typing
 import wave
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -25,6 +27,7 @@ import numpy as np
 import pytest
 
 from app.audio import get_active_recorder, get_meeting_recorder
+from app.audio.base import write_wav
 from app.audio.config import AudioSettings
 from app.audio.meeting_recorder import (
     MEETING_BUSY_DETAIL,
@@ -32,6 +35,9 @@ from app.audio.meeting_recorder import (
     MeetingCaptureEmptyError,
     MeetingRecorder,
     MeetingRecording,
+    MeetingState,
+    MeetingWriteFailedError,
+    _CapturedMeeting,
     _release_devices,
 )
 from app.audio.system_source import (
@@ -2190,6 +2196,126 @@ async def test_a_meeting_that_captured_nothing_answers_410_and_a_double_stop_ans
     assert (await client.post("/audio/meeting/stop")).status_code == 409
 
 
+def test_the_recorder_abc_declares_only_what_both_recorders_honour():
+    """The base class must not advertise a signature a subclass breaks.
+
+    `stop()` used to be declared `-> Path` on `AudioRecorder` while
+    `MeetingRecorder.stop()` answers a `MeetingRecording`, so code written
+    against the abstraction — `path = await recorder.stop()` then
+    `path.name` — worked for dictation and raised `AttributeError` for a
+    meeting. Nothing consumes the two polymorphically, so this compares the
+    resolved return annotation of every abstract member against both
+    implementations and fails the moment one of them stops matching.
+    """
+    from app.audio.base import AudioRecorder
+    from app.audio.recorder import MicrophoneRecorder
+
+    abstract_names = sorted(AudioRecorder.__abstractmethods__)
+    assert abstract_names == ["duration_seconds", "is_recording", "level_db", "start"], (
+        "an abstract member was added or removed — check both recorders still "
+        "return the same thing for it before widening this list"
+    )
+
+    def _returns(owner: type, name: str):
+        member = owner.__dict__.get(name) or getattr(owner, name)
+        function = member.fget if isinstance(member, property) else member
+        return typing.get_type_hints(function).get("return")
+
+    for name in abstract_names:
+        declared = _returns(AudioRecorder, name)
+        for implementation in (MicrophoneRecorder, MeetingRecorder):
+            assert _returns(implementation, name) == declared, (
+                f"{implementation.__name__}.{name} does not return what "
+                f"AudioRecorder.{name} declares"
+            )
+
+    assert "stop" not in abstract_names
+    assert typing.get_type_hints(MicrophoneRecorder.stop)["return"] is Path
+    assert typing.get_type_hints(MeetingRecorder.stop)["return"] is MeetingRecording
+
+
+@pytest.mark.anyio
+async def test_a_meeting_whose_file_cannot_be_written_answers_507_and_is_already_idle(
+    client, audio_settings, fake_system_source, fake_microphone_stream
+):
+    """The real write path fails, and the widget must be told the call ended.
+
+    `_end_capture` releases both handles and returns the recorder to `IDLE`
+    before the write is even submitted, so a write failure never means "still
+    recording". It used to surface as an uncaught 500, which the widget cannot
+    tell from an unreachable backend: the indicator stayed lit and the tray
+    stayed flagged after the meeting had ended, clearing only on a second
+    click that drew a 409. The `temp_dir` is removed after the capture has
+    started, which is the disk failure itself rather than a mocked rejection.
+    """
+    recorder = MeetingRecorder(audio_settings)
+    app.dependency_overrides[get_meeting_recorder] = lambda: recorder
+    try:
+        await recorder.start()
+        _wait_for_devices(recorder)
+        _feed_microphone(recorder, 3)
+        _deliver_over_a_real_span(recorder, fake_system_source, 3)
+        shutil.rmtree(audio_settings.temp_dir)
+
+        resp = await client.post("/audio/meeting/stop")
+
+        assert resp.status_code == 507
+        assert "could not be written" in resp.json()["detail"]
+        assert recorder.is_busy is False
+        assert recorder.is_recording is False
+        assert fake_system_source.stopped is True
+    finally:
+        recorder.cleanup()
+
+
+def test_a_failed_wav_write_constructs_no_half_built_wave_object(tmp_path):
+    """`wave.open(path)` builds a `Wave_write` around the open it performs.
+
+    When that open fails — the disk-full and vanished-`temp_dir` cases the 507
+    answer exists for — the half-constructed object survives in the raised
+    exception's traceback and its `__del__` raises `AttributeError: _file`
+    into the unraisable hook, printing a second, misleading traceback beside
+    the real error. `write_wav` opens the file itself so nothing is built.
+    """
+    gc.collect()
+    before = sum(1 for obj in gc.get_objects() if isinstance(obj, wave.Wave_write))
+
+    with pytest.raises(OSError):
+        write_wav(
+            tmp_path / "gone" / "meeting.wav",
+            np.zeros(16, dtype=np.float32),
+            16000,
+            channels=1,
+        )
+
+    alive = sum(1 for obj in gc.get_objects() if isinstance(obj, wave.Wave_write))
+    assert alive == before
+
+
+def test_a_failed_write_raises_the_507_error_and_not_the_bare_os_error(audio_settings):
+    """The router branches on the type, so the type is what has to change.
+
+    Left as the `OSError` the wave module raises, the stop endpoint answers
+    500 and `src/widget/meeting-toggle.ts` keeps the indicator lit.
+    """
+    recorder = MeetingRecorder(audio_settings)
+    try:
+        captured = _CapturedMeeting(
+            microphone_blocks=[],
+            system_blocks=[],
+            system_rate=SYSTEM_RATE,
+            recording_start=0.0,
+            recording_stop=1.0,
+            truncated=False,
+        )
+        with pytest.raises(MeetingWriteFailedError) as raised:
+            recorder._write_captured_meeting(captured)
+        assert isinstance(raised.value.__cause__, OSError)
+        assert not isinstance(raised.value, MeetingCaptureAbortedError)
+    finally:
+        recorder.cleanup()
+
+
 @pytest.mark.asyncio
 async def test_cleanup_retires_both_executors_and_refuses_a_later_start(
     audio_settings, fake_system_source, fake_microphone_stream
@@ -2385,8 +2511,16 @@ async def test_a_stop_accepted_during_the_open_reports_the_duration_it_captured(
 
     The stop guard is `is_busy`, so a stop issued during the microphone open
     is queued behind it and harvests a real capture — the far side is already
-    live and `_store` admits it. The live duration is `0.0` for that whole
-    window, so the response cannot be built from it.
+    live and `_store` admits it. The harvest clears the live clock before the
+    endpoint reads it, so the response cannot be built from it.
+
+    The window is asserted through `_state`, not through `duration_seconds`.
+    `_start_time` is published the instant the system source starts, which is
+    before the microphone open this test parks, so the live duration is
+    already counting here — it merely reads back as `0.0` while less than one
+    `time.monotonic()` tick has passed, which on Windows is 15.625 ms. Under
+    full-suite load that tick rolls over and the old assertion failed on a
+    capture that was behaving exactly as intended.
     """
     opening_started = threading.Event()
     release_open = threading.Event()
@@ -2403,7 +2537,7 @@ async def test_a_stop_accepted_during_the_open_reports_the_duration_it_captured(
         starting = asyncio.ensure_future(recorder.start())
         await asyncio.to_thread(opening_started.wait, 5.0)
 
-        assert recorder.duration_seconds == 0.0, (
+        assert recorder._state is MeetingState.STARTING, (
             "the open had already finished, so this proves nothing about the window"
         )
         for index in range(8):
