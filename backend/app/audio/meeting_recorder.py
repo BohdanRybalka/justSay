@@ -336,30 +336,40 @@ class MeetingRecorder(AudioRecorder):
         time_info: object,
         status: sd.CallbackFlags,
     ) -> None:
-        """Keep the block, then publish its level if the session still exists.
+        """Keep the block, then publish its level if the session is still live.
 
         The keep and the level write are two separate lock holds, and a stop
-        can complete in the gap between them, so the token is checked again
-        in the second one. Without that check a callback preempted mid-way
+        can complete in the gap between them, so the session is re-checked in
+        the second one. Without that check a callback preempted mid-way
         republishes an ended meeting's level after `_end_capture` cleared it.
+
+        The level is published whether or not the block was kept. Both stores
+        share one raw-byte budget, and past it `_store` answers `False` for
+        the rest of the meeting while capture keeps running — gating the meter
+        on that answer froze both readings at their last pre-cap value on any
+        call long enough to exhaust the budget, which is the opposite of what
+        `system_level_db` exists for. The re-check repeats `_store`'s own
+        session token rather than its return value, so a block belonging to a
+        session that has already ended still publishes nothing.
         """
         arrival = time.monotonic()
         mono = to_mono(indata)
-        if self._store(token, self._microphone_blocks, arrival, mono):
-            with self._lock:
-                if self._session_token == token:
-                    self._current_level = rms_dbfs(mono)
+        self._store(token, self._microphone_blocks, arrival, mono)
+        with self._lock:
+            if self._session_token == token:
+                self._current_level = rms_dbfs(mono)
 
     def _system_callback(self, token: int, arrival: float, mono: np.ndarray) -> None:
         """The far side's half of `_microphone_callback`, with the same re-check.
 
         The level write is a second lock hold here too, so a stop landing in
-        the gap must not be followed by the ended meeting's far-side level.
+        the gap must not be followed by the ended meeting's far-side level,
+        and it is reached past the raw-byte cap for the same reason.
         """
-        if self._store(token, self._system_blocks, arrival, mono):
-            with self._lock:
-                if self._session_token == token:
-                    self._system_level = rms_dbfs(mono)
+        self._store(token, self._system_blocks, arrival, mono)
+        with self._lock:
+            if self._session_token == token:
+                self._system_level = rms_dbfs(mono)
 
     async def start(self) -> None:
         """Send the owner thread a start command and wait for its answer.
@@ -386,6 +396,29 @@ class MeetingRecorder(AudioRecorder):
                     "could be torn down"
                 )
             raise
+
+    def _forget_capture(self) -> None:
+        """Return every field describing a capture to its no-meeting value.
+
+        Called with `_lock` held, by all three sites that end a capture: a
+        start that failed on its devices, an abandoned start and a harvest.
+        They cleared the same eight fields in three separate copies, and a
+        copy that ended up clearing seven of them is how a recorder that
+        held no handle went on answering `is_recording: true` with a ticking
+        duration and a named endpoint.
+
+        `_truncated` is deliberately not here. It belongs to the capture
+        being harvested and travels inside the `_CapturedMeeting`; the next
+        start clears it.
+        """
+        self._microphone_blocks = []
+        self._system_blocks = []
+        self._raw_bytes = 0
+        self._session_token = None
+        self._start_time = None
+        self._endpoint_name = None
+        self._current_level = float("-inf")
+        self._system_level = float("-inf")
 
     def _begin_capture(self, token: int) -> None:
         """Open both devices and publish them, in one callable on the owner thread.
@@ -447,14 +480,7 @@ class MeetingRecorder(AudioRecorder):
         except BaseException:
             _release_devices(stream, source)
             with self._lock:
-                self._microphone_blocks = []
-                self._system_blocks = []
-                self._raw_bytes = 0
-                self._session_token = None
-                self._current_level = float("-inf")
-                self._system_level = float("-inf")
-                self._start_time = None
-                self._endpoint_name = None
+                self._forget_capture()
             self._transition(MeetingState.IDLE)
             raise
 
@@ -493,9 +519,16 @@ class MeetingRecorder(AudioRecorder):
     def _end_capture(self) -> Future[MeetingRecording]:
         """Harvest, release, submit the write and return its future.
 
-        The release and the return to `IDLE` are both in the `finally`, and
-        they hold the two halves of one invariant: the recorder is idle if
-        and only if it holds no device handle. The transition is there
+        Forgetting the capture, releasing it and returning to `IDLE` are all
+        three in the `finally`, and they hold the three halves of one
+        invariant: an idle recorder holds no device handle and describes no
+        meeting. The forgetting is there because a raise inside the harvest
+        hold used to leave the fields that name the capture — `_start_time`,
+        `_endpoint_name`, `_session_token` — set on a recorder that was
+        already `IDLE` and already empty-handed, which answered
+        `is_recording: true` with a duration ticking up and a named endpoint
+        for a call nothing was capturing, refused every stop with 409, and
+        healed only on the next successful start. The transition is there
         because the loop-side task awaiting this may be cancelled — FastAPI
         cancels the endpoint task when a client disconnects — and the
         recorder must not be left reporting itself busy with both handles
@@ -517,9 +550,9 @@ class MeetingRecorder(AudioRecorder):
         capture while the live copy belongs to whichever meeting starts next.
 
         Both level meters are cleared with the rest of the capture's identity,
-        the same way the abandoned-start path clears them, so a status read
-        between a stop and the next start cannot report the ended meeting's
-        levels next to `system_endpoint: null`.
+        by the same `_forget_capture` the abandoned-start path calls, so a
+        status read between a stop and the next start cannot report the ended
+        meeting's levels next to `system_endpoint: null`.
         """
         with self._lock:
             if self._state is not MeetingState.RECORDING:
@@ -545,15 +578,9 @@ class MeetingRecorder(AudioRecorder):
                     recording_stop=time.monotonic(),
                     truncated=self._truncated,
                 )
-                self._microphone_blocks = []
-                self._system_blocks = []
-                self._raw_bytes = 0
-                self._endpoint_name = None
-                self._session_token = None
-                self._start_time = None
-                self._current_level = float("-inf")
-                self._system_level = float("-inf")
         finally:
+            with self._lock:
+                self._forget_capture()
             _release_devices(stream, source)
             self._transition(MeetingState.IDLE)
 
@@ -617,14 +644,7 @@ class MeetingRecorder(AudioRecorder):
             source = self._system_source
             self._stream = None
             self._system_source = None
-            self._microphone_blocks = []
-            self._system_blocks = []
-            self._raw_bytes = 0
-            self._endpoint_name = None
-            self._session_token = None
-            self._start_time = None
-            self._current_level = float("-inf")
-            self._system_level = float("-inf")
+            self._forget_capture()
         _release_devices(stream, source)
         self._transition(MeetingState.IDLE)
 

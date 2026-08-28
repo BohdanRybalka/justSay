@@ -28,6 +28,15 @@
  * answers 507 rather than the 500 a failed write used to raise precisely so
  * this branch can tell it apart from a backend that never answered.
  *
+ * A start has its own 409, and it means the opposite of everything above: the
+ * backend refuses to start because it is already holding both devices. That is
+ * the one start failure after which something *is* being recorded, so it puts
+ * the indicator up rather than down. Reaching it means the widget had lost
+ * track — a window reload whose status call failed leaves `meetingActive`
+ * false while the call keeps recording — and hiding the indicator there both
+ * broke ADR 040 obligation 2 and left the recording unstoppable, because the
+ * next click would take the start branch again and get the same 409.
+ *
  * The sentence a user reads is written here and the backend detail is appended
  * to it as its cause, which is why the 507 detail carries the write error alone
  * and not a second sentence of its own.
@@ -40,6 +49,7 @@ export const DISCLOSURE_REQUIRED_MESSAGE =
 
 const DISCLOSURE_REQUIRED_STATUS = 403;
 const ALREADY_STOPPED_STATUS = 409;
+const ALREADY_RECORDING_STATUS = 409;
 const NOTHING_CAPTURED_STATUS = 410;
 const WRITE_FAILED_STATUS = 507;
 
@@ -67,6 +77,10 @@ function nothingCapturedMessage(error: unknown): string {
 
 function writeFailedMessage(error: unknown): string {
   return `The call ended but its recording could not be saved: ${describeFailure(error)}`;
+}
+
+function alreadyRecordingMessage(error: unknown): string {
+  return `A call is already being recorded: ${describeFailure(error)}`;
 }
 
 function captureOverMessage(error: ApiRequestError): string {
@@ -114,6 +128,12 @@ export async function runMeetingToggle(actions: MeetingToggleActions): Promise<v
   try {
     await actions.startRecording();
   } catch (e) {
+    if (e instanceof ApiRequestError && e.status === ALREADY_RECORDING_STATUS) {
+      actions.showIndicator();
+      await actions.setTrayRecording(true);
+      actions.reportError(alreadyRecordingMessage(e));
+      return;
+    }
     actions.hideIndicator();
     await actions.setTrayRecording(false);
     if (e instanceof ApiRequestError && e.status === DISCLOSURE_REQUIRED_STATUS) {

@@ -3336,3 +3336,135 @@ async def test_a_far_side_block_kept_during_the_open_is_already_reported_recordi
         )
     finally:
         recorder.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_a_raise_inside_the_harvest_describes_no_meeting_afterwards(
+    audio_settings, fake_microphone_stream
+):
+    """GitHub review iteration 11, finding 1.
+
+    The sibling above pins the handles and the state. This pins the third
+    half of the same invariant, which the `finally` did not cover: the
+    fields that *describe* the capture were cleared inside the `try`, after
+    the read that raises, so the recorder went back to `IDLE` holding no
+    handle and went on answering `is_recording: true` with a duration
+    ticking up and a named endpoint for a call nothing was capturing. Every
+    stop was then refused with 409 and only the next successful start healed
+    it, so the assertion that matters most here is the last one.
+    """
+    source = _ExplodingRateSource()
+    recorder = MeetingRecorder(audio_settings)
+
+    try:
+        with patch(
+            "app.audio.meeting_recorder.create_system_audio_source", lambda _: source
+        ):
+            await recorder.start()
+        _wait_for_devices(recorder)
+        source.armed = True
+
+        with pytest.raises(RuntimeError, match="the device went away mid-harvest"):
+            await recorder.stop()
+        _wait_for_devices(recorder)
+
+        snapshot = recorder.status_snapshot()
+        assert snapshot.is_recording is False, (
+            "the widget lights its recording indicator on every reload and the "
+            "duration ticks up, for a call nothing is capturing"
+        )
+        assert snapshot.duration_seconds == 0.0
+        assert snapshot.system_endpoint is None, (
+            "the status names the output device of a capture that no longer exists"
+        )
+        assert snapshot.level_db == float("-inf")
+        assert snapshot.system_level_db == float("-inf")
+        assert recorder._session_token is None
+    finally:
+        recorder.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_both_level_meters_keep_reading_past_the_raw_byte_cap(
+    tmp_path, fake_system_source, fake_microphone_stream
+):
+    """GitHub review iteration 11, finding 3.
+
+    Past `meeting_max_raw_bytes` capture keeps running and `_store` answers
+    `False` for the rest of the meeting. Gating the meters on that answer
+    froze both at their last pre-cap reading, so a call long enough to
+    exhaust the budget showed a stale non-zero far-side level for the rest of
+    its length — the exact opposite of what `system_level_db` exists for,
+    which is making a silent far side visible while it happens.
+    """
+    settings = AudioSettings(
+        sample_rate=16000,
+        channels=1,
+        temp_dir=tmp_path / "tmp",
+        meeting_max_raw_bytes=BLOCK_FRAMES * 4 * 2,
+    )
+    recorder = MeetingRecorder(settings)
+
+    try:
+        await recorder.start()
+        _feed_microphone(recorder, 1, fill=0.5)
+        fake_system_source.deliver(recorder._start_time, fill=0.5)
+        loud_microphone = recorder.level_db
+        loud_system = recorder.system_level_db
+        assert loud_microphone > -12.0 and loud_system > -12.0
+
+        _feed_microphone(recorder, 20, fill=0.5)
+        assert recorder._raw_bytes >= settings.meeting_max_raw_bytes
+
+        _feed_microphone(recorder, 1, fill=0.001)
+        fake_system_source.deliver(recorder._start_time, fill=0.001)
+
+        assert recorder.level_db < -40.0, (
+            "the near-side meter is frozen at its last pre-cap reading while "
+            "the microphone is near-silent"
+        )
+        assert recorder.system_level_db < -40.0, (
+            "the far-side meter reports a live call while the far side has "
+            "gone quiet, because the cap stopped the level being published"
+        )
+    finally:
+        recorder.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_a_level_from_a_dead_session_is_still_refused_past_the_cap(
+    tmp_path, fake_system_source, fake_microphone_stream
+):
+    """The guard the cap fix must not have removed along with the gate.
+
+    The level write no longer asks whether the block was kept, so what keeps
+    an ended meeting's level from being republished is the session re-check
+    in its own lock hold. This drives a callback carrying the finished
+    session's token after the stop, which is the shape iteration 9 found.
+    """
+    settings = AudioSettings(
+        sample_rate=16000,
+        channels=1,
+        temp_dir=tmp_path / "tmp",
+        meeting_max_raw_bytes=BLOCK_FRAMES * 4 * 2,
+    )
+    recorder = MeetingRecorder(settings)
+
+    try:
+        await recorder.start()
+        token = recorder._session_token
+        _feed_microphone(recorder, 20, fill=0.5)
+        assert recorder._raw_bytes >= settings.meeting_max_raw_bytes
+        await recorder.stop()
+        _wait_for_devices(recorder)
+
+        block = np.full((BLOCK_FRAMES, 1), 0.5, dtype=np.float32)
+        recorder._microphone_callback(token, block, BLOCK_FRAMES, None, MagicMock())
+        recorder._system_callback(token, time.monotonic(), block[:, 0])
+
+        assert recorder.level_db == float("-inf"), (
+            "an ended meeting's level came back beside is_recording: false"
+        )
+        assert recorder.system_level_db == float("-inf")
+    finally:
+        recorder.cleanup()
