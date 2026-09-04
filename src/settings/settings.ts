@@ -8,7 +8,8 @@ import {
   type CloudKeyStatus,
   type UserSettings,
 } from "../api";
-import { withTimeout } from "../timeout";
+import { TimedOutError, withTimeout } from "../timeout";
+import { isStaleStatusResponse } from "../stale-response";
 import { renderGeneral } from "./tabs/general";
 import { renderModels } from "./tabs/models";
 import { renderHistory } from "./tabs/history";
@@ -42,18 +43,40 @@ const tabs: Record<string, (container: HTMLElement, settings: UserSettings) => (
   words: (container) => renderWords(container),
 };
 
-/** `bridge-missing` / `invoke-timeout` / `invoke-failed: <detail>` — the token
- *  verbatim, because these strings are what a remote user reads back to us off
- *  a screenshot and each one points at a different layer (ADR 028). */
+/** `bridge-missing` / `bridge-timeout` / `bridge-failed: <detail>` /
+ *  `invoke-timeout` / `invoke-failed: <detail>` — the token verbatim, because
+ *  these strings are what a remote user reads back to us off a screenshot and
+ *  each one points at a different layer (ADR 028). All five `BridgeDiagnosis`
+ *  kinds other than `ok` are covered; a list that silently omits one is worse
+ *  than no list, because the omitted string then arrives off a screenshot
+ *  looking like something nobody recognises. The detail is appended by asking
+ *  whether the diagnosis carries one, so a sixth kind with a detail cannot be
+ *  added and quietly lose it. */
 function bridgeDiagnosisText(diagnosis: BridgeDiagnosis): string {
-  return diagnosis.kind === "invoke-failed"
-    ? `invoke-failed: ${diagnosis.detail}`
-    : diagnosis.kind;
+  return "detail" in diagnosis ? `${diagnosis.kind}: ${diagnosis.detail}` : diagnosis.kind;
 }
 
+/** `TimedOutError` reaches this screen from two mechanisms and they know
+ *  different things, which `subject` is what distinguishes. With a subject it
+ *  came from `api.ts`, where a single request was accepted by the backend and
+ *  went unanswered, and the endpoint and the budget are the facts worth
+ *  reporting — the error's own sentence says them, so the prefix must not say
+ *  them again. With `subject === null` it came from the outer
+ *  `withTimeout(loadSettings(), ...)`, which wraps several awaits and can name
+ *  none of them.
+ *
+ *  Neither branch claims the backend accepted anything. A budget that names an
+ *  endpoint can still have expired before the request was sent — it covers the
+ *  token wait too — so "accepted and never answered" would be an invention on
+ *  the exact failure this text exists to explain. */
 function settingsUnavailableMessage(error: unknown, reachable: boolean): string {
   if (error instanceof ApiAuthError) {
     return `JustSay could not authenticate to its own backend, so it is refusing every request (401). Tauri bridge: ${bridgeDiagnosisText(error.diagnosis)}.`;
+  }
+  if (error instanceof TimedOutError) {
+    return error.subject === null
+      ? `Loading settings did not finish in time: ${error.message}. It may still be starting up — try again.`
+      : `The backend did not answer this window's request in time (${error.subject}, ${error.budgetMs / 1000} s). It may still be starting up — try again.`;
   }
   if (!reachable) {
     return "The backend was not responding when this window loaded its settings. Make sure it is running, then try again.";
@@ -64,8 +87,10 @@ function settingsUnavailableMessage(error: unknown, reachable: boolean): string 
 /**
  * The failure screen, with the way out of it.
  *
- * `init()` races the sidecar, which the Rust side budgets thirty seconds for,
- * so this screen is reached on an ordinary cold start. Closing the window does
+ * `init()` races the sidecar, whose readiness poll the Rust side runs for a
+ * hundred attempts 300 ms apart (`src-tauri/src/backend.rs`), so it can take
+ * well over thirty seconds and this screen is reached on an ordinary cold
+ * start. Closing the window does
  * not reload the webview -- `src-tauri/src/lib.rs` intercepts CloseRequested
  * and hides it instead -- so without a retry the only recovery is restarting
  * the whole app.
@@ -113,22 +138,41 @@ function renderSettingsUnavailable(container: HTMLElement) {
  * of order, and the loser's failure repaint would erase a tab the winner had
  * already rendered.
  *
- * `api.request()` has no timeout, so a backend that accepts the connection and
- * never answers would leave this pending forever with nothing on screen but
- * "Loading settings...". The race below turns that hang into the same failure
- * screen a rejection produces.
+ * The outer race is no longer what bounds an unanswered *request*. Every call
+ * either half of this function makes carries its own budget, and that budget
+ * now starts before the token is asked for rather than after it, so the one
+ * unbounded step that used to sit in front of it — the dynamic
+ * `import("@tauri-apps/api/core")` — is inside a budget too. `probeBackend()`
+ * is awaited outside `loadSettings()` and therefore outside the race; it is
+ * bounded because the request underneath it is, not because of anything here.
+ *
+ * The race is kept for what it still covers: this function grows more awaits
+ * over time, and it is the only thing that bounds a step nobody remembered to
+ * give a budget of its own. Its 40 s sits above the 15 s worst case of the two
+ * bounded reads it wraps, which run in parallel under `Promise.all` and so cost
+ * one budget between them, not two — it fires only on something new.
+ *
+ * The number a user waits is larger than either, and it is worth stating
+ * because it is what this screen is about: `probeBackend()` carries its own
+ * `REQUEST_TIMEOUT_MS` and is awaited before the race rather than inside it, so
+ * a backend that accepts and never answers spends 15 s there and 15 s here
+ * before any failure text appears. That probe runs on every call, retry
+ * included: the poll's guard discards superseded answers rather than skipping
+ * probes, so pressing "Try again" asks the backend rather than returning on a
+ * reading up to a budget old.
  */
 async function loadSettingsIntoUi(): Promise<void> {
   if (settingsLoadInFlight) return;
   settingsLoadInFlight = true;
+  let reachable = false;
   try {
-    await checkBackend();
+    reachable = await probeBackend();
     await withTimeout(loadSettings(), SETTINGS_LOAD_TIMEOUT_MS);
     settingsError = null;
     settingsLoadInFlight = false;
     switchTab(currentTab);
   } catch (e) {
-    settingsError = settingsUnavailableMessage(e, backendReachable);
+    settingsError = settingsUnavailableMessage(e, reachable);
     settingsLoadInFlight = false;
     renderSettingsUnavailable(tabContent);
     renderBackendStatus(backendReachable);
@@ -221,14 +265,44 @@ function renderBackendStatus(reachable: boolean) {
   backendStatus.removeAttribute("title");
 }
 
-async function checkBackend() {
+let latestBackendProbeToken = 0;
+
+/** Probes `/health`, repainting only if no newer probe has been issued since.
+ *
+ *  `setInterval` does not await this function, so against a backend that
+ *  accepts and then goes quiet a probe outlives the 5 s interval and several
+ *  overlap. Each would otherwise write `backendReachable` and repaint the badge
+ *  in fetch-completion order rather than start order, so a stale probe's
+ *  failure lands on top of a fresh probe's success and the header says the
+ *  backend is offline while the window is reading it.
+ *
+ *  The guard is a generation counter and not an in-flight boolean because a
+ *  boolean drops the probe instead of the answer: with a 15 s budget on a 5 s
+ *  interval one is in flight essentially always, so the retry button would
+ *  return without asking anything and decide on a reading up to 15 s old. Every
+ *  caller here gets its own probe; only the superseded answers are discarded,
+ *  so the badge reads whichever probe most recently finished rather than
+ *  whichever most recently started.
+ *
+ *  What the guard governs is the *badge*, and the returned value is deliberately
+ *  outside it. `loadSettingsIntoUi` awaits this probe to decide which failure
+ *  sentence the screen shows, and discarding a superseded answer there would
+ *  hand it the module-level `backendReachable` — a reading some other probe
+ *  took, possibly before this window ever asked. The caller gets what its own
+ *  probe observed, always; only the repaint is arbitrated. */
+async function probeBackend(): Promise<boolean> {
+  const token = ++latestBackendProbeToken;
+  let reachable: boolean;
   try {
     await api.health();
-    backendReachable = true;
+    reachable = true;
   } catch {
-    backendReachable = false;
+    reachable = false;
   }
+  if (isStaleStatusResponse(token, latestBackendProbeToken)) return reachable;
+  backendReachable = reachable;
   renderBackendStatus(backendReachable);
+  return reachable;
 }
 
 async function initAppVersion() {
@@ -255,7 +329,7 @@ navButtons.forEach((btn) => {
 async function init() {
   void initAppVersion();
   renderSettingsUnavailable(tabContent);
-  setInterval(checkBackend, 5000);
+  setInterval(probeBackend, 5000);
   await loadSettingsIntoUi();
 }
 

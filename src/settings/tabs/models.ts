@@ -5,6 +5,7 @@ import {
 } from "../../api";
 import { loadSettings } from "../settings";
 import { notifyError } from "../../notify";
+import { isStaleStatusResponse } from "../../stale-response";
 import {
   computeIndicatorState,
   onIndicatorStateChange,
@@ -13,10 +14,6 @@ import {
 } from "../../status-indicator";
 
 let prevLastError: string | null = null;
-
-export function isStaleStatusResponse(requestToken: number, latestIssuedToken: number): boolean {
-  return requestToken !== latestIssuedToken;
-}
 
 export function renderModels(container: HTMLElement, settings: UserSettings): () => void {
   container.innerHTML = `

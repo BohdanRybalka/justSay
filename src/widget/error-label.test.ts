@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiAuthError } from "../api";
-import { dictationErrorLabel } from "./error-label";
+import { dictationErrorLabel, startErrorLabel } from "./error-label";
 
 describe("dictationErrorLabel", () => {
   it("an ApiAuthError never renders the API-key label, even though its message contains 'missing'", () => {
@@ -31,4 +31,33 @@ describe("dictationErrorLabel", () => {
     expect(dictationErrorLabel("missing something").label).toBe("Add key in Settings");
     expect(dictationErrorLabel(undefined).label).toBe("Failed");
   });
+
+});
+
+describe("startErrorLabel", () => {
+  it("keeps a refused start off the dictation wording, whatever the refusal says", () => {
+    for (const failure of [
+      new Error("Already recording"),
+      new Error("Missing or invalid API token"),
+      new Error("connection reset"),
+    ]) {
+      const { label, toast } = startErrorLabel(failure);
+
+      expect(label).toBe("Start failed");
+      expect(toast).toBe("Couldn't start recording — try again.");
+    }
+  });
+
+  it("tells a 401 to restart the app instead of offering a retry that cannot work", () => {
+    const { label, toast } = startErrorLabel(
+      new ApiAuthError("Missing or invalid API token", { kind: "bridge-missing" }),
+    );
+
+    expect(label).toBe("Auth failed");
+    expect(label).not.toBe("Start failed");
+    expect(toast).toBe("JustSay could not authenticate to its own backend — restart the app.");
+    expect(toast).not.toContain("try again");
+    expect(toast).not.toContain("API key");
+  });
+
 });

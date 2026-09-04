@@ -19,6 +19,18 @@ import { notifyError } from "../../notify";
 
 const UPDATES_CHECK_LABEL = "Check for updates";
 
+/** A stop that failed states what is known and promises nothing: whether the
+ *  device was released is exactly what this window cannot find out. That is
+ *  true of every failed stop, whatever failed it — `recorder.stop()` is reached
+ *  before the handler can raise, so a 500 and a refused connection leave the
+ *  device in the same unknown state. `POST /audio/stop` carries no budget
+ *  (ADR 049), so a stop cannot be abandoned here; it is waited out, and only a
+ *  real failure reaches this label. The button is left on `Stop` so the user can
+ *  try again, and this label must not tell them that pressing it closes anything
+ *  — nothing here can establish that it did. */
+const MICROPHONE_UNCONFIRMED_LABEL =
+  "Stopping the microphone failed — it may still be open";
+
 /** The subset of the updater plugin's `Update` this module actually uses. */
 interface PendingUpdate {
   version: string;
@@ -174,16 +186,27 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   let isRecording = false;
   let levelStreamAbort: AbortController | null = null;
 
+  /** Both callbacks check that they are still the current stream before they
+   *  write anything. A stream is detached in three places — a new one starting,
+   *  the tab being destroyed, and a stop that failed — and in the last of those
+   *  the label holds the only instruction the user has for closing a microphone
+   *  that may still be open. A late error from a stream nobody is listening to
+   *  must not overwrite it. */
   function startLevelStream(fill: HTMLElement) {
     stopLevelStream();
-    levelStreamAbort = levelStream(
+    const stream: AbortController = levelStream(
       (data) => {
+        if (levelStreamAbort !== stream) return;
         const pct = Math.max(0, Math.min(100, ((data.level_db + 60) / 60) * 100));
         fill.style.width = `${pct}%`;
       },
       () => {},
-      () => {},
+      (error) => {
+        if (levelStreamAbort !== stream) return;
+        recLabel.textContent = `Recording — the level meter stopped: ${error}`;
+      },
     );
+    levelStreamAbort = stream;
   }
 
   function stopLevelStream() {
@@ -197,7 +220,13 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     if (isRecording) {
       try {
         await api.audioStop();
-      } catch {}
+      } catch (e) {
+        stopLevelStream();
+        levelFill.style.width = "0%";
+        recLabel.textContent = MICROPHONE_UNCONFIRMED_LABEL;
+        console.error(e);
+        return;
+      }
       isRecording = false;
       btnTest.textContent = "Record";
       recLabel.textContent = "Click to test microphone";

@@ -3,17 +3,23 @@
  */
 
 import { BACKEND_BASE_URL } from "./contracts";
+import { TimedOutError } from "./timeout";
 
 /** Why the per-launch token could not be obtained, retained so the UI can name
  *  the failing layer instead of presenting as a dead window (ADR 028).
  *  `bridge-missing` = Tauri's injected bridge scripts never ran (a synchronous
- *  throw); `invoke-timeout` = the bridge ran but the IPC transport never
- *  answered (an unbounded hang, capped here); `invoke-failed` = the command
- *  itself rejected. The three are distinguishable on purpose: they point at
- *  different layers, and on macOS there is nothing else to attach to. */
+ *  throw); `bridge-timeout` = the bridge module's dynamic import never resolved,
+ *  so no `invoke` was ever reached; `bridge-failed` = that same import *rejected*,
+ *  which is a different fact and used to be reported as `invoke-failed` even
+ *  though no `invoke` had been attempted; `invoke-timeout` = the bridge loaded
+ *  but the IPC transport never answered; `invoke-failed` = the command itself
+ *  rejected. The five are distinguishable on purpose: they point at different
+ *  layers, and on macOS there is nothing else to attach to. */
 export type BridgeDiagnosis =
   | { kind: "ok" }
   | { kind: "bridge-missing" }
+  | { kind: "bridge-timeout" }
+  | { kind: "bridge-failed"; detail: string }
   | { kind: "invoke-timeout" }
   | { kind: "invoke-failed"; detail: string };
 
@@ -29,6 +35,12 @@ export class ApiAuthError extends Error {
   }
 }
 
+/** The budget for each of the two steps that stand between a caller and the
+ *  per-launch token: loading the Tauri bridge module, and the `invoke()` behind
+ *  it. Both are bounded because either can go absent rather than slow — a
+ *  dynamic import has no timeout and `invoke()` has no reject channel at all
+ *  (ADR 028) — and an unbounded one leaves the memoised `tokenPromise` pending
+ *  for the life of the window, which every later caller then joins. */
 const TOKEN_TIMEOUT_MS = 3000;
 const TOKEN_TIMED_OUT = Symbol("token-timed-out");
 /** How long a single unanswered `get_backend_token` call may keep being reused
@@ -38,17 +50,73 @@ const TOKEN_TIMED_OUT = Symbol("token-timed-out");
  *  no new `invoke()` would ever be attempted. */
 export const TOKEN_CALL_REUSE_MS = 60_000;
 
+/** How long a read may go unanswered before it is abandoned.
+ *
+ *  `fetch` has no timeout of its own, so a request the backend accepts and then
+ *  abandons never settles — and neither does anything sequenced behind it. That
+ *  is not a slow window, it is a dead one: the Settings window never reaches
+ *  the failure screen its own 40 s bound was added to guarantee.
+ *
+ *  15 s rather than a rounder number: every read this app makes answers from
+ *  memory or from one SQLite query, so the budget is an order of magnitude
+ *  above the work, and it has to stay clear of `getToken()` as well — the timer
+ *  is armed before the token is asked for, and `getToken()` bounds two steps in
+ *  sequence, so a budget at or below `TOKEN_TIMEOUT_MS * 2` would expire with
+ *  no request issued and blame the backend for a bridge fault. */
+export const REQUEST_TIMEOUT_MS = 15_000;
+
+/** Which row of ADR 049 a call is on.
+ *
+ *  The rule, after the fourth amendment reinstated the second: a budget belongs
+ *  on a request whose abandonment costs the user nothing, and a state-mutating
+ *  request is never one of those. Every entry in `api` states its own row, and
+ *  there is no default, so a new endpoint has to be placed rather than inherit a
+ *  number nobody chose. */
+type Budget = { readonly ms: number } | { readonly ms: null };
+
+/** A read the UI can simply ask for again. Abandoning costs one more press;
+ *  waiting forever costs a screen that never resolves. */
+const REREADABLE: Budget = { ms: REQUEST_TIMEOUT_MS };
+
+/** Everything that changes state on the backend, plus the two reads whose own
+ *  degradation path a budget would preempt.
+ *
+ *  The third amendment briefly put the dictation path on a budget, on the claim
+ *  that abandoning a start is a strict subset of waiting on one. It is not:
+ *  `recording-intent.ts` drops a queued release when the widget is not in
+ *  `recording`, and a timed-out start leaves it in `error`, so the one intent
+ *  that would have closed the microphone is destroyed rather than delayed and
+ *  every later press cycles on `409 Already recording`. Waiting parks the
+ *  intent; abandoning throws it away. Elsewhere in this class abandoning
+ *  reports a failure for work that ran to completion and invites a second
+ *  destructive call, or discards a half-answered search.
+ *
+ *  Giving up here is only honest once the client can find out what the backend
+ *  did, and that reconciliation needs the client-minted session id spec 119
+ *  adds. Until then no budget, rather than a wrong one. */
+const UNRECONCILED: Budget = { ms: null };
+
 let cachedToken: string | null = null;
 let tokenPromise: Promise<string | null> | null = null;
-/** The outstanding `get_backend_token` IPC call, with the time it started. When
- *  the transport hangs, `invoke()` never settles and has no reject channel
- *  (ADR 028), so the losing side of the timeout race is left pending forever. A
- *  failed token fetch is deliberately not cached — the next request must retry —
+/** The outstanding `get_backend_token` IPC call and the outstanding bridge
+ *  import, each with the time it started. Both steps can go absent rather than
+ *  slow — `invoke()` has no reject channel at all (ADR 028) and a dynamic import
+ *  of a module that never arrives stays pending for the life of the window — so
+ *  the losing side of either timeout race is left attached forever. A failed
+ *  token fetch is deliberately not cached, because the next request must retry,
  *  which means every 5 s `/health` poll would otherwise start another one and
  *  strand it. Reusing the unsettled call keeps the retry guarantee (a
  *  *rejection* settles it, so the next round starts fresh) while cutting the
- *  strays to one per `TOKEN_CALL_REUSE_MS`. */
-let pendingTokenCall: { call: Promise<string>; startedAt: number } | null = null;
+ *  strays to one per `TOKEN_CALL_REUSE_MS`.
+ *
+ *  The import needs it for the same reason the invoke does and did not have it:
+ *  `import()` hands every caller the *same* pending module promise, so each new
+ *  `getToken()` attached one more never-releasable reaction pair to it and
+ *  logged one more warning about a fault already reported. */
+type CallSlot<T> = { pending: { call: Promise<T>; startedAt: number } | null };
+const tokenCallSlot: CallSlot<string> = { pending: null };
+type BridgeModule = typeof import("@tauri-apps/api/core");
+const bridgeImportSlot: CallSlot<BridgeModule> = { pending: null };
 let bridgeDiagnosis: BridgeDiagnosis = { kind: "ok" };
 let authFailureSeen = false;
 
@@ -81,22 +149,30 @@ function recordAuthOutcome(path: string, resp: { ok: boolean; status: number }):
   }
 }
 
-function sharedTokenCall(start: () => Promise<string>): Promise<string> {
+/** `fresh` says whether this caller is the one that started the underlying
+ *  call, so a diagnosis that is logged once per fault can tell itself apart
+ *  from the callers merely joining it. */
+function shareWhilePending<T>(
+  slot: CallSlot<T>,
+  start: () => Promise<T>,
+  reuseMs: number,
+): { call: Promise<T>; fresh: boolean } {
   const now = Date.now();
-  if (pendingTokenCall !== null && now - pendingTokenCall.startedAt >= TOKEN_CALL_REUSE_MS) {
-    pendingTokenCall = null;
+  if (slot.pending !== null && now - slot.pending.startedAt >= reuseMs) {
+    slot.pending = null;
   }
-  if (pendingTokenCall === null) {
-    const entry = { call: start(), startedAt: now };
-    pendingTokenCall = entry;
-    const release = () => {
-      if (pendingTokenCall === entry) {
-        pendingTokenCall = null;
-      }
-    };
-    entry.call.then(release, release);
+  if (slot.pending !== null) {
+    return { call: slot.pending.call, fresh: false };
   }
-  return pendingTokenCall.call;
+  const entry = { call: start(), startedAt: now };
+  slot.pending = entry;
+  const release = () => {
+    if (slot.pending === entry) {
+      slot.pending = null;
+    }
+  };
+  entry.call.then(release, release);
+  return { call: entry.call, fresh: true };
 }
 
 function getToken(): Promise<string | null> {
@@ -109,23 +185,62 @@ function getToken(): Promise<string | null> {
         bridgeDiagnosis = { kind: "bridge-missing" };
         return null;
       }
-      const { invoke } = await import("@tauri-apps/api/core");
+      const bridgeImport = shareWhilePending(
+        bridgeImportSlot,
+        () => import("@tauri-apps/api/core"),
+        TOKEN_CALL_REUSE_MS,
+      );
+      let importTimer: ReturnType<typeof setTimeout> | undefined;
+      let bridge: BridgeModule | typeof TOKEN_TIMED_OUT;
+      try {
+        bridge = await Promise.race([
+          bridgeImport.call,
+          new Promise<typeof TOKEN_TIMED_OUT>((resolve) => {
+            importTimer = setTimeout(() => resolve(TOKEN_TIMED_OUT), TOKEN_TIMEOUT_MS);
+          }),
+        ]);
+      } catch (e) {
+        bridgeDiagnosis = {
+          kind: "bridge-failed",
+          detail: e instanceof Error ? e.message : String(e),
+        };
+        if (bridgeImport.fresh) {
+          console.warn("getToken: the Tauri bridge module failed to load", e);
+        }
+        return null;
+      } finally {
+        clearTimeout(importTimer);
+      }
+      if (bridge === TOKEN_TIMED_OUT) {
+        bridgeDiagnosis = { kind: "bridge-timeout" };
+        if (bridgeImport.fresh) {
+          console.warn(`getToken: the Tauri bridge module did not load in ${TOKEN_TIMEOUT_MS} ms`);
+        }
+        return null;
+      }
+      const { invoke } = bridge;
+      const tokenCall = shareWhilePending(
+        tokenCallSlot,
+        () => invoke<string>("get_backend_token"),
+        TOKEN_CALL_REUSE_MS,
+      );
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const expiry = new Promise<typeof TOKEN_TIMED_OUT>((resolve) => {
-        timer = setTimeout(() => resolve(TOKEN_TIMED_OUT), TOKEN_TIMEOUT_MS);
-      });
       let token: string | typeof TOKEN_TIMED_OUT;
       try {
         token = await Promise.race([
-          sharedTokenCall(() => invoke<string>("get_backend_token")),
-          expiry,
+          tokenCall.call,
+          new Promise<typeof TOKEN_TIMED_OUT>((resolve) => {
+            timer = setTimeout(() => resolve(TOKEN_TIMED_OUT), TOKEN_TIMEOUT_MS);
+          }),
         ]);
       } finally {
         clearTimeout(timer);
       }
       if (token === TOKEN_TIMED_OUT) {
         bridgeDiagnosis = { kind: "invoke-timeout" };
-        console.warn(`getToken: get_backend_token did not settle in ${TOKEN_TIMEOUT_MS} ms`);
+        if (tokenCall.fresh) {
+          console.warn(`getToken: get_backend_token did not settle in ${TOKEN_TIMEOUT_MS} ms`);
+        }
         return null;
       }
       bridgeDiagnosis = { kind: "ok" };
@@ -158,31 +273,173 @@ export class ApiRequestError extends Error {
   }
 }
 
+/** The error a non-2xx response describes — or the abort, rethrown.
+ *
+ *  Reading the error body can itself run out of the budget, and a blanket
+ *  `.catch` here turns that abort into a fully formed `ApiRequestError`, which
+ *  `fetchJsonWithin`'s catch then has no way to recognise as a timeout. The
+ *  caller ends up branching on a status the backend never finished sending.
+ *
+ *  The body is read as nullable because `resp.json()` *succeeding* does not mean
+ *  it produced an object: a response whose body is the four bytes `null` is
+ *  valid JSON and resolves to `null`, and reading `.detail` off it threw a
+ *  `TypeError` that left this function through neither of its two paths — the
+ *  caller saw a type error where it was branching on a status. */
 async function responseError(resp: Response): Promise<Error> {
-  const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-  const detail = err.detail || `HTTP ${resp.status}`;
+  let err: { detail?: string } | null;
+  try {
+    err = await resp.json();
+  } catch (e) {
+    if (isAbortError(e)) throw e;
+    err = { detail: resp.statusText };
+  }
+  const detail = err?.detail || `HTTP ${resp.status}`;
   if (resp.status === 401) {
     return new ApiAuthError(detail, bridgeDiagnosis);
   }
   return new ApiRequestError(detail, resp.status);
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const token = await getToken();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) {
-    headers["X-JustSay-Token"] = token;
+/** An abort is identified by its `name`, not by its class.
+ *
+ *  `fetch` rejects an aborted request with a `DOMException`, and `DOMException`
+ *  does not extend `Error` in every environment this code runs in — it does not
+ *  under jsdom, which is what the suite uses. Discriminating on the name is
+ *  what makes the check hold in the browser and in the tests both, and the
+ *  check has to discriminate: `signal.aborted` alone relabels every error
+ *  raised after the budget expired, including a `403` whose body merely stopped
+ *  part-way, and a `403` reported as a timeout is a refusal the caller can no
+ *  longer act on — the consent dialog it should open never opens. */
+function isAbortError(e: unknown): boolean {
+  return typeof e === "object" && e !== null && (e as { name?: unknown }).name === "AbortError";
+}
+
+/** Await `work`, but give up the moment `signal` aborts.
+ *
+ *  `getToken()` takes no signal, so arming a timer in front of it does nothing
+ *  on its own — nothing is listening — and the wait itself has to end when the
+ *  budget does. The abandoned work is left running; it settles or it does not,
+ *  and either way no caller is still attached to it once it has.
+ *
+ *  *Once it has* is the load-bearing half. This function detaches by hanging
+ *  its own cleanup off `work`, so a `work` that never settles keeps every
+ *  abandoned caller's `resolve`/`reject` pair attached to it, and nothing this
+ *  wrapper can do reaches them while it is still pending.
+ *
+ *  The already-aborted path still attaches to `work`, for the same reason the
+ *  normal path does: a `work` that rejects with nobody listening is an
+ *  unhandled rejection, and the caller is not listening precisely because this
+ *  function decided not to wait for it. */
+function until<T>(work: Promise<T>, signal: AbortSignal, giveUp: () => Error): Promise<T> {
+  if (signal.aborted) {
+    work.catch(() => {});
+    return Promise.reject(giveUp());
   }
-  const opts: RequestInit = { method, headers };
-  if (body) {
-    opts.body = JSON.stringify(body);
-  }
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => reject(giveUp());
+    signal.addEventListener("abort", stop, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop));
+  });
+}
+
+/** The exchange itself, with no opinion about how long it may take. */
+async function fetchJson<T>(path: string, opts: RequestInit): Promise<T> {
   const resp = await fetch(`${BACKEND_BASE_URL}${path}`, opts);
   recordAuthOutcome(path, resp);
   if (!resp.ok) {
     throw await responseError(resp);
   }
-  return resp.json();
+  return (await resp.json()) as T;
+}
+
+/** One whole HTTP exchange under a budget, abandoning it rather than waiting
+ *  forever.
+ *
+ *  The budget covers the token wait and the body, not only the headers.
+ *  `fetch` settles the moment the response headers arrive, so a backend that
+ *  writes headers and then stops
+ *  sending leaves the caller hanging in `resp.json()` — the original defect one
+ *  layer down. Disarming the controller only after the body has been consumed
+ *  is what closes that: an abort during a body read rejects the `json()` promise
+ *  with the same `AbortError`, which the `catch` below discriminates exactly as
+ *  it does an abort during the headers.
+ *
+ *  The abort is also what releases the socket; the rejection it produces is
+ *  translated into a `TimedOutError` so the caller gets a branchable type and a
+ *  sentence naming the endpoint and the budget instead of a bare `AbortError`.
+ *  The query string is dropped from that message: `/history/search?q=` carries
+ *  whatever the user typed, and an error message is rendered in more places than
+ *  it is read. */
+async function fetchJsonWithin<T>(
+  path: string,
+  buildRequest: () => Promise<RequestInit>,
+  budgetMs: number,
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), budgetMs);
+  const timedOut = () => new TimedOutError(budgetMs, path.split("?")[0]);
+  try {
+    const opts = await until(buildRequest(), controller.signal, timedOut);
+    return await fetchJson<T>(path, { ...opts, signal: controller.signal });
+  } catch (e) {
+    if (e instanceof TimedOutError) {
+      throw e;
+    }
+    if (isAbortError(e) && controller.signal.aborted) {
+      throw timedOut();
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The same exchange with no budget and therefore no `AbortController`: an
+ *  `UNRECONCILED` call is waited out, because abandoning it would leave the UI
+ *  asserting an outcome nobody established. */
+async function fetchJsonUntilAnswered<T>(
+  path: string,
+  buildRequest: () => Promise<RequestInit>,
+): Promise<T> {
+  return fetchJson<T>(path, await buildRequest());
+}
+
+/** The one place a `Budget` decides which of the two mechanisms runs, so a call
+ *  that builds its own request — `processFile` and its `FormData` — is placed
+ *  by the same object every other endpoint is placed by. */
+function send<T>(
+  path: string,
+  buildRequest: () => Promise<RequestInit>,
+  budget: Budget,
+): Promise<T> {
+  return budget.ms === null
+    ? fetchJsonUntilAnswered<T>(path, buildRequest)
+    : fetchJsonWithin<T>(path, buildRequest, budget.ms);
+}
+
+/** `budget` is an object rather than a fourth positional argument because the
+ *  third is `body?: unknown`: a bare number in that slot type-checks, ships the
+ *  budget as the request body, and silently keeps the default budget. It has no
+ *  default at all, so every endpoint below names the class it is in. */
+function request<T>(
+  method: string,
+  path: string,
+  body: unknown,
+  budget: Budget,
+): Promise<T> {
+  const buildRequest = async () => {
+    const token = await getToken();
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) {
+      headers["X-JustSay-Token"] = token;
+    }
+    const opts: RequestInit = { method, headers };
+    if (body) {
+      opts.body = JSON.stringify(body);
+    }
+    return opts;
+  };
+  return send<T>(path, buildRequest, budget);
 }
 
 
@@ -363,29 +620,116 @@ export interface TopWordsResponse {
 }
 
 
+/**
+ * Every endpoint, each stating which row of ADR 049 it is on.
+ *
+ * The question each answers: does abandoning this request cost the user
+ * nothing? For a `REREADABLE` read the answer is yes — the remedy is to ask
+ * again. For an `UNRECONCILED` call it is no, because the backend acted before
+ * it answered and this client cannot find out what it did: it would report a
+ * failure for work that finished, destroy the queued intent that would have
+ * closed the microphone, or discard a search half of which had already
+ * answered. Waiting there costs a spinner, which is the smaller of the two.
+ */
 export const api = {
-  health: () => request<HealthResponse>("GET", "/health"),
+  health: () => request<HealthResponse>("GET", "/health", undefined, REREADABLE),
 
-  audioStart: () => request<RecordingStatus>("POST", "/audio/start"),
+  audioStatus: () => request<RecordingStatus>("GET", "/audio/status", undefined, REREADABLE),
 
-  audioStop: () => request<{ filename: string; duration_seconds: number }>("POST", "/audio/stop"),
+  getMeetingStatus: () =>
+    request<MeetingStatus>("GET", "/audio/meeting/status", undefined, REREADABLE),
 
-  audioStatus: () => request<RecordingStatus>("GET", "/audio/status"),
+  resources: () => request<ResourceInfo>("GET", "/resources", undefined, REREADABLE),
 
-  startMeetingRecording: () => request<MeetingStatus>("POST", "/audio/meeting/start"),
+  sttLocalStatus: () => request<LocalSttStatus>("GET", "/stt/local/status", undefined, REREADABLE),
 
-  stopMeetingRecording: () => request<MeetingStopResponse>("POST", "/audio/meeting/stop"),
+  getSettings: () => request<UserSettings>("GET", "/settings", undefined, REREADABLE),
 
-  getMeetingStatus: () => request<MeetingStatus>("GET", "/audio/meeting/status"),
+  getStorageInfo: () => request<StorageInfo>("GET", "/settings/storage", undefined, REREADABLE),
 
+  cloudKeyStatus: () =>
+    request<CloudKeyStatus>("GET", "/settings/cloud-status", undefined, REREADABLE),
+
+  getHistory: (limit = 50, offset = 0) =>
+    request<HistoryListResponse>(
+      "GET",
+      `/history?limit=${limit}&offset=${offset}`,
+      undefined,
+      REREADABLE,
+    ),
+
+  historyStats: () => request<HistoryStats>("GET", "/history/stats", undefined, REREADABLE),
+
+  wordsTop: (lang: "all" | "uk" | "en" = "all", limit = 50) =>
+    request<TopWordsResponse>("GET", `/words/top?lang=${lang}&limit=${limit}`, undefined, REREADABLE),
+
+  /** A read, and still `UNRECONCILED`: `_semantic_lane` falls back to full-text
+   *  search when the embedding provider is slow (ADR 010), and a slow provider
+   *  does not raise, so a client-side budget fires first and throws away the
+   *  local half that had already answered. A slow search would become no
+   *  search — the degradation path the backend was built with, preempted. */
+  searchHistory: (q: string, limit = 30) =>
+    request<HistoryListResponse>(
+      "GET",
+      `/history/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+      undefined,
+      UNRECONCILED,
+    ),
+
+  /** `POST /audio/start` calls `await recorder.start()` before it answers, so
+   *  the microphone may be open whichever way this ends — and a budget makes
+   *  that worse rather than better. A timed-out start leaves the widget in
+   *  `error`, where `recording-intent.ts` drops the release the user had already
+   *  queued as matching the current state; the next press starts again, is
+   *  refused `409 Already recording`, and nothing recovers the intent. Waiting
+   *  parks it instead (ADR 049, fourth amendment). */
+  audioStart: () => request<RecordingStatus>("POST", "/audio/start", undefined, UNRECONCILED),
+
+  audioStop: () =>
+    request<{ filename: string; duration_seconds: number }>(
+      "POST",
+      "/audio/stop",
+      undefined,
+      UNRECONCILED,
+    ),
+
+  /** Opens both devices before it answers — spec 099 measured up to six seconds
+   *  of enumeration for this one call, so a budget sized to the transport fires
+   *  on a healthy start on a slow machine, and abandoning it leaves a capture
+   *  running while the toggle has nothing to reconcile against. */
+  startMeetingRecording: () =>
+    request<MeetingStatus>("POST", "/audio/meeting/start", undefined, UNRECONCILED),
+
+  /** Ends the capture and writes the whole WAV before it answers —
+   *  `_assemble_and_write` puts a 45-minute call at "~86 MB to disk" and
+   *  `meeting_max_raw_bytes` allows roughly eight times that. Abandoning it
+   *  costs the filename of a recording that was made, with nothing able to
+   *  recover it. */
+  stopMeetingRecording: () =>
+    request<MeetingStopResponse>("POST", "/audio/meeting/stop", undefined, UNRECONCILED),
+
+  /** Stops the recorder as the handler's first act and can write the clipboard
+   *  as its last, so an abandoned one leaves both unknown and the transcript
+   *  possibly already in History. Transcription is legitimately slow — the local
+   *  path alone waits up to 300 s for readiness before it starts — so any budget
+   *  short enough to be useful fires on work that was going to finish. */
   dictate: (language = "uk") =>
-    request<DictateResponse>("POST", `/pipeline/dictate?language=${language}`),
+    request<DictateResponse>(
+      "POST",
+      `/pipeline/dictate?language=${language}`,
+      undefined,
+      UNRECONCILED,
+    ),
 
   /** Upload an audio file to the pipeline. Accepts an ArrayBuffer of file bytes.
    *  `language` defaults to `"auto"` — every STT provider maps that sentinel
    *  onto its own native auto-detect mechanism (see `STTProvider.transcribe`'s
-   *  docstring in the backend for the per-provider translation). */
-  processFile: async (
+   *  docstring in the backend for the per-provider translation).
+   *
+   *  `UNRECONCILED` for the same reason as `dictate`: it transcribes and writes
+   *  a History row before it answers, and abandoning it reports a failure for a
+   *  transcription that may already have been saved. */
+  processFile: (
     fileBytes: ArrayBuffer,
     filename: string,
     language = "auto",
@@ -393,62 +737,59 @@ export const api = {
     const form = new FormData();
     const blob = new Blob([fileBytes], { type: "application/octet-stream" });
     form.append("file", blob, filename);
-    const path = `/pipeline/process-file?language=${language}`;
-    const token = await getToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers["X-JustSay-Token"] = token;
-    }
-    const resp = await fetch(`${BACKEND_BASE_URL}${path}`, { method: "POST", body: form, headers });
-    recordAuthOutcome(path, resp);
-    if (!resp.ok) {
-      throw await responseError(resp);
-    }
-    return resp.json();
+    return send<DictateResponse>(
+      `/pipeline/process-file?language=${language}`,
+      async () => {
+        const token = await getToken();
+        const headers: Record<string, string> = {};
+        if (token) {
+          headers["X-JustSay-Token"] = token;
+        }
+        return { method: "POST", body: form, headers };
+      },
+      UNRECONCILED,
+    );
   },
 
-  setSttMode: (mode: "cloud" | "local") =>
-    request("PUT", "/stt/mode", { mode }),
+  setSttMode: (mode: "cloud" | "local") => request("PUT", "/stt/mode", { mode }, UNRECONCILED),
 
-  resources: () => request<ResourceInfo>("GET", "/resources"),
-
-  sttLocalStatus: () => request<LocalSttStatus>("GET", "/stt/local/status"),
-  sttLocalLoad: () => request<{ loaded: boolean; model?: string }>("POST", "/stt/local/load"),
-  sttLocalUnload: () => request<{ unloaded: boolean }>("POST", "/stt/local/unload"),
-  /** Retry affordance for the Local STT status indicator's error state —
-   *  fire-and-forget on the backend, returns before the model finishes loading. */
-  sttLocalPrewarm: () => request<{ started: boolean }>("POST", "/stt/local/prewarm"),
-
-  getSettings: () => request<UserSettings>("GET", "/settings"),
-
-  updateSettings: (updates: Partial<UserSettings>) =>
-    request<SettingsUpdateResponse>("PUT", "/settings", updates),
-
-  getStorageInfo: () => request<StorageInfo>("GET", "/settings/storage"),
-
-  cleanupTemp: () => request<CleanupResult>("POST", "/settings/cleanup"),
-
-  cloudKeyStatus: () => request<CloudKeyStatus>("GET", "/settings/cloud-status"),
-
-  getHistory: (limit = 50, offset = 0) =>
-    request<HistoryListResponse>("GET", `/history?limit=${limit}&offset=${offset}`),
-
-  historyStats: () => request<HistoryStats>("GET", "/history/stats"),
-
-  deleteHistoryEntry: (id: string) =>
-    request<{ deleted: boolean }>("DELETE", `/history/${id}`),
-
-  clearHistory: () =>
-    request<{ deleted: number }>("DELETE", "/history"),
-
-  searchHistory: (q: string, limit = 30) =>
-    request<HistoryListResponse>(
-      "GET",
-      `/history/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+  /** "May take minutes on first run (model download)", and it leaves a loaded
+   *  provider behind whether or not this window waited for the answer. */
+  sttLocalLoad: () =>
+    request<{ loaded: boolean; model?: string }>(
+      "POST",
+      "/stt/local/load",
+      undefined,
+      UNRECONCILED,
     ),
 
-  wordsTop: (lang: "all" | "uk" | "en" = "all", limit = 50) =>
-    request<TopWordsResponse>("GET", `/words/top?lang=${lang}&limit=${limit}`),
+  sttLocalUnload: () =>
+    request<{ unloaded: boolean }>("POST", "/stt/local/unload", undefined, UNRECONCILED),
+
+  /** Retry affordance for the Local STT status indicator's error state —
+   *  fire-and-forget on the backend, returns before the model finishes loading.
+   *  There is nothing to reconcile, so it is a read for this purpose: abandoning
+   *  it leaves the load running exactly as answering it would, while waiting
+   *  forever hangs the one button that exists to escape a stuck state. */
+  sttLocalPrewarm: () =>
+    request<{ started: boolean }>("POST", "/stt/local/prewarm", undefined, REREADABLE),
+
+  updateSettings: (updates: Partial<UserSettings>) =>
+    request<SettingsUpdateResponse>("PUT", "/settings", updates, UNRECONCILED),
+
+  /** Unlinks every scratch file inline and is bounded by nothing on the
+   *  backend, so a budget would report a failure for a deletion that completes
+   *  — and the natural retry is a second destructive call issued against a
+   *  backend still executing the first. */
+  cleanupTemp: () => request<CleanupResult>("POST", "/settings/cleanup", undefined, UNRECONCILED),
+
+  deleteHistoryEntry: (id: string) =>
+    request<{ deleted: boolean }>("DELETE", `/history/${id}`, undefined, UNRECONCILED),
+
+  /** Deletes the transcripts and their `entry_embeddings` vector rows, with no
+   *  backend bound on either — the same false report about deleted data that
+   *  `cleanupTemp` would give. */
+  clearHistory: () => request<{ deleted: number }>("DELETE", "/history", undefined, UNRECONCILED),
 };
 
 
@@ -459,14 +800,45 @@ export interface LevelStreamEvent {
 
 const LEVEL_STREAM_PATH = "/audio/level-stream";
 
+/** The level meter's stream, opened under a budget that covers the handshake
+ *  only.
+ *
+ *  The stream itself must stay unbounded — it is long-lived by design and a
+ *  budget on it would cut the meter off mid-recording. The handshake is a
+ *  different thing: it is opened right after `POST /audio/start`, so it can land
+ *  on a backend that has stopped answering, and without a bound the meter sits
+ *  flat forever with nothing on screen saying why.
+ *
+ *  The timer is cleared once the first chunk has been read, not once the reader
+ *  has been obtained. `getReader()` is available the instant the response
+ *  *headers* arrive, so clearing there bounds exactly what `fetch` already
+ *  settles on, and a backend that writes `200 text/event-stream` and then stops
+ *  sending sits in the same flat-meter silence this budget exists to break —
+ *  the headers-only bound `fetchJsonWithin` refuses one layer down.
+ *
+ *  A handshake is `REREADABLE` in ADR 049's sense: abandoning it moves nothing,
+ *  and the remedy is to open the stream again.
+ *
+ *  `timedOut` is what lets the terminal `catch` tell our own abort from the
+ *  caller's: `stopLevelStream()` aborts the same controller on every normal stop
+ *  and must stay silent, while the handshake expiring must reach `onError`. */
 export function levelStream(
   onLevel: (data: LevelStreamEvent) => void,
   onDone: () => void,
   onError: (error: string) => void,
 ): AbortController {
   const controller = new AbortController();
+  let timedOut = false;
+  const handshakeTimer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
 
-  getToken()
+  until(getToken(), controller.signal, () =>
+    timedOut
+      ? new TimedOutError(REQUEST_TIMEOUT_MS, LEVEL_STREAM_PATH)
+      : new DOMException("The level stream was closed by its caller.", "AbortError"),
+  )
     .then((token) => {
       const headers: Record<string, string> = {};
       if (token) {
@@ -481,15 +853,22 @@ export function levelStream(
     .then(async (resp) => {
       recordAuthOutcome(LEVEL_STREAM_PATH, resp);
       if (!resp.ok || !resp.body) {
+        clearTimeout(handshakeTimer);
+        controller.abort();
         onError(`HTTP ${resp.status}`);
         return;
       }
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let handshakeDone = false;
 
       while (true) {
         const { done, value } = await reader.read();
+        if (!handshakeDone) {
+          handshakeDone = true;
+          clearTimeout(handshakeTimer);
+        }
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
@@ -515,6 +894,15 @@ export function levelStream(
       }
     })
     .catch((err) => {
+      clearTimeout(handshakeTimer);
+      if (err instanceof TimedOutError) {
+        onError(err.message);
+        return;
+      }
+      if (timedOut) {
+        onError(new TimedOutError(REQUEST_TIMEOUT_MS, LEVEL_STREAM_PATH).message);
+        return;
+      }
       if (err.name !== "AbortError") {
         onError(String(err));
       }

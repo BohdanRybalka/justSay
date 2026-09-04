@@ -16,8 +16,10 @@ import {
 } from "../contracts";
 import { formatStopwatch } from "../format";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
+import { isStaleStatusResponse } from "../stale-response";
+import { withTimeout } from "../timeout";
 import { computeDoneStatus } from "./done-status";
-import { dictationErrorLabel } from "./error-label";
+import { dictationErrorLabel, startErrorLabel, type DictationErrorLabel } from "./error-label";
 import { MEETING_STATE_CLASS, renderMeetingIndicator } from "./meeting-indicator";
 import { type MeetingToggleActions, runMeetingToggle } from "./meeting-toggle";
 import { createRecordingIntentQueue } from "./recording-intent";
@@ -40,6 +42,7 @@ let state: WidgetState = "idle";
 let isHovered = false;
 let durationInterval: ReturnType<typeof setInterval> | null = null;
 let iconFlashTimer: ReturnType<typeof setTimeout> | null = null;
+let autoRevertTimer: ReturnType<typeof setTimeout> | null = null;
 let connectionState: ConnectionCheckState = { offline: false, firstCheckDone: false };
 
 let currentShortcut = DEFAULT_SHORTCUT;
@@ -83,6 +86,11 @@ function setState(newState: WidgetState, message?: string, durationLabel?: strin
     iconFlashTimer = null;
   }
 
+  if (autoRevertTimer) {
+    clearTimeout(autoRevertTimer);
+    autoRevertTimer = null;
+  }
+
   switch (state) {
     case "idle":
       text.textContent = "JustSay";
@@ -107,7 +115,8 @@ function setState(newState: WidgetState, message?: string, durationLabel?: strin
         iconFlashTimer = null;
         if (state === "done") renderIcon(isHovered ? "hover" : "idle");
       }, 700);
-      setTimeout(() => {
+      autoRevertTimer = setTimeout(() => {
+        autoRevertTimer = null;
         if (state === "done") setState("idle");
       }, AUTO_REVERT_MS);
       break;
@@ -115,7 +124,8 @@ function setState(newState: WidgetState, message?: string, durationLabel?: strin
       text.textContent = message || "Error";
       durationEl.textContent = "";
       renderIcon("error");
-      setTimeout(() => {
+      autoRevertTimer = setTimeout(() => {
+        autoRevertTimer = null;
         if (state === "error") setState("idle");
       }, AUTO_REVERT_MS);
       break;
@@ -141,10 +151,18 @@ async function startRecording() {
   try {
     await api.audioStart();
   } catch (e) {
-    setState("error", "Start failed");
-    notifyError("Couldn't start recording — try again.");
+    reportTransitionFailure(startErrorLabel(e));
     console.error("Start recording failed:", e);
   }
+}
+
+/** Reports a failed start or a failed dictation. The label is the caller's —
+ *  `startErrorLabel` and `dictationErrorLabel` say different things and must
+ *  keep doing so — and the pill and the toast are raised together here so a
+ *  caller cannot raise one without the other. */
+function reportTransitionFailure({ label, toast }: DictationErrorLabel) {
+  setState("error", label);
+  notifyError(toast);
 }
 
 async function stopAndProcess() {
@@ -164,9 +182,7 @@ async function stopAndProcess() {
       setState("idle");
     }
   } catch (e) {
-    const { label, toast } = dictationErrorLabel(e);
-    setState("error", label);
-    notifyError(toast);
+    reportTransitionFailure(dictationErrorLabel(e));
     console.error("Pipeline failed:", e);
   }
 }
@@ -226,10 +242,27 @@ function endMeetingIndicator() {
   renderMeetingIndicatorFromState();
 }
 
+/** The budget on a shell command, covering the bridge import and the `invoke()`
+ *  behind it as one unit.
+ *
+ *  Neither step has a bound of its own — a dynamic import has no timeout and
+ *  `invoke()` has no reject channel at all (ADR 028) — so an absent bridge
+ *  leaves this promise pending for the life of the window. The meeting toggle
+ *  awaits it while holding `meetingBusy`, which would swallow every later
+ *  press, tray included: the wedge ADR 049 gave the HTTP calls a budget to
+ *  remove, one layer down. Matched to `api.ts`'s own bridge budget, because it
+ *  is the same two steps against the same transport. */
+const SHELL_INVOKE_TIMEOUT_MS = 3000;
+
 async function invokeShell(command: string, args?: Record<string, unknown>) {
   try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke(command, args);
+    await withTimeout(
+      (async () => {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke(command, args);
+      })(),
+      SHELL_INVOKE_TIMEOUT_MS,
+    );
   } catch (e) {
     console.warn(`Shell command ${command} failed:`, e);
   }
@@ -482,13 +515,28 @@ async function listenForSettingsChanges() {
 }
 
 
+let latestConnectionProbeToken = 0;
+
+/** `setInterval` does not await this function, so against a backend that
+ *  accepts and abandons, a probe outlives the 5 s interval and several are in
+ *  flight at once — each then writing `connectionState` from whatever it read
+ *  when it started, in fetch-completion order rather than start order, which
+ *  duplicates or swallows the unreachable toast.
+ *
+ *  The generation counter discards the superseded *answers* and keeps every
+ *  probe, which an in-flight boolean cannot: a boolean skips a tick outright,
+ *  so with a 15 s budget on a 5 s poll the widget can sit a whole budget past a
+ *  tick before it notices the backend came back. Same guard, same shape, as the
+ *  Settings window's badge and the Models tab's status read. */
 async function checkConnection() {
+  const token = ++latestConnectionProbeToken;
   let healthOk = true;
   try {
     await api.health();
   } catch {
     healthOk = false;
   }
+  if (isStaleStatusResponse(token, latestConnectionProbeToken)) return;
   const result = nextConnectionCheckState(connectionState, healthOk);
   connectionState = { offline: result.offline, firstCheckDone: result.firstCheckDone };
 

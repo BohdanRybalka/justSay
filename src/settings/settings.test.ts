@@ -459,8 +459,33 @@ describe("backend unreachable from the first poll", () => {
     await vi.advanceTimersByTimeAsync(41_000);
 
     expect(tabContent.textContent).toContain("Cannot load settings");
-    expect(tabContent.textContent).toContain("did not answer within");
+    expect(tabContent.textContent).toContain("Loading settings did not finish in time");
     expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(false);
+
+    vi.useRealTimers();
+    consoleError.mockRestore();
+  });
+
+  it("names the endpoint and the budget when the budget that expired knows them", async () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { TimedOutError } = await import("../timeout");
+    apiMock.health.mockResolvedValue({
+      status: "ok",
+      version: "0.0.0",
+      stt_mode: "cloud",
+      llm_mode: "cloud",
+    });
+    apiMock.getSettings.mockRejectedValue(new TimedOutError(15_000, "/settings"));
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
+
+    await import("./settings");
+    const tabContent = document.getElementById("tab-content")!;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(tabContent.textContent).toContain("Cannot load settings");
+    expect(tabContent.textContent).toContain("(/settings, 15 s)");
+    expect(tabContent.textContent).not.toContain("accepted");
 
     vi.useRealTimers();
     consoleError.mockRestore();
@@ -573,32 +598,105 @@ describe("a settings load that has not settled", () => {
 });
 
 describe("a settings load that fails after the backend has gone away", () => {
-  it("reports the reachability the latest poll measured, not the one at load time", async () => {
+  it("writes its sentence from its own probe, even when a later poll supersedes it", async () => {
     vi.useFakeTimers();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" });
-    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
-
-    let failSettings!: (error: unknown) => void;
-    apiMock.getSettings.mockImplementation(
-      () => new Promise<UserSettings>((_resolve, reject) => { failSettings = reject; }),
+    const pending: Array<(ok: boolean) => void> = [];
+    apiMock.health.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          pending.push((ok) =>
+            ok
+              ? resolve({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" })
+              : reject(new TypeError("Failed to fetch")),
+          );
+        }),
     );
+    apiMock.getSettings.mockRejectedValue(new TypeError("Failed to fetch"));
+    apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
 
     await import("./settings");
     const tabContent = document.getElementById("tab-content")!;
+    await vi.advanceTimersByTimeAsync(0);
 
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(pending.length).toBe(2);
+
+    pending[1](true);
     await vi.advanceTimersByTimeAsync(0);
     expect(backendStatusEl().textContent).toBe("Backend");
 
-    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
-    await vi.advanceTimersByTimeAsync(5000);
-    expect(backendStatusEl().textContent).toBe("Backend offline");
-
-    failSettings(new TypeError("Failed to fetch"));
+    pending[0](false);
     await vi.advanceTimersByTimeAsync(0);
 
     expect(tabContent.textContent).toContain("was not responding");
     expect(tabContent.textContent).not.toContain("The backend answered");
+    expect(backendStatusEl().textContent).toBe("Backend");
+
+    vi.useRealTimers();
+    consoleError.mockRestore();
+  });
+});
+
+describe("the Settings window's own health poll", () => {
+  it("keeps probing while one is unanswered, and lets only the newest answer repaint", async () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pending: Array<(ok: boolean) => void> = [];
+    apiMock.health.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          pending.push((ok) =>
+            ok
+              ? resolve({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" })
+              : reject(new TypeError("Failed to fetch")),
+          );
+        }),
+    );
+    apiMock.getSettings.mockRejectedValue(new TypeError("Failed to fetch"));
+    apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await import("./settings");
+    await vi.advanceTimersByTimeAsync(0);
+    const before = apiMock.health.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(5000 * 4);
+
+    expect(apiMock.health.mock.calls.length - before).toBe(4);
+
+    pending[pending.length - 1](true);
+    await vi.advanceTimersByTimeAsync(0);
+    for (const settle of pending.slice(0, -1)) settle(false);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(backendStatusEl().textContent).toBe("Backend");
+
+    vi.useRealTimers();
+    consoleError.mockRestore();
+  });
+
+  it("the retry button probes rather than joining a probe already in flight", async () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+    apiMock.getSettings.mockRejectedValue(new TypeError("Failed to fetch"));
+    apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await import("./settings");
+    const tabContent = document.getElementById("tab-content")!;
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => {
+      expect(tabContent.querySelector("#btn-retry-settings")).not.toBeNull();
+    });
+
+    apiMock.health.mockImplementation(() => new Promise(() => {}));
+    await vi.advanceTimersByTimeAsync(5000);
+    const before = apiMock.health.mock.calls.length;
+
+    tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(apiMock.health.mock.calls.length - before).toBe(1);
 
     vi.useRealTimers();
     consoleError.mockRestore();

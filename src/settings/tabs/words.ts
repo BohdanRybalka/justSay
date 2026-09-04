@@ -5,6 +5,7 @@ import {
 } from "../../api";
 import { formatCoarseDuration } from "../../format";
 import { escapeHtml } from "../html";
+import { isStaleStatusResponse } from "../../stale-response";
 
 const LANGUAGE_LABELS: Record<string, string> = {
   uk: "Ukrainian",
@@ -61,7 +62,25 @@ export function renderWords(container: HTMLElement): () => void {
     }
   }
 
+  let latestStatsToken = 0;
+  let pageReadInFlight = false;
+
+  /** The whole-page read, and the only writer of `body.innerHTML`,
+   *  `lastTotalEntries` and `pageRendered`. It re-reads both endpoints and then
+   *  writes all three, which the poll's generation counter does not cover: the
+   *  counter arbitrates the poll's own incremental repaints, and a tick that
+   *  started after this read could finish before it and then be overwritten by
+   *  the older answer.
+   *
+   *  It is closed by holding the ticks off instead of by giving this read a
+   *  token, because a superseded whole-page read cannot simply be discarded.
+   *  Dropping its write leaves `pageRendered` false while `lastTotalEntries` is
+   *  positive, which is the one combination `refreshStats` returns early on
+   *  forever — the empty-state text would stay on screen for the life of the
+   *  tab. A tick skipped while this runs loses nothing, because this read is
+   *  about to write everything that tick would have. */
   async function renderPage() {
+    pageReadInFlight = true;
     try {
       const stats = await api.historyStats();
       if (cancelled) return;
@@ -79,13 +98,22 @@ export function renderWords(container: HTMLElement): () => void {
       if (cancelled) return;
       body.innerHTML = `<div class="value" style="color:var(--red)">Failed to load: ${escapeHtml((e as Error).message)}</div>`;
       pageRendered = false;
+    } finally {
+      pageReadInFlight = false;
     }
   }
 
+  /** Same guard as the Models tab and both connection polls: this runs on a
+   *  5 s interval nothing awaits, and `historyStats` is bounded at 15 s rather
+   *  than unbounded now, so several probes overlap against a backend that has
+   *  gone quiet and the later-starting one can finish first. Only the newest
+   *  answer may write `lastTotalEntries` or repaint. */
   async function refreshStats() {
+    if (pageReadInFlight) return;
+    const token = ++latestStatsToken;
     try {
       const stats = await api.historyStats();
-      if (cancelled) return;
+      if (cancelled || isStaleStatusResponse(token, latestStatsToken)) return;
 
       if (lastTotalEntries < 0) return;
 
@@ -99,7 +127,7 @@ export function renderWords(container: HTMLElement): () => void {
       if (isEmpty || !pageRendered) return;
 
       const top = await fetchTop();
-      if (cancelled) return;
+      if (cancelled || isStaleStatusResponse(token, latestStatsToken)) return;
 
       renderText("words-stat-today", stats.today_words.toLocaleString("uk-UA"));
       renderText("words-stat-week", stats.week_words.toLocaleString("uk-UA"));
@@ -121,7 +149,7 @@ export function renderWords(container: HTMLElement): () => void {
         modelEl.innerHTML = renderBucketRows(stats.by_model, (m) => m);
       }
     } catch (e) {
-      if (cancelled) return;
+      if (cancelled || isStaleStatusResponse(token, latestStatsToken)) return;
       console.error("refreshStats failed:", e);
     }
   }

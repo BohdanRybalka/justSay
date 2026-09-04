@@ -17,8 +17,12 @@
  * comes down too, because left in the general branch a 409 lit it forever: the
  * next click took the stop branch, got the same 409, and only reloading the
  * widget window cleared it. Or it fails for any other reason — an unreachable
- * backend, a timeout — where nothing says the capture ended, so the indicator
- * stays up.
+ * backend, a refused connection — where nothing says the capture ended, so the
+ * indicator stays up.
+ *
+ * Neither meeting call carries a budget (ADR 049, fourth amendment), so no
+ * outcome here is an abandoned request: every failure this function sees was
+ * observed.
  *
  * The three share a branch and not a message. 409 is a double click; 410 is a
  * call that ran and captured nothing, which is news rather than a mistimed

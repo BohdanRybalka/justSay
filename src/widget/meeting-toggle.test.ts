@@ -43,6 +43,8 @@ describe("the meeting recording toggle", () => {
     expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
   });
 
+
+
   it("clears the indicator when starting fails, because nothing is recording", async () => {
     const deps = actions({
       startRecording: vi.fn(async () => {
@@ -216,5 +218,26 @@ describe("the meeting recording toggle", () => {
     expect(deps.setTrayRecording).toHaveBeenCalledWith(true);
     expect(deps.reportError.mock.calls[0][0]).toContain("already being recorded");
     expect(deps.openDisclosure).not.toHaveBeenCalled();
+  });
+
+  it("leaves the indicator up and the toggle usable when a stop fails, so a second press stops again", async () => {
+    let recording = true;
+    const deps = actions({
+      isRecording: () => recording,
+      stopRecording: vi.fn(async () => {
+        throw new Error("Failed to fetch");
+      }),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.hideIndicator).not.toHaveBeenCalled();
+    expect(deps.reportError.mock.calls[0][0]).toContain("still being recorded");
+    expect(deps.reportError.mock.calls[0][0]).toContain("Failed to fetch");
+
+    expect(recording).toBe(true);
+    await runMeetingToggle(deps);
+    expect(deps.stopRecording).toHaveBeenCalledTimes(2);
+    expect(deps.startRecording).not.toHaveBeenCalled();
   });
 });
