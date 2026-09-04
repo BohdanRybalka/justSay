@@ -9,21 +9,11 @@ import logging
 from pathlib import Path
 
 from app.core.audio_formats import mime_for_extension
-from app.stt.base import STTProvider, TranscriptionResult
+from app.stt.base import STTProvider, TranscriptionResult, clean_transcript_text
 from app.stt.config import STTSettings
 from app.stt.languages import LANGUAGE_NAMES
 
 log = logging.getLogger(__name__)
-
-_REFUSAL_PREFIXES: tuple[str, ...] = (
-    "i cannot",
-    "i can't",
-    "i'm unable",
-    "no speech detected",
-    "no audio",
-    "the audio is",
-    "sorry,",
-)
 
 
 class GeminiSTTProvider(STTProvider):
@@ -90,7 +80,7 @@ class GeminiSTTProvider(STTProvider):
             raise
 
         return TranscriptionResult(
-            text=self._clean_output(raw_text),
+            text=clean_transcript_text(raw_text),
             tokens_used=tokens_used,
             detected_language=None,
             no_speech_prob=None,
@@ -149,16 +139,34 @@ class GeminiSTTProvider(STTProvider):
         return base
 
     @staticmethod
-    def _clean_output(text: str | None) -> str:
-        if not text:
-            return ""
-        stripped = text.strip()
-        if not stripped:
-            return ""
-        head = stripped.lower()
-        if any(head.startswith(p) for p in _REFUSAL_PREFIXES):
-            return ""
-        return stripped
+    def _transcript_from_response(response) -> str:
+        """The transcript, or a raise naming why the response carries none.
+
+        A candidate can come back with no text part at all — a safety block, a
+        ``RECITATION`` stop, a ``MAX_TOKENS`` truncation. Reading that as an
+        empty transcription made it indistinguishable from a successful silent
+        dictation: `process_audio` copied nothing, wrote a zero-word history row
+        and returned ``discarded_reason=None``, so the widget showed no status,
+        no badge and no error. Raising instead puts the reason on screen, since
+        `process_audio` and the pipeline router both propagate.
+        """
+        try:
+            text = response.text
+        except ValueError:
+            text = None
+        if text and text.strip():
+            return text
+
+        block_reason = getattr(getattr(response, "prompt_feedback", None), "block_reason", None)
+        if block_reason is not None:
+            raise RuntimeError(f"Gemini returned no transcription (blocked: {block_reason})")
+        candidates = getattr(response, "candidates", None) or []
+        finish_reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+        if finish_reason is not None:
+            raise RuntimeError(
+                f"Gemini returned no transcription (finish_reason: {finish_reason})"
+            )
+        raise RuntimeError("Gemini returned no transcription")
 
     @staticmethod
     def _call_gemini(
@@ -178,10 +186,7 @@ class GeminiSTTProvider(STTProvider):
                 prompt,
             ],
         )
-        try:
-            text = response.text
-        except ValueError:
-            text = ""
+        text = GeminiSTTProvider._transcript_from_response(response)
 
         tokens_used: int | None = None
         try:

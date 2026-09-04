@@ -147,6 +147,32 @@ async def test_pipeline_does_not_copy_empty_text(
 
 
 @pytest.mark.asyncio
+async def test_pipeline_copies_speech_that_opens_like_a_refusal(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """The layer where the damage was visible, not the layer that caused it.
+
+    A provider-side filter on refusal-shaped prefixes deleted this exact
+    sentence and reported a normal finish. Pinning it in the STT provider only
+    proves that one filter stays gone; this pins the outcome the user gets, so
+    a discard reintroduced anywhere in the pipeline turns it red too.
+    """
+    copy_mock, save_mock = _isolate_side_effects
+    spoken = "Sorry, I was late to the meeting."
+    stt = _make_stt_mock(spoken)
+
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
+        result = await process_audio(sample_wav, language="en", style="normal")
+
+    assert result.text == spoken
+    assert result.copied_to_clipboard is True
+    assert result.discarded_reason is None
+    copy_mock.assert_called_once_with(spoken)
+    assert save_mock.call_args.kwargs["text"] == spoken
+    assert save_mock.call_args.kwargs["word_count"] == 7
+
+
+@pytest.mark.asyncio
 async def test_pipeline_clipboard_failure_is_graceful(
     sample_wav, cloud_mode, _isolate_side_effects
 ):

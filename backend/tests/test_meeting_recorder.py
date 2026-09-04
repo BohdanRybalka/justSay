@@ -264,6 +264,21 @@ def _wait_for_devices(recorder: MeetingRecorder, timeout: float = 5.0) -> None:
         recorder._devices.shutdown(wait=True)
 
 
+async def _wait_until_free(recorder: MeetingRecorder, timeout: float = 5.0) -> None:
+    """Await the recorder releasing its devices, rather than assuming an instant.
+
+    The write is submitted from inside `_end_capture`, before the `finally`
+    that returns the recorder to `IDLE`, and `_devices_in_flight` drops on the
+    loop side after `_run_on_devices` returns. So a writer thread that has
+    already started is not evidence that either has happened yet — it only
+    means both are imminent. Reading `is_busy` at that instant is a race the
+    recorder never promised to win, and it lost it on a loaded CI runner.
+    """
+    deadline = time.monotonic() + timeout
+    while recorder.is_busy and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+
+
 def _wait_for_writes(recorder: MeetingRecorder, timeout: float = 5.0) -> None:
     """Block until every meeting file the recorder submitted has been written.
 
@@ -2823,6 +2838,7 @@ async def test_a_second_meeting_cannot_rewrite_what_the_first_stop_answers(
     await asyncio.sleep(0.3)
     long_truncated_stop = asyncio.ensure_future(recorder.stop())
     await asyncio.to_thread(write_started.wait, 5.0)
+    await _wait_until_free(recorder)
 
     assert recorder.is_busy is False, (
         "the recorder stayed busy through the write, so no second meeting could "
