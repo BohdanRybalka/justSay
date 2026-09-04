@@ -192,6 +192,36 @@ async def test_gemini_detected_language_always_none(sample_wav):
     assert result.detected_language is None
 
 
+@pytest.mark.parametrize(
+    "spoken",
+    [
+        "I cannot make it on Friday.",
+        "I can't attend tomorrow.",
+        "I'm unable to join the call.",
+        "No speech detected in the room, so we moved on.",
+        "No audio input was configured on the laptop.",
+        "The audio is muffled at the start, please re-record.",
+        "Sorry, I was late to the meeting.",
+    ],
+)
+@pytest.mark.asyncio
+async def test_cloud_stt_keeps_speech_that_opens_like_a_refusal(sample_wav, spoken):
+    """Audit 2026-08-25 BLOCKER 1: every one of these returned "" on master.
+
+    ``_clean_output`` matched seven prefixes against the start of the transcript
+    and dropped the whole thing, and ``process_audio`` then reported success with
+    ``discarded_reason=None`` — real speech deleted with nothing to show for it.
+    Decision A3 removed the filter; silence is guarded before any provider runs,
+    by ``analyze_vad``/``analyze_silence`` in ``pipeline/service.py``.
+    """
+    settings = STTSettings(mode=ProviderMode.CLOUD, gemini_api_key="test-key")
+    provider = GeminiSTTProvider(settings)
+    provider._client = MagicMock()
+
+    with patch.object(GeminiSTTProvider, "_call_gemini", return_value=(f"  {spoken}  ", None)):
+        result = await provider.transcribe(sample_wav, language="en")
+
+    assert result.text == spoken
 
 
 def test_local_stt_model_name():

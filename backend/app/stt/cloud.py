@@ -15,16 +15,6 @@ from app.stt.languages import LANGUAGE_NAMES
 
 log = logging.getLogger(__name__)
 
-_REFUSAL_PREFIXES: tuple[str, ...] = (
-    "i cannot",
-    "i can't",
-    "i'm unable",
-    "no speech detected",
-    "no audio",
-    "the audio is",
-    "sorry,",
-)
-
 
 class GeminiSTTProvider(STTProvider):
     """Gemini 2.5 Flash Native Audio — cloud STT provider.
@@ -152,13 +142,7 @@ class GeminiSTTProvider(STTProvider):
     def _clean_output(text: str | None) -> str:
         if not text:
             return ""
-        stripped = text.strip()
-        if not stripped:
-            return ""
-        head = stripped.lower()
-        if any(head.startswith(p) for p in _REFUSAL_PREFIXES):
-            return ""
-        return stripped
+        return text.strip()
 
     @staticmethod
     def _call_gemini(
