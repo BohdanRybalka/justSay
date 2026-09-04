@@ -3,6 +3,7 @@
  */
 
 import { BACKEND_BASE_URL } from "./contracts";
+import { TimedOutError } from "./timeout";
 
 /** Why the per-launch token could not be obtained, retained so the UI can name
  *  the failing layer instead of presenting as a dead window (ADR 028).
@@ -196,23 +197,36 @@ async function responseError(resp: Response): Promise<Error> {
   return new ApiRequestError(detail, resp.status);
 }
 
-/** `fetch` under a budget, abandoning the request rather than waiting forever.
+/** One whole HTTP exchange under a budget, abandoning it rather than waiting
+ *  forever.
  *
- *  The abort is what releases the socket; the rejection it produces is
- *  translated here so the caller gets a sentence naming the endpoint and the
- *  budget instead of a bare `AbortError`. The query string is dropped from that
- *  message: `/history/search?q=` carries whatever the user typed, and an error
- *  message is rendered in more places than it is read. */
-async function fetchWithin(path: string, opts: RequestInit, budgetMs: number): Promise<Response> {
+ *  The budget covers the body, not the headers. `fetch` settles the moment the
+ *  response headers arrive, so a backend that writes headers and then stops
+ *  sending leaves the caller hanging in `resp.json()` — the original defect one
+ *  layer down. Disarming the controller only after the body has been consumed
+ *  is what closes that: an abort during a body read rejects the `json()` promise
+ *  with the same `AbortError`, which the `catch` below discriminates exactly as
+ *  it does an abort during the headers.
+ *
+ *  The abort is also what releases the socket; the rejection it produces is
+ *  translated into a `TimedOutError` so the caller gets a branchable type and a
+ *  sentence naming the endpoint and the budget instead of a bare `AbortError`.
+ *  The query string is dropped from that message: `/history/search?q=` carries
+ *  whatever the user typed, and an error message is rendered in more places than
+ *  it is read. */
+async function fetchJsonWithin<T>(path: string, opts: RequestInit, budgetMs: number): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), budgetMs);
   try {
-    return await fetch(`${BACKEND_BASE_URL}${path}`, { ...opts, signal: controller.signal });
+    const resp = await fetch(`${BACKEND_BASE_URL}${path}`, { ...opts, signal: controller.signal });
+    recordAuthOutcome(path, resp);
+    if (!resp.ok) {
+      throw await responseError(resp);
+    }
+    return (await resp.json()) as T;
   } catch (e) {
     if (controller.signal.aborted) {
-      throw new Error(
-        `the backend did not answer ${path.split("?")[0]} within ${budgetMs / 1000} seconds`,
-      );
+      throw new TimedOutError(budgetMs, path.split("?")[0]);
     }
     throw e;
   } finally {
@@ -235,12 +249,7 @@ async function request<T>(
   if (body) {
     opts.body = JSON.stringify(body);
   }
-  const resp = await fetchWithin(path, opts, budgetMs);
-  recordAuthOutcome(path, resp);
-  if (!resp.ok) {
-    throw await responseError(resp);
-  }
-  return resp.json();
+  return fetchJsonWithin<T>(path, opts, budgetMs);
 }
 
 
@@ -462,16 +471,11 @@ export const api = {
     if (token) {
       headers["X-JustSay-Token"] = token;
     }
-    const resp = await fetchWithin(
+    return fetchJsonWithin<DictateResponse>(
       path,
       { method: "POST", body: form, headers },
       LONG_REQUEST_TIMEOUT_MS,
     );
-    recordAuthOutcome(path, resp);
-    if (!resp.ok) {
-      throw await responseError(resp);
-    }
-    return resp.json();
   },
 
   setSttMode: (mode: "cloud" | "local") =>
@@ -532,12 +536,30 @@ export interface LevelStreamEvent {
 
 const LEVEL_STREAM_PATH = "/audio/level-stream";
 
+/** The level meter's stream, opened under a budget that covers the handshake
+ *  only.
+ *
+ *  The stream itself must stay unbounded — it is long-lived by design and a
+ *  budget on it would cut the meter off mid-recording. The handshake is a
+ *  different thing: it is opened right after `POST /audio/start`, so it can land
+ *  on a backend that has stopped answering, and without a bound the meter sits
+ *  flat forever with nothing on screen saying why. The timer is cleared once the
+ *  reader has been obtained, which is the moment the stream begins.
+ *
+ *  `timedOut` is what lets the terminal `catch` tell our own abort from the
+ *  caller's: `stopLevelStream()` aborts the same controller on every normal stop
+ *  and must stay silent, while the handshake expiring must reach `onError`. */
 export function levelStream(
   onLevel: (data: LevelStreamEvent) => void,
   onDone: () => void,
   onError: (error: string) => void,
 ): AbortController {
   const controller = new AbortController();
+  let timedOut = false;
+  const handshakeTimer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
 
   getToken()
     .then((token) => {
@@ -554,10 +576,12 @@ export function levelStream(
     .then(async (resp) => {
       recordAuthOutcome(LEVEL_STREAM_PATH, resp);
       if (!resp.ok || !resp.body) {
+        clearTimeout(handshakeTimer);
         onError(`HTTP ${resp.status}`);
         return;
       }
       const reader = resp.body.getReader();
+      clearTimeout(handshakeTimer);
       const decoder = new TextDecoder();
       let buffer = "";
 
@@ -588,6 +612,11 @@ export function levelStream(
       }
     })
     .catch((err) => {
+      clearTimeout(handshakeTimer);
+      if (timedOut) {
+        onError(new TimedOutError(REQUEST_TIMEOUT_MS, LEVEL_STREAM_PATH).message);
+        return;
+      }
       if (err.name !== "AbortError") {
         onError(String(err));
       }

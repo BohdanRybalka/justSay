@@ -28,11 +28,13 @@
  *
  * What "never dropped" means precisely is: never dropped for arriving at an
  * inconvenient moment. It is not a liveness guarantee. An injected action that
- * neither resolves nor rejects — a request the backend accepts and abandons —
- * leaves the drain awaiting it forever, and every later intent then joins that
- * same unsettled promise. The queue serializes intents; it does not bound the
- * transport underneath them, and the boolean guard it replaced wedged on
- * exactly the same failure.
+ * neither resolves nor rejects leaves the drain awaiting it forever, and every
+ * later intent then joins that same unsettled promise. The queue serializes
+ * intents; it does not bound the work underneath them, and the boolean guard it
+ * replaced wedged on exactly the same failure. HTTP is no longer an example of
+ * such work — every request in `api.ts` carries a budget — but anything an
+ * injected action awaits that `api.ts` does not budget still is, a Tauri
+ * `invoke()` with no reject channel among them (ADR 028).
  */
 
 export type RecordingIntent = "start" | "stop" | "toggle";

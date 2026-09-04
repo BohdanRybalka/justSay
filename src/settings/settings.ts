@@ -8,7 +8,7 @@ import {
   type CloudKeyStatus,
   type UserSettings,
 } from "../api";
-import { withTimeout } from "../timeout";
+import { TimedOutError, withTimeout } from "../timeout";
 import { renderGeneral } from "./tabs/general";
 import { renderModels } from "./tabs/models";
 import { renderHistory } from "./tabs/history";
@@ -54,6 +54,9 @@ function bridgeDiagnosisText(diagnosis: BridgeDiagnosis): string {
 function settingsUnavailableMessage(error: unknown, reachable: boolean): string {
   if (error instanceof ApiAuthError) {
     return `JustSay could not authenticate to its own backend, so it is refusing every request (401). Tauri bridge: ${bridgeDiagnosisText(error.diagnosis)}.`;
+  }
+  if (error instanceof TimedOutError) {
+    return `The backend accepted this window's request and never answered it: ${error.message}. It may still be starting up — try again.`;
   }
   if (!reachable) {
     return "The backend was not responding when this window loaded its settings. Make sure it is running, then try again.";
@@ -113,10 +116,16 @@ function renderSettingsUnavailable(container: HTMLElement) {
  * of order, and the loser's failure repaint would erase a tab the winner had
  * already rendered.
  *
- * `api.request()` has no timeout, so a backend that accepts the connection and
- * never answers would leave this pending forever with nothing on screen but
- * "Loading settings...". The race below turns that hang into the same failure
- * screen a rejection produces.
+ * The outer race is no longer what bounds an unanswered *request*: every call
+ * `loadSettings()` makes carries its own budget now, and the arithmetic says it
+ * cannot reach this one — `api.getSettings()` and `api.cloudKeyStatus()` run in
+ * parallel, each bounded by the 3 s token race plus the 15 s request budget, so
+ * 18 s against a 40 s outer bound. What the race still covers is everything
+ * underneath those budgets that has none of its own: `getToken()` reaches its
+ * own race only after an unbounded `await import("@tauri-apps/api/core")`, and
+ * `checkBackend()` above is awaited outside `loadSettings()` entirely. Without
+ * this bound a wedge there leaves the window on "Loading settings..." with no
+ * way out, which is the failure the screen below exists for.
  */
 async function loadSettingsIntoUi(): Promise<void> {
   if (settingsLoadInFlight) return;

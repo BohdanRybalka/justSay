@@ -16,6 +16,11 @@ import {
 } from "../contracts";
 import { formatStopwatch } from "../format";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
+import { TimedOutError } from "../timeout";
+import {
+  readRecordingTruth,
+  stateAfterAbandonedStart,
+} from "./abandoned-request";
 import { computeDoneStatus } from "./done-status";
 import { dictationErrorLabel } from "./error-label";
 import { MEETING_STATE_CLASS, renderMeetingIndicator } from "./meeting-indicator";
@@ -122,8 +127,12 @@ function setState(newState: WidgetState, message?: string, durationLabel?: strin
   }
 }
 
-function startDurationTimer() {
-  const start = Date.now();
+/** `startedAt` exists so an adopted recording shows the backend's elapsed time
+ *  rather than restarting the stopwatch at zero: when a start times out and the
+ *  backend turns out to be recording, the capture began before the budget ran
+ *  out (ADR 049). */
+function startDurationTimer(startedAt = Date.now()) {
+  const start = startedAt;
   const update = () => {
     const elapsed = (Date.now() - start) / 1000;
     durationEl.textContent = formatStopwatch(elapsed);
@@ -141,6 +150,18 @@ async function startRecording() {
   try {
     await api.audioStart();
   } catch (e) {
+    if (e instanceof TimedOutError) {
+      const truth = await readRecordingTruth(api.audioStatus);
+      if (stateAfterAbandonedStart(truth) === "recording" && truth.kind === "recording") {
+        if (durationInterval) {
+          clearInterval(durationInterval);
+          durationInterval = null;
+        }
+        startDurationTimer(Date.now() - truth.elapsedSeconds * 1000);
+        console.warn("Start recording timed out but the backend is recording; adopted it", e);
+        return;
+      }
+    }
     setState("error", "Start failed");
     notifyError("Couldn't start recording — try again.");
     console.error("Start recording failed:", e);
@@ -242,6 +263,7 @@ const meetingToggleActions: MeetingToggleActions = {
   showIndicator: beginMeetingIndicator,
   hideIndicator: endMeetingIndicator,
   setTrayRecording: (active) => invokeShell("set_meeting_recording", { active }),
+  readStartTruth: () => readRecordingTruth(api.getMeetingStatus),
   openDisclosure: () => invokeShell("show_settings_window"),
   reportError: (message) => {
     console.error("Meeting recording:", message);

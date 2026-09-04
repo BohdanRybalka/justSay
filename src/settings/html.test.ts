@@ -17,20 +17,20 @@ describe("escapeHtml — the frontend's only XSS barrier", () => {
     expect(escapeHtml("&amp;")).toBe("&amp;amp;");
   });
 
-  it("replaces the ampersand first, which is what keeps the other three single-escaped", () => {
-    /** The ordering pin. `.replace()` runs left to right over the whole string,
-     *  so an `&` rule that ran after the others would find the ampersands they
-     *  had just introduced and escape those too: `<b>` would come out as
-     *  `&amp;lt;b&amp;gt;`, which renders as the literal text `&lt;b&gt;`
-     *  instead of an inert tag. Every call site assigns the result to
-     *  `innerHTML`, so a double-escaped value is a visible defect and a
-     *  single-escaped one is the whole barrier. */
+  it("replaces the ampersand first, which is what keeps the others single-escaped", () => {
     expect(escapeHtml("<b>")).toBe("&lt;b&gt;");
     expect(escapeHtml('<a href="x">&</a>')).toBe("&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;");
+    expect(escapeHtml("<i>'</i>")).toBe("&lt;i&gt;&#39;&lt;/i&gt;");
+  });
+
+  it("neutralises a payload that would break out of a single-quoted attribute", () => {
+    expect(escapeHtml("'")).toBe("&#39;");
+    expect(escapeHtml("' onerror='alert(1)")).toBe("&#39; onerror=&#39;alert(1)");
   });
 
   it("leaves text with nothing to escape byte-identical", () => {
     expect(escapeHtml("Привіт світ")).toBe("Привіт світ");
     expect(escapeHtml("")).toBe("");
+    expect(escapeHtml("Tom & Jerry <b>")).toBe("Tom &amp; Jerry &lt;b&gt;");
   });
 });

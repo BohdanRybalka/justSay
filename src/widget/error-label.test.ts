@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ApiAuthError } from "../api";
+import { ApiAuthError, REQUEST_TIMEOUT_MS } from "../api";
+import { TimedOutError } from "../timeout";
 import { dictationErrorLabel } from "./error-label";
 
 describe("dictationErrorLabel", () => {
@@ -30,5 +31,16 @@ describe("dictationErrorLabel", () => {
   it("a non-Error rejection is stringified rather than crashing the handler", () => {
     expect(dictationErrorLabel("missing something").label).toBe("Add key in Settings");
     expect(dictationErrorLabel(undefined).label).toBe("Failed");
+  });
+
+  it("a budget that expired names the wait and does not claim the dictation failed", () => {
+    const { label, toast } = dictationErrorLabel(
+      new TimedOutError(REQUEST_TIMEOUT_MS, "/pipeline/dictate"),
+    );
+
+    expect(label).not.toBe("Failed");
+    expect(label).toBe("No answer");
+    expect(toast).toContain("may not have been copied");
+    expect(toast).not.toBe("Dictation failed — try again.");
   });
 });

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { ApiRequestError } from "../api";
+import { ApiRequestError, REQUEST_TIMEOUT_MS } from "../api";
+import { TimedOutError } from "../timeout";
+import type { RecordingTruth } from "./abandoned-request";
 import {
   DISCLOSURE_REQUIRED_MESSAGE,
   type MeetingToggleActions,
@@ -14,6 +16,7 @@ function actions(overrides: Partial<MeetingToggleActions> = {}) {
     showIndicator: vi.fn(),
     hideIndicator: vi.fn(),
     setTrayRecording: vi.fn(async () => {}),
+    readStartTruth: vi.fn(async (): Promise<RecordingTruth> => ({ kind: "unknown" })),
     openDisclosure: vi.fn(async () => {}),
     reportError: vi.fn(),
   };
@@ -216,5 +219,76 @@ describe("the meeting recording toggle", () => {
     expect(deps.setTrayRecording).toHaveBeenCalledWith(true);
     expect(deps.reportError.mock.calls[0][0]).toContain("already being recorded");
     expect(deps.openDisclosure).not.toHaveBeenCalled();
+  });
+
+  it("keeps the indicator up when a start times out and the backend is recording", async () => {
+    const deps = actions({
+      startRecording: vi.fn(async () => {
+        throw new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/meeting/start");
+      }),
+      readStartTruth: vi.fn(async (): Promise<RecordingTruth> => ({
+        kind: "recording",
+        elapsedSeconds: 4,
+      })),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.showIndicator).toHaveBeenCalledOnce();
+    expect(deps.hideIndicator).not.toHaveBeenCalled();
+    expect(deps.setTrayRecording).toHaveBeenCalledWith(true);
+    expect(deps.reportError.mock.calls[0][0]).toContain("may or may not have started");
+  });
+
+  it("takes the indicator down when a start times out and the backend is idle", async () => {
+    const deps = actions({
+      startRecording: vi.fn(async () => {
+        throw new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/meeting/start");
+      }),
+      readStartTruth: vi.fn(async (): Promise<RecordingTruth> => ({ kind: "idle" })),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.hideIndicator).toHaveBeenCalledOnce();
+    expect(deps.showIndicator).not.toHaveBeenCalled();
+    expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
+  });
+
+  it("keeps the indicator up when a start times out and the status read fails too", async () => {
+    const deps = actions({
+      startRecording: vi.fn(async () => {
+        throw new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/meeting/start");
+      }),
+      readStartTruth: vi.fn(async (): Promise<RecordingTruth> => ({ kind: "unknown" })),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.showIndicator).toHaveBeenCalledOnce();
+    expect(deps.hideIndicator).not.toHaveBeenCalled();
+    expect(deps.setTrayRecording).toHaveBeenCalledWith(true);
+  });
+
+  it("leaves the indicator up and the toggle usable when a stop times out, so a second press stops again", async () => {
+    let recording = true;
+    const deps = actions({
+      isRecording: () => recording,
+      stopRecording: vi.fn(async () => {
+        throw new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/meeting/stop");
+      }),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.hideIndicator).not.toHaveBeenCalled();
+    expect(deps.readStartTruth).not.toHaveBeenCalled();
+    expect(deps.reportError.mock.calls[0][0]).toContain("still being recorded");
+    expect(deps.reportError.mock.calls[0][0]).toContain("did not answer /audio/meeting/stop");
+
+    expect(recording).toBe(true);
+    await runMeetingToggle(deps);
+    expect(deps.stopRecording).toHaveBeenCalledTimes(2);
+    expect(deps.startRecording).not.toHaveBeenCalled();
   });
 });

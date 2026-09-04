@@ -382,6 +382,7 @@ describe("sawAuthFailure() clears as well as sets", () => {
 describe("a backend that accepts a request and never answers", () => {
   beforeEach(() => {
     invokeMock.mockResolvedValue("secret-token");
+    vi.useFakeTimers();
   });
 
   /** A `fetch` that behaves like the real one against a backend that has stopped
@@ -395,8 +396,23 @@ describe("a backend that accepts a request and never answers", () => {
       });
   }
 
+  /** The half-answer a headers-only budget cannot catch: the status line and the
+   *  headers arrive, so `fetch` settles, and then the body never comes. */
+  function headersThenSilenceFetch() {
+    return (_url: string, opts: RequestInit) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () =>
+          new Promise((_, reject) => {
+            opts.signal?.addEventListener("abort", () =>
+              reject(new DOMException("The operation was aborted.", "AbortError")),
+            );
+          }),
+      } as unknown as Response);
+  }
+
   it("abandons an ordinary request at the budget instead of never settling", async () => {
-    vi.useFakeTimers();
     const { api, REQUEST_TIMEOUT_MS } = await import("./api");
     fetchMock.mockImplementation(deafFetch());
 
@@ -412,7 +428,6 @@ describe("a backend that accepts a request and never answers", () => {
   });
 
   it("aborts the request it gave up on, so the socket is not left open", async () => {
-    vi.useFakeTimers();
     const { api, REQUEST_TIMEOUT_MS } = await import("./api");
     fetchMock.mockImplementation(deafFetch());
 
@@ -427,7 +442,6 @@ describe("a backend that accepts a request and never answers", () => {
   });
 
   it("keeps the query string out of the message, since it carries what was typed", async () => {
-    vi.useFakeTimers();
     const { api, REQUEST_TIMEOUT_MS } = await import("./api");
     fetchMock.mockImplementation(deafFetch());
 
@@ -438,11 +452,32 @@ describe("a backend that accepts a request and never answers", () => {
     await expect(pending).rejects.toThrow(
       "the backend did not answer /history/search within 15 seconds",
     );
-    await expect(pending).rejects.not.toThrow(/my private note/);
+    const message = await pending.then(
+      () => "resolved",
+      (e: Error) => e.message,
+    );
+    expect(message).not.toContain(encodeURIComponent("my private note"));
+    expect(message).not.toContain("?q=");
+  });
+
+  it("leaks not even a one-word query, which percent-encoding passes through verbatim", async () => {
+    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
+    fetchMock.mockImplementation(deafFetch());
+
+    const pending = api.searchHistory("secret");
+    pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
+
+    const message = await pending.then(
+      () => "resolved",
+      (e: Error) => e.message,
+    );
+    expect(encodeURIComponent("secret")).toBe("secret");
+    expect(message).not.toContain("secret");
+    expect(message).not.toContain("?q=");
   });
 
   it("gives transcription the long budget rather than the short one", async () => {
-    vi.useFakeTimers();
     const { api, REQUEST_TIMEOUT_MS, LONG_REQUEST_TIMEOUT_MS } = await import("./api");
     fetchMock.mockImplementation(deafFetch());
 
@@ -457,8 +492,91 @@ describe("a backend that accepts a request and never answers", () => {
     await expect(pending).rejects.toThrow("within 600 seconds");
   });
 
+  it("gives a file upload the long budget, since a 25 MB upload is minutes of audio", async () => {
+    const { api, LONG_REQUEST_TIMEOUT_MS } = await import("./api");
+    fetchMock.mockImplementation(deafFetch());
+
+    const pending = api.processFile(new ArrayBuffer(8), "call.wav");
+    const settled = vi.fn();
+    pending.then(settled, settled);
+
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(settled).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(LONG_REQUEST_TIMEOUT_MS);
+    await expect(pending).rejects.toThrow(
+      "the backend did not answer /pipeline/process-file within 600 seconds",
+    );
+  });
+
+  it("gives the local model load the long budget, since a first run downloads it", async () => {
+    const { api, LONG_REQUEST_TIMEOUT_MS } = await import("./api");
+    fetchMock.mockImplementation(deafFetch());
+
+    const pending = api.sttLocalLoad();
+    const settled = vi.fn();
+    pending.then(settled, settled);
+
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(settled).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(LONG_REQUEST_TIMEOUT_MS);
+    await expect(pending).rejects.toThrow(
+      "the backend did not answer /stt/local/load within 600 seconds",
+    );
+  });
+
+  it("holds the budget through the body, not only through the headers", async () => {
+    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
+    fetchMock.mockImplementation(headersThenSilenceFetch());
+
+    const pending = api.health();
+    const settled = vi.fn();
+    pending.then(settled, settled);
+
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1);
+    expect(settled).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2);
+    await expect(pending).rejects.toThrow("the backend did not answer /health within 15 seconds");
+  });
+
+  it("rejects with a TimedOutError carrying the budget and the path, so callers can branch", async () => {
+    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
+    const { TimedOutError } = await import("./timeout");
+    fetchMock.mockImplementation(deafFetch());
+
+    const pending = api.audioStart();
+    pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
+
+    const error = await pending.then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(TimedOutError);
+    expect((error as InstanceType<typeof TimedOutError>).budgetMs).toBe(REQUEST_TIMEOUT_MS);
+    expect((error as InstanceType<typeof TimedOutError>).subject).toBe("/audio/start");
+  });
+
+  it("carries the same identity when it is the body that stops part-way", async () => {
+    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
+    const { TimedOutError } = await import("./timeout");
+    fetchMock.mockImplementation(headersThenSilenceFetch());
+
+    const pending = api.audioStatus();
+    pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
+
+    const error = await pending.then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(TimedOutError);
+    expect((error as InstanceType<typeof TimedOutError>).subject).toBe("/audio/status");
+  });
+
   it("lets the widget's intent queue recover instead of wedging on one dead request", async () => {
-    vi.useFakeTimers();
     const { api, REQUEST_TIMEOUT_MS } = await import("./api");
     const { createRecordingIntentQueue } = await import("./widget/recording-intent");
     fetchMock.mockImplementation(deafFetch());
@@ -496,5 +614,107 @@ describe("a backend that accepts a request and never answers", () => {
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
     await secondPress;
     expect(errors).toHaveLength(2);
+  });
+});
+
+describe("the level stream's handshake, which is bounded while the stream is not", () => {
+  beforeEach(() => {
+    invokeMock.mockResolvedValue("secret-token");
+    vi.useFakeTimers();
+  });
+
+  function streamOf(chunks: string[], hold: Promise<void>) {
+    let index = 0;
+    const encoder = new TextEncoder();
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (index < chunks.length) {
+              return { done: false, value: encoder.encode(chunks[index++]) };
+            }
+            await hold;
+            return { done: true, value: undefined };
+          },
+        }),
+      },
+    } as unknown as Response;
+  }
+
+  it("reports an error when the backend never sends response headers", async () => {
+    const { levelStream, REQUEST_TIMEOUT_MS } = await import("./api");
+    fetchMock.mockImplementation(
+      (_url: string, opts: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          opts.signal?.addEventListener("abort", () =>
+            reject(new DOMException("The operation was aborted.", "AbortError")),
+          );
+        }),
+    );
+    const onError = vi.fn();
+
+    levelStream(
+      () => {},
+      () => {},
+      onError,
+    );
+
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1);
+    expect(onError).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError.mock.calls[0][0]).toContain("/audio/level-stream");
+  });
+
+  it("never cuts off a stream that has already delivered its first chunk", async () => {
+    const { levelStream, REQUEST_TIMEOUT_MS } = await import("./api");
+    let release = () => {};
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fetchMock.mockResolvedValue(
+      streamOf(['event: level\ndata: {"level_db":-20,"is_recording":true}\n\n'], hold),
+    );
+    const onLevel = vi.fn();
+    const onError = vi.fn();
+
+    const controller = levelStream(onLevel, () => {}, onError);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onLevel).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS * 4);
+    expect(onError).not.toHaveBeenCalled();
+    expect(controller.signal.aborted).toBe(false);
+
+    release();
+  });
+
+  it("stays silent when the caller aborts the stream itself", async () => {
+    const { levelStream } = await import("./api");
+    fetchMock.mockImplementation(
+      (_url: string, opts: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          opts.signal?.addEventListener("abort", () =>
+            reject(new DOMException("The operation was aborted.", "AbortError")),
+          );
+        }),
+    );
+    const onError = vi.fn();
+
+    const controller = levelStream(
+      () => {},
+      () => {},
+      onError,
+    );
+
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onError).not.toHaveBeenCalled();
   });
 });

@@ -37,12 +37,23 @@
  * broke ADR 040 obligation 2 and left the recording unstoppable, because the
  * next click would take the start branch again and get the same 409.
  *
+ * A start that runs out of its budget is none of the above and is decided
+ * before them, because the backend may well have started the recording it never
+ * got to report (ADR 049). The widget reads the meeting status once and routes
+ * on that instead of guessing, and an unreadable status puts the indicator up —
+ * the same asymmetry the failed stop above rests on, for the same reason.
+ *
  * The sentence a user reads is written here and the backend detail is appended
  * to it as its cause, which is why the 507 detail carries the write error alone
  * and not a second sentence of its own.
  */
 
 import { ApiRequestError } from "../api";
+import { TimedOutError } from "../timeout";
+import {
+  indicatorAfterAbandonedMeetingStart,
+  type RecordingTruth,
+} from "./abandoned-request";
 
 export const DISCLOSURE_REQUIRED_MESSAGE =
   "Read the meeting-recording disclosure before recording a call.";
@@ -79,6 +90,10 @@ function writeFailedMessage(error: unknown): string {
   return `The call ended but its recording could not be saved: ${describeFailure(error)}`;
 }
 
+function abandonedStartMessage(error: unknown): string {
+  return `The call may or may not have started — the backend never answered: ${describeFailure(error)}`;
+}
+
 function alreadyRecordingMessage(error: unknown): string {
   return `A call is already being recorded: ${describeFailure(error)}`;
 }
@@ -102,6 +117,7 @@ export interface MeetingToggleActions {
   showIndicator(): void;
   hideIndicator(): void;
   setTrayRecording(active: boolean): Promise<void>;
+  readStartTruth(): Promise<RecordingTruth>;
   openDisclosure(): Promise<void>;
   reportError(message: string): void;
 }
@@ -128,6 +144,17 @@ export async function runMeetingToggle(actions: MeetingToggleActions): Promise<v
   try {
     await actions.startRecording();
   } catch (e) {
+    if (e instanceof TimedOutError) {
+      const showing = indicatorAfterAbandonedMeetingStart(await actions.readStartTruth()) === "show";
+      if (showing) {
+        actions.showIndicator();
+      } else {
+        actions.hideIndicator();
+      }
+      await actions.setTrayRecording(showing);
+      actions.reportError(abandonedStartMessage(e));
+      return;
+    }
     if (e instanceof ApiRequestError && e.status === ALREADY_RECORDING_STATUS) {
       actions.showIndicator();
       await actions.setTrayRecording(true);
