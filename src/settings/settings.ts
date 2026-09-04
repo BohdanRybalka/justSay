@@ -51,12 +51,22 @@ function bridgeDiagnosisText(diagnosis: BridgeDiagnosis): string {
     : diagnosis.kind;
 }
 
+/** `TimedOutError` reaches this screen from two mechanisms and they know
+ *  different things, which `subject` is what distinguishes. With a subject it
+ *  came from `api.ts`, where a single request was accepted by the backend and
+ *  went unanswered, and the endpoint and the budget are the facts worth
+ *  reporting — the error's own sentence says them, so the prefix must not say
+ *  them again. With `subject === null` it came from the outer
+ *  `withTimeout(loadSettings(), ...)`, which wraps several awaits and observed
+ *  no acceptance of anything, so claiming one would be an invention. */
 function settingsUnavailableMessage(error: unknown, reachable: boolean): string {
   if (error instanceof ApiAuthError) {
     return `JustSay could not authenticate to its own backend, so it is refusing every request (401). Tauri bridge: ${bridgeDiagnosisText(error.diagnosis)}.`;
   }
   if (error instanceof TimedOutError) {
-    return `The backend accepted this window's request and never answered it: ${error.message}. It may still be starting up — try again.`;
+    return error.subject === null
+      ? `Loading settings did not finish in time: ${error.message}. It may still be starting up — try again.`
+      : `The backend accepted this window's request and never answered it (${error.subject}, ${error.budgetMs / 1000} s). It may still be starting up — try again.`;
   }
   if (!reachable) {
     return "The backend was not responding when this window loaded its settings. Make sure it is running, then try again.";

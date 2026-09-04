@@ -65,12 +65,13 @@ export async function readRecordingTruth(
  *  recovery until the window reloads, while a false positive is provisional:
  *  the widget marks the indicator unconfirmed and the connection poll withdraws
  *  it on the first status read that reports no recording. */
-export function indicatorAfterAbandonedMeetingStart(truth: RecordingTruth): "show" | "hide" {
-  return truth.kind === "idle" ? "hide" : "show";
+export function shouldShowIndicatorAfterAbandonedMeetingStart(truth: RecordingTruth): boolean {
+  return truth.kind !== "idle";
 }
 
-/** The `POST /audio/stop` a dictation start left behind, held until the backend
- *  is answering again. */
+/** The `POST /audio/stop` an abandoned dictation left behind — a start that
+ *  could not be adopted, or a `POST /pipeline/dictate` whose own handler never
+ *  ran the stop it opens with — held until the backend is answering again. */
 export interface AbandonedStartCleanup {
   owe(): void;
   settle(backendAnswered: boolean): Promise<"nothing-owed" | "deferred" | "settled">;
@@ -87,7 +88,18 @@ export interface AbandonedStartCleanup {
  *  5 s while a stop carries a 15 s budget, so without the single-flight flag
  *  three could be in the air at once. A resolved stop clears it, and so does an
  *  `ApiRequestError` or an `ApiAuthError`, because both mean the backend saw
- *  the request. Any other rejection is another silence and keeps it. */
+ *  the request. Any other rejection is another silence and keeps it.
+ *
+ *  A stop that lands writes a WAV. `POST /audio/stop`
+ *  (`backend/app/audio/router.py:108-117`) harvests the capture and returns its
+ *  filename, and the only path that deletes such a file is `/pipeline/dictate`
+ *  (`backend/app/pipeline/router.py:71-73`), which this one is not. So every
+ *  discharged obligation leaves one untranscribed recording in the temp
+ *  directory that nothing announces and nothing removes until the user runs
+ *  Settings' cleanup. It is an accepted cost rather than an oversight — no
+ *  per-file delete endpoint exists and this spec is frontend-only — recorded in
+ *  ADR 049 and filed as [JS-122]. The alternative is the open microphone this
+ *  obligation exists to close. */
 export function createAbandonedStartCleanup(deps: {
   stopRecording: () => Promise<unknown>;
   isBusy: () => boolean;

@@ -17,11 +17,14 @@ export interface DictationErrorLabel {
  * authenticating to its own local backend (spec 042).
  *
  * The `TimedOutError` branch runs before it for the same reason and one of its
- * own: "Failed" would be a claim the widget cannot make. `POST /pipeline/dictate`
- * stops the recorder before it transcribes, so nothing is left open, but a
- * cancellation inside the pipeline can land either side of the clipboard write
- * and nothing the frontend can read says which (ADR 049). The toast therefore
- * says the text may not have been copied rather than that the dictation failed.
+ * own: "Failed" would be a claim the widget cannot make. Two separate things
+ * are unknown after an abandoned `POST /pipeline/dictate`, and the toast names
+ * both. A cancellation inside the pipeline can land either side of the
+ * clipboard write, and nothing the frontend can read says which. And the stop
+ * that ends the capture is the handler's own first act
+ * (`backend/app/pipeline/router.py:45-48`), so a backend that never ran the
+ * handler never stopped the recorder either — the microphone may still be open,
+ * which is why `stopAndProcess` also records the stop it owes (ADR 049).
  */
 export function dictationErrorLabel(error: unknown): DictationErrorLabel {
   if (error instanceof ApiAuthError) {
@@ -34,7 +37,8 @@ export function dictationErrorLabel(error: unknown): DictationErrorLabel {
   if (error instanceof TimedOutError) {
     return {
       label: "No answer",
-      toast: "The backend never answered — your text may not have been copied.",
+      toast:
+        "The backend never answered — your text may not have been copied, and the microphone may still be open.",
     };
   }
 

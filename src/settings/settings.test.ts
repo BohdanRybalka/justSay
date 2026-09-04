@@ -460,6 +460,7 @@ describe("backend unreachable from the first poll", () => {
 
     expect(tabContent.textContent).toContain("Cannot load settings");
     expect(tabContent.textContent).toContain("did not answer within");
+    expect(tabContent.textContent).not.toContain("accepted this window's request");
     expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(false);
 
     vi.useRealTimers();

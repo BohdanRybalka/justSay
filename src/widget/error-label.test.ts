@@ -41,6 +41,7 @@ describe("dictationErrorLabel", () => {
     expect(label).not.toBe("Failed");
     expect(label).toBe("No answer");
     expect(toast).toContain("may not have been copied");
+    expect(toast).toContain("microphone may still be open");
     expect(toast).not.toBe("Dictation failed — try again.");
   });
 });

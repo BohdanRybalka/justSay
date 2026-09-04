@@ -127,10 +127,6 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
-/** `vi.resetModules()` hands the next test a fresh module but cannot reach the
- *  previous instance's `setInterval(checkConnection, CONNECTION_POLL_MS)` or its
- *  100 ms stopwatch. Discarding the fake clock discards every timer scheduled on
- *  it, which is the leak fixed at its source rather than masked. */
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -248,6 +244,54 @@ describe("the stop a widget owes after a start it could not adopt", () => {
   });
 });
 
+describe("the stop a widget owes after a dictation the backend never answered", () => {
+  async function abandonDictate() {
+    apiMock.audioStart.mockResolvedValue(recordingStatus({ is_recording: true }));
+    apiMock.dictate.mockRejectedValue(await timedOut("/pipeline/dictate"));
+    apiMock.audioStop.mockResolvedValue({ filename: "rec.wav", duration_seconds: 1 });
+    await loadWidget();
+
+    root().dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(root().className).toBe("widget recording"));
+    root().dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(root().className).toBe("widget error"));
+  }
+
+  it("issues one stop on the next healthy poll when the status read cannot answer either", async () => {
+    apiMock.audioStatus.mockRejectedValue(await timedOut("/audio/status"));
+    await abandonDictate();
+
+    expect(apiMock.audioStatus).toHaveBeenCalledOnce();
+    expect(apiMock.audioStop).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS);
+    await vi.waitFor(() => expect(apiMock.audioStop).toHaveBeenCalledOnce());
+  });
+
+  it("owes nothing when the backend positively reports the microphone closed", async () => {
+    apiMock.audioStatus.mockResolvedValue(recordingStatus({ is_recording: false }));
+    await abandonDictate();
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS * 3);
+    expect(apiMock.audioStop).not.toHaveBeenCalled();
+  });
+
+  it("reads no status at all when the dictation fails for an ordinary reason", async () => {
+    apiMock.audioStart.mockResolvedValue(recordingStatus({ is_recording: true }));
+    apiMock.dictate.mockRejectedValue(new Error("connection refused"));
+    await loadWidget();
+
+    root().dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(root().className).toBe("widget recording"));
+    root().dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(root().className).toBe("widget error"));
+
+    expect(apiMock.audioStatus).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS * 3);
+    expect(apiMock.audioStop).not.toHaveBeenCalled();
+  });
+});
+
 describe("a meeting indicator raised on a status the widget could not read", () => {
   async function abandonMeetingStart() {
     apiMock.startMeetingRecording.mockRejectedValue(await timedOut("/audio/meeting/start"));
@@ -271,6 +315,16 @@ describe("a meeting indicator raised on a status the widget could not read", () 
     apiMock.getMeetingStatus.mockResolvedValue(meetingStatus(true, 12));
     await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS * 3);
     expect(meetingIndicatorShown()).toBe(true);
+  });
+
+  it("keeps one confirmation read in flight while the backend stays silent", async () => {
+    await abandonMeetingStart();
+    apiMock.getMeetingStatus.mockImplementation(() => new Promise(() => {}));
+    const before = apiMock.getMeetingStatus.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS * 3);
+
+    expect(apiMock.getMeetingStatus.mock.calls.length - before).toBe(1);
   });
 
   it("is not re-read once the status has confirmed it", async () => {

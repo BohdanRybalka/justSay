@@ -184,6 +184,10 @@ async function stopAndProcess() {
       setState("idle");
     }
   } catch (e) {
+    if (e instanceof TimedOutError) {
+      const truth = await readRecordingTruth(api.audioStatus);
+      if (truth.kind !== "idle") abandonedStart.owe();
+    }
     const { label, toast } = dictationErrorLabel(e);
     setState("error", label);
     notifyError(toast);
@@ -191,10 +195,19 @@ async function stopAndProcess() {
   }
 }
 
-/** The stop a timed-out start left behind. It is discharged by `checkConnection`
- *  rather than at the timeout site because `unknown` means the backend has just
- *  proved it is not answering, so a compensating stop sent there would be sent
- *  into the same silence (ADR 049). */
+/** The stop a timed-out request left behind, from either end of a dictation.
+ *  A start that could not be adopted owes one because `MicrophoneRecorder.start`
+ *  leaves the device open when the handler is cancelled; a `POST /pipeline/dictate`
+ *  that ran out of its budget owes one for the same reason one layer up, since
+ *  that handler calls `recorder.stop()` itself
+ *  (`backend/app/pipeline/router.py:45-48`) and a backend that never ran it
+ *  never stopped anything.
+ *
+ *  Both arm the debt on anything short of a positive `idle`, and neither
+ *  discharges it at the timeout site: `unknown` means the backend has just
+ *  proved it is not answering, so a compensating stop sent there would go into
+ *  the same silence. `checkConnection` discharges it once the backend answers
+ *  again (ADR 049). */
 const abandonedStart = createAbandonedStartCleanup({
   stopRecording: () => api.audioStop(),
   isBusy: () => state === "recording" || state === "processing",
@@ -230,6 +243,7 @@ let meetingStartedAt = 0;
 let meetingTimer: ReturnType<typeof setInterval> | null = null;
 let meetingBusy = false;
 let meetingIndicatorUnconfirmed = false;
+let meetingIndicatorSyncInFlight = false;
 
 const MEETING_TICK_MS = 500;
 
@@ -298,7 +312,11 @@ async function toggleMeetingRecording() {
  *  it is restored from the backend rather than from this window's memory.
  *
  *  It answers whether it managed to read the status, which is what lets
- *  `checkConnection` withdraw an indicator raised on an unreadable one. */
+ *  `checkConnection` withdraw an indicator raised on an unreadable one. That
+ *  confirmation is single-flighted by its caller for the reason the owed stop
+ *  is: the poll fires every 5 s and an unanswered read holds its own budget, so
+ *  without the flag a backend that stays wedged would accumulate concurrent
+ *  status reads against it for the life of the window. */
 async function syncMeetingIndicator(): Promise<boolean> {
   let status;
   try {
@@ -542,8 +560,13 @@ async function checkConnection() {
 
   await abandonedStart.settle(healthOk);
 
-  if (healthOk && meetingIndicatorUnconfirmed && (await syncMeetingIndicator())) {
-    meetingIndicatorUnconfirmed = false;
+  if (healthOk && meetingIndicatorUnconfirmed && !meetingIndicatorSyncInFlight) {
+    meetingIndicatorSyncInFlight = true;
+    try {
+      if (await syncMeetingIndicator()) meetingIndicatorUnconfirmed = false;
+    } finally {
+      meetingIndicatorSyncInFlight = false;
+    }
   }
 }
 

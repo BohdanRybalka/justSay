@@ -3,7 +3,7 @@ import { ApiAuthError, ApiRequestError, REQUEST_TIMEOUT_MS } from "../api";
 import { TimedOutError } from "../timeout";
 import {
   createAbandonedStartCleanup,
-  indicatorAfterAbandonedMeetingStart,
+  shouldShowIndicatorAfterAbandonedMeetingStart,
   readRecordingTruth,
   type RecordingSnapshot,
 } from "./abandoned-request";
@@ -48,19 +48,19 @@ describe("readRecordingTruth", () => {
   });
 });
 
-describe("indicatorAfterAbandonedMeetingStart", () => {
+describe("shouldShowIndicatorAfterAbandonedMeetingStart", () => {
   it("shows the indicator for a recording the backend really holds", () => {
-    expect(indicatorAfterAbandonedMeetingStart({ kind: "recording", elapsedSeconds: 3 })).toBe(
-      "show",
-    );
+    expect(
+      shouldShowIndicatorAfterAbandonedMeetingStart({ kind: "recording", elapsedSeconds: 3 }),
+    ).toBe(true);
   });
 
   it("hides it only when the backend positively reports no recording", () => {
-    expect(indicatorAfterAbandonedMeetingStart({ kind: "idle" })).toBe("hide");
+    expect(shouldShowIndicatorAfterAbandonedMeetingStart({ kind: "idle" })).toBe(false);
   });
 
   it("shows it when the truth is unknown, because a false negative has no recovery", () => {
-    expect(indicatorAfterAbandonedMeetingStart({ kind: "unknown" })).toBe("show");
+    expect(shouldShowIndicatorAfterAbandonedMeetingStart({ kind: "unknown" })).toBe(true);
   });
 });
 

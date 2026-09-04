@@ -8,13 +8,15 @@ import { TimedOutError } from "./timeout";
 /** Why the per-launch token could not be obtained, retained so the UI can name
  *  the failing layer instead of presenting as a dead window (ADR 028).
  *  `bridge-missing` = Tauri's injected bridge scripts never ran (a synchronous
- *  throw); `invoke-timeout` = the bridge ran but the IPC transport never
- *  answered (an unbounded hang, capped here); `invoke-failed` = the command
- *  itself rejected. The three are distinguishable on purpose: they point at
- *  different layers, and on macOS there is nothing else to attach to. */
+ *  throw); `bridge-timeout` = the bridge module's dynamic import never resolved,
+ *  so no `invoke` was ever reached; `invoke-timeout` = the bridge loaded but the
+ *  IPC transport never answered; `invoke-failed` = the command itself rejected.
+ *  The four are distinguishable on purpose: they point at different layers, and
+ *  on macOS there is nothing else to attach to. */
 export type BridgeDiagnosis =
   | { kind: "ok" }
   | { kind: "bridge-missing" }
+  | { kind: "bridge-timeout" }
   | { kind: "invoke-timeout" }
   | { kind: "invoke-failed"; detail: string };
 
@@ -30,6 +32,12 @@ export class ApiAuthError extends Error {
   }
 }
 
+/** The budget for each of the two steps that stand between a caller and the
+ *  per-launch token: loading the Tauri bridge module, and the `invoke()` behind
+ *  it. Both are bounded because either can go absent rather than slow — a
+ *  dynamic import has no timeout and `invoke()` has no reject channel at all
+ *  (ADR 028) — and an unbounded one leaves the memoised `tokenPromise` pending
+ *  for the life of the window, which every later caller then joins. */
 const TOKEN_TIMEOUT_MS = 3000;
 const TOKEN_TIMED_OUT = Symbol("token-timed-out");
 /** How long a single unanswered `get_backend_token` call may keep being reused
@@ -54,6 +62,24 @@ export const TOKEN_CALL_REUSE_MS = 60_000;
  *  real answer while staying well inside the Settings window's outer bound —
  *  the inner budget fires first and names the endpoint that hung. */
 export const REQUEST_TIMEOUT_MS = 15_000;
+
+/** The budget for reading a status, deliberately shorter than an ordinary
+ *  request's because the work behind it is a different kind of work.
+ *  `GET /audio/status` (`backend/app/audio/router.py:119-125`) and
+ *  `GET /audio/meeting/status` (`:73-89`) return fields already held in memory
+ *  on the recorder object and open no device, so none of the up-to-six-second
+ *  enumeration `REQUEST_TIMEOUT_MS` is sized for can happen inside them.
+ *
+ *  It is the recovery budget, and that is what makes the difference matter. A
+ *  start that runs out of its budget reads the status to find out what the
+ *  backend did, so the two budgets run back to back against the same
+ *  unresponsive backend while the widget still says "Recording" and the intent
+ *  queue's drain is parked inside the start. Reusing the request budget made
+ *  that window 30 s; this makes it 18 s, and the second half of it now costs
+ *  what a transport that answers nothing is worth rather than what a device
+ *  enumeration is worth. Same number as `TOKEN_TIMEOUT_MS`, for the same
+ *  reason: both bound a transport rather than the work behind it. */
+export const STATUS_TIMEOUT_MS = 3_000;
 
 /** The budget for the three calls that do real work rather than answer a question.
  *
@@ -139,7 +165,22 @@ function getToken(): Promise<string | null> {
         bridgeDiagnosis = { kind: "bridge-missing" };
         return null;
       }
-      const { invoke } = await import("@tauri-apps/api/core");
+      let importTimer: ReturnType<typeof setTimeout> | undefined;
+      const importExpiry = new Promise<typeof TOKEN_TIMED_OUT>((resolve) => {
+        importTimer = setTimeout(() => resolve(TOKEN_TIMED_OUT), TOKEN_TIMEOUT_MS);
+      });
+      let bridge: typeof import("@tauri-apps/api/core") | typeof TOKEN_TIMED_OUT;
+      try {
+        bridge = await Promise.race([import("@tauri-apps/api/core"), importExpiry]);
+      } finally {
+        clearTimeout(importTimer);
+      }
+      if (bridge === TOKEN_TIMED_OUT) {
+        bridgeDiagnosis = { kind: "bridge-timeout" };
+        console.warn(`getToken: the Tauri bridge module did not load in ${TOKEN_TIMEOUT_MS} ms`);
+        return null;
+      }
+      const { invoke } = bridge;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const expiry = new Promise<typeof TOKEN_TIMED_OUT>((resolve) => {
         timer = setTimeout(() => resolve(TOKEN_TIMED_OUT), TOKEN_TIMEOUT_MS);
@@ -213,13 +254,21 @@ function isAbortError(e: unknown): boolean {
 
 /** Await `work`, but give up the moment `signal` aborts.
  *
- *  `getToken()` takes no signal and can hang: it reaches its own 3 s race only
- *  after `await import("@tauri-apps/api/core")`, which is unbounded, and a
- *  wedge there leaves `tokenPromise` pending for the life of the window so
- *  every later caller joins the same dead promise. Arming a timer in front of
- *  that does nothing on its own — nothing is listening — so the wait itself has
- *  to end when the budget does. The abandoned work is left running; it settles
- *  or it does not, and either way no caller is still attached to it. */
+ *  `getToken()` takes no signal, so arming a timer in front of it does nothing
+ *  on its own — nothing is listening — and the wait itself has to end when the
+ *  budget does. The abandoned work is left running; it settles or it does not,
+ *  and either way no caller is still attached to it once it has.
+ *
+ *  *Once it has* is the load-bearing half, and it is why `TOKEN_TIMEOUT_MS`
+ *  bounds the bridge import as well as the `invoke()`. This function detaches
+ *  by hanging its own cleanup off `work`, so a `work` that never settles keeps
+ *  every abandoned caller's `resolve`/`reject` pair and its `AbortController`
+ *  attached to it. `getToken()` hands the same memoised promise to everybody,
+ *  so an unbounded step inside it would make that a leak of one retained
+ *  continuation per request, growing fastest in the wedge this function exists
+ *  for. The bound is on the promise rather than here because a settling `work`
+ *  is what releases the references; nothing this wrapper can do reaches them
+ *  while it is still pending. */
 function until<T>(work: Promise<T>, signal: AbortSignal, giveUp: () => Error): Promise<T> {
   if (signal.aborted) return Promise.reject(giveUp());
   return new Promise<T>((resolve, reject) => {
@@ -485,7 +534,7 @@ export const api = {
 
   audioStop: () => request<{ filename: string; duration_seconds: number }>("POST", "/audio/stop"),
 
-  audioStatus: () => request<RecordingStatus>("GET", "/audio/status"),
+  audioStatus: () => request<RecordingStatus>("GET", "/audio/status", undefined, STATUS_TIMEOUT_MS),
 
   startMeetingRecording: () => request<MeetingStatus>("POST", "/audio/meeting/start"),
 
@@ -499,7 +548,8 @@ export const api = {
   stopMeetingRecording: () =>
     request<MeetingStopResponse>("POST", "/audio/meeting/stop", undefined, LONG_REQUEST_TIMEOUT_MS),
 
-  getMeetingStatus: () => request<MeetingStatus>("GET", "/audio/meeting/status"),
+  getMeetingStatus: () =>
+    request<MeetingStatus>("GET", "/audio/meeting/status", undefined, STATUS_TIMEOUT_MS),
 
   dictate: (language = "uk") =>
     request<DictateResponse>(
@@ -619,7 +669,7 @@ export function levelStream(
     controller.abort();
   }, REQUEST_TIMEOUT_MS);
 
-  getToken()
+  until(getToken(), controller.signal, () => new TimedOutError(REQUEST_TIMEOUT_MS, LEVEL_STREAM_PATH))
     .then((token) => {
       const headers: Record<string, string> = {};
       if (token) {

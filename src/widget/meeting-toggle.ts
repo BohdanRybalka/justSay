@@ -61,7 +61,7 @@
 import { ApiRequestError } from "../api";
 import { TimedOutError } from "../timeout";
 import {
-  indicatorAfterAbandonedMeetingStart,
+  shouldShowIndicatorAfterAbandonedMeetingStart,
   type RecordingTruth,
 } from "./abandoned-request";
 
@@ -170,7 +170,7 @@ export async function runMeetingToggle(actions: MeetingToggleActions): Promise<v
   } catch (e) {
     if (e instanceof TimedOutError) {
       const truth = await actions.readStartTruth();
-      const showing = indicatorAfterAbandonedMeetingStart(truth) === "show";
+      const showing = shouldShowIndicatorAfterAbandonedMeetingStart(truth);
       if (showing) {
         actions.showIndicator(
           truth.kind === "recording" ? Date.now() - truth.elapsedSeconds * 1000 : undefined,

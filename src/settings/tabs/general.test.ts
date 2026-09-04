@@ -15,10 +15,6 @@ const apiMock = {
 
 const levelStreamMock = vi.fn();
 
-/** The real module is spread rather than replaced wholesale: `TimedOutError` is
- *  what the microphone test branches on, and a stand-in module would leave the
- *  `REQUEST_TIMEOUT_MS` this file throws with belonging to a different class
- *  than the one `general.ts` compares against. */
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
   return { ...actual, api: apiMock, levelStream: levelStreamMock };
@@ -767,6 +763,21 @@ describe("renderGeneral — the microphone test", () => {
 
     expect(button.textContent).toBe("Record");
     expect(label.textContent).toBe("Click to test microphone");
+  });
+
+  it("refuses to take a microphone it could not confirm was free", async () => {
+    apiMock.audioStatus.mockRejectedValue(new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/status"));
+    apiMock.audioStart.mockRejectedValue(new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/start"));
+    const { button, label } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(label.textContent).toContain("Could not check whether the microphone is free");
+    });
+
+    expect(apiMock.audioStart).not.toHaveBeenCalled();
+    expect(button.textContent).toBe("Record");
+    expect(levelStreamMock).not.toHaveBeenCalled();
   });
 
   it("still reports an ordinary start failure as a failure", async () => {

@@ -526,6 +526,41 @@ describe("a backend that accepts a request and never answers", () => {
     );
   });
 
+  it("gives a status read the short budget, so a recovery read does not cost a second full one", async () => {
+    const { api, STATUS_TIMEOUT_MS, REQUEST_TIMEOUT_MS } = await import("./api");
+    fetchMock.mockImplementation(deafFetch());
+
+    const pending = api.audioStatus();
+    const settled = vi.fn();
+    pending.then(settled, settled);
+
+    await vi.advanceTimersByTimeAsync(STATUS_TIMEOUT_MS - 1);
+    expect(settled).not.toHaveBeenCalled();
+    expect(STATUS_TIMEOUT_MS).toBeLessThan(REQUEST_TIMEOUT_MS);
+
+    await vi.advanceTimersByTimeAsync(2);
+    await expect(pending).rejects.toThrow(
+      "the backend did not answer /audio/status within 3 seconds",
+    );
+  });
+
+  it("gives the meeting status read the same short budget, since it reads the same in-memory state", async () => {
+    const { api, STATUS_TIMEOUT_MS } = await import("./api");
+    fetchMock.mockImplementation(deafFetch());
+
+    const pending = api.getMeetingStatus();
+    const settled = vi.fn();
+    pending.then(settled, settled);
+
+    await vi.advanceTimersByTimeAsync(STATUS_TIMEOUT_MS - 1);
+    expect(settled).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2);
+    await expect(pending).rejects.toThrow(
+      "the backend did not answer /audio/meeting/status within 3 seconds",
+    );
+  });
+
   it("holds the budget through the body, not only through the headers", async () => {
     const { api, REQUEST_TIMEOUT_MS } = await import("./api");
     fetchMock.mockImplementation(headersThenSilenceFetch());
@@ -740,8 +775,8 @@ describe("a token wait that never ends, because the bridge module never loads", 
       });
   }
 
-  it("bounds the token wait too, not only the part after a token is in hand", async () => {
-    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
+  it("gives the bridge import its own budget, so the shared token promise settles rather than retaining every later caller", async () => {
+    const { api, lastBridgeDiagnosis, REQUEST_TIMEOUT_MS } = await import("./api");
     const { TimedOutError } = await import("./timeout");
     fetchMock.mockImplementation(deafFetch());
 
@@ -749,12 +784,17 @@ describe("a token wait that never ends, because the bridge module never loads", 
     const settled = vi.fn();
     pending.then(settled, settled);
 
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1);
+    expect(lastBridgeDiagnosis()).toEqual({ kind: "bridge-timeout" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-JustSay-Token");
     expect(settled).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(2);
     await expect(pending).rejects.toBeInstanceOf(TimedOutError);
-    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("frees a later caller after a token wait that never ends, rather than pooling them on it", async () => {
