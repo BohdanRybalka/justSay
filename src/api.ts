@@ -47,61 +47,38 @@ const TOKEN_TIMED_OUT = Symbol("token-timed-out");
  *  no new `invoke()` would ever be attempted. */
 export const TOKEN_CALL_REUSE_MS = 60_000;
 
-/** How long an ordinary request may go unanswered before it is abandoned.
+/** How long a re-readable request may go unanswered before it is abandoned.
  *
  *  `fetch` has no timeout of its own, so a request the backend accepts and then
  *  abandons never settles — and neither does anything sequenced behind it. That
- *  is not a slow window, it is a dead one: the widget's intent queue keeps
- *  handing every later press the same pending promise while the microphone
- *  stays open, and the Settings window never reaches the failure screen its own
- *  40 s bound was added to guarantee.
+ *  is not a slow window, it is a dead one: the Settings window never reaches
+ *  the failure screen its own 40 s bound was added to guarantee.
  *
- *  15 s rather than a rounder number: the slowest control-plane call this app
- *  makes is starting a meeting recording, measured in spec 099 at up to six
- *  seconds of device enumeration, so the budget is over twice the worst known
- *  real answer while staying well inside the Settings window's outer bound —
- *  the inner budget fires first and names the endpoint that hung. */
+ *  It applies to reads and to nothing else, for the reason `REREADABLE` states.
+ *  15 s rather than a rounder number: every read this app makes answers from
+ *  memory or from one SQLite query, so the budget is an order of magnitude
+ *  above the work, and it has to stay clear of `getToken()` as well — the timer
+ *  is armed before the token is asked for, and `getToken()` bounds two steps in
+ *  sequence, so a budget at or below `TOKEN_TIMEOUT_MS * 2` would expire with
+ *  no request issued and blame the backend for a bridge fault. */
 export const REQUEST_TIMEOUT_MS = 15_000;
 
-/** The budget for reading a status, deliberately shorter than an ordinary
- *  request's because the work behind it is a different kind of work.
- *  `GET /audio/status` (`backend/app/audio/router.py:119-125`) and
- *  `GET /audio/meeting/status` (`:73-89`) return fields already held in memory
- *  on the recorder object and open no device, so none of the up-to-six-second
- *  enumeration `REQUEST_TIMEOUT_MS` is sized for can happen inside them.
- *
- *  It is the recovery budget, and that is what makes the difference matter. A
- *  start that runs out of its budget reads the status to find out what the
- *  backend did, so the two budgets run back to back against the same
- *  unresponsive backend while the widget still says "Recording" and the intent
- *  queue's drain is parked inside the start. Reusing the request budget made
- *  that window 30 s; this makes it 18 s, and the second half of it now costs
- *  what a transport that answers nothing is worth rather than what a device
- *  enumeration is worth.
- *
- *  It is derived rather than chosen, because a budget shorter than the token
- *  path it now contains can never issue a request at all. `fetchJsonWithin`
- *  arms its timer before `getToken()`, and `getToken()` bounds two steps in
- *  sequence — the bridge import, then the `invoke` — so the ceiling on getting
- *  a token is twice `TOKEN_TIMEOUT_MS`. A flat 3 s here meant every status read
- *  on an uncached token expired with zero fetches issued and blamed the backend
- *  for a bridge fault, which is the opposite of what this budget is for. */
-const TOKEN_ACQUISITION_CEILING_MS = TOKEN_TIMEOUT_MS * 2;
+/** Which of the two classes in ADR 049's second amendment a call belongs to.
+ *  Every entry in `api` states its own, and there is no default, so a new
+ *  endpoint has to be placed rather than inherit a number nobody chose. */
+type Budget = { readonly ms: number } | { readonly ms: null };
 
-export const STATUS_TIMEOUT_MS = TOKEN_ACQUISITION_CEILING_MS + 3_000;
+/** A read the UI can simply ask for again. Abandoning it costs the user
+ *  nothing — no state moved, nothing was deleted, and the caller's remedy is to
+ *  re-issue it — so a budget here only ever converts a hang into a message. */
+const REREADABLE: Budget = { ms: REQUEST_TIMEOUT_MS };
 
-/** The budget for the three calls that do real work rather than answer a question.
- *
- *  Transcription and model loading are legitimately slow: `POST /stt/local/load`
- *  says "may take minutes on first run (model download)", and the dictation path
- *  waits up to 300 s for local readiness before it starts transcribing at all.
- *  Ten minutes doubles that wait, and it is far outside any real transcription —
- *  uploads are capped at 25 MB, which is about thirteen minutes of 16 kHz mono
- *  audio, and the local path's own acceptance criterion is 150 s of audio in
- *  under 10 s. Unbounded was the rejected alternative: "no budget" is the defect
- *  this constant exists to remove, and it wedges the intent queue just as the
- *  short calls did, because `stopAndProcess` awaits the transcription. */
-export const LONG_REQUEST_TIMEOUT_MS = 600_000;
+/** A call whose abandonment leaves something behind: a device opened, rows
+ *  deleted, a setting half-applied, or a backend degradation path preempted.
+ *  Giving up on one of these is only honest once the client can find out what
+ *  the backend did with it, and that reconciliation needs the client-minted
+ *  session id spec 119 adds. Until then no budget, rather than a wrong one. */
+const UNRECONCILED: Budget = { ms: null };
 
 let cachedToken: string | null = null;
 let tokenPromise: Promise<string | null> | null = null;
@@ -280,16 +257,10 @@ function isAbortError(e: unknown): boolean {
  *  budget does. The abandoned work is left running; it settles or it does not,
  *  and either way no caller is still attached to it once it has.
  *
- *  *Once it has* is the load-bearing half, and it is why `TOKEN_TIMEOUT_MS`
- *  bounds the bridge import as well as the `invoke()`. This function detaches
- *  by hanging its own cleanup off `work`, so a `work` that never settles keeps
- *  every abandoned caller's `resolve`/`reject` pair and its `AbortController`
- *  attached to it. `getToken()` hands the same memoised promise to everybody,
- *  so an unbounded step inside it would make that a leak of one retained
- *  continuation per request, growing fastest in the wedge this function exists
- *  for. The bound is on the promise rather than here because a settling `work`
- *  is what releases the references; nothing this wrapper can do reaches them
- *  while it is still pending. */
+ *  *Once it has* is the load-bearing half. This function detaches by hanging
+ *  its own cleanup off `work`, so a `work` that never settles keeps every
+ *  abandoned caller's `resolve`/`reject` pair attached to it, and nothing this
+ *  wrapper can do reaches them while it is still pending. */
 function until<T>(work: Promise<T>, signal: AbortSignal, giveUp: () => Error): Promise<T> {
   if (signal.aborted) return Promise.reject(giveUp());
   return new Promise<T>((resolve, reject) => {
@@ -297,6 +268,16 @@ function until<T>(work: Promise<T>, signal: AbortSignal, giveUp: () => Error): P
     signal.addEventListener("abort", stop, { once: true });
     work.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop));
   });
+}
+
+/** The exchange itself, with no opinion about how long it may take. */
+async function fetchJson<T>(path: string, opts: RequestInit): Promise<T> {
+  const resp = await fetch(`${BACKEND_BASE_URL}${path}`, opts);
+  recordAuthOutcome(path, resp);
+  if (!resp.ok) {
+    throw await responseError(resp);
+  }
+  return (await resp.json()) as T;
 }
 
 /** One whole HTTP exchange under a budget, abandoning it rather than waiting
@@ -327,12 +308,7 @@ async function fetchJsonWithin<T>(
   const timedOut = () => new TimedOutError(budgetMs, path.split("?")[0]);
   try {
     const opts = await until(buildRequest(), controller.signal, timedOut);
-    const resp = await fetch(`${BACKEND_BASE_URL}${path}`, { ...opts, signal: controller.signal });
-    recordAuthOutcome(path, resp);
-    if (!resp.ok) {
-      throw await responseError(resp);
-    }
-    return (await resp.json()) as T;
+    return await fetchJson<T>(path, { ...opts, signal: controller.signal });
   } catch (e) {
     if (e instanceof TimedOutError) {
       throw e;
@@ -346,31 +322,41 @@ async function fetchJsonWithin<T>(
   }
 }
 
+/** The same exchange with no budget and therefore no `AbortController`: an
+ *  `UNRECONCILED` call is waited out, because abandoning it would leave the UI
+ *  asserting an outcome nobody established. */
+async function fetchJsonUntilAnswered<T>(
+  path: string,
+  buildRequest: () => Promise<RequestInit>,
+): Promise<T> {
+  return fetchJson<T>(path, await buildRequest());
+}
+
 /** `budget` is an object rather than a fourth positional argument because the
  *  third is `body?: unknown`: a bare number in that slot type-checks, ships the
- *  budget as the request body, and silently keeps the default budget. */
+ *  budget as the request body, and silently keeps the default budget. It has no
+ *  default at all, so every endpoint below names the class it is in. */
 async function request<T>(
   method: string,
   path: string,
-  body?: unknown,
-  budget: { ms: number } = { ms: REQUEST_TIMEOUT_MS },
+  body: unknown,
+  budget: Budget,
 ): Promise<T> {
-  return fetchJsonWithin<T>(
-    path,
-    async () => {
-      const token = await getToken();
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (token) {
-        headers["X-JustSay-Token"] = token;
-      }
-      const opts: RequestInit = { method, headers };
-      if (body) {
-        opts.body = JSON.stringify(body);
-      }
-      return opts;
-    },
-    budget.ms,
-  );
+  const buildRequest = async () => {
+    const token = await getToken();
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) {
+      headers["X-JustSay-Token"] = token;
+    }
+    const opts: RequestInit = { method, headers };
+    if (body) {
+      opts.body = JSON.stringify(body);
+    }
+    return opts;
+  };
+  return budget.ms === null
+    ? fetchJsonUntilAnswered<T>(path, buildRequest)
+    : fetchJsonWithin<T>(path, buildRequest, budget.ms);
 }
 
 
@@ -551,42 +537,106 @@ export interface TopWordsResponse {
 }
 
 
+/**
+ * Every endpoint, each stating which of the two classes of ADR 049's second
+ * amendment it is in.
+ *
+ * `REREADABLE` is a read: nothing moved, so abandoning it costs the user a
+ * second press. `UNRECONCILED` is everything else — it opened a device, wrote
+ * or deleted something, or has a backend degradation path a client abort would
+ * preempt — and until spec 119 lets the client ask what became of an abandoned
+ * request, waiting is the only answer that does not invent one.
+ */
 export const api = {
-  health: () => request<HealthResponse>("GET", "/health"),
+  health: () => request<HealthResponse>("GET", "/health", undefined, REREADABLE),
 
-  audioStart: () => request<RecordingStatus>("POST", "/audio/start"),
-
-  audioStop: () => request<{ filename: string; duration_seconds: number }>("POST", "/audio/stop"),
-
-  audioStatus: () => request<RecordingStatus>("GET", "/audio/status", undefined, { ms: STATUS_TIMEOUT_MS }),
-
-  startMeetingRecording: () => request<MeetingStatus>("POST", "/audio/meeting/start"),
-
-  /** The long budget, not the control-plane one: this call writes the whole WAV
-   *  before it answers. `_assemble_and_write`'s docstring puts a 45-minute call
-   *  at "tens of millions of samples and ~86 MB to disk", and
-   *  `meeting_max_raw_bytes` caps the raw capture at roughly eight times that.
-   *  Abandoning it at 15 s does not lose the file — an abandoned stop still
-   *  writes it — but it tells the user the call is still recording when it is
-   *  not, and leaves the indicator up on nothing. */
-  stopMeetingRecording: () =>
-    request<MeetingStopResponse>("POST", "/audio/meeting/stop", undefined, { ms: LONG_REQUEST_TIMEOUT_MS }),
+  audioStatus: () => request<RecordingStatus>("GET", "/audio/status", undefined, REREADABLE),
 
   getMeetingStatus: () =>
-    request<MeetingStatus>("GET", "/audio/meeting/status", undefined, { ms: STATUS_TIMEOUT_MS }),
+    request<MeetingStatus>("GET", "/audio/meeting/status", undefined, REREADABLE),
 
+  resources: () => request<ResourceInfo>("GET", "/resources", undefined, REREADABLE),
+
+  sttLocalStatus: () => request<LocalSttStatus>("GET", "/stt/local/status", undefined, REREADABLE),
+
+  getSettings: () => request<UserSettings>("GET", "/settings", undefined, REREADABLE),
+
+  getStorageInfo: () => request<StorageInfo>("GET", "/settings/storage", undefined, REREADABLE),
+
+  cloudKeyStatus: () =>
+    request<CloudKeyStatus>("GET", "/settings/cloud-status", undefined, REREADABLE),
+
+  getHistory: (limit = 50, offset = 0) =>
+    request<HistoryListResponse>(
+      "GET",
+      `/history?limit=${limit}&offset=${offset}`,
+      undefined,
+      REREADABLE,
+    ),
+
+  historyStats: () => request<HistoryStats>("GET", "/history/stats", undefined, REREADABLE),
+
+  wordsTop: (lang: "all" | "uk" | "en" = "all", limit = 50) =>
+    request<TopWordsResponse>("GET", `/words/top?lang=${lang}&limit=${limit}`, undefined, REREADABLE),
+
+  /** A read, and still `UNRECONCILED`: `_semantic_lane` falls back to full-text
+   *  search when the embedding provider is slow (ADR 010), and a slow provider
+   *  does not raise, so a client-side budget fires first and throws away the
+   *  local half that had already answered. A slow search would become no
+   *  search — the degradation path the backend was built with, preempted. */
+  searchHistory: (q: string, limit = 30) =>
+    request<HistoryListResponse>(
+      "GET",
+      `/history/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+      undefined,
+      UNRECONCILED,
+    ),
+
+  /** `POST /audio/start` calls `await recorder.start()` before it answers, so a
+   *  request abandoned mid-flight leaves the microphone open with nothing in
+   *  this window able to name it, let alone close it. */
+  audioStart: () => request<RecordingStatus>("POST", "/audio/start", undefined, UNRECONCILED),
+
+  audioStop: () =>
+    request<{ filename: string; duration_seconds: number }>(
+      "POST",
+      "/audio/stop",
+      undefined,
+      UNRECONCILED,
+    ),
+
+  /** Opens both devices before answering, and spec 099 measured up to six
+   *  seconds of device enumeration for this one call — so a control-plane
+   *  budget is reached on a healthy start on a slow machine, and the capture
+   *  it abandons is running. */
+  startMeetingRecording: () =>
+    request<MeetingStatus>("POST", "/audio/meeting/start", undefined, UNRECONCILED),
+
+  /** Writes the whole WAV before it answers — `_assemble_and_write` puts a
+   *  45-minute call at "~86 MB to disk" and `meeting_max_raw_bytes` allows
+   *  roughly eight times that. */
+  stopMeetingRecording: () =>
+    request<MeetingStopResponse>("POST", "/audio/meeting/stop", undefined, UNRECONCILED),
+
+  /** Stops the recorder as the handler's first act and can write the clipboard
+   *  as its last, so an abandoned dictation leaves both the microphone and the
+   *  clipboard in a state only the backend knows. */
   dictate: (language = "uk") =>
     request<DictateResponse>(
       "POST",
       `/pipeline/dictate?language=${language}`,
       undefined,
-      { ms: LONG_REQUEST_TIMEOUT_MS },
+      UNRECONCILED,
     ),
 
   /** Upload an audio file to the pipeline. Accepts an ArrayBuffer of file bytes.
    *  `language` defaults to `"auto"` — every STT provider maps that sentinel
    *  onto its own native auto-detect mechanism (see `STTProvider.transcribe`'s
-   *  docstring in the backend for the per-provider translation). */
+   *  docstring in the backend for the per-provider translation).
+   *
+   *  `UNRECONCILED` for the same reason as `dictate`, plus its own: the upload
+   *  is capped at 25 MB, about thirteen minutes of 16 kHz mono audio, and it
+   *  writes the clipboard on success. */
   processFile: async (
     fileBytes: ArrayBuffer,
     filename: string,
@@ -595,9 +645,8 @@ export const api = {
     const form = new FormData();
     const blob = new Blob([fileBytes], { type: "application/octet-stream" });
     form.append("file", blob, filename);
-    const path = `/pipeline/process-file?language=${language}`;
-    return fetchJsonWithin<DictateResponse>(
-      path,
+    return fetchJsonUntilAnswered<DictateResponse>(
+      `/pipeline/process-file?language=${language}`,
       async () => {
         const token = await getToken();
         const headers: Record<string, string> = {};
@@ -606,58 +655,45 @@ export const api = {
         }
         return { method: "POST", body: form, headers };
       },
-      LONG_REQUEST_TIMEOUT_MS,
     );
   },
 
-  setSttMode: (mode: "cloud" | "local") =>
-    request("PUT", "/stt/mode", { mode }),
+  setSttMode: (mode: "cloud" | "local") => request("PUT", "/stt/mode", { mode }, UNRECONCILED),
 
-  resources: () => request<ResourceInfo>("GET", "/resources"),
-
-  sttLocalStatus: () => request<LocalSttStatus>("GET", "/stt/local/status"),
+  /** "May take minutes on first run (model download)", and it leaves a loaded
+   *  provider behind whether or not this window waited for the answer. */
   sttLocalLoad: () =>
     request<{ loaded: boolean; model?: string }>(
       "POST",
       "/stt/local/load",
       undefined,
-      { ms: LONG_REQUEST_TIMEOUT_MS },
+      UNRECONCILED,
     ),
-  sttLocalUnload: () => request<{ unloaded: boolean }>("POST", "/stt/local/unload"),
+
+  sttLocalUnload: () =>
+    request<{ unloaded: boolean }>("POST", "/stt/local/unload", undefined, UNRECONCILED),
+
   /** Retry affordance for the Local STT status indicator's error state —
    *  fire-and-forget on the backend, returns before the model finishes loading. */
-  sttLocalPrewarm: () => request<{ started: boolean }>("POST", "/stt/local/prewarm"),
-
-  getSettings: () => request<UserSettings>("GET", "/settings"),
+  sttLocalPrewarm: () =>
+    request<{ started: boolean }>("POST", "/stt/local/prewarm", undefined, UNRECONCILED),
 
   updateSettings: (updates: Partial<UserSettings>) =>
-    request<SettingsUpdateResponse>("PUT", "/settings", updates),
+    request<SettingsUpdateResponse>("PUT", "/settings", updates, UNRECONCILED),
 
-  getStorageInfo: () => request<StorageInfo>("GET", "/settings/storage"),
-
-  cleanupTemp: () => request<CleanupResult>("POST", "/settings/cleanup"),
-
-  cloudKeyStatus: () => request<CloudKeyStatus>("GET", "/settings/cloud-status"),
-
-  getHistory: (limit = 50, offset = 0) =>
-    request<HistoryListResponse>("GET", `/history?limit=${limit}&offset=${offset}`),
-
-  historyStats: () => request<HistoryStats>("GET", "/history/stats"),
+  /** Unlinks every scratch file inline and is bounded by nothing on the
+   *  backend, so a budget would report a failure for a deletion that completes
+   *  — and the natural retry is a second destructive call issued against a
+   *  backend still executing the first. */
+  cleanupTemp: () => request<CleanupResult>("POST", "/settings/cleanup", undefined, UNRECONCILED),
 
   deleteHistoryEntry: (id: string) =>
-    request<{ deleted: boolean }>("DELETE", `/history/${id}`),
+    request<{ deleted: boolean }>("DELETE", `/history/${id}`, undefined, UNRECONCILED),
 
-  clearHistory: () =>
-    request<{ deleted: number }>("DELETE", "/history"),
-
-  searchHistory: (q: string, limit = 30) =>
-    request<HistoryListResponse>(
-      "GET",
-      `/history/search?q=${encodeURIComponent(q)}&limit=${limit}`,
-    ),
-
-  wordsTop: (lang: "all" | "uk" | "en" = "all", limit = 50) =>
-    request<TopWordsResponse>("GET", `/words/top?lang=${lang}&limit=${limit}`),
+  /** Deletes the transcripts and their `entry_embeddings` vector rows, with no
+   *  backend bound on either — the same false report about deleted data that
+   *  `cleanupTemp` would give. */
+  clearHistory: () => request<{ deleted: number }>("DELETE", "/history", undefined, UNRECONCILED),
 };
 
 
@@ -675,8 +711,17 @@ const LEVEL_STREAM_PATH = "/audio/level-stream";
  *  budget on it would cut the meter off mid-recording. The handshake is a
  *  different thing: it is opened right after `POST /audio/start`, so it can land
  *  on a backend that has stopped answering, and without a bound the meter sits
- *  flat forever with nothing on screen saying why. The timer is cleared once the
- *  reader has been obtained, which is the moment the stream begins.
+ *  flat forever with nothing on screen saying why.
+ *
+ *  The timer is cleared once the first chunk has been read, not once the reader
+ *  has been obtained. `getReader()` is available the instant the response
+ *  *headers* arrive, so clearing there bounds exactly what `fetch` already
+ *  settles on, and a backend that writes `200 text/event-stream` and then stops
+ *  sending sits in the same flat-meter silence this budget exists to break —
+ *  the headers-only bound `fetchJsonWithin` refuses one layer down.
+ *
+ *  A handshake is `REREADABLE` in ADR 049's sense: abandoning it moves nothing,
+ *  and the remedy is to open the stream again.
  *
  *  `timedOut` is what lets the terminal `catch` tell our own abort from the
  *  caller's: `stopLevelStream()` aborts the same controller on every normal stop
@@ -717,12 +762,12 @@ export function levelStream(
         return;
       }
       const reader = resp.body.getReader();
-      clearTimeout(handshakeTimer);
       const decoder = new TextDecoder();
       let buffer = "";
 
       while (true) {
         const { done, value } = await reader.read();
+        clearTimeout(handshakeTimer);
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });

@@ -97,8 +97,11 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
   };
 }
 
+const consoleErrorMock = vi.fn();
+
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.spyOn(console, "error").mockImplementation(consoleErrorMock);
   listenMock.mockImplementation(async () => unlistenMock);
   apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
   levelStreamMock.mockImplementation(() => ({ abort: vi.fn() }));
@@ -731,36 +734,41 @@ describe("renderGeneral — the microphone test", () => {
     };
   }
 
-  it("does not claim the microphone is closed when the stop runs out of its budget", async () => {
+  it.each([
+    ["an unanswered request", new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/stop")],
+    ["a backend error", new Error("HTTP 500")],
+  ])("does not claim the microphone is closed when the stop fails with %s", async (_name, failure) => {
     apiMock.audioStatus.mockResolvedValue({ is_recording: false, duration_seconds: 0, level_db: -60 });
     apiMock.audioStart.mockResolvedValue({ is_recording: true, duration_seconds: 0, level_db: -60 });
-    apiMock.audioStop.mockRejectedValue(new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/stop"));
+    apiMock.audioStop.mockRejectedValue(failure);
     const abort = vi.fn();
     levelStreamMock.mockImplementation(() => ({ abort }));
-    const { button, label } = renderMicrophoneTest();
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+    const button = container.querySelector<HTMLButtonElement>("#btn-test-mic")!;
+    const label = container.querySelector<HTMLElement>("#rec-label")!;
+    const fill = container.querySelector<HTMLElement>("#level-fill")!;
 
     button.click();
     await vi.waitFor(() => {
       expect(button.textContent).toBe("Stop");
     });
+    fill.style.width = "72%";
 
     button.click();
     await vi.waitFor(() => {
       expect(apiMock.audioStop).toHaveBeenCalledOnce();
     });
 
-    expect(label.textContent).toContain("the microphone may still be open");
-    expect(label.textContent).toBe(
-      "The backend did not answer — the microphone may still be open",
-    );
+    expect(label.textContent).toBe("Stopping the microphone failed — it may still be open");
     expect(button.textContent).toBe("Stop");
     expect(abort).toHaveBeenCalled();
+    expect(fill.style.width).toBe("0%");
+    expect(consoleErrorMock).toHaveBeenCalledWith(failure);
 
     const onError = levelStreamMock.mock.calls[0][2] as (error: string) => void;
     onError("the backend did not answer /audio/level-stream within 15 seconds");
-    expect(label.textContent).toBe(
-      "The backend did not answer — the microphone may still be open",
-    );
+    expect(label.textContent).toBe("Stopping the microphone failed — it may still be open");
   });
 
   it("still reports an ordinary start failure as a failure", async () => {

@@ -145,8 +145,9 @@ async function startRecording() {
   try {
     await api.audioStart();
   } catch (e) {
-    setState("error", "Start failed");
-    notifyError("Couldn't start recording — try again.");
+    const { label, toast } = dictationErrorLabel(e);
+    setState("error", label);
+    notifyError(toast);
     console.error("Start recording failed:", e);
   }
 }
@@ -487,12 +488,23 @@ async function listenForSettingsChanges() {
 }
 
 
+/** One probe at a time. `setInterval` does not await this function, so against
+ *  a backend that accepts and abandons, a probe outlives the 5 s interval and
+ *  several are in flight at once — each then writing `connectionState` from
+ *  whatever it read when it started, in fetch-completion order rather than
+ *  start order, which duplicates or swallows the unreachable toast. */
+let connectionCheckInFlight = false;
+
 async function checkConnection() {
+  if (connectionCheckInFlight) return;
+  connectionCheckInFlight = true;
   let healthOk = true;
   try {
     await api.health();
   } catch {
     healthOk = false;
+  } finally {
+    connectionCheckInFlight = false;
   }
   const result = nextConnectionCheckState(connectionState, healthOk);
   connectionState = { offline: result.offline, firstCheckDone: result.firstCheckDone };

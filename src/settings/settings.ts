@@ -42,9 +42,13 @@ const tabs: Record<string, (container: HTMLElement, settings: UserSettings) => (
   words: (container) => renderWords(container),
 };
 
-/** `bridge-missing` / `invoke-timeout` / `invoke-failed: <detail>` — the token
- *  verbatim, because these strings are what a remote user reads back to us off
- *  a screenshot and each one points at a different layer (ADR 028). */
+/** `bridge-missing` / `bridge-timeout` / `invoke-timeout` / `invoke-failed:
+ *  <detail>` — the token verbatim, because these strings are what a remote user
+ *  reads back to us off a screenshot and each one points at a different layer
+ *  (ADR 028). All four `BridgeDiagnosis` kinds other than `ok` are listed; a
+ *  list that silently omits one is worse than no list, because the omitted
+ *  string then arrives off a screenshot looking like something nobody
+ *  recognises. */
 function bridgeDiagnosisText(diagnosis: BridgeDiagnosis): string {
   return diagnosis.kind === "invoke-failed"
     ? `invoke-failed: ${diagnosis.detail}`
@@ -141,8 +145,15 @@ function renderSettingsUnavailable(container: HTMLElement) {
  *
  * The race is kept for what it still covers: this function grows more awaits
  * over time, and it is the only thing that bounds a step nobody remembered to
- * give a budget of its own. Its 40 s sits above the ~18 s worst case of the two
- * parallel bounded calls, so it fires only on something new.
+ * give a budget of its own. Its 40 s sits above the 15 s worst case of the two
+ * bounded reads it wraps, which run in parallel under `Promise.all` and so cost
+ * one budget between them, not two — it fires only on something new.
+ *
+ * The number a user waits is larger than either, and it is worth stating
+ * because it is what this screen is about: `checkBackend()` carries its own
+ * `REQUEST_TIMEOUT_MS` and is awaited before the race rather than inside it, so
+ * a backend that accepts and never answers spends 15 s there and 15 s here
+ * before any failure text appears.
  */
 async function loadSettingsIntoUi(): Promise<void> {
   if (settingsLoadInFlight) return;

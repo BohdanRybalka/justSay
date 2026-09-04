@@ -15,6 +15,8 @@ function removeBridge() {
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
 }
 
+type Api = typeof import("./api").api;
+
 function okJson(body: unknown) {
   return { ok: true, status: 200, json: async () => body };
 }
@@ -431,7 +433,7 @@ describe("a backend that accepts a request and never answers", () => {
     const { api, REQUEST_TIMEOUT_MS } = await import("./api");
     fetchMock.mockImplementation(deafFetch());
 
-    const pending = api.audioStart();
+    const pending = api.audioStatus();
     pending.catch(() => {});
     await vi.advanceTimersByTimeAsync(0);
     const signal = (fetchMock.mock.calls[0][1] as RequestInit).signal!;
@@ -441,124 +443,64 @@ describe("a backend that accepts a request and never answers", () => {
     expect(signal.aborted).toBe(true);
   });
 
-  it("keeps the query string out of the message, since it carries what was typed", async () => {
+  it("keeps the query string out of the message, since it names what was asked for", async () => {
     const { api, REQUEST_TIMEOUT_MS } = await import("./api");
     fetchMock.mockImplementation(deafFetch());
 
-    const pending = api.searchHistory("my private note");
+    const pending = api.getHistory(50, 10);
     pending.catch(() => {});
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
 
-    await expect(pending).rejects.toThrow(
-      "the backend did not answer /history/search within 15 seconds",
-    );
+    await expect(pending).rejects.toThrow("the backend did not answer /history within 15 seconds");
     const message = await pending.then(
       () => "resolved",
       (e: Error) => e.message,
     );
-    expect(message).not.toContain(encodeURIComponent("my private note"));
-    expect(message).not.toContain("?q=");
+    expect(message).not.toContain("?limit=");
+    expect(message).not.toContain("offset");
   });
 
-  it("leaks not even a one-word query, which percent-encoding passes through verbatim", async () => {
+  it.each([
+    ["audioStart", (a: Api) => a.audioStart()],
+    ["audioStop", (a: Api) => a.audioStop()],
+    ["startMeetingRecording", (a: Api) => a.startMeetingRecording()],
+    ["stopMeetingRecording", (a: Api) => a.stopMeetingRecording()],
+    ["dictate", (a: Api) => a.dictate("uk")],
+    ["processFile", (a: Api) => a.processFile(new ArrayBuffer(8), "call.wav")],
+    ["updateSettings", (a: Api) => a.updateSettings({ language: "uk" })],
+    ["sttLocalLoad", (a: Api) => a.sttLocalLoad()],
+    ["cleanupTemp", (a: Api) => a.cleanupTemp()],
+    ["clearHistory", (a: Api) => a.clearHistory()],
+    ["searchHistory", (a: Api) => a.searchHistory("note")],
+  ])("waits %s out rather than reporting an outcome nobody established", async (_name, call) => {
+    const { api } = await import("./api");
+    fetchMock.mockImplementation(deafFetch());
+
+    const pending = call(api);
+    const settled = vi.fn();
+    pending.then(settled, settled);
+
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(settled).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((fetchMock.mock.calls[0][1] as RequestInit).signal ?? null).toBeNull();
+  });
+
+  it("gives a status read the ordinary read budget, since asking again costs nothing", async () => {
     const { api, REQUEST_TIMEOUT_MS } = await import("./api");
-    fetchMock.mockImplementation(deafFetch());
-
-    const pending = api.searchHistory("secret");
-    pending.catch(() => {});
-    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
-
-    const message = await pending.then(
-      () => "resolved",
-      (e: Error) => e.message,
-    );
-    expect(encodeURIComponent("secret")).toBe("secret");
-    expect(message).not.toContain("secret");
-    expect(message).not.toContain("?q=");
-  });
-
-  it("gives transcription the long budget rather than the short one", async () => {
-    const { api, REQUEST_TIMEOUT_MS, LONG_REQUEST_TIMEOUT_MS } = await import("./api");
-    fetchMock.mockImplementation(deafFetch());
-
-    const pending = api.dictate("uk");
-    const settled = vi.fn();
-    pending.then(settled, settled);
-
-    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS * 2);
-    expect(settled).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(LONG_REQUEST_TIMEOUT_MS);
-    await expect(pending).rejects.toThrow("within 600 seconds");
-  });
-
-  it("gives a file upload the long budget, since a 25 MB upload is minutes of audio", async () => {
-    const { api, LONG_REQUEST_TIMEOUT_MS } = await import("./api");
-    fetchMock.mockImplementation(deafFetch());
-
-    const pending = api.processFile(new ArrayBuffer(8), "call.wav");
-    const settled = vi.fn();
-    pending.then(settled, settled);
-
-    await vi.advanceTimersByTimeAsync(300_000);
-    expect(settled).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(LONG_REQUEST_TIMEOUT_MS);
-    await expect(pending).rejects.toThrow(
-      "the backend did not answer /pipeline/process-file within 600 seconds",
-    );
-  });
-
-  it("gives the local model load the long budget, since a first run downloads it", async () => {
-    const { api, LONG_REQUEST_TIMEOUT_MS } = await import("./api");
-    fetchMock.mockImplementation(deafFetch());
-
-    const pending = api.sttLocalLoad();
-    const settled = vi.fn();
-    pending.then(settled, settled);
-
-    await vi.advanceTimersByTimeAsync(300_000);
-    expect(settled).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(LONG_REQUEST_TIMEOUT_MS);
-    await expect(pending).rejects.toThrow(
-      "the backend did not answer /stt/local/load within 600 seconds",
-    );
-  });
-
-  it("gives a status read the short budget, so a recovery read does not cost a second full one", async () => {
-    const { api, STATUS_TIMEOUT_MS, REQUEST_TIMEOUT_MS } = await import("./api");
     fetchMock.mockImplementation(deafFetch());
 
     const pending = api.audioStatus();
     const settled = vi.fn();
     pending.then(settled, settled);
 
-    await vi.advanceTimersByTimeAsync(STATUS_TIMEOUT_MS - 1);
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1);
     expect(settled).not.toHaveBeenCalled();
-    expect(STATUS_TIMEOUT_MS).toBeLessThan(REQUEST_TIMEOUT_MS);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(2);
     await expect(pending).rejects.toThrow(
-      `the backend did not answer /audio/status within ${STATUS_TIMEOUT_MS / 1000} seconds`,
-    );
-  });
-
-  it("gives the meeting status read the same short budget, since it reads the same in-memory state", async () => {
-    const { api, STATUS_TIMEOUT_MS } = await import("./api");
-    fetchMock.mockImplementation(deafFetch());
-
-    const pending = api.getMeetingStatus();
-    const settled = vi.fn();
-    pending.then(settled, settled);
-
-    await vi.advanceTimersByTimeAsync(STATUS_TIMEOUT_MS - 1);
-    expect(settled).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(2);
-    await expect(pending).rejects.toThrow(
-      `the backend did not answer /audio/meeting/status within ${STATUS_TIMEOUT_MS / 1000} seconds`,
+      "the backend did not answer /audio/status within 15 seconds",
     );
   });
 
@@ -582,7 +524,7 @@ describe("a backend that accepts a request and never answers", () => {
     const { TimedOutError } = await import("./timeout");
     fetchMock.mockImplementation(deafFetch());
 
-    const pending = api.audioStart();
+    const pending = api.audioStatus();
     pending.catch(() => {});
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
 
@@ -592,7 +534,7 @@ describe("a backend that accepts a request and never answers", () => {
     );
     expect(error).toBeInstanceOf(TimedOutError);
     expect((error as InstanceType<typeof TimedOutError>).budgetMs).toBe(REQUEST_TIMEOUT_MS);
-    expect((error as InstanceType<typeof TimedOutError>).subject).toBe("/audio/start");
+    expect((error as InstanceType<typeof TimedOutError>).subject).toBe("/audio/status");
   });
 
   it("carries the same identity when it is the body that stops part-way", async () => {
@@ -612,45 +554,6 @@ describe("a backend that accepts a request and never answers", () => {
     expect((error as InstanceType<typeof TimedOutError>).subject).toBe("/audio/status");
   });
 
-  it("lets the widget's intent queue recover instead of wedging on one dead request", async () => {
-    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
-    const { createRecordingIntentQueue } = await import("./widget/recording-intent");
-    fetchMock.mockImplementation(deafFetch());
-
-    let recording = false;
-    const errors: unknown[] = [];
-    const queue = createRecordingIntentQueue({
-      isRecording: () => recording,
-      isBusy: () => false,
-      startRecording: async () => {
-        await api.audioStart();
-        recording = true;
-      },
-      stopRecording: async () => {
-        await api.dictate("uk");
-        recording = false;
-      },
-      reportError: (e) => errors.push(e),
-    });
-
-    const firstPress = queue.request("start");
-    firstPress.catch(() => {});
-    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
-    await firstPress;
-
-    expect(errors).toHaveLength(1);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-
-    const secondPress = queue.request("start");
-    secondPress.catch(() => {});
-    await vi.advanceTimersByTimeAsync(0);
-    expect(secondPress).not.toBe(firstPress);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-
-    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
-    await secondPress;
-    expect(errors).toHaveLength(2);
-  });
 });
 
 describe("a non-2xx response whose error body never arrives", () => {
@@ -676,7 +579,7 @@ describe("a non-2xx response whose error body never arrives", () => {
       } as unknown as Response),
     );
 
-    const pending = api.audioStart();
+    const pending = api.getSettings();
     pending.catch(() => {});
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
 
@@ -719,6 +622,40 @@ describe("the level stream's handshake, which is bounded while the stream is not
             reject(new DOMException("The operation was aborted.", "AbortError")),
           );
         }),
+    );
+    const onError = vi.fn();
+
+    levelStream(
+      () => {},
+      () => {},
+      onError,
+    );
+
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1);
+    expect(onError).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError.mock.calls[0][0]).toContain("/audio/level-stream");
+  });
+
+  it("reports an error when the headers arrive and the first chunk never does", async () => {
+    const { levelStream, REQUEST_TIMEOUT_MS } = await import("./api");
+    fetchMock.mockImplementation((_url: string, opts: RequestInit) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: () =>
+              new Promise((_, reject) => {
+                opts.signal?.addEventListener("abort", () =>
+                  reject(new DOMException("The operation was aborted.", "AbortError")),
+                );
+              }),
+          }),
+        },
+      } as unknown as Response),
     );
     const onError = vi.fn();
 
@@ -853,12 +790,12 @@ describe("a token wait that never ends, because the bridge module never loads", 
     const { TimedOutError } = await import("./timeout");
     fetchMock.mockImplementation(deafFetch());
 
-    const first = api.audioStart();
+    const first = api.audioStatus();
     first.catch(() => {});
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
     await expect(first).rejects.toBeInstanceOf(TimedOutError);
 
-    const second = api.audioStart();
+    const second = api.audioStatus();
     second.catch(() => {});
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
     await expect(second).rejects.toBeInstanceOf(TimedOutError);

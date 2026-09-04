@@ -16,17 +16,19 @@ import { saveSettings, getCloudKeyStatus, cachePersistedShortcut } from "../sett
 import { escapeHtml, meetingDisclosureHtml } from "../html";
 import { renderKeys } from "./keys";
 import { notifyError } from "../../notify";
-import { TimedOutError } from "../../timeout";
 
 const UPDATES_CHECK_LABEL = "Check for updates";
 
-/** A stop that ran out of its budget states what is known and promises
- *  nothing: the request was accepted and never answered, so whether the device
- *  was released is exactly what this window cannot find out. The button is left
- *  on `Stop` so the user can try again, and this label must not tell them that
- *  pressing it closes anything — nothing here can establish that it did. */
+/** A stop that failed states what is known and promises nothing: whether the
+ *  device was released is exactly what this window cannot find out. That is
+ *  true of every failed stop and not only of a timed-out one — `recorder.stop()`
+ *  is reached before the handler can raise, so a 500, a refused connection and
+ *  an unanswered request all leave the device in the same unknown state. The
+ *  button is left on `Stop` so the user can try again, and this label must not
+ *  tell them that pressing it closes anything — nothing here can establish that
+ *  it did. */
 const MICROPHONE_UNCONFIRMED_LABEL =
-  "The backend did not answer — the microphone may still be open";
+  "Stopping the microphone failed — it may still be open";
 
 /** The subset of the updater plugin's `Update` this module actually uses. */
 interface PendingUpdate {
@@ -218,12 +220,11 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
       try {
         await api.audioStop();
       } catch (e) {
-        if (e instanceof TimedOutError) {
-          stopLevelStream();
-          recLabel.textContent = MICROPHONE_UNCONFIRMED_LABEL;
-          console.error(e);
-          return;
-        }
+        stopLevelStream();
+        levelFill.style.width = "0%";
+        recLabel.textContent = MICROPHONE_UNCONFIRMED_LABEL;
+        console.error(e);
+        return;
       }
       isRecording = false;
       btnTest.textContent = "Record";

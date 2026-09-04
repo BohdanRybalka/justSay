@@ -100,4 +100,41 @@ describe("the widget's own timers", () => {
 
     expect(apiMock.health.mock.calls.length - before).toBe(3);
   });
+
+  it("never runs two health probes at once, so the connection state is written in order", async () => {
+    await loadWidget();
+    let release = () => {};
+    apiMock.health.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ status: "ok", version: "0", stt_mode: "cloud", llm_mode: "cloud" });
+        }),
+    );
+    const before = apiMock.health.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS * 4);
+
+    expect(apiMock.health.mock.calls.length - before).toBe(1);
+    release();
+  });
+});
+
+describe("a start the backend refuses", () => {
+  it("names the layer that refused it rather than telling the user to try again", async () => {
+    const { ApiAuthError } = await import("../api");
+    await loadWidget();
+    apiMock.audioStart.mockRejectedValue(
+      new ApiAuthError("Missing or invalid API token", { kind: "invoke-timeout" }),
+    );
+
+    document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => {
+      expect(apiMock.audioStart).toHaveBeenCalledOnce();
+    });
+
+    expect(document.getElementById("widget-text")!.textContent).toBe("Auth failed");
+    expect(notifyErrorMock).toHaveBeenCalledWith(
+      "JustSay could not authenticate to its own backend — restart the app.",
+    );
+  });
 });

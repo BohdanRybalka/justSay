@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ApiRequestError, REQUEST_TIMEOUT_MS } from "../api";
-import { TimedOutError } from "../timeout";
+import { ApiRequestError } from "../api";
 import {
   DISCLOSURE_REQUIRED_MESSAGE,
   type MeetingToggleActions,
@@ -219,12 +218,12 @@ describe("the meeting recording toggle", () => {
     expect(deps.openDisclosure).not.toHaveBeenCalled();
   });
 
-  it("leaves the indicator up and the toggle usable when a stop times out, so a second press stops again", async () => {
+  it("leaves the indicator up and the toggle usable when a stop fails, so a second press stops again", async () => {
     let recording = true;
     const deps = actions({
       isRecording: () => recording,
       stopRecording: vi.fn(async () => {
-        throw new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/meeting/stop");
+        throw new Error("Failed to fetch");
       }),
     });
 
@@ -232,7 +231,7 @@ describe("the meeting recording toggle", () => {
 
     expect(deps.hideIndicator).not.toHaveBeenCalled();
     expect(deps.reportError.mock.calls[0][0]).toContain("still being recorded");
-    expect(deps.reportError.mock.calls[0][0]).toContain("did not answer /audio/meeting/stop");
+    expect(deps.reportError.mock.calls[0][0]).toContain("Failed to fetch");
 
     expect(recording).toBe(true);
     await runMeetingToggle(deps);
