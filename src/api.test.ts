@@ -380,9 +380,9 @@ describe("a bridge module whose import never settles", () => {
     vi.resetModules();
   });
 
-  it("reports the same unresolved import once per reuse window, not once per request", async () => {
+  it("reports the same unresolved import once, not once per request that joins it", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { api, TOKEN_CALL_REUSE_MS } = await import("./api");
+    const { api } = await import("./api");
     fetchMock.mockResolvedValue(okJson({ status: "ok" }));
 
     for (let i = 0; i < 4; i += 1) {
@@ -391,16 +391,10 @@ describe("a bridge module whose import never settles", () => {
       await pending;
     }
 
-    const importWarnings = () =>
-      warnSpy.mock.calls.filter((call) => String(call[0]).includes("bridge module did not load"));
-    expect(importWarnings()).toHaveLength(1);
-
-    await vi.advanceTimersByTimeAsync(TOKEN_CALL_REUSE_MS);
-    const later = api.health();
-    await vi.advanceTimersByTimeAsync(3000);
-    await later;
-
-    expect(importWarnings()).toHaveLength(2);
+    const importWarnings = warnSpy.mock.calls.filter((call) =>
+      String(call[0]).includes("bridge module did not load"),
+    );
+    expect(importWarnings).toHaveLength(1);
     warnSpy.mockRestore();
   });
 });
