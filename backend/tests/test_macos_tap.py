@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import threading
 import time
 import wave
 from pathlib import Path
@@ -57,11 +58,38 @@ def header_line(
     )
 
 
+class _GatedStdout(io.BytesIO):
+    """Stdout that holds the audio body back until the gate is opened.
+
+    The header still arrives immediately, which is what `MacOSTapSource.start`
+    blocks on, but the blocks arrive only when the test says so. A real
+    helper's audio arrives over the length of a call; an ungated BytesIO
+    hands every block a near-identical arrival, which is not what a call
+    looks like on the timeline.
+
+    The wait's result is asserted rather than discarded: a gate that is never
+    opened has to fail the test that forgot to open it, not delay every read
+    by the timeout and then hand the body over anyway.
+    """
+
+    def __init__(self, data: bytes):
+        super().__init__(data)
+        self.gate = threading.Event()
+
+    def read(self, size: int = -1) -> bytes:
+        assert self.gate.wait(timeout=5.0), "the test never opened the stdout gate"
+        return super().read(size)
+
+
 class _FakeTapProcess:
     """A helper process whose whole life is a byte string on stdout."""
 
-    def __init__(self, stdout: bytes, returncode: int = 0, stderr: bytes = b""):
-        self.stdout = io.BytesIO(stdout)
+    def __init__(
+        self, stdout: bytes, returncode: int = 0, stderr: bytes = b"", gated: bool = False
+    ):
+        self.stdout = _GatedStdout(stdout)
+        if not gated:
+            self.stdout.gate.set()
         self.stderr = io.BytesIO(stderr)
         self.returncode = returncode
         self.terminated = False
@@ -243,7 +271,10 @@ async def test_a_helper_that_dies_mid_capture_leaves_a_wav_and_a_prompt_stop(tap
     arrive, within one block of what the helper managed to write."""
     delivered_blocks = 6
     process = _FakeTapProcess(
-        tap_stdout(blocks=delivered_blocks), returncode=3, stderr=b"tap died\n"
+        tap_stdout(blocks=delivered_blocks),
+        returncode=3,
+        stderr=b"tap died\n",
+        gated=True,
     )
     source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
     recorder = MeetingRecorder(tap_settings)
@@ -253,10 +284,11 @@ async def test_a_helper_that_dies_mid_capture_leaves_a_wav_and_a_prompt_stop(tap
     ), patch("app.audio.meeting_recorder.sd.InputStream") as stream:
         stream.return_value = MagicMock()
         await recorder.start()
+        process.stdout.gate.set()
         source._reader.join(timeout=2.0)
         time.sleep(0.05)
         started = time.monotonic()
-        audio_path = await recorder.stop()
+        audio_path = (await recorder.stop()).path
         elapsed = time.monotonic() - started
 
     assert elapsed < 2.0

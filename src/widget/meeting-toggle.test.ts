@@ -96,6 +96,97 @@ describe("the meeting recording toggle", () => {
     expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
   });
 
+  it("clears the indicator when a stop is refused with 410, and does not call it a double click", async () => {
+    const deps = actions({
+      isRecording: vi.fn(() => true),
+      stopRecording: vi.fn(async () => {
+        throw new ApiRequestError("No audio data captured", 410);
+      }),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.hideIndicator).toHaveBeenCalledOnce();
+    expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
+    expect(deps.reportError).toHaveBeenCalledOnce();
+    expect(deps.reportError.mock.calls[0][0]).toContain("No audio data captured");
+    expect(deps.reportError.mock.calls[0][0]).not.toContain("still being recorded");
+    expect(deps.reportError.mock.calls[0][0]).not.toContain("already stopped");
+  });
+
+  it("clears the indicator when a stop is refused with 409, and says the call was already stopped", async () => {
+    const deps = actions({
+      isRecording: vi.fn(() => true),
+      stopRecording: vi.fn(async () => {
+        throw new ApiRequestError("Not recording", 409);
+      }),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.hideIndicator).toHaveBeenCalledOnce();
+    expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
+    expect(deps.reportError).toHaveBeenCalledOnce();
+    expect(deps.reportError.mock.calls[0][0]).toContain("already stopped");
+    expect(deps.reportError.mock.calls[0][0]).not.toContain("still being recorded");
+  });
+
+  it("puts the next click back on the start branch after a 409 stop", async () => {
+    let recording = true;
+    const deps = actions({
+      isRecording: vi.fn(() => recording),
+      stopRecording: vi.fn(async () => {
+        throw new ApiRequestError("Not recording", 409);
+      }),
+      hideIndicator: vi.fn(() => {
+        recording = false;
+      }),
+    });
+
+    await runMeetingToggle(deps);
+    await runMeetingToggle(deps);
+
+    expect(deps.stopRecording).toHaveBeenCalledOnce();
+    expect(deps.startRecording).toHaveBeenCalledOnce();
+    expect(deps.showIndicator).toHaveBeenCalledOnce();
+  });
+
+  it("clears the indicator when a stop answers 507, because the call already ended", async () => {
+    const deps = actions({
+      isRecording: vi.fn(() => true),
+      stopRecording: vi.fn(async () => {
+        throw new ApiRequestError("[Errno 2] No such file or directory", 507);
+      }),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.hideIndicator).toHaveBeenCalledOnce();
+    expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
+    expect(deps.reportError).toHaveBeenCalledOnce();
+    expect(deps.reportError.mock.calls[0][0]).toBe(
+      "The call ended but its recording could not be saved: [Errno 2] No such file or directory"
+    );
+    expect(deps.reportError.mock.calls[0][0]).not.toContain("still being recorded");
+    expect(deps.reportError.mock.calls[0][0]).not.toContain("already stopped");
+    expect(deps.reportError.mock.calls[0][0]).not.toContain("with no audio");
+  });
+
+  it("keeps the indicator up when a stop fails without reaching the backend", async () => {
+    const deps = actions({
+      isRecording: vi.fn(() => true),
+      stopRecording: vi.fn(async () => {
+        throw new Error("backend unreachable");
+      }),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.hideIndicator).not.toHaveBeenCalled();
+    expect(deps.setTrayRecording).not.toHaveBeenCalled();
+    expect(deps.reportError.mock.calls[0][0]).toContain("still being recorded");
+  });
+
   it("opens the disclosure when a start is refused with 403", async () => {
     const deps = actions({
       startRecording: vi.fn(async () => {
@@ -109,5 +200,21 @@ describe("the meeting recording toggle", () => {
     expect(deps.reportError).toHaveBeenCalledWith(DISCLOSURE_REQUIRED_MESSAGE);
     expect(deps.hideIndicator).toHaveBeenCalledOnce();
     expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
+  });
+
+  it("puts the indicator up when a start is refused because a call is already recording", async () => {
+    const deps = actions({
+      startRecording: vi.fn(async () => {
+        throw new ApiRequestError("A meeting is already being recorded", 409);
+      }),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.hideIndicator).not.toHaveBeenCalled();
+    expect(deps.showIndicator).toHaveBeenCalledOnce();
+    expect(deps.setTrayRecording).toHaveBeenCalledWith(true);
+    expect(deps.reportError.mock.calls[0][0]).toContain("already being recorded");
+    expect(deps.openDisclosure).not.toHaveBeenCalled();
   });
 });

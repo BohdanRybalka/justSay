@@ -12,6 +12,12 @@ from app.audio import (
     get_meeting_recorder,
     get_recorder,
 )
+from app.audio.meeting_recorder import (
+    MEETING_BUSY_DETAIL,
+    MeetingCaptureAbortedError,
+    MeetingCaptureEmptyError,
+    MeetingWriteFailedError,
+)
 from app.audio.system_source import SystemAudioUnavailableError
 from app.core.utils import sse_event
 from app.preferences.user_settings import get_user_settings
@@ -64,12 +70,21 @@ _CONSENT_REQUIRED_DETAIL = (
 
 
 def _meeting_status(recorder: MeetingRecorder) -> MeetingStatus:
+    """Build the response from one snapshot rather than five property reads.
+
+    Read one at a time, the device thread can finish a stop between two of
+    them and the response describes two different moments — a live meeting
+    with no elapsed time and no endpoint. `syncMeetingIndicator` runs once at
+    widget load and nothing polls after it, so such a response leaves a
+    ticking indicator up for a call that has already ended.
+    """
+    snapshot = recorder.status_snapshot()
     return MeetingStatus(
-        is_recording=recorder.is_recording,
-        duration_seconds=recorder.duration_seconds,
-        level_db=recorder.level_db,
-        system_endpoint=recorder.system_endpoint,
-        system_level_db=recorder.system_level_db,
+        is_recording=snapshot.is_recording,
+        duration_seconds=snapshot.duration_seconds,
+        level_db=snapshot.level_db,
+        system_endpoint=snapshot.system_endpoint,
+        system_level_db=snapshot.system_level_db,
     )
 
 
@@ -78,7 +93,7 @@ async def start_recording(
     recorder: MicrophoneRecorder = Depends(get_recorder),
     meeting_recorder: MeetingRecorder | None = Depends(get_active_meeting_recorder),
 ):
-    if meeting_recorder is not None and meeting_recorder.is_recording:
+    if meeting_recorder is not None and meeting_recorder.is_busy:
         raise HTTPException(status_code=409, detail="A meeting recording is in progress")
     if recorder.is_recording:
         raise HTTPException(status_code=409, detail="Already recording")
@@ -123,30 +138,68 @@ async def start_meeting_recording(
     docs/adr/040-recording-other-people-is-not-covered-by-zero-leak.md. A
     platform with no system-audio implementation answers 501 and opens no
     stream at all.
+
+    The `is_busy` guard is a conservative filter, not a decision: it can only
+    refuse, never permit something the recorder would refuse, because the
+    recorder re-checks on the thread that owns the answer and raises
+    `MeetingCaptureAbortedError` — a 409 — when it declines.
     """
     if not get_user_settings().meeting_consent_acknowledged:
         raise HTTPException(status_code=403, detail=_CONSENT_REQUIRED_DETAIL)
     if dictation_recorder is not None and dictation_recorder.is_recording:
         raise HTTPException(status_code=409, detail="A dictation recording is in progress")
-    if recorder.is_recording:
-        raise HTTPException(status_code=409, detail="Already recording")
+    if recorder.is_busy:
+        raise HTTPException(status_code=409, detail=MEETING_BUSY_DETAIL)
     try:
         await recorder.start()
     except SystemAudioUnavailableError as e:
         raise HTTPException(status_code=501, detail=str(e)) from e
+    except MeetingCaptureAbortedError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     return _meeting_status(recorder)
 
 
 @router.post("/meeting/stop", response_model=MeetingStopResponse)
 async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting_recorder)):
-    if not recorder.is_recording:
+    """End the recording and return the written file.
+
+    The guard is `is_busy`, not `is_recording`, so a stop that arrives while
+    the devices are still opening reaches `recorder.stop()` and is answered
+    after that open rather than being refused before it. Like the other two
+    guards it can only refuse: the recorder decides on its own thread and
+    raises `MeetingCaptureAbortedError` when there is no file to return.
+
+    Every 409, the one 410 and the one 507 this endpoint can produce mean
+    nothing is being recorded and both devices are released — which is what
+    lets the widget take its indicator down on all three
+    (`src/widget/meeting-toggle.ts`). They are three codes rather than three
+    wordings because a stop that found nothing recording, a meeting that
+    captured nothing and a meeting whose audio was lost on the way to disk
+    are different outcomes, and the widget must not describe any of them as
+    a double click. 507 in particular replaces the 500 a failed write used to
+    raise: the recorder is idle by then, but a 500 is indistinguishable from
+    an unreachable backend, so the widget kept the indicator lit.
+
+    `duration_seconds` and `truncated` arrive with the file, inside the
+    `MeetingRecording` the write produces, rather than being read off the
+    recorder: the harvest clears the live clock, so reading it here answers
+    `0.0`, and a meeting started while this file is still being written owns
+    the recorder's live truncation flag by then.
+    """
+    if not recorder.is_busy:
         raise HTTPException(status_code=409, detail="Not recording")
-    duration = recorder.duration_seconds
-    audio_path = await recorder.stop()
+    try:
+        recording = await recorder.stop()
+    except MeetingWriteFailedError as e:
+        raise HTTPException(status_code=507, detail=str(e)) from e
+    except MeetingCaptureEmptyError as e:
+        raise HTTPException(status_code=410, detail=str(e)) from e
+    except MeetingCaptureAbortedError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     return MeetingStopResponse(
-        filename=audio_path.name,
-        duration_seconds=duration,
-        truncated=recorder.truncated,
+        filename=recording.path.name,
+        duration_seconds=recording.duration_seconds,
+        truncated=recording.truncated,
     )
 
 
