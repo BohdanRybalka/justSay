@@ -183,18 +183,27 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   let isRecording = false;
   let levelStreamAbort: AbortController | null = null;
 
+  /** Both callbacks check that they are still the current stream before they
+   *  write anything. A stream is detached in three places — a new one starting,
+   *  the tab being destroyed, and a stop that ran out of its budget — and in the
+   *  last of those the label holds the only instruction the user has for closing
+   *  a microphone that may still be open. A late error from a stream nobody is
+   *  listening to must not overwrite it. */
   function startLevelStream(fill: HTMLElement) {
     stopLevelStream();
-    levelStreamAbort = levelStream(
+    const stream: AbortController = levelStream(
       (data) => {
+        if (levelStreamAbort !== stream) return;
         const pct = Math.max(0, Math.min(100, ((data.level_db + 60) / 60) * 100));
         fill.style.width = `${pct}%`;
       },
       () => {},
       (error) => {
+        if (levelStreamAbort !== stream) return;
         recLabel.textContent = `Recording — the level meter stopped: ${error}`;
       },
     );
+    levelStreamAbort = stream;
   }
 
   function stopLevelStream() {
@@ -210,6 +219,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
         await api.audioStop();
       } catch (e) {
         if (e instanceof TimedOutError) {
+          stopLevelStream();
           recLabel.textContent = MICROPHONE_UNCONFIRMED_LABEL;
           console.error(e);
           return;

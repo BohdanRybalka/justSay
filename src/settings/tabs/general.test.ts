@@ -735,6 +735,8 @@ describe("renderGeneral — the microphone test", () => {
     apiMock.audioStatus.mockResolvedValue({ is_recording: false, duration_seconds: 0, level_db: -60 });
     apiMock.audioStart.mockResolvedValue({ is_recording: true, duration_seconds: 0, level_db: -60 });
     apiMock.audioStop.mockRejectedValue(new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/stop"));
+    const abort = vi.fn();
+    levelStreamMock.mockImplementation(() => ({ abort }));
     const { button, label } = renderMicrophoneTest();
 
     button.click();
@@ -752,6 +754,13 @@ describe("renderGeneral — the microphone test", () => {
       "The backend did not answer — the microphone may still be open",
     );
     expect(button.textContent).toBe("Stop");
+    expect(abort).toHaveBeenCalled();
+
+    const onError = levelStreamMock.mock.calls[0][2] as (error: string) => void;
+    onError("the backend did not answer /audio/level-stream within 15 seconds");
+    expect(label.textContent).toBe(
+      "The backend did not answer — the microphone may still be open",
+    );
   });
 
   it("still reports an ordinary start failure as a failure", async () => {
