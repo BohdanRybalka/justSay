@@ -69,3 +69,38 @@ describe("the Words tab's 5 s poll", () => {
     container.remove();
   });
 });
+
+describe("the whole-page read the empty-to-non-empty transition triggers", () => {
+  it("holds the poll off while it runs, so its own answer is the one that lands", async () => {
+    const settle: Array<(stats: HistoryStats) => void> = [];
+    apiMock.historyStats.mockResolvedValueOnce(buildStats({ total_entries: 0 }));
+    apiMock.historyStats.mockResolvedValueOnce(buildStats({ total_entries: 5, total_words: 55 }));
+    apiMock.historyStats.mockImplementation(
+      () => new Promise<HistoryStats>((resolve) => settle.push(resolve)),
+    );
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const destroy = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(container.textContent).toContain("No transcriptions yet");
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(settle).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(settle).toHaveLength(1);
+
+    settle[0](buildStats({ total_entries: 5, total_words: 55 }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(container.textContent).not.toContain("No transcriptions yet");
+    expect(document.getElementById("words-stat-lifetime")!.textContent).toBe(
+      (55).toLocaleString("uk-UA"),
+    );
+
+    destroy();
+    container.remove();
+  });
+});

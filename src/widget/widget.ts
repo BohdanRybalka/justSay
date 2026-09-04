@@ -17,7 +17,7 @@ import {
 import { formatStopwatch } from "../format";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
 import { isStaleStatusResponse } from "../stale-response";
-import { TimedOutError, withTimeout } from "../timeout";
+import { withTimeout } from "../timeout";
 import { computeDoneStatus } from "./done-status";
 import { dictationErrorLabel, startErrorLabel, type DictationErrorLabel } from "./error-label";
 import { MEETING_STATE_CLASS, renderMeetingIndicator } from "./meeting-indicator";
@@ -42,7 +42,7 @@ let state: WidgetState = "idle";
 let isHovered = false;
 let durationInterval: ReturnType<typeof setInterval> | null = null;
 let iconFlashTimer: ReturnType<typeof setTimeout> | null = null;
-let errorRevertTimer: ReturnType<typeof setTimeout> | null = null;
+let autoRevertTimer: ReturnType<typeof setTimeout> | null = null;
 let connectionState: ConnectionCheckState = { offline: false, firstCheckDone: false };
 
 let currentShortcut = DEFAULT_SHORTCUT;
@@ -72,12 +72,7 @@ function isInteractive(): boolean {
 }
 
 
-function setState(
-  newState: WidgetState,
-  message?: string,
-  durationLabel?: string,
-  { persist = false }: { persist?: boolean } = {},
-) {
+function setState(newState: WidgetState, message?: string, durationLabel?: string) {
   state = newState;
   widget.className = `widget ${state}${meetingActive ? ` ${MEETING_STATE_CLASS}` : ""}`;
 
@@ -91,9 +86,9 @@ function setState(
     iconFlashTimer = null;
   }
 
-  if (errorRevertTimer) {
-    clearTimeout(errorRevertTimer);
-    errorRevertTimer = null;
+  if (autoRevertTimer) {
+    clearTimeout(autoRevertTimer);
+    autoRevertTimer = null;
   }
 
   switch (state) {
@@ -120,7 +115,8 @@ function setState(
         iconFlashTimer = null;
         if (state === "done") renderIcon(isHovered ? "hover" : "idle");
       }, 700);
-      setTimeout(() => {
+      autoRevertTimer = setTimeout(() => {
+        autoRevertTimer = null;
         if (state === "done") setState("idle");
       }, AUTO_REVERT_MS);
       break;
@@ -128,40 +124,16 @@ function setState(
       text.textContent = message || "Error";
       durationEl.textContent = "";
       renderIcon("error");
-      if (!persist) {
-        errorRevertTimer = setTimeout(() => {
-          errorRevertTimer = null;
-          if (state === "error") setState("idle");
-        }, AUTO_REVERT_MS);
-      }
+      autoRevertTimer = setTimeout(() => {
+        autoRevertTimer = null;
+        if (state === "error") setState("idle");
+      }, AUTO_REVERT_MS);
       break;
   }
 }
 
-/** An error the widget must not talk itself out of.
- *
- * The ordinary error state reverts to "JustSay" after three seconds, which is
- * right for a failure that was observed and finished: nothing is left running.
- * It is wrong for a request that was abandoned, because the microphone may
- * still be open and reverting is the widget asserting that all is well on the
- * one outcome nobody established (ADR 049, third amendment). The state stays
- * until the user acts on it — a click still starts a new dictation from here,
- * so this is a message that waits, not a dead end.
- *
- * `persist` is asked for rather than the revert being armed and then cancelled,
- * so that "this state does not revert" is a property of the one place that
- * arms the timer. Undoing the arming leaves the state one added `setTimeout`
- * away from silently reverting again, and nothing would fail. */
-function setUnresolvedError(label: string) {
-  setState("error", label, undefined, { persist: true });
-}
-
-/** Clears the interval it is about to replace, so the one function that creates
- *  the stopwatch is also the one that owns there being only one of it: two of
- *  them would write to the same node. */
 function startDurationTimer() {
   const start = Date.now();
-  if (durationInterval) clearInterval(durationInterval);
   const update = () => {
     const elapsed = (Date.now() - start) / 1000;
     durationEl.textContent = formatStopwatch(elapsed);
@@ -179,23 +151,17 @@ async function startRecording() {
   try {
     await api.audioStart();
   } catch (e) {
-    reportTransitionFailure(startErrorLabel(e), e);
+    reportTransitionFailure(startErrorLabel(e));
     console.error("Start recording failed:", e);
   }
 }
 
-/** Reports a failed start or a failed dictation: both are transitions out of a
- *  state the user asked for, and both are told apart the same way. The label is
- *  the caller's — `startErrorLabel` and `dictationErrorLabel` say different
- *  things and must keep doing so — and only the revert policy is decided here.
- *  A failure that was observed reverts to idle; one that was only abandoned
- *  stays on screen, because the state it describes has not resolved itself. */
-function reportTransitionFailure({ label, toast }: DictationErrorLabel, error: unknown) {
-  if (error instanceof TimedOutError) {
-    setUnresolvedError(label);
-  } else {
-    setState("error", label);
-  }
+/** Reports a failed start or a failed dictation. The label is the caller's —
+ *  `startErrorLabel` and `dictationErrorLabel` say different things and must
+ *  keep doing so — and the pill and the toast are raised together here so a
+ *  caller cannot raise one without the other. */
+function reportTransitionFailure({ label, toast }: DictationErrorLabel) {
+  setState("error", label);
   notifyError(toast);
 }
 
@@ -216,7 +182,7 @@ async function stopAndProcess() {
       setState("idle");
     }
   } catch (e) {
-    reportTransitionFailure(dictationErrorLabel(e), e);
+    reportTransitionFailure(dictationErrorLabel(e));
     console.error("Pipeline failed:", e);
   }
 }
@@ -261,7 +227,6 @@ function renderMeetingIndicatorFromState() {
 }
 
 function beginMeetingIndicator(startedAt = Date.now()) {
-  if (meetingTimer) clearInterval(meetingTimer);
   meetingActive = true;
   meetingStartedAt = startedAt;
   renderMeetingIndicatorFromState();

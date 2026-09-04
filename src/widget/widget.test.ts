@@ -165,49 +165,37 @@ describe("a start the backend refuses", () => {
   });
 });
 
-describe("a start the backend never answered", () => {
-  it("says the microphone may still be open and stays there", async () => {
-    const { TimedOutError } = await import("../timeout");
+describe("two dictations finishing within three seconds of each other", () => {
+  it("does not let the first one's auto-revert cut the second one's result short", async () => {
     await loadWidget();
-    apiMock.audioStart.mockRejectedValue(new TimedOutError(60_000, "/audio/start"));
-
-    document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => {
-      expect(document.getElementById("widget-text")!.textContent).toBe("No answer");
+    apiMock.audioStart.mockResolvedValue({ is_recording: true, duration_seconds: 0, level_db: -60 });
+    apiMock.audioStop.mockResolvedValue({ filename: "a.wav", duration_seconds: 1 });
+    apiMock.dictate.mockResolvedValue({
+      text: "one",
+      duration_ms: 100,
+      copied_to_clipboard: true,
     });
-
-    expect(notifyErrorMock).toHaveBeenCalledWith(
-      "The backend never answered — the microphone may still be open.",
-    );
-
-    await vi.advanceTimersByTimeAsync(60_000);
-
-    expect(document.getElementById("widget-text")!.textContent).toBe("No answer");
-  });
-
-  it("keeps the same refusal to revert after an abandoned dictation", async () => {
-    const { TimedOutError } = await import("../timeout");
-    await loadWidget();
-    apiMock.audioStart.mockResolvedValue({
-      is_recording: true,
-      duration_seconds: 0,
-      level_db: -60,
-    });
-    apiMock.dictate.mockRejectedValue(new TimedOutError(600_000, "/pipeline/dictate"));
-
     const widget = document.getElementById("widget")!;
-    widget.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => {
-      expect(document.getElementById("widget-text")!.textContent).toBe("Recording");
-    });
-    widget.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => {
-      expect(document.getElementById("widget-text")!.textContent).toBe("No answer");
-    });
+    const text = document.getElementById("widget-text")!;
 
-    await vi.advanceTimersByTimeAsync(60_000);
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(text.textContent).toBe("Recording"));
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(text.textContent).toBe("Copied"));
 
-    expect(document.getElementById("widget-text")!.textContent).toBe("No answer");
+    await vi.advanceTimersByTimeAsync(1500);
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(text.textContent).toBe("Recording"));
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(text.textContent).toBe("Copied"));
+
+    await vi.advanceTimersByTimeAsync(1600);
+
+    expect(text.textContent).toBe("Copied");
+
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(text.textContent).toBe("JustSay");
   });
 });
 

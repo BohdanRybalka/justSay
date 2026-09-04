@@ -6,7 +6,7 @@
  * `import("@tauri-apps/api/core")` in front of it is unbounded too, so a promise
  * built from either is not slow but absent — and everything sequenced after it
  * is absent as well. The HTTP requests `api.ts` gives a budget to are bounded
- * there — nine of its endpoints are deliberately `UNRECONCILED` and are not —
+ * there — fourteen of its endpoints are deliberately `UNRECONCILED` and are not —
  * so what this race still covers is the bridge underneath them and any
  * caller-level unit of work assembled from several awaits.
  *

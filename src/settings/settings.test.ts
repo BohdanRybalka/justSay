@@ -598,32 +598,40 @@ describe("a settings load that has not settled", () => {
 });
 
 describe("a settings load that fails after the backend has gone away", () => {
-  it("reports the reachability the latest poll measured, not the one at load time", async () => {
+  it("writes its sentence from its own probe, even when a later poll supersedes it", async () => {
     vi.useFakeTimers();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" });
-    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
-
-    let failSettings!: (error: unknown) => void;
-    apiMock.getSettings.mockImplementation(
-      () => new Promise<UserSettings>((_resolve, reject) => { failSettings = reject; }),
+    const pending: Array<(ok: boolean) => void> = [];
+    apiMock.health.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          pending.push((ok) =>
+            ok
+              ? resolve({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" })
+              : reject(new TypeError("Failed to fetch")),
+          );
+        }),
     );
+    apiMock.getSettings.mockRejectedValue(new TypeError("Failed to fetch"));
+    apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
 
     await import("./settings");
     const tabContent = document.getElementById("tab-content")!;
+    await vi.advanceTimersByTimeAsync(0);
 
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(pending.length).toBe(2);
+
+    pending[1](true);
     await vi.advanceTimersByTimeAsync(0);
     expect(backendStatusEl().textContent).toBe("Backend");
 
-    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
-    await vi.advanceTimersByTimeAsync(5000);
-    expect(backendStatusEl().textContent).toBe("Backend offline");
-
-    failSettings(new TypeError("Failed to fetch"));
+    pending[0](false);
     await vi.advanceTimersByTimeAsync(0);
 
     expect(tabContent.textContent).toContain("was not responding");
     expect(tabContent.textContent).not.toContain("The backend answered");
+    expect(backendStatusEl().textContent).toBe("Backend");
 
     vi.useRealTimers();
     consoleError.mockRestore();

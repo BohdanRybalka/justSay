@@ -11,8 +11,7 @@
  * protection without the dropped read.
  *
  * It lives at the root rather than in `settings/tabs/` because the widget polls
- * too, and two mechanisms for one problem is what the eighth review of PR #85
- * rejected.
+ * too, and one problem gets one mechanism.
  */
 export function isStaleStatusResponse(requestToken: number, latestIssuedToken: number): boolean {
   return requestToken !== latestIssuedToken;

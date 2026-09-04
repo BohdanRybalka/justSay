@@ -186,6 +186,22 @@ describe("a hung IPC transport strands at most one token call", () => {
     warnSpy.mockRestore();
   });
 
+  it("leaves no armed timer behind when invoke throws before it ever returns a promise", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { api } = await import("./api");
+    invokeMock.mockImplementation(() => {
+      throw new Error("the bridge is gone");
+    });
+    fetchMock.mockResolvedValue(okJson({ status: "ok" }));
+
+    const before = vi.getTimerCount();
+    await api.health();
+
+    expect(vi.getTimerCount()).toBe(before);
+    warnSpy.mockRestore();
+  });
+
   it("a call still unanswered past the reuse window is abandoned for a fresh one", async () => {
     vi.useFakeTimers();
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -618,6 +634,11 @@ describe("a backend that accepts a request and never answers", () => {
 
   it.each([
     ["audioStop", (a: Api) => a.audioStop()],
+    ["audioStart", (a: Api) => a.audioStart()],
+    ["startMeetingRecording", (a: Api) => a.startMeetingRecording()],
+    ["stopMeetingRecording", (a: Api) => a.stopMeetingRecording()],
+    ["dictate", (a: Api) => a.dictate("uk")],
+    ["processFile", (a: Api) => a.processFile(new ArrayBuffer(8), "call.wav")],
     ["updateSettings", (a: Api) => a.updateSettings({ language: "uk" })],
     ["setSttMode", (a: Api) => a.setSttMode("local")],
     ["sttLocalLoad", (a: Api) => a.sttLocalLoad()],
@@ -641,21 +662,6 @@ describe("a backend that accepts a request and never answers", () => {
   });
 
   it.each([
-    ["audioStart", (a: Api) => a.audioStart(), "/audio/start", 60_000],
-    [
-      "startMeetingRecording",
-      (a: Api) => a.startMeetingRecording(),
-      "/audio/meeting/start",
-      60_000,
-    ],
-    ["stopMeetingRecording", (a: Api) => a.stopMeetingRecording(), "/audio/meeting/stop", 600_000],
-    ["dictate", (a: Api) => a.dictate("uk"), "/pipeline/dictate", 600_000],
-    [
-      "processFile",
-      (a: Api) => a.processFile(new ArrayBuffer(8), "call.wav"),
-      "/pipeline/process-file",
-      600_000,
-    ],
     ["sttLocalPrewarm", (a: Api) => a.sttLocalPrewarm(), "/stt/local/prewarm", 15_000],
   ])(
     "abandons %s at its own budget rather than leaving the surface that called it dead",
@@ -822,6 +828,30 @@ describe("the level stream's handshake, which is bounded while the stream is not
       },
     } as unknown as Response;
   }
+
+  it("releases the connection when the handshake is refused, rather than holding it open", async () => {
+    const { levelStream } = await import("./api");
+    let signal!: AbortSignal;
+    fetchMock.mockImplementation((_url: string, opts: RequestInit) => {
+      signal = opts.signal!;
+      return Promise.resolve({
+        ok: false,
+        status: 503,
+        body: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      } as unknown as Response);
+    });
+    const onError = vi.fn();
+
+    levelStream(
+      () => {},
+      () => {},
+      onError,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onError).toHaveBeenCalledWith("HTTP 503");
+    expect(signal.aborted).toBe(true);
+  });
 
   it("reports an error when the backend never sends response headers", async () => {
     const { levelStream, REQUEST_TIMEOUT_MS } = await import("./api");

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ApiAuthError, REQUEST_TIMEOUT_MS } from "../api";
-import { TimedOutError } from "../timeout";
+import { ApiAuthError } from "../api";
 import { dictationErrorLabel, startErrorLabel } from "./error-label";
 
 describe("dictationErrorLabel", () => {
@@ -33,17 +32,6 @@ describe("dictationErrorLabel", () => {
     expect(dictationErrorLabel(undefined).label).toBe("Failed");
   });
 
-  it("a budget that expired names the wait and does not claim the dictation failed", () => {
-    const { label, toast } = dictationErrorLabel(
-      new TimedOutError(REQUEST_TIMEOUT_MS, "/pipeline/dictate"),
-    );
-
-    expect(label).not.toBe("Failed");
-    expect(label).toBe("No answer");
-    expect(toast).toContain("may not have been copied");
-    expect(toast).toContain("microphone may still be open");
-    expect(toast).not.toBe("Dictation failed — try again.");
-  });
 });
 
 describe("startErrorLabel", () => {
@@ -72,11 +60,4 @@ describe("startErrorLabel", () => {
     expect(toast).not.toContain("API key");
   });
 
-  it("names the abandoned request instead, because the microphone may be open", () => {
-    const { label, toast } = startErrorLabel(new TimedOutError(60_000, "/audio/start"));
-
-    expect(label).toBe("No answer");
-    expect(label).not.toBe("Start failed");
-    expect(toast).toBe("The backend never answered — the microphone may still be open.");
-  });
 });

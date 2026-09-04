@@ -65,58 +65,35 @@ export const TOKEN_CALL_REUSE_MS = 60_000;
  *  no request issued and blame the backend for a bridge fault. */
 export const REQUEST_TIMEOUT_MS = 15_000;
 
-/** The budget for a call that opens a capture device before it answers.
+/** Which row of ADR 049 a call is on.
  *
- *  Sized to the work rather than to the transport, which is the correction ADR
- *  049's second amendment demanded. Spec 099 measured up to six seconds of
- *  device enumeration inside a single `POST /audio/meeting/start`
- *  (`specs/099-meeting-start-freezes-the-app/plan.md`), so a read's 15 s is only
- *  2.5x the worst known *healthy* answer and a slow machine reaches it with
- *  nothing wrong. A minute keeps the same order-of-magnitude margin over the
- *  measurement that `REQUEST_TIMEOUT_MS` keeps over a read. */
-export const DEVICE_TIMEOUT_MS = 60_000;
-
-/** The budget for the calls that transcribe or write a whole recording.
- *
- *  Transcription is legitimately slow: the dictation path waits up to 300 s for
- *  local readiness before it starts transcribing at all, and ten minutes
- *  doubles that. It is far outside any real answer — an upload is capped at
- *  25 MB, about thirteen minutes of 16 kHz mono audio, and the local path's own
- *  acceptance criterion is 150 s of audio in under 10 s — and it also covers
- *  `POST /audio/meeting/stop`, which writes the whole WAV before answering
- *  (`_assemble_and_write` puts a 45-minute call at ~86 MB, and
- *  `meeting_max_raw_bytes` allows roughly eight times that). */
-export const LONG_REQUEST_TIMEOUT_MS = 600_000;
-
-/** Which row of ADR 049's third amendment a call is on.
- *
- *  The rule there is a comparison rather than a cost: a budget belongs where
- *  abandoning the request costs the user *less* than waiting for it forever
- *  does. Every entry in `api` states its own row, and there is no default, so a
- *  new endpoint has to be placed rather than inherit a number nobody chose. */
+ *  The rule, after the fourth amendment reinstated the second: a budget belongs
+ *  on a request whose abandonment costs the user nothing, and a state-mutating
+ *  request is never one of those. Every entry in `api` states its own row, and
+ *  there is no default, so a new endpoint has to be placed rather than inherit a
+ *  number nobody chose. */
 type Budget = { readonly ms: number } | { readonly ms: null };
 
 /** A read the UI can simply ask for again. Abandoning costs one more press;
  *  waiting forever costs a screen that never resolves. */
 const REREADABLE: Budget = { ms: REQUEST_TIMEOUT_MS };
 
-/** A call that opens a capture device before it answers. Abandoning it is a
- *  strict subset of waiting on it: the device may be open either way, and only
- *  waiting adds a dead intent queue, or a toggle that swallows every press
- *  including the tray's, on top of that. */
-const DEVICE_TRANSITION: Budget = { ms: DEVICE_TIMEOUT_MS };
-
-/** The same comparison over work measured in minutes rather than seconds —
- *  transcribing a dictation, writing a meeting's WAV to disk. */
-const SLOW_TRANSITION: Budget = { ms: LONG_REQUEST_TIMEOUT_MS };
-
-/** A call where the comparison runs the other way. Abandoning reports a failure
- *  for work that ran to completion anyway and invites a second destructive
- *  call, or throws away a backend degradation path that had already half
- *  answered; waiting costs a spinner. Giving up here is only honest once the
- *  client can find out what the backend did, and that reconciliation needs the
- *  client-minted session id spec 119 adds. Until then no budget, rather than a
- *  wrong one. */
+/** Everything that changes state on the backend, plus the two reads whose own
+ *  degradation path a budget would preempt.
+ *
+ *  The third amendment briefly put the dictation path on a budget, on the claim
+ *  that abandoning a start is a strict subset of waiting on one. It is not:
+ *  `recording-intent.ts` drops a queued release when the widget is not in
+ *  `recording`, and a timed-out start leaves it in `error`, so the one intent
+ *  that would have closed the microphone is destroyed rather than delayed and
+ *  every later press cycles on `409 Already recording`. Waiting parks the
+ *  intent; abandoning throws it away. Elsewhere in this class abandoning
+ *  reports a failure for work that ran to completion and invites a second
+ *  destructive call, or discards a half-answered search.
+ *
+ *  Giving up here is only honest once the client can find out what the backend
+ *  did, and that reconciliation needs the client-minted session id spec 119
+ *  adds. Until then no budget, rather than a wrong one. */
 const UNRECONCILED: Budget = { ms: null };
 
 let cachedToken: string | null = null;
@@ -208,18 +185,20 @@ function getToken(): Promise<string | null> {
         bridgeDiagnosis = { kind: "bridge-missing" };
         return null;
       }
-      let importTimer: ReturnType<typeof setTimeout> | undefined;
-      const importExpiry = new Promise<typeof TOKEN_TIMED_OUT>((resolve) => {
-        importTimer = setTimeout(() => resolve(TOKEN_TIMED_OUT), TOKEN_TIMEOUT_MS);
-      });
       const bridgeImport = shareWhilePending(
         bridgeImportSlot,
         () => import("@tauri-apps/api/core"),
         TOKEN_CALL_REUSE_MS,
       );
+      let importTimer: ReturnType<typeof setTimeout> | undefined;
       let bridge: BridgeModule | typeof TOKEN_TIMED_OUT;
       try {
-        bridge = await Promise.race([bridgeImport.call, importExpiry]);
+        bridge = await Promise.race([
+          bridgeImport.call,
+          new Promise<typeof TOKEN_TIMED_OUT>((resolve) => {
+            importTimer = setTimeout(() => resolve(TOKEN_TIMED_OUT), TOKEN_TIMEOUT_MS);
+          }),
+        ]);
       } catch (e) {
         bridgeDiagnosis = {
           kind: "bridge-failed",
@@ -240,18 +219,20 @@ function getToken(): Promise<string | null> {
         return null;
       }
       const { invoke } = bridge;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const expiry = new Promise<typeof TOKEN_TIMED_OUT>((resolve) => {
-        timer = setTimeout(() => resolve(TOKEN_TIMED_OUT), TOKEN_TIMEOUT_MS);
-      });
       const tokenCall = shareWhilePending(
         tokenCallSlot,
         () => invoke<string>("get_backend_token"),
         TOKEN_CALL_REUSE_MS,
       );
+      let timer: ReturnType<typeof setTimeout> | undefined;
       let token: string | typeof TOKEN_TIMED_OUT;
       try {
-        token = await Promise.race([tokenCall.call, expiry]);
+        token = await Promise.race([
+          tokenCall.call,
+          new Promise<typeof TOKEN_TIMED_OUT>((resolve) => {
+            timer = setTimeout(() => resolve(TOKEN_TIMED_OUT), TOKEN_TIMEOUT_MS);
+          }),
+        ]);
       } finally {
         clearTimeout(timer);
       }
@@ -343,9 +324,17 @@ function isAbortError(e: unknown): boolean {
  *  *Once it has* is the load-bearing half. This function detaches by hanging
  *  its own cleanup off `work`, so a `work` that never settles keeps every
  *  abandoned caller's `resolve`/`reject` pair attached to it, and nothing this
- *  wrapper can do reaches them while it is still pending. */
+ *  wrapper can do reaches them while it is still pending.
+ *
+ *  The already-aborted path still attaches to `work`, for the same reason the
+ *  normal path does: a `work` that rejects with nobody listening is an
+ *  unhandled rejection, and the caller is not listening precisely because this
+ *  function decided not to wait for it. */
 function until<T>(work: Promise<T>, signal: AbortSignal, giveUp: () => Error): Promise<T> {
-  if (signal.aborted) return Promise.reject(giveUp());
+  if (signal.aborted) {
+    work.catch(() => {});
+    return Promise.reject(giveUp());
+  }
   return new Promise<T>((resolve, reject) => {
     const stop = () => reject(giveUp());
     signal.addEventListener("abort", stop, { once: true });
@@ -632,20 +621,15 @@ export interface TopWordsResponse {
 
 
 /**
- * Every endpoint, each stating which row of ADR 049's third amendment it is on.
+ * Every endpoint, each stating which row of ADR 049 it is on.
  *
- * The question each answers is the comparison, not the cost: is abandoning this
- * request worse for the user than waiting for it forever? For a `REREADABLE`
- * read the answer is trivially no. For a `DEVICE_TRANSITION` or a
- * `SLOW_TRANSITION` it is no because abandoning is a strict subset of waiting —
- * the device is in the same state either way, and only waiting adds a dead
- * intent queue or a dead toggle on top of it. For an `UNRECONCILED` call the
- * answer is yes: abandoning reports a failure for work that finished, or throws
- * away a half-answered degradation path, while waiting costs a spinner.
- *
- * What a budget does not buy is the right to guess. The callers of the two
- * transition classes report the abandonment as its own outcome and never as a
- * failure that was observed.
+ * The question each answers: does abandoning this request cost the user
+ * nothing? For a `REREADABLE` read the answer is yes — the remedy is to ask
+ * again. For an `UNRECONCILED` call it is no, because the backend acted before
+ * it answered and this client cannot find out what it did: it would report a
+ * failure for work that finished, destroy the queued intent that would have
+ * closed the microphone, or discard a search half of which had already
+ * answered. Waiting there costs a spinner, which is the smaller of the two.
  */
 export const api = {
   health: () => request<HealthResponse>("GET", "/health", undefined, REREADABLE),
@@ -693,12 +677,13 @@ export const api = {
     ),
 
   /** `POST /audio/start` calls `await recorder.start()` before it answers, so
-   *  the microphone may be open whichever way this ends. Waiting adds the widget
-   *  stuck on "Recording" and an intent queue parked inside the start — the
-   *  wedge this spec exists to remove — so the budget is the smaller cost, and
-   *  the caller says the request was abandoned rather than that the start
-   *  failed. */
-  audioStart: () => request<RecordingStatus>("POST", "/audio/start", undefined, DEVICE_TRANSITION),
+   *  the microphone may be open whichever way this ends — and a budget makes
+   *  that worse rather than better. A timed-out start leaves the widget in
+   *  `error`, where `recording-intent.ts` drops the release the user had already
+   *  queued as matching the current state; the next press starts again, is
+   *  refused `409 Already recording`, and nothing recovers the intent. Waiting
+   *  parks it instead (ADR 049, fourth amendment). */
+  audioStart: () => request<RecordingStatus>("POST", "/audio/start", undefined, UNRECONCILED),
 
   audioStop: () =>
     request<{ filename: string; duration_seconds: number }>(
@@ -708,32 +693,32 @@ export const api = {
       UNRECONCILED,
     ),
 
-  /** Opens both devices before answering, which is why it is on the device
-   *  budget rather than a read's — spec 099 measured up to six seconds of
-   *  enumeration for this one call. Waiting forever is what left the toggle
-   *  swallowing every press, the tray's included, for the life of the window. */
+  /** Opens both devices before it answers — spec 099 measured up to six seconds
+   *  of enumeration for this one call, so a budget sized to the transport fires
+   *  on a healthy start on a slow machine, and abandoning it leaves a capture
+   *  running while the toggle has nothing to reconcile against. */
   startMeetingRecording: () =>
-    request<MeetingStatus>("POST", "/audio/meeting/start", undefined, DEVICE_TRANSITION),
+    request<MeetingStatus>("POST", "/audio/meeting/start", undefined, UNRECONCILED),
 
-  /** Writes the whole WAV before it answers — `_assemble_and_write` puts a
-   *  45-minute call at "~86 MB to disk" and `meeting_max_raw_bytes` allows
-   *  roughly eight times that — so it takes the long budget rather than the
-   *  device one. The recording survives the abort; what an abandoned stop costs
-   *  is the answer, and the indicator stays up on it. */
+  /** Ends the capture and writes the whole WAV before it answers —
+   *  `_assemble_and_write` puts a 45-minute call at "~86 MB to disk" and
+   *  `meeting_max_raw_bytes` allows roughly eight times that. Abandoning it
+   *  costs the filename of a recording that was made, with nothing able to
+   *  recover it. */
   stopMeetingRecording: () =>
-    request<MeetingStopResponse>("POST", "/audio/meeting/stop", undefined, SLOW_TRANSITION),
+    request<MeetingStopResponse>("POST", "/audio/meeting/stop", undefined, UNRECONCILED),
 
   /** Stops the recorder as the handler's first act and can write the clipboard
-   *  as its last — but a backend that never ran the handler stopped nothing, so
-   *  the microphone may be open either way and only waiting adds a widget stuck
-   *  on "Processing" to it. The long budget, because transcription is the work
-   *  being waited on rather than a device open. */
+   *  as its last, so an abandoned one leaves both unknown and the transcript
+   *  possibly already in History. Transcription is legitimately slow — the local
+   *  path alone waits up to 300 s for readiness before it starts — so any budget
+   *  short enough to be useful fires on work that was going to finish. */
   dictate: (language = "uk") =>
     request<DictateResponse>(
       "POST",
       `/pipeline/dictate?language=${language}`,
       undefined,
-      SLOW_TRANSITION,
+      UNRECONCILED,
     ),
 
   /** Upload an audio file to the pipeline. Accepts an ArrayBuffer of file bytes.
@@ -741,11 +726,9 @@ export const api = {
    *  onto its own native auto-detect mechanism (see `STTProvider.transcribe`'s
    *  docstring in the backend for the per-provider translation).
    *
-   *  `SLOW_TRANSITION` for the same reason as `dictate`, and the same number
-   *  covers its own worst case: the upload is capped at 25 MB, about thirteen
-   *  minutes of 16 kHz mono audio. It opens no device, so waiting forever costs
-   *  only the Transcribe tab — but that tab has no other way out, which is the
-   *  comparison this class is on. */
+   *  `UNRECONCILED` for the same reason as `dictate`: it transcribes and writes
+   *  a History row before it answers, and abandoning it reports a failure for a
+   *  transcription that may already have been saved. */
   processFile: (
     fileBytes: ArrayBuffer,
     filename: string,
@@ -764,7 +747,7 @@ export const api = {
         }
         return { method: "POST", body: form, headers };
       },
-      SLOW_TRANSITION,
+      UNRECONCILED,
     );
   },
 
@@ -871,6 +854,7 @@ export function levelStream(
       recordAuthOutcome(LEVEL_STREAM_PATH, resp);
       if (!resp.ok || !resp.body) {
         clearTimeout(handshakeTimer);
+        controller.abort();
         onError(`HTTP ${resp.status}`);
         return;
       }

@@ -16,7 +16,6 @@ import { saveSettings, getCloudKeyStatus, cachePersistedShortcut } from "../sett
 import { escapeHtml, meetingDisclosureHtml } from "../html";
 import { renderKeys } from "./keys";
 import { notifyError } from "../../notify";
-import { TimedOutError } from "../../timeout";
 
 const UPDATES_CHECK_LABEL = "Check for updates";
 
@@ -25,24 +24,12 @@ const UPDATES_CHECK_LABEL = "Check for updates";
  *  true of every failed stop, whatever failed it — `recorder.stop()` is reached
  *  before the handler can raise, so a 500 and a refused connection leave the
  *  device in the same unknown state. `POST /audio/stop` carries no budget
- *  (ADR 049, third amendment), so a stop cannot be abandoned here; it is waited
- *  out, and only a real failure reaches this label. The button is left on `Stop`
- *  so the user can try again, and this label must not tell them that pressing it
- *  closes anything — nothing here can establish that it did. */
+ *  (ADR 049), so a stop cannot be abandoned here; it is waited out, and only a
+ *  real failure reaches this label. The button is left on `Stop` so the user can
+ *  try again, and this label must not tell them that pressing it closes anything
+ *  — nothing here can establish that it did. */
 const MICROPHONE_UNCONFIRMED_LABEL =
   "Stopping the microphone failed — it may still be open";
-
-/** A start that ran out of its budget states the same unknown from the other
- *  side, and this window adopts it (ADR 049: where a surface owns a stop
- *  button, adopting beats reconciling). `POST /audio/start` opens the device
- *  and then answers, so an abandoned one may have left the microphone running;
- *  "Failed to start" asserts it did not, flips the button back to `Record` and
- *  leaves this window with no affordance for closing it — and the next press
- *  reads a recording it started itself and blames the widget for it. Leaving
- *  the button on `Stop` costs one refused stop, which the stop path's own
- *  `catch` already absorbs. */
-const MICROPHONE_START_UNCONFIRMED_LABEL =
-  "The start was not confirmed — the microphone may be open; press Stop to close it";
 
 /** The subset of the updater plugin's `Update` this module actually uses. */
 interface PendingUpdate {
@@ -261,13 +248,6 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
         recLabel.textContent = "Recording...";
         startLevelStream(levelFill);
       } catch (e) {
-        if (e instanceof TimedOutError) {
-          isRecording = true;
-          btnTest.textContent = "Stop";
-          recLabel.textContent = MICROPHONE_START_UNCONFIRMED_LABEL;
-          console.error(e);
-          return;
-        }
         recLabel.textContent = "Failed to start";
         console.error(e);
       }

@@ -11,22 +11,18 @@
  * recording unstoppable — the next click would take the start branch and be
  * refused with 409, hiding the indicator again.
  *
- * A stop has four outcomes here. It succeeds, and the indicator comes down.
+ * A stop has three outcomes here. It succeeds, and the indicator comes down.
  * It answers 409, 410 or 507 — the three codes the backend produces only once
  * nothing is being recorded and both devices are released — and the indicator
  * comes down too, because left in the general branch a 409 lit it forever: the
  * next click took the stop branch, got the same 409, and only reloading the
- * widget window cleared it. It runs out of its budget, which is not a failure
- * and must not be reported as one: `POST /audio/meeting/stop` ends the capture
- * and then writes the file before it answers, so an abandoned one most likely
- * landed on a backend that did stop the recording and was still writing
- * (ADR 049 — what an abandoned stop costs is the answer, not the recording).
- * Saying "the call is still being recorded" there asserts the opposite of the
- * likelier truth on no evidence at all, so the message says the stop was not
- * confirmed and the indicator stays exactly as it was, which is the same
- * refusal to claim knowledge the abandoned *start* below makes. Or it fails for
- * any other reason — an unreachable backend, a refused connection — where
- * nothing says the capture ended, so the indicator stays up.
+ * widget window cleared it. Or it fails for any other reason — an unreachable
+ * backend, a refused connection — where nothing says the capture ended, so the
+ * indicator stays up.
+ *
+ * Neither meeting call carries a budget (ADR 049, fourth amendment), so no
+ * outcome here is an abandoned request: every failure this function sees was
+ * observed.
  *
  * The three share a branch and not a message. 409 is a double click; 410 is a
  * call that ran and captured nothing, which is news rather than a mistimed
@@ -45,22 +41,12 @@
  * broke ADR 040 obligation 2 and left the recording unstoppable, because the
  * next click would take the start branch again and get the same 409.
  *
- * A start that ran out of its budget is the one start failure that is neither.
- * `POST /audio/meeting/start` opens both devices and then answers, so an
- * abandoned one leaves a capture that may be running and may not, and the
- * indicator therefore neither comes down nor goes up: taking it down asserts
- * that nothing is being recorded, which is what ADR 040 obligation 2 forbids
- * getting wrong, and putting it up asserts the opposite on the same absence of
- * evidence. What the toggle does instead is say the request was abandoned and
- * leave every visible state exactly as it found it, tray included.
- *
  * The sentence a user reads is written here and the backend detail is appended
  * to it as its cause, which is why the 507 detail carries the write error alone
  * and not a second sentence of its own.
  */
 
 import { ApiRequestError } from "../api";
-import { TimedOutError } from "../timeout";
 
 export const DISCLOSURE_REQUIRED_MESSAGE =
   "Read the meeting-recording disclosure before recording a call.";
@@ -97,16 +83,8 @@ function writeFailedMessage(error: unknown): string {
   return `The call ended but its recording could not be saved: ${describeFailure(error)}`;
 }
 
-function abandonedStopMessage(error: unknown): string {
-  return `Stopping the call was not confirmed — the request was abandoned and whether the recording ended is unknown: ${describeFailure(error)}`;
-}
-
 function alreadyRecordingMessage(error: unknown): string {
   return `A call is already being recorded: ${describeFailure(error)}`;
-}
-
-function abandonedStartMessage(error: unknown): string {
-  return `The recording was not confirmed — the request was abandoned and the microphone may still be open: ${describeFailure(error)}`;
 }
 
 function captureOverMessage(error: ApiRequestError): string {
@@ -137,10 +115,6 @@ export async function runMeetingToggle(actions: MeetingToggleActions): Promise<v
     try {
       await actions.stopRecording();
     } catch (e) {
-      if (e instanceof TimedOutError) {
-        actions.reportError(abandonedStopMessage(e));
-        return;
-      }
       if (e instanceof ApiRequestError && CAPTURE_OVER_STATUSES.includes(e.status)) {
         actions.hideIndicator();
         await actions.setTrayRecording(false);
@@ -162,10 +136,6 @@ export async function runMeetingToggle(actions: MeetingToggleActions): Promise<v
       actions.showIndicator();
       await actions.setTrayRecording(true);
       actions.reportError(alreadyRecordingMessage(e));
-      return;
-    }
-    if (e instanceof TimedOutError) {
-      actions.reportError(abandonedStartMessage(e));
       return;
     }
     actions.hideIndicator();

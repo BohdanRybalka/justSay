@@ -164,14 +164,15 @@ function renderSettingsUnavailable(container: HTMLElement) {
 async function loadSettingsIntoUi(): Promise<void> {
   if (settingsLoadInFlight) return;
   settingsLoadInFlight = true;
+  let reachable = false;
   try {
-    await probeBackend();
+    reachable = await probeBackend();
     await withTimeout(loadSettings(), SETTINGS_LOAD_TIMEOUT_MS);
     settingsError = null;
     settingsLoadInFlight = false;
     switchTab(currentTab);
   } catch (e) {
-    settingsError = settingsUnavailableMessage(e, backendReachable);
+    settingsError = settingsUnavailableMessage(e, reachable);
     settingsLoadInFlight = false;
     renderSettingsUnavailable(tabContent);
     renderBackendStatus(backendReachable);
@@ -280,9 +281,16 @@ let latestBackendProbeToken = 0;
  *  interval one is in flight essentially always, so the retry button would
  *  return without asking anything and decide on a reading up to 15 s old. Every
  *  caller here gets its own probe; only the superseded answers are discarded,
- *  so the badge and the failure sentence read whichever probe most recently
- *  finished rather than whichever most recently started. */
-async function probeBackend(): Promise<void> {
+ *  so the badge reads whichever probe most recently finished rather than
+ *  whichever most recently started.
+ *
+ *  What the guard governs is the *badge*, and the returned value is deliberately
+ *  outside it. `loadSettingsIntoUi` awaits this probe to decide which failure
+ *  sentence the screen shows, and discarding a superseded answer there would
+ *  hand it the module-level `backendReachable` — a reading some other probe
+ *  took, possibly before this window ever asked. The caller gets what its own
+ *  probe observed, always; only the repaint is arbitrated. */
+async function probeBackend(): Promise<boolean> {
   const token = ++latestBackendProbeToken;
   let reachable: boolean;
   try {
@@ -291,9 +299,10 @@ async function probeBackend(): Promise<void> {
   } catch {
     reachable = false;
   }
-  if (isStaleStatusResponse(token, latestBackendProbeToken)) return;
+  if (isStaleStatusResponse(token, latestBackendProbeToken)) return reachable;
   backendReachable = reachable;
   renderBackendStatus(backendReachable);
+  return reachable;
 }
 
 async function initAppVersion() {
