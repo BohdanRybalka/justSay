@@ -20,35 +20,13 @@ import { TimedOutError } from "../../timeout";
 
 const UPDATES_CHECK_LABEL = "Check for updates";
 
-/** A microphone test whose start ran out of its budget adopts the recording
- *  rather than reading `GET /audio/status` a second time (ADR 049). It is
- *  unconditional only inside the branch: the pre-flight above has already
- *  confirmed the recorder was free, and `MICROPHONE_UNCHECKED_LABEL` is what
- *  happens when it could not.
- *  A false adoption costs one refused stop; a missed one leaves a microphone
- *  open that neither surface can reach, so adopting is the cheaper mistake.
- *
- *  The affordance is the Stop button and only the Stop button. The teardown at
- *  the bottom of this module does issue `api.audioStop()`, but it runs on a tab
- *  switch and a re-render — not on closing the window, because
- *  `src-tauri/src/lib.rs` intercepts `CloseRequested`, prevents it and hides the
- *  window instead, leaving this tab mounted. So a microphone adopted here
- *  survives the window being dismissed and is reachable only by opening Settings
- *  again. [JS-121] carries the remedy, which needs a surface this spec does not
- *  own. */
+/** A stop that ran out of its budget states what is known and promises
+ *  nothing: the request was accepted and never answered, so whether the device
+ *  was released is exactly what this window cannot find out. The button is left
+ *  on `Stop` so the user can try again, and this label must not tell them that
+ *  pressing it closes anything — nothing here can establish that it did. */
 const MICROPHONE_UNCONFIRMED_LABEL =
-  "The backend never answered — press Stop to close the microphone";
-
-/** The pre-flight fails closed. Adopting a start that went unanswered is only
- *  safe once this tab has established the recorder was free to begin with:
- *  `GET /audio/status` reports the one process-wide recorder and carries no
- *  session id, so a read that fails leaves the widget's own live dictation
- *  indistinguishable from an idle device. Starting anyway and then adopting
- *  would put the Stop button in this window over somebody else's capture, and
- *  pressing it would end a dictation the user is in the middle of speaking.
- *  Refusing costs one press. */
-const MICROPHONE_UNCHECKED_LABEL =
-  "Could not check whether the microphone is free — try again";
+  "The backend did not answer — the microphone may still be open";
 
 /** The subset of the updater plugin's `Update` this module actually uses. */
 interface PendingUpdate {
@@ -249,11 +227,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
           recLabel.textContent = "Microphone busy (widget recording)";
           return;
         }
-      } catch (e) {
-        recLabel.textContent = MICROPHONE_UNCHECKED_LABEL;
-        console.error(e);
-        return;
-      }
+      } catch {}
 
       try {
         await api.audioStart();
@@ -262,13 +236,6 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
         recLabel.textContent = "Recording...";
         startLevelStream(levelFill);
       } catch (e) {
-        if (e instanceof TimedOutError) {
-          isRecording = true;
-          btnTest.textContent = "Stop";
-          recLabel.textContent = MICROPHONE_UNCONFIRMED_LABEL;
-          console.error(e);
-          return;
-        }
         recLabel.textContent = "Failed to start";
         console.error(e);
       }

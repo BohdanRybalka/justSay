@@ -246,8 +246,8 @@ async function responseError(resp: Response): Promise<Error> {
  *  what makes the check hold in the browser and in the tests both, and the
  *  check has to discriminate: `signal.aborted` alone relabels every error
  *  raised after the budget expired, including a `403` whose body merely stopped
- *  part-way, and a `403` reported as a timeout takes the widget down the
- *  adopt-the-recording branch instead of opening the consent dialog. */
+ *  part-way, and a `403` reported as a timeout is a refusal the caller can no
+ *  longer act on — the consent dialog it should open never opens. */
 function isAbortError(e: unknown): boolean {
   return typeof e === "object" && e !== null && (e as { name?: unknown }).name === "AbortError";
 }

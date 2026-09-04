@@ -37,33 +37,12 @@
  * broke ADR 040 obligation 2 and left the recording unstoppable, because the
  * next click would take the start branch again and get the same 409.
  *
- * A start that runs out of its budget is none of the above and is decided
- * before them, because the backend may well have started the recording it never
- * got to report (ADR 049). The widget reads the meeting status once and routes
- * on that instead of guessing, and an unreadable status puts the indicator up —
- * the same asymmetry the failed stop above rests on, for the same reason. That
- * indicator is provisional and says so: an unreadable status marks it
- * unconfirmed, and the widget's connection poll withdraws it on the first
- * status read that reports no recording. It has to, because nothing the user
- * can do would: raising the indicator sets `meetingActive`, and the widget's
- * click handler and dictation shortcut both return early while that is true, so
- * the only trigger left is the tray menu item.
- *
- * The sentence the user reads is picked from the status too, not from the error
- * alone, so the toast cannot say the call may or may not have started next to
- * an indicator saying it did.
- *
  * The sentence a user reads is written here and the backend detail is appended
  * to it as its cause, which is why the 507 detail carries the write error alone
  * and not a second sentence of its own.
  */
 
 import { ApiRequestError } from "../api";
-import { TimedOutError } from "../timeout";
-import {
-  shouldShowIndicatorAfterAbandonedMeetingStart,
-  type RecordingTruth,
-} from "./abandoned-request";
 
 export const DISCLOSURE_REQUIRED_MESSAGE =
   "Read the meeting-recording disclosure before recording a call.";
@@ -100,16 +79,6 @@ function writeFailedMessage(error: unknown): string {
   return `The call ended but its recording could not be saved: ${describeFailure(error)}`;
 }
 
-function abandonedStartMessage(truth: RecordingTruth, error: unknown): string {
-  if (truth.kind === "recording") {
-    return `The call is being recorded — the backend was slow to confirm it: ${describeFailure(error)}`;
-  }
-  if (truth.kind === "idle") {
-    return `The call did not start — the backend never answered: ${describeFailure(error)}`;
-  }
-  return `The call may or may not have started — the backend never answered: ${describeFailure(error)}`;
-}
-
 function alreadyRecordingMessage(error: unknown): string {
   return `A call is already being recorded: ${describeFailure(error)}`;
 }
@@ -130,18 +99,9 @@ export interface MeetingToggleActions {
   isRecording(): boolean;
   startRecording(): Promise<unknown>;
   stopRecording(): Promise<unknown>;
-  /** `startedAt` back-dates the indicator's clock. An adopted recording began
-   *  before the budget ran out, so starting it at zero would leave the readout
-   *  short by the whole budget for the rest of the call. */
-  showIndicator(startedAt?: number): void;
+  showIndicator(): void;
   hideIndicator(): void;
   setTrayRecording(active: boolean): Promise<void>;
-  readStartTruth(): Promise<RecordingTruth>;
-  /** Records that the indicator now up was raised on a status the widget could
-   *  not read, so the connection poll knows to confirm or withdraw it. A verb of
-   *  its own rather than an argument on `showIndicator`: the other three call
-   *  sites have no answer to give. */
-  markIndicatorUnconfirmed(): void;
   openDisclosure(): Promise<void>;
   reportError(message: string): void;
 }
@@ -168,21 +128,6 @@ export async function runMeetingToggle(actions: MeetingToggleActions): Promise<v
   try {
     await actions.startRecording();
   } catch (e) {
-    if (e instanceof TimedOutError) {
-      const truth = await actions.readStartTruth();
-      const showing = shouldShowIndicatorAfterAbandonedMeetingStart(truth);
-      if (showing) {
-        actions.showIndicator(
-          truth.kind === "recording" ? Date.now() - truth.elapsedSeconds * 1000 : undefined,
-        );
-        if (truth.kind === "unknown") actions.markIndicatorUnconfirmed();
-      } else {
-        actions.hideIndicator();
-      }
-      await actions.setTrayRecording(showing);
-      actions.reportError(abandonedStartMessage(truth, e));
-      return;
-    }
     if (e instanceof ApiRequestError && e.status === ALREADY_RECORDING_STATUS) {
       actions.showIndicator();
       await actions.setTrayRecording(true);

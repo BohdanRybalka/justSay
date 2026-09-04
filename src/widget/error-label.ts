@@ -23,8 +23,8 @@ export interface DictationErrorLabel {
  * clipboard write, and nothing the frontend can read says which. And the stop
  * that ends the capture is the handler's own first act
  * (`backend/app/pipeline/router.py:45-48`), so a backend that never ran the
- * handler never stopped the recorder either — the microphone may still be open,
- * which is why `stopAndProcess` also records the stop it owes (ADR 049).
+ * handler never stopped the recorder either, and nothing in this window can
+ * close it — which is what the toast says rather than glossing.
  */
 export function dictationErrorLabel(error: unknown): DictationErrorLabel {
   if (error instanceof ApiAuthError) {

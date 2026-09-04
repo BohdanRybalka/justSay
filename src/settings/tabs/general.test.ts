@@ -731,24 +731,10 @@ describe("renderGeneral — the microphone test", () => {
     };
   }
 
-  it("adopts the microphone when the start runs out of its budget", async () => {
+  it("does not claim the microphone is closed when the stop runs out of its budget", async () => {
     apiMock.audioStatus.mockResolvedValue({ is_recording: false, duration_seconds: 0, level_db: -60 });
-    apiMock.audioStart.mockRejectedValue(new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/start"));
-    const { button, label } = renderMicrophoneTest();
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(button.textContent).toBe("Stop");
-    });
-
-    expect(label.textContent).toContain("press Stop");
-    expect(levelStreamMock).not.toHaveBeenCalled();
-  });
-
-  it("closes the adopted microphone on the next press", async () => {
-    apiMock.audioStatus.mockResolvedValue({ is_recording: false, duration_seconds: 0, level_db: -60 });
-    apiMock.audioStart.mockRejectedValue(new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/start"));
-    apiMock.audioStop.mockResolvedValue({ filename: "rec.wav", duration_seconds: 1 });
+    apiMock.audioStart.mockResolvedValue({ is_recording: true, duration_seconds: 0, level_db: -60 });
+    apiMock.audioStop.mockRejectedValue(new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/stop"));
     const { button, label } = renderMicrophoneTest();
 
     button.click();
@@ -761,23 +747,9 @@ describe("renderGeneral — the microphone test", () => {
       expect(apiMock.audioStop).toHaveBeenCalledOnce();
     });
 
-    expect(button.textContent).toBe("Record");
-    expect(label.textContent).toBe("Click to test microphone");
-  });
-
-  it("refuses to take a microphone it could not confirm was free", async () => {
-    apiMock.audioStatus.mockRejectedValue(new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/status"));
-    apiMock.audioStart.mockRejectedValue(new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/start"));
-    const { button, label } = renderMicrophoneTest();
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(label.textContent).toContain("Could not check whether the microphone is free");
-    });
-
-    expect(apiMock.audioStart).not.toHaveBeenCalled();
-    expect(button.textContent).toBe("Record");
-    expect(levelStreamMock).not.toHaveBeenCalled();
+    expect(label.textContent).toContain("the microphone may still be open");
+    expect(label.textContent).not.toContain("press Stop");
+    expect(button.textContent).toBe("Stop");
   });
 
   it("still reports an ordinary start failure as a failure", async () => {
