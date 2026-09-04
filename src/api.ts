@@ -38,6 +38,35 @@ const TOKEN_TIMED_OUT = Symbol("token-timed-out");
  *  no new `invoke()` would ever be attempted. */
 export const TOKEN_CALL_REUSE_MS = 60_000;
 
+/** How long an ordinary request may go unanswered before it is abandoned.
+ *
+ *  `fetch` has no timeout of its own, so a request the backend accepts and then
+ *  abandons never settles — and neither does anything sequenced behind it. That
+ *  is not a slow window, it is a dead one: the widget's intent queue keeps
+ *  handing every later press the same pending promise while the microphone
+ *  stays open, and the Settings window never reaches the failure screen its own
+ *  40 s bound was added to guarantee.
+ *
+ *  15 s rather than a rounder number: the slowest control-plane call this app
+ *  makes is starting a meeting recording, measured in spec 099 at up to six
+ *  seconds of device enumeration, so the budget is over twice the worst known
+ *  real answer while staying well inside the Settings window's outer bound —
+ *  the inner budget fires first and names the endpoint that hung. */
+export const REQUEST_TIMEOUT_MS = 15_000;
+
+/** The budget for the three calls that do real work rather than answer a question.
+ *
+ *  Transcription and model loading are legitimately slow: `POST /stt/local/load`
+ *  says "may take minutes on first run (model download)", and the dictation path
+ *  waits up to 300 s for local readiness before it starts transcribing at all.
+ *  Ten minutes doubles that wait, and it is far outside any real transcription —
+ *  uploads are capped at 25 MB, which is about thirteen minutes of 16 kHz mono
+ *  audio, and the local path's own acceptance criterion is 150 s of audio in
+ *  under 10 s. Unbounded was the rejected alternative: "no budget" is the defect
+ *  this constant exists to remove, and it wedges the intent queue just as the
+ *  short calls did, because `stopAndProcess` awaits the transcription. */
+export const LONG_REQUEST_TIMEOUT_MS = 600_000;
+
 let cachedToken: string | null = null;
 let tokenPromise: Promise<string | null> | null = null;
 /** The outstanding `get_backend_token` IPC call, with the time it started. When
@@ -167,7 +196,36 @@ async function responseError(resp: Response): Promise<Error> {
   return new ApiRequestError(detail, resp.status);
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+/** `fetch` under a budget, abandoning the request rather than waiting forever.
+ *
+ *  The abort is what releases the socket; the rejection it produces is
+ *  translated here so the caller gets a sentence naming the endpoint and the
+ *  budget instead of a bare `AbortError`. The query string is dropped from that
+ *  message: `/history/search?q=` carries whatever the user typed, and an error
+ *  message is rendered in more places than it is read. */
+async function fetchWithin(path: string, opts: RequestInit, budgetMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), budgetMs);
+  try {
+    return await fetch(`${BACKEND_BASE_URL}${path}`, { ...opts, signal: controller.signal });
+  } catch (e) {
+    if (controller.signal.aborted) {
+      throw new Error(
+        `the backend did not answer ${path.split("?")[0]} within ${budgetMs / 1000} seconds`,
+      );
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  budgetMs: number = REQUEST_TIMEOUT_MS,
+): Promise<T> {
   const token = await getToken();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) {
@@ -177,7 +235,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   if (body) {
     opts.body = JSON.stringify(body);
   }
-  const resp = await fetch(`${BACKEND_BASE_URL}${path}`, opts);
+  const resp = await fetchWithin(path, opts, budgetMs);
   recordAuthOutcome(path, resp);
   if (!resp.ok) {
     throw await responseError(resp);
@@ -379,7 +437,12 @@ export const api = {
   getMeetingStatus: () => request<MeetingStatus>("GET", "/audio/meeting/status"),
 
   dictate: (language = "uk") =>
-    request<DictateResponse>("POST", `/pipeline/dictate?language=${language}`),
+    request<DictateResponse>(
+      "POST",
+      `/pipeline/dictate?language=${language}`,
+      undefined,
+      LONG_REQUEST_TIMEOUT_MS,
+    ),
 
   /** Upload an audio file to the pipeline. Accepts an ArrayBuffer of file bytes.
    *  `language` defaults to `"auto"` — every STT provider maps that sentinel
@@ -399,7 +462,11 @@ export const api = {
     if (token) {
       headers["X-JustSay-Token"] = token;
     }
-    const resp = await fetch(`${BACKEND_BASE_URL}${path}`, { method: "POST", body: form, headers });
+    const resp = await fetchWithin(
+      path,
+      { method: "POST", body: form, headers },
+      LONG_REQUEST_TIMEOUT_MS,
+    );
     recordAuthOutcome(path, resp);
     if (!resp.ok) {
       throw await responseError(resp);
@@ -413,7 +480,13 @@ export const api = {
   resources: () => request<ResourceInfo>("GET", "/resources"),
 
   sttLocalStatus: () => request<LocalSttStatus>("GET", "/stt/local/status"),
-  sttLocalLoad: () => request<{ loaded: boolean; model?: string }>("POST", "/stt/local/load"),
+  sttLocalLoad: () =>
+    request<{ loaded: boolean; model?: string }>(
+      "POST",
+      "/stt/local/load",
+      undefined,
+      LONG_REQUEST_TIMEOUT_MS,
+    ),
   sttLocalUnload: () => request<{ unloaded: boolean }>("POST", "/stt/local/unload"),
   /** Retry affordance for the Local STT status indicator's error state —
    *  fire-and-forget on the backend, returns before the model finishes loading. */

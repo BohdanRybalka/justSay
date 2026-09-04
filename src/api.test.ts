@@ -378,3 +378,123 @@ describe("sawAuthFailure() clears as well as sets", () => {
     await vi.waitFor(() => expect(sawAuthFailure()).toBe(true));
   });
 });
+
+describe("a backend that accepts a request and never answers", () => {
+  beforeEach(() => {
+    invokeMock.mockResolvedValue("secret-token");
+  });
+
+  /** A `fetch` that behaves like the real one against a backend that has stopped
+   *  answering: it holds the connection open and settles only when aborted. */
+  function deafFetch() {
+    return (_url: string, opts: RequestInit) =>
+      new Promise<Response>((_, reject) => {
+        opts.signal?.addEventListener("abort", () =>
+          reject(new DOMException("The operation was aborted.", "AbortError")),
+        );
+      });
+  }
+
+  it("abandons an ordinary request at the budget instead of never settling", async () => {
+    vi.useFakeTimers();
+    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
+    fetchMock.mockImplementation(deafFetch());
+
+    const pending = api.health();
+    const settled = vi.fn();
+    pending.then(settled, settled);
+
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1);
+    expect(settled).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2);
+    await expect(pending).rejects.toThrow("the backend did not answer /health within 15 seconds");
+  });
+
+  it("aborts the request it gave up on, so the socket is not left open", async () => {
+    vi.useFakeTimers();
+    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
+    fetchMock.mockImplementation(deafFetch());
+
+    const pending = api.audioStart();
+    pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    const signal = (fetchMock.mock.calls[0][1] as RequestInit).signal!;
+    expect(signal.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("keeps the query string out of the message, since it carries what was typed", async () => {
+    vi.useFakeTimers();
+    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
+    fetchMock.mockImplementation(deafFetch());
+
+    const pending = api.searchHistory("my private note");
+    pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
+
+    await expect(pending).rejects.toThrow(
+      "the backend did not answer /history/search within 15 seconds",
+    );
+    await expect(pending).rejects.not.toThrow(/my private note/);
+  });
+
+  it("gives transcription the long budget rather than the short one", async () => {
+    vi.useFakeTimers();
+    const { api, REQUEST_TIMEOUT_MS, LONG_REQUEST_TIMEOUT_MS } = await import("./api");
+    fetchMock.mockImplementation(deafFetch());
+
+    const pending = api.dictate("uk");
+    const settled = vi.fn();
+    pending.then(settled, settled);
+
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS * 2);
+    expect(settled).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(LONG_REQUEST_TIMEOUT_MS);
+    await expect(pending).rejects.toThrow("within 600 seconds");
+  });
+
+  it("lets the widget's intent queue recover instead of wedging on one dead request", async () => {
+    vi.useFakeTimers();
+    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
+    const { createRecordingIntentQueue } = await import("./widget/recording-intent");
+    fetchMock.mockImplementation(deafFetch());
+
+    let recording = false;
+    const errors: unknown[] = [];
+    const queue = createRecordingIntentQueue({
+      isRecording: () => recording,
+      isBusy: () => false,
+      startRecording: async () => {
+        await api.audioStart();
+        recording = true;
+      },
+      stopRecording: async () => {
+        await api.dictate("uk");
+        recording = false;
+      },
+      reportError: (e) => errors.push(e),
+    });
+
+    const firstPress = queue.request("start");
+    firstPress.catch(() => {});
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
+    await firstPress;
+
+    expect(errors).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const secondPress = queue.request("start");
+    secondPress.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(secondPress).not.toBe(firstPress);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
+    await secondPress;
+    expect(errors).toHaveLength(2);
+  });
+});
