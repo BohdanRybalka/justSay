@@ -61,6 +61,25 @@ describe("the meeting recording toggle", () => {
     );
   });
 
+  it("does not claim the call is still recording when the stop was only abandoned", async () => {
+    const deps = actions({
+      isRecording: vi.fn(() => true),
+      stopRecording: vi.fn(async () => {
+        throw new TimedOutError(600_000, "/audio/meeting/stop");
+      }),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.hideIndicator).not.toHaveBeenCalled();
+    expect(deps.showIndicator).not.toHaveBeenCalled();
+    expect(deps.setTrayRecording).not.toHaveBeenCalled();
+    expect(deps.reportError).toHaveBeenCalledWith(
+      "Stopping the call was not confirmed — the request was abandoned and whether the recording ended is unknown: the backend did not answer /audio/meeting/stop within 600 seconds",
+    );
+    expect(deps.reportError.mock.calls[0][0]).not.toContain("still being recorded");
+  });
+
   it("clears the indicator when starting fails, because nothing is recording", async () => {
     const deps = actions({
       startRecording: vi.fn(async () => {

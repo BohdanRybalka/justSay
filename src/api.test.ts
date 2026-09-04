@@ -389,6 +389,85 @@ describe("a bridge module whose import never settles", () => {
   });
 });
 
+describe("an invoke that never settles", () => {
+  beforeEach(() => {
+    installBridge();
+    vi.useFakeTimers();
+    invokeMock.mockImplementation(() => new Promise(() => {}));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    invokeMock.mockReset();
+    vi.resetModules();
+  });
+
+  it("reports the same unanswered call once per reuse window, not once per joined caller", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { api, TOKEN_CALL_REUSE_MS } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ status: "ok" }));
+
+    for (let i = 0; i < 4; i += 1) {
+      const pending = api.health();
+      await vi.advanceTimersByTimeAsync(3000);
+      await pending;
+    }
+
+    const invokeWarnings = () =>
+      warnSpy.mock.calls.filter((call) => String(call[0]).includes("did not settle in"));
+    expect(invokeWarnings()).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(TOKEN_CALL_REUSE_MS);
+    const later = api.health();
+    await vi.advanceTimersByTimeAsync(3000);
+    await later;
+
+    expect(invokeWarnings()).toHaveLength(2);
+    warnSpy.mockRestore();
+  });
+});
+
+describe("a bridge import that rejects after a caller has already given up on it", () => {
+  beforeEach(() => {
+    installBridge();
+    vi.useFakeTimers();
+    vi.doMock(
+      "@tauri-apps/api/core",
+      () =>
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error("chunk load failed")), 5000);
+        }),
+    );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+    vi.resetModules();
+  });
+
+  it("does not log the rejection again for the caller that merely joined the import", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { api, lastBridgeDiagnosis } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ status: "ok" }));
+
+    const first = api.health();
+    await vi.advanceTimersByTimeAsync(3000);
+    await first;
+    expect(lastBridgeDiagnosis().kind).toBe("bridge-timeout");
+
+    const joined = api.health();
+    await vi.advanceTimersByTimeAsync(3000);
+    await joined;
+
+    expect(lastBridgeDiagnosis().kind).toBe("bridge-failed");
+    expect(
+      warnSpy.mock.calls.filter((call) => String(call[0]).includes("bridge module failed to load")),
+    ).toHaveLength(0);
+    warnSpy.mockRestore();
+  });
+});
+
 describe("401 handling", () => {
   it("request() throws ApiAuthError carrying the diagnosis, and sawAuthFailure() flips", async () => {
     removeBridge();

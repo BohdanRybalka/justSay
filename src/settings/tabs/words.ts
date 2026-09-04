@@ -5,6 +5,7 @@ import {
 } from "../../api";
 import { formatCoarseDuration } from "../../format";
 import { escapeHtml } from "../html";
+import { isStaleStatusResponse } from "../../stale-response";
 
 const LANGUAGE_LABELS: Record<string, string> = {
   uk: "Ukrainian",
@@ -82,10 +83,18 @@ export function renderWords(container: HTMLElement): () => void {
     }
   }
 
+  let latestStatsToken = 0;
+
+  /** Same guard as the Models tab and both connection polls: this runs on a
+   *  5 s interval nothing awaits, and `historyStats` is bounded at 15 s rather
+   *  than unbounded now, so several probes overlap against a backend that has
+   *  gone quiet and the later-starting one can finish first. Only the newest
+   *  answer may write `lastTotalEntries` or repaint. */
   async function refreshStats() {
+    const token = ++latestStatsToken;
     try {
       const stats = await api.historyStats();
-      if (cancelled) return;
+      if (cancelled || isStaleStatusResponse(token, latestStatsToken)) return;
 
       if (lastTotalEntries < 0) return;
 
@@ -99,7 +108,7 @@ export function renderWords(container: HTMLElement): () => void {
       if (isEmpty || !pageRendered) return;
 
       const top = await fetchTop();
-      if (cancelled) return;
+      if (cancelled || isStaleStatusResponse(token, latestStatsToken)) return;
 
       renderText("words-stat-today", stats.today_words.toLocaleString("uk-UA"));
       renderText("words-stat-week", stats.week_words.toLocaleString("uk-UA"));
@@ -121,7 +130,7 @@ export function renderWords(container: HTMLElement): () => void {
         modelEl.innerHTML = renderBucketRows(stats.by_model, (m) => m);
       }
     } catch (e) {
-      if (cancelled) return;
+      if (cancelled || isStaleStatusResponse(token, latestStatsToken)) return;
       console.error("refreshStats failed:", e);
     }
   }

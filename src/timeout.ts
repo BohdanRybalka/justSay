@@ -5,16 +5,18 @@
  * Tauri `invoke()` has no reject channel at all (ADR 028), and the dynamic
  * `import("@tauri-apps/api/core")` in front of it is unbounded too, so a promise
  * built from either is not slow but absent — and everything sequenced after it
- * is absent as well. HTTP requests are bounded inside `api.ts` now; what this
- * race still covers is the bridge underneath them and any caller-level unit of
- * work assembled from several awaits.
+ * is absent as well. The HTTP requests `api.ts` gives a budget to are bounded
+ * there — nine of its endpoints are deliberately `UNRECONCILED` and are not —
+ * so what this race still covers is the bridge underneath them and any
+ * caller-level unit of work assembled from several awaits.
  *
  * The budget covers the whole unit of work the caller cannot proceed without,
  * not the first half of it. Racing only the fetch and then awaiting an unbounded
  * apply leaves exactly the wedge the race was added to remove.
  *
- * Each caller owns its own budget, because the two are unrelated numbers that
- * happen to be equal today.
+ * Each caller owns its own budget, because they are unrelated numbers: the two
+ * settings loads happen to be equal today and the widget's shell command is a
+ * different order of magnitude.
  */
 
 /** Thrown whenever a budget in this app expires, so a caller can branch on "we

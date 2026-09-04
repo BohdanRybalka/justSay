@@ -225,7 +225,9 @@ function getToken(): Promise<string | null> {
           kind: "bridge-failed",
           detail: e instanceof Error ? e.message : String(e),
         };
-        console.warn("getToken: the Tauri bridge module failed to load", e);
+        if (bridgeImport.fresh) {
+          console.warn("getToken: the Tauri bridge module failed to load", e);
+        }
         return null;
       } finally {
         clearTimeout(importTimer);
@@ -242,22 +244,22 @@ function getToken(): Promise<string | null> {
       const expiry = new Promise<typeof TOKEN_TIMED_OUT>((resolve) => {
         timer = setTimeout(() => resolve(TOKEN_TIMED_OUT), TOKEN_TIMEOUT_MS);
       });
+      const tokenCall = shareWhilePending(
+        tokenCallSlot,
+        () => invoke<string>("get_backend_token"),
+        TOKEN_CALL_REUSE_MS,
+      );
       let token: string | typeof TOKEN_TIMED_OUT;
       try {
-        token = await Promise.race([
-          shareWhilePending(
-            tokenCallSlot,
-            () => invoke<string>("get_backend_token"),
-            TOKEN_CALL_REUSE_MS,
-          ).call,
-          expiry,
-        ]);
+        token = await Promise.race([tokenCall.call, expiry]);
       } finally {
         clearTimeout(timer);
       }
       if (token === TOKEN_TIMED_OUT) {
         bridgeDiagnosis = { kind: "invoke-timeout" };
-        console.warn(`getToken: get_backend_token did not settle in ${TOKEN_TIMEOUT_MS} ms`);
+        if (tokenCall.fresh) {
+          console.warn(`getToken: get_backend_token did not settle in ${TOKEN_TIMEOUT_MS} ms`);
+        }
         return null;
       }
       bridgeDiagnosis = { kind: "ok" };

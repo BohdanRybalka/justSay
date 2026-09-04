@@ -51,7 +51,6 @@ describe("startErrorLabel", () => {
     for (const failure of [
       new Error("Already recording"),
       new Error("Missing or invalid API token"),
-      new ApiAuthError("Missing or invalid API token", { kind: "bridge-missing" }),
       new Error("connection reset"),
     ]) {
       const { label, toast } = startErrorLabel(failure);
@@ -59,6 +58,18 @@ describe("startErrorLabel", () => {
       expect(label).toBe("Start failed");
       expect(toast).toBe("Couldn't start recording — try again.");
     }
+  });
+
+  it("tells a 401 to restart the app instead of offering a retry that cannot work", () => {
+    const { label, toast } = startErrorLabel(
+      new ApiAuthError("Missing or invalid API token", { kind: "bridge-missing" }),
+    );
+
+    expect(label).toBe("Auth failed");
+    expect(label).not.toBe("Start failed");
+    expect(toast).toBe("JustSay could not authenticate to its own backend — restart the app.");
+    expect(toast).not.toContain("try again");
+    expect(toast).not.toContain("API key");
   });
 
   it("names the abandoned request instead, because the microphone may be open", () => {

@@ -9,6 +9,7 @@ import {
   type UserSettings,
 } from "../api";
 import { TimedOutError, withTimeout } from "../timeout";
+import { isStaleStatusResponse } from "../stale-response";
 import { renderGeneral } from "./tabs/general";
 import { renderModels } from "./tabs/models";
 import { renderHistory } from "./tabs/history";
@@ -86,8 +87,10 @@ function settingsUnavailableMessage(error: unknown, reachable: boolean): string 
 /**
  * The failure screen, with the way out of it.
  *
- * `init()` races the sidecar, which the Rust side budgets thirty seconds for,
- * so this screen is reached on an ordinary cold start. Closing the window does
+ * `init()` races the sidecar, whose readiness poll the Rust side runs for a
+ * hundred attempts 300 ms apart (`src-tauri/src/backend.rs`), so it can take
+ * well over thirty seconds and this screen is reached on an ordinary cold
+ * start. Closing the window does
  * not reload the webview -- `src-tauri/src/lib.rs` intercepts CloseRequested
  * and hides it instead -- so without a retry the only recovery is restarting
  * the whole app.
@@ -139,7 +142,7 @@ function renderSettingsUnavailable(container: HTMLElement) {
  * either half of this function makes carries its own budget, and that budget
  * now starts before the token is asked for rather than after it, so the one
  * unbounded step that used to sit in front of it — the dynamic
- * `import("@tauri-apps/api/core")` — is inside a budget too. `checkBackend()`
+ * `import("@tauri-apps/api/core")` — is inside a budget too. `probeBackend()`
  * is awaited outside `loadSettings()` and therefore outside the race; it is
  * bounded because the request underneath it is, not because of anything here.
  *
@@ -150,16 +153,19 @@ function renderSettingsUnavailable(container: HTMLElement) {
  * one budget between them, not two — it fires only on something new.
  *
  * The number a user waits is larger than either, and it is worth stating
- * because it is what this screen is about: `checkBackend()` carries its own
+ * because it is what this screen is about: `probeBackend()` carries its own
  * `REQUEST_TIMEOUT_MS` and is awaited before the race rather than inside it, so
  * a backend that accepts and never answers spends 15 s there and 15 s here
- * before any failure text appears.
+ * before any failure text appears. That probe runs on every call, retry
+ * included: the poll's guard discards superseded answers rather than skipping
+ * probes, so pressing "Try again" asks the backend rather than returning on a
+ * reading up to a budget old.
  */
 async function loadSettingsIntoUi(): Promise<void> {
   if (settingsLoadInFlight) return;
   settingsLoadInFlight = true;
   try {
-    await checkBackend();
+    await probeBackend();
     await withTimeout(loadSettings(), SETTINGS_LOAD_TIMEOUT_MS);
     settingsError = null;
     settingsLoadInFlight = false;
@@ -258,26 +264,35 @@ function renderBackendStatus(reachable: boolean) {
   backendStatus.removeAttribute("title");
 }
 
-/** One probe at a time, for the reason the widget's own poll already guards
- *  against: `setInterval` does not await this function, so against a backend
- *  that accepts and then goes quiet a probe outlives the 5 s interval and
- *  several overlap. Each then writes `backendReachable` and repaints the badge
+let latestBackendProbeToken = 0;
+
+/** Probes `/health`, repainting only if no newer probe has been issued since.
+ *
+ *  `setInterval` does not await this function, so against a backend that
+ *  accepts and then goes quiet a probe outlives the 5 s interval and several
+ *  overlap. Each would otherwise write `backendReachable` and repaint the badge
  *  in fetch-completion order rather than start order, so a stale probe's
  *  failure lands on top of a fresh probe's success and the header says the
- *  backend is offline while the window is reading it. */
-let backendCheckInFlight = false;
-
-async function checkBackend() {
-  if (backendCheckInFlight) return;
-  backendCheckInFlight = true;
+ *  backend is offline while the window is reading it.
+ *
+ *  The guard is a generation counter and not an in-flight boolean because a
+ *  boolean drops the probe instead of the answer: with a 15 s budget on a 5 s
+ *  interval one is in flight essentially always, so the retry button would
+ *  return without asking anything and decide on a reading up to 15 s old. Every
+ *  caller here gets its own probe; only the superseded answers are discarded,
+ *  so the badge and the failure sentence read whichever probe most recently
+ *  finished rather than whichever most recently started. */
+async function probeBackend(): Promise<void> {
+  const token = ++latestBackendProbeToken;
+  let reachable: boolean;
   try {
     await api.health();
-    backendReachable = true;
+    reachable = true;
   } catch {
-    backendReachable = false;
-  } finally {
-    backendCheckInFlight = false;
+    reachable = false;
   }
+  if (isStaleStatusResponse(token, latestBackendProbeToken)) return;
+  backendReachable = reachable;
   renderBackendStatus(backendReachable);
 }
 
@@ -305,7 +320,7 @@ navButtons.forEach((btn) => {
 async function init() {
   void initAppVersion();
   renderSettingsUnavailable(tabContent);
-  setInterval(checkBackend, 5000);
+  setInterval(probeBackend, 5000);
   await loadSettingsIntoUi();
 }
 

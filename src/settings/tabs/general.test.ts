@@ -784,6 +784,33 @@ describe("renderGeneral — the microphone test", () => {
     expect(button.textContent).toBe("Record");
   });
 
+  it("adopts a start that was abandoned rather than blaming the widget on the next press", async () => {
+    apiMock.audioStatus.mockResolvedValue({ is_recording: false, duration_seconds: 0, level_db: -60 });
+    apiMock.audioStart.mockRejectedValue(new TimedOutError(60_000, "/audio/start"));
+    const { button, label } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(apiMock.audioStart).toHaveBeenCalledOnce();
+    });
+
+    expect(label.textContent).toBe(
+      "The start was not confirmed — the microphone may be open; press Stop to close it",
+    );
+    expect(label.textContent).not.toBe("Failed to start");
+    expect(button.textContent).toBe("Stop");
+
+    apiMock.audioStatus.mockResolvedValue({ is_recording: true, duration_seconds: 3, level_db: -20 });
+    apiMock.audioStop.mockResolvedValue({ path: "rec.wav" });
+    button.click();
+    await vi.waitFor(() => {
+      expect(apiMock.audioStop).toHaveBeenCalledOnce();
+    });
+
+    expect(label.textContent).not.toContain("Microphone busy");
+    expect(apiMock.audioStart).toHaveBeenCalledOnce();
+  });
+
   it("puts an expired level-stream handshake into the label and leaves the recording alone", async () => {
     apiMock.audioStatus.mockResolvedValue({ is_recording: false, duration_seconds: 0, level_db: -60 });
     apiMock.audioStart.mockResolvedValue({ is_recording: true, duration_seconds: 0, level_db: -60 });

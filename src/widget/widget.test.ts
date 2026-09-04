@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EVENT_MEETING_TOGGLE } from "../contracts";
 import { CONNECTION_POLL_MS } from "./settings-retry";
 
 const apiMock = {
@@ -39,7 +40,8 @@ vi.mock("../notify", async (importOriginal) => {
   return { ...actual, notifyError: notifyErrorMock };
 });
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => {}) }));
+const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn(async () => {}) }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (event: string, handler: (payload: unknown) => unknown) => {
     listeners.set(event, handler);
@@ -83,6 +85,7 @@ beforeEach(() => {
     system_endpoint: null,
     system_level_db: -60,
   });
+  invokeMock.mockResolvedValue(undefined);
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -101,21 +104,32 @@ describe("the widget's own timers", () => {
     expect(apiMock.health.mock.calls.length - before).toBe(3);
   });
 
-  it("never runs two health probes at once, so the connection state is written in order", async () => {
+  it("keeps probing while one is unanswered, and lets only the newest answer speak", async () => {
     await loadWidget();
-    let release = () => {};
+    const pending: Array<(ok: boolean) => void> = [];
     apiMock.health.mockImplementation(
       () =>
-        new Promise((resolve) => {
-          release = () => resolve({ status: "ok", version: "0", stt_mode: "cloud", llm_mode: "cloud" });
+        new Promise((resolve, reject) => {
+          pending.push((ok) =>
+            ok
+              ? resolve({ status: "ok", version: "0", stt_mode: "cloud", llm_mode: "cloud" })
+              : reject(new TypeError("Failed to fetch")),
+          );
         }),
     );
     const before = apiMock.health.mock.calls.length;
 
     await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS * 4);
 
-    expect(apiMock.health.mock.calls.length - before).toBe(1);
-    release();
+    expect(apiMock.health.mock.calls.length - before).toBe(4);
+
+    pending[pending.length - 1](true);
+    await vi.advanceTimersByTimeAsync(0);
+    for (const settle of pending.slice(0, -1)) settle(false);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(document.getElementById("widget-text")!.textContent).toBe("JustSay");
+    expect(notifyErrorMock).not.toHaveBeenCalledWith("JustSay backend is unreachable.");
   });
 });
 
@@ -194,5 +208,33 @@ describe("a start the backend never answered", () => {
     await vi.advanceTimersByTimeAsync(60_000);
 
     expect(document.getElementById("widget-text")!.textContent).toBe("No answer");
+  });
+});
+
+describe("a Tauri bridge that stops answering", () => {
+  it("does not leave the meeting toggle swallowing every later press", async () => {
+    await loadWidget();
+    await vi.waitFor(() => expect(listeners.get(EVENT_MEETING_TOGGLE)).toBeTypeOf("function"));
+    const pressTray = listeners.get(EVENT_MEETING_TOGGLE)!;
+    apiMock.startMeetingRecording.mockResolvedValue({
+      is_recording: true,
+      duration_seconds: 0,
+      level_db: -60,
+      system_endpoint: null,
+      system_level_db: -60,
+    });
+    apiMock.stopMeetingRecording.mockResolvedValue({ path: "meeting.wav" });
+    invokeMock.mockImplementation(() => new Promise(() => {}));
+
+    void pressTray({});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(apiMock.startMeetingRecording).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(3000);
+
+    void pressTray({});
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(apiMock.stopMeetingRecording).toHaveBeenCalledOnce();
   });
 });

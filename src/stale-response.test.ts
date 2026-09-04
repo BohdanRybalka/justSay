@@ -1,8 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-
-vi.mock("../settings", () => ({ loadSettings: vi.fn() }));
-
-import { isStaleStatusResponse } from "./models";
+import { describe, expect, it } from "vitest";
+import { isStaleStatusResponse } from "./stale-response";
 
 describe("isStaleStatusResponse", () => {
   it("a token superseded by a newer issued token is stale", () => {

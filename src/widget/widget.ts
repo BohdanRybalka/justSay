@@ -16,7 +16,8 @@ import {
 } from "../contracts";
 import { formatStopwatch } from "../format";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
-import { TimedOutError } from "../timeout";
+import { isStaleStatusResponse } from "../stale-response";
+import { TimedOutError, withTimeout } from "../timeout";
 import { computeDoneStatus } from "./done-status";
 import { dictationErrorLabel, startErrorLabel, type DictationErrorLabel } from "./error-label";
 import { MEETING_STATE_CLASS, renderMeetingIndicator } from "./meeting-indicator";
@@ -71,7 +72,12 @@ function isInteractive(): boolean {
 }
 
 
-function setState(newState: WidgetState, message?: string, durationLabel?: string) {
+function setState(
+  newState: WidgetState,
+  message?: string,
+  durationLabel?: string,
+  { persist = false }: { persist?: boolean } = {},
+) {
   state = newState;
   widget.className = `widget ${state}${meetingActive ? ` ${MEETING_STATE_CLASS}` : ""}`;
 
@@ -122,10 +128,12 @@ function setState(newState: WidgetState, message?: string, durationLabel?: strin
       text.textContent = message || "Error";
       durationEl.textContent = "";
       renderIcon("error");
-      errorRevertTimer = setTimeout(() => {
-        errorRevertTimer = null;
-        if (state === "error") setState("idle");
-      }, AUTO_REVERT_MS);
+      if (!persist) {
+        errorRevertTimer = setTimeout(() => {
+          errorRevertTimer = null;
+          if (state === "error") setState("idle");
+        }, AUTO_REVERT_MS);
+      }
       break;
   }
 }
@@ -138,13 +146,14 @@ function setState(newState: WidgetState, message?: string, durationLabel?: strin
  * still be open and reverting is the widget asserting that all is well on the
  * one outcome nobody established (ADR 049, third amendment). The state stays
  * until the user acts on it — a click still starts a new dictation from here,
- * so this is a message that waits, not a dead end. */
+ * so this is a message that waits, not a dead end.
+ *
+ * `persist` is asked for rather than the revert being armed and then cancelled,
+ * so that "this state does not revert" is a property of the one place that
+ * arms the timer. Undoing the arming leaves the state one added `setTimeout`
+ * away from silently reverting again, and nothing would fail. */
 function setUnresolvedError(label: string) {
-  setState("error", label);
-  if (errorRevertTimer) {
-    clearTimeout(errorRevertTimer);
-    errorRevertTimer = null;
-  }
+  setState("error", label, undefined, { persist: true });
 }
 
 /** Clears the interval it is about to replace, so the one function that creates
@@ -170,14 +179,18 @@ async function startRecording() {
   try {
     await api.audioStart();
   } catch (e) {
-    reportDictationFailure(startErrorLabel(e), e);
+    reportTransitionFailure(startErrorLabel(e), e);
     console.error("Start recording failed:", e);
   }
 }
 
-/** A failure that was observed reverts to idle; one that was only abandoned
+/** Reports a failed start or a failed dictation: both are transitions out of a
+ *  state the user asked for, and both are told apart the same way. The label is
+ *  the caller's — `startErrorLabel` and `dictationErrorLabel` say different
+ *  things and must keep doing so — and only the revert policy is decided here.
+ *  A failure that was observed reverts to idle; one that was only abandoned
  *  stays on screen, because the state it describes has not resolved itself. */
-function reportDictationFailure({ label, toast }: DictationErrorLabel, error: unknown) {
+function reportTransitionFailure({ label, toast }: DictationErrorLabel, error: unknown) {
   if (error instanceof TimedOutError) {
     setUnresolvedError(label);
   } else {
@@ -203,7 +216,7 @@ async function stopAndProcess() {
       setState("idle");
     }
   } catch (e) {
-    reportDictationFailure(dictationErrorLabel(e), e);
+    reportTransitionFailure(dictationErrorLabel(e), e);
     console.error("Pipeline failed:", e);
   }
 }
@@ -264,10 +277,27 @@ function endMeetingIndicator() {
   renderMeetingIndicatorFromState();
 }
 
+/** The budget on a shell command, covering the bridge import and the `invoke()`
+ *  behind it as one unit.
+ *
+ *  Neither step has a bound of its own — a dynamic import has no timeout and
+ *  `invoke()` has no reject channel at all (ADR 028) — so an absent bridge
+ *  leaves this promise pending for the life of the window. The meeting toggle
+ *  awaits it while holding `meetingBusy`, which would swallow every later
+ *  press, tray included: the wedge ADR 049 gave the HTTP calls a budget to
+ *  remove, one layer down. Matched to `api.ts`'s own bridge budget, because it
+ *  is the same two steps against the same transport. */
+const SHELL_INVOKE_TIMEOUT_MS = 3000;
+
 async function invokeShell(command: string, args?: Record<string, unknown>) {
   try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke(command, args);
+    await withTimeout(
+      (async () => {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke(command, args);
+      })(),
+      SHELL_INVOKE_TIMEOUT_MS,
+    );
   } catch (e) {
     console.warn(`Shell command ${command} failed:`, e);
   }
@@ -520,24 +550,28 @@ async function listenForSettingsChanges() {
 }
 
 
-/** One probe at a time. `setInterval` does not await this function, so against
- *  a backend that accepts and abandons, a probe outlives the 5 s interval and
- *  several are in flight at once — each then writing `connectionState` from
- *  whatever it read when it started, in fetch-completion order rather than
- *  start order, which duplicates or swallows the unreachable toast. */
-let connectionCheckInFlight = false;
+let latestConnectionProbeToken = 0;
 
+/** `setInterval` does not await this function, so against a backend that
+ *  accepts and abandons, a probe outlives the 5 s interval and several are in
+ *  flight at once — each then writing `connectionState` from whatever it read
+ *  when it started, in fetch-completion order rather than start order, which
+ *  duplicates or swallows the unreachable toast.
+ *
+ *  The generation counter discards the superseded *answers* and keeps every
+ *  probe, which an in-flight boolean cannot: a boolean skips a tick outright,
+ *  so with a 15 s budget on a 5 s poll the widget can sit a whole budget past a
+ *  tick before it notices the backend came back. Same guard, same shape, as the
+ *  Settings window's badge and the Models tab's status read. */
 async function checkConnection() {
-  if (connectionCheckInFlight) return;
-  connectionCheckInFlight = true;
+  const token = ++latestConnectionProbeToken;
   let healthOk = true;
   try {
     await api.health();
   } catch {
     healthOk = false;
-  } finally {
-    connectionCheckInFlight = false;
   }
+  if (isStaleStatusResponse(token, latestConnectionProbeToken)) return;
   const result = nextConnectionCheckState(connectionState, healthOk);
   connectionState = { offline: result.offline, firstCheckDone: result.firstCheckDone };
 
