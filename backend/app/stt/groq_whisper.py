@@ -12,6 +12,7 @@ from app.core.constants import GROQ_TIMEOUT_SECONDS
 from app.stt.base import (
     STTProvider,
     TranscriptionResult,
+    clean_transcript_text,
     min_no_speech_prob,
     normalize_detected_language,
 )
@@ -75,7 +76,7 @@ class GroqWhisperSTTProvider(STTProvider):
             log.exception("Groq Whisper call failed")
             raise
         return TranscriptionResult(
-            text=text.strip() if text else "",
+            text=clean_transcript_text(text),
             tokens_used=None,
             detected_language=normalize_detected_language(detected_raw),
             no_speech_prob=no_speech_prob,

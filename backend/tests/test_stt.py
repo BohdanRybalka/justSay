@@ -2,6 +2,7 @@ import asyncio
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -10,7 +11,11 @@ import soundfile as sf
 
 from app.core.types import ProviderMode
 from app.stt import clear_cache, get_provider
-from app.stt.base import TranscriptionResult, normalize_detected_language
+from app.stt.base import (
+    TranscriptionResult,
+    clean_transcript_text,
+    normalize_detected_language,
+)
 from app.stt.cloud import GeminiSTTProvider
 from app.stt.config import STTSettings
 from app.stt.local import LocalSTTProvider
@@ -206,13 +211,14 @@ async def test_gemini_detected_language_always_none(sample_wav):
 )
 @pytest.mark.asyncio
 async def test_cloud_stt_keeps_speech_that_opens_like_a_refusal(sample_wav, spoken):
-    """Audit 2026-08-25 BLOCKER 1: every one of these returned "" on master.
+    """A transcript is returned intact even when it opens with a phrase that
+    reads like a model refusal ("Sorry,", "I cannot", "The audio is").
 
-    ``_clean_output`` matched seven prefixes against the start of the transcript
-    and dropped the whole thing, and ``process_audio`` then reported success with
-    ``discarded_reason=None`` — real speech deleted with nothing to show for it.
-    Decision A3 removed the filter; silence is guarded before any provider runs,
-    by ``analyze_vad``/``analyze_silence`` in ``pipeline/service.py``.
+    The provider applies no content filter: an opening phrase is not evidence
+    about the audio, and two of these seven are ordinary openings of real
+    speech. Whether audio is worth transcribing is decided upstream, by
+    ``analyze_vad``/``analyze_silence`` in ``pipeline/service.py``, before any
+    provider is called.
     """
     settings = STTSettings(mode=ProviderMode.CLOUD, gemini_api_key="test-key")
     provider = GeminiSTTProvider(settings)
@@ -222,6 +228,55 @@ async def test_cloud_stt_keeps_speech_that_opens_like_a_refusal(sample_wav, spok
         result = await provider.transcribe(sample_wav, language="en")
 
     assert result.text == spoken
+
+
+@pytest.mark.parametrize("raw", [None, "", "   ", '\n\t '])
+def test_clean_transcript_text_coerces_absent_text_to_empty(raw):
+    """The branch every `_call_gemini` stub in this suite skips.
+
+    google-genai's ``response.text`` is typed ``Optional[str]`` and returns
+    ``None`` when the candidate carries no text part, so "simplifying" this to
+    ``raw.strip()`` is an ``AttributeError`` in production with the suite green.
+    """
+    assert clean_transcript_text(raw) == ""
+
+
+def test_clean_transcript_text_strips_but_keeps_everything_else():
+    assert clean_transcript_text("  Привіт світ  ") == "Привіт світ"
+    assert clean_transcript_text("Sorry, I was late.") == "Sorry, I was late."
+
+
+class _FakeResponse:
+    def __init__(self, text=None, block_reason=None, finish_reason=None):
+        self.text = text
+        self.prompt_feedback = SimpleNamespace(block_reason=block_reason)
+        self.candidates = [SimpleNamespace(finish_reason=finish_reason)] if finish_reason else []
+
+
+def test_gemini_returns_the_transcript_when_the_response_carries_one():
+    assert GeminiSTTProvider._transcript_from_response(_FakeResponse(text="Привіт")) == "Привіт"
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_fragment"),
+    [
+        (_FakeResponse(block_reason="SAFETY"), "blocked: SAFETY"),
+        (_FakeResponse(finish_reason="MAX_TOKENS"), "finish_reason: MAX_TOKENS"),
+        (_FakeResponse(), "no transcription"),
+    ],
+)
+def test_gemini_raises_rather_than_reporting_a_blocked_response_as_success(
+    response, expected_fragment
+):
+    """A candidate with no text part must not read as a silent success.
+
+    Returning "" here produced the same shape a deleted transcript did:
+    ``process_audio`` copies nothing, saves a zero-word history row and reports
+    ``discarded_reason=None``, which ``computeDoneStatus`` renders as nothing at
+    all. The raise reaches the user as a 500 naming the reason instead.
+    """
+    with pytest.raises(RuntimeError, match=expected_fragment):
+        GeminiSTTProvider._transcript_from_response(response)
 
 
 def test_local_stt_model_name():

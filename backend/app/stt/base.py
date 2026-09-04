@@ -45,6 +45,22 @@ def normalize_detected_language(raw: str | None) -> str | None:
     return name_to_code.get(candidate) or name_to_code.get(primary)
 
 
+def clean_transcript_text(raw: str | None) -> str:
+    """Coerce one provider's raw transcript into a stripped ``str``.
+
+    Every cloud SDK here types its text field as optional and means it:
+    google-genai returns ``None`` when the candidate carries no text part, and
+    Groq's ``verbose_json`` body is closed-source and undocumented. Both
+    providers inlined the same ``strip``-or-empty expression, which is one
+    defensive reader too few — the same reason `min_no_speech_prob` lives here.
+
+    It coerces and nothing else. A provider that decides a transcript should be
+    discarded says so through `TranscriptionResult` or by raising; deciding it
+    from the text itself is what deleted real speech for the whole of v0.12.
+    """
+    return raw.strip() if raw else ""
+
+
 def coerce_no_speech_prob(value) -> float | None:
     """Coerce one raw ``no_speech_prob`` value to a float, or ``None``.
 
