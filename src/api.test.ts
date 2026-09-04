@@ -727,7 +727,7 @@ describe("a token wait that never ends, because the bridge module never loads", 
   });
 
   afterEach(() => {
-    vi.doUnmock("@tauri-apps/api/core");
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
     vi.resetModules();
   });
 

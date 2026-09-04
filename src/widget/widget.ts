@@ -17,10 +17,7 @@ import {
 import { formatStopwatch } from "../format";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
 import { TimedOutError } from "../timeout";
-import {
-  readRecordingTruth,
-  stateAfterAbandonedStart,
-} from "./abandoned-request";
+import { createAbandonedStartCleanup, readRecordingTruth } from "./abandoned-request";
 import { computeDoneStatus } from "./done-status";
 import { dictationErrorLabel } from "./error-label";
 import { MEETING_STATE_CLASS, renderMeetingIndicator } from "./meeting-indicator";
@@ -127,12 +124,17 @@ function setState(newState: WidgetState, message?: string, durationLabel?: strin
   }
 }
 
-/** `startedAt` exists so an adopted recording shows the backend's elapsed time
+/** `start` exists so an adopted recording shows the backend's elapsed time
  *  rather than restarting the stopwatch at zero: when a start times out and the
  *  backend turns out to be recording, the capture began before the budget ran
- *  out (ADR 049). */
-function startDurationTimer(startedAt = Date.now()) {
-  const start = startedAt;
+ *  out (ADR 049).
+ *
+ *  It clears the interval it is about to replace, so the one function that
+ *  creates the stopwatch is also the one that owns there being only one of it:
+ *  the adoption path calls this while `setState("recording")` has already armed
+ *  an interval, and two of them would write to the same node. */
+function startDurationTimer(start = Date.now()) {
+  if (durationInterval) clearInterval(durationInterval);
   const update = () => {
     const elapsed = (Date.now() - start) / 1000;
     durationEl.textContent = formatStopwatch(elapsed);
@@ -152,15 +154,12 @@ async function startRecording() {
   } catch (e) {
     if (e instanceof TimedOutError) {
       const truth = await readRecordingTruth(api.audioStatus);
-      if (stateAfterAbandonedStart(truth) === "recording" && truth.kind === "recording") {
-        if (durationInterval) {
-          clearInterval(durationInterval);
-          durationInterval = null;
-        }
+      if (truth.kind === "recording") {
         startDurationTimer(Date.now() - truth.elapsedSeconds * 1000);
         console.warn("Start recording timed out but the backend is recording; adopted it", e);
         return;
       }
+      abandonedStart.owe();
     }
     setState("error", "Start failed");
     notifyError("Couldn't start recording — try again.");
@@ -192,6 +191,15 @@ async function stopAndProcess() {
   }
 }
 
+/** The stop a timed-out start left behind. It is discharged by `checkConnection`
+ *  rather than at the timeout site because `unknown` means the backend has just
+ *  proved it is not answering, so a compensating stop sent there would be sent
+ *  into the same silence (ADR 049). */
+const abandonedStart = createAbandonedStartCleanup({
+  stopRecording: () => api.audioStop(),
+  isBusy: () => state === "recording" || state === "processing",
+});
+
 const recordingIntent = createRecordingIntentQueue({
   isRecording: () => state === "recording",
   isBusy: () => state === "processing",
@@ -221,6 +229,7 @@ let meetingActive = false;
 let meetingStartedAt = 0;
 let meetingTimer: ReturnType<typeof setInterval> | null = null;
 let meetingBusy = false;
+let meetingIndicatorUnconfirmed = false;
 
 const MEETING_TICK_MS = 500;
 
@@ -264,6 +273,9 @@ const meetingToggleActions: MeetingToggleActions = {
   hideIndicator: endMeetingIndicator,
   setTrayRecording: (active) => invokeShell("set_meeting_recording", { active }),
   readStartTruth: () => readRecordingTruth(api.getMeetingStatus),
+  markIndicatorUnconfirmed: () => {
+    meetingIndicatorUnconfirmed = true;
+  },
   openDisclosure: () => invokeShell("show_settings_window"),
   reportError: (message) => {
     console.error("Meeting recording:", message);
@@ -283,20 +295,26 @@ async function toggleMeetingRecording() {
 
 /** The widget window can be reloaded while a recording is running, and the
  *  indicator is the only thing telling the room a call is being captured — so
- *  it is restored from the backend rather than from this window's memory. */
-async function syncMeetingIndicator() {
+ *  it is restored from the backend rather than from this window's memory.
+ *
+ *  It answers whether it managed to read the status, which is what lets
+ *  `checkConnection` withdraw an indicator raised on an unreadable one. */
+async function syncMeetingIndicator(): Promise<boolean> {
+  let status;
   try {
-    const status = await api.getMeetingStatus();
-    if (status.is_recording === meetingActive) return;
-    if (status.is_recording) {
-      beginMeetingIndicator(Date.now() - status.duration_seconds * 1000);
-    } else {
-      endMeetingIndicator();
-    }
-    await invokeShell("set_meeting_recording", { active: status.is_recording });
+    status = await api.getMeetingStatus();
   } catch (e) {
     console.warn("Could not read the meeting recording status:", e);
+    return false;
   }
+  if (status.is_recording === meetingActive) return true;
+  if (status.is_recording) {
+    beginMeetingIndicator(Date.now() - status.duration_seconds * 1000);
+  } else {
+    endMeetingIndicator();
+  }
+  await invokeShell("set_meeting_recording", { active: status.is_recording });
+  return true;
 }
 
 widget.addEventListener("click", () => {
@@ -520,6 +538,12 @@ async function checkConnection() {
   } else {
     if (state === "idle") text.textContent = "Offline";
     if (result.shouldNotify) notifyError("JustSay backend is unreachable.");
+  }
+
+  await abandonedStart.settle(healthOk);
+
+  if (healthOk && meetingIndicatorUnconfirmed && (await syncMeetingIndicator())) {
+    meetingIndicatorUnconfirmed = false;
   }
 }
 

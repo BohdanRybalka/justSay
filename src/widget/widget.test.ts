@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RecordingStatus } from "../api";
+import { EVENT_MEETING_TOGGLE } from "../contracts";
+import { MEETING_STATE_CLASS } from "./meeting-indicator";
+import { CONNECTION_POLL_MS } from "./settings-retry";
 
 const apiMock = {
   health: vi.fn(async () => ({ status: "ok", version: "0", stt_mode: "cloud", llm_mode: "cloud" })),
@@ -20,9 +23,12 @@ const apiMock = {
   startMeetingRecording: vi.fn(),
   stopMeetingRecording: vi.fn(),
   audioStart: vi.fn(),
+  audioStop: vi.fn(),
   audioStatus: vi.fn(),
   dictate: vi.fn(),
 };
+
+const listeners = new Map<string, (event: unknown) => unknown>();
 
 const notifyErrorMock = vi.fn();
 
@@ -38,7 +44,10 @@ vi.mock("../notify", async (importOriginal) => {
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => {}) }));
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async () => () => {}),
+  listen: vi.fn(async (event: string, handler: (payload: unknown) => unknown) => {
+    listeners.set(event, handler);
+    return () => {};
+  }),
   emit: vi.fn(async () => {}),
 }));
 vi.mock("@tauri-apps/plugin-global-shortcut", () => ({
@@ -76,9 +85,30 @@ function root(): HTMLElement {
   return document.getElementById("widget")!;
 }
 
+function meetingStatus(isRecording: boolean, durationSeconds = 0) {
+  return {
+    is_recording: isRecording,
+    duration_seconds: durationSeconds,
+    level_db: -60,
+    system_endpoint: null,
+    system_level_db: -60,
+  };
+}
+
+async function triggerMeetingToggle() {
+  await vi.waitFor(() => expect(listeners.has(EVENT_MEETING_TOGGLE)).toBe(true));
+  await listeners.get(EVENT_MEETING_TOGGLE)!({});
+}
+
+function meetingIndicatorShown(): boolean {
+  return root().classList.contains(MEETING_STATE_CLASS);
+}
+
 beforeEach(() => {
+  vi.useFakeTimers();
   vi.resetModules();
   vi.clearAllMocks();
+  listeners.clear();
   apiMock.health.mockResolvedValue({
     status: "ok",
     version: "0",
@@ -95,6 +125,14 @@ beforeEach(() => {
   });
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
+});
+
+/** `vi.resetModules()` hands the next test a fresh module but cannot reach the
+ *  previous instance's `setInterval(checkConnection, CONNECTION_POLL_MS)` or its
+ *  100 ms stopwatch. Discarding the fake clock discards every timer scheduled on
+ *  it, which is the leak fixed at its source rather than masked. */
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("a dictation start that runs out of its budget", () => {
@@ -153,5 +191,132 @@ describe("a dictation start that runs out of its budget", () => {
     await vi.waitFor(() => expect(root().className).toBe("widget error"));
 
     expect(apiMock.audioStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe("the stop a widget owes after a start it could not adopt", () => {
+  async function abandonStart() {
+    apiMock.audioStart.mockRejectedValue(await timedOut("/audio/start"));
+    apiMock.audioStatus.mockRejectedValue(await timedOut("/audio/status"));
+    apiMock.audioStop.mockResolvedValue({ filename: "rec.wav", duration_seconds: 1 });
+    await loadWidget();
+
+    root().dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(root().className).toBe("widget error"));
+  }
+
+  it("issues exactly one stop on the first poll that reaches a live backend", async () => {
+    await abandonStart();
+    expect(apiMock.audioStop).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS);
+    await vi.waitFor(() => expect(apiMock.audioStop).toHaveBeenCalledOnce());
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS * 3);
+    expect(apiMock.audioStop).toHaveBeenCalledOnce();
+  });
+
+  it("holds the stop while the backend is unreachable and pays it when it answers", async () => {
+    await abandonStart();
+    apiMock.health.mockRejectedValue(new Error("backend unreachable"));
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS * 6);
+    expect(apiMock.audioStop).not.toHaveBeenCalled();
+
+    apiMock.health.mockResolvedValue({
+      status: "ok",
+      version: "0",
+      stt_mode: "cloud",
+      llm_mode: "cloud",
+    });
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS);
+    await vi.waitFor(() => expect(apiMock.audioStop).toHaveBeenCalledOnce());
+  });
+
+  it("owes nothing when the recording was adopted", async () => {
+    apiMock.audioStart.mockRejectedValue(await timedOut("/audio/start"));
+    apiMock.audioStatus.mockResolvedValue(
+      recordingStatus({ is_recording: true, duration_seconds: 7.5 }),
+    );
+    await loadWidget();
+
+    root().dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(apiMock.audioStatus).toHaveBeenCalled());
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS * 3);
+    expect(apiMock.audioStop).not.toHaveBeenCalled();
+  });
+});
+
+describe("a meeting indicator raised on a status the widget could not read", () => {
+  async function abandonMeetingStart() {
+    apiMock.startMeetingRecording.mockRejectedValue(await timedOut("/audio/meeting/start"));
+    apiMock.getMeetingStatus.mockRejectedValue(new Error("no answer"));
+    await loadWidget();
+    await triggerMeetingToggle();
+    expect(meetingIndicatorShown()).toBe(true);
+  }
+
+  it("comes back down on the first poll that reads no recording, with no user action", async () => {
+    await abandonMeetingStart();
+
+    apiMock.getMeetingStatus.mockResolvedValue(meetingStatus(false));
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS);
+    await vi.waitFor(() => expect(meetingIndicatorShown()).toBe(false));
+  });
+
+  it("stays up when the poll finds the call really is being recorded", async () => {
+    await abandonMeetingStart();
+
+    apiMock.getMeetingStatus.mockResolvedValue(meetingStatus(true, 12));
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS * 3);
+    expect(meetingIndicatorShown()).toBe(true);
+  });
+
+  it("is not re-read once the status has confirmed it", async () => {
+    await abandonMeetingStart();
+
+    apiMock.getMeetingStatus.mockResolvedValue(meetingStatus(true, 12));
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS);
+    await vi.waitFor(() => expect(apiMock.getMeetingStatus).toHaveBeenCalled());
+    const reads = apiMock.getMeetingStatus.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS * 3);
+    expect(apiMock.getMeetingStatus).toHaveBeenCalledTimes(reads);
+  });
+});
+
+describe("the widget's own timers", () => {
+  it("leaves exactly one stopwatch running after an adopted recording", async () => {
+    apiMock.audioStart.mockResolvedValue(recordingStatus({ is_recording: true }));
+    await loadWidget();
+    root().dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(apiMock.audioStart).toHaveBeenCalled());
+    const afterAPlainStart = vi.getTimerCount();
+
+    vi.useRealTimers();
+    vi.useFakeTimers();
+    vi.resetModules();
+    listeners.clear();
+    apiMock.audioStart.mockRejectedValue(await timedOut("/audio/start"));
+    apiMock.audioStatus.mockResolvedValue(
+      recordingStatus({ is_recording: true, duration_seconds: 7.5 }),
+    );
+    await loadWidget();
+    root().dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() =>
+      expect(document.getElementById("widget-duration")!.textContent).toMatch(/^7\.\ds$/),
+    );
+
+    expect(vi.getTimerCount()).toBe(afterAPlainStart);
+  });
+
+  it("advances only its own connection poll, whatever ran before it", async () => {
+    await loadWidget();
+    const before = apiMock.health.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS * 3);
+
+    expect(apiMock.health.mock.calls.length - before).toBe(3);
   });
 });

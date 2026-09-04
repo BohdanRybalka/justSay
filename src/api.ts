@@ -197,23 +197,6 @@ async function responseError(resp: Response): Promise<Error> {
   return new ApiRequestError(detail, resp.status);
 }
 
-/** One whole HTTP exchange under a budget, abandoning it rather than waiting
- *  forever.
- *
- *  The budget covers the body, not the headers. `fetch` settles the moment the
- *  response headers arrive, so a backend that writes headers and then stops
- *  sending leaves the caller hanging in `resp.json()` — the original defect one
- *  layer down. Disarming the controller only after the body has been consumed
- *  is what closes that: an abort during a body read rejects the `json()` promise
- *  with the same `AbortError`, which the `catch` below discriminates exactly as
- *  it does an abort during the headers.
- *
- *  The abort is also what releases the socket; the rejection it produces is
- *  translated into a `TimedOutError` so the caller gets a branchable type and a
- *  sentence naming the endpoint and the budget instead of a bare `AbortError`.
- *  The query string is dropped from that message: `/history/search?q=` carries
- *  whatever the user typed, and an error message is rendered in more places than
- *  it is read. */
 /** An abort is identified by its `name`, not by its class.
  *
  *  `fetch` rejects an aborted request with a `DOMException`, and `DOMException`
@@ -246,6 +229,24 @@ function until<T>(work: Promise<T>, signal: AbortSignal, giveUp: () => Error): P
   });
 }
 
+/** One whole HTTP exchange under a budget, abandoning it rather than waiting
+ *  forever.
+ *
+ *  The budget covers the token wait and the body, not only the headers.
+ *  `fetch` settles the moment the response headers arrive, so a backend that
+ *  writes headers and then stops
+ *  sending leaves the caller hanging in `resp.json()` — the original defect one
+ *  layer down. Disarming the controller only after the body has been consumed
+ *  is what closes that: an abort during a body read rejects the `json()` promise
+ *  with the same `AbortError`, which the `catch` below discriminates exactly as
+ *  it does an abort during the headers.
+ *
+ *  The abort is also what releases the socket; the rejection it produces is
+ *  translated into a `TimedOutError` so the caller gets a branchable type and a
+ *  sentence naming the endpoint and the budget instead of a bare `AbortError`.
+ *  The query string is dropped from that message: `/history/search?q=` carries
+ *  whatever the user typed, and an error message is rendered in more places than
+ *  it is read. */
 async function fetchJsonWithin<T>(
   path: string,
   buildRequest: () => Promise<RequestInit>,

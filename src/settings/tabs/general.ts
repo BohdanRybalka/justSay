@@ -16,8 +16,18 @@ import { saveSettings, getCloudKeyStatus, cachePersistedShortcut } from "../sett
 import { escapeHtml, meetingDisclosureHtml } from "../html";
 import { renderKeys } from "./keys";
 import { notifyError } from "../../notify";
+import { TimedOutError } from "../../timeout";
 
 const UPDATES_CHECK_LABEL = "Check for updates";
+
+/** A microphone test whose start ran out of its budget adopts the recording
+ *  unconditionally rather than reading `GET /audio/status` first (ADR 049).
+ *  Settings has a Stop button on screen and a teardown that stops the recorder
+ *  when the window closes, so a false adoption costs one refused stop the
+ *  existing `catch {}` swallows, while a missed one leaves a microphone open
+ *  that neither surface can reach. */
+const MICROPHONE_UNCONFIRMED_LABEL =
+  "The backend never answered — press Stop to close the microphone";
 
 /** The subset of the updater plugin's `Update` this module actually uses. */
 interface PendingUpdate {
@@ -182,7 +192,9 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
         fill.style.width = `${pct}%`;
       },
       () => {},
-      () => {},
+      (error) => {
+        recLabel.textContent = `Recording — the level meter stopped: ${error}`;
+      },
     );
   }
 
@@ -219,6 +231,13 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
         recLabel.textContent = "Recording...";
         startLevelStream(levelFill);
       } catch (e) {
+        if (e instanceof TimedOutError) {
+          isRecording = true;
+          btnTest.textContent = "Stop";
+          recLabel.textContent = MICROPHONE_UNCONFIRMED_LABEL;
+          console.error(e);
+          return;
+        }
         recLabel.textContent = "Failed to start";
         console.error(e);
       }

@@ -17,6 +17,7 @@ function actions(overrides: Partial<MeetingToggleActions> = {}) {
     hideIndicator: vi.fn(),
     setTrayRecording: vi.fn(async () => {}),
     readStartTruth: vi.fn(async (): Promise<RecordingTruth> => ({ kind: "unknown" })),
+    markIndicatorUnconfirmed: vi.fn(),
     openDisclosure: vi.fn(async () => {}),
     reportError: vi.fn(),
   };
@@ -237,7 +238,10 @@ describe("the meeting recording toggle", () => {
     expect(deps.showIndicator).toHaveBeenCalledOnce();
     expect(deps.hideIndicator).not.toHaveBeenCalled();
     expect(deps.setTrayRecording).toHaveBeenCalledWith(true);
-    expect(deps.reportError.mock.calls[0][0]).toContain("may or may not have started");
+    expect(deps.reportError.mock.calls[0][0]).toContain("is being recorded");
+    expect(deps.reportError.mock.calls[0][0]).not.toContain("may or may not");
+    expect(deps.reportError.mock.calls[0][0]).not.toContain("did not start");
+    expect(deps.markIndicatorUnconfirmed).not.toHaveBeenCalled();
   });
 
   it("takes the indicator down when a start times out and the backend is idle", async () => {
@@ -253,6 +257,8 @@ describe("the meeting recording toggle", () => {
     expect(deps.hideIndicator).toHaveBeenCalledOnce();
     expect(deps.showIndicator).not.toHaveBeenCalled();
     expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
+    expect(deps.reportError.mock.calls[0][0]).toContain("The call did not start");
+    expect(deps.markIndicatorUnconfirmed).not.toHaveBeenCalled();
   });
 
   it("keeps the indicator up when a start times out and the status read fails too", async () => {
@@ -268,6 +274,8 @@ describe("the meeting recording toggle", () => {
     expect(deps.showIndicator).toHaveBeenCalledOnce();
     expect(deps.hideIndicator).not.toHaveBeenCalled();
     expect(deps.setTrayRecording).toHaveBeenCalledWith(true);
+    expect(deps.markIndicatorUnconfirmed).toHaveBeenCalledOnce();
+    expect(deps.reportError.mock.calls[0][0]).toContain("may or may not have started");
   });
 
   it("leaves the indicator up and the toggle usable when a stop times out, so a second press stops again", async () => {

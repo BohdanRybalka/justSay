@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SHORTCUT } from "../../accelerator";
 import type { UserSettings } from "../../api";
+import { TimedOutError } from "../../timeout";
 
 const apiMock = {
   getStorageInfo: vi.fn(),
@@ -12,10 +13,16 @@ const apiMock = {
   updateSettings: vi.fn(),
 };
 
-vi.mock("../../api", () => ({
-  api: apiMock,
-  levelStream: vi.fn(() => ({ abort: vi.fn() })),
-}));
+const levelStreamMock = vi.fn();
+
+/** The real module is spread rather than replaced wholesale: `TimedOutError` is
+ *  what the microphone test branches on, and a stand-in module would leave the
+ *  `REQUEST_TIMEOUT_MS` this file throws with belonging to a different class
+ *  than the one `general.ts` compares against. */
+vi.mock("../../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../api")>();
+  return { ...actual, api: apiMock, levelStream: levelStreamMock };
+});
 
 const saveSettingsMock = vi.fn();
 const getCloudKeyStatusMock = vi.fn();
@@ -71,6 +78,7 @@ vi.mock("@tauri-apps/api/app", () => ({
 }));
 
 const { renderGeneral } = await import("./general");
+const { REQUEST_TIMEOUT_MS } = await import("../../api");
 
 function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
   return {
@@ -97,6 +105,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   listenMock.mockImplementation(async () => unlistenMock);
   apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+  levelStreamMock.mockImplementation(() => ({ abort: vi.fn() }));
 });
 
 describe("renderGeneral — the updates button", () => {
@@ -713,5 +722,82 @@ describe("renderGeneral — history path is separated from temp cleanup (spec 05
     expect(pathLabel.textContent).not.toBe(cleanupLabel.textContent);
     expect(pathLabel.textContent).toMatch(/history/i);
     expect(cleanupLabel.textContent).toMatch(/audio/i);
+  });
+});
+
+describe("renderGeneral — the microphone test", () => {
+  function renderMicrophoneTest() {
+    const container = document.createElement("div");
+    renderGeneral(container, buildSettings());
+    return {
+      button: container.querySelector<HTMLButtonElement>("#btn-test-mic")!,
+      label: container.querySelector<HTMLElement>("#rec-label")!,
+    };
+  }
+
+  it("adopts the microphone when the start runs out of its budget", async () => {
+    apiMock.audioStatus.mockResolvedValue({ is_recording: false, duration_seconds: 0, level_db: -60 });
+    apiMock.audioStart.mockRejectedValue(new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/start"));
+    const { button, label } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(button.textContent).toBe("Stop");
+    });
+
+    expect(label.textContent).toContain("press Stop");
+    expect(levelStreamMock).not.toHaveBeenCalled();
+  });
+
+  it("closes the adopted microphone on the next press", async () => {
+    apiMock.audioStatus.mockResolvedValue({ is_recording: false, duration_seconds: 0, level_db: -60 });
+    apiMock.audioStart.mockRejectedValue(new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/start"));
+    apiMock.audioStop.mockResolvedValue({ filename: "rec.wav", duration_seconds: 1 });
+    const { button, label } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(button.textContent).toBe("Stop");
+    });
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(apiMock.audioStop).toHaveBeenCalledOnce();
+    });
+
+    expect(button.textContent).toBe("Record");
+    expect(label.textContent).toBe("Click to test microphone");
+  });
+
+  it("still reports an ordinary start failure as a failure", async () => {
+    apiMock.audioStatus.mockResolvedValue({ is_recording: false, duration_seconds: 0, level_db: -60 });
+    apiMock.audioStart.mockRejectedValue(new Error("connection refused"));
+    const { button, label } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(label.textContent).toBe("Failed to start");
+    });
+
+    expect(button.textContent).toBe("Record");
+  });
+
+  it("puts an expired level-stream handshake into the label and leaves the recording alone", async () => {
+    apiMock.audioStatus.mockResolvedValue({ is_recording: false, duration_seconds: 0, level_db: -60 });
+    apiMock.audioStart.mockResolvedValue({ is_recording: true, duration_seconds: 0, level_db: -60 });
+    const { button, label } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => {
+      expect(levelStreamMock).toHaveBeenCalledOnce();
+    });
+
+    const onError = levelStreamMock.mock.calls[0][2] as (error: string) => void;
+    onError(new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/level-stream").message);
+
+    expect(label.textContent).toContain("the level meter stopped");
+    expect(label.textContent).toContain("did not answer /audio/level-stream");
+    expect(button.textContent).toBe("Stop");
+    expect(apiMock.audioStop).not.toHaveBeenCalled();
   });
 });
