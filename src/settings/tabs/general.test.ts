@@ -735,8 +735,8 @@ describe("renderGeneral — the microphone test", () => {
   }
 
   it.each([
-    ["an unanswered request", new TimedOutError(REQUEST_TIMEOUT_MS, "/audio/stop")],
     ["a backend error", new Error("HTTP 500")],
+    ["a connection that never reached it", new TypeError("Failed to fetch")],
   ])("does not claim the microphone is closed when the stop fails with %s", async (_name, failure) => {
     apiMock.audioStatus.mockResolvedValue({ is_recording: false, duration_seconds: 0, level_db: -60 });
     apiMock.audioStart.mockResolvedValue({ is_recording: true, duration_seconds: 0, level_db: -60 });

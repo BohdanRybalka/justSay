@@ -42,17 +42,17 @@ const tabs: Record<string, (container: HTMLElement, settings: UserSettings) => (
   words: (container) => renderWords(container),
 };
 
-/** `bridge-missing` / `bridge-timeout` / `invoke-timeout` / `invoke-failed:
- *  <detail>` — the token verbatim, because these strings are what a remote user
- *  reads back to us off a screenshot and each one points at a different layer
- *  (ADR 028). All four `BridgeDiagnosis` kinds other than `ok` are listed; a
- *  list that silently omits one is worse than no list, because the omitted
- *  string then arrives off a screenshot looking like something nobody
- *  recognises. */
+/** `bridge-missing` / `bridge-timeout` / `bridge-failed: <detail>` /
+ *  `invoke-timeout` / `invoke-failed: <detail>` — the token verbatim, because
+ *  these strings are what a remote user reads back to us off a screenshot and
+ *  each one points at a different layer (ADR 028). All five `BridgeDiagnosis`
+ *  kinds other than `ok` are covered; a list that silently omits one is worse
+ *  than no list, because the omitted string then arrives off a screenshot
+ *  looking like something nobody recognises. The detail is appended by asking
+ *  whether the diagnosis carries one, so a sixth kind with a detail cannot be
+ *  added and quietly lose it. */
 function bridgeDiagnosisText(diagnosis: BridgeDiagnosis): string {
-  return diagnosis.kind === "invoke-failed"
-    ? `invoke-failed: ${diagnosis.detail}`
-    : diagnosis.kind;
+  return "detail" in diagnosis ? `${diagnosis.kind}: ${diagnosis.detail}` : diagnosis.kind;
 }
 
 /** `TimedOutError` reaches this screen from two mechanisms and they know
@@ -258,12 +258,25 @@ function renderBackendStatus(reachable: boolean) {
   backendStatus.removeAttribute("title");
 }
 
+/** One probe at a time, for the reason the widget's own poll already guards
+ *  against: `setInterval` does not await this function, so against a backend
+ *  that accepts and then goes quiet a probe outlives the 5 s interval and
+ *  several overlap. Each then writes `backendReachable` and repaints the badge
+ *  in fetch-completion order rather than start order, so a stale probe's
+ *  failure lands on top of a fresh probe's success and the header says the
+ *  backend is offline while the window is reading it. */
+let backendCheckInFlight = false;
+
 async function checkBackend() {
+  if (backendCheckInFlight) return;
+  backendCheckInFlight = true;
   try {
     await api.health();
     backendReachable = true;
   } catch {
     backendReachable = false;
+  } finally {
+    backendCheckInFlight = false;
   }
   renderBackendStatus(backendReachable);
 }

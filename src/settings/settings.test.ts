@@ -629,3 +629,31 @@ describe("a settings load that fails after the backend has gone away", () => {
     consoleError.mockRestore();
   });
 });
+
+describe("the Settings window's own health poll", () => {
+  it("never runs two probes at once, so a stale one cannot repaint the badge", async () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    let release: (() => void) | null = null;
+    apiMock.health.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          release = () => reject(new TypeError("Failed to fetch"));
+        }),
+    );
+    apiMock.getSettings.mockRejectedValue(new TypeError("Failed to fetch"));
+    apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await import("./settings");
+    await vi.advanceTimersByTimeAsync(0);
+    const before = apiMock.health.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(5000 * 4);
+
+    expect(apiMock.health.mock.calls.length - before).toBe(0);
+    release!();
+
+    vi.useRealTimers();
+    consoleError.mockRestore();
+  });
+});

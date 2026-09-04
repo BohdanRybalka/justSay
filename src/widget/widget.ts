@@ -16,8 +16,9 @@ import {
 } from "../contracts";
 import { formatStopwatch } from "../format";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
+import { TimedOutError } from "../timeout";
 import { computeDoneStatus } from "./done-status";
-import { dictationErrorLabel } from "./error-label";
+import { dictationErrorLabel, startErrorLabel, type DictationErrorLabel } from "./error-label";
 import { MEETING_STATE_CLASS, renderMeetingIndicator } from "./meeting-indicator";
 import { type MeetingToggleActions, runMeetingToggle } from "./meeting-toggle";
 import { createRecordingIntentQueue } from "./recording-intent";
@@ -40,6 +41,7 @@ let state: WidgetState = "idle";
 let isHovered = false;
 let durationInterval: ReturnType<typeof setInterval> | null = null;
 let iconFlashTimer: ReturnType<typeof setTimeout> | null = null;
+let errorRevertTimer: ReturnType<typeof setTimeout> | null = null;
 let connectionState: ConnectionCheckState = { offline: false, firstCheckDone: false };
 
 let currentShortcut = DEFAULT_SHORTCUT;
@@ -83,6 +85,11 @@ function setState(newState: WidgetState, message?: string, durationLabel?: strin
     iconFlashTimer = null;
   }
 
+  if (errorRevertTimer) {
+    clearTimeout(errorRevertTimer);
+    errorRevertTimer = null;
+  }
+
   switch (state) {
     case "idle":
       text.textContent = "JustSay";
@@ -115,10 +122,28 @@ function setState(newState: WidgetState, message?: string, durationLabel?: strin
       text.textContent = message || "Error";
       durationEl.textContent = "";
       renderIcon("error");
-      setTimeout(() => {
+      errorRevertTimer = setTimeout(() => {
+        errorRevertTimer = null;
         if (state === "error") setState("idle");
       }, AUTO_REVERT_MS);
       break;
+  }
+}
+
+/** An error the widget must not talk itself out of.
+ *
+ * The ordinary error state reverts to "JustSay" after three seconds, which is
+ * right for a failure that was observed and finished: nothing is left running.
+ * It is wrong for a request that was abandoned, because the microphone may
+ * still be open and reverting is the widget asserting that all is well on the
+ * one outcome nobody established (ADR 049, third amendment). The state stays
+ * until the user acts on it — a click still starts a new dictation from here,
+ * so this is a message that waits, not a dead end. */
+function setUnresolvedError(label: string) {
+  setState("error", label);
+  if (errorRevertTimer) {
+    clearTimeout(errorRevertTimer);
+    errorRevertTimer = null;
   }
 }
 
@@ -145,11 +170,20 @@ async function startRecording() {
   try {
     await api.audioStart();
   } catch (e) {
-    const { label, toast } = dictationErrorLabel(e);
-    setState("error", label);
-    notifyError(toast);
+    reportDictationFailure(startErrorLabel(e), e);
     console.error("Start recording failed:", e);
   }
+}
+
+/** A failure that was observed reverts to idle; one that was only abandoned
+ *  stays on screen, because the state it describes has not resolved itself. */
+function reportDictationFailure({ label, toast }: DictationErrorLabel, error: unknown) {
+  if (error instanceof TimedOutError) {
+    setUnresolvedError(label);
+  } else {
+    setState("error", label);
+  }
+  notifyError(toast);
 }
 
 async function stopAndProcess() {
@@ -169,9 +203,7 @@ async function stopAndProcess() {
       setState("idle");
     }
   } catch (e) {
-    const { label, toast } = dictationErrorLabel(e);
-    setState("error", label);
-    notifyError(toast);
+    reportDictationFailure(dictationErrorLabel(e), e);
     console.error("Pipeline failed:", e);
   }
 }

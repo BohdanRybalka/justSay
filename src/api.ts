@@ -9,14 +9,17 @@ import { TimedOutError } from "./timeout";
  *  the failing layer instead of presenting as a dead window (ADR 028).
  *  `bridge-missing` = Tauri's injected bridge scripts never ran (a synchronous
  *  throw); `bridge-timeout` = the bridge module's dynamic import never resolved,
- *  so no `invoke` was ever reached; `invoke-timeout` = the bridge loaded but the
- *  IPC transport never answered; `invoke-failed` = the command itself rejected.
- *  The four are distinguishable on purpose: they point at different layers, and
- *  on macOS there is nothing else to attach to. */
+ *  so no `invoke` was ever reached; `bridge-failed` = that same import *rejected*,
+ *  which is a different fact and used to be reported as `invoke-failed` even
+ *  though no `invoke` had been attempted; `invoke-timeout` = the bridge loaded
+ *  but the IPC transport never answered; `invoke-failed` = the command itself
+ *  rejected. The five are distinguishable on purpose: they point at different
+ *  layers, and on macOS there is nothing else to attach to. */
 export type BridgeDiagnosis =
   | { kind: "ok" }
   | { kind: "bridge-missing" }
   | { kind: "bridge-timeout" }
+  | { kind: "bridge-failed"; detail: string }
   | { kind: "invoke-timeout" }
   | { kind: "invoke-failed"; detail: string };
 
@@ -47,14 +50,13 @@ const TOKEN_TIMED_OUT = Symbol("token-timed-out");
  *  no new `invoke()` would ever be attempted. */
 export const TOKEN_CALL_REUSE_MS = 60_000;
 
-/** How long a re-readable request may go unanswered before it is abandoned.
+/** How long a read may go unanswered before it is abandoned.
  *
  *  `fetch` has no timeout of its own, so a request the backend accepts and then
  *  abandons never settles — and neither does anything sequenced behind it. That
  *  is not a slow window, it is a dead one: the Settings window never reaches
  *  the failure screen its own 40 s bound was added to guarantee.
  *
- *  It applies to reads and to nothing else, for the reason `REREADABLE` states.
  *  15 s rather than a rounder number: every read this app makes answers from
  *  memory or from one SQLite query, so the budget is an order of magnitude
  *  above the work, and it has to stay clear of `getToken()` as well — the timer
@@ -63,34 +65,81 @@ export const TOKEN_CALL_REUSE_MS = 60_000;
  *  no request issued and blame the backend for a bridge fault. */
 export const REQUEST_TIMEOUT_MS = 15_000;
 
-/** Which of the two classes in ADR 049's second amendment a call belongs to.
- *  Every entry in `api` states its own, and there is no default, so a new
- *  endpoint has to be placed rather than inherit a number nobody chose. */
+/** The budget for a call that opens a capture device before it answers.
+ *
+ *  Sized to the work rather than to the transport, which is the correction ADR
+ *  049's second amendment demanded. Spec 099 measured up to six seconds of
+ *  device enumeration inside a single `POST /audio/meeting/start`
+ *  (`specs/099-meeting-start-freezes-the-app/plan.md`), so a read's 15 s is only
+ *  2.5x the worst known *healthy* answer and a slow machine reaches it with
+ *  nothing wrong. A minute keeps the same order-of-magnitude margin over the
+ *  measurement that `REQUEST_TIMEOUT_MS` keeps over a read. */
+export const DEVICE_TIMEOUT_MS = 60_000;
+
+/** The budget for the calls that transcribe or write a whole recording.
+ *
+ *  Transcription is legitimately slow: the dictation path waits up to 300 s for
+ *  local readiness before it starts transcribing at all, and ten minutes
+ *  doubles that. It is far outside any real answer — an upload is capped at
+ *  25 MB, about thirteen minutes of 16 kHz mono audio, and the local path's own
+ *  acceptance criterion is 150 s of audio in under 10 s — and it also covers
+ *  `POST /audio/meeting/stop`, which writes the whole WAV before answering
+ *  (`_assemble_and_write` puts a 45-minute call at ~86 MB, and
+ *  `meeting_max_raw_bytes` allows roughly eight times that). */
+export const LONG_REQUEST_TIMEOUT_MS = 600_000;
+
+/** Which row of ADR 049's third amendment a call is on.
+ *
+ *  The rule there is a comparison rather than a cost: a budget belongs where
+ *  abandoning the request costs the user *less* than waiting for it forever
+ *  does. Every entry in `api` states its own row, and there is no default, so a
+ *  new endpoint has to be placed rather than inherit a number nobody chose. */
 type Budget = { readonly ms: number } | { readonly ms: null };
 
-/** A read the UI can simply ask for again. Abandoning it costs the user
- *  nothing — no state moved, nothing was deleted, and the caller's remedy is to
- *  re-issue it — so a budget here only ever converts a hang into a message. */
+/** A read the UI can simply ask for again. Abandoning costs one more press;
+ *  waiting forever costs a screen that never resolves. */
 const REREADABLE: Budget = { ms: REQUEST_TIMEOUT_MS };
 
-/** A call whose abandonment leaves something behind: a device opened, rows
- *  deleted, a setting half-applied, or a backend degradation path preempted.
- *  Giving up on one of these is only honest once the client can find out what
- *  the backend did with it, and that reconciliation needs the client-minted
- *  session id spec 119 adds. Until then no budget, rather than a wrong one. */
+/** A call that opens a capture device before it answers. Abandoning it is a
+ *  strict subset of waiting on it: the device may be open either way, and only
+ *  waiting adds a dead intent queue, or a toggle that swallows every press
+ *  including the tray's, on top of that. */
+const DEVICE_TRANSITION: Budget = { ms: DEVICE_TIMEOUT_MS };
+
+/** The same comparison over work measured in minutes rather than seconds —
+ *  transcribing a dictation, writing a meeting's WAV to disk. */
+const SLOW_TRANSITION: Budget = { ms: LONG_REQUEST_TIMEOUT_MS };
+
+/** A call where the comparison runs the other way. Abandoning reports a failure
+ *  for work that ran to completion anyway and invites a second destructive
+ *  call, or throws away a backend degradation path that had already half
+ *  answered; waiting costs a spinner. Giving up here is only honest once the
+ *  client can find out what the backend did, and that reconciliation needs the
+ *  client-minted session id spec 119 adds. Until then no budget, rather than a
+ *  wrong one. */
 const UNRECONCILED: Budget = { ms: null };
 
 let cachedToken: string | null = null;
 let tokenPromise: Promise<string | null> | null = null;
-/** The outstanding `get_backend_token` IPC call, with the time it started. When
- *  the transport hangs, `invoke()` never settles and has no reject channel
- *  (ADR 028), so the losing side of the timeout race is left pending forever. A
- *  failed token fetch is deliberately not cached — the next request must retry —
+/** The outstanding `get_backend_token` IPC call and the outstanding bridge
+ *  import, each with the time it started. Both steps can go absent rather than
+ *  slow — `invoke()` has no reject channel at all (ADR 028) and a dynamic import
+ *  of a module that never arrives stays pending for the life of the window — so
+ *  the losing side of either timeout race is left attached forever. A failed
+ *  token fetch is deliberately not cached, because the next request must retry,
  *  which means every 5 s `/health` poll would otherwise start another one and
  *  strand it. Reusing the unsettled call keeps the retry guarantee (a
  *  *rejection* settles it, so the next round starts fresh) while cutting the
- *  strays to one per `TOKEN_CALL_REUSE_MS`. */
-let pendingTokenCall: { call: Promise<string>; startedAt: number } | null = null;
+ *  strays to one per `TOKEN_CALL_REUSE_MS`.
+ *
+ *  The import needs it for the same reason the invoke does and did not have it:
+ *  `import()` hands every caller the *same* pending module promise, so each new
+ *  `getToken()` attached one more never-releasable reaction pair to it and
+ *  logged one more warning about a fault already reported. */
+type CallSlot<T> = { pending: { call: Promise<T>; startedAt: number } | null };
+const tokenCallSlot: CallSlot<string> = { pending: null };
+type BridgeModule = typeof import("@tauri-apps/api/core");
+const bridgeImportSlot: CallSlot<BridgeModule> = { pending: null };
 let bridgeDiagnosis: BridgeDiagnosis = { kind: "ok" };
 let authFailureSeen = false;
 
@@ -123,22 +172,30 @@ function recordAuthOutcome(path: string, resp: { ok: boolean; status: number }):
   }
 }
 
-function sharedTokenCall(start: () => Promise<string>): Promise<string> {
+/** `fresh` says whether this caller is the one that started the underlying
+ *  call, so a diagnosis that is logged once per fault can tell itself apart
+ *  from the callers merely joining it. */
+function shareWhilePending<T>(
+  slot: CallSlot<T>,
+  start: () => Promise<T>,
+  reuseMs: number,
+): { call: Promise<T>; fresh: boolean } {
   const now = Date.now();
-  if (pendingTokenCall !== null && now - pendingTokenCall.startedAt >= TOKEN_CALL_REUSE_MS) {
-    pendingTokenCall = null;
+  if (slot.pending !== null && now - slot.pending.startedAt >= reuseMs) {
+    slot.pending = null;
   }
-  if (pendingTokenCall === null) {
-    const entry = { call: start(), startedAt: now };
-    pendingTokenCall = entry;
-    const release = () => {
-      if (pendingTokenCall === entry) {
-        pendingTokenCall = null;
-      }
-    };
-    entry.call.then(release, release);
+  if (slot.pending !== null) {
+    return { call: slot.pending.call, fresh: false };
   }
-  return pendingTokenCall.call;
+  const entry = { call: start(), startedAt: now };
+  slot.pending = entry;
+  const release = () => {
+    if (slot.pending === entry) {
+      slot.pending = null;
+    }
+  };
+  entry.call.then(release, release);
+  return { call: entry.call, fresh: true };
 }
 
 function getToken(): Promise<string | null> {
@@ -155,15 +212,29 @@ function getToken(): Promise<string | null> {
       const importExpiry = new Promise<typeof TOKEN_TIMED_OUT>((resolve) => {
         importTimer = setTimeout(() => resolve(TOKEN_TIMED_OUT), TOKEN_TIMEOUT_MS);
       });
-      let bridge: typeof import("@tauri-apps/api/core") | typeof TOKEN_TIMED_OUT;
+      const bridgeImport = shareWhilePending(
+        bridgeImportSlot,
+        () => import("@tauri-apps/api/core"),
+        TOKEN_CALL_REUSE_MS,
+      );
+      let bridge: BridgeModule | typeof TOKEN_TIMED_OUT;
       try {
-        bridge = await Promise.race([import("@tauri-apps/api/core"), importExpiry]);
+        bridge = await Promise.race([bridgeImport.call, importExpiry]);
+      } catch (e) {
+        bridgeDiagnosis = {
+          kind: "bridge-failed",
+          detail: e instanceof Error ? e.message : String(e),
+        };
+        console.warn("getToken: the Tauri bridge module failed to load", e);
+        return null;
       } finally {
         clearTimeout(importTimer);
       }
       if (bridge === TOKEN_TIMED_OUT) {
         bridgeDiagnosis = { kind: "bridge-timeout" };
-        console.warn(`getToken: the Tauri bridge module did not load in ${TOKEN_TIMEOUT_MS} ms`);
+        if (bridgeImport.fresh) {
+          console.warn(`getToken: the Tauri bridge module did not load in ${TOKEN_TIMEOUT_MS} ms`);
+        }
         return null;
       }
       const { invoke } = bridge;
@@ -174,7 +245,11 @@ function getToken(): Promise<string | null> {
       let token: string | typeof TOKEN_TIMED_OUT;
       try {
         token = await Promise.race([
-          sharedTokenCall(() => invoke<string>("get_backend_token")),
+          shareWhilePending(
+            tokenCallSlot,
+            () => invoke<string>("get_backend_token"),
+            TOKEN_CALL_REUSE_MS,
+          ).call,
           expiry,
         ]);
       } finally {
@@ -220,16 +295,22 @@ export class ApiRequestError extends Error {
  *  Reading the error body can itself run out of the budget, and a blanket
  *  `.catch` here turns that abort into a fully formed `ApiRequestError`, which
  *  `fetchJsonWithin`'s catch then has no way to recognise as a timeout. The
- *  caller ends up branching on a status the backend never finished sending. */
+ *  caller ends up branching on a status the backend never finished sending.
+ *
+ *  The body is read as nullable because `resp.json()` *succeeding* does not mean
+ *  it produced an object: a response whose body is the four bytes `null` is
+ *  valid JSON and resolves to `null`, and reading `.detail` off it threw a
+ *  `TypeError` that left this function through neither of its two paths — the
+ *  caller saw a type error where it was branching on a status. */
 async function responseError(resp: Response): Promise<Error> {
-  let err: { detail?: string };
+  let err: { detail?: string } | null;
   try {
     err = await resp.json();
   } catch (e) {
     if (isAbortError(e)) throw e;
     err = { detail: resp.statusText };
   }
-  const detail = err.detail || `HTTP ${resp.status}`;
+  const detail = err?.detail || `HTTP ${resp.status}`;
   if (resp.status === 401) {
     return new ApiAuthError(detail, bridgeDiagnosis);
   }
@@ -332,11 +413,24 @@ async function fetchJsonUntilAnswered<T>(
   return fetchJson<T>(path, await buildRequest());
 }
 
+/** The one place a `Budget` decides which of the two mechanisms runs, so a call
+ *  that builds its own request — `processFile` and its `FormData` — is placed
+ *  by the same object every other endpoint is placed by. */
+function send<T>(
+  path: string,
+  buildRequest: () => Promise<RequestInit>,
+  budget: Budget,
+): Promise<T> {
+  return budget.ms === null
+    ? fetchJsonUntilAnswered<T>(path, buildRequest)
+    : fetchJsonWithin<T>(path, buildRequest, budget.ms);
+}
+
 /** `budget` is an object rather than a fourth positional argument because the
  *  third is `body?: unknown`: a bare number in that slot type-checks, ships the
  *  budget as the request body, and silently keeps the default budget. It has no
  *  default at all, so every endpoint below names the class it is in. */
-async function request<T>(
+function request<T>(
   method: string,
   path: string,
   body: unknown,
@@ -354,9 +448,7 @@ async function request<T>(
     }
     return opts;
   };
-  return budget.ms === null
-    ? fetchJsonUntilAnswered<T>(path, buildRequest)
-    : fetchJsonWithin<T>(path, buildRequest, budget.ms);
+  return send<T>(path, buildRequest, budget);
 }
 
 
@@ -538,14 +630,20 @@ export interface TopWordsResponse {
 
 
 /**
- * Every endpoint, each stating which of the two classes of ADR 049's second
- * amendment it is in.
+ * Every endpoint, each stating which row of ADR 049's third amendment it is on.
  *
- * `REREADABLE` is a read: nothing moved, so abandoning it costs the user a
- * second press. `UNRECONCILED` is everything else — it opened a device, wrote
- * or deleted something, or has a backend degradation path a client abort would
- * preempt — and until spec 119 lets the client ask what became of an abandoned
- * request, waiting is the only answer that does not invent one.
+ * The question each answers is the comparison, not the cost: is abandoning this
+ * request worse for the user than waiting for it forever? For a `REREADABLE`
+ * read the answer is trivially no. For a `DEVICE_TRANSITION` or a
+ * `SLOW_TRANSITION` it is no because abandoning is a strict subset of waiting —
+ * the device is in the same state either way, and only waiting adds a dead
+ * intent queue or a dead toggle on top of it. For an `UNRECONCILED` call the
+ * answer is yes: abandoning reports a failure for work that finished, or throws
+ * away a half-answered degradation path, while waiting costs a spinner.
+ *
+ * What a budget does not buy is the right to guess. The callers of the two
+ * transition classes report the abandonment as its own outcome and never as a
+ * failure that was observed.
  */
 export const api = {
   health: () => request<HealthResponse>("GET", "/health", undefined, REREADABLE),
@@ -592,10 +690,13 @@ export const api = {
       UNRECONCILED,
     ),
 
-  /** `POST /audio/start` calls `await recorder.start()` before it answers, so a
-   *  request abandoned mid-flight leaves the microphone open with nothing in
-   *  this window able to name it, let alone close it. */
-  audioStart: () => request<RecordingStatus>("POST", "/audio/start", undefined, UNRECONCILED),
+  /** `POST /audio/start` calls `await recorder.start()` before it answers, so
+   *  the microphone may be open whichever way this ends. Waiting adds the widget
+   *  stuck on "Recording" and an intent queue parked inside the start — the
+   *  wedge this spec exists to remove — so the budget is the smaller cost, and
+   *  the caller says the request was abandoned rather than that the start
+   *  failed. */
+  audioStart: () => request<RecordingStatus>("POST", "/audio/start", undefined, DEVICE_TRANSITION),
 
   audioStop: () =>
     request<{ filename: string; duration_seconds: number }>(
@@ -605,28 +706,32 @@ export const api = {
       UNRECONCILED,
     ),
 
-  /** Opens both devices before answering, and spec 099 measured up to six
-   *  seconds of device enumeration for this one call — so a control-plane
-   *  budget is reached on a healthy start on a slow machine, and the capture
-   *  it abandons is running. */
+  /** Opens both devices before answering, which is why it is on the device
+   *  budget rather than a read's — spec 099 measured up to six seconds of
+   *  enumeration for this one call. Waiting forever is what left the toggle
+   *  swallowing every press, the tray's included, for the life of the window. */
   startMeetingRecording: () =>
-    request<MeetingStatus>("POST", "/audio/meeting/start", undefined, UNRECONCILED),
+    request<MeetingStatus>("POST", "/audio/meeting/start", undefined, DEVICE_TRANSITION),
 
   /** Writes the whole WAV before it answers — `_assemble_and_write` puts a
    *  45-minute call at "~86 MB to disk" and `meeting_max_raw_bytes` allows
-   *  roughly eight times that. */
+   *  roughly eight times that — so it takes the long budget rather than the
+   *  device one. The recording survives the abort; what an abandoned stop costs
+   *  is the answer, and the indicator stays up on it. */
   stopMeetingRecording: () =>
-    request<MeetingStopResponse>("POST", "/audio/meeting/stop", undefined, UNRECONCILED),
+    request<MeetingStopResponse>("POST", "/audio/meeting/stop", undefined, SLOW_TRANSITION),
 
   /** Stops the recorder as the handler's first act and can write the clipboard
-   *  as its last, so an abandoned dictation leaves both the microphone and the
-   *  clipboard in a state only the backend knows. */
+   *  as its last — but a backend that never ran the handler stopped nothing, so
+   *  the microphone may be open either way and only waiting adds a widget stuck
+   *  on "Processing" to it. The long budget, because transcription is the work
+   *  being waited on rather than a device open. */
   dictate: (language = "uk") =>
     request<DictateResponse>(
       "POST",
       `/pipeline/dictate?language=${language}`,
       undefined,
-      UNRECONCILED,
+      SLOW_TRANSITION,
     ),
 
   /** Upload an audio file to the pipeline. Accepts an ArrayBuffer of file bytes.
@@ -634,10 +739,12 @@ export const api = {
    *  onto its own native auto-detect mechanism (see `STTProvider.transcribe`'s
    *  docstring in the backend for the per-provider translation).
    *
-   *  `UNRECONCILED` for the same reason as `dictate`, plus its own: the upload
-   *  is capped at 25 MB, about thirteen minutes of 16 kHz mono audio, and it
-   *  writes the clipboard on success. */
-  processFile: async (
+   *  `SLOW_TRANSITION` for the same reason as `dictate`, and the same number
+   *  covers its own worst case: the upload is capped at 25 MB, about thirteen
+   *  minutes of 16 kHz mono audio. It opens no device, so waiting forever costs
+   *  only the Transcribe tab — but that tab has no other way out, which is the
+   *  comparison this class is on. */
+  processFile: (
     fileBytes: ArrayBuffer,
     filename: string,
     language = "auto",
@@ -645,7 +752,7 @@ export const api = {
     const form = new FormData();
     const blob = new Blob([fileBytes], { type: "application/octet-stream" });
     form.append("file", blob, filename);
-    return fetchJsonUntilAnswered<DictateResponse>(
+    return send<DictateResponse>(
       `/pipeline/process-file?language=${language}`,
       async () => {
         const token = await getToken();
@@ -655,6 +762,7 @@ export const api = {
         }
         return { method: "POST", body: form, headers };
       },
+      SLOW_TRANSITION,
     );
   },
 
@@ -674,9 +782,12 @@ export const api = {
     request<{ unloaded: boolean }>("POST", "/stt/local/unload", undefined, UNRECONCILED),
 
   /** Retry affordance for the Local STT status indicator's error state —
-   *  fire-and-forget on the backend, returns before the model finishes loading. */
+   *  fire-and-forget on the backend, returns before the model finishes loading.
+   *  There is nothing to reconcile, so it is a read for this purpose: abandoning
+   *  it leaves the load running exactly as answering it would, while waiting
+   *  forever hangs the one button that exists to escape a stuck state. */
   sttLocalPrewarm: () =>
-    request<{ started: boolean }>("POST", "/stt/local/prewarm", undefined, UNRECONCILED),
+    request<{ started: boolean }>("POST", "/stt/local/prewarm", undefined, REREADABLE),
 
   updateSettings: (updates: Partial<UserSettings>) =>
     request<SettingsUpdateResponse>("PUT", "/settings", updates, UNRECONCILED),
@@ -764,10 +875,14 @@ export function levelStream(
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let handshakeDone = false;
 
       while (true) {
         const { done, value } = await reader.read();
-        clearTimeout(handshakeTimer);
+        if (!handshakeDone) {
+          handshakeDone = true;
+          clearTimeout(handshakeTimer);
+        }
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });

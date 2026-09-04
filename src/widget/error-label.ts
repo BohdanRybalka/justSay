@@ -26,6 +26,33 @@ export interface DictationErrorLabel {
  * handler never stopped the recorder either, and nothing in this window can
  * close it — which is what the toast says rather than glossing.
  */
+/**
+ * Decides what the widget shows after a failed `POST /audio/start`.
+ *
+ * Separate from `dictationErrorLabel` because a start is not a dictation and
+ * that function's other two branches actively misdescribe one. A `409 Already
+ * recording` is not "Dictation failed — try again", and the substring heuristic
+ * reads the word "missing" out of a microphone fault and sends the user to the
+ * cloud-key screen — the exact spec 042 defect, reintroduced at a different
+ * endpoint by routing the start through the dictation labels.
+ *
+ * So only the abandoned request gets its own wording here, because only it is a
+ * claim the widget cannot otherwise make: the handler opens the device and then
+ * answers, so a start that ran out of its budget may have left the microphone
+ * open and nothing this window can read says whether it did. Every other
+ * failure keeps the start's own generic text.
+ */
+export function startErrorLabel(error: unknown): DictationErrorLabel {
+  if (error instanceof TimedOutError) {
+    return {
+      label: "No answer",
+      toast: "The backend never answered — the microphone may still be open.",
+    };
+  }
+
+  return { label: "Start failed", toast: "Couldn't start recording — try again." };
+}
+
 export function dictationErrorLabel(error: unknown): DictationErrorLabel {
   if (error instanceof ApiAuthError) {
     return {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiRequestError } from "../api";
+import { TimedOutError } from "../timeout";
 import {
   DISCLOSURE_REQUIRED_MESSAGE,
   type MeetingToggleActions,
@@ -41,6 +42,23 @@ describe("the meeting recording toggle", () => {
     expect(deps.startRecording).not.toHaveBeenCalled();
     expect(deps.hideIndicator).toHaveBeenCalledOnce();
     expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
+  });
+
+  it("leaves every visible state alone when the start was abandoned rather than refused", async () => {
+    const deps = actions({
+      startRecording: vi.fn(async () => {
+        throw new TimedOutError(60_000, "/audio/meeting/start");
+      }),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.hideIndicator).not.toHaveBeenCalled();
+    expect(deps.showIndicator).not.toHaveBeenCalled();
+    expect(deps.setTrayRecording).not.toHaveBeenCalled();
+    expect(deps.reportError).toHaveBeenCalledWith(
+      "The recording was not confirmed — the request was abandoned and the microphone may still be open: the backend did not answer /audio/meeting/start within 60 seconds",
+    );
   });
 
   it("clears the indicator when starting fails, because nothing is recording", async () => {

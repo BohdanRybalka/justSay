@@ -37,12 +37,22 @@
  * broke ADR 040 obligation 2 and left the recording unstoppable, because the
  * next click would take the start branch again and get the same 409.
  *
+ * A start that ran out of its budget is the one start failure that is neither.
+ * `POST /audio/meeting/start` opens both devices and then answers, so an
+ * abandoned one leaves a capture that may be running and may not, and the
+ * indicator therefore neither comes down nor goes up: taking it down asserts
+ * that nothing is being recorded, which is what ADR 040 obligation 2 forbids
+ * getting wrong, and putting it up asserts the opposite on the same absence of
+ * evidence. What the toggle does instead is say the request was abandoned and
+ * leave every visible state exactly as it found it, tray included.
+ *
  * The sentence a user reads is written here and the backend detail is appended
  * to it as its cause, which is why the 507 detail carries the write error alone
  * and not a second sentence of its own.
  */
 
 import { ApiRequestError } from "../api";
+import { TimedOutError } from "../timeout";
 
 export const DISCLOSURE_REQUIRED_MESSAGE =
   "Read the meeting-recording disclosure before recording a call.";
@@ -81,6 +91,10 @@ function writeFailedMessage(error: unknown): string {
 
 function alreadyRecordingMessage(error: unknown): string {
   return `A call is already being recorded: ${describeFailure(error)}`;
+}
+
+function abandonedStartMessage(error: unknown): string {
+  return `The recording was not confirmed — the request was abandoned and the microphone may still be open: ${describeFailure(error)}`;
 }
 
 function captureOverMessage(error: ApiRequestError): string {
@@ -132,6 +146,10 @@ export async function runMeetingToggle(actions: MeetingToggleActions): Promise<v
       actions.showIndicator();
       await actions.setTrayRecording(true);
       actions.reportError(alreadyRecordingMessage(e));
+      return;
+    }
+    if (e instanceof TimedOutError) {
+      actions.reportError(abandonedStartMessage(e));
       return;
     }
     actions.hideIndicator();

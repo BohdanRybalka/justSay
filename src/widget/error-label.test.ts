@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiAuthError, REQUEST_TIMEOUT_MS } from "../api";
 import { TimedOutError } from "../timeout";
-import { dictationErrorLabel } from "./error-label";
+import { dictationErrorLabel, startErrorLabel } from "./error-label";
 
 describe("dictationErrorLabel", () => {
   it("an ApiAuthError never renders the API-key label, even though its message contains 'missing'", () => {
@@ -43,5 +43,29 @@ describe("dictationErrorLabel", () => {
     expect(toast).toContain("may not have been copied");
     expect(toast).toContain("microphone may still be open");
     expect(toast).not.toBe("Dictation failed — try again.");
+  });
+});
+
+describe("startErrorLabel", () => {
+  it("keeps a refused start off the dictation wording, whatever the refusal says", () => {
+    for (const failure of [
+      new Error("Already recording"),
+      new Error("Missing or invalid API token"),
+      new ApiAuthError("Missing or invalid API token", { kind: "bridge-missing" }),
+      new Error("connection reset"),
+    ]) {
+      const { label, toast } = startErrorLabel(failure);
+
+      expect(label).toBe("Start failed");
+      expect(toast).toBe("Couldn't start recording — try again.");
+    }
+  });
+
+  it("names the abandoned request instead, because the microphone may be open", () => {
+    const { label, toast } = startErrorLabel(new TimedOutError(60_000, "/audio/start"));
+
+    expect(label).toBe("No answer");
+    expect(label).not.toBe("Start failed");
+    expect(toast).toBe("The backend never answered — the microphone may still be open.");
   });
 });

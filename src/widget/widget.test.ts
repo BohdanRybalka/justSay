@@ -120,21 +120,79 @@ describe("the widget's own timers", () => {
 });
 
 describe("a start the backend refuses", () => {
-  it("names the layer that refused it rather than telling the user to try again", async () => {
-    const { ApiAuthError } = await import("../api");
+  it.each([
+    ["a refusal whose body contains the word 'missing'", new Error("Missing or invalid API token")],
+    ["a 409 that means the recorder is already held", new Error("Already recording")],
+  ])("does not describe %s as a dictation or as a missing cloud key", async (_name, failure) => {
     await loadWidget();
-    apiMock.audioStart.mockRejectedValue(
-      new ApiAuthError("Missing or invalid API token", { kind: "invoke-timeout" }),
-    );
+    apiMock.audioStart.mockRejectedValue(failure);
 
     document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
     await vi.waitFor(() => {
       expect(apiMock.audioStart).toHaveBeenCalledOnce();
     });
 
-    expect(document.getElementById("widget-text")!.textContent).toBe("Auth failed");
+    expect(document.getElementById("widget-text")!.textContent).toBe("Start failed");
+    expect(notifyErrorMock).toHaveBeenCalledWith("Couldn't start recording — try again.");
+  });
+
+  it("reverts to idle on a failure that was observed, because nothing is left running", async () => {
+    await loadWidget();
+    apiMock.audioStart.mockRejectedValue(new Error("connection refused"));
+
+    document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => {
+      expect(document.getElementById("widget-text")!.textContent).toBe("Start failed");
+    });
+
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(document.getElementById("widget-text")!.textContent).toBe("JustSay");
+  });
+});
+
+describe("a start the backend never answered", () => {
+  it("says the microphone may still be open and stays there", async () => {
+    const { TimedOutError } = await import("../timeout");
+    await loadWidget();
+    apiMock.audioStart.mockRejectedValue(new TimedOutError(60_000, "/audio/start"));
+
+    document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => {
+      expect(document.getElementById("widget-text")!.textContent).toBe("No answer");
+    });
+
     expect(notifyErrorMock).toHaveBeenCalledWith(
-      "JustSay could not authenticate to its own backend — restart the app.",
+      "The backend never answered — the microphone may still be open.",
     );
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(document.getElementById("widget-text")!.textContent).toBe("No answer");
+  });
+
+  it("keeps the same refusal to revert after an abandoned dictation", async () => {
+    const { TimedOutError } = await import("../timeout");
+    await loadWidget();
+    apiMock.audioStart.mockResolvedValue({
+      is_recording: true,
+      duration_seconds: 0,
+      level_db: -60,
+    });
+    apiMock.dictate.mockRejectedValue(new TimedOutError(600_000, "/pipeline/dictate"));
+
+    const widget = document.getElementById("widget")!;
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => {
+      expect(document.getElementById("widget-text")!.textContent).toBe("Recording");
+    });
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => {
+      expect(document.getElementById("widget-text")!.textContent).toBe("No answer");
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(document.getElementById("widget-text")!.textContent).toBe("No answer");
   });
 });
