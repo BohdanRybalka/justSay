@@ -114,7 +114,10 @@ export interface MeetingToggleActions {
   isRecording(): boolean;
   startRecording(): Promise<unknown>;
   stopRecording(): Promise<unknown>;
-  showIndicator(): void;
+  /** `startedAt` back-dates the indicator's clock. An adopted recording began
+   *  before the budget ran out, so starting it at zero would leave the readout
+   *  short by the whole budget for the rest of the call. */
+  showIndicator(startedAt?: number): void;
   hideIndicator(): void;
   setTrayRecording(active: boolean): Promise<void>;
   readStartTruth(): Promise<RecordingTruth>;
@@ -145,9 +148,12 @@ export async function runMeetingToggle(actions: MeetingToggleActions): Promise<v
     await actions.startRecording();
   } catch (e) {
     if (e instanceof TimedOutError) {
-      const showing = indicatorAfterAbandonedMeetingStart(await actions.readStartTruth()) === "show";
+      const truth = await actions.readStartTruth();
+      const showing = indicatorAfterAbandonedMeetingStart(truth) === "show";
       if (showing) {
-        actions.showIndicator();
+        actions.showIndicator(
+          truth.kind === "recording" ? Date.now() - truth.elapsedSeconds * 1000 : undefined,
+        );
       } else {
         actions.hideIndicator();
       }

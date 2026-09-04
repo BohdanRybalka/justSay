@@ -214,10 +214,48 @@ async function responseError(resp: Response): Promise<Error> {
  *  The query string is dropped from that message: `/history/search?q=` carries
  *  whatever the user typed, and an error message is rendered in more places than
  *  it is read. */
-async function fetchJsonWithin<T>(path: string, opts: RequestInit, budgetMs: number): Promise<T> {
+/** An abort is identified by its `name`, not by its class.
+ *
+ *  `fetch` rejects an aborted request with a `DOMException`, and `DOMException`
+ *  does not extend `Error` in every environment this code runs in — it does not
+ *  under jsdom, which is what the suite uses. Discriminating on the name is
+ *  what makes the check hold in the browser and in the tests both, and the
+ *  check has to discriminate: `signal.aborted` alone relabels every error
+ *  raised after the budget expired, including a `403` whose body merely stopped
+ *  part-way, and a `403` reported as a timeout takes the widget down the
+ *  adopt-the-recording branch instead of opening the consent dialog. */
+function isAbortError(e: unknown): boolean {
+  return typeof e === "object" && e !== null && (e as { name?: unknown }).name === "AbortError";
+}
+
+/** Await `work`, but give up the moment `signal` aborts.
+ *
+ *  `getToken()` takes no signal and can hang: it reaches its own 3 s race only
+ *  after `await import("@tauri-apps/api/core")`, which is unbounded, and a
+ *  wedge there leaves `tokenPromise` pending for the life of the window so
+ *  every later caller joins the same dead promise. Arming a timer in front of
+ *  that does nothing on its own — nothing is listening — so the wait itself has
+ *  to end when the budget does. The abandoned work is left running; it settles
+ *  or it does not, and either way no caller is still attached to it. */
+function until<T>(work: Promise<T>, signal: AbortSignal, giveUp: () => Error): Promise<T> {
+  if (signal.aborted) return Promise.reject(giveUp());
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => reject(giveUp());
+    signal.addEventListener("abort", stop, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop));
+  });
+}
+
+async function fetchJsonWithin<T>(
+  path: string,
+  buildRequest: () => Promise<RequestInit>,
+  budgetMs: number,
+): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), budgetMs);
+  const timedOut = () => new TimedOutError(budgetMs, path.split("?")[0]);
   try {
+    const opts = await until(buildRequest(), controller.signal, timedOut);
     const resp = await fetch(`${BACKEND_BASE_URL}${path}`, { ...opts, signal: controller.signal });
     recordAuthOutcome(path, resp);
     if (!resp.ok) {
@@ -225,8 +263,11 @@ async function fetchJsonWithin<T>(path: string, opts: RequestInit, budgetMs: num
     }
     return (await resp.json()) as T;
   } catch (e) {
-    if (controller.signal.aborted) {
-      throw new TimedOutError(budgetMs, path.split("?")[0]);
+    if (e instanceof TimedOutError) {
+      throw e;
+    }
+    if (isAbortError(e) && controller.signal.aborted) {
+      throw timedOut();
     }
     throw e;
   } finally {
@@ -240,16 +281,22 @@ async function request<T>(
   body?: unknown,
   budgetMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<T> {
-  const token = await getToken();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) {
-    headers["X-JustSay-Token"] = token;
-  }
-  const opts: RequestInit = { method, headers };
-  if (body) {
-    opts.body = JSON.stringify(body);
-  }
-  return fetchJsonWithin<T>(path, opts, budgetMs);
+  return fetchJsonWithin<T>(
+    path,
+    async () => {
+      const token = await getToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) {
+        headers["X-JustSay-Token"] = token;
+      }
+      const opts: RequestInit = { method, headers };
+      if (body) {
+        opts.body = JSON.stringify(body);
+      }
+      return opts;
+    },
+    budgetMs,
+  );
 }
 
 
@@ -441,7 +488,15 @@ export const api = {
 
   startMeetingRecording: () => request<MeetingStatus>("POST", "/audio/meeting/start"),
 
-  stopMeetingRecording: () => request<MeetingStopResponse>("POST", "/audio/meeting/stop"),
+  /** The long budget, not the control-plane one: this call writes the whole WAV
+   *  before it answers. `_assemble_and_write`'s docstring puts a 45-minute call
+   *  at "tens of millions of samples and ~86 MB to disk", and
+   *  `meeting_max_raw_bytes` caps the raw capture at roughly eight times that.
+   *  Abandoning it at 15 s does not lose the file — an abandoned stop still
+   *  writes it — but it tells the user the call is still recording when it is
+   *  not, and leaves the indicator up on nothing. */
+  stopMeetingRecording: () =>
+    request<MeetingStopResponse>("POST", "/audio/meeting/stop", undefined, LONG_REQUEST_TIMEOUT_MS),
 
   getMeetingStatus: () => request<MeetingStatus>("GET", "/audio/meeting/status"),
 
@@ -466,14 +521,16 @@ export const api = {
     const blob = new Blob([fileBytes], { type: "application/octet-stream" });
     form.append("file", blob, filename);
     const path = `/pipeline/process-file?language=${language}`;
-    const token = await getToken();
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers["X-JustSay-Token"] = token;
-    }
     return fetchJsonWithin<DictateResponse>(
       path,
-      { method: "POST", body: form, headers },
+      async () => {
+        const token = await getToken();
+        const headers: Record<string, string> = {};
+        if (token) {
+          headers["X-JustSay-Token"] = token;
+        }
+        return { method: "POST", body: form, headers };
+      },
       LONG_REQUEST_TIMEOUT_MS,
     );
   },

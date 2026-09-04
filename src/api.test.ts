@@ -718,3 +718,58 @@ describe("the level stream's handshake, which is bounded while the stream is not
     expect(onError).not.toHaveBeenCalled();
   });
 });
+
+describe("a token wait that never ends, because the bridge module never loads", () => {
+  beforeEach(() => {
+    invokeMock.mockResolvedValue("secret-token");
+    vi.useFakeTimers();
+    vi.doMock("@tauri-apps/api/core", () => new Promise(() => {}));
+  });
+
+  afterEach(() => {
+    vi.doUnmock("@tauri-apps/api/core");
+    vi.resetModules();
+  });
+
+  function deafFetch() {
+    return (_url: string, opts: RequestInit) =>
+      new Promise<Response>((_, reject) => {
+        opts.signal?.addEventListener("abort", () =>
+          reject(new DOMException("The operation was aborted.", "AbortError")),
+        );
+      });
+  }
+
+  it("bounds the token wait too, not only the part after a token is in hand", async () => {
+    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
+    const { TimedOutError } = await import("./timeout");
+    fetchMock.mockImplementation(deafFetch());
+
+    const pending = api.health();
+    const settled = vi.fn();
+    pending.then(settled, settled);
+
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1);
+    expect(settled).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2);
+    await expect(pending).rejects.toBeInstanceOf(TimedOutError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("frees a later caller after a token wait that never ends, rather than pooling them on it", async () => {
+    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
+    const { TimedOutError } = await import("./timeout");
+    fetchMock.mockImplementation(deafFetch());
+
+    const first = api.audioStart();
+    first.catch(() => {});
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
+    await expect(first).rejects.toBeInstanceOf(TimedOutError);
+
+    const second = api.audioStart();
+    second.catch(() => {});
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
+    await expect(second).rejects.toBeInstanceOf(TimedOutError);
+  });
+});

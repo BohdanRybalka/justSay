@@ -10,10 +10,19 @@
  *
  * The answer is to ask the status endpoint that already exists, once, and
  * branch on three outcomes rather than two. It is one read and not a poll
- * because one read answers the only question there is; and it stays here, at
- * the timeout site, rather than in the widget's connection poll, because only
- * here does the widget know the recording it is looking at is the one it asked
- * for — the Settings window's microphone test drives the same shared recorder.
+ * because one read answers the only question there is, and it lives here rather
+ * than in the widget's connection poll so that it runs only when a budget has
+ * actually expired.
+ *
+ * What it cannot establish is ownership. `GET /audio/status` reports the one
+ * process-wide recorder and says nothing about who started it, and there is no
+ * session id on `/audio/start` to echo back. So a capture the widget adopts may
+ * be somebody else's — Settings' microphone test drives the same recorder — and
+ * the honest bound on this design is that adoption is right about *whether* a
+ * recording exists and only presumed about *whose* it is. The presumption is
+ * recoverable in one press and the alternative is a microphone left open with
+ * the widget claiming failure; [JS-119] carries the session id that would
+ * settle it.
  */
 
 export interface RecordingSnapshot {

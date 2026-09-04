@@ -116,16 +116,18 @@ function renderSettingsUnavailable(container: HTMLElement) {
  * of order, and the loser's failure repaint would erase a tab the winner had
  * already rendered.
  *
- * The outer race is no longer what bounds an unanswered *request*: every call
- * `loadSettings()` makes carries its own budget now, and the arithmetic says it
- * cannot reach this one — `api.getSettings()` and `api.cloudKeyStatus()` run in
- * parallel, each bounded by the 3 s token race plus the 15 s request budget, so
- * 18 s against a 40 s outer bound. What the race still covers is everything
- * underneath those budgets that has none of its own: `getToken()` reaches its
- * own race only after an unbounded `await import("@tauri-apps/api/core")`, and
- * `checkBackend()` above is awaited outside `loadSettings()` entirely. Without
- * this bound a wedge there leaves the window on "Loading settings..." with no
- * way out, which is the failure the screen below exists for.
+ * The outer race is no longer what bounds an unanswered *request*. Every call
+ * either half of this function makes carries its own budget, and that budget
+ * now starts before the token is asked for rather than after it, so the one
+ * unbounded step that used to sit in front of it — the dynamic
+ * `import("@tauri-apps/api/core")` — is inside a budget too. `checkBackend()`
+ * is awaited outside `loadSettings()` and therefore outside the race; it is
+ * bounded because the request underneath it is, not because of anything here.
+ *
+ * The race is kept for what it still covers: this function grows more awaits
+ * over time, and it is the only thing that bounds a step nobody remembered to
+ * give a budget of its own. Its 40 s sits above the ~18 s worst case of the two
+ * parallel bounded calls, so it fires only on something new.
  */
 async function loadSettingsIntoUi(): Promise<void> {
   if (settingsLoadInFlight) return;
