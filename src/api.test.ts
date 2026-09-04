@@ -537,10 +537,11 @@ describe("a backend that accepts a request and never answers", () => {
     await vi.advanceTimersByTimeAsync(STATUS_TIMEOUT_MS - 1);
     expect(settled).not.toHaveBeenCalled();
     expect(STATUS_TIMEOUT_MS).toBeLessThan(REQUEST_TIMEOUT_MS);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(2);
     await expect(pending).rejects.toThrow(
-      "the backend did not answer /audio/status within 3 seconds",
+      `the backend did not answer /audio/status within ${STATUS_TIMEOUT_MS / 1000} seconds`,
     );
   });
 
@@ -557,7 +558,7 @@ describe("a backend that accepts a request and never answers", () => {
 
     await vi.advanceTimersByTimeAsync(2);
     await expect(pending).rejects.toThrow(
-      "the backend did not answer /audio/meeting/status within 3 seconds",
+      `the backend did not answer /audio/meeting/status within ${STATUS_TIMEOUT_MS / 1000} seconds`,
     );
   });
 
@@ -652,6 +653,37 @@ describe("a backend that accepts a request and never answers", () => {
   });
 });
 
+describe("a non-2xx response whose error body never arrives", () => {
+  beforeEach(() => {
+    invokeMock.mockResolvedValue("secret-token");
+    vi.useFakeTimers();
+  });
+
+  it("is a timeout, not the status it never finished sending", async () => {
+    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
+    const { TimedOutError } = await import("./timeout");
+    fetchMock.mockImplementation((_url: string, opts: RequestInit) =>
+      Promise.resolve({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        json: () =>
+          new Promise((_, reject) => {
+            opts.signal?.addEventListener("abort", () =>
+              reject(new DOMException("The operation was aborted.", "AbortError")),
+            );
+          }),
+      } as unknown as Response),
+    );
+
+    const pending = api.audioStart();
+    pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
+
+    await expect(pending).rejects.toBeInstanceOf(TimedOutError);
+  });
+});
+
 describe("the level stream's handshake, which is bounded while the stream is not", () => {
   beforeEach(() => {
     invokeMock.mockResolvedValue("secret-token");
@@ -726,6 +758,25 @@ describe("the level stream's handshake, which is bounded while the stream is not
     expect(controller.signal.aborted).toBe(false);
 
     release();
+  });
+
+  it("stays silent when the caller aborts while the token is still being fetched", async () => {
+    invokeMock.mockImplementation(() => new Promise<string>(() => {}));
+    const { levelStream } = await import("./api");
+    fetchMock.mockImplementation(() => new Promise<Response>(() => {}));
+    const onError = vi.fn();
+
+    const controller = levelStream(
+      () => {},
+      () => {},
+      onError,
+    );
+
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("stays silent when the caller aborts the stream itself", async () => {
@@ -811,5 +862,35 @@ describe("a token wait that never ends, because the bridge module never loads", 
     second.catch(() => {});
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
     await expect(second).rejects.toBeInstanceOf(TimedOutError);
+  });
+});
+
+describe("a status read against a bridge that is slow but alive", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.doMock("@tauri-apps/api/core", () => {
+      return new Promise((resolve) => {
+        setTimeout(() => resolve({ invoke: invokeMock }), 2500);
+      });
+    });
+  });
+
+  afterEach(() => {
+    vi.doUnmock("@tauri-apps/api/core");
+    vi.resetModules();
+  });
+
+  it("still issues its request, because the budget contains the token path it waits on", async () => {
+    invokeMock.mockImplementation(
+      () => new Promise<string>((resolve) => setTimeout(() => resolve("secret-token"), 1000)),
+    );
+    const { api } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ is_recording: false, duration_seconds: 0, level_db: -60 }));
+
+    const pending = api.audioStatus();
+    await vi.advanceTimersByTimeAsync(4000);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(pending).resolves.toMatchObject({ is_recording: false });
   });
 });

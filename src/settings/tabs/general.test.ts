@@ -748,7 +748,9 @@ describe("renderGeneral — the microphone test", () => {
     });
 
     expect(label.textContent).toContain("the microphone may still be open");
-    expect(label.textContent).not.toContain("press Stop");
+    expect(label.textContent).toBe(
+      "The backend did not answer — the microphone may still be open",
+    );
     expect(button.textContent).toBe("Stop");
   });
 

@@ -459,9 +459,33 @@ describe("backend unreachable from the first poll", () => {
     await vi.advanceTimersByTimeAsync(41_000);
 
     expect(tabContent.textContent).toContain("Cannot load settings");
-    expect(tabContent.textContent).toContain("did not answer within");
-    expect(tabContent.textContent).not.toContain("accepted this window's request");
+    expect(tabContent.textContent).toContain("Loading settings did not finish in time");
     expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(false);
+
+    vi.useRealTimers();
+    consoleError.mockRestore();
+  });
+
+  it("names the endpoint and the budget when the budget that expired knows them", async () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { TimedOutError } = await import("../timeout");
+    apiMock.health.mockResolvedValue({
+      status: "ok",
+      version: "0.0.0",
+      stt_mode: "cloud",
+      llm_mode: "cloud",
+    });
+    apiMock.getSettings.mockRejectedValue(new TimedOutError(15_000, "/settings"));
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
+
+    await import("./settings");
+    const tabContent = document.getElementById("tab-content")!;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(tabContent.textContent).toContain("Cannot load settings");
+    expect(tabContent.textContent).toContain("(/settings, 15 s)");
+    expect(tabContent.textContent).not.toContain("accepted");
 
     vi.useRealTimers();
     consoleError.mockRestore();

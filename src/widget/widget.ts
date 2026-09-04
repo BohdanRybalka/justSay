@@ -215,6 +215,7 @@ function renderMeetingIndicatorFromState() {
 }
 
 function beginMeetingIndicator(startedAt = Date.now()) {
+  if (meetingTimer) clearInterval(meetingTimer);
   meetingActive = true;
   meetingStartedAt = startedAt;
   renderMeetingIndicatorFromState();

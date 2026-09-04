@@ -77,9 +77,18 @@ export const REQUEST_TIMEOUT_MS = 15_000;
  *  queue's drain is parked inside the start. Reusing the request budget made
  *  that window 30 s; this makes it 18 s, and the second half of it now costs
  *  what a transport that answers nothing is worth rather than what a device
- *  enumeration is worth. Same number as `TOKEN_TIMEOUT_MS`, for the same
- *  reason: both bound a transport rather than the work behind it. */
-export const STATUS_TIMEOUT_MS = 3_000;
+ *  enumeration is worth.
+ *
+ *  It is derived rather than chosen, because a budget shorter than the token
+ *  path it now contains can never issue a request at all. `fetchJsonWithin`
+ *  arms its timer before `getToken()`, and `getToken()` bounds two steps in
+ *  sequence — the bridge import, then the `invoke` — so the ceiling on getting
+ *  a token is twice `TOKEN_TIMEOUT_MS`. A flat 3 s here meant every status read
+ *  on an uncached token expired with zero fetches issued and blamed the backend
+ *  for a bridge fault, which is the opposite of what this budget is for. */
+const TOKEN_ACQUISITION_CEILING_MS = TOKEN_TIMEOUT_MS * 2;
+
+export const STATUS_TIMEOUT_MS = TOKEN_ACQUISITION_CEILING_MS + 3_000;
 
 /** The budget for the three calls that do real work rather than answer a question.
  *
@@ -229,8 +238,20 @@ export class ApiRequestError extends Error {
   }
 }
 
+/** The error a non-2xx response describes — or the abort, rethrown.
+ *
+ *  Reading the error body can itself run out of the budget, and a blanket
+ *  `.catch` here turns that abort into a fully formed `ApiRequestError`, which
+ *  `fetchJsonWithin`'s catch then has no way to recognise as a timeout. The
+ *  caller ends up branching on a status the backend never finished sending. */
 async function responseError(resp: Response): Promise<Error> {
-  const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+  let err: { detail?: string };
+  try {
+    err = await resp.json();
+  } catch (e) {
+    if (isAbortError(e)) throw e;
+    err = { detail: resp.statusText };
+  }
   const detail = err.detail || `HTTP ${resp.status}`;
   if (resp.status === 401) {
     return new ApiAuthError(detail, bridgeDiagnosis);
@@ -325,11 +346,14 @@ async function fetchJsonWithin<T>(
   }
 }
 
+/** `budget` is an object rather than a fourth positional argument because the
+ *  third is `body?: unknown`: a bare number in that slot type-checks, ships the
+ *  budget as the request body, and silently keeps the default budget. */
 async function request<T>(
   method: string,
   path: string,
   body?: unknown,
-  budgetMs: number = REQUEST_TIMEOUT_MS,
+  budget: { ms: number } = { ms: REQUEST_TIMEOUT_MS },
 ): Promise<T> {
   return fetchJsonWithin<T>(
     path,
@@ -345,7 +369,7 @@ async function request<T>(
       }
       return opts;
     },
-    budgetMs,
+    budget.ms,
   );
 }
 
@@ -534,7 +558,7 @@ export const api = {
 
   audioStop: () => request<{ filename: string; duration_seconds: number }>("POST", "/audio/stop"),
 
-  audioStatus: () => request<RecordingStatus>("GET", "/audio/status", undefined, STATUS_TIMEOUT_MS),
+  audioStatus: () => request<RecordingStatus>("GET", "/audio/status", undefined, { ms: STATUS_TIMEOUT_MS }),
 
   startMeetingRecording: () => request<MeetingStatus>("POST", "/audio/meeting/start"),
 
@@ -546,17 +570,17 @@ export const api = {
    *  writes it — but it tells the user the call is still recording when it is
    *  not, and leaves the indicator up on nothing. */
   stopMeetingRecording: () =>
-    request<MeetingStopResponse>("POST", "/audio/meeting/stop", undefined, LONG_REQUEST_TIMEOUT_MS),
+    request<MeetingStopResponse>("POST", "/audio/meeting/stop", undefined, { ms: LONG_REQUEST_TIMEOUT_MS }),
 
   getMeetingStatus: () =>
-    request<MeetingStatus>("GET", "/audio/meeting/status", undefined, STATUS_TIMEOUT_MS),
+    request<MeetingStatus>("GET", "/audio/meeting/status", undefined, { ms: STATUS_TIMEOUT_MS }),
 
   dictate: (language = "uk") =>
     request<DictateResponse>(
       "POST",
       `/pipeline/dictate?language=${language}`,
       undefined,
-      LONG_REQUEST_TIMEOUT_MS,
+      { ms: LONG_REQUEST_TIMEOUT_MS },
     ),
 
   /** Upload an audio file to the pipeline. Accepts an ArrayBuffer of file bytes.
@@ -597,7 +621,7 @@ export const api = {
       "POST",
       "/stt/local/load",
       undefined,
-      LONG_REQUEST_TIMEOUT_MS,
+      { ms: LONG_REQUEST_TIMEOUT_MS },
     ),
   sttLocalUnload: () => request<{ unloaded: boolean }>("POST", "/stt/local/unload"),
   /** Retry affordance for the Local STT status indicator's error state —
@@ -669,7 +693,11 @@ export function levelStream(
     controller.abort();
   }, REQUEST_TIMEOUT_MS);
 
-  until(getToken(), controller.signal, () => new TimedOutError(REQUEST_TIMEOUT_MS, LEVEL_STREAM_PATH))
+  until(getToken(), controller.signal, () =>
+    timedOut
+      ? new TimedOutError(REQUEST_TIMEOUT_MS, LEVEL_STREAM_PATH)
+      : new DOMException("The level stream was closed by its caller.", "AbortError"),
+  )
     .then((token) => {
       const headers: Record<string, string> = {};
       if (token) {
@@ -721,6 +749,10 @@ export function levelStream(
     })
     .catch((err) => {
       clearTimeout(handshakeTimer);
+      if (err instanceof TimedOutError) {
+        onError(err.message);
+        return;
+      }
       if (timedOut) {
         onError(new TimedOutError(REQUEST_TIMEOUT_MS, LEVEL_STREAM_PATH).message);
         return;
