@@ -1,5 +1,6 @@
 import asyncio
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -376,6 +377,27 @@ def _clear_dependency_overrides():
     app.dependency_overrides.clear()
 
 
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+_IMPORT_PROBE_VIOLATION = 17
+
+
+def _run_import_probe(probe: str) -> subprocess.CompletedProcess[str]:
+    """Run an import-hygiene probe in an isolated child interpreter.
+
+    `-I` is what makes the verdict trustworthy: it drops an inherited
+    `PYTHONPATH` and, through `-E`, every other `PYTHON*` variable — including
+    `PYTHONOPTIMIZE`, which would otherwise strip the child's own checks and
+    turn both gates below into unconditional passes. The child therefore also
+    ends in an explicit `sys.exit`, never a bare `assert`, and sets its own
+    `sys.path` entry because `-I` removes the working directory from it.
+    """
+    return subprocess.run(
+        [sys.executable, "-I", "-c", probe],
+        capture_output=True,
+        text=True,
+    )
+
+
 def assert_module_binds_no_third_party(module_name: str, forbidden: tuple[str, ...]) -> None:
     """Import `module_name` in a fresh interpreter and assert none of
     `forbidden` ended up bound in its namespace.
@@ -395,18 +417,20 @@ def assert_module_binds_no_third_party(module_name: str, forbidden: tuple[str, .
     checks ask, which is whether importing the module on a machine without
     the optional extras installed would crash.
     """
-    import subprocess
-    import sys
-
-    checks = " and ".join(f"not hasattr(m, {name!r})" for name in forbidden)
-    result = subprocess.run(
-        [sys.executable, "-c", f"import {module_name} as m; assert {checks}"],
-        capture_output=True,
-        text=True,
+    checks = " or ".join(f"hasattr(m, {name!r})" for name in forbidden)
+    probe = (
+        f"import sys; sys.path.insert(0, {str(_BACKEND_DIR)!r}); "
+        f"import {module_name} as m; "
+        f"sys.exit({_IMPORT_PROBE_VIOLATION} if ({checks}) else 0)"
+    )
+    result = _run_import_probe(probe)
+    assert result.returncode != _IMPORT_PROBE_VIOLATION, (
+        f"importing {module_name} in a fresh interpreter bound one of {forbidden} "
+        f"at module level:\n{result.stdout}{result.stderr}"
     )
     assert result.returncode == 0, (
-        f"importing {module_name} in a fresh interpreter bound one of {forbidden} "
-        f"at module level:\n{result.stderr}"
+        f"importing {module_name} in a fresh interpreter failed before it could be "
+        f"checked (exit {result.returncode}):\n{result.stdout}{result.stderr}"
     )
 
 
@@ -421,22 +445,21 @@ def assert_import_loads_no_module(module_name: str, forbidden: tuple[str, ...]) 
     test already imported, and `test_sys_modules_hygiene.py` forbids the
     `del sys.modules[...]` that would hide that.
     """
-    import subprocess
-    import sys
-
     probe = (
-        f"import sys; import {module_name}; "
+        f"import sys; sys.path.insert(0, {str(_BACKEND_DIR)!r}); "
+        f"import {module_name}; "
         f"loaded = [name for name in {forbidden!r} if name in sys.modules]; "
-        "assert not loaded, loaded"
+        "print(loaded); "
+        f"sys.exit({_IMPORT_PROBE_VIOLATION} if loaded else 0)"
     )
-    result = subprocess.run(
-        [sys.executable, "-c", probe],
-        capture_output=True,
-        text=True,
+    result = _run_import_probe(probe)
+    assert result.returncode != _IMPORT_PROBE_VIOLATION, (
+        f"importing {module_name} in a fresh interpreter loaded one of "
+        f"{forbidden}:\n{result.stdout}{result.stderr}"
     )
     assert result.returncode == 0, (
-        f"importing {module_name} in a fresh interpreter loaded one of "
-        f"{forbidden}:\n{result.stderr}"
+        f"importing {module_name} in a fresh interpreter failed before it could be "
+        f"checked (exit {result.returncode}):\n{result.stdout}{result.stderr}"
     )
 
 

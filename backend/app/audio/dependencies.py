@@ -1,7 +1,9 @@
 """FastAPI wiring for the audio package, and nothing else.
 
-The four ``Depends()`` accessors below are the only reason anything under
-``app/audio/`` may import ``fastapi``. Capture logic, DSP and configuration
+Dependency injection is the only reason this module imports ``fastapi``, and
+the four ``Depends()`` accessors below are all of it; ``router.py`` is the
+package's other exempt module, and holds the endpoints themselves. Capture
+logic, DSP and configuration
 live in their own modules and stay web-framework free, so importing one of
 them does not drag the HTTP stack — or the capture stack — into the process.
 Anything that is not dependency injection belongs elsewhere.

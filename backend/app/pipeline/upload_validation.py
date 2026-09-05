@@ -103,7 +103,7 @@ async def read_upload_with_limit(file: UploadFile, max_size: int) -> bytes:
         if total > max_size:
             raise HTTPException(
                 status_code=413,
-                detail=f"File too large (max {max_size // 1024 // 1024}MB)",
+                detail=f"File too large (max {max_size / (1024 * 1024):.3g}MB)",
             )
         chunks.append(chunk)
     return b"".join(chunks)
