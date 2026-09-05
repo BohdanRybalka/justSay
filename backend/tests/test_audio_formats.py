@@ -24,6 +24,7 @@ from app.core.audio_formats import (
     detect_audio_mime,
     mime_for_extension,
 )
+from app.core.constants import MAX_UPLOAD_SIZE
 from app.pipeline.upload_validation import read_upload_with_limit, validate_audio_upload
 
 
@@ -251,3 +252,50 @@ async def test_read_upload_with_limit_stops_reading_before_buffering_it_all():
         f"the whole {_MULTI_CHUNK_SIZE}-byte payload was read before the 413: "
         "the size check is not running per chunk"
     )
+
+
+class _SizedChunk:
+    """A chunk that reports a length without holding the bytes.
+
+    `read_upload_with_limit` measures each chunk with `len()` and raises
+    before it joins anything, so a gigabyte-scale limit can be driven past
+    without allocating a gigabyte.
+    """
+
+    def __init__(self, size: int) -> None:
+        self._size = size
+
+    def __len__(self) -> int:
+        return self._size
+
+
+class _OversizedUpload:
+    """An upload whose very first chunk already exceeds the limit."""
+
+    def __init__(self, size: int) -> None:
+        self._size = size
+
+    async def read(self, size: int) -> _SizedChunk:
+        return _SizedChunk(self._size)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("max_size", "expected_detail"),
+    [
+        (512 * 1024, "File too large (max 0.5MB)"),
+        (MAX_UPLOAD_SIZE, "File too large (max 25MB)"),
+        (1024 * 1024 * 1024, "File too large (max 1024MB)"),
+    ],
+)
+async def test_read_upload_with_limit_states_the_limit_the_user_will_read(
+    max_size, expected_detail
+):
+    """The 413 detail reaches the user: `src/api.ts` surfaces `detail`
+    verbatim. Two rounds of edits changed this string unnoticed — flooring it
+    to `max 0MB` below a megabyte, then rendering a gigabyte limit as
+    `1.02e+03MB` — because nothing asserted what it actually says."""
+    with pytest.raises(HTTPException) as excinfo:
+        await read_upload_with_limit(_OversizedUpload(max_size + 1), max_size)
+
+    assert excinfo.value.detail == expected_detail

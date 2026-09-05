@@ -379,23 +379,44 @@ def _clear_dependency_overrides():
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _IMPORT_PROBE_VIOLATION = 17
+_IMPORT_PROBE_TIMEOUT_SECONDS = 60
 
 
-def _run_import_probe(probe: str) -> subprocess.CompletedProcess[str]:
-    """Run an import-hygiene probe in an isolated child interpreter.
+def _run_import_probe(probe: str, module_name: str) -> subprocess.CompletedProcess[str]:
+    """Run an import-hygiene probe in a child interpreter with a scrubbed
+    environment.
 
-    `-I` is what makes the verdict trustworthy: it drops an inherited
-    `PYTHONPATH` and, through `-E`, every other `PYTHON*` variable — including
-    `PYTHONOPTIMIZE`, which would otherwise strip the child's own checks and
-    turn both gates below into unconditional passes. The child therefore also
-    ends in an explicit `sys.exit`, never a bare `assert`, and sets its own
-    `sys.path` entry because `-I` removes the working directory from it.
+    `-E` is what makes the verdict trustworthy: it ignores every `PYTHON*`
+    variable the parent exports — `PYTHONPATH`, which would let the child see
+    modules this machine happens to have lying around, and `PYTHONOPTIMIZE`,
+    which strips `assert` and would otherwise turn a child that checks itself
+    with one into an unconditional pass. The child therefore also ends in an
+    explicit `sys.exit`, never a bare `assert`, and inserts the backend
+    directory into its own `sys.path` rather than trusting the parent's
+    working directory to be it.
+
+    `-I` is deliberately not used: it implies `-s`, which drops the user site
+    directory, so a backend installed with `pip install --user` would leave
+    the child unable to import its own dependencies and every call site
+    reporting a layering violation it never checked.
+
+    The timeout exists because this helper is the single funnel for three
+    tests: an import that wedges rather than failing must fail the test that
+    asked for it, not hang the suite.
     """
-    return subprocess.run(
-        [sys.executable, "-I", "-c", probe],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        return subprocess.run(
+            [sys.executable, "-E", "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=_IMPORT_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as expired:
+        raise AssertionError(
+            f"importing {module_name} in a fresh interpreter did not finish "
+            f"within {_IMPORT_PROBE_TIMEOUT_SECONDS}s -- it wedged during import "
+            "rather than failing, which would otherwise hang the whole suite"
+        ) from expired
 
 
 def assert_module_binds_no_third_party(module_name: str, forbidden: tuple[str, ...]) -> None:
@@ -423,7 +444,7 @@ def assert_module_binds_no_third_party(module_name: str, forbidden: tuple[str, .
         f"import {module_name} as m; "
         f"sys.exit({_IMPORT_PROBE_VIOLATION} if ({checks}) else 0)"
     )
-    result = _run_import_probe(probe)
+    result = _run_import_probe(probe, module_name)
     assert result.returncode != _IMPORT_PROBE_VIOLATION, (
         f"importing {module_name} in a fresh interpreter bound one of {forbidden} "
         f"at module level:\n{result.stdout}{result.stderr}"
@@ -452,7 +473,7 @@ def assert_import_loads_no_module(module_name: str, forbidden: tuple[str, ...]) 
         "print(loaded); "
         f"sys.exit({_IMPORT_PROBE_VIOLATION} if loaded else 0)"
     )
-    result = _run_import_probe(probe)
+    result = _run_import_probe(probe, module_name)
     assert result.returncode != _IMPORT_PROBE_VIOLATION, (
         f"importing {module_name} in a fresh interpreter loaded one of "
         f"{forbidden}:\n{result.stdout}{result.stderr}"
