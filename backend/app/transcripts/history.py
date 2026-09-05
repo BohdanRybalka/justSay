@@ -43,6 +43,7 @@ log = logging.getLogger(__name__)
 HISTORY_FILENAME = "history.db"
 SCHEMA_VERSION = 3
 STATS_TTL_SECONDS = 5.0
+HISTORY_LIMIT_MAX = 200
 
 _lock = threading.Lock()
 _output_dir: Path | None = None

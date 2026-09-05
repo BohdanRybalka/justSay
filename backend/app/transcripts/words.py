@@ -66,8 +66,10 @@ def top_words(
 ) -> TopWordsResponse:
     """Compute top-N words across (filtered) entries.
 
-    Always applies the merged UK+EN stop-word set. ``limit`` is clamped
-    to ``[1, TOP_LIMIT_MAX]`` to avoid OOM at large DBs.
+    Always applies the merged UK+EN stop-word set. ``limit`` clamps the
+    *output* to ``[1, TOP_LIMIT_MAX]`` and nothing else: the scan below reads
+    every row of ``entries``, so this is blocking work proportional to the
+    whole history and its caller runs it off the event loop.
     """
     clamped_limit = max(1, min(int(limit), TOP_LIMIT_MAX))
 
@@ -225,16 +227,16 @@ def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
             (fts_expr, clamped_limit),
         ).fetchall()
 
-        hits = [_hit_from_row(r, tokens) for r in fts_rows]
+        rows = list(fts_rows)
 
-        residual = clamped_limit - len(hits)
+        residual = clamped_limit - len(rows)
         if residual > 0:
             like_clauses = " AND ".join(["cleaned_text LIKE ? ESCAPE '\\'"] * len(tokens))
             def _escape_like(t: str) -> str:
                 return t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             like_params: list = [f"%{_escape_like(t)}%" for t in tokens]
 
-            existing_ids = [h.id for h in hits]
+            existing_ids = [r["id"] for r in rows]
             if existing_ids:
                 placeholders = ",".join("?" * len(existing_ids))
                 not_in_clause = f" AND id NOT IN ({placeholders})"
@@ -252,9 +254,9 @@ def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
                 params,
             ).fetchall()
 
-            hits.extend(_hit_from_row(r, tokens) for r in like_rows)
+            rows.extend(like_rows)
 
-    return hits[:clamped_limit]
+    return [_hit_from_row(r, tokens) for r in rows[:clamped_limit]]
 
 
 

@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app.transcripts import words as words_service
 from app.transcripts.history import (
+    HISTORY_LIMIT_MAX,
     HistoryEntry,
     HistoryStats,
     clear_all,
@@ -55,7 +56,10 @@ def _is_fts_syntax_error(e: sqlite3.OperationalError) -> bool:
 
 
 @router.get("", response_model=HistoryListResponse)
-async def list_history(limit: int = 50, offset: int = 0):
+async def list_history(
+    limit: int = Query(50, ge=1, le=HISTORY_LIMIT_MAX),
+    offset: int = Query(0, ge=0),
+):
     with store_busy_as_503():
         return HistoryListResponse(
             entries=get_entries(limit=limit, offset=offset),

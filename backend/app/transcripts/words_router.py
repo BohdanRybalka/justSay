@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
 from fastapi import APIRouter, Query
@@ -18,4 +19,4 @@ async def words_top(
     limit: int = Query(50, ge=1, le=words.TOP_LIMIT_MAX),
 ):
     with store_busy_as_503():
-        return words.top_words(lang=lang, limit=limit)
+        return await asyncio.to_thread(words.top_words, lang, limit)
