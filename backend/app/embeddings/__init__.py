@@ -17,6 +17,7 @@ full reasoning.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from typing import Protocol
 
@@ -24,6 +25,8 @@ from app.core.types import ProviderMode
 from app.embeddings.config import EmbeddingSettings
 from app.llm.config import LLMSettings
 from app.stt.config import STTSettings
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "EmbeddingProvider",
@@ -115,7 +118,9 @@ async def resolve_embedding_provider(
                     try:
                         stale_local_provider.cleanup()
                     except Exception:
-                        pass
+                        log.warning(
+                            "Releasing the stale local embedding provider failed", exc_info=True
+                        )
                 provider = None
                 reason = LOCAL_MISSING_MODEL_REASON
 
@@ -152,9 +157,10 @@ def clear_cache() -> None:
     ``changed_stt``/``changed_llm`` invalidation, and into ``main.py``'s
     ``lifespan`` shutdown block alongside the STT-cache release.
 
-    Calls the cached provider's ``cleanup()`` (swallowing any exception)
-    before dropping the reference, so ``LocalEmbeddingProvider`` gets a
-    chance to unload ``nomic-embed-text`` from Ollama's memory.
+    Calls the cached provider's ``cleanup()`` before dropping the reference,
+    so ``LocalEmbeddingProvider`` gets a chance to unload ``nomic-embed-text``
+    from Ollama's memory. A cleanup failure is logged and does not propagate —
+    invalidation must succeed even when the unload cannot.
     """
     global _cached_provider, _cached_reason, _cached_key
     with _cache_lock:
@@ -162,7 +168,7 @@ def clear_cache() -> None:
             try:
                 _cached_provider.cleanup()
             except Exception:
-                pass
+                log.warning("Releasing the cached embedding provider failed", exc_info=True)
         _cached_provider = None
         _cached_reason = None
         _cached_key = None

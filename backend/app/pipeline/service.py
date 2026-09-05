@@ -103,13 +103,9 @@ async def process_audio(
     )
 
     if is_local_provider(stt):
-        from app.stt.local_setup import LocalReadinessTimeoutError, await_local_ready
+        from app.stt.local_setup import await_local_ready
 
-        try:
-            await await_local_ready(settings.stt)
-        except LocalReadinessTimeoutError as e:
-            log.error("Local STT readiness wait failed: %s", e)
-            raise RuntimeError(str(e)) from e
+        await await_local_ready(settings.stt)
 
     try:
         result = await stt.transcribe(
@@ -155,8 +151,8 @@ async def process_audio(
         try:
             pyperclip.copy(text)
             copied = True
-        except Exception as e:
-            log.warning("Clipboard copy failed: %s", e)
+        except Exception:
+            log.warning("Copying the transcript to the clipboard failed", exc_info=True)
 
     duration_ms = int((time.perf_counter() - start) * 1000)
     word_count = len(text.split()) if text else 0
@@ -181,8 +177,8 @@ async def process_audio(
 
             background_tasks.add_task(vector_store.embed_entry_background, entry.id, text)
             background_tasks.add_task(vector_store.run_background_indexer)
-    except Exception as e:
-        log.warning("Failed to save history entry: %s", e)
+    except Exception:
+        log.exception("Saving the history entry failed — this transcript is not in history")
 
     return ProcessingResult(
         text=text,

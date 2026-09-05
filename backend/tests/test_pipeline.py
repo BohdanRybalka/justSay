@@ -1,5 +1,7 @@
 import asyncio
+import logging
 import time
+import traceback
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -174,19 +176,23 @@ async def test_pipeline_copies_speech_that_opens_like_a_refusal(
 
 @pytest.mark.asyncio
 async def test_pipeline_clipboard_failure_is_graceful(
-    sample_wav, cloud_mode, _isolate_side_effects
+    sample_wav, cloud_mode, _isolate_side_effects, caplog
 ):
     copy_mock, save_mock = _isolate_side_effects
     copy_mock.side_effect = RuntimeError("no clipboard")
     stt = _make_stt_mock("text")
 
-    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
+    with (
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+        caplog.at_level(logging.DEBUG, logger="app.pipeline.service"),
+    ):
         result = await process_audio(sample_wav, language="uk", style="normal")
 
     assert result.text == "text"
     assert result.copied_to_clipboard is False
     assert save_mock.call_count == 1
     assert save_mock.call_args.kwargs["text"] == "text"
+    assert [r for r in caplog.records if r.name == "app.pipeline.service" and r.exc_info]
 
 
 @pytest.mark.asyncio
@@ -640,8 +646,14 @@ async def test_process_audio_raises_clear_error_when_readiness_wait_times_out(
 ):
     """AC 13: a genuinely stuck local load must surface a clear error
     identifying the model as not ready, instead of process_audio hanging (or
-    silently falling through into an equally-unbounded transcribe() call)."""
+    silently falling through into an equally-unbounded transcribe() call).
+
+    The exception type is pinned, not only its text: `LocalReadinessTimeoutError`
+    exists to be distinguishable from every other pipeline fault, and converting
+    it to a bare `RuntimeError` on the way out erased that.
+    """
     from app.stt.local import LocalSTTProvider
+    from app.stt.local_setup import LocalReadinessTimeoutError
 
     def _stuck_get_model(self):
         time.sleep(0.3)
@@ -654,7 +666,7 @@ async def test_process_audio_raises_clear_error_when_readiness_wait_times_out(
 
     monkeypatch.setattr(LocalSTTProvider, "transcribe", _boom)
 
-    with pytest.raises(RuntimeError, match="not become ready"):
+    with pytest.raises(LocalReadinessTimeoutError, match="not become ready"):
         await process_audio(sample_wav, style="normal")
 
 
@@ -1215,3 +1227,34 @@ async def test_no_speech_threshold_is_settings_driven(
 
     assert result.discarded_reason is None
     assert result.text == "гранична впевненість"
+
+
+@pytest.mark.asyncio
+async def test_history_save_failure_records_its_cause(
+    sample_wav, cloud_mode, _isolate_side_effects, caplog
+):
+    """The one swallow on this path that loses user data: `save_entry` raising
+    leaves the transcript nowhere on disk, and the response is still a 200. The
+    old `log.warning("...: %s", e)` recorded that as a single stack-free line,
+    so by the time anyone opened `backend.log` the cause was gone — a locked
+    database, a full disk and a failed migration all read identically.
+    """
+    _copy_mock, save_mock = _isolate_side_effects
+    save_mock.side_effect = OSError("database is locked")
+    stt = _make_stt_mock("the transcript")
+
+    with (
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+        caplog.at_level(logging.DEBUG, logger="app.pipeline.service"),
+    ):
+        result = await process_audio(sample_wav, language="uk", style="normal")
+
+    assert result.text == "the transcript"
+    failures = [
+        r for r in caplog.records
+        if r.name == "app.pipeline.service" and r.levelno >= logging.ERROR
+    ]
+    assert len(failures) == 1
+    assert failures[0].exc_info is not None
+    assert "database is locked" in "".join(traceback.format_exception(*failures[0].exc_info))
+

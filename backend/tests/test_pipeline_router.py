@@ -10,12 +10,15 @@ what the router forwards to `process_audio`.
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.audio import get_recorder
 from app.main import app
 
 
@@ -107,3 +110,79 @@ async def test_process_file_rejects_empty_file(client):
 
     assert resp.status_code == 400
     assert "too small" in resp.json()["detail"].lower()
+
+
+def _refuse_to_unlink(self, missing_ok: bool = False):
+    raise OSError("the file is in use by another process")
+
+
+@pytest.mark.anyio
+async def test_process_file_returns_the_transcription_when_the_scratch_delete_fails(
+    client, monkeypatch, caplog
+):
+    """The scratch delete sits in a ``finally``. Unguarded, an ``OSError`` there
+    replaced the response that was about to be returned: a completed
+    transcription — already copied to the clipboard and saved to history —
+    reached the widget as a bare 500, which `src/widget/error-label.ts` renders
+    as "Failed".
+    """
+    monkeypatch.setattr(Path, "unlink", _refuse_to_unlink)
+
+    with (
+        patch("app.pipeline.router.process_audio", AsyncMock(return_value=_fake_result())),
+        caplog.at_level(logging.WARNING, logger="app.pipeline.router"),
+    ):
+        resp = await client.post(
+            "/pipeline/process-file",
+            files={"file": ("speech.wav", _wav_bytes(), "audio/wav")},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["text"] == "hello"
+    assert [r for r in caplog.records if r.name == "app.pipeline.router" and r.exc_info]
+
+
+@pytest.mark.anyio
+async def test_dictate_returns_the_transcription_when_the_recording_delete_fails(
+    client, tmp_path, monkeypatch, caplog
+):
+    """The same ``finally`` on the dictation path, which is the one a user hits
+    on every push-to-talk release."""
+    recording = tmp_path / "rec.wav"
+    recording.write_bytes(_wav_bytes())
+
+    recorder = MagicMock()
+    recorder.is_recording = True
+    recorder.stop = AsyncMock(return_value=recording)
+    recorder.last_duration_seconds = 3.0
+    app.dependency_overrides[get_recorder] = lambda: recorder
+
+    monkeypatch.setattr(Path, "unlink", _refuse_to_unlink)
+
+    with (
+        patch("app.pipeline.router.process_audio", AsyncMock(return_value=_fake_result())),
+        caplog.at_level(logging.WARNING, logger="app.pipeline.router"),
+    ):
+        resp = await client.post("/pipeline/dictate")
+
+    assert resp.status_code == 200
+    assert resp.json()["text"] == "hello"
+    assert [r for r in caplog.records if r.name == "app.pipeline.router" and r.exc_info]
+
+
+@pytest.mark.anyio
+async def test_process_file_removes_its_scratch_file_on_the_success_path(client):
+    """The guard must not turn the delete into a no-op — the temp directory
+    still empties after a successful upload."""
+    mock_process_audio = AsyncMock(return_value=_fake_result())
+
+    with patch("app.pipeline.router.process_audio", mock_process_audio):
+        resp = await client.post(
+            "/pipeline/process-file",
+            files={"file": ("speech.wav", _wav_bytes(), "audio/wav")},
+        )
+
+    assert resp.status_code == 200
+    scratch_path = mock_process_audio.call_args.args[0]
+    assert not scratch_path.exists()
+

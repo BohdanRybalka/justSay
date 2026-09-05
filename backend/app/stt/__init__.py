@@ -23,11 +23,14 @@ CLOUD + unknown length   :class:`~app.stt.cloud.GeminiSTTProvider` (safe default
 ======================  ========================================================
 """
 
+import logging
 import threading
 
 from app.core.types import ProviderMode
 from app.stt.base import STTProvider
 from app.stt.config import STTSettings
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "STTProvider",
@@ -219,5 +222,7 @@ def clear_cache() -> None:
             try:
                 p.cleanup()
             except Exception:
-                pass
+                log.warning(
+                    "Releasing the %s provider failed", type(p).__name__, exc_info=True
+                )
         _providers.clear()

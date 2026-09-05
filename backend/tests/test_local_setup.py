@@ -1008,6 +1008,40 @@ async def test_ensure_local_ready_cleans_up_orphan_after_mode_change_mid_load(mo
 
 
 @pytest.mark.asyncio
+async def test_a_superseded_provider_that_refuses_to_release_does_not_fail_the_load(
+    monkeypatch, caplog
+):
+    """The orphan cleanup above sits in a `finally`, so a `cleanup()` that raises
+    escapes `_run_get_model`, travels back through `ensure_local_ready` and
+    `await_local_ready`, and turns a load that actually succeeded into a failed
+    dictation. `LocalSTTProvider.cleanup()` does `del self._model`,
+    `gc.collect()` and `import torch`, any of which can raise.
+    """
+    settings = STTSettings(mode=ProviderMode.LOCAL)
+    cache = {"current": None}
+
+    def _supersede_during_load(self_provider):
+        cache["current"] = None
+        self_provider.is_loaded = True
+
+    provider = _FakePrewarmProvider(get_model=_supersede_during_load)
+    provider.cleanup = MagicMock(side_effect=RuntimeError("torch is not importable"))
+    cache["current"] = provider
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: cache["current"])
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: cache["current"])
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+
+    with caplog.at_level(logging.DEBUG, logger="app.stt.local_setup"):
+        await local_setup.ensure_local_ready(settings)
+
+    provider.cleanup.assert_called_once()
+    assert local_setup._prewarm_error is None
+    assert [
+        r for r in caplog.records if r.name == "app.stt.local_setup" and r.exc_info
+    ]
+
+
+@pytest.mark.asyncio
 async def test_ensure_local_ready_swallows_get_model_exception_without_cleanup(monkeypatch):
     """A load failure is swallowed (the provider already latched its own
     error) and must not trigger cleanup() while the mode is still LOCAL."""
