@@ -231,7 +231,10 @@ async def _run_get_model(provider) -> None:
         from app.stt import peek_local_provider
 
         if peek_local_provider() is not provider:
-            provider.cleanup()
+            try:
+                provider.cleanup()
+            except Exception:
+                log.warning("Releasing the superseded local provider failed", exc_info=True)
 
 
 async def ensure_local_ready(stt_settings: STTSettings) -> None:

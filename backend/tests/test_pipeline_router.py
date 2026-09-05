@@ -123,7 +123,8 @@ async def test_process_file_returns_the_transcription_when_the_scratch_delete_fa
     """The scratch delete sits in a ``finally``. Unguarded, an ``OSError`` there
     replaced the response that was about to be returned: a completed
     transcription — already copied to the clipboard and saved to history —
-    reached the widget as a bare 500, which `src/api.ts` degrades to "Failed".
+    reached the widget as a bare 500, which `src/widget/error-label.ts` renders
+    as "Failed".
     """
     monkeypatch.setattr(Path, "unlink", _refuse_to_unlink)
 

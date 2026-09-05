@@ -209,11 +209,13 @@ async def test_cleanup_stops_and_closes_open_stream(audio_settings, mock_stream)
 
 
 @pytest.mark.asyncio
-async def test_cleanup_records_a_stream_close_failure(audio_settings, mock_stream, caplog):
-    """`meeting_recorder.py` logs this exact operation and the dictation
-    recorder swallowed it, so a device that refuses to close left no evidence
-    at all — including on the failed-start rollback, which JS-80 routed through
-    this same `cleanup()`.
+async def test_cleanup_closes_the_stream_even_when_stopping_it_fails(
+    audio_settings, mock_stream, caplog
+):
+    """`sounddevice._StreamBase` has no finalizer and `cleanup()` has already
+    dropped the reference, so a `stop()` that raises — the unplugged-headset
+    case — would skip the `close()` and hold that PortAudio stream for the life
+    of the process. `meeting_recorder.py` splits the pair for this reason.
     """
     _, stream_instance = mock_stream
     stream_instance.stop.side_effect = OSError("PaErrorCode -9988")
@@ -223,9 +225,54 @@ async def test_cleanup_records_a_stream_close_failure(audio_settings, mock_strea
     with caplog.at_level(logging.DEBUG, logger="app.audio.recorder"):
         recorder.cleanup()
 
+    stream_instance.close.assert_called_once()
     failures = [r for r in caplog.records if r.name == "app.audio.recorder" and r.exc_info]
     assert len(failures) == 1
     assert recorder.is_recording is False
+
+
+@pytest.mark.asyncio
+async def test_cleanup_records_the_two_stream_failures_separately(
+    audio_settings, mock_stream, caplog
+):
+    """Which of the two calls failed is the whole point of splitting them, so
+    one message covering both would read the same either way."""
+    _, stream_instance = mock_stream
+    stream_instance.stop.side_effect = OSError("PaErrorCode -9988")
+    stream_instance.close.side_effect = OSError("PaErrorCode -9993")
+    recorder = MicrophoneRecorder(audio_settings)
+
+    await recorder.start()
+    with caplog.at_level(logging.DEBUG, logger="app.audio.recorder"):
+        recorder.cleanup()
+
+    messages = [
+        r.getMessage() for r in caplog.records
+        if r.name == "app.audio.recorder" and r.exc_info
+    ]
+    assert messages == [
+        "Stopping the dictation microphone stream failed",
+        "Closing the dictation microphone stream failed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_the_stream_even_when_stopping_it_fails(audio_settings, mock_stream):
+    """The same leak on the path a user actually takes: `stop()` runs on every
+    push-to-talk release and drops the reference in its own `finally`. The
+    failure still reaches the caller — only the leak is closed.
+    """
+    _, stream_instance = mock_stream
+    stream_instance.stop.side_effect = OSError("PaErrorCode -9988")
+    recorder = MicrophoneRecorder(audio_settings)
+
+    await recorder.start()
+    _simulate_audio_callback(recorder, num_blocks=3)
+
+    with pytest.raises(OSError, match="-9988"):
+        await recorder.stop()
+
+    stream_instance.close.assert_called_once()
 
 
 def test_cleanup_noop_when_never_started(audio_settings):

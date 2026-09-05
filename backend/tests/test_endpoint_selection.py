@@ -226,18 +226,21 @@ def _com_failures(caplog) -> list:
 
 
 def test_a_refused_default_endpoint_query_is_recorded(monkeypatch, com_log):
-    """ADR 042 exists so a meeting follows the communications endpoint. A COM
-    failure here is reported as "this role has no default endpoint", which
-    `resolve_loopback_device` then skips — recording from the console endpoint
-    instead, the exact defect the ADR prevents, with nothing in the log."""
+    """The return value stays `None` — telling a refused query apart from a role
+    that genuinely has no default endpoint is JS-124, and it changes which device
+    a meeting records from. What is pinned here is the record: the reason reaches
+    `backend.log`, named by role rather than by its `ERole` integer.
+    """
     monkeypatch.setattr(windows_endpoints, "_method", lambda *a, **k: _raise_com_failure)
 
     name = windows_endpoints._default_endpoint_name(
-        MagicMock(), ctypes.c_void_p(0x1234), windows_endpoints._ROLE_VALUES["communications"]
+        MagicMock(), ctypes.c_void_p(0x1234), "communications"
     )
 
     assert name is None
-    assert len(_com_failures(com_log)) == 1
+    failures = _com_failures(com_log)
+    assert len(failures) == 1
+    assert "communications" in failures[0].getMessage()
 
 
 def test_a_refused_property_store_is_recorded(monkeypatch, com_log):

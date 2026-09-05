@@ -70,11 +70,12 @@ class MicrophoneRecorder(AudioRecorder):
             self._final_duration = time.monotonic() - self._start_time
             self._recording = False
 
+        stream = self._stream
+        self._stream = None
         try:
-            self._stream.stop()
-            self._stream.close()
+            stream.stop()
         finally:
-            self._stream = None
+            stream.close()
 
         with self._lock:
             frames = self._frames
@@ -126,7 +127,13 @@ class MicrophoneRecorder(AudioRecorder):
         """Release the audio stream if one is open. Safe to call any time,
         including when never started. Discards buffered frames without writing
         a WAV — call on app shutdown, or to roll a failed start() back to a
-        stopped state, but never as a substitute for stop()."""
+        stopped state, but never as a substitute for stop().
+
+        `stop()` and `close()` get a `try` each, as `meeting_recorder.py` does
+        for the same pair: the reference is already dropped and
+        `sounddevice._StreamBase` has no finalizer, so a `stop()` that raises —
+        the unplugged-headset case — would otherwise skip the `close()` and
+        hold that PortAudio stream for the life of the process."""
         with self._lock:
             stream = self._stream
             self._stream = None
@@ -135,9 +142,9 @@ class MicrophoneRecorder(AudioRecorder):
         if stream is not None:
             try:
                 stream.stop()
+            except Exception:
+                log.warning("Stopping the dictation microphone stream failed", exc_info=True)
+            try:
                 stream.close()
             except Exception:
-                log.warning(
-                    "Stopping and closing the dictation microphone stream failed",
-                    exc_info=True,
-                )
+                log.warning("Closing the dictation microphone stream failed", exc_info=True)

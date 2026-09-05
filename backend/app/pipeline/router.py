@@ -30,7 +30,7 @@ def _discard_scratch_file(path: Path) -> None:
     try:
         path.unlink(missing_ok=True)
     except OSError:
-        log.warning("Could not remove the scratch file %s", path, exc_info=True)
+        log.warning("Could not remove scratch file %s", path, exc_info=True)
 
 
 class DictateResponse(BaseModel):

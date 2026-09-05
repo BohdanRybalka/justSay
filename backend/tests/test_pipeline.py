@@ -176,19 +176,23 @@ async def test_pipeline_copies_speech_that_opens_like_a_refusal(
 
 @pytest.mark.asyncio
 async def test_pipeline_clipboard_failure_is_graceful(
-    sample_wav, cloud_mode, _isolate_side_effects
+    sample_wav, cloud_mode, _isolate_side_effects, caplog
 ):
     copy_mock, save_mock = _isolate_side_effects
     copy_mock.side_effect = RuntimeError("no clipboard")
     stt = _make_stt_mock("text")
 
-    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
+    with (
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+        caplog.at_level(logging.DEBUG, logger="app.pipeline.service"),
+    ):
         result = await process_audio(sample_wav, language="uk", style="normal")
 
     assert result.text == "text"
     assert result.copied_to_clipboard is False
     assert save_mock.call_count == 1
     assert save_mock.call_args.kwargs["text"] == "text"
+    assert [r for r in caplog.records if r.name == "app.pipeline.service" and r.exc_info]
 
 
 @pytest.mark.asyncio
