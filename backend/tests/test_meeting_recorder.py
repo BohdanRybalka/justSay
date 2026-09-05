@@ -26,9 +26,9 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from app.audio import get_active_recorder, get_meeting_recorder
 from app.audio.base import write_wav
 from app.audio.config import AudioSettings
+from app.audio.dependencies import get_active_recorder, get_meeting_recorder
 from app.audio.meeting_recorder import (
     MEETING_BUSY_DETAIL,
     MeetingCaptureAbortedError,
@@ -878,7 +878,7 @@ async def test_meeting_start_is_409_while_dictation_is_recording(client):
 @pytest.mark.anyio
 async def test_audio_start_is_409_while_a_meeting_is_recording(client):
     """AC: the mirror-image guard."""
-    from app.audio import get_active_meeting_recorder, get_recorder
+    from app.audio.dependencies import get_active_meeting_recorder, get_recorder
 
     dictation = _FakeRecorder()
     app.dependency_overrides[get_recorder] = lambda: dictation
@@ -943,7 +943,7 @@ async def test_meeting_stop_reports_the_filename_and_truncation(client, tmp_path
 async def test_instant_prompt_stop_response_has_no_meeting_fields(client, tmp_path):
     """The Instant Prompt response model must stay exactly as it was — the
     frontend parses it, and spec 066 ships no frontend change."""
-    from app.audio import get_recorder
+    from app.audio.dependencies import get_recorder
 
     class _Stopping(_FakeRecorder):
         def __init__(self):
@@ -967,7 +967,7 @@ async def test_instant_prompt_stop_response_has_no_meeting_fields(client, tmp_pa
 @pytest.mark.parametrize("path", ["/audio/status", "/audio/start"])
 async def test_the_dictation_status_shape_did_not_move(client, path):
     """AC: RecordingStatus has exactly the fields it has today."""
-    from app.audio import get_recorder
+    from app.audio.dependencies import get_recorder
 
     app.dependency_overrides[get_recorder] = lambda: _FakeRecorder()
 
@@ -1753,7 +1753,7 @@ async def test_every_refused_meeting_stop_leaves_nothing_recording(
 async def test_dictation_start_is_409_while_a_meeting_start_is_in_flight(client):
     """AC: the mutual-exclusion guards ask whether the devices are spoken
     for, which is true for the whole open — `is_recording` is not."""
-    from app.audio import get_active_meeting_recorder, get_recorder
+    from app.audio.dependencies import get_active_meeting_recorder, get_recorder
 
     dictation = _FakeRecorder()
     app.dependency_overrides[get_recorder] = lambda: dictation
@@ -2110,7 +2110,7 @@ async def test_a_meeting_write_does_not_make_the_recorder_busy(
 ):
     """The write holds no device, so counting it would refuse every dictation
     start for the length of an 86 MB write."""
-    from app.audio import get_active_meeting_recorder, get_recorder
+    from app.audio.dependencies import get_active_meeting_recorder, get_recorder
 
     release_write = threading.Event()
     real_write_wav = importlib.import_module("app.audio.meeting_recorder").write_wav

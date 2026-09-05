@@ -18,7 +18,7 @@ from app.core.audio_formats import (
     detect_audio_mime,
     mime_for_extension,
 )
-from app.pipeline.upload_validation import validate_audio_upload
+from app.pipeline.upload_validation import read_upload_with_limit, validate_audio_upload
 
 
 def test_every_allowed_extension_is_detectable_or_trusted():
@@ -174,3 +174,27 @@ def test_mime_for_extension_unknown_falls_back_to_wav():
     bypasses the validator."""
     assert mime_for_extension("strange.xyz") == "audio/wav"
     assert mime_for_extension(None) == "audio/wav"
+
+
+class _PayloadUpload:
+    """The slice of UploadFile read_upload_with_limit uses: chunked async read."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._remaining = payload
+
+    async def read(self, size: int) -> bytes:
+        chunk, self._remaining = self._remaining[:size], self._remaining[size:]
+        return chunk
+
+
+@pytest.mark.asyncio
+async def test_read_upload_with_limit_returns_a_payload_of_exactly_the_limit():
+    payload = b"x" * 4096
+    assert await read_upload_with_limit(_PayloadUpload(payload), 4096) == payload
+
+
+@pytest.mark.asyncio
+async def test_read_upload_with_limit_rejects_one_byte_over_the_limit():
+    with pytest.raises(HTTPException) as excinfo:
+        await read_upload_with_limit(_PayloadUpload(b"x" * 4097), 4096)
+    assert excinfo.value.status_code == 413

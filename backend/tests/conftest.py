@@ -410,6 +410,36 @@ def assert_module_binds_no_third_party(module_name: str, forbidden: tuple[str, .
     )
 
 
+def assert_import_loads_no_module(module_name: str, forbidden: tuple[str, ...]) -> None:
+    """Import `module_name` in a fresh interpreter and assert none of
+    `forbidden` was loaded into the child's `sys.modules`.
+
+    The sibling of `assert_module_binds_no_third_party`, asking the other
+    half of the question: not what the module bound in its own namespace,
+    but what the import cost the process. A subprocess for the same reason,
+    plus one of its own -- in-process the answer depends on what an earlier
+    test already imported, and `test_sys_modules_hygiene.py` forbids the
+    `del sys.modules[...]` that would hide that.
+    """
+    import subprocess
+    import sys
+
+    probe = (
+        f"import sys; import {module_name}; "
+        f"loaded = [name for name in {forbidden!r} if name in sys.modules]; "
+        "assert not loaded, loaded"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"importing {module_name} in a fresh interpreter loaded one of "
+        f"{forbidden}:\n{result.stderr}"
+    )
+
+
 _LIFESPAN_APP_STATE_ATTRIBUTES = ("recorder", "meeting_recorder")
 
 

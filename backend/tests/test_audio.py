@@ -345,8 +345,8 @@ async def test_instant_prompt_opens_no_system_audio_source(client, monkeypatch, 
     must not touch that machinery even once — so this makes the factory
     itself fatal and drives POST /audio/start through it.
     """
-    from app.audio import get_recorder
     from app.audio import system_source as system_source_module
+    from app.audio.dependencies import get_recorder
     from app.main import app as fastapi_app
 
     def _boom(settings):

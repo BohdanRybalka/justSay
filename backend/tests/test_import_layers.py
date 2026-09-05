@@ -3,7 +3,7 @@
 `docs/style-guide.md` §1a states where a backend module goes, and ADR 044
 records why. Prose rots; this file fails.
 
-Four properties are pinned here:
+Six properties are pinned here:
 
 1. `app.core` is a leaf. Only `config.py` (the composition root) and
    `router.py` (operational endpoints) may import a feature package. Letting a
@@ -16,12 +16,23 @@ Four properties are pinned here:
 3. No provider package acquires a web framework.
 4. The set of package-level cycles does not grow, and does not outlive the
    cycles it lists.
+5. `app/audio/__init__.py` holds a docstring and nothing else, so reaching
+   any module in the package costs only that module. Nothing else means
+   nothing else: a lazy `__getattr__` re-export defers the cost rather than
+   removing it, and puts the package surface this rule deletes straight back.
+6. Importing a pure DSP module does not load the capture stack.
 
 Every assertion below was mutation-checked when written: a core module made to
 import a feature package, `import fastapi` planted in the base DSP module, the
 analysis/timeline direction reversed, a fresh `transcripts <-> pipeline` cycle,
-a provider given `HTTPException`, and a fictional entry added to the known-cycle
-list each turned exactly one test red.
+a provider given `HTTPException`, a fictional entry added to the known-cycle
+list, a recorder import planted in `app/audio/__init__.py`, and a
+`__getattr__` re-export planted in the same file. Two of those redden two tests
+rather than one, because two properties genuinely overlap on them: `fastapi` in
+`app/audio/timeline.py` is both a web framework in a free package and a module
+the DSP import must not load, and a recorder import in `app/audio/__init__.py`
+both grows the package surface and puts the capture stack back on `timeline`'s
+import path.
 
 Each list below is an allowlist, not a description: adding an entry is a
 deliberate act a reviewer can see in the diff.
@@ -32,6 +43,8 @@ from __future__ import annotations
 import ast
 from collections import defaultdict
 from pathlib import Path
+
+from tests.conftest import assert_import_loads_no_module
 
 _APP_DIR = Path(__file__).resolve().parent.parent / "app"
 
@@ -56,10 +69,14 @@ _MUST_NOT_IMPORT_APP_MODULE = {
 }
 
 _WEB_FRAMEWORK_FREE_PACKAGES = {
+    "audio": {"router.py", "dependencies.py"},
+    "core": {"router.py"},
     "stt": {"router.py"},
     "embeddings": set(),
     "transcripts": {"history_router.py", "words_router.py", "store_errors.py"},
 }
+
+_IMPORT_FREE_PACKAGE_INITS = {"audio"}
 
 _KNOWN_PACKAGE_CYCLES = {
     ("app.core", "app.audio"),
@@ -189,6 +206,63 @@ def test_providers_do_not_acquire_a_web_framework():
     assert not offenders, (
         f"These modules import fastapi: {offenders}. Raise a plain exception "
         "and let the router map it, per docs/style-guide.md §3.2."
+    )
+
+
+def _statement_description(node: ast.stmt) -> str:
+    if isinstance(node, ast.Import):
+        return "import " + ", ".join(alias.name for alias in node.names)
+    if isinstance(node, ast.ImportFrom):
+        module = "." * node.level + (node.module or "")
+        names = ", ".join(alias.name for alias in node.names)
+        return f"from {module} import {names}"
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return f"def {node.name}"
+    if isinstance(node, ast.ClassDef):
+        return f"class {node.name}"
+    return type(node).__name__
+
+
+def test_the_audio_package_surface_holds_nothing_but_a_docstring():
+    """A package `__init__.py` executes on every `app.<package>.<module>`
+    import, so anything it holds is paid for by every consumer. `app.audio`
+    once re-exported both recorders, which made the pure numpy module
+    `app.audio.timeline` drag the whole capture stack behind it.
+
+    Checked as "nothing but a docstring" rather than "no import statements",
+    because a module-level `__getattr__` restores the same re-export while
+    leaving the import statements absent — it defers the cost to the first
+    attribute read instead of removing it, and the runtime test below cannot
+    see it either, since importing a submodule never invokes it."""
+    offenders = []
+    for package in sorted(_IMPORT_FREE_PACKAGE_INITS):
+        path = _APP_DIR / package / "__init__.py"
+        body = list(ast.parse(path.read_text(encoding="utf-8")).body)
+        if body and ast.get_docstring(ast.Module(body=body, type_ignores=[])):
+            body = body[1:]
+        for node in body:
+            offenders.append(f"{package}/__init__.py: {_statement_description(node)}")
+
+    assert not offenders, (
+        f"These package surfaces hold more than a docstring: {offenders}. A "
+        "package __init__.py holds a docstring and nothing else — not an "
+        "import, not a lazy __getattr__; import the submodule directly "
+        "instead, per docs/style-guide.md §1a."
+    )
+
+
+def test_importing_a_dsp_module_does_not_load_the_capture_stack():
+    """The static check above cannot see a transitive acquisition — a recorder
+    import appearing in `app/audio/analysis.py` or `app/audio/config.py` would
+    cost `timeline` the same 133 modules with `__init__.py` still empty."""
+    assert_import_loads_no_module(
+        "app.audio.timeline",
+        (
+            "fastapi",
+            "sounddevice",
+            "app.audio.recorder",
+            "app.audio.meeting_recorder",
+        ),
     )
 
 
