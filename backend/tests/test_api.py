@@ -236,3 +236,18 @@ async def test_level_stream_not_recording_emits_only_done(client):
 
     assert b"event: level" not in body
     assert body.count(b"event: done") == 1
+
+
+@pytest.mark.asyncio
+async def test_history_limit_is_bounded(client):
+    """`GET /history` returns full rows and had no bound at all, while both
+    siblings in the same package clamp theirs — `/history/search` at
+    SEARCH_LIMIT_MAX and `/words/top` at TOP_LIMIT_MAX. The largest real caller
+    asks for 50 (`src/settings/tabs/metrics.ts`)."""
+    from app.transcripts.history import HISTORY_LIMIT_MAX
+
+    assert (await client.get(f"/history?limit={HISTORY_LIMIT_MAX}")).status_code == 200
+    assert (await client.get(f"/history?limit={HISTORY_LIMIT_MAX + 1}")).status_code == 422
+    assert (await client.get("/history?limit=0")).status_code == 422
+    assert (await client.get("/history?offset=-1")).status_code == 422
+

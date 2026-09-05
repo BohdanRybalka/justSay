@@ -527,3 +527,141 @@ async def test_search_history_hybrid_empty_query_returns_empty_without_calling_e
     ):
         assert await words.search_history_hybrid("", limit=10) == []
         assert await words.search_history_hybrid("   ", limit=10) == []
+
+
+def _seed_history(count: int) -> None:
+    for index in range(count):
+        history.save_entry(
+            text=f"запис номер {index} про кота пса рибку та ще трохи слів для сканування",
+            duration_ms=1,
+            language="uk",
+        )
+
+
+@pytest.mark.asyncio
+async def test_words_top_leaves_the_event_loop_free(monkeypatch):
+    """`top_words` reads every row of `entries` and regex-tokenises each one,
+    and `src/settings/tabs/words.ts:186` asks for it every five seconds for as
+    long as the Words tab is open — on the loop that also serves `/health` and
+    the widget poll.
+
+    The tokeniser, not the whole function, carries the known interval, so the
+    blocking is the seeded rows' own scan lengthened rather than a sleep
+    standing in for it — a wrapper around `top_words` itself would tick the same
+    against an empty database. Shape borrowed from
+    `test_audio.py::test_dictation_stop_leaves_the_event_loop_free`, after JS-97
+    found `ticks > 0` satisfied by a single bare `await asyncio.sleep(0)`.
+    """
+    from app.transcripts import words_router
+
+    rows = 200
+    per_row_seconds = 0.001
+    _seed_history(rows)
+
+    real_tokenize = words.tokenize
+
+    def slow_tokenize(text):
+        time.sleep(per_row_seconds)
+        return real_tokenize(text)
+
+    monkeypatch.setattr(words, "tokenize", slow_tokenize)
+
+    ticks = 0
+
+    async def competitor():
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    race = asyncio.ensure_future(competitor())
+    response = await words_router.words_top(lang="all", limit=50)
+    race.cancel()
+
+    assert response.scanned == rows
+    assert response.items
+    assert ticks > 100, (
+        f"the loop ticked {ticks} times while /words/top tokenised {rows} rows at "
+        f"{per_row_seconds}s each -- the scan is still on the event loop"
+    )
+
+
+def test_top_words_does_not_rescan_an_unchanged_history(monkeypatch):
+    """The Words tab asks every five seconds. Without a cache the whole table is
+    read and re-tokenised on every tick — the gap `compute_stats` already closes
+    for the cheaper half of the same poll."""
+    _seed_history(20)
+
+    scans = 0
+    real_tokenize = words.tokenize
+
+    def counting_tokenize(text):
+        nonlocal scans
+        scans += 1
+        return real_tokenize(text)
+
+    monkeypatch.setattr(words, "tokenize", counting_tokenize)
+
+    first = words.top_words(lang="all", limit=5)
+    after_first = scans
+    second = words.top_words(lang="all", limit=5)
+
+    assert after_first == 20
+    assert scans == after_first
+    assert second.items == first.items
+    assert second.scanned == first.scanned
+
+
+def test_a_new_entry_invalidates_the_word_counts(monkeypatch):
+    """A cache that outlives a write would report yesterday's counts forever."""
+    history.save_entry(text="кіт кіт кіт", duration_ms=1, language="uk")
+    before = words.top_words(lang="all", limit=5)
+
+    history.save_entry(text="пес пес пес пес", duration_ms=1, language="uk")
+    after = words.top_words(lang="all", limit=5)
+
+    assert before.scanned == 1
+    assert after.scanned == 2
+    assert [i.word for i in after.items][0] == "пес"
+
+
+def test_a_cleared_history_invalidates_the_word_counts():
+    history.save_entry(text="кіт кіт кіт", duration_ms=1, language="uk")
+    assert words.top_words(lang="all", limit=5).items
+
+    history.clear_all()
+
+    empty = words.top_words(lang="all", limit=5)
+    assert empty.items == []
+    assert empty.scanned == 0
+
+
+def test_search_does_not_hold_the_store_lock_while_highlighting(monkeypatch):
+    """`history._lock` is the single lock every write also takes, and
+    `_build_highlight` runs `re.finditer` per token plus `html.escape` per
+    segment for up to SEARCH_LIMIT_MAX rows. None of that needs the connection,
+    so holding the lock across it blocks `save_entry` for its duration.
+
+    `_lock` is a plain `threading.Lock`, not an `RLock`, so a non-blocking
+    acquire from the same thread answers the question honestly.
+    """
+    history.save_entry(text="правив у файлі", duration_ms=1, language="uk")
+
+    real_build_highlight = words._build_highlight
+    lock_was_free: list[bool] = []
+
+    def probing_build_highlight(text, tokens):
+        acquired = history._lock.acquire(blocking=False)
+        lock_was_free.append(acquired)
+        if acquired:
+            history._lock.release()
+        return real_build_highlight(text, tokens)
+
+    monkeypatch.setattr(words, "_build_highlight", probing_build_highlight)
+
+    hits = words.search_history("прав", limit=5)
+
+    assert len(hits) == 1
+    assert "<mark>прав</mark>ив" in hits[0].highlighted_text
+    assert lock_was_free == [True]
+
