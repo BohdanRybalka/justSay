@@ -950,3 +950,22 @@ def test_concurrent_save_and_search_serialised(isolated_storage, tmp_path):
     assert errors == []
     assert all(0 <= n <= 20 for n in seen)
     assert history.get_count() == 20
+
+
+def test_get_entries_clamps_its_own_limit(isolated_storage, tmp_path):
+    """The router's `Query(..., le=HISTORY_LIMIT_MAX)` bounds the endpoint, not
+    the function. `LIMIT -1` is SQLite for "every row", so an unclamped service
+    call still materialises the whole table into `HistoryEntry` objects under
+    the lock. `words.top_words` and `words.search_history` both clamp in the
+    service as well as at their routers.
+    """
+    for index in range(history.HISTORY_LIMIT_MAX + 5):
+        history.save_entry(text=f"entry {index}", duration_ms=1)
+
+    assert len(history.get_entries(limit=history.HISTORY_LIMIT_MAX + 100)) == (
+        history.HISTORY_LIMIT_MAX
+    )
+    assert len(history.get_entries(limit=-1)) == 1
+    assert len(history.get_entries(limit=0)) == 1
+    assert len(history.get_entries(limit=5, offset=-3)) == 5
+

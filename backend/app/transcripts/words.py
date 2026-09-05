@@ -40,6 +40,8 @@ STOPWORDS_ALL: frozenset[str] = STOPWORDS_UK | STOPWORDS_EN
 
 _TOKEN_RE = re.compile(r"[\wЀ-ӿ]+(?:['’][\wЀ-ӿ]+)*", re.UNICODE)
 
+_top_words_cache: dict[str, tuple[int, int, Counter[str]]] = {}
+
 
 def tokenize(text: str) -> list[str]:
     """Lowercase + extract content tokens. Stop-words NOT applied here —
@@ -67,9 +69,20 @@ def top_words(
     """Compute top-N words across (filtered) entries.
 
     Always applies the merged UK+EN stop-word set. ``limit`` clamps the
-    *output* to ``[1, TOP_LIMIT_MAX]`` and nothing else: the scan below reads
-    every row of ``entries``, so this is blocking work proportional to the
-    whole history and its caller runs it off the event loop.
+    *output* to ``[1, TOP_LIMIT_MAX]`` and nothing else: a miss reads every row
+    of ``entries`` and tokenises each one, so the cost is proportional to the
+    whole history rather than to ``limit``.
+
+    Two things keep that cost off the Words tab's five-second poll. The counts
+    are cached per language against ``history.derived_generation_locked()``, the
+    counter every mutator bumps, so an unchanged history is answered without a
+    scan however often it is asked — the mechanism ``compute_stats`` already
+    uses for the cheaper half of the same poll. And ``words_router.words_top``,
+    the only caller, runs a miss through ``asyncio.to_thread``; calling this
+    from the event loop directly puts the scan back on it.
+
+    The scan holds ``history._lock`` only for the SQL. Tokenising runs outside
+    it, because it needs no connection and the lock is the one every write takes.
     """
     clamped_limit = max(1, min(int(limit), TOP_LIMIT_MAX))
 
@@ -80,24 +93,38 @@ def top_words(
         sql = "SELECT cleaned_text FROM entries WHERE language = ?"
         params = (lang,)
 
+    rows = None
     with history._lock:
-        conn = history._ensure_conn_locked()
-        rows = conn.execute(sql, params).fetchall()
+        generation = history.derived_generation_locked()
+        cached = _top_words_cache.get(lang)
+        if cached is not None and cached[0] == generation:
+            _, scanned, counter = cached
+        else:
+            conn = history._ensure_conn_locked()
+            rows = conn.execute(sql, params).fetchall()
 
-    counter: Counter[str] = Counter()
-    for row in rows:
-        for tok in tokenize(row["cleaned_text"]):
-            if tok in STOPWORDS_ALL:
-                continue
-            if len(tok) < 2:
-                continue
-            counter[tok] += 1
+    if rows is not None:
+        counter = Counter()
+        for row in rows:
+            for tok in tokenize(row["cleaned_text"]):
+                if tok in STOPWORDS_ALL:
+                    continue
+                if len(tok) < 2:
+                    continue
+                counter[tok] += 1
+        scanned = len(rows)
+
+        with history._lock:
+            if history.derived_generation_locked() == generation:
+                for stale in [k for k, v in _top_words_cache.items() if v[0] != generation]:
+                    del _top_words_cache[stale]
+                _top_words_cache[lang] = (generation, scanned, counter)
 
     items = [
         WordCount(word=w, count=c)
         for w, c in counter.most_common(clamped_limit)
     ]
-    return TopWordsResponse(items=items, scanned=len(rows))
+    return TopWordsResponse(items=items, scanned=scanned)
 
 
 
@@ -227,7 +254,7 @@ def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
             (fts_expr, clamped_limit),
         ).fetchall()
 
-        rows = list(fts_rows)
+        rows = fts_rows
 
         residual = clamped_limit - len(rows)
         if residual > 0:

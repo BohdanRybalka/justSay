@@ -160,7 +160,7 @@ def _isolated_app_data(tmp_path, monkeypatch):
     with history._lock:
         history._close_conn_locked()
         history._output_dir = None
-        history._stats_cache = None
+        history.invalidate_derived_caches_locked()
     yield
     with history._lock:
         history._close_conn_locked()

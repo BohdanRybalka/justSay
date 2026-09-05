@@ -545,23 +545,26 @@ async def test_words_top_leaves_the_event_loop_free(monkeypatch):
     long as the Words tab is open — on the loop that also serves `/health` and
     the widget poll.
 
-    The real scan runs over a seeded history; the blocking is lengthened by a
-    known interval so the tick floor is proportional to it, the shape
-    `test_audio.py::test_dictation_stop_leaves_the_event_loop_free` uses after
-    JS-97 found `ticks > 0` satisfied by a single bare `await asyncio.sleep(0)`.
+    The tokeniser, not the whole function, carries the known interval, so the
+    blocking is the seeded rows' own scan lengthened rather than a sleep
+    standing in for it — a wrapper around `top_words` itself would tick the same
+    against an empty database. Shape borrowed from
+    `test_audio.py::test_dictation_stop_leaves_the_event_loop_free`, after JS-97
+    found `ticks > 0` satisfied by a single bare `await asyncio.sleep(0)`.
     """
     from app.transcripts import words_router
 
-    _seed_history(200)
+    rows = 200
+    per_row_seconds = 0.001
+    _seed_history(rows)
 
-    blocked_seconds = 0.2
-    real_top_words = words.top_words
+    real_tokenize = words.tokenize
 
-    def slow_top_words(*args, **kwargs):
-        time.sleep(blocked_seconds)
-        return real_top_words(*args, **kwargs)
+    def slow_tokenize(text):
+        time.sleep(per_row_seconds)
+        return real_tokenize(text)
 
-    monkeypatch.setattr(words, "top_words", slow_top_words)
+    monkeypatch.setattr(words, "tokenize", slow_tokenize)
 
     ticks = 0
 
@@ -575,12 +578,62 @@ async def test_words_top_leaves_the_event_loop_free(monkeypatch):
     response = await words_router.words_top(lang="all", limit=50)
     race.cancel()
 
-    assert response.scanned == 200
+    assert response.scanned == rows
     assert response.items
     assert ticks > 100, (
-        f"the loop ticked {ticks} times while /words/top blocked for "
-        f"{blocked_seconds}s -- the scan is still on the event loop"
+        f"the loop ticked {ticks} times while /words/top tokenised {rows} rows at "
+        f"{per_row_seconds}s each -- the scan is still on the event loop"
     )
+
+
+def test_top_words_does_not_rescan_an_unchanged_history(monkeypatch):
+    """The Words tab asks every five seconds. Without a cache the whole table is
+    read and re-tokenised on every tick — the gap `compute_stats` already closes
+    for the cheaper half of the same poll."""
+    _seed_history(20)
+
+    scans = 0
+    real_tokenize = words.tokenize
+
+    def counting_tokenize(text):
+        nonlocal scans
+        scans += 1
+        return real_tokenize(text)
+
+    monkeypatch.setattr(words, "tokenize", counting_tokenize)
+
+    first = words.top_words(lang="all", limit=5)
+    after_first = scans
+    second = words.top_words(lang="all", limit=5)
+
+    assert after_first == 20
+    assert scans == after_first
+    assert second.items == first.items
+    assert second.scanned == first.scanned
+
+
+def test_a_new_entry_invalidates_the_word_counts(monkeypatch):
+    """A cache that outlives a write would report yesterday's counts forever."""
+    history.save_entry(text="кіт кіт кіт", duration_ms=1, language="uk")
+    before = words.top_words(lang="all", limit=5)
+
+    history.save_entry(text="пес пес пес пес", duration_ms=1, language="uk")
+    after = words.top_words(lang="all", limit=5)
+
+    assert before.scanned == 1
+    assert after.scanned == 2
+    assert [i.word for i in after.items][0] == "пес"
+
+
+def test_a_cleared_history_invalidates_the_word_counts():
+    history.save_entry(text="кіт кіт кіт", duration_ms=1, language="uk")
+    assert words.top_words(lang="all", limit=5).items
+
+    history.clear_all()
+
+    empty = words.top_words(lang="all", limit=5)
+    assert empty.items == []
+    assert empty.scanned == 0
 
 
 def test_search_does_not_hold_the_store_lock_while_highlighting(monkeypatch):

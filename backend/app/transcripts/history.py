@@ -49,6 +49,7 @@ _lock = threading.Lock()
 _output_dir: Path | None = None
 _conn: sqlite3.Connection | None = None
 _stats_cache: tuple[float, HistoryStats] | None = None
+_derived_generation = 0
 
 _vec_available: bool = False
 _vec_load_warned = False
@@ -224,20 +225,20 @@ def history_path() -> Path:
 
 def init_output_dir(target: Path) -> None:
     """Test/internal helper. Real lifespan callers should use ``bootstrap``."""
-    global _output_dir, _stats_cache
+    global _output_dir
     with _lock:
         _close_conn_locked()
         _output_dir = target
-        _stats_cache = None
+        invalidate_derived_caches_locked()
 
 
 def bootstrap(target: Path) -> None:
     """Lifespan helper: open the SQLite connection at ``<target>/history.db``."""
-    global _output_dir, _conn, _stats_cache
+    global _output_dir, _conn
     with _lock:
         _close_conn_locked()
         _output_dir = target
-        _stats_cache = None
+        invalidate_derived_caches_locked()
         target.mkdir(parents=True, exist_ok=True)
         _conn = _connect(target / HISTORY_FILENAME)
         _init_schema(_conn)
@@ -272,7 +273,7 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
     the v3 tables via ``IF NOT EXISTS`` — a no-op on a file that already
     has them.
     """
-    global _output_dir, _conn, _stats_cache
+    global _output_dir, _conn
     with _lock:
         old_dir = _resolve_output_dir()
         old_path = old_dir / HISTORY_FILENAME
@@ -283,7 +284,7 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             same = False
 
         if same:
-            _stats_cache = None
+            invalidate_derived_caches_locked()
             return RelocateOutcome.NO_OLD_FILE, None
 
         new_path = new_dir / HISTORY_FILENAME
@@ -298,7 +299,7 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             _output_dir = new_dir
             _conn = _connect(new_path)
             _init_schema(_conn)
-            _stats_cache = None
+            invalidate_derived_caches_locked()
             return RelocateOutcome.NEW_ALREADY_HAS_FILE, None
 
         if not old_path.exists():
@@ -306,7 +307,7 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             _output_dir = new_dir
             _conn = _connect(new_path)
             _init_schema(_conn)
-            _stats_cache = None
+            invalidate_derived_caches_locked()
             return RelocateOutcome.NO_OLD_FILE, None
 
         _close_conn_locked()
@@ -317,7 +318,7 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
                 new_path.unlink(missing_ok=True)
                 _conn = _connect(old_path)
                 _init_schema(_conn)
-                _stats_cache = None
+                invalidate_derived_caches_locked()
                 return RelocateOutcome.FAILED, "Verification failed: entry count mismatch"
 
             new_conn = _connect(new_path)
@@ -328,7 +329,7 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             _output_dir = new_dir
             _conn = new_conn
             new_conn = None
-            _stats_cache = None
+            invalidate_derived_caches_locked()
             log.info("Relocated history %s → %s", old_path, new_path)
             return RelocateOutcome.MOVED, None
         except (OSError, sqlite3.Error) as e:
@@ -343,7 +344,7 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
                 _init_schema(_conn)
             except sqlite3.Error:
                 _conn = None
-            _stats_cache = None
+            invalidate_derived_caches_locked()
             log.exception("Relocate failed: %s", e)
             return RelocateOutcome.FAILED, f"Move failed: {e}"
 
@@ -465,7 +466,6 @@ def save_entry(
     word_count: int | None = None,
 ) -> HistoryEntry:
     """Append a new entry. ``text`` is written to both legacy columns for compat."""
-    global _stats_cache
     timestamp = datetime.now(timezone.utc).isoformat()
     entry = HistoryEntry(
         id=uuid.uuid4().hex[:12],
@@ -500,20 +500,28 @@ def save_entry(
         except Exception:
             conn.execute("ROLLBACK")
             raise
-        _stats_cache = None
+        invalidate_derived_caches_locked()
 
     return entry
 
 
 def get_entries(limit: int = 50, offset: int = 0) -> list[HistoryEntry]:
-    """Get history entries newest first. Returns full rows (existing API contract)."""
+    """Get history entries newest first. Returns full rows (existing API contract).
+
+    ``limit`` is clamped here as well as in the router, the way
+    ``words.top_words`` and ``words.search_history`` clamp their own: a bound
+    that lives only in a FastAPI signature is not a bound on the function, and
+    ``LIMIT -1`` materialises every row in the table.
+    """
+    clamped_limit = max(1, min(int(limit), HISTORY_LIMIT_MAX))
+    clamped_offset = max(0, int(offset))
     with _lock:
         conn = _ensure_conn_locked()
         rows = conn.execute(
             "SELECT id, ts, language, style, raw_text, duration_ms, "
             "audio_duration_seconds, word_count, model_name, tokens_used "
             "FROM entries ORDER BY ts DESC LIMIT ? OFFSET ?",
-            (limit, offset),
+            (clamped_limit, clamped_offset),
         ).fetchall()
     return [_row_to_entry(r) for r in rows]
 
@@ -525,7 +533,6 @@ def get_count() -> int:
 
 
 def delete_entry(entry_id: str) -> bool:
-    global _stats_cache
     with _lock:
         conn = _ensure_conn_locked()
         conn.execute("BEGIN")
@@ -537,13 +544,12 @@ def delete_entry(entry_id: str) -> bool:
             conn.execute("ROLLBACK")
             raise
         if deleted:
-            _stats_cache = None
+            invalidate_derived_caches_locked()
 
     return deleted
 
 
 def clear_all() -> int:
-    global _stats_cache
     with _lock:
         conn = _ensure_conn_locked()
         count = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
@@ -554,7 +560,7 @@ def clear_all() -> int:
         except Exception:
             conn.execute("ROLLBACK")
             raise
-        _stats_cache = None
+        invalidate_derived_caches_locked()
 
     return count
 
@@ -615,6 +621,24 @@ def compute_stats(now: datetime | None = None) -> HistoryStats:
         _stats_cache = (time.monotonic(), stats)
         return stats
 
+
+
+def invalidate_derived_caches_locked() -> None:
+    """Drop every cache derived from ``entries``. Caller MUST hold ``_lock``.
+
+    Two of them exist: this module's own 5 s stats cache, and the word-frequency
+    cache in ``app.transcripts.words``, which reads ``derived_generation_locked``
+    rather than a timestamp because a whole-table tokenising scan must not be
+    repeated while nothing has changed.
+    """
+    global _stats_cache, _derived_generation
+    _stats_cache = None
+    _derived_generation += 1
+
+
+def derived_generation_locked() -> int:
+    """The counter ``invalidate_derived_caches_locked`` bumps. Caller MUST hold ``_lock``."""
+    return _derived_generation
 
 
 def _row_to_entry(row: sqlite3.Row) -> HistoryEntry:
