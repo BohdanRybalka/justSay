@@ -8,8 +8,13 @@ ubuntu CI runner. The COM lifetime rules are driven against a fake `ole32`.
 
 from __future__ import annotations
 
+import ctypes
+import logging
+from unittest.mock import MagicMock
+
 import pytest
 
+from app.audio import windows_endpoints
 from app.audio.config import AudioSettings
 from app.audio.endpoint_selection import resolve_loopback_device
 from app.audio.system_source import SystemAudioUnavailableError
@@ -201,3 +206,63 @@ def test_com_is_released_even_when_the_block_raises():
             raise RuntimeError("boom")
 
     assert ole32.uninitialize_calls == 1
+
+
+def _raise_com_failure(*args, **kwargs):
+    raise OSError("[WinError -2147024809] The parameter is incorrect")
+
+
+@pytest.fixture
+def com_log(caplog):
+    with caplog.at_level(logging.DEBUG, logger="app.audio.windows_endpoints"):
+        yield caplog
+
+
+def _com_failures(caplog) -> list:
+    return [
+        r for r in caplog.records
+        if r.name == "app.audio.windows_endpoints" and r.exc_info
+    ]
+
+
+def test_a_refused_default_endpoint_query_is_recorded(monkeypatch, com_log):
+    """ADR 042 exists so a meeting follows the communications endpoint. A COM
+    failure here is reported as "this role has no default endpoint", which
+    `resolve_loopback_device` then skips — recording from the console endpoint
+    instead, the exact defect the ADR prevents, with nothing in the log."""
+    monkeypatch.setattr(windows_endpoints, "_method", lambda *a, **k: _raise_com_failure)
+
+    name = windows_endpoints._default_endpoint_name(
+        MagicMock(), ctypes.c_void_p(0x1234), windows_endpoints._ROLE_VALUES["communications"]
+    )
+
+    assert name is None
+    assert len(_com_failures(com_log)) == 1
+
+
+def test_a_refused_property_store_is_recorded(monkeypatch, com_log):
+    monkeypatch.setattr(windows_endpoints, "_method", lambda *a, **k: _raise_com_failure)
+
+    name = windows_endpoints._friendly_name(MagicMock(), ctypes.c_void_p(0x1234))
+
+    assert name is None
+    assert len(_com_failures(com_log)) == 1
+
+
+def test_a_refused_friendly_name_read_is_recorded(monkeypatch, com_log):
+    def _open_store(_device, _mode, out):
+        out._obj.value = 0x5678
+
+    def _dispatch(_pointer, slot, *_argtypes):
+        if slot == windows_endpoints._OPEN_PROPERTY_STORE_SLOT:
+            return _open_store
+        return _raise_com_failure
+
+    monkeypatch.setattr(windows_endpoints, "_method", _dispatch)
+    monkeypatch.setattr(windows_endpoints, "_release", lambda _pointer: None)
+
+    name = windows_endpoints._friendly_name(MagicMock(), ctypes.c_void_p(0x1234))
+
+    assert name is None
+    assert len(_com_failures(com_log)) == 1
+

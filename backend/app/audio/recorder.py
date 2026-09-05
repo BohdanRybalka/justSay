@@ -1,6 +1,7 @@
 """Microphone recorder using sounddevice."""
 
 import asyncio
+import logging
 import threading
 import time
 import uuid
@@ -12,6 +13,8 @@ import sounddevice as sd
 from app.audio.analysis import rms_dbfs
 from app.audio.base import AudioRecorder, write_wav
 from app.audio.config import AudioSettings
+
+log = logging.getLogger(__name__)
 
 
 class MicrophoneRecorder(AudioRecorder):
@@ -134,4 +137,7 @@ class MicrophoneRecorder(AudioRecorder):
                 stream.stop()
                 stream.close()
             except Exception:
-                pass
+                log.warning(
+                    "Stopping and closing the dictation microphone stream failed",
+                    exc_info=True,
+                )

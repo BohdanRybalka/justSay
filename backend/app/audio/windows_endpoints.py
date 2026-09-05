@@ -184,6 +184,9 @@ def _default_endpoint_name(
     try:
         get_endpoint(enumerator, _E_RENDER, role, ctypes.byref(device))
     except OSError:
+        log.warning(
+            "Asking for the default render endpoint of role %d failed", role, exc_info=True
+        )
         return None
     if not device:
         return None
@@ -204,6 +207,7 @@ def _friendly_name(ole32: object, device: ctypes.c_void_p) -> str | None:
     try:
         open_store(device, _STGM_READ, ctypes.byref(store))
     except OSError:
+        log.warning("Opening the render endpoint's property store failed", exc_info=True)
         return None
     if not store:
         return None
@@ -223,6 +227,7 @@ def _friendly_name(ole32: object, device: ctypes.c_void_p) -> str | None:
         )
         return value.pwszVal if value.vt == _VT_LPWSTR else None
     except OSError:
+        log.warning("Reading the render endpoint's friendly name failed", exc_info=True)
         return None
     finally:
         ole32.PropVariantClear(ctypes.byref(value))

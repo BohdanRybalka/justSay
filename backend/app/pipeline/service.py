@@ -107,9 +107,9 @@ async def process_audio(
 
         try:
             await await_local_ready(settings.stt)
-        except LocalReadinessTimeoutError as e:
-            log.error("Local STT readiness wait failed: %s", e)
-            raise RuntimeError(str(e)) from e
+        except LocalReadinessTimeoutError:
+            log.exception("Local STT readiness wait failed")
+            raise
 
     try:
         result = await stt.transcribe(
@@ -181,8 +181,8 @@ async def process_audio(
 
             background_tasks.add_task(vector_store.embed_entry_background, entry.id, text)
             background_tasks.add_task(vector_store.run_background_indexer)
-    except Exception as e:
-        log.warning("Failed to save history entry: %s", e)
+    except Exception:
+        log.exception("Saving the history entry failed — this transcript is not in history")
 
     return ProcessingResult(
         text=text,

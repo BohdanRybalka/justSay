@@ -18,6 +18,21 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _discard_scratch_file(path: Path) -> None:
+    """Delete a scratch file without letting the delete replace the response.
+
+    Both call sites sit in a ``finally``, where an ``OSError`` would throw away
+    an already-built response: a completed transcription — copied to the
+    clipboard and saved to history — would reach the widget as a bare 500.
+    ``preferences/router.py``'s cleanup endpoint already guards the same
+    operation in the same directory.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        log.warning("Could not remove the scratch file %s", path, exc_info=True)
+
+
 class DictateResponse(BaseModel):
     """Wire shape for /pipeline/dictate and /pipeline/process-file responses."""
     text: str
@@ -69,8 +84,7 @@ async def dictate(
             detail=f"Pipeline failed: {type(e).__name__}: {e}",
         )
     finally:
-        if audio_path.exists():
-            audio_path.unlink()
+        _discard_scratch_file(audio_path)
 
 
 @router.post("/process-file", response_model=DictateResponse)
@@ -109,5 +123,4 @@ async def process_file(
             detail=f"Pipeline failed: {type(e).__name__}: {e}",
         )
     finally:
-        if temp_path.exists():
-            temp_path.unlink()
+        _discard_scratch_file(temp_path)

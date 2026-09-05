@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import threading
 import time
 from pathlib import Path
@@ -944,3 +945,23 @@ async def test_local_stt_consumes_lazy_segment_generator_only_once(sample_wav):
 
     assert result.text == "привіт світ"
     assert result.no_speech_prob == 0.2
+
+
+def test_clear_cache_records_a_provider_cleanup_failure(caplog):
+    """`cleanup()` releases a loaded local model. Swallowed, a provider that
+    refuses to release left the cache emptied and the reason nowhere — the
+    invalidation still has to succeed, but silently is not the same as
+    cleanly."""
+    import app.stt as stt_module
+
+    provider = MagicMock()
+    provider.cleanup.side_effect = OSError("the model is still loading")
+    stt_module._providers[object()] = provider
+
+    with caplog.at_level(logging.DEBUG, logger="app.stt"):
+        clear_cache()
+
+    failures = [r for r in caplog.records if r.name == "app.stt" and r.exc_info]
+    assert len(failures) == 1
+    assert not stt_module._providers
+

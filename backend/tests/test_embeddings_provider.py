@@ -9,6 +9,7 @@ cloud-SDK bypass cannot pass.
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -447,3 +448,47 @@ def test_local_embedding_cleanup_swallows_errors():
     provider.cleanup()
 
     assert provider._client is None
+
+
+def test_clear_cache_records_a_provider_cleanup_failure(caplog):
+    """`LocalEmbeddingProvider.cleanup()` is an HTTP call to Ollama that unloads
+    `nomic-embed-text`. A host that has gone away leaves the model resident, and
+    the swallow left no record that the unload was even attempted."""
+    import app.embeddings as embeddings_module
+
+    provider = MagicMock()
+    provider.cleanup.side_effect = OSError("Ollama is not reachable")
+    embeddings_module._cached_provider = provider
+
+    with caplog.at_level(logging.DEBUG, logger="app.embeddings"):
+        clear_cache()
+
+    failures = [r for r in caplog.records if r.name == "app.embeddings" and r.exc_info]
+    assert len(failures) == 1
+    assert embeddings_module._cached_provider is None
+
+
+@pytest.mark.asyncio
+async def test_a_stale_local_provider_that_refuses_to_release_is_recorded(caplog):
+    """The re-probe branch's own swallow: the model has disappeared from Ollama,
+    so the cached provider is dropped — and if its release fails, that is the
+    same lost unload as above, on the path that runs without anyone asking."""
+    import app.embeddings as embeddings_module
+
+    stt, llm, emb = _settings(ProviderMode.LOCAL, ProviderMode.LOCAL)
+    stale = MagicMock()
+    stale.cleanup.side_effect = OSError("Ollama is not reachable")
+    embeddings_module._cached_provider = stale
+    embeddings_module._cached_key = (ProviderMode.LOCAL, ProviderMode.LOCAL)
+
+    with (
+        patch("app.embeddings.local.is_model_available", new=AsyncMock(return_value=False)),
+        caplog.at_level(logging.DEBUG, logger="app.embeddings"),
+    ):
+        provider, reason = await resolve_embedding_provider(stt, llm, emb)
+
+    assert provider is None
+    assert reason == LOCAL_MISSING_MODEL_REASON
+    failures = [r for r in caplog.records if r.name == "app.embeddings" and r.exc_info]
+    assert len(failures) == 1
+

@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 import sys
 import threading
 import time
@@ -204,6 +205,26 @@ async def test_cleanup_stops_and_closes_open_stream(audio_settings, mock_stream)
 
     stream_instance.stop.assert_called_once()
     stream_instance.close.assert_called_once()
+    assert recorder.is_recording is False
+
+
+@pytest.mark.asyncio
+async def test_cleanup_records_a_stream_close_failure(audio_settings, mock_stream, caplog):
+    """`meeting_recorder.py` logs this exact operation and the dictation
+    recorder swallowed it, so a device that refuses to close left no evidence
+    at all — including on the failed-start rollback, which JS-80 routed through
+    this same `cleanup()`.
+    """
+    _, stream_instance = mock_stream
+    stream_instance.stop.side_effect = OSError("PaErrorCode -9988")
+    recorder = MicrophoneRecorder(audio_settings)
+
+    await recorder.start()
+    with caplog.at_level(logging.DEBUG, logger="app.audio.recorder"):
+        recorder.cleanup()
+
+    failures = [r for r in caplog.records if r.name == "app.audio.recorder" and r.exc_info]
+    assert len(failures) == 1
     assert recorder.is_recording is False
 
 
