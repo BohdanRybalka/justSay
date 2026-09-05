@@ -1,5 +1,6 @@
 import asyncio
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -376,6 +377,48 @@ def _clear_dependency_overrides():
     app.dependency_overrides.clear()
 
 
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+_IMPORT_PROBE_VIOLATION = 17
+_IMPORT_PROBE_TIMEOUT_SECONDS = 60
+
+
+def _run_import_probe(probe: str, module_name: str) -> subprocess.CompletedProcess[str]:
+    """Run an import-hygiene probe in a child interpreter with a scrubbed
+    environment.
+
+    `-E` is what makes the verdict trustworthy: it ignores every `PYTHON*`
+    variable the parent exports — `PYTHONPATH`, which would let the child see
+    modules this machine happens to have lying around, and `PYTHONOPTIMIZE`,
+    which strips `assert` and would otherwise turn a child that checks itself
+    with one into an unconditional pass. The child therefore also ends in an
+    explicit `sys.exit`, never a bare `assert`, and inserts the backend
+    directory into its own `sys.path` rather than trusting the parent's
+    working directory to be it.
+
+    `-I` is deliberately not used: it implies `-s`, which drops the user site
+    directory, so a backend installed with `pip install --user` would leave
+    the child unable to import its own dependencies and every call site
+    reporting a layering violation it never checked.
+
+    The timeout exists because this helper is the single funnel for three
+    tests: an import that wedges rather than failing must fail the test that
+    asked for it, not hang the suite.
+    """
+    try:
+        return subprocess.run(
+            [sys.executable, "-E", "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=_IMPORT_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as expired:
+        raise AssertionError(
+            f"importing {module_name} in a fresh interpreter did not finish "
+            f"within {_IMPORT_PROBE_TIMEOUT_SECONDS}s -- it wedged during import "
+            "rather than failing, which would otherwise hang the whole suite"
+        ) from expired
+
+
 def assert_module_binds_no_third_party(module_name: str, forbidden: tuple[str, ...]) -> None:
     """Import `module_name` in a fresh interpreter and assert none of
     `forbidden` ended up bound in its namespace.
@@ -395,18 +438,49 @@ def assert_module_binds_no_third_party(module_name: str, forbidden: tuple[str, .
     checks ask, which is whether importing the module on a machine without
     the optional extras installed would crash.
     """
-    import subprocess
-    import sys
-
-    checks = " and ".join(f"not hasattr(m, {name!r})" for name in forbidden)
-    result = subprocess.run(
-        [sys.executable, "-c", f"import {module_name} as m; assert {checks}"],
-        capture_output=True,
-        text=True,
+    checks = " or ".join(f"hasattr(m, {name!r})" for name in forbidden)
+    probe = (
+        f"import sys; sys.path.insert(0, {str(_BACKEND_DIR)!r}); "
+        f"import {module_name} as m; "
+        f"sys.exit({_IMPORT_PROBE_VIOLATION} if ({checks}) else 0)"
+    )
+    result = _run_import_probe(probe, module_name)
+    assert result.returncode != _IMPORT_PROBE_VIOLATION, (
+        f"importing {module_name} in a fresh interpreter bound one of {forbidden} "
+        f"at module level:\n{result.stdout}{result.stderr}"
     )
     assert result.returncode == 0, (
-        f"importing {module_name} in a fresh interpreter bound one of {forbidden} "
-        f"at module level:\n{result.stderr}"
+        f"importing {module_name} in a fresh interpreter failed before it could be "
+        f"checked (exit {result.returncode}):\n{result.stdout}{result.stderr}"
+    )
+
+
+def assert_import_loads_no_module(module_name: str, forbidden: tuple[str, ...]) -> None:
+    """Import `module_name` in a fresh interpreter and assert none of
+    `forbidden` was loaded into the child's `sys.modules`.
+
+    The sibling of `assert_module_binds_no_third_party`, asking the other
+    half of the question: not what the module bound in its own namespace,
+    but what the import cost the process. A subprocess for the same reason,
+    plus one of its own -- in-process the answer depends on what an earlier
+    test already imported, and `test_sys_modules_hygiene.py` forbids the
+    `del sys.modules[...]` that would hide that.
+    """
+    probe = (
+        f"import sys; sys.path.insert(0, {str(_BACKEND_DIR)!r}); "
+        f"import {module_name}; "
+        f"loaded = [name for name in {forbidden!r} if name in sys.modules]; "
+        "print(loaded); "
+        f"sys.exit({_IMPORT_PROBE_VIOLATION} if loaded else 0)"
+    )
+    result = _run_import_probe(probe, module_name)
+    assert result.returncode != _IMPORT_PROBE_VIOLATION, (
+        f"importing {module_name} in a fresh interpreter loaded one of "
+        f"{forbidden}:\n{result.stdout}{result.stderr}"
+    )
+    assert result.returncode == 0, (
+        f"importing {module_name} in a fresh interpreter failed before it could be "
+        f"checked (exit {result.returncode}):\n{result.stdout}{result.stderr}"
     )
 
 

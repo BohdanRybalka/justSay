@@ -371,7 +371,7 @@ def teardown_probe(monkeypatch):
     release step and the only one with a real OS resource (the audio stream)
     behind it, so it is recorded rather than left unobserved.
     """
-    import app.audio
+    import app.audio.recorder
     import app.embeddings
     import app.main
     import app.stt
@@ -389,7 +389,7 @@ def teardown_probe(monkeypatch):
             order.append("recorder_cleanup")
 
     monkeypatch.setattr(app.main, "_warm_gpu_probe_cache", _noop_probe)
-    monkeypatch.setattr(app.audio, "MicrophoneRecorder", _FakeRecorder)
+    monkeypatch.setattr(app.audio.recorder, "MicrophoneRecorder", _FakeRecorder)
     monkeypatch.setattr(app.stt, "clear_cache", lambda: order.append("clear_stt"))
     monkeypatch.setattr(
         app.embeddings, "clear_cache", lambda: order.append("clear_embeddings")

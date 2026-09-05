@@ -1,9 +1,15 @@
-"""Tests for the magic-bytes audio validator (Plan 008 / Task 3 tech-debt batch).
+"""Tests for `app.pipeline.upload_validation` — both gates it holds.
 
-`/pipeline/process-file` used to trust the filename's
-extension alone. This module covers the new content-aware validation:
+The content gate (Plan 008 / Task 3 tech-debt batch): `/pipeline/process-file`
+used to trust the filename's extension alone. `validate_audio_upload` covers
 empty/short files, extension/content mismatch (renamed executables), niche
 formats we trust on extension, and the MIME→extension family map.
+
+The size gate: `read_upload_with_limit` streams an upload in fixed chunks and
+raises 413 the moment the running total passes the limit, so an oversized
+upload is refused mid-read rather than after the whole payload sits in memory.
+The two share a module rather than any code, which is why the tests below are
+in the same file and named apart.
 """
 
 from __future__ import annotations
@@ -18,7 +24,8 @@ from app.core.audio_formats import (
     detect_audio_mime,
     mime_for_extension,
 )
-from app.pipeline.upload_validation import validate_audio_upload
+from app.core.constants import MAX_UPLOAD_SIZE
+from app.pipeline.upload_validation import read_upload_with_limit, validate_audio_upload
 
 
 def test_every_allowed_extension_is_detectable_or_trusted():
@@ -174,3 +181,121 @@ def test_mime_for_extension_unknown_falls_back_to_wav():
     bypasses the validator."""
     assert mime_for_extension("strange.xyz") == "audio/wav"
     assert mime_for_extension(None) == "audio/wav"
+
+
+class _PayloadUpload:
+    """The slice of UploadFile read_upload_with_limit uses: chunked async read.
+
+    Records the size of every chunk it hands back, so a test can state how the
+    payload was read and not merely what came out.
+    """
+
+    def __init__(self, payload: bytes) -> None:
+        self._remaining = payload
+        self.chunks_read: list[int] = []
+
+    async def read(self, size: int) -> bytes:
+        chunk, self._remaining = self._remaining[:size], self._remaining[size:]
+        self.chunks_read.append(len(chunk))
+        return chunk
+
+    @property
+    def bytes_read(self) -> int:
+        return sum(self.chunks_read)
+
+
+_MULTI_CHUNK_SIZE = 5 * 64 * 1024
+
+
+@pytest.mark.asyncio
+async def test_read_upload_with_limit_returns_a_payload_of_exactly_the_limit():
+    payload = b"x" * 4096
+    assert await read_upload_with_limit(_PayloadUpload(payload), 4096) == payload
+
+
+@pytest.mark.asyncio
+async def test_read_upload_with_limit_rejects_one_byte_over_the_limit():
+    with pytest.raises(HTTPException) as excinfo:
+        await read_upload_with_limit(_PayloadUpload(b"x" * 4097), 4096)
+    assert excinfo.value.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_read_upload_with_limit_accumulates_a_payload_spanning_many_chunks():
+    """The two boundary cases above fit inside a single read, so they pass
+    whatever the chunk size is. This one is the reason the function reads in
+    chunks at all: the payload must arrive in several pieces and be joined back
+    in order."""
+    payload = bytes(i % 251 for i in range(_MULTI_CHUNK_SIZE))
+    upload = _PayloadUpload(payload)
+
+    assert await read_upload_with_limit(upload, _MULTI_CHUNK_SIZE) == payload
+    assert len(upload.chunks_read) > 2, (
+        f"the payload came back in {len(upload.chunks_read)} read(s): the chunked "
+        "accumulation this test exists for never ran"
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_upload_with_limit_stops_reading_before_buffering_it_all():
+    """The running total is checked per chunk, so an oversized upload is
+    refused partway through. Reading it whole and only then raising 413 would
+    put the entire payload in memory first — which is what the limit exists to
+    prevent."""
+    upload = _PayloadUpload(b"x" * _MULTI_CHUNK_SIZE)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await read_upload_with_limit(upload, 2 * 64 * 1024)
+
+    assert excinfo.value.status_code == 413
+    assert upload.bytes_read < _MULTI_CHUNK_SIZE, (
+        f"the whole {_MULTI_CHUNK_SIZE}-byte payload was read before the 413: "
+        "the size check is not running per chunk"
+    )
+
+
+class _SizedChunk:
+    """A chunk that reports a length without holding the bytes.
+
+    `read_upload_with_limit` measures each chunk with `len()` and raises
+    before it joins anything, so a gigabyte-scale limit can be driven past
+    without allocating a gigabyte.
+    """
+
+    def __init__(self, size: int) -> None:
+        self._size = size
+
+    def __len__(self) -> int:
+        return self._size
+
+
+class _OversizedUpload:
+    """An upload whose very first chunk already exceeds the limit."""
+
+    def __init__(self, size: int) -> None:
+        self._size = size
+
+    async def read(self, size: int) -> _SizedChunk:
+        return _SizedChunk(self._size)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("max_size", "expected_detail"),
+    [
+        (512 * 1024, "File too large (max 0.5MB)"),
+        (MAX_UPLOAD_SIZE, "File too large (max 25MB)"),
+        (1024 * 1024 * 1024, "File too large (max 1024MB)"),
+    ],
+)
+async def test_read_upload_with_limit_states_the_limit_the_user_will_read(
+    max_size, expected_detail
+):
+    """The 413 detail reaches the user: `src/api.ts` surfaces `detail`
+    verbatim. Two rounds of edits changed this string unnoticed — flooring it
+    to `max 0MB` below a megabyte, then rendering a gigabyte limit as
+    `1.02e+03MB` — because nothing asserted what it actually says."""
+    with pytest.raises(HTTPException) as excinfo:
+        await read_upload_with_limit(_OversizedUpload(max_size + 1), max_size)
+
+    assert excinfo.value.detail == expected_detail
