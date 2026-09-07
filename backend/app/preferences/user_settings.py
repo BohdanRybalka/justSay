@@ -66,7 +66,7 @@ class UserSettings(BaseModel):
 
 
 @dataclass
-class UpdateOutcome:
+class UpdateResult:
     settings: UserSettings
     warning: str | None = None
 
@@ -85,7 +85,7 @@ def get_user_settings() -> UserSettings:
     return _settings
 
 
-def update_user_settings(updates: dict) -> UpdateOutcome:
+def update_user_settings(updates: dict) -> UpdateResult:
     """Merge partial updates into settings, validate, and save to disk.
 
     For ``output_dir`` the flow is: validate → relocate history file →
@@ -118,7 +118,7 @@ def update_user_settings(updates: dict) -> UpdateOutcome:
         _save(merged)
         global _settings
         _settings = merged
-        return UpdateOutcome(settings=merged, warning=warning)
+        return UpdateResult(settings=merged, warning=warning)
 
 
 def _validate_whisper_model_size(value: object) -> None:

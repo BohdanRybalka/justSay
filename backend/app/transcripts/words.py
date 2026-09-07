@@ -244,9 +244,7 @@ def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
     with history._lock:
         conn = history._ensure_conn_locked()
         fts_rows = conn.execute(
-            "SELECT e.id, e.ts, e.language, e.style, e.raw_text, "
-            "e.cleaned_text, e.duration_ms, e.audio_duration_seconds, "
-            "e.word_count, e.model_name, e.tokens_used, "
+            f"SELECT {history.columns_sql(history.ENTRY_COLUMNS, alias='e')}, "
             "bm25(entry_fts) AS rank "
             "FROM entry_fts JOIN entries e ON e.rowid = entry_fts.rowid "
             "WHERE entry_fts MATCH ? "
@@ -273,9 +271,7 @@ def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
                 params = (*like_params, residual)
 
             like_rows = conn.execute(
-                "SELECT id, ts, language, style, raw_text, cleaned_text, "
-                "duration_ms, audio_duration_seconds, word_count, "
-                "model_name, tokens_used "
+                f"SELECT {history.columns_sql(history.ENTRY_COLUMNS)} "
                 f"FROM entries WHERE {like_clauses}{not_in_clause} "
                 "ORDER BY ts DESC LIMIT ?",
                 params,

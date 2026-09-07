@@ -382,8 +382,8 @@ def test_vad_analysis_fields_are_native_python_types(tmp_path):
 
     assert result is not None
     assert type(result.is_silent) is bool
-    assert type(result.speech_frame_count) is int
-    assert type(result.total_frame_count) is int
+    assert type(result.speech_hop_count) is int
+    assert type(result.total_hop_count) is int
     assert type(result.max_probability) is float
 
 
@@ -396,7 +396,7 @@ def test_digital_silence_is_silent(tmp_path):
 
     assert result is not None
     assert result.is_silent is True
-    assert result.speech_frame_count == 0
+    assert result.speech_hop_count == 0
 
 
 @_requires_dll
@@ -568,7 +568,7 @@ async def test_averted_energy_false_positive_is_not_discarded_end_to_end(tmp_pat
     assert vad is not None
     assert vad.is_silent is False, (
         f"the VAD must rescue this real-speech window "
-        f"(hops={vad.speech_frame_count}/{vad.total_frame_count}, "
+        f"(hops={vad.speech_hop_count}/{vad.total_hop_count}, "
         f"max_prob={vad.max_probability:.3f})"
     )
 
@@ -624,7 +624,7 @@ def test_loud_non_speech_is_discarded(tmp_path, kind):
     )
     assert vad is not None
     assert vad.is_silent is True, (
-        f"{kind} reached the model: hops={vad.speech_frame_count}/{vad.total_frame_count}, "
+        f"{kind} reached the model: hops={vad.speech_hop_count}/{vad.total_hop_count}, "
         f"max_prob={vad.max_probability:.3f}"
     )
 
@@ -663,8 +663,8 @@ def test_click_train_escape_is_a_pinned_known_limitation(tmp_path):
 
     assert vad is not None
     assert vad.is_silent is True, (
-        f"click train reached the model: hops={vad.speech_frame_count}/"
-        f"{vad.total_frame_count}, max_prob={vad.max_probability:.3f}"
+        f"click train reached the model: hops={vad.speech_hop_count}/"
+        f"{vad.total_hop_count}, max_prob={vad.max_probability:.3f}"
     )
 
 
@@ -809,10 +809,10 @@ def test_concurrent_verdicts_match_single_threaded_verdicts(tmp_path):
             f"AC 14(c) VIOLATED — {name}'s verdict changed under concurrency: "
             f"solo is_silent={solo[name].is_silent}, concurrent={concurrent[name].is_silent}"
         )
-        assert concurrent[name].speech_frame_count == solo[name].speech_frame_count, (
+        assert concurrent[name].speech_hop_count == solo[name].speech_hop_count, (
             f"AC 14(c) VIOLATED — {name}'s speech-hop count changed under concurrency: "
-            f"solo={solo[name].speech_frame_count}, "
-            f"concurrent={concurrent[name].speech_frame_count}"
+            f"solo={solo[name].speech_hop_count}, "
+            f"concurrent={concurrent[name].speech_hop_count}"
         )
 
 
@@ -860,7 +860,7 @@ def test_cold_cache_stampede_loads_the_library_exactly_once(tmp_path, monkeypatc
 
     assert loads["n"] == 1, (
         f"AC 14(c) VIOLATED — {loads['n']} library loads for 4 concurrent cold-cache "
-        "calls; the cache must be read and written under _library_lock"
+        "calls; the cache must be read and written under _library_cache_lock"
     )
 
 

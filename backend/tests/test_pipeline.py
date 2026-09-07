@@ -777,8 +777,8 @@ def _vad_analysis(is_silent: bool):
     from app.audio.vad import VadAnalysis
 
     return VadAnalysis(
-        speech_frame_count=0 if is_silent else 40,
-        total_frame_count=62,
+        speech_hop_count=0 if is_silent else 40,
+        total_hop_count=62,
         max_probability=0.12 if is_silent else 0.93,
         is_silent=is_silent,
     )

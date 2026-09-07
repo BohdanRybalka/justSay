@@ -47,8 +47,8 @@ _ENV_OVERRIDE = "JUSTSAY_TEN_VAD_LIB"
 
 @dataclass(frozen=True)
 class VadAnalysis:
-    speech_frame_count: int
-    total_frame_count: int
+    speech_hop_count: int
+    total_hop_count: int
     max_probability: float
     is_silent: bool
 
@@ -173,12 +173,13 @@ class _LoadFailed:
 
 _LOAD_FAILED = _LoadFailed()
 _library: _TenVadLibrary | _LoadFailed | None = None
-_library_lock = threading.Lock()
+_library_cache_lock = threading.Lock()
+_ten_vad_api_lock = threading.Lock()
 
 
 def _get_library() -> _TenVadLibrary | None:
     global _library
-    with _library_lock:
+    with _library_cache_lock:
         if _library is _LOAD_FAILED:
             return None
         if isinstance(_library, _TenVadLibrary):
@@ -210,7 +211,7 @@ def _get_library() -> _TenVadLibrary | None:
 def _reset_library_cache() -> None:
     """Test-only: drop the cached load so a monkeypatched resolver takes effect."""
     global _library
-    with _library_lock:
+    with _library_cache_lock:
         _library = None
 
 
@@ -308,7 +309,7 @@ def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None
         total_samples_decoded = 0
         early_exit = False
 
-        with _library_lock:
+        with _ten_vad_api_lock:
             handle = library.create(float(settings.silence_vad_probability))
         try:
             for block in sf.blocks(
@@ -324,7 +325,7 @@ def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None
                     hop = np.ascontiguousarray(
                         np.clip(chunk, -1.0, 1.0) * 32767.0, dtype=np.int16
                     )
-                    with _library_lock:
+                    with _ten_vad_api_lock:
                         probability = library.process(handle, hop)
                     total_hops += 1
                     max_probability = max(max_probability, probability)
@@ -337,7 +338,7 @@ def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None
                     early_exit = True
                     break
         finally:
-            with _library_lock:
+            with _ten_vad_api_lock:
                 library.destroy(handle)
     except Exception as e:
         log.warning(
@@ -358,8 +359,8 @@ def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None
         required_hops = _required_speech_hops(max(1, total_hops), settings)
 
     return VadAnalysis(
-        speech_frame_count=int(speech_hops),
-        total_frame_count=int(total_hops),
+        speech_hop_count=int(speech_hops),
+        total_hop_count=int(total_hops),
         max_probability=float(max_probability),
         is_silent=bool(speech_hops < required_hops),
     )
