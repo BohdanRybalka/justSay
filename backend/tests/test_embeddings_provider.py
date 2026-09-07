@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core.constants import GEMINI_TIMEOUT_SECONDS
+from app.core.constants import GEMINI_EMBEDDING_TIMEOUT_SECONDS, GEMINI_TIMEOUT_SECONDS
 from app.core.types import ProviderMode
 from app.embeddings import LOCAL_MISSING_MODEL_REASON, clear_cache, resolve_embedding_provider
 from app.embeddings.cloud import CloudEmbeddingProvider
@@ -396,8 +396,13 @@ def test_cloud_embedding_client_carries_a_timeout_in_milliseconds():
     the process and the search request never returns -- the same defect the
     STT client was fixed for, on a second live path.
 
+    The budget is its own constant rather than the STT one. 300 s is sized for
+    uploading a recording of up to `MAX_UPLOAD_SIZE`; an embedding sends one
+    short string, so borrowing that number lets a handful of unanswered embeds
+    hold the shared default executor for five minutes each.
+
     `HttpOptions.timeout` is milliseconds, so the assertion is on the scaled
-    number: passing seconds would give a 300 ms budget and break every cloud
+    number: passing seconds would give a 30 ms budget and break every cloud
     embedding.
     """
     from tests.conftest import fake_genai_modules
@@ -409,7 +414,12 @@ def test_cloud_embedding_client_carries_a_timeout_in_milliseconds():
         provider._get_client()
 
     http_options = client_class.call_args.kwargs["http_options"]
-    assert http_options.timeout == int(GEMINI_TIMEOUT_SECONDS * 1000)
+    assert http_options.timeout == int(GEMINI_EMBEDDING_TIMEOUT_SECONDS * 1000)
+    assert GEMINI_EMBEDDING_TIMEOUT_SECONDS == 30.0
+    assert GEMINI_EMBEDDING_TIMEOUT_SECONDS < GEMINI_TIMEOUT_SECONDS, (
+        "an embedding is one short string, so it must not inherit the budget "
+        "sized for uploading a whole recording"
+    )
 
 
 def test_an_embedding_request_that_is_never_answered_raises_a_timeout():

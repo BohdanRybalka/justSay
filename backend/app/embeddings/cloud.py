@@ -13,7 +13,7 @@ carrying ``.values: list[float]``.
 
 import asyncio
 
-from app.core.constants import GEMINI_TIMEOUT_SECONDS
+from app.core.constants import GEMINI_EMBEDDING_TIMEOUT_SECONDS
 
 
 class CloudEmbeddingProvider:
@@ -45,7 +45,7 @@ class CloudEmbeddingProvider:
             self._client = genai.Client(
                 api_key=self._api_key,
                 http_options=types.HttpOptions(
-                    timeout=int(GEMINI_TIMEOUT_SECONDS * 1000)
+                    timeout=int(GEMINI_EMBEDDING_TIMEOUT_SECONDS * 1000)
                 ),
             )
         return self._client
@@ -57,7 +57,15 @@ class CloudEmbeddingProvider:
         `/history/search` and from the background indexer, so an unanswered
         embed parks a default-executor worker for the life of the process and
         the search request never returns. The client's own budget is the only
-        thing that ends it -- the same bound `GeminiSTTProvider` carries.
+        thing that ends it.
+
+        That budget is its own constant, not `GeminiSTTProvider`'s. The STT one
+        is 300 s because it covers uploading a recording of up to
+        `MAX_UPLOAD_SIZE`; this call sends one short string and answers in well
+        under a second, so borrowing 300 s here means a few dozen unanswered
+        embeds -- `/history/search` plus the background indexer -- hold the
+        shared default executor for five minutes each and starve every other
+        `to_thread` caller in the process.
         """
         client = self._get_client()
         return await asyncio.to_thread(self._call_embed, client, self._model, text)
