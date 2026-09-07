@@ -39,8 +39,6 @@ class GpuProbeResult:
     vendor: GpuVendor
     name: str | None = None
     vram_total_mb: int | None = None
-    vram_used_mb: int | None = None
-    vram_free_mb: int | None = None
 
 
 _cache_lock = threading.Lock()
@@ -115,7 +113,7 @@ def _probe_env_override() -> GpuProbeResult | None:
 
 
 def _probe_torch_cuda() -> GpuProbeResult | None:
-    """NVIDIA via torch.cuda — the only source with a live used/free VRAM split."""
+    """NVIDIA via torch.cuda — checked before the `nvidia-smi` CLI fallback."""
     try:
         import torch
     except ImportError:
@@ -127,16 +125,11 @@ def _probe_torch_cuda() -> GpuProbeResult | None:
 
         props = torch.cuda.get_device_properties(0)
         total = props.total_memory
-        reserved = torch.cuda.memory_reserved(0)
-        allocated = torch.cuda.memory_allocated(0)
-        free = total - reserved
 
         return GpuProbeResult(
             vendor=GpuVendor.NVIDIA,
             name=props.name,
             vram_total_mb=total // (1024 * 1024),
-            vram_used_mb=allocated // (1024 * 1024),
-            vram_free_mb=free // (1024 * 1024),
         )
     except Exception as e:
         log.warning("torch.cuda probe failed: %s", e)
@@ -144,11 +137,20 @@ def _probe_torch_cuda() -> GpuProbeResult | None:
 
 
 def _probe_nvidia_smi() -> GpuProbeResult | None:
-    """NVIDIA via the `nvidia-smi` CLI — total VRAM only, no used/free split.
+    """NVIDIA via the `nvidia-smi` CLI — the fallback when torch is absent.
 
     Checked before any AMD/Intel source so an NVIDIA box is never
     misclassified by an AMD/Intel-oriented probe finding an unrelated
     secondary adapter.
+
+    An unparseable `memory.total` (`[N/A]`, `[Not Supported]`, a driver that
+    omits the column) yields `vram_total_mb=None` and still reports NVIDIA.
+    `nvidia-smi` having answered at all is the evidence that decides the
+    vendor; discarding the whole result over one number would fall through to
+    the AMD/Intel registry probe and route Local STT to the Vulkan provider on
+    a CUDA box. Nothing reads an NVIDIA `vram_total_mb` — only
+    `_probe_windows_registry()`'s max-VRAM pick reads the field at all, and it
+    never sees an NVIDIA result.
     """
     try:
         result = subprocess.run(
@@ -165,12 +167,13 @@ def _probe_nvidia_smi() -> GpuProbeResult | None:
         return None
 
     first_line = result.stdout.strip().splitlines()[0]
+    name, _, total_str = (part.strip() for part in first_line.partition(","))
+    vram_total_mb: int | None
     try:
-        name, total_str = (part.strip() for part in first_line.split(",", 1))
         vram_total_mb = int(float(total_str))
-    except (ValueError, IndexError) as e:
-        log.warning("nvidia-smi output malformed: %r (%s)", first_line, e)
-        return None
+    except ValueError as e:
+        log.warning("nvidia-smi VRAM value malformed: %r (%s)", first_line, e)
+        vram_total_mb = None
 
     return GpuProbeResult(vendor=GpuVendor.NVIDIA, name=name, vram_total_mb=vram_total_mb)
 

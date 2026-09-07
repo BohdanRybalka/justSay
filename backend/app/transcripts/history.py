@@ -211,25 +211,15 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
 
 def _resolve_output_dir() -> Path:
-    """`_output_dir` if `bootstrap()`/`init_output_dir()`/`relocate()` has
-    already set one, else a lazy fallback resolved fresh on every call --
-    never cached at import time (ADR 014, AC 8a)."""
+    """`_output_dir` if `bootstrap()`/`relocate()` has already set one, else a
+    lazy fallback resolved fresh on every call -- never cached at import time
+    (ADR 014, AC 8a)."""
     return _output_dir if _output_dir is not None else resolve_app_data_root()
 
 
 def history_path() -> Path:
     """Lock-free read of the current history.db path."""
     return _resolve_output_dir() / HISTORY_FILENAME
-
-
-
-def init_output_dir(target: Path) -> None:
-    """Test/internal helper. Real lifespan callers should use ``bootstrap``."""
-    global _output_dir
-    with _lock:
-        _close_conn_locked()
-        _output_dir = target
-        invalidate_derived_caches_locked()
 
 
 def bootstrap(target: Path) -> None:
@@ -658,8 +648,8 @@ def _row_to_entry(row: sqlite3.Row) -> HistoryEntry:
 
 def _ensure_conn_locked() -> sqlite3.Connection:
     """Caller MUST hold ``_lock``. Lazy-opens the connection on demand
-    (covers the case where init_output_dir was called by tests but
-    bootstrap was not)."""
+    (covers the case where the output directory was set but ``bootstrap``
+    was not called)."""
     global _conn
     if _conn is None:
         _conn = _connect(_resolve_output_dir() / HISTORY_FILENAME)

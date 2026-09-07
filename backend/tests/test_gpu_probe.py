@@ -86,7 +86,7 @@ def test_nvidia_source_wins_over_windows_registry_amd(monkeypatch):
         gpu_probe, "_probe_torch_cuda",
         lambda: GpuProbeResult(
             vendor=GpuVendor.NVIDIA, name="RTX 4090",
-            vram_total_mb=24576, vram_used_mb=1024, vram_free_mb=23552,
+            vram_total_mb=24576,
         ),
     )
     registry_spy = MagicMock(
@@ -178,8 +178,6 @@ def test_torch_cuda_probe_computes_vram_from_real_total_memory_attribute():
     fake_torch = MagicMock()
     fake_torch.cuda.is_available.return_value = True
     fake_torch.cuda.get_device_properties.return_value = fake_props
-    fake_torch.cuda.memory_reserved.return_value = 2 * 1024 * 1024 * 1024
-    fake_torch.cuda.memory_allocated.return_value = 1 * 1024 * 1024 * 1024
 
     with patch.dict("sys.modules", {"torch": fake_torch}):
         result = gpu_probe._probe_torch_cuda()
@@ -188,8 +186,6 @@ def test_torch_cuda_probe_computes_vram_from_real_total_memory_attribute():
     assert result.vendor == GpuVendor.NVIDIA
     assert result.name == "NVIDIA GeForce RTX 3060"
     assert result.vram_total_mb == 12 * 1024
-    assert result.vram_used_mb == 1 * 1024
-    assert result.vram_free_mb == (12 - 2) * 1024
 
 
 def test_nvidia_smi_probe_returns_none_when_binary_missing(monkeypatch):
@@ -200,10 +196,36 @@ def test_nvidia_smi_probe_returns_none_when_binary_missing(monkeypatch):
     assert gpu_probe._probe_nvidia_smi() is None
 
 
-def test_nvidia_smi_probe_returns_none_on_malformed_output(monkeypatch):
-    fake_result = MagicMock(returncode=0, stdout="some gpu name, not-a-number\n", stderr="")
+def test_nvidia_smi_probe_keeps_the_nvidia_verdict_when_vram_is_unparseable(monkeypatch):
+    """A driver reporting `[N/A]` must not cost the box its NVIDIA classification.
+
+    Returning `None` here falls through to the AMD/Intel registry probe and
+    routes Local STT to the Vulkan provider instead of faster-whisper/CUDA.
+    Nothing reads an NVIDIA `vram_total_mb`, so the number is not worth the
+    verdict.
+    """
+    fake_result = MagicMock(returncode=0, stdout="NVIDIA GeForce RTX 3060, [N/A]\n", stderr="")
     monkeypatch.setattr(gpu_probe.subprocess, "run", lambda *a, **k: fake_result)
-    assert gpu_probe._probe_nvidia_smi() is None
+
+    result = gpu_probe._probe_nvidia_smi()
+
+    assert result is not None
+    assert result.vendor == GpuVendor.NVIDIA
+    assert result.name == "NVIDIA GeForce RTX 3060"
+    assert result.vram_total_mb is None
+
+
+def test_nvidia_smi_probe_keeps_the_nvidia_verdict_when_the_vram_column_is_absent(monkeypatch):
+    """No comma at all: the whole line is the adapter name, VRAM unknown."""
+    fake_result = MagicMock(returncode=0, stdout="NVIDIA GeForce RTX 3060\n", stderr="")
+    monkeypatch.setattr(gpu_probe.subprocess, "run", lambda *a, **k: fake_result)
+
+    result = gpu_probe._probe_nvidia_smi()
+
+    assert result is not None
+    assert result.vendor == GpuVendor.NVIDIA
+    assert result.name == "NVIDIA GeForce RTX 3060"
+    assert result.vram_total_mb is None
 
 
 def test_nvidia_smi_probe_parses_name_and_total_vram(monkeypatch):

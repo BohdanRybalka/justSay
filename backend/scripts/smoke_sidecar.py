@@ -8,11 +8,20 @@ can boot without a system Python install:
   2. Launch ``dist/justsay-backend/justsay-backend[.exe] --host <h> --port <p>``.
   3. Poll ``GET /health`` every 500 ms for up to 30 s; require
      ``{"status": "ok", ...}`` (exact match — ``"degraded"`` fails).
-  4. GET ``/resources``, ``/settings``, ``/settings/cloud-status``,
-     ``/audio/status`` — assert HTTP 200 on each. These cover the
-     subsystems that have to import successfully under the frozen
-     interpreter (psutil + GPU probe, settings I/O, cloud-key store,
-     sounddevice).
+  4. GET ``/stt/local/status``, ``/settings``, ``/settings/cloud-status``,
+     ``/audio/status`` — assert HTTP 200 on each. Each proves one
+     subsystem imports under the frozen interpreter:
+     ``/stt/local/status`` runs ``app.core.gpu_probe.probe_gpu()`` through
+     ``local_setup._detect_gpu()`` (Windows and Intel macOS; Apple Silicon
+     short-circuits to the Metal label before the import), ``/settings``
+     settings I/O, ``/settings/cloud-status`` the cloud-key store, and
+     ``/audio/status`` sounddevice.
+
+     ``psutil`` is deliberately not covered. Its only importer is
+     ``local_setup._estimate_model_ram_mb()``, reached solely when a whisper
+     model is already loaded — which needs a model on disk that no release
+     runner has. ``/resources``, deleted in spec 105, was the last route
+     that imported it unconditionally.
   5. Terminate the child (SIGTERM on POSIX, ``taskkill /T /F /PID`` on
      Windows) and wait briefly for exit.
 
@@ -159,7 +168,7 @@ def main() -> int:
 
     try:
         poll_health(args.host, args.port)
-        for path in ("/resources", "/settings", "/settings/cloud-status", "/audio/status"):
+        for path in ("/stt/local/status", "/settings", "/settings/cloud-status", "/audio/status"):
             assert_200(args.host, args.port, path)
         log("all checks passed")
         return 0

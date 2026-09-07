@@ -137,9 +137,13 @@ jobs:
 
       # Mirrors the v0.8.0 local-3.10 smoke matrix against the CI-built
       # 3.12 artifact: bind-test port 9377, launch the frozen sidecar,
-      # poll /health for {"status":"ok"}, then assert 200 on /resources,
-      # /settings, /settings/cloud-status, /audio/status. Stdlib-only —
-      # runs before any test extra is installed.
+      # poll /health for {"status": "ok"}, then assert 200 on
+      # /stt/local/status, /settings, /settings/cloud-status,
+      # /audio/status. The first of those replaced /resources when spec 105
+      # deleted it, and is the route that still reaches probe_gpu(); the
+      # script's own docstring says which subsystem each path proves and
+      # which one (psutil) is now proved by none. Stdlib-only — runs before
+      # any test extra is installed.
       - name: Smoke test sidecar
         run: python backend/scripts/smoke_sidecar.py --host 127.0.0.1 --port 9377
 
