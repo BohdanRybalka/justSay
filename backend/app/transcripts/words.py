@@ -244,7 +244,7 @@ def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
     with history._lock:
         conn = history._ensure_conn_locked()
         fts_rows = conn.execute(
-            f"SELECT {history.columns_sql(history.ENTRY_COLUMNS, prefix='e.')}, "
+            f"SELECT {history.columns_sql(history.ENTRY_COLUMNS, alias='e')}, "
             "bm25(entry_fts) AS rank "
             "FROM entry_fts JOIN entries e ON e.rowid = entry_fts.rowid "
             "WHERE entry_fts MATCH ? "

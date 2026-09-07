@@ -11,7 +11,7 @@ import contextlib
 import sqlite3
 import threading
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1022,10 +1022,10 @@ def test_entry_read_columns_are_exactly_what_row_to_entry_reads(
     assert entries[0].text == "hello world"
 
 
-def test_columns_sql_qualifies_every_name_with_the_prefix():
+def test_columns_sql_qualifies_every_name_with_the_alias():
     """The FTS lane joins `entries` as `e`, so every name must carry the alias."""
     assert history.columns_sql(("id", "ts")) == "id, ts"
-    assert history.columns_sql(("id", "ts"), prefix="e.") == "e.id, e.ts"
+    assert history.columns_sql(("id", "ts"), alias="e") == "e.id, e.ts"
 
 
 def test_columns_sql_refuses_a_name_that_is_not_an_entries_column():
@@ -1037,6 +1037,14 @@ def test_columns_sql_refuses_a_name_that_is_not_an_entries_column():
     """
     with pytest.raises(ValueError, match="entries table"):
         history.columns_sql(("id", "raw_text; DROP TABLE entries"))
+
+
+def test_columns_sql_refuses_an_alias_that_is_not_an_identifier():
+    """The column names were checked and the table alias was not, so the
+    docstring's promise that an `entries` column is the only thing this can
+    emit was false for anything reaching the second argument."""
+    with pytest.raises(ValueError, match="table alias"):
+        history.columns_sql(("id",), alias="x FROM sqlite_master; -- ")
 
 
 def test_a_saved_row_lands_in_the_right_columns_whatever_their_order(
@@ -1099,3 +1107,38 @@ def test_a_failed_relocate_does_not_cache_a_lazily_resolved_directory(
     assert outcome == history.RelocateOutcome.FAILED
     assert reason and "Verification failed" in reason
     assert history._output_dir is None
+
+
+def test_a_relocate_that_raises_mid_copy_leaves_a_working_store_behind(
+    isolated_storage, tmp_path, monkeypatch
+):
+    """The rollback after a failed copy reopens the way every other site does.
+
+    `relocate`'s exception handler hand-rolled the close/connect/schema/
+    invalidate sequence that `_reopen_conn_locked` owns, so this module carried
+    two reopen semantics and the divergent one was the rollback -- the path
+    where a second failure matters most. It now calls the same helper, with the
+    one difference it actually needs (a second failure leaves `_conn` as None
+    rather than raising out of `relocate`) written as a wrapper around it.
+    """
+    history.save_entry(text="before the move", duration_ms=1)
+    old_dir = history._resolve_output_dir()
+    monkeypatch.setattr(
+        history.shutil, "copy2", MagicMock(side_effect=OSError("disk full"))
+    )
+
+    history.compute_stats()
+    generation_before = history._derived_generation
+
+    outcome, reason = history.relocate(tmp_path / "new")
+
+    assert outcome == history.RelocateOutcome.FAILED
+    assert reason and "disk full" in reason
+    assert history._resolve_output_dir() == old_dir
+    assert history._stats_cache is None
+    assert history._derived_generation != generation_before
+    history.save_entry(text="after the failure", duration_ms=1)
+    assert [e.text for e in history.get_entries()] == [
+        "after the failure",
+        "before the move",
+    ]

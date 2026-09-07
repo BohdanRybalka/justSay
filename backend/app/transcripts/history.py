@@ -323,11 +323,10 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
                     pass
             new_path.unlink(missing_ok=True)
             try:
-                _conn = _connect(old_path)
-                _init_schema(_conn)
+                _reopen_conn_locked(old_dir)
             except sqlite3.Error:
                 _conn = None
-            invalidate_derived_caches_locked()
+                invalidate_derived_caches_locked()
             log.exception("Relocate failed: %s", e)
             return RelocateOutcome.FAILED, f"Move failed: {e}"
 
@@ -349,19 +348,23 @@ ENTRY_COLUMNS = (
 ENTRY_READ_COLUMNS = tuple(c for c in ENTRY_COLUMNS if c != "cleaned_text")
 
 
-def columns_sql(columns: Sequence[str], prefix: str = "") -> str:
+def columns_sql(columns: Sequence[str], alias: str = "") -> str:
     """The column list for a SELECT or INSERT, optionally table-qualified.
 
     The result is interpolated into SQL, which sqlite cannot parameterise for
-    identifiers, so every name is checked against ``ENTRY_COLUMNS`` rather than
-    trusted: an ``entries`` column is the only thing this can ever emit, and a
-    caller that reaches it with a value from a request gets a ``ValueError``
-    instead of a query.
+    identifiers, so nothing here is trusted: every name is checked against
+    ``ENTRY_COLUMNS``, and ``alias`` -- the table alias, written without its
+    dot -- must be a plain identifier. An ``entries`` column, qualified by at
+    most one identifier, is the only thing this can emit; anything else is a
+    ``ValueError`` rather than a query.
     """
     unknown = [name for name in columns if name not in ENTRY_COLUMNS]
     if unknown:
         raise ValueError(f"Not columns of the entries table: {unknown}")
-    return ", ".join(f"{prefix}{name}" for name in columns)
+    if alias and not alias.isidentifier():
+        raise ValueError(f"Not a table alias: {alias!r}")
+    qualifier = f"{alias}." if alias else ""
+    return ", ".join(f"{qualifier}{name}" for name in columns)
 
 
 def _premigration_path(target_dir: Path) -> Path:
