@@ -58,6 +58,13 @@ class MicrophoneRecorder(AudioRecorder):
     async def start(self, session_id: str | None = None) -> None:
         """Open the device, recording `session_id` as the capture's owner.
 
+        An already-open device keeps the owner it was opened with and this call
+        does nothing. The id names a capture rather than a caller, so writing a
+        second caller's id over a live one would hand that capture to a window
+        which never opened it and could then stop or discard it — the exact
+        confusion the id exists to remove. `POST /audio/start` refuses this case
+        with 409 before reaching here, so no caller observes the difference.
+
         `None` keeps the unowned semantics every caller had before spec 119:
         the recorder answers to anyone, which is what a curl caller and
         `smoke_sidecar.py` still rely on.

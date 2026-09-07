@@ -1156,6 +1156,26 @@ async def test_a_stopped_recorder_never_names_an_owner(audio_settings, mock_stre
 
 
 @pytest.mark.asyncio
+async def test_a_live_capture_keeps_the_owner_it_was_opened_with(audio_settings, mock_stream):
+    """A second `start()` does not re-title a capture that is already open.
+
+    The id names the capture, so writing a later caller's id over a live one
+    would hand that capture to a window which never opened it and could then
+    stop or discard it. `POST /audio/start` refuses the case with 409 before
+    the recorder is reached, so this pins the layer below that refusal rather
+    than a reachable path.
+    """
+    recorder = MicrophoneRecorder(audio_settings)
+
+    await recorder.start(OWNER_SESSION_ID)
+    await recorder.start(OTHER_SESSION_ID)
+
+    assert recorder.session_id == OWNER_SESSION_ID
+    with pytest.raises(SessionMismatchError):
+        await recorder.discard(OTHER_SESSION_ID)
+
+
+@pytest.mark.asyncio
 async def test_an_unowned_recording_answers_to_an_unnamed_caller_only(audio_settings, mock_stream):
     """A capture started with no session id keeps today's semantics for the
     callers that have none — a curl caller and `smoke_sidecar.py` still stop
