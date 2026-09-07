@@ -23,30 +23,33 @@
  * downstream of the start had run; 403 and 409 mean it did not.
  */
 
-import { ApiRequestError } from "../api";
+import { isDecisiveRefusal } from "../session";
 
-/** The two refusals `POST /audio/discard` can only produce from inside the
- *  recorder's lock, having compared the caller's id against the live one:
- *  `403` (the recorder is held by a different session) and `409` (nothing is
- *  being recorded). Every other status this window can see is produced before
- *  the route handler runs, or by something other than that comparison, and so
- *  says nothing about who holds the recorder. */
-const DECISIVE_REFUSALS = new Set([403, 409]);
+/** What became of a session this window could not account for.
+ *
+ *  `proven` is the single outcome that establishes the backend was still
+ *  holding it when the probe arrived, which is what a caller racing a request
+ *  against the promise is asking about. `not-live` is every other way an entry
+ *  leaves the map — the recorder answered that this session is not the live
+ *  capture, or the request it belonged to answered after all — and it exists so
+ *  that removing an entry always settles the promise `owe()` handed out.
+ *  Deleting the key without settling retained the caller's reaction for the
+ *  window's life, one dead closure per dictation. */
+export type OwedOutcome = "proven" | "not-live";
 
-/** One session this window cannot account for. `proven` resolves the promise
- *  `owe()` handed back, and only a 200 calls it: that is the single outcome
- *  which proves the backend was still holding the session, which is what a
- *  caller racing a request against it is asking about. */
+/** One session this window cannot account for. `settleWith` settles the promise
+ *  `owe()` handed back, and is called exactly once, by whichever removal took
+ *  the entry out of the map. */
 interface OwedSession {
   probeNotBefore: number;
-  promise: Promise<void>;
-  proven: () => void;
+  promise: Promise<OwedOutcome>;
+  settleWith: (outcome: OwedOutcome) => void;
 }
 
 export type SettleOutcome = "settled" | "deferred" | "nothing-owed";
 
 export interface AbandonedSessions {
-  owe(sessionId: string, probeNotBefore: number): Promise<void>;
+  owe(sessionId: string, probeNotBefore: number): Promise<OwedOutcome>;
   forget(sessionId: string): void;
   settle(now: number): Promise<SettleOutcome>;
 }
@@ -101,17 +104,22 @@ export function createAbandonedSessions(deps: {
       const existing = owed.get(sessionId);
       if (existing) return existing.promise;
 
-      let proven!: () => void;
-      const promise = new Promise<void>((resolve) => {
-        proven = resolve;
+      let settleWith!: (outcome: OwedOutcome) => void;
+      const promise = new Promise<OwedOutcome>((resolve) => {
+        settleWith = resolve;
       });
-      owed.set(sessionId, { probeNotBefore, promise, proven });
+      owed.set(sessionId, { probeNotBefore, promise, settleWith });
       return promise;
     },
 
-    /** The request answered, so there is nothing left to reconcile. */
+    /** The request answered, so there is nothing left to reconcile. The promise
+     *  settles as `not-live`: the session is accounted for, and nothing here
+     *  proved the backend was still holding it. */
     forget(sessionId) {
+      const session = owed.get(sessionId);
+      if (!session) return;
       owed.delete(sessionId);
+      session.settleWith("not-live");
     },
 
     /** Send at most one discard, for the oldest session whose wait has passed.
@@ -148,15 +156,16 @@ export function createAbandonedSessions(deps: {
       try {
         await deps.discard(sessionId);
       } catch (e) {
-        if (!(e instanceof ApiRequestError) || !DECISIVE_REFUSALS.has(e.status)) return "deferred";
+        if (!isDecisiveRefusal(e)) return "deferred";
         owed.delete(sessionId);
+        session.settleWith("not-live");
         return "settled";
       } finally {
         probeInFlight = false;
       }
 
       owed.delete(sessionId);
-      session.proven();
+      session.settleWith("proven");
       return "settled";
     },
   };

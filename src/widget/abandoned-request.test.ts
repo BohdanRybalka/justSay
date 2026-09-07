@@ -49,17 +49,17 @@ describe("createAbandonedSessions", () => {
     expect(discard).toHaveBeenCalledWith(SESSION_A);
   });
 
-  it("resolves the promise it handed out only when a probe answers 200", async () => {
+  it("resolves the promise it handed out as proof only when a probe answers 200", async () => {
     const sessions = createAbandonedSessions({ discard });
-    const proven = vi.fn();
-    void sessions.owe(SESSION_A, 0).then(proven);
+    const settled = vi.fn();
+    void sessions.owe(SESSION_A, 0).then(settled);
 
     const settling = sessions.settle(0);
     releases[0].resolve();
     await expect(settling).resolves.toBe("settled");
     await Promise.resolve();
 
-    expect(proven).toHaveBeenCalled();
+    expect(settled).toHaveBeenCalledWith("proven");
   });
 
   it.each([
@@ -67,8 +67,8 @@ describe("createAbandonedSessions", () => {
     ["a 409, because nothing is recording", new ApiRequestError("not recording", 409)],
   ])("drops a session on %s", async (_name, answer) => {
     const sessions = createAbandonedSessions({ discard });
-    const proven = vi.fn();
-    void sessions.owe(SESSION_A, 0).then(proven);
+    const settled = vi.fn();
+    void sessions.owe(SESSION_A, 0).then(settled);
 
     const settling = sessions.settle(0);
     releases[0].reject(answer);
@@ -76,7 +76,24 @@ describe("createAbandonedSessions", () => {
     await Promise.resolve();
 
     await expect(sessions.settle(0)).resolves.toBe("nothing-owed");
-    expect(proven).not.toHaveBeenCalled();
+    expect(settled).toHaveBeenCalledWith("not-live");
+  });
+
+  it("settles the promise of every session it removes, so no caller waits forever", async () => {
+    const sessions = createAbandonedSessions({ discard });
+    const forgotten = vi.fn();
+    const refused = vi.fn();
+    void sessions.owe(SESSION_A, 0).then(forgotten);
+    void sessions.owe(SESSION_B, 0).then(refused);
+
+    sessions.forget(SESSION_A);
+    const settling = sessions.settle(0);
+    releases[0].reject(new ApiRequestError("not recording", 409));
+    await settling;
+    await Promise.resolve();
+
+    expect(forgotten).toHaveBeenCalledWith("not-live");
+    expect(refused).toHaveBeenCalledWith("not-live");
   });
 
   it.each([
