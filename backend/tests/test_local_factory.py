@@ -229,23 +229,32 @@ def test_factory_module_imports_no_third_party_at_module_level():
 
 
 @pytest.mark.parametrize(
-    "device,expected",
+    "kind_name,device,expected",
     [
-        ("cuda", "float16"),
-        ("metal", "float16"),
-        ("vulkan", "float16"),
-        ("cpu", "int8"),
-        ("auto", "int8"),
-        ("", "int8"),
+        ("FASTER_WHISPER", "cuda", "float16"),
+        ("FASTER_WHISPER", "metal", "int8"),
+        ("FASTER_WHISPER", "vulkan", "int8"),
+        ("FASTER_WHISPER", "cpu", "int8"),
+        ("FASTER_WHISPER", "auto", "int8"),
+        ("FASTER_WHISPER", "", "int8"),
+        ("WHISPER_CPP_SERVER", "metal", "float16"),
+        ("WHISPER_CPP_SERVER", "vulkan", "float16"),
+        ("WHISPER_CPP_SERVER", "cuda", "int8"),
+        ("WHISPER_CPP_SERVER", "cpu", "int8"),
     ],
 )
-def test_compute_type_for_device(device: str, expected: str):
+def test_compute_type_for_device(kind_name: str, device: str, expected: str):
     """The one declaration of the device-to-compute-type rule.
+
+    Keyed on the provider that will load, because the device string alone does
+    not settle it: `"metal"` is faster-whisper's int8 CPU fallback and
+    whisper.cpp's fp16 GPU backend, and `Settings` reporting the second for a
+    machine routed to the first describes a load that cannot happen.
 
     `"auto"` and `""` are here because `whisper_device` is an unconstrained
     `str` (`stt/config.py`): an unresolved or unrecognized device must fall to
     `int8`, never to a GPU compute type the backend cannot honour.
     """
-    from app.stt.local_factory import compute_type_for_device
+    from app.stt.local_factory import LocalProviderKind, compute_type_for_device
 
-    assert compute_type_for_device(device) == expected
+    assert compute_type_for_device(device, LocalProviderKind[kind_name]) == expected

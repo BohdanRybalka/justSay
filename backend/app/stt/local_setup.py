@@ -72,6 +72,7 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
     cuda_probe_available, gpu_name, gpu_vendor = _detect_gpu()
 
     if is_macos_arm64():
+        kind = LocalProviderKind.WHISPER_CPP_SERVER
         device = "metal"
     else:
         from app.core.gpu_probe import GpuVendor
@@ -84,7 +85,7 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
             if device == "auto":
                 device = "cuda" if cuda_probe_available else "cpu"
 
-    compute_type = compute_type_for_device(device)
+    compute_type = compute_type_for_device(device, kind)
 
     gpu_available = device in ("cuda", "vulkan", "metal")
 

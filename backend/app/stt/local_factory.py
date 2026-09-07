@@ -32,16 +32,27 @@ class LocalProviderKind(str, Enum):
     WHISPER_CPP_SERVER = "whisper_cpp_server"
 
 
-_FLOAT16_DEVICES = frozenset({"cuda", "metal", "vulkan"})
+_FLOAT16_DEVICES: dict[LocalProviderKind, frozenset[str]] = {
+    LocalProviderKind.FASTER_WHISPER: frozenset({"cuda"}),
+    LocalProviderKind.WHISPER_CPP_SERVER: frozenset({"metal", "vulkan"}),
+}
 
 
-def compute_type_for_device(device: str) -> str:
-    """The compute type a resolved device string implies.
+def compute_type_for_device(device: str, kind: LocalProviderKind) -> str:
+    """The compute type a device implies for the provider that will load it.
 
-    The one declaration of the rule: every other device -- `"cpu"`, and any
-    unrecognized `whisper_device` the user typed -- gets `"int8"`.
+    The rule keys on the provider because the device string alone does not
+    settle it. faster-whisper reaches CTranslate2, which has a CUDA backend
+    and no Metal or Vulkan one, so a `whisper_device` hand-set to `"metal"` on
+    a machine routed to faster-whisper is an int8 CPU load however it is
+    spelled -- reporting `float16` for it describes a path that cannot load.
+    whisper.cpp is the opposite: Metal and Vulkan are exactly its fp16 GPU
+    backends.
+
+    Every other device -- `"cpu"`, and any unrecognized `whisper_device` the
+    user typed -- gets `"int8"`.
     """
-    return "float16" if device in _FLOAT16_DEVICES else "int8"
+    return "float16" if device in _FLOAT16_DEVICES[kind] else "int8"
 
 
 def is_macos_arm64() -> bool:
