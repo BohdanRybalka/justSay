@@ -13,6 +13,8 @@ carrying ``.values: list[float]``.
 
 import asyncio
 
+from app.core.constants import GEMINI_TIMEOUT_SECONDS
+
 
 class CloudEmbeddingProvider:
     """Gemini cloud embedding provider — model id comes from
@@ -38,11 +40,25 @@ class CloudEmbeddingProvider:
                     "Gemini API key is missing. Go to Settings → Keys and add your key."
                 )
             from google import genai
+            from google.genai import types
 
-            self._client = genai.Client(api_key=self._api_key)
+            self._client = genai.Client(
+                api_key=self._api_key,
+                http_options=types.HttpOptions(
+                    timeout=int(GEMINI_TIMEOUT_SECONDS * 1000)
+                ),
+            )
         return self._client
 
     async def embed(self, text: str) -> list[float]:
+        """One embedding, on a worker that a request timeout can end.
+
+        `asyncio.to_thread` cannot be cancelled, and this is reached from
+        `/history/search` and from the background indexer, so an unanswered
+        embed parks a default-executor worker for the life of the process and
+        the search request never returns. The client's own budget is the only
+        thing that ends it -- the same bound `GeminiSTTProvider` carries.
+        """
         client = self._get_client()
         return await asyncio.to_thread(self._call_embed, client, self._model, text)
 

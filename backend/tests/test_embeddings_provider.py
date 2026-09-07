@@ -10,10 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
+import sys
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.core.constants import GEMINI_TIMEOUT_SECONDS
 from app.core.types import ProviderMode
 from app.embeddings import LOCAL_MISSING_MODEL_REASON, clear_cache, resolve_embedding_provider
 from app.embeddings.cloud import CloudEmbeddingProvider
@@ -377,6 +381,90 @@ async def test_cloud_embedding_embed_parses_response():
     assert result == [0.1, 0.2, 0.3]
     fake_client.models.embed_content.assert_called_once_with(
         model="text-embedding-004", contents="hello world"
+    )
+
+
+_UNANSWERED_EMBED_TIMEOUT_MS = 300
+
+
+def test_cloud_embedding_client_carries_a_timeout_in_milliseconds():
+    """AC: the embedding client is bounded the way the STT client is.
+
+    `embed()` runs under `asyncio.to_thread`, which cannot be cancelled, and it
+    is reached from `/history/search` and from the background indexer. An
+    unanswered embed therefore parks a default-executor worker for the life of
+    the process and the search request never returns -- the same defect the
+    STT client was fixed for, on a second live path.
+
+    `HttpOptions.timeout` is milliseconds, so the assertion is on the scaled
+    number: passing seconds would give a 300 ms budget and break every cloud
+    embedding.
+    """
+    from tests.conftest import fake_genai_modules
+
+    provider = CloudEmbeddingProvider(gemini_api_key="test-key", model="text-embedding-004")
+    client_class = MagicMock()
+
+    with patch.dict(sys.modules, fake_genai_modules(client_class)):
+        provider._get_client()
+
+    http_options = client_class.call_args.kwargs["http_options"]
+    assert http_options.timeout == int(GEMINI_TIMEOUT_SECONDS * 1000)
+
+
+def test_an_embedding_request_that_is_never_answered_raises_a_timeout():
+    """AC: an unanswered embedding call ends instead of holding a worker.
+
+    The socket is bound and listening but never accepted, so the kernel
+    completes the handshake out of the backlog and the request then waits on a
+    response that never comes -- the shape of the hang this bounds, which a
+    refused connection would not reproduce. The call runs on a worker joined
+    with a hard cap, so dropping `http_options` fails this test on
+    `is_alive()` instead of hanging the suite.
+    """
+    pytest.importorskip(
+        "google.genai",
+        reason="the real SDK is what carries the timeout to httpx; it lives in the "
+        "optional cloud extra",
+    )
+    import httpx
+    from google import genai
+    from google.genai import types
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    caught: list[BaseException] = []
+
+    def _call() -> None:
+        client = genai.Client(
+            api_key="test-key",
+            http_options=types.HttpOptions(
+                base_url=f"http://127.0.0.1:{port}",
+                timeout=_UNANSWERED_EMBED_TIMEOUT_MS,
+            ),
+        )
+        try:
+            CloudEmbeddingProvider._call_embed(client, "text-embedding-004", "hello")
+        except BaseException as e:
+            caught.append(e)
+
+    worker = threading.Thread(target=_call, name="embed-timeout-probe", daemon=True)
+    worker.start()
+    worker.join(timeout=5.0)
+    finished = not worker.is_alive()
+    listener.close()
+
+    assert finished, (
+        "the embedding call was still waiting after 5 s, so the client carries no "
+        "timeout and a history search against an unanswering endpoint never returns"
+    )
+    assert caught, "the call returned a result from a server that never answered"
+    assert isinstance(caught[0], httpx.ReadTimeout), (
+        f"the call ended on {caught[0]!r} rather than a read timeout, so it proves "
+        "nothing about the budget on a request that was accepted"
     )
 
 
