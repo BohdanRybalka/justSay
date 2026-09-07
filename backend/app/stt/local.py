@@ -4,6 +4,16 @@ Selected by `app.stt.local_factory.get_local_provider_class()` on
 Windows NVIDIA/no-GPU, Linux and macOS-Intel. On macOS Apple Silicon and on
 Windows AMD/Intel the factory returns `WhisperCppServerSTTProvider` instead,
 which drives a GPU-accelerated whisper.cpp `whisper-server` child process.
+
+The factory is imported inside `_get_model`, not at module level. It imports
+this module back -- lazily, inside `get_local_provider_class()` -- so a
+module-level import here closes a real cycle, and the two ends would then
+disagree about module identity whenever one of them is reimported: a
+`LocalProviderKind` member bound before the reimport still indexes the new
+module's dict, because `Enum.__hash__` is `hash(self._name_)` and the `str`
+mixin supplies `__eq__`. That coincidence is what makes such a split silent
+rather than loud, and `tests/conftest.py`'s module-identity fixtures exist
+because this project has already paid for one.
 """
 
 import asyncio
@@ -57,11 +67,18 @@ class LocalSTTProvider(STTProvider):
                 try:
                     from faster_whisper import WhisperModel
 
+                    from app.stt.local_factory import (
+                        LocalProviderKind,
+                        compute_type_for_device,
+                    )
+
                     device = self._settings.whisper_device
                     if device == "auto":
                         device = self._detect_device()
 
-                    compute_type = "float16" if device == "cuda" else "int8"
+                    compute_type = compute_type_for_device(
+                        device, LocalProviderKind.FASTER_WHISPER
+                    )
 
                     log.info(
                         "Loading whisper: model=%s device=%s compute=%s",

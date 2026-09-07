@@ -226,3 +226,117 @@ def test_factory_module_imports_no_third_party_at_module_level():
     assert_module_binds_no_third_party(
         "app.stt.local_factory", ("faster_whisper", "local_whisper_cpp")
     )
+
+
+@pytest.mark.parametrize(
+    "kind_name,device,expected",
+    [
+        ("FASTER_WHISPER", "cuda", "float16"),
+        ("FASTER_WHISPER", "metal", "int8"),
+        ("FASTER_WHISPER", "vulkan", "int8"),
+        ("FASTER_WHISPER", "cpu", "int8"),
+        ("FASTER_WHISPER", "auto", "int8"),
+        ("FASTER_WHISPER", "", "int8"),
+        ("WHISPER_CPP_SERVER", "metal", "float16"),
+        ("WHISPER_CPP_SERVER", "vulkan", "float16"),
+        ("WHISPER_CPP_SERVER", "cuda", "int8"),
+        ("WHISPER_CPP_SERVER", "cpu", "int8"),
+    ],
+)
+def test_compute_type_for_device(kind_name: str, device: str, expected: str):
+    """The one declaration of the device-to-compute-type rule.
+
+    Keyed on the provider that will load, because the device string alone does
+    not settle it: `"metal"` is faster-whisper's int8 CPU fallback and
+    whisper.cpp's fp16 GPU backend, and `Settings` reporting the second for a
+    machine routed to the first describes a load that cannot happen.
+
+    `"auto"` and `""` are here because `whisper_device` is an unconstrained
+    `str` (`stt/config.py`): an unresolved or unrecognized device must fall to
+    `int8`, never to a GPU compute type the backend cannot honour.
+    """
+    from app.stt.local_factory import LocalProviderKind, compute_type_for_device
+
+    assert compute_type_for_device(device, LocalProviderKind[kind_name]) == expected
+
+
+@pytest.mark.parametrize(
+    "kind_name,device,expected",
+    [
+        ("FASTER_WHISPER", "cuda", True),
+        ("FASTER_WHISPER", "metal", False),
+        ("FASTER_WHISPER", "vulkan", False),
+        ("FASTER_WHISPER", "cpu", False),
+        ("WHISPER_CPP_SERVER", "metal", True),
+        ("WHISPER_CPP_SERVER", "vulkan", True),
+        ("WHISPER_CPP_SERVER", "cuda", False),
+        ("WHISPER_CPP_SERVER", "cpu", False),
+    ],
+)
+def test_is_accelerated_device(kind_name: str, device: str, expected: bool):
+    """`gpu_available` on the Settings screen reads this, and so does the
+    compute type, so the two cannot disagree about the same machine."""
+    from app.stt.local_factory import LocalProviderKind, is_accelerated_device
+
+    assert is_accelerated_device(device, LocalProviderKind[kind_name]) is expected
+
+
+def test_an_unlisted_provider_kind_accelerates_nothing_instead_of_raising():
+    """A third `LocalProviderKind` -- which this module's docstring already
+    anticipates -- must degrade `GET /stt/local/status` to the conservative CPU
+    answer, not turn it into a 500 on a `KeyError`."""
+    from app.stt import local_factory
+
+    unlisted = "a_kind_this_mapping_does_not_list"
+
+    assert local_factory.is_accelerated_device("cuda", unlisted) is False
+    assert local_factory.compute_type_for_device("metal", unlisted) == "int8"
+
+
+def test_the_provider_module_does_not_import_the_factory_at_module_level():
+    """The factory imports `app.stt.local` back, so this direction must stay lazy.
+
+    With both ends bound at import time the cycle is real, and it survives a
+    reimport of either module only by coincidence: `Enum.__hash__` is
+    `hash(self._name_)` and the `str` mixin supplies `__eq__`, so a
+    `LocalProviderKind` member captured before the reimport still indexes the
+    new module's mapping. A split module identity that behaves correctly is the
+    kind this project has already been burnt by -- it fails somewhere else,
+    later, on an `is` check.
+
+    A submodule reaches this file under two spellings and both are collected:
+    `import app.stt.local_factory` names it directly, and
+    `from app.stt import local_factory` names the package with the module as an
+    alias. Stage 6 found the second shape invisible here -- the check saw only
+    `app.stt` -- which would have let the cycle back in under the spelling this
+    file does not happen to use today.
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "app" / "stt" / "local.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+
+    module_level = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    ]
+    imported = {
+        getattr(node, "module", None) or ""
+        for node in module_level
+        if isinstance(node, ast.ImportFrom)
+    } | {
+        f"{node.module}.{alias.name}"
+        for node in module_level
+        if isinstance(node, ast.ImportFrom) and node.module
+        for alias in node.names
+    } | {
+        alias.name for node in module_level if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+
+    assert "app.stt.local_factory" not in imported, (
+        "app.stt.local imports the factory at module level, closing the cycle "
+        "the factory's own function-level import of this module opens"
+    )

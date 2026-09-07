@@ -75,6 +75,45 @@ def test_check_status_uses_cuda_when_gpu_auto():
     assert status.compute_type == "float16"
 
 
+def test_check_status_reports_int8_for_a_gpu_device_faster_whisper_cannot_load():
+    """A `whisper_device` typed by hand does not change which provider loads.
+
+    On a machine routed to faster-whisper, CTranslate2 has no Metal or Vulkan
+    backend and rejects the device at load, so `"metal"` there is an int8 CPU
+    load. Reporting `float16` would put an accelerated local engine on the
+    Settings screen for a machine that is about to fail to start one.
+    """
+    settings = STTSettings(whisper_device="metal")
+
+    with _apply(_patches(True, (False, None, "none"))):
+        status = check_status(settings)
+
+    assert status.device == "metal"
+    assert status.compute_type == "int8"
+    assert status.gpu_available is False
+    assert status.gpu_vendor == "none"
+
+
+def test_check_status_never_claims_a_gpu_the_compute_type_says_it_cannot_use():
+    """`gpu_available` and `compute_type` answer the same question.
+
+    They were derived from two different rules: `compute_type` from the
+    provider that loads, `gpu_available` from the device string alone. A
+    `whisper_device` of `"metal"` or `"vulkan"` on a machine routed to
+    faster-whisper therefore reported `int8` beside `gpu_available=True` --
+    Settings showing an accelerated engine next to a CPU compute type, for a
+    load CTranslate2 rejects.
+    """
+    for device in ("metal", "vulkan", "cuda", "cpu", "wat"):
+        with _apply(_patches(True, (False, None, "none"))):
+            status = check_status(STTSettings(whisper_device=device))
+
+        assert status.gpu_available is (status.compute_type == "float16"), (
+            f"{device!r} reports gpu_available={status.gpu_available} beside "
+            f"compute_type={status.compute_type!r}"
+        )
+
+
 def test_check_status_respects_explicit_cpu_device():
     settings = STTSettings(whisper_device="cpu")
 

@@ -68,7 +68,7 @@ async def process_audio(
     if vad is not None and vad.is_silent:
         discard_log = (
             "Discarding no-speech audio (layer=vad): speech_hops=%d/%d, max_prob=%.3f",
-            (vad.speech_frame_count, vad.total_frame_count, vad.max_probability),
+            (vad.speech_hop_count, vad.total_hop_count, vad.max_probability),
         )
     elif analysis is not None and analysis.is_silent:
         discard_log = (

@@ -350,3 +350,29 @@ def test_the_frontend_build_scripts_create_both_vendor_directories(vendor_dir):
         assert vendor_dir in scripts[script_name], (
             f"npm run {script_name} does not create src-tauri/resources/{vendor_dir}"
         )
+
+
+def test_the_hang_guard_plugin_is_declared_and_active(pytestconfig):
+    """`@pytest.mark.timeout` is a no-op unless `pytest-timeout` is installed.
+
+    The macOS pipe tests are guarded by that marker because the regression they
+    catch is a parked writer, not a wrong value: without a timeout the run does
+    not fail, it hangs until GitHub kills the job six hours later. An
+    unregistered marker raises `PytestUnknownMarkWarning` and passes, so the
+    guard silently disappears wherever the plugin is absent -- which is every
+    machine that installs `justsay-backend[dev]` and does not happen to have it
+    already.
+    """
+    section = PYPROJECT.read_text(encoding="utf-8").split(
+        "[project.optional-dependencies]", 1
+    )[1].split("\n[", 1)[0]
+    dev_extra = section.split("dev = [", 1)[1].split("]", 1)[0]
+
+    assert "pytest-timeout" in dev_extra, (
+        "pytest-timeout is not in the dev extra, so CI installs no timeout "
+        "plugin and every @pytest.mark.timeout guard in the suite is inert"
+    )
+    assert pytestconfig.pluginmanager.hasplugin("timeout"), (
+        "the timeout plugin is not loaded in this run, so the hang guards in "
+        "tests/test_macos_tap.py cannot fail a regression -- they hang on it"
+    )

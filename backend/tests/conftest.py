@@ -16,6 +16,7 @@ import shutil
 import warnings
 from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -673,3 +674,33 @@ def _no_background_indexer_by_default(monkeypatch, request):
 
     if not request.node.get_closest_marker("background_indexer"):
         monkeypatch.setattr(vector_store, "run_background_indexer", _noop)
+
+
+def fake_genai_modules(client_class) -> dict[str, ModuleType]:
+    """A `google.genai` stand-in for tests that must run without the cloud extra.
+
+    `HttpOptions` keeps whatever keywords it is given so an assertion can read
+    the scaled timeout back; nothing else about the SDK is modelled. Both
+    Gemini clients -- STT and embeddings -- import the SDK inside their
+    `_get_client`, so patching the real `google.genai.Client` needs a package
+    the `[cloud]` extra may not have installed. This is shared rather than
+    written twice because a second copy is a second thing to keep in step with
+    the SDK.
+    """
+
+    class _HttpOptions:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    types_module = ModuleType("google.genai.types")
+    types_module.HttpOptions = _HttpOptions
+    genai_module = ModuleType("google.genai")
+    genai_module.Client = client_class
+    genai_module.types = types_module
+    google_module = ModuleType("google")
+    google_module.genai = genai_module
+    return {
+        "google": google_module,
+        "google.genai": genai_module,
+        "google.genai.types": types_module,
+    }

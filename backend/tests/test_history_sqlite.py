@@ -11,7 +11,7 @@ import contextlib
 import sqlite3
 import threading
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -969,3 +969,176 @@ def test_get_entries_clamps_its_own_limit(isolated_storage, tmp_path):
     assert len(history.get_entries(limit=0)) == 1
     assert len(history.get_entries(limit=5, offset=-3)) == 5
 
+
+
+def test_entry_columns_match_the_bootstrapped_schema(isolated_storage, tmp_path):
+    """`ENTRY_COLUMNS` is checked against the DDL, not against another copy of itself.
+
+    Adding a column to `_DDL_*` without listing it here -- or reordering the
+    declaration away from the table -- breaks the INSERT that builds its
+    placeholder run from `len(ENTRY_COLUMNS)`, so the drift fails here first.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    conn = sqlite3.connect(target / "history.db")
+    try:
+        schema_columns = tuple(
+            row[1] for row in conn.execute("PRAGMA table_info(entries)").fetchall()
+        )
+    finally:
+        conn.close()
+    assert history.ENTRY_COLUMNS == schema_columns
+
+
+def test_entry_read_columns_are_exactly_what_row_to_entry_reads(
+    isolated_storage, tmp_path
+):
+    """The read list drops `cleaned_text` and nothing else.
+
+    `get_entries` builds its SELECT from `ENTRY_READ_COLUMNS`, so a column
+    dropped from it becomes a `KeyError` in `_row_to_entry` at runtime.
+
+    The expectation comes from the table rather than from `ENTRY_COLUMNS`.
+    `ENTRY_READ_COLUMNS` is *defined* as `ENTRY_COLUMNS` minus `cleaned_text`,
+    so comparing the two restates the definition and holds no matter what the
+    schema does; reading `PRAGMA table_info(entries)` is what makes a column
+    added to the DDL and left out of the read list fail here.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    history.save_entry("hello world", 1200, language="uk", style="normal")
+    entries = history.get_entries()
+
+    conn = sqlite3.connect(target / "history.db")
+    try:
+        schema_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(entries)").fetchall()
+        }
+    finally:
+        conn.close()
+
+    assert set(history.ENTRY_READ_COLUMNS) == schema_columns - {"cleaned_text"}
+    assert len(entries) == 1
+    assert entries[0].text == "hello world"
+
+
+def test_columns_sql_qualifies_every_name_with_the_alias():
+    """The FTS lane joins `entries` as `e`, so every name must carry the alias."""
+    assert history.columns_sql(("id", "ts")) == "id, ts"
+    assert history.columns_sql(("id", "ts"), alias="e") == "e.id, e.ts"
+
+
+def test_columns_sql_refuses_a_name_that_is_not_an_entries_column():
+    """The one place this module interpolates identifiers into SQL.
+
+    sqlite cannot parameterise a column name, so the safety of `columns_sql`
+    rested entirely on a docstring asking callers not to pass a request value.
+    The check makes that a property of the function.
+    """
+    with pytest.raises(ValueError, match="entries table"):
+        history.columns_sql(("id", "raw_text; DROP TABLE entries"))
+
+
+def test_columns_sql_refuses_an_alias_that_is_not_an_identifier():
+    """The column names were checked and the table alias was not, so the
+    docstring's promise that an `entries` column is the only thing this can
+    emit was false for anything reaching the second argument."""
+    with pytest.raises(ValueError, match="table alias"):
+        history.columns_sql(("id",), alias="x FROM sqlite_master; -- ")
+
+
+def test_a_saved_row_lands_in_the_right_columns_whatever_their_order(
+    isolated_storage, tmp_path, monkeypatch
+):
+    """AC: the INSERT's names and its values cannot drift apart.
+
+    The column names come from `ENTRY_COLUMNS` while the values were a
+    hand-ordered literal, with nothing tying the two orders together: a
+    consistent reorder of the DDL and `ENTRY_COLUMNS` still passes the schema
+    test above and writes every row with its values one column out, which
+    sqlite's type affinity accepts in silence. Reordering the declaration here
+    is that reorder, and named placeholders are what survive it.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    monkeypatch.setattr(history, "ENTRY_COLUMNS", tuple(reversed(history.ENTRY_COLUMNS)))
+
+    history.save_entry(
+        text="hello world",
+        duration_ms=1200,
+        language="uk",
+        style="normal",
+        model_name="gemini/flash",
+        tokens_used=42,
+        audio_duration_seconds=3.5,
+        word_count=2,
+    )
+
+    conn = sqlite3.connect(target / "history.db")
+    try:
+        row = conn.execute(
+            "SELECT raw_text, duration_ms, model_name, tokens_used, word_count "
+            "FROM entries"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row == ("hello world", 1200, "gemini/flash", 42, 2)
+
+
+def test_a_failed_relocate_does_not_cache_a_lazily_resolved_directory(
+    isolated_storage, tmp_path, monkeypatch
+):
+    """AC: the verification-failure rollback leaves `_output_dir` as it found it.
+
+    `_resolve_output_dir` resolves a fallback fresh on every call and is never
+    cached (ADR 014): the store must follow a `JUSTSAY_DATA_DIR` that changes
+    under it. The rollback runs with `_output_dir` unset whenever `relocate`
+    was reached without a `bootstrap` first, so writing the resolved fallback
+    there pins it for the life of the process.
+    """
+    monkeypatch.setattr(history, "_output_dir", None)
+    monkeypatch.setattr(history, "_conn", None)
+    history.save_entry(text="x", duration_ms=1)
+    monkeypatch.setattr(history, "_verify_db_row_count", lambda *_a, **_kw: False)
+
+    outcome, reason = history.relocate(tmp_path / "new")
+
+    assert outcome == history.RelocateOutcome.FAILED
+    assert reason and "Verification failed" in reason
+    assert history._output_dir is None
+
+
+def test_a_relocate_that_raises_mid_copy_leaves_a_working_store_behind(
+    isolated_storage, tmp_path, monkeypatch
+):
+    """The rollback after a failed copy reopens the way every other site does.
+
+    `relocate`'s exception handler hand-rolled the close/connect/schema/
+    invalidate sequence that `_reopen_conn_locked` owns, so this module carried
+    two reopen semantics and the divergent one was the rollback -- the path
+    where a second failure matters most. It now calls the same helper, with the
+    one difference it actually needs (a second failure leaves `_conn` as None
+    rather than raising out of `relocate`) written as a wrapper around it.
+    """
+    history.save_entry(text="before the move", duration_ms=1)
+    old_dir = history._resolve_output_dir()
+    monkeypatch.setattr(
+        history.shutil, "copy2", MagicMock(side_effect=OSError("disk full"))
+    )
+
+    history.compute_stats()
+    generation_before = history._derived_generation
+
+    outcome, reason = history.relocate(tmp_path / "new")
+
+    assert outcome == history.RelocateOutcome.FAILED
+    assert reason and "disk full" in reason
+    assert history._resolve_output_dir() == old_dir
+    assert history._stats_cache is None
+    assert history._derived_generation != generation_before
+    history.save_entry(text="after the failure", duration_ms=1)
+    assert [e.text for e in history.get_entries()] == [
+        "after the failure",
+        "before the move",
+    ]

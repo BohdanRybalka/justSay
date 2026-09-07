@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 
 from app.core.audio_formats import mime_for_extension
+from app.core.constants import GEMINI_TIMEOUT_SECONDS
 from app.stt.base import STTProvider, TranscriptionResult, clean_transcript_text
 from app.stt.config import STTSettings
 from app.stt.languages import LANGUAGE_NAMES
@@ -41,8 +42,14 @@ class GeminiSTTProvider(STTProvider):
                     "Gemini API key is missing. Go to Settings → Keys and add your key."
                 )
             from google import genai
+            from google.genai import types
 
-            self._client = genai.Client(api_key=self._settings.gemini_api_key)
+            self._client = genai.Client(
+                api_key=self._settings.gemini_api_key,
+                http_options=types.HttpOptions(
+                    timeout=int(GEMINI_TIMEOUT_SECONDS * 1000)
+                ),
+            )
         return self._client
 
     def cleanup(self) -> None:
