@@ -367,10 +367,16 @@ class MacOSTapSource(SystemAudioSource):
         stays in `STOPPING` for the life of the process (ADR 052).
 
         The readers share one `_READER_JOIN_TIMEOUT_SECONDS` deadline rather
-        than getting one each, because this runs inline on the event loop
-        thread (`pipeline/router.py`'s `await recorder.start()`) and a
-        per-reader budget multiplies the freeze by however many readers there
-        are. Whatever is still parked when the deadline passes keeps its pipe
+        than getting one each, because this runs on `MeetingRecorder`'s single
+        device worker (ADR 048), which serialises every lifecycle transition:
+        the time spent here is time the awaiting `stop()` request waits and the
+        next `start()` cannot begin, and a per-reader budget multiplies it by
+        however many readers there are. It is not the event loop that blocks --
+        an earlier draft of this docstring, of ADR 052 and of the test below
+        all said it was, citing an `await recorder.start()` in
+        `pipeline/router.py` that does not exist; the call is
+        `audio/router.py:100` and `:154`, and it awaits a future the worker
+        resolves. Whatever is still parked when the deadline passes keeps its pipe
         open here and is handed to `_close_when_idle`, so a stuck reader delays
         the close instead of leaking the descriptor: `stop()` has already
         dropped every reference this object held, and without that handoff

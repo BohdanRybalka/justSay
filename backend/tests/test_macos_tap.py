@@ -783,12 +783,12 @@ def test_shutdown_spends_one_join_budget_on_all_the_readers_together(
 ):
     """AC: the join budget is shared, not handed out per reader.
 
-    `_shutdown` runs inline on the event-loop thread -- `pipeline/router.py`
-    awaits `recorder.start()` without a `to_thread` -- so every second it
-    spends is a second the whole backend is frozen, which is the freeze JS-99
-    already filed. A per-reader budget multiplies that by however many readers
-    there are, and it kept evaluating readers after one was already known
-    stuck.
+    `_shutdown` runs on `MeetingRecorder`'s single device worker (ADR 048), the
+    thread every lifecycle transition is serialised through, so every second it
+    spends is a second the awaiting `stop()` request waits and the next
+    `start()` cannot begin. A per-reader budget multiplies that by however many
+    readers there are, and it kept evaluating readers after one was already
+    known stuck.
     """
     monkeypatch.setattr(macos_tap, "_READER_JOIN_TIMEOUT_SECONDS", 0.5)
     process = _PipedTapProcess()
