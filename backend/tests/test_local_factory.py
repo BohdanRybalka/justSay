@@ -258,3 +258,40 @@ def test_compute_type_for_device(kind_name: str, device: str, expected: str):
     from app.stt.local_factory import LocalProviderKind, compute_type_for_device
 
     assert compute_type_for_device(device, LocalProviderKind[kind_name]) == expected
+
+
+def test_the_provider_module_does_not_import_the_factory_at_module_level():
+    """The factory imports `app.stt.local` back, so this direction must stay lazy.
+
+    With both ends bound at import time the cycle is real, and it survives a
+    reimport of either module only by coincidence: `Enum.__hash__` is
+    `hash(self._name_)` and the `str` mixin supplies `__eq__`, so a
+    `LocalProviderKind` member captured before the reimport still indexes the
+    new module's mapping. A split module identity that behaves correctly is the
+    kind this project has already been burnt by -- it fails somewhere else,
+    later, on an `is` check.
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "app" / "stt" / "local.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+
+    module_level = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    ]
+    imported = {
+        getattr(node, "module", None) or ""
+        for node in module_level
+        if isinstance(node, ast.ImportFrom)
+    } | {
+        alias.name for node in module_level if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+
+    assert "app.stt.local_factory" not in imported, (
+        "app.stt.local imports the factory at module level, closing the cycle "
+        "the factory's own function-level import of this module opens"
+    )
