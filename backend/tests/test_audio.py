@@ -6,7 +6,8 @@ import sys
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -972,6 +973,18 @@ HOSTILE_SESSION_IDS = [
     12345,
 ]
 
+def _transcription_the_provider_would_have_returned() -> SimpleNamespace:
+    """Stands in for `ProcessingResult`, whose fields the router splats into
+    `DictateResponse`. Mirrors `test_pipeline_router.py`'s `_fake_result`."""
+    return SimpleNamespace(
+        text="hello",
+        duration_ms=100,
+        copied_to_clipboard=True,
+        model_name="mock/provider",
+        fallback_reason=None,
+    )
+
+
 _MUTATING_ENDPOINTS = ["/audio/start", "/audio/stop", "/audio/discard", "/pipeline/dictate"]
 
 
@@ -1069,6 +1082,12 @@ async def test_a_body_less_request_keeps_the_pre_session_contract(client, wired_
     answer is 422, and the point of asserting it here is that the *shape* of
     every mutating endpoint's no-body answer is pinned in one place rather
     than discovered by a curl caller.
+
+    `process_audio` is stubbed because this asserts the *binding*, not the
+    transcription: without the stub `/pipeline/dictate` reaches a real STT
+    provider, which answers 500 wherever no cloud key is configured. That is
+    a fact about the machine rather than about the contract, and it passed
+    locally and failed on CI for exactly that reason.
     """
     recorder, _ = wired_recorder
     if path != "/audio/start":
@@ -1076,7 +1095,11 @@ async def test_a_body_less_request_keeps_the_pre_session_contract(client, wired_
         assert recorder.session_id is None
         _simulate_audio_callback(recorder)
 
-    resp = await client.post(path)
+    with patch(
+        "app.pipeline.router.process_audio",
+        AsyncMock(return_value=_transcription_the_provider_would_have_returned()),
+    ):
+        resp = await client.post(path)
 
     assert resp.status_code == (422 if path == "/audio/discard" else 200)
 
