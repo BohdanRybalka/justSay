@@ -1,73 +1,10 @@
-"""Resource endpoint extensions and history aggregation."""
+"""History aggregation: `compute_stats` bucketing and the `/history/stats` endpoint."""
 
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.core import router as core_router
-from app.core.gpu_probe import GpuProbeResult, GpuVendor
 from app.transcripts import history
-
-
-@pytest.mark.asyncio
-async def test_resources_includes_cpu_percent_and_gb(client):
-    """`/resources` must expose process CPU% and GB-formatted RAM."""
-    resp = await client.get("/resources")
-    assert resp.status_code == 200
-    data = resp.json()
-
-    assert data["cpu_percent_process"] >= 0
-    assert data["cpu_percent_total"] >= 0
-
-    assert data["ram_total_gb"] > 0
-    assert data["pid_ram_gb"] >= 0
-    assert abs(data["ram_total_gb"] - data["ram_total_mb"] / 1024) < 0.01
-    assert abs(data["pid_ram_gb"] - data["pid_ram_mb"] / 1024) < 0.01
-
-
-
-
-def test_get_gpu_info_returns_none_when_probe_reports_none(monkeypatch):
-    monkeypatch.setattr(
-        "app.core.gpu_probe.probe_gpu",
-        lambda: GpuProbeResult(vendor=GpuVendor.NONE),
-    )
-    assert core_router._get_gpu_info() is None
-
-
-def test_get_gpu_info_nvidia_populates_used_and_free(monkeypatch):
-    """torch.cuda-shaped result: name/vendor/total/used/free all populated."""
-    monkeypatch.setattr(
-        "app.core.gpu_probe.probe_gpu",
-        lambda: GpuProbeResult(
-            vendor=GpuVendor.NVIDIA, name="RTX 4090",
-            vram_total_mb=24576, vram_used_mb=2048, vram_free_mb=22528,
-        ),
-    )
-    info = core_router._get_gpu_info()
-    assert info is not None
-    assert info.name == "RTX 4090"
-    assert info.vendor == "nvidia"
-    assert info.vram_total_mb == 24576
-    assert info.vram_used_mb == 2048
-    assert info.vram_free_mb == 22528
-
-
-def test_get_gpu_info_amd_reports_total_only(monkeypatch):
-    """Registry-shaped AMD result has no live-usage reading — used/free both None."""
-    monkeypatch.setattr(
-        "app.core.gpu_probe.probe_gpu",
-        lambda: GpuProbeResult(
-            vendor=GpuVendor.AMD, name="AMD Radeon RX 5700 XT", vram_total_mb=8172,
-        ),
-    )
-    info = core_router._get_gpu_info()
-    assert info is not None
-    assert info.name == "AMD Radeon RX 5700 XT"
-    assert info.vendor == "amd"
-    assert info.vram_total_mb == 8172
-    assert info.vram_used_mb is None
-    assert info.vram_free_mb is None
 
 
 def _insert_entry(words: int, lang: str, model: str, when: datetime) -> None:

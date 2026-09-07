@@ -39,8 +39,6 @@ class GpuProbeResult:
     vendor: GpuVendor
     name: str | None = None
     vram_total_mb: int | None = None
-    vram_used_mb: int | None = None
-    vram_free_mb: int | None = None
 
 
 _cache_lock = threading.Lock()
@@ -115,7 +113,7 @@ def _probe_env_override() -> GpuProbeResult | None:
 
 
 def _probe_torch_cuda() -> GpuProbeResult | None:
-    """NVIDIA via torch.cuda — the only source with a live used/free VRAM split."""
+    """NVIDIA via torch.cuda — checked before the `nvidia-smi` CLI fallback."""
     try:
         import torch
     except ImportError:
@@ -127,16 +125,11 @@ def _probe_torch_cuda() -> GpuProbeResult | None:
 
         props = torch.cuda.get_device_properties(0)
         total = props.total_memory
-        reserved = torch.cuda.memory_reserved(0)
-        allocated = torch.cuda.memory_allocated(0)
-        free = total - reserved
 
         return GpuProbeResult(
             vendor=GpuVendor.NVIDIA,
             name=props.name,
             vram_total_mb=total // (1024 * 1024),
-            vram_used_mb=allocated // (1024 * 1024),
-            vram_free_mb=free // (1024 * 1024),
         )
     except Exception as e:
         log.warning("torch.cuda probe failed: %s", e)
@@ -144,7 +137,7 @@ def _probe_torch_cuda() -> GpuProbeResult | None:
 
 
 def _probe_nvidia_smi() -> GpuProbeResult | None:
-    """NVIDIA via the `nvidia-smi` CLI — total VRAM only, no used/free split.
+    """NVIDIA via the `nvidia-smi` CLI — the fallback when torch is absent.
 
     Checked before any AMD/Intel source so an NVIDIA box is never
     misclassified by an AMD/Intel-oriented probe finding an unrelated

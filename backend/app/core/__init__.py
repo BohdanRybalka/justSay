@@ -14,7 +14,7 @@ Two modules deliberately break that rule:
   rather than beneath them, and lives here only because that is where callers
   already look for `settings`. See ADR 044.
 - `router.py` serves the operational endpoints (`/health`, `/config`,
-  `/resources`, `/shutdown`) and reads the active STT provider to report it.
+  `/shutdown`) and reads the active STT provider to report it.
 
 Until spec 076 this package also held the transcript store, the user
 preferences and four HTTP routers, which made it simultaneously above and below

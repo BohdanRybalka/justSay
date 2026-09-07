@@ -86,7 +86,7 @@ def test_nvidia_source_wins_over_windows_registry_amd(monkeypatch):
         gpu_probe, "_probe_torch_cuda",
         lambda: GpuProbeResult(
             vendor=GpuVendor.NVIDIA, name="RTX 4090",
-            vram_total_mb=24576, vram_used_mb=1024, vram_free_mb=23552,
+            vram_total_mb=24576,
         ),
     )
     registry_spy = MagicMock(
@@ -178,8 +178,6 @@ def test_torch_cuda_probe_computes_vram_from_real_total_memory_attribute():
     fake_torch = MagicMock()
     fake_torch.cuda.is_available.return_value = True
     fake_torch.cuda.get_device_properties.return_value = fake_props
-    fake_torch.cuda.memory_reserved.return_value = 2 * 1024 * 1024 * 1024
-    fake_torch.cuda.memory_allocated.return_value = 1 * 1024 * 1024 * 1024
 
     with patch.dict("sys.modules", {"torch": fake_torch}):
         result = gpu_probe._probe_torch_cuda()
@@ -188,8 +186,6 @@ def test_torch_cuda_probe_computes_vram_from_real_total_memory_attribute():
     assert result.vendor == GpuVendor.NVIDIA
     assert result.name == "NVIDIA GeForce RTX 3060"
     assert result.vram_total_mb == 12 * 1024
-    assert result.vram_used_mb == 1 * 1024
-    assert result.vram_free_mb == (12 - 2) * 1024
 
 
 def test_nvidia_smi_probe_returns_none_when_binary_missing(monkeypatch):

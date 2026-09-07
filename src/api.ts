@@ -538,32 +538,6 @@ export interface LocalSttStatus {
   last_error: string | null;
 }
 
-export interface GpuInfo {
-  name: string;
-  vendor: string;
-  vram_total_mb: number;
-  /** Only populated via the torch.cuda detection source — null for the
-   *  Windows-registry AMD/Intel source, which has no live-usage reading. */
-  vram_used_mb: number | null;
-  vram_free_mb: number | null;
-}
-
-export interface ResourceInfo {
-  cpu_cores: number;
-  cpu_threads: number;
-  cpu_percent_total: number;
-  cpu_percent_process: number;
-  ram_total_mb: number;
-  ram_used_mb: number;
-  ram_available_mb: number;
-  ram_total_gb: number;
-  ram_used_gb: number;
-  ram_available_gb: number;
-  pid_ram_mb: number;
-  pid_ram_gb: number;
-  gpu: GpuInfo | null;
-}
-
 export interface HistoryStats {
   total_entries: number;
   total_words: number;
@@ -638,8 +612,6 @@ export const api = {
 
   getMeetingStatus: () =>
     request<MeetingStatus>("GET", "/audio/meeting/status", undefined, REREADABLE),
-
-  resources: () => request<ResourceInfo>("GET", "/resources", undefined, REREADABLE),
 
   sttLocalStatus: () => request<LocalSttStatus>("GET", "/stt/local/status", undefined, REREADABLE),
 
