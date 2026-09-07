@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.audio.dependencies import get_recorder
 from app.audio.recorder import MicrophoneRecorder
+from app.audio.session import SessionMismatchError, SessionRef
 from app.core.config import settings
 from app.core.constants import MAX_UPLOAD_SIZE
 from app.pipeline.service import process_audio
@@ -46,6 +47,7 @@ class DictateResponse(BaseModel):
 @router.post("/dictate", response_model=DictateResponse)
 async def dictate(
     background_tasks: BackgroundTasks,
+    ref: SessionRef | None = None,
     language: str = "uk",
     style: str = "normal",
     copy_to_clipboard: bool = True,
@@ -56,11 +58,19 @@ async def dictate(
     Call POST /audio/start first, then call this endpoint when done speaking.
     The recorder reports the captured duration via ``last_duration_seconds`` so
     the pipeline can route short audio to Groq without re-reading the WAV.
+
+    The optional ``session_id`` body names the recording this dictation means,
+    and a stranger's is refused with 403 before anything is transcribed. The
+    stop is this handler's first act, which is what lets a client that never
+    got an answer ask ``POST /audio/discard`` whether the handler ran at all.
     """
     if not recorder.is_recording:
         raise HTTPException(status_code=409, detail="Not recording. Call POST /audio/start first")
 
-    audio_path = await recorder.stop()
+    try:
+        audio_path = await recorder.stop(ref.session_id if ref else None)
+    except SessionMismatchError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
     captured_duration = recorder.last_duration_seconds
     log.info(
         "Dictate: stopped recording. path=%s duration=%.2fs language=%s style=%s",

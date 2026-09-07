@@ -175,3 +175,20 @@ async def test_open_mode_no_token_configured_serves_protected_endpoints(client):
 
     resp = await client.put("/settings", json={"shortcut": "Ctrl+Alt+KeyM"})
     assert resp.status_code == 200
+@pytest.mark.anyio
+async def test_discard_is_not_auth_exempt(client, token):
+    """Spec 119 AC 4: the new endpoint ends a live capture, so it needs the token.
+
+    `POST /audio/discard` is the one endpoint whose whole purpose is to stop a
+    recording somebody else's window started, which is exactly the capability
+    an unauthenticated caller on the loopback interface must not have. The 401
+    also proves the route body never ran: the ASGI client skips the lifespan,
+    so `app.state.recorder` does not exist and a request that reached the
+    handler would have failed differently.
+    """
+    resp = await client.post(
+        "/audio/discard", json={"session_id": "0123456789abcdef0123456789abcdef"}
+    )
+
+    assert resp.status_code == 401
+    assert "/audio/discard" not in _EXEMPT_PATHS

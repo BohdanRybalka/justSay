@@ -13,8 +13,22 @@ import sounddevice as sd
 from app.audio.analysis import rms_dbfs
 from app.audio.base import AudioRecorder, write_wav
 from app.audio.config import AudioSettings
+from app.audio.session import SESSION_MISMATCH_DETAIL, SessionMismatchError
 
 log = logging.getLogger(__name__)
+
+
+class NotRecordingError(Exception):
+    """A request to end a capture arrived when no capture was running.
+
+    Named rather than raised as a bare ``RuntimeError`` so that the router can
+    map exactly this state to its 409 instead of wrapping a whole coroutine
+    body in ``except RuntimeError``. That shape is the one [JS-107] was: any
+    unrelated ``RuntimeError`` raised later inside the handler's call would be
+    answered as "not recording", and the client reads that 409 as *proof* that
+    its abandoned request was already processed.
+    """
+
 
 
 class MicrophoneRecorder(AudioRecorder):
@@ -26,6 +40,7 @@ class MicrophoneRecorder(AudioRecorder):
         self._frames: list[np.ndarray] = []
         self._stream: sd.InputStream | None = None
         self._recording = False
+        self._session_id: str | None = None
         self._start_time: float = 0.0
         self._final_duration: float = 0.0
         self._current_level: float = float("-inf")
@@ -40,13 +55,20 @@ class MicrophoneRecorder(AudioRecorder):
             self._frames.append(indata.copy())
             self._current_level = rms_dbfs(indata)
 
-    async def start(self) -> None:
+    async def start(self, session_id: str | None = None) -> None:
+        """Open the device, recording `session_id` as the capture's owner.
+
+        `None` keeps the unowned semantics every caller had before spec 119:
+        the recorder answers to anyone, which is what a curl caller and
+        `smoke_sidecar.py` still rely on.
+        """
         with self._lock:
             if self._recording:
                 return
             self._frames = []
             self._current_level = float("-inf")
             self._recording = True
+            self._session_id = session_id
 
         try:
             self._settings.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -63,12 +85,23 @@ class MicrophoneRecorder(AudioRecorder):
 
         self._start_time = time.monotonic()
 
-    async def stop(self) -> Path:
+    async def stop(self, session_id: str | None = None) -> Path:
+        """Harvest the capture, refusing a session that does not own it.
+
+        The guard and the state change are indivisible because they share one
+        `with self._lock` acquisition and because no `await` appears inside
+        any such block in this module — both facts are asserted by an AST test
+        in `backend/tests/test_audio.py`, so a future edit that moves either
+        out turns the suite red rather than reopening the race.
+        """
         with self._lock:
             if not self._recording or self._stream is None:
                 raise RuntimeError("Not recording")
+            if session_id is not None and session_id != self._session_id:
+                raise SessionMismatchError(SESSION_MISMATCH_DETAIL)
             self._final_duration = time.monotonic() - self._start_time
             self._recording = False
+            self._session_id = None
 
         stream = self._stream
         self._stream = None
@@ -89,6 +122,35 @@ class MicrophoneRecorder(AudioRecorder):
 
         return await asyncio.to_thread(self._concatenate_and_write, frames, output_path)
 
+    async def discard(self, session_id: str | None = None) -> float:
+        """End the capture and drop its frames, writing no file at all.
+
+        The counterpart of `stop()` for a recording nobody is going to
+        transcribe: an abandoned start the client reclaims, or the Settings
+        microphone test, neither of which ever wanted the WAV that `stop()`
+        leaves in the scratch directory for nothing to delete ([JS-122]).
+        Returns the duration that was dropped, which is the only thing left to
+        report about it.
+        """
+        with self._lock:
+            if not self._recording or self._stream is None:
+                raise NotRecordingError("Not recording")
+            if session_id is not None and session_id != self._session_id:
+                raise SessionMismatchError(SESSION_MISMATCH_DETAIL)
+            dropped_seconds = time.monotonic() - self._start_time
+            self._recording = False
+            self._session_id = None
+            stream = self._stream
+            self._stream = None
+            self._frames = []
+
+        try:
+            stream.stop()
+        finally:
+            stream.close()
+
+        return dropped_seconds
+
     def _concatenate_and_write(self, frames: list[np.ndarray], output_path: Path) -> Path:
         """The dictation counterpart of the meeting recorder's off-loop write.
 
@@ -106,6 +168,16 @@ class MicrophoneRecorder(AudioRecorder):
     @property
     def is_recording(self) -> bool:
         return self._recording
+
+    @property
+    def session_id(self) -> str | None:
+        """Who owns the live capture, or `None` when nothing is being recorded.
+
+        Never a stale name: every exit path clears it inside the same locked
+        block that clears `_recording`, which
+        `test_a_stopped_recorder_never_names_an_owner` asserts on all four.
+        """
+        return self._session_id
 
     @property
     def duration_seconds(self) -> float:
@@ -138,6 +210,7 @@ class MicrophoneRecorder(AudioRecorder):
             stream = self._stream
             self._stream = None
             self._recording = False
+            self._session_id = None
             self._frames = []
         if stream is not None:
             try:
