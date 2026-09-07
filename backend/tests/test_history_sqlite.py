@@ -1026,3 +1026,76 @@ def test_columns_sql_qualifies_every_name_with_the_prefix():
     """The FTS lane joins `entries` as `e`, so every name must carry the alias."""
     assert history.columns_sql(("id", "ts")) == "id, ts"
     assert history.columns_sql(("id", "ts"), prefix="e.") == "e.id, e.ts"
+
+
+def test_columns_sql_refuses_a_name_that_is_not_an_entries_column():
+    """The one place this module interpolates identifiers into SQL.
+
+    sqlite cannot parameterise a column name, so the safety of `columns_sql`
+    rested entirely on a docstring asking callers not to pass a request value.
+    The check makes that a property of the function.
+    """
+    with pytest.raises(ValueError, match="entries table"):
+        history.columns_sql(("id", "raw_text; DROP TABLE entries"))
+
+
+def test_a_saved_row_lands_in_the_right_columns_whatever_their_order(
+    isolated_storage, tmp_path, monkeypatch
+):
+    """AC: the INSERT's names and its values cannot drift apart.
+
+    The column names come from `ENTRY_COLUMNS` while the values were a
+    hand-ordered literal, with nothing tying the two orders together: a
+    consistent reorder of the DDL and `ENTRY_COLUMNS` still passes the schema
+    test above and writes every row with its values one column out, which
+    sqlite's type affinity accepts in silence. Reordering the declaration here
+    is that reorder, and named placeholders are what survive it.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    monkeypatch.setattr(history, "ENTRY_COLUMNS", tuple(reversed(history.ENTRY_COLUMNS)))
+
+    history.save_entry(
+        text="hello world",
+        duration_ms=1200,
+        language="uk",
+        style="normal",
+        model_name="gemini/flash",
+        tokens_used=42,
+        audio_duration_seconds=3.5,
+        word_count=2,
+    )
+
+    conn = sqlite3.connect(target / "history.db")
+    try:
+        row = conn.execute(
+            "SELECT raw_text, duration_ms, model_name, tokens_used, word_count "
+            "FROM entries"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row == ("hello world", 1200, "gemini/flash", 42, 2)
+
+
+def test_a_failed_relocate_does_not_cache_a_lazily_resolved_directory(
+    isolated_storage, tmp_path, monkeypatch
+):
+    """AC: the verification-failure rollback leaves `_output_dir` as it found it.
+
+    `_resolve_output_dir` resolves a fallback fresh on every call and is never
+    cached (ADR 014): the store must follow a `JUSTSAY_DATA_DIR` that changes
+    under it. The rollback runs with `_output_dir` unset whenever `relocate`
+    was reached without a `bootstrap` first, so writing the resolved fallback
+    there pins it for the life of the process.
+    """
+    monkeypatch.setattr(history, "_output_dir", None)
+    monkeypatch.setattr(history, "_conn", None)
+    history.save_entry(text="x", duration_ms=1)
+    monkeypatch.setattr(history, "_verify_db_row_count", lambda *_a, **_kw: False)
+
+    outcome, reason = history.relocate(tmp_path / "new")
+
+    assert outcome == history.RelocateOutcome.FAILED
+    assert reason and "Verification failed" in reason
+    assert history._output_dir is None

@@ -286,11 +286,13 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             return RelocateOutcome.FAILED, f"Could not create target directory: {e}"
 
         if new_path.exists():
-            _reopen_at_locked(new_dir)
+            _output_dir = new_dir
+            _reopen_conn_locked(new_dir)
             return RelocateOutcome.NEW_ALREADY_HAS_FILE, None
 
         if not old_path.exists():
-            _reopen_at_locked(new_dir)
+            _output_dir = new_dir
+            _reopen_conn_locked(new_dir)
             return RelocateOutcome.NO_OLD_FILE, None
 
         _close_conn_locked()
@@ -299,7 +301,7 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             shutil.copy2(old_path, new_path)
             if not _verify_db_row_count(old_path, new_path):
                 new_path.unlink(missing_ok=True)
-                _reopen_at_locked(old_dir)
+                _reopen_conn_locked(old_dir)
                 return RelocateOutcome.FAILED, "Verification failed: entry count mismatch"
 
             new_conn = _connect(new_path)
@@ -350,10 +352,15 @@ ENTRY_READ_COLUMNS = tuple(c for c in ENTRY_COLUMNS if c != "cleaned_text")
 def columns_sql(columns: Sequence[str], prefix: str = "") -> str:
     """The column list for a SELECT or INSERT, optionally table-qualified.
 
-    Only module-level declarations and literal aliases are ever passed here;
-    a request value must never reach it, since the result is interpolated
-    into SQL that sqlite cannot parameterise.
+    The result is interpolated into SQL, which sqlite cannot parameterise for
+    identifiers, so every name is checked against ``ENTRY_COLUMNS`` rather than
+    trusted: an ``entries`` column is the only thing this can ever emit, and a
+    caller that reaches it with a value from a request gets a ``ValueError``
+    instead of a query.
     """
+    unknown = [name for name in columns if name not in ENTRY_COLUMNS]
+    if unknown:
+        raise ValueError(f"Not columns of the entries table: {unknown}")
     return ", ".join(f"{prefix}{name}" for name in columns)
 
 
@@ -412,7 +419,7 @@ def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateOut
             return ConsolidateOutcome.FAILED, "Source database has no entries table"
 
         shared = [name for name in ENTRY_COLUMNS if name in source_columns]
-        column_list = ", ".join(shared)
+        column_list = columns_sql(shared)
         conn.execute("BEGIN")
         cursor = conn.execute(
             f"INSERT OR IGNORE INTO entries ({column_list}) "
@@ -480,13 +487,20 @@ def save_entry(
         try:
             conn.execute(
                 f"INSERT INTO entries({columns_sql(ENTRY_COLUMNS)}) "
-                f"VALUES ({', '.join('?' * len(ENTRY_COLUMNS))})",
-                (
-                    entry.id, ts_ms, entry.language, entry.style,
-                    entry.text, entry.text, entry.duration_ms,
-                    entry.audio_duration_seconds, entry.word_count,
-                    entry.model_name, entry.tokens_used,
-                ),
+                f"VALUES ({', '.join(':' + name for name in ENTRY_COLUMNS)})",
+                {
+                    "id": entry.id,
+                    "ts": ts_ms,
+                    "language": entry.language,
+                    "style": entry.style,
+                    "raw_text": entry.text,
+                    "cleaned_text": entry.text,
+                    "duration_ms": entry.duration_ms,
+                    "audio_duration_seconds": entry.audio_duration_seconds,
+                    "word_count": entry.word_count,
+                    "model_name": entry.model_name,
+                    "tokens_used": entry.tokens_used,
+                },
             )
             conn.execute("COMMIT")
         except Exception:
@@ -658,17 +672,19 @@ def _ensure_conn_locked() -> sqlite3.Connection:
     return _conn
 
 
-def _reopen_at_locked(directory: Path) -> None:
-    """Point the store at ``directory``, reopening the connection there.
+def _reopen_conn_locked(directory: Path) -> None:
+    """Reopen the connection against the history file in ``directory``.
 
     Caller MUST hold ``_lock``. Closes the current connection (a no-op when
-    there is none), makes ``directory`` the output directory, connects to the
-    history file inside it, applies the schema and invalidates the derived
-    caches -- the sequence every clean ``relocate`` outcome ends with.
+    there is none), connects, applies the schema and invalidates the derived
+    caches. ``_output_dir`` is deliberately left alone: on ``relocate``'s
+    rollback the store is going back to a directory it may never have had
+    recorded, and writing it there would cache a lazily-resolved fallback for
+    the life of the process, against ``_resolve_output_dir``'s contract
+    (ADR 014). A caller that is moving the store sets ``_output_dir`` itself.
     """
-    global _output_dir, _conn
+    global _conn
     _close_conn_locked()
-    _output_dir = directory
     _conn = _connect(directory / HISTORY_FILENAME)
     _init_schema(_conn)
     invalidate_derived_caches_locked()
