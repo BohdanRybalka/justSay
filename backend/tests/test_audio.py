@@ -880,7 +880,7 @@ def test_a_stalled_macos_helper_fails_instead_of_blocking_forever(monkeypatch):
 
     started = time.monotonic()
     with pytest.raises(SystemAudioUnavailableError, match="did not answer"):
-        macos_tap._read_header(stalled)
+        macos_tap._read_header(stalled, [])
     elapsed = time.monotonic() - started
 
     assert elapsed < 2.0
@@ -893,7 +893,7 @@ def test_a_helper_that_answers_in_time_is_read_normally():
     class _Prompt:
         stdout = _ImmediateStream(b'{"sample_rate":48000}\n')
 
-    assert macos_tap._read_header(_Prompt()) == b'{"sample_rate":48000}\n'
+    assert macos_tap._read_header(_Prompt(), []) == b'{"sample_rate":48000}\n'
 
 
 class _ImmediateStream:
