@@ -1,10 +1,11 @@
 import asyncio
 import logging
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -969,6 +970,31 @@ def test_clear_cache_records_a_provider_cleanup_failure(caplog):
     assert len(failures) == 1
     assert not stt_module._providers
 
+def _fake_genai_modules(client_class: MagicMock) -> dict[str, ModuleType]:
+    """A `google.genai` stand-in for tests that must run without the cloud extra.
+
+    `HttpOptions` keeps whatever keywords it is given so the assertion can read
+    the scaled timeout back; nothing else about the SDK is modelled.
+    """
+
+    class _HttpOptions:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    types_module = ModuleType("google.genai.types")
+    types_module.HttpOptions = _HttpOptions
+    genai_module = ModuleType("google.genai")
+    genai_module.Client = client_class
+    genai_module.types = types_module
+    google_module = ModuleType("google")
+    google_module.genai = genai_module
+    return {
+        "google": google_module,
+        "google.genai": genai_module,
+        "google.genai.types": types_module,
+    }
+
+
 def test_gemini_client_carries_a_timeout_in_milliseconds():
     """AC: the budget reaches the SDK in the unit it documents.
 
@@ -977,11 +1003,18 @@ def test_gemini_client_carries_a_timeout_in_milliseconds():
     to httpx. Passing `GEMINI_TIMEOUT_SECONDS` unscaled would give the client a
     300 ms budget and break every cloud dictation, so the assertion is on the
     scaled number rather than on "a timeout is set".
+
+    The SDK is stubbed through `sys.modules` rather than patched on the real
+    package, because `GeminiSTTProvider` imports it inside `_get_client` for
+    exactly this reason -- `google-genai` lives in the optional `cloud` extra
+    and CI installs `[dev,audio]`. Patching `google.genai.Client` needs the
+    package present and failed on CI while passing here.
     """
     settings = STTSettings(mode=ProviderMode.CLOUD, gemini_api_key="test-key")
     provider = GeminiSTTProvider(settings)
+    client_class = MagicMock()
 
-    with patch("google.genai.Client") as client_class:
+    with patch.dict(sys.modules, _fake_genai_modules(client_class)):
         provider._get_client()
 
     http_options = client_class.call_args.kwargs["http_options"]
@@ -1002,6 +1035,12 @@ def test_a_gemini_request_that_is_never_answered_raises_a_timeout():
     `http_options` fails this test on `is_alive()` instead of hanging the suite
     forever.
     """
+    pytest.importorskip(
+        "google.genai",
+        reason="the real SDK is what carries the timeout to httpx; it lives in the "
+        "optional cloud extra, so this runs where that extra is installed and skips "
+        "in CI, which installs [dev,audio]",
+    )
     import httpx
     from google import genai
     from google.genai import types

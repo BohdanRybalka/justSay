@@ -414,6 +414,13 @@ def test_a_helper_writing_more_stderr_than_the_pipe_holds_is_not_blocked(tap_set
     The tail assertion is what stops this passing vacuously: a platform whose
     pipe buffer swallowed the whole megabyte would let the writer finish with
     no reader at all, and could not also produce the last line here.
+
+    The drain is joined before that assertion because the writer finishing says
+    nothing about the reader having caught up: the writer's last `write`
+    returns as soon as the bytes are in the pipe. Windows happened to win that
+    race and Linux did not, which is how this test passed locally and failed on
+    CI at `9209027`. The join makes the order a fact rather than a scheduling
+    accident -- the writer closes its end, so the drain reaches EOF and returns.
     """
     read_fd, write_fd = os.pipe()
     last_line = b"y" * (_STDERR_LINE_BYTES - 1) + b"\n"
@@ -429,6 +436,7 @@ def test_a_helper_writing_more_stderr_than_the_pipe_holds_is_not_blocked(tap_set
         writer.start()
         writer.join(timeout=5.0)
         writer_finished = not writer.is_alive()
+        source._stderr_reader.join(timeout=5.0)
         source._reader.join(timeout=2.0)
         source.stop()
 
