@@ -188,6 +188,7 @@ pub fn run() {
                         api.prevent_close();
                         if let Some(win) = settings_handle.get_webview_window("settings") {
                             let _ = win.hide();
+                            let _ = settings_handle.emit("settings-hidden", ());
                         }
                     }
                 });

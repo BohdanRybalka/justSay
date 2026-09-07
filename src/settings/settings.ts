@@ -8,6 +8,7 @@ import {
   type CloudKeyStatus,
   type UserSettings,
 } from "../api";
+import { EVENT_SETTINGS_HIDDEN } from "../contracts";
 import { TimedOutError, withTimeout } from "../timeout";
 import { isStaleStatusResponse } from "../stale-response";
 import { renderGeneral } from "./tabs/general";
@@ -326,8 +327,32 @@ navButtons.forEach((btn) => {
 });
 
 
+/** Release whatever the active tab is holding when the window is dismissed.
+ *
+ *  The shell prevents the close and hides the window instead, so the webview
+ *  stays mounted and no tab's teardown runs — the General tab's microphone test
+ *  outlived the window and was reachable only by opening Settings again
+ *  ([JS-121]). `switchTab` already runs the active tab's destroy and re-mounts
+ *  it, so this covers any future tab that holds a resource rather than only the
+ *  microphone.
+ *
+ *  A failed listener attach is swallowed for the same reason every other one
+ *  here is: outside Tauri there is no event bus, and a settings screen that
+ *  refuses to load because it could not subscribe to a hide is worse than one
+ *  that never hears it. */
+async function releaseTabOnWindowHide() {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    await listen(EVENT_SETTINGS_HIDDEN, () => {
+      if (settings) switchTab(currentTab);
+    });
+  } catch {}
+}
+
+
 async function init() {
   void initAppVersion();
+  void releaseTabOnWindowHide();
   renderSettingsUnavailable(tabContent);
   setInterval(probeBackend, 5000);
   await loadSettingsIntoUi();

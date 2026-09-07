@@ -6,7 +6,7 @@ import { TimedOutError } from "../../timeout";
 
 const apiMock = {
   getStorageInfo: vi.fn(),
-  audioStop: vi.fn(),
+  audioDiscard: vi.fn(),
   audioStatus: vi.fn(),
   audioStart: vi.fn(),
   cleanupTemp: vi.fn(),
@@ -725,55 +725,166 @@ describe("renderGeneral — history path is separated from temp cleanup (spec 05
 });
 
 describe("renderGeneral — the microphone test", () => {
+  const UNCONFIRMED_LABEL = "The backend did not answer — the microphone may still be open";
+
+  function idleStatus(overrides: Record<string, unknown> = {}) {
+    return {
+      is_recording: false,
+      duration_seconds: 0,
+      level_db: -60,
+      session_id: null,
+      ...overrides,
+    };
+  }
+
+  function mintedSession(): string {
+    return apiMock.audioStart.mock.calls[0][0] as string;
+  }
+
   function renderMicrophoneTest() {
     const container = document.createElement("div");
     renderGeneral(container, buildSettings());
     return {
+      container,
       button: container.querySelector<HTMLButtonElement>("#btn-test-mic")!,
       label: container.querySelector<HTMLElement>("#rec-label")!,
+      fill: container.querySelector<HTMLElement>("#level-fill")!,
     };
   }
+
+  it("asks the backend to discard rather than to stop, so no WAV is written", async () => {
+    apiMock.audioStart.mockResolvedValue(idleStatus({ is_recording: true }));
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 2 });
+    const { button, label } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Record"));
+
+    expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession());
+    expect(label.textContent).toBe("Click to test microphone");
+  });
+
+  it("starts without a pre-flight status read, since the start's own 409 cannot be stale", async () => {
+    apiMock.audioStart.mockResolvedValue(idleStatus({ is_recording: true }));
+    const { button } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
+
+    expect(apiMock.audioStatus).not.toHaveBeenCalled();
+  });
+
+  it("names the widget when the backend refuses because the microphone is held", async () => {
+    const { ApiRequestError } = await import("../../api");
+    apiMock.audioStart.mockRejectedValue(new ApiRequestError("Already recording", 409));
+    const { button, label } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => expect(label.textContent).toBe("Microphone busy (widget recording)"));
+
+    expect(button.textContent).toBe("Record");
+  });
 
   it.each([
     ["a backend error", new Error("HTTP 500")],
     ["a connection that never reached it", new TypeError("Failed to fetch")],
-  ])("does not claim the microphone is closed when the stop fails with %s", async (_name, failure) => {
-    apiMock.audioStatus.mockResolvedValue({ is_recording: false, duration_seconds: 0, level_db: -60 });
-    apiMock.audioStart.mockResolvedValue({ is_recording: true, duration_seconds: 0, level_db: -60 });
-    apiMock.audioStop.mockRejectedValue(failure);
-    const abort = vi.fn();
-    levelStreamMock.mockImplementation(() => ({ abort }));
-    const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
-    const button = container.querySelector<HTMLButtonElement>("#btn-test-mic")!;
-    const label = container.querySelector<HTMLElement>("#rec-label")!;
-    const fill = container.querySelector<HTMLElement>("#level-fill")!;
+  ])(
+    "does not claim the microphone is closed when the discard fails with %s",
+    async (_name, failure) => {
+      apiMock.audioStart.mockResolvedValue(idleStatus({ is_recording: true }));
+      apiMock.audioDiscard.mockRejectedValue(failure);
+      const abort = vi.fn();
+      levelStreamMock.mockImplementation(() => ({ abort }));
+      const { button, label, fill } = renderMicrophoneTest();
 
-    button.click();
-    await vi.waitFor(() => {
+      button.click();
+      await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
+      fill.style.width = "72%";
+
+      button.click();
+      await vi.waitFor(() => expect(apiMock.audioDiscard).toHaveBeenCalledOnce());
+
+      expect(label.textContent).toBe(UNCONFIRMED_LABEL);
       expect(button.textContent).toBe("Stop");
-    });
-    fill.style.width = "72%";
+      expect(abort).toHaveBeenCalled();
+      expect(fill.style.width).toBe("0%");
+      expect(consoleErrorMock).toHaveBeenCalledWith(failure);
+
+      const onError = levelStreamMock.mock.calls[0][2] as (error: string) => void;
+      onError("the backend did not answer /audio/level-stream within 15 seconds");
+      expect(label.textContent).toBe(UNCONFIRMED_LABEL);
+    },
+  );
+
+  it("retries the same session on the next press rather than minting a second one", async () => {
+    apiMock.audioStart.mockResolvedValue(idleStatus({ is_recording: true }));
+    apiMock.audioDiscard.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 2 });
+    const { button } = renderMicrophoneTest();
 
     button.click();
-    await vi.waitFor(() => {
-      expect(apiMock.audioStop).toHaveBeenCalledOnce();
-    });
+    await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
+    button.click();
+    await vi.waitFor(() => expect(apiMock.audioDiscard).toHaveBeenCalledOnce());
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Record"));
 
-    expect(label.textContent).toBe("Stopping the microphone failed — it may still be open");
+    expect(apiMock.audioStart).toHaveBeenCalledOnce();
+    expect(apiMock.audioDiscard.mock.calls).toEqual([[mintedSession()], [mintedSession()]]);
+  });
+
+  it("releases the session when the window hides, which is what destroys the tab", async () => {
+    apiMock.audioStart.mockResolvedValue(idleStatus({ is_recording: true }));
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 2 });
+    const container = document.createElement("div");
+    const destroy = renderGeneral(container, buildSettings())!;
+    const button = container.querySelector<HTMLButtonElement>("#btn-test-mic")!;
+
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
+    destroy();
+
+    expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession());
+  });
+
+  it("adopts a timed-out start only when the backend names this tab's own session", async () => {
+    const { TimedOutError: Timeout } = await import("../../timeout");
+    apiMock.audioStart.mockRejectedValue(new Timeout(REQUEST_TIMEOUT_MS, "/audio/start"));
+    apiMock.audioStatus.mockImplementation(async () =>
+      idleStatus({ is_recording: true, session_id: mintedSession() }),
+    );
+    const { button, label } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
+
+    expect(label.textContent).toBe("Recording...");
+    expect(levelStreamMock).toHaveBeenCalledOnce();
+  });
+
+  it("leaves the microphone unconfirmed when the status read proves nothing", async () => {
+    const { TimedOutError: Timeout } = await import("../../timeout");
+    apiMock.audioStart.mockRejectedValue(new Timeout(REQUEST_TIMEOUT_MS, "/audio/start"));
+    apiMock.audioStatus.mockRejectedValue(new Timeout(REQUEST_TIMEOUT_MS, "/audio/status"));
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 2 });
+    const { button, label } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => expect(label.textContent).toBe(UNCONFIRMED_LABEL));
+
     expect(button.textContent).toBe("Stop");
-    expect(abort).toHaveBeenCalled();
-    expect(fill.style.width).toBe("0%");
-    expect(consoleErrorMock).toHaveBeenCalledWith(failure);
+    expect(levelStreamMock).not.toHaveBeenCalled();
 
-    const onError = levelStreamMock.mock.calls[0][2] as (error: string) => void;
-    onError("the backend did not answer /audio/level-stream within 15 seconds");
-    expect(label.textContent).toBe("Stopping the microphone failed — it may still be open");
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Record"));
+    expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession());
   });
 
   it("still reports an ordinary start failure as a failure", async () => {
-    apiMock.audioStatus.mockResolvedValue({ is_recording: false, duration_seconds: 0, level_db: -60 });
     apiMock.audioStart.mockRejectedValue(new Error("connection refused"));
+    apiMock.audioStatus.mockResolvedValue(idleStatus());
     const { button, label } = renderMicrophoneTest();
 
     button.click();
@@ -785,8 +896,7 @@ describe("renderGeneral — the microphone test", () => {
   });
 
   it("puts an expired level-stream handshake into the label and leaves the recording alone", async () => {
-    apiMock.audioStatus.mockResolvedValue({ is_recording: false, duration_seconds: 0, level_db: -60 });
-    apiMock.audioStart.mockResolvedValue({ is_recording: true, duration_seconds: 0, level_db: -60 });
+    apiMock.audioStart.mockResolvedValue(idleStatus({ is_recording: true }));
     const { button, label } = renderMicrophoneTest();
 
     button.click();
@@ -800,6 +910,6 @@ describe("renderGeneral — the microphone test", () => {
     expect(label.textContent).toContain("the level meter stopped");
     expect(label.textContent).toContain("did not answer /audio/level-stream");
     expect(button.textContent).toBe("Stop");
-    expect(apiMock.audioStop).not.toHaveBeenCalled();
+    expect(apiMock.audioDiscard).not.toHaveBeenCalled();
   });
 });
