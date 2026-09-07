@@ -179,10 +179,11 @@ async function startRecording() {
   currentSession = session;
   setState("recording");
 
+  const startIssuedAt = Date.now();
   try {
     await api.audioStart(session);
   } catch (e) {
-    if (e instanceof TimedOutError && (await adoptTimedOutStart(session))) {
+    if (e instanceof TimedOutError && (await adoptTimedOutStart(session, startIssuedAt))) {
       console.warn("Start recording timed out but the backend holds this session; adopted it", e);
       return;
     }
@@ -206,14 +207,19 @@ async function startRecording() {
  *  debt is the discard's own answer — 200 if the start did land, 403 or 409 if
  *  it never did — rather than a status read taken before the handler ran.
  *
- *  The debt waits `REQUEST_TIMEOUT_MS`, the same eligibility wait a dictation
- *  gets, so the probe cannot beat the queued handler to the recorder's lock and
- *  then read its own earliness as proof.
+ *  The debt waits `REQUEST_TIMEOUT_MS` from the instant the start was *issued*,
+ *  which is the same eligibility wait a dictation gets and is measured from the
+ *  same place. Anchoring it to the moment adoption gave up instead would stack
+ *  the status read's own budget on top of the wait — a start abandoned at 15 s
+ *  and a status read abandoned at 15 s would hold the probe back for 45 s — and
+ *  the invariant the wait exists for is about the queued handler, which was
+ *  queued when the start went out. The probe still cannot beat that handler to
+ *  the recorder's lock and then read its own earliness as proof.
  *
  *  A start that failed with an *answer* — a refused connection, a 409, a 422 —
  *  never reaches this function, and must not: those are decisive on their own
  *  and owing them would turn a settled failure into debt. */
-async function adoptTimedOutStart(session: string): Promise<boolean> {
+async function adoptTimedOutStart(session: string, startIssuedAt: number): Promise<boolean> {
   const status = await api.audioStatus().catch(() => null);
 
   if (status?.is_recording && status.session_id === session) {
@@ -221,7 +227,7 @@ async function adoptTimedOutStart(session: string): Promise<boolean> {
     return true;
   }
 
-  void abandoned.owe(session, Date.now() + REQUEST_TIMEOUT_MS);
+  void abandoned.owe(session, startIssuedAt + REQUEST_TIMEOUT_MS);
   return false;
 }
 
@@ -249,7 +255,12 @@ function reportTransitionFailure({ label, toast }: DictationErrorLabel) {
  *  the discard that resolves it is not eligible until `REQUEST_TIMEOUT_MS` has
  *  passed, which is what stops a probe beating a healthy handler to the lock.
  *  Worst case in `processing`: that wait, plus one 5 s poll period, plus the
- *  probe's own 15 s budget. */
+ *  probe's own 15 s budget.
+ *
+ *  A probe that came back `not-live` is not that outcome: `403` and `409` are
+ *  the recorder saying it is no longer holding this session, which is what a
+ *  dictate handler that already ran leaves behind. The widget then goes back to
+ *  waiting for that dictation rather than declaring it dead. */
 async function stopAndProcess() {
   if (state !== "recording") return;
 
@@ -262,10 +273,15 @@ async function stopAndProcess() {
     (error) => ({ kind: "failed", error }) as const,
   );
 
-  const outcome = await Promise.race([
+  const raced = await Promise.race([
     dictated,
-    neverProcessed.then(() => ({ kind: "never-processed" }) as const),
+    neverProcessed.then((proof) => ({ kind: "proof", proof }) as const),
   ]);
+
+  const outcome =
+    raced.kind !== "proof" ? raced
+    : raced.proof === "proven" ? ({ kind: "never-processed" } as const)
+    : await dictated;
 
   if (outcome.kind === "never-processed") {
     reportTransitionFailure(DICTATION_NEVER_PROCESSED);

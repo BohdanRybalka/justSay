@@ -358,6 +358,27 @@ describe("a start that runs out of its budget", () => {
     expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession());
   });
 
+  it("waits from the moment the start was issued, so the status read's budget does not stack", async () => {
+    await loadWidget();
+    const { REQUEST_TIMEOUT_MS } = await import("../api");
+    const started = await timedOut("/audio/start");
+    const read = await timedOut("/audio/status");
+    apiMock.audioStart.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => setTimeout(() => reject(started), REQUEST_TIMEOUT_MS)),
+    );
+    apiMock.audioStatus.mockImplementation(
+      () => new Promise((_resolve, reject) => setTimeout(() => reject(read), REQUEST_TIMEOUT_MS)),
+    );
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 0 });
+
+    document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS * 2 + CONNECTION_POLL_MS * 2);
+
+    expect(apiMock.audioDiscard).toHaveBeenCalledTimes(1);
+    expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession());
+  });
+
   it("owes the session when the status read fails, and probes it against a dead /health", async () => {
     await loadWidget();
     apiMock.audioStart.mockRejectedValue(await timedOut("/audio/start"));
