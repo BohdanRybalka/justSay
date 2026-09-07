@@ -18,6 +18,7 @@ from app.stt.local_factory import (
     LocalProviderKind,
     compute_type_for_device,
     get_local_provider_kind,
+    is_accelerated_device,
     is_macos_arm64,
 )
 
@@ -86,8 +87,7 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
                 device = "cuda" if cuda_probe_available else "cpu"
 
     compute_type = compute_type_for_device(device, kind)
-
-    gpu_available = device in ("cuda", "vulkan", "metal")
+    gpu_available = is_accelerated_device(device, kind)
 
     from app.stt import get_local_load_error, is_model_loaded
 

@@ -260,6 +260,39 @@ def test_compute_type_for_device(kind_name: str, device: str, expected: str):
     assert compute_type_for_device(device, LocalProviderKind[kind_name]) == expected
 
 
+@pytest.mark.parametrize(
+    "kind_name,device,expected",
+    [
+        ("FASTER_WHISPER", "cuda", True),
+        ("FASTER_WHISPER", "metal", False),
+        ("FASTER_WHISPER", "vulkan", False),
+        ("FASTER_WHISPER", "cpu", False),
+        ("WHISPER_CPP_SERVER", "metal", True),
+        ("WHISPER_CPP_SERVER", "vulkan", True),
+        ("WHISPER_CPP_SERVER", "cuda", False),
+        ("WHISPER_CPP_SERVER", "cpu", False),
+    ],
+)
+def test_is_accelerated_device(kind_name: str, device: str, expected: bool):
+    """`gpu_available` on the Settings screen reads this, and so does the
+    compute type, so the two cannot disagree about the same machine."""
+    from app.stt.local_factory import LocalProviderKind, is_accelerated_device
+
+    assert is_accelerated_device(device, LocalProviderKind[kind_name]) is expected
+
+
+def test_an_unlisted_provider_kind_accelerates_nothing_instead_of_raising():
+    """A third `LocalProviderKind` -- which this module's docstring already
+    anticipates -- must degrade `GET /stt/local/status` to the conservative CPU
+    answer, not turn it into a 500 on a `KeyError`."""
+    from app.stt import local_factory
+
+    unlisted = "a_kind_this_mapping_does_not_list"
+
+    assert local_factory.is_accelerated_device("cuda", unlisted) is False
+    assert local_factory.compute_type_for_device("metal", unlisted) == "int8"
+
+
 def test_the_provider_module_does_not_import_the_factory_at_module_level():
     """The factory imports `app.stt.local` back, so this direction must stay lazy.
 
