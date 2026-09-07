@@ -12,9 +12,9 @@ import {
   type ShortcutApplied,
   type ShortcutRequested,
 } from "../../contracts";
-import { saveSettings, getCloudKeyStatus, cachePersistedShortcut } from "../settings";
+import { saveSettings, getCloudKeyStatus, cachePersistedShortcut, type TabLifecycle } from "../settings";
 import { escapeHtml, meetingDisclosureHtml } from "../html";
-import { newSessionId } from "../../session";
+import { isDecisiveRefusal, newSessionId } from "../../session";
 import { renderKeys } from "./keys";
 import { notifyError } from "../../notify";
 import { TimedOutError } from "../../timeout";
@@ -88,7 +88,7 @@ const LANGUAGES = [
   { code: "zh", label: "Chinese" },
 ];
 
-export function renderGeneral(container: HTMLElement, settings: UserSettings): () => void {
+export function renderGeneral(container: HTMLElement, settings: UserSettings): TabLifecycle {
   const platform = detectShortcutPlatform(navigator);
 
   container.innerHTML = `
@@ -193,7 +193,8 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   /** The session this tab started and has not seen released. Kept across a
    *  failed discard on purpose: it is the only handle anything has on that
    *  capture, and dropping it would leave a microphone open that no surface in
-   *  the app can reach. */
+   *  the app can reach. A teardown hands it to `sessionAwaitingRelease`, which
+   *  outlives this closure, rather than dropping it. */
   let heldSession = "";
   let levelStreamAbort: AbortController | null = null;
 
@@ -229,7 +230,9 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
 
   /** Whether the backend is holding *this* tab's capture.
    *
-   *  Asked only after a start ran out of its budget, and answered by the id
+   *  Asked only after a start ran out of its budget — never after a refusal,
+   *  which already answers the question and whose caller would otherwise wait
+   *  a second 15 s budget before the label changed — and answered by the id
    *  rather than by `is_recording`: the recorder is process-wide, so a bare
    *  "something is recording" would let this window's Stop button end a
    *  dictation the user is in the middle of speaking. A read that fails proves
@@ -255,22 +258,36 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
    *  displays, and only `/pipeline/dictate` ever deletes such a file, so every
    *  test left audio of the room on disk ([JS-122]). `POST /audio/discard`
    *  writes nothing, so there is nothing to delete and nothing to announce. */
-  async function stopMicrophoneTest() {
-    try {
-      await api.audioDiscard(heldSession);
-    } catch (e) {
-      stopLevelStream();
-      levelFill.style.width = "0%";
-      recLabel.textContent = MICROPHONE_UNCONFIRMED_LABEL;
-      console.error(e);
-      return;
-    }
+  function showIdle() {
     heldSession = "";
     isRecording = false;
     btnTest.textContent = "Record";
     recLabel.textContent = "Click to test microphone";
     stopLevelStream();
     levelFill.style.width = "0%";
+  }
+
+  /** A refusal the recorder produced from inside its own lock is an answer, not
+   *  silence: `403` says another session holds the device and `409` says
+   *  nothing is being recorded, and either way this tab's capture is closed.
+   *  Reporting those as "the backend did not answer" was factually wrong and
+   *  left the button on `Stop` with nothing that could ever clear it. */
+  async function stopMicrophoneTest() {
+    const session = heldSession;
+    try {
+      await api.audioDiscard(session);
+    } catch (e) {
+      console.error(e);
+      if (destroyed) return;
+      if (!isDecisiveRefusal(e)) {
+        stopLevelStream();
+        levelFill.style.width = "0%";
+        recLabel.textContent = MICROPHONE_UNCONFIRMED_LABEL;
+        return;
+      }
+    }
+    if (destroyed) return;
+    showIdle();
   }
 
   /** There is no pre-flight `GET /audio/status` any more.
@@ -292,11 +309,14 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
       await api.audioStart(session);
     } catch (e) {
       console.error(e);
-      if (await backendHoldsSession(session)) {
-        showRecording();
-        return;
-      }
+      if (destroyed) return;
       if (e instanceof TimedOutError) {
+        const held = await backendHoldsSession(session);
+        if (destroyed) return;
+        if (held) {
+          showRecording();
+          return;
+        }
         isRecording = true;
         btnTest.textContent = "Stop";
         recLabel.textContent = MICROPHONE_UNCONFIRMED_LABEL;
@@ -307,6 +327,10 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
         e instanceof ApiRequestError && e.status === 409
           ? "Microphone busy (widget recording)"
           : "Failed to start";
+      return;
+    }
+    if (destroyed) {
+      releaseAndRemember(session);
       return;
     }
     showRecording();
@@ -334,6 +358,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let destroyed = false;
   loadFilesInfo(tempSize, () => destroyed);
+  if (sessionAwaitingRelease) releaseAndRemember(sessionAwaitingRelease);
 
   const consentGroup = container.querySelector<HTMLElement>("#meeting-consent-group")!;
   consentGroup
@@ -586,21 +611,66 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     } catch {}
   })();
 
-  return () => {
-    destroyed = true;
-    stopCapture();
-    if (debounceTimer) clearTimeout(debounceTimer);
-    stopLevelStream();
-    if (heldSession) {
-      api.audioDiscard(heldSession).catch(() => {});
-      heldSession = "";
-    }
-    if (unlistenShortcutApplied) {
-      unlistenShortcutApplied();
-      unlistenShortcutApplied = null;
-    }
-    destroyKeys();
-  };
+  /** A debounced save is work the user has already typed, so a teardown flushes
+   *  it rather than clearing the timer and losing it. Dismissing the window
+   *  inside the 600 ms window used to discard the edit silently — no save, no
+   *  error, and the old path back on screen from the re-render. */
+  function flushPendingOutputDir() {
+    if (!debounceTimer) return;
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+    void persistOutputDir(outputDir.value);
+  }
+
+  /** The window was dismissed while this tab stays mounted, so everything that
+   *  is not a held resource — an update this tab has found, the values on
+   *  screen, the reads it has already paid for — is left exactly as it is. The
+   *  discard follows the same path a press of `Stop` does, including the label
+   *  it leaves when the backend does not answer. */
+  function releaseResources() {
+    flushPendingOutputDir();
+    if (heldSession) void stopMicrophoneTest();
+  }
+
+  return {
+    destroy: () => {
+      destroyed = true;
+      stopCapture();
+      flushPendingOutputDir();
+      stopLevelStream();
+      if (heldSession) {
+        releaseAndRemember(heldSession);
+        heldSession = "";
+      }
+      if (unlistenShortcutApplied) {
+        unlistenShortcutApplied();
+        unlistenShortcutApplied = null;
+      }
+      destroyKeys();
+    },
+    releaseResources,
+  } satisfies TabLifecycle;
+}
+
+/** A capture whose release has not been confirmed, held outside any tab
+ *  instance because the id is the only handle this app has on that device and
+ *  a teardown would otherwise drop it. The next render of this tab retries it,
+ *  which is what makes `heldSession`'s stated invariant true rather than
+ *  aspirational. It is cleared only by an answer about that session: a 200, or
+ *  a refusal the recorder gave from inside its own lock. */
+let sessionAwaitingRelease = "";
+
+function releaseAndRemember(sessionId: string): void {
+  sessionAwaitingRelease = sessionId;
+  void api.audioDiscard(sessionId).then(
+    () => {
+      if (sessionAwaitingRelease === sessionId) sessionAwaitingRelease = "";
+    },
+    (e) => {
+      console.error(e);
+      if (isDecisiveRefusal(e) && sessionAwaitingRelease === sessionId) sessionAwaitingRelease = "";
+    },
+  );
 }
 
 async function loadFilesInfo(tempSize: HTMLElement, isDestroyed: () => boolean) {

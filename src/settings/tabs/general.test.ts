@@ -532,7 +532,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
     const removeSpy = vi.spyOn(document, "removeEventListener");
 
     const container = document.createElement("div");
-    const destroy = renderGeneral(container, buildSettings());
+    const { destroy } = renderGeneral(container, buildSettings());
     container.querySelector<HTMLButtonElement>("#btn-shortcut")!.click();
 
     const added = addSpy.mock.calls.filter(([type]) => type === "keydown");
@@ -553,7 +553,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
     const addSpy = vi.spyOn(document, "addEventListener");
 
     const container = document.createElement("div");
-    const destroy = renderGeneral(container, buildSettings());
+    const { destroy } = renderGeneral(container, buildSettings());
     container.querySelector<HTMLButtonElement>("#btn-shortcut")!.click();
 
     const registered = addSpy.mock.calls.find(([type]) => type === "keydown")!;
@@ -570,7 +570,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
 
   it("an abandoned capture leaves no keydown handler behind after destroy", async () => {
     const container = document.createElement("div");
-    const destroy = renderGeneral(container, buildSettings());
+    const { destroy } = renderGeneral(container, buildSettings());
 
     container.querySelector<HTMLButtonElement>("#btn-shortcut")!.click();
     destroy();
@@ -584,7 +584,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
 
   it("releases the shortcut-applied listener when the tab is destroyed", async () => {
     const container = document.createElement("div");
-    const destroy = renderGeneral(container, buildSettings());
+    const { destroy } = renderGeneral(container, buildSettings());
 
     await vi.waitFor(() => {
       expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
@@ -724,6 +724,44 @@ describe("renderGeneral — history path is separated from temp cleanup (spec 05
   });
 });
 
+describe("renderGeneral — the output directory", () => {
+  function renderOutputDir() {
+    const container = document.createElement("div");
+    const lifecycle = renderGeneral(container, buildSettings());
+    return {
+      lifecycle,
+      input: container.querySelector<HTMLInputElement>("#output-dir")!,
+    };
+  }
+
+  it("saves an edit the user typed less than the debounce before the window was dismissed", async () => {
+    saveSettingsMock.mockResolvedValue({ settings: buildSettings(), warning: null });
+    const { lifecycle, input } = renderOutputDir();
+
+    input.value = "D:/typed";
+    input.dispatchEvent(new Event("input"));
+    lifecycle.releaseResources!();
+
+    await vi.waitFor(() =>
+      expect(saveSettingsMock).toHaveBeenCalledWith({ output_dir: "D:/typed" }),
+    );
+    expect(input.value).toBe("D:/typed");
+  });
+
+  it("saves that edit on a teardown too, rather than clearing the timer and losing it", async () => {
+    saveSettingsMock.mockResolvedValue({ settings: buildSettings(), warning: null });
+    const { lifecycle, input } = renderOutputDir();
+
+    input.value = "D:/typed";
+    input.dispatchEvent(new Event("input"));
+    lifecycle.destroy();
+
+    await vi.waitFor(() =>
+      expect(saveSettingsMock).toHaveBeenCalledWith({ output_dir: "D:/typed" }),
+    );
+  });
+});
+
 describe("renderGeneral — the microphone test", () => {
   const UNCONFIRMED_LABEL = "The backend did not answer — the microphone may still be open";
 
@@ -743,9 +781,10 @@ describe("renderGeneral — the microphone test", () => {
 
   function renderMicrophoneTest() {
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    const lifecycle = renderGeneral(container, buildSettings());
     return {
       container,
+      lifecycle,
       button: container.querySelector<HTMLButtonElement>("#btn-test-mic")!,
       label: container.querySelector<HTMLElement>("#rec-label")!,
       fill: container.querySelector<HTMLElement>("#level-fill")!,
@@ -839,7 +878,7 @@ describe("renderGeneral — the microphone test", () => {
     apiMock.audioStart.mockResolvedValue(idleStatus({ is_recording: true }));
     apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 2 });
     const container = document.createElement("div");
-    const destroy = renderGeneral(container, buildSettings())!;
+    const { destroy } = renderGeneral(container, buildSettings());
     const button = container.querySelector<HTMLButtonElement>("#btn-test-mic")!;
 
     button.click();
@@ -893,6 +932,120 @@ describe("renderGeneral — the microphone test", () => {
     });
 
     expect(button.textContent).toBe("Record");
+  });
+
+  it("reads a 403 as the recorder's own answer, so the button comes back to Record", async () => {
+    const { ApiRequestError } = await import("../../api");
+    apiMock.audioStart.mockResolvedValue(idleStatus({ is_recording: true }));
+    apiMock.audioDiscard.mockRejectedValue(new ApiRequestError("not yours", 403));
+    const { button, label } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
+    button.click();
+
+    await vi.waitFor(() => expect(button.textContent).toBe("Record"));
+    expect(label.textContent).toBe("Click to test microphone");
+    expect(label.textContent).not.toBe(UNCONFIRMED_LABEL);
+  });
+
+  it("reads a 409 the same way, since nothing being recorded is also an answer", async () => {
+    const { ApiRequestError } = await import("../../api");
+    apiMock.audioStart.mockResolvedValue(idleStatus({ is_recording: true }));
+    apiMock.audioDiscard.mockRejectedValue(new ApiRequestError("not recording", 409));
+    const { button, label } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
+    button.click();
+
+    await vi.waitFor(() => expect(button.textContent).toBe("Record"));
+    expect(label.textContent).toBe("Click to test microphone");
+  });
+
+  it("keeps the session and the unconfirmed label when the discard itself goes unanswered", async () => {
+    const { TimedOutError: Timeout } = await import("../../timeout");
+    apiMock.audioStart.mockResolvedValue(idleStatus({ is_recording: true }));
+    apiMock.audioDiscard.mockRejectedValue(new Timeout(REQUEST_TIMEOUT_MS, "/audio/discard"));
+    const { button, label } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
+    button.click();
+
+    await vi.waitFor(() => expect(label.textContent).toBe(UNCONFIRMED_LABEL));
+    expect(button.textContent).toBe("Stop");
+
+    button.click();
+    await vi.waitFor(() => expect(apiMock.audioDiscard).toHaveBeenCalledTimes(2));
+    expect(apiMock.audioDiscard.mock.calls[1][0]).toBe(mintedSession());
+  });
+
+  it("does not read the status after a refusal that already answers the question", async () => {
+    const { ApiRequestError } = await import("../../api");
+    apiMock.audioStart.mockRejectedValue(new ApiRequestError("Already recording", 409));
+    const { button, label } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => expect(label.textContent).toBe("Microphone busy (widget recording)"));
+
+    expect(apiMock.audioStatus).not.toHaveBeenCalled();
+  });
+
+  it("opens no level stream when the tab is torn down while the start is in flight", async () => {
+    let landStart: (() => void) | null = null;
+    apiMock.audioStart.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          landStart = () => resolve(idleStatus({ is_recording: true }));
+        }),
+    );
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 0 });
+    const { button, label, lifecycle } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => expect(landStart).not.toBeNull());
+    lifecycle.destroy();
+    landStart!();
+    await vi.waitFor(() => expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession()));
+
+    expect(levelStreamMock).not.toHaveBeenCalled();
+    expect(label.textContent).not.toBe("Recording...");
+  });
+
+  it("hands an unconfirmed release to the next render rather than dropping the only handle", async () => {
+    const { TimedOutError: Timeout } = await import("../../timeout");
+    apiMock.audioStart.mockResolvedValue(idleStatus({ is_recording: true }));
+    apiMock.audioDiscard.mockRejectedValue(new Timeout(REQUEST_TIMEOUT_MS, "/audio/discard"));
+    const { button, lifecycle } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
+    const session = mintedSession();
+    lifecycle.destroy();
+    await vi.waitFor(() => expect(apiMock.audioDiscard).toHaveBeenCalledWith(session));
+
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 0 });
+    renderGeneral(document.createElement("div"), buildSettings());
+
+    await vi.waitFor(() => expect(apiMock.audioDiscard).toHaveBeenCalledTimes(2));
+    expect(apiMock.audioDiscard.mock.calls[1][0]).toBe(session);
+  });
+
+  it("releases the microphone on the window being dismissed without re-rendering the tab", async () => {
+    apiMock.audioStart.mockResolvedValue(idleStatus({ is_recording: true }));
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 2 });
+    const { button, label, lifecycle } = renderMicrophoneTest();
+
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
+    const readsBefore = apiMock.getStorageInfo.mock.calls.length;
+    lifecycle.releaseResources!();
+
+    await vi.waitFor(() => expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession()));
+    expect(button.textContent).toBe("Record");
+    expect(label.textContent).toBe("Click to test microphone");
+    expect(apiMock.getStorageInfo.mock.calls.length).toBe(readsBefore);
   });
 
   it("puts an expired level-stream handshake into the label and leaves the recording alone", async () => {
