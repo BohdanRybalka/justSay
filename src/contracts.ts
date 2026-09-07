@@ -37,6 +37,23 @@ export const EVENT_SHORTCUT_REQUESTED = "shortcut-requested";
 export const EVENT_SHORTCUT_APPLIED = "shortcut-applied";
 export const EVENT_MEETING_TOGGLE = "meeting-toggle";
 
+/** The Settings window was dismissed. The shell intercepts `CloseRequested`,
+ *  prevents it and hides the window, so the webview stays mounted and no tab's
+ *  teardown ever runs — a microphone the General tab holds outlives the window
+ *  that opened it. The Rust side emits this after `hide()` and `settings.ts`
+ *  re-mounts the active tab on it, which releases whatever that tab held
+ *  ([JS-121]). An event we emit ourselves rather than `visibilitychange`,
+ *  which WebView2 and WKWebView are not verifiably agreed on for a native
+ *  hide. */
+export const EVENT_SETTINGS_HIDDEN = "settings-hidden";
+
+/** What a `session_id` may look like on the wire, spelled the same way as
+ *  `SESSION_ID_PATTERN` in `backend/app/audio/session.py` and pinned against
+ *  it by `backend/tests/test_cross_language_contracts.py`. The backend answers
+ *  422 to anything else, so a mint that drifted from this would fail every
+ *  recording rather than one. */
+export const SESSION_ID_PATTERN = /^[0-9a-f]{32}$/;
+
 /** Payload of `EVENT_SHORTCUT_REQUESTED` — Settings asks the widget, which
  *  owns the global-shortcut registration, to take a new accelerator. */
 export interface ShortcutRequested {
