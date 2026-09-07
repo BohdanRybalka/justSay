@@ -303,6 +303,13 @@ def test_the_provider_module_does_not_import_the_factory_at_module_level():
     new module's mapping. A split module identity that behaves correctly is the
     kind this project has already been burnt by -- it fails somewhere else,
     later, on an `is` check.
+
+    A submodule reaches this file under two spellings and both are collected:
+    `import app.stt.local_factory` names it directly, and
+    `from app.stt import local_factory` names the package with the module as an
+    alias. Stage 6 found the second shape invisible here -- the check saw only
+    `app.stt` -- which would have let the cycle back in under the spelling this
+    file does not happen to use today.
     """
     import ast
     from pathlib import Path
@@ -319,6 +326,11 @@ def test_the_provider_module_does_not_import_the_factory_at_module_level():
         getattr(node, "module", None) or ""
         for node in module_level
         if isinstance(node, ast.ImportFrom)
+    } | {
+        f"{node.module}.{alias.name}"
+        for node in module_level
+        if isinstance(node, ast.ImportFrom) and node.module
+        for alias in node.names
     } | {
         alias.name for node in module_level if isinstance(node, ast.Import)
         for alias in node.names
