@@ -76,7 +76,21 @@ def resolve_audio_tap_path(executable: Path, override: Path | None) -> Path:
     return _DEV_TAP_PATH
 
 
-def _read_header(process: subprocess.Popen, readers: list[threading.Thread]) -> bytes:
+def _start_reader(target, name: str) -> threading.Thread:
+    """A started daemon thread, handed back so the caller can shut it down.
+
+    Every thread this module starts reads one of the helper's pipes, and
+    whoever tears the helper down has to know which of them are still parked
+    inside a read before closing anything (ADR 052). Returning the thread makes
+    that a value the caller holds rather than something a function was trusted
+    to append to a list it was passed.
+    """
+    reader = threading.Thread(target=target, name=name, daemon=True)
+    reader.start()
+    return reader
+
+
+def _await_header(reader: threading.Thread, header: list[bytes]) -> bytes:
     """The helper's first line, bounded, or a raise saying it never arrived.
 
     The helper writes its header only after both `AudioHardwareCreateProcessTap`
@@ -87,26 +101,17 @@ def _read_header(process: subprocess.Popen, readers: list[threading.Thread]) -> 
     other blocking call in this module is already bounded; this was the one
     that was not, and the Windows loopback source has no equivalent.
 
-    The thread this starts is appended to `readers` before it runs, because on
-    the timeout path it is still parked inside `readline()` on the helper's
-    stdout: whoever tears the helper down has to know that pipe is under a
-    blocked read before closing it (ADR 052).
+    On the timeout path `reader` is still parked inside `readline()` on the
+    helper's stdout, which is why the caller holds it: that pipe must not be
+    closed under a blocked read.
     """
-    line: list[bytes] = []
-    reader = threading.Thread(
-        target=lambda: line.append(process.stdout.readline()),
-        name="macos-audio-tap-header",
-        daemon=True,
-    )
-    readers.append(reader)
-    reader.start()
     reader.join(timeout=_HEADER_TIMEOUT_SECONDS)
-    if not line:
+    if not header:
         raise SystemAudioUnavailableError(
             f"The macOS audio helper did not answer within {_HEADER_TIMEOUT_SECONDS:.0f}s. "
             "It may be waiting on a system-audio recording permission that was never granted."
         )
-    return line[0]
+    return header[0]
 
 
 def parse_tap_header(line: bytes) -> tuple[int, int]:
@@ -170,6 +175,7 @@ class MacOSTapSource(SystemAudioSource):
         self._stderr_reader: threading.Thread | None = None
         self._lock = threading.Lock()
         self._stderr_lock = threading.Lock()
+        self._stopping = threading.Event()
         self._stderr_tail: collections.deque[str] = collections.deque(
             maxlen=_STDERR_TAIL_LINES
         )
@@ -186,18 +192,19 @@ class MacOSTapSource(SystemAudioSource):
         return ENDPOINT_NAME
 
     def start(self, on_block: BlockSink) -> None:
+        self._stopping.clear()
         process = self._spawn()
-        stderr_reader = threading.Thread(
-            target=self._drain_stderr,
-            args=(process.stderr,),
-            name="macos-audio-tap-stderr",
-            daemon=True,
+        stderr_reader = _start_reader(
+            lambda: self._drain_stderr(process.stderr), "macos-audio-tap-stderr"
         )
-        stderr_reader.start()
-        readers = [stderr_reader]
+        header: list[bytes] = []
+        header_reader = _start_reader(
+            lambda: header.append(process.stdout.readline()), "macos-audio-tap-header"
+        )
+        readers = [stderr_reader, header_reader]
         try:
             self._native_sample_rate, self._channels = parse_tap_header(
-                _read_header(process, readers)
+                _await_header(header_reader, header)
             )
         except SystemAudioUnavailableError as e:
             self._shutdown(process, readers)
@@ -210,13 +217,9 @@ class MacOSTapSource(SystemAudioSource):
             self._on_block = on_block
         self._process = process
         self._stderr_reader = stderr_reader
-        self._reader = threading.Thread(
-            target=self._read_blocks,
-            args=(process, stderr_reader),
-            name="macos-audio-tap",
-            daemon=True,
+        self._reader = _start_reader(
+            lambda: self._read_blocks(process, stderr_reader), "macos-audio-tap"
         )
-        self._reader.start()
         log.info(
             "macOS system-audio tap started: %d Hz, %d ch",
             self._native_sample_rate,
@@ -238,6 +241,16 @@ class MacOSTapSource(SystemAudioSource):
     def _read_blocks(
         self, process: subprocess.Popen, stderr_reader: threading.Thread
     ) -> None:
+        """Frames until the helper stops producing them, then why it stopped.
+
+        The exit report joins the drain first, because the helper's last words
+        are written on the way out and arrive after its exit is observed. That
+        join is skipped once `stop()` has been entered: a deliberate stop kills
+        the helper, so a non-zero code there says nothing, and this thread is
+        one of the ones `_shutdown` is joining -- sitting inside a join of its
+        own would spend the shutdown's whole budget and get itself classified
+        as parked on a pipe it is not reading.
+        """
         block_bytes = self._settings.meeting_block_frames * self._channels * 4
         stdout = process.stdout
         while True:
@@ -251,7 +264,7 @@ class MacOSTapSource(SystemAudioSource):
             sink(time.monotonic(), interleaved_buffer_to_mono(chunk, self._channels, "<f4"))
 
         code = process.poll()
-        if code is not None and code != 0:
+        if code is not None and code != 0 and not self._stopping.is_set():
             stderr_reader.join(timeout=_READER_JOIN_TIMEOUT_SECONDS)
             log.error(
                 "The macOS system-audio helper exited with code %d, so this meeting "
@@ -268,22 +281,33 @@ class MacOSTapSource(SystemAudioSource):
         header read does, because the Core Audio setup the helper logs during
         is exactly the phase that precedes the header.
 
-        Each read is capped at `_STDERR_MAX_LINE_BYTES` and at most
-        `_STDERR_TAIL_LINES` of them are kept, so the buffer is bounded in
-        bytes rather than in lines: a helper that never writes a newline
-        cannot grow one string for the length of a recording. Returns at EOF,
-        which is the helper's exit closing the write end -- never a close of
-        this stream from another thread, which would deadlock on the buffer
-        lock this read holds.
+        What is bounded is what is kept, not what is read. Each read stops at
+        `_STDERR_MAX_LINE_BYTES`, and the remainder of a line longer than that
+        is read and dropped rather than kept as further entries: a single
+        100 KB Core Audio dump would otherwise become 25 of the
+        `_STDERR_TAIL_LINES` the buffer holds and evict the `fail(...)` line
+        the buffer exists to preserve. So one written line is at most one
+        entry, of at most `_STDERR_MAX_LINE_BYTES` characters -- characters,
+        not bytes, because `errors="replace"` turns each undecodable byte into
+        a U+FFFD that re-encodes to three.
+
+        Returns at EOF, which is the helper's exit closing the write end --
+        never a close of this stream from another thread, which would deadlock
+        on the buffer lock this read holds.
         """
         if stream is None:
             return
         try:
+            continuation = False
             while True:
-                line = stream.readline(_STDERR_MAX_LINE_BYTES)
-                if not line:
+                chunk = stream.readline(_STDERR_MAX_LINE_BYTES)
+                if not chunk:
                     return
-                text = line.decode("utf-8", errors="replace").rstrip()
+                truncated = continuation
+                continuation = not chunk.endswith(b"\n")
+                if truncated:
+                    continue
+                text = chunk.decode("utf-8", errors="replace").rstrip()
                 if text:
                     with self._stderr_lock:
                         self._stderr_tail.append(text)
@@ -318,6 +342,7 @@ class MacOSTapSource(SystemAudioSource):
         return f"{reason} The helper wrote: {tail}"
 
     def stop(self) -> None:
+        self._stopping.set()
         with self._lock:
             self._on_block = None
         process = self._process
@@ -339,25 +364,30 @@ class MacOSTapSource(SystemAudioSource):
         instead is a deadlock -- `close()` waits on the buffer lock the reader
         holds inside `readline()`, and this runs on the thread that owns the
         recording, so `MeetingRecorder.stop()` never returns and the meeting
-        stays in `STOPPING` for the life of the process (ADR 052). A reader
-        still alive after the join keeps its stream open rather than being
-        closed into that wait.
+        stays in `STOPPING` for the life of the process (ADR 052).
+
+        The readers share one `_READER_JOIN_TIMEOUT_SECONDS` deadline rather
+        than getting one each, because this runs inline on the event loop
+        thread (`pipeline/router.py`'s `await recorder.start()`) and a
+        per-reader budget multiplies the freeze by however many readers there
+        are. Whatever is still parked when the deadline passes keeps its pipe
+        open here and is handed to `_close_when_idle`, so a stuck reader delays
+        the close instead of leaking the descriptor: `stop()` has already
+        dropped every reference this object held, and without that handoff
+        nothing could ever close them again.
         """
         self._terminate(process)
-        stuck = [reader for reader in readers if not _joined(reader)]
+        deadline = time.monotonic() + _READER_JOIN_TIMEOUT_SECONDS
+        stuck = [reader for reader in readers if not _joined(reader, deadline)]
         if stuck:
             log.warning(
-                "The macOS system-audio helper's pipes are left open because %s "
-                "did not finish reading",
+                "The macOS system-audio helper's pipes stay open until %s "
+                "finishes reading",
                 ", ".join(reader.name for reader in stuck),
             )
+            _close_when_idle(process, stuck)
             return
-        for stream in (process.stdout, process.stderr):
-            try:
-                if stream is not None:
-                    stream.close()
-            except OSError:
-                pass
+        _close_streams(process)
 
     def _terminate(self, process: subprocess.Popen) -> None:
         try:
@@ -371,10 +401,43 @@ class MacOSTapSource(SystemAudioSource):
             log.warning("Stopping the macOS system-audio helper failed", exc_info=True)
 
 
-def _joined(reader: threading.Thread) -> bool:
-    """True once `reader` has finished, given the join budget to do so."""
-    reader.join(timeout=_READER_JOIN_TIMEOUT_SECONDS)
+def _joined(reader: threading.Thread, deadline: float) -> bool:
+    """True once `reader` has finished, within a budget shared with its peers."""
+    reader.join(timeout=max(0.0, deadline - time.monotonic()))
     return not reader.is_alive()
+
+
+def _close_streams(process: subprocess.Popen) -> None:
+    """Close both of the helper's pipes, with nothing reading either."""
+    for stream in (process.stdout, process.stderr):
+        try:
+            if stream is not None:
+                stream.close()
+        except OSError:
+            pass
+
+
+def _close_when_idle(
+    process: subprocess.Popen, readers: Sequence[threading.Thread]
+) -> None:
+    """Close the helper's pipes once the readers still parked on them are out.
+
+    The wait is unbounded and therefore never on the caller's thread: `stop()`
+    runs inside `MeetingRecorder.stop()`'s `finally` on the thread that owns
+    the recording. A reader parked on a pipe whose writer is gone leaves within
+    milliseconds of the helper dying; one that never leaves holds two
+    descriptors, which is what the old "return and hope the `Popen` is
+    collected" path did for as long as this thread would have.
+    """
+
+    def _wait_then_close() -> None:
+        for reader in readers:
+            reader.join()
+        _close_streams(process)
+
+    threading.Thread(
+        target=_wait_then_close, name="macos-audio-tap-cleanup", daemon=True
+    ).start()
 
 
 def _read_exactly(stream: object, size: int) -> bytes | None:

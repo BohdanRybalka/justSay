@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
+from app.audio import macos_tap
 from app.audio.config import AudioSettings
 from app.audio.macos_tap import (
     _STDERR_MAX_LINE_BYTES,
@@ -35,6 +36,7 @@ from app.audio.meeting_recorder import MeetingRecorder
 from app.audio.system_source import SystemAudioUnavailableError, create_system_audio_source
 
 BLOCK_FRAMES = 64
+NEWLINE = b"\n"
 
 
 @pytest.fixture
@@ -102,6 +104,7 @@ class _FakeTapProcess:
         self.returncode = returncode
         self.terminated = False
         self.killed = False
+        self.exit_observed = threading.Event()
 
     def terminate(self) -> None:
         self.terminated = True
@@ -113,6 +116,7 @@ class _FakeTapProcess:
         return self.returncode
 
     def poll(self) -> int:
+        self.exit_observed.set()
         return self.returncode
 
 
@@ -462,29 +466,37 @@ def test_a_helper_writing_more_stderr_than_the_pipe_holds_is_not_blocked(tap_set
     )
 
 
-def test_a_nonzero_exit_is_logged_with_what_the_helper_wrote(tap_settings, caplog):
+@pytest.mark.timeout(30)
+def test_a_nonzero_exit_is_logged_with_what_the_helper_wrote(
+    tap_settings, caplog, monkeypatch
+):
     """AC: the exit diagnostic still carries the helper's own stderr text.
 
     Draining into a bounded buffer replaced the read-it-all-at-exit call, so
     this pins that the replacement did not turn the error log into an empty
     tail -- the only place a user-visible reason for a failed capture appears.
 
-    The stderr here is a real `os.pipe()` whose writer sleeps before writing,
-    and that is the point of the test rather than a detail. Against an
-    `io.BytesIO` the line is in the buffer before the reader thread even starts,
-    so the log carries it whether or not `_read_blocks` joins the drain first --
-    the test passed identically with the join deleted, over ten consecutive runs.
-    A late write reproduces the race the join exists to close: the helper's last
-    words arrive after its exit is observed, and without the join they are logged
-    as an empty tail.
+    The stderr here is a real `os.pipe()` whose writer holds its line back
+    until the exit has been observed, and that ordering is the test rather than
+    a detail. Against an `io.BytesIO` the line is in the buffer before the
+    reader thread even starts, so the log carries it whether or not
+    `_read_blocks` joins the drain first -- the test passed identically with the
+    join deleted, over ten consecutive runs. What the join closes is the race
+    where the helper's last words arrive after its exit is observed, and the
+    fake helper's `poll()` is what says that moment has come: the write is
+    ordered after it by an event rather than by a sleep that a loaded runner
+    can overrun. The join budget is raised for the same reason -- the default
+    0.5 s is a real bound on a 2-core runner, and a red here would report a
+    missing diagnostic that is really a scheduling delay.
     """
+    monkeypatch.setattr(macos_tap, "_READER_JOIN_TIMEOUT_SECONDS", 5.0)
     read_fd, write_fd = os.pipe()
     process = _FakeTapProcess(tap_stdout(blocks=1), returncode=3)
     process.stderr = os.fdopen(read_fd, "rb")
 
     def write_after_the_exit_is_observed() -> None:
-        time.sleep(0.1)
-        os.write(write_fd, b"tap died: no permission\n")
+        assert process.exit_observed.wait(timeout=10.0), "the helper's exit was never polled"
+        os.write(write_fd, b"tap died: no permission" + NEWLINE)
         os.close(write_fd)
 
     writer = threading.Thread(
@@ -496,7 +508,7 @@ def test_a_nonzero_exit_is_logged_with_what_the_helper_wrote(tap_settings, caplo
         with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
             source.start(lambda arrival, mono: None)
             writer.start()
-            source._reader.join(timeout=2.0)
+            source._reader.join(timeout=10.0)
             source.stop()
 
     writer.join(timeout=2.0)
@@ -698,8 +710,8 @@ def test_the_drain_logs_a_failure_it_did_not_expect_instead_of_dying_silently(
 
 
 @pytest.mark.timeout(30)
-def test_the_exit_diagnostic_survives_a_stop_that_clears_the_drain_reference(
-    tap_settings, caplog
+def test_the_exit_diagnostic_uses_the_drain_thread_it_was_handed(
+    tap_settings, caplog, monkeypatch
 ):
     """AC: the exit log joins the drain thread it was actually given.
 
@@ -707,16 +719,25 @@ def test_the_exit_diagnostic_survives_a_stop_that_clears_the_drain_reference(
     `stop()` cleared it with none either, so a stop racing the helper's exit
     made the join disappear and the log reported an empty tail -- the empty
     diagnostic the join was added to close. The thread is handed to the reader
-    as an argument instead, so there is no shared field to race on. Clearing
-    the field here is what the race would have done.
+    as an argument instead, so there is no shared field to race on.
+
+    Clearing the field is how that race is reproduced, and the field is put
+    back before `stop()` runs. `stop()` builds `_shutdown`'s reader list from
+    it, and `_shutdown` closes a pipe only when nothing is parked on it: a
+    version of this test that left the field cleared would be closing the
+    helper's stderr under a live drain thread -- the deadlock ADR 052 exists to
+    prevent, disarmed inside the test that exists to protect it. It passed only
+    because the writer usually finished first, and under load it hung instead
+    of failing.
     """
+    monkeypatch.setattr(macos_tap, "_READER_JOIN_TIMEOUT_SECONDS", 5.0)
     read_fd, write_fd = os.pipe()
     process = _FakeTapProcess(tap_stdout(blocks=1), returncode=3, gated=True)
     process.stderr = os.fdopen(read_fd, "rb")
 
     def write_after_the_exit_is_observed() -> None:
-        time.sleep(0.1)
-        os.write(write_fd, b"tap died: no permission\n")
+        assert process.exit_observed.wait(timeout=10.0), "the helper's exit was never polled"
+        os.write(write_fd, b"tap died: no permission" + NEWLINE)
         os.close(write_fd)
 
     writer = threading.Thread(
@@ -727,12 +748,158 @@ def test_the_exit_diagnostic_survives_a_stop_that_clears_the_drain_reference(
     with caplog.at_level(logging.ERROR, logger="app.audio.macos_tap"):
         with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
             source.start(lambda arrival, mono: None)
+            drain = source._stderr_reader
             source._stderr_reader = None
             writer.start()
             process.stdout.gate.set()
-            source._reader.join(timeout=2.0)
+            source._reader.join(timeout=10.0)
+            source._stderr_reader = drain
             source.stop()
 
     writer.join(timeout=2.0)
     messages = [record.getMessage() for record in caplog.records]
     assert any("tap died: no permission" in message for message in messages), messages
+
+
+class _ParkedReader:
+    """A thread parked until the test releases it, standing in for a reader.
+
+    A drain blocked inside `readline()` on a pipe whose writer has not gone
+    away is exactly this: alive, holding a stream's buffer lock, and not
+    leaving on its own.
+    """
+
+    def __init__(self, name: str):
+        self.released = threading.Event()
+        self.thread = threading.Thread(
+            target=lambda: self.released.wait(timeout=30.0), name=name, daemon=True
+        )
+        self.thread.start()
+
+
+@pytest.mark.timeout(30)
+def test_shutdown_spends_one_join_budget_on_all_the_readers_together(
+    tap_settings, monkeypatch
+):
+    """AC: the join budget is shared, not handed out per reader.
+
+    `_shutdown` runs inline on the event-loop thread -- `pipeline/router.py`
+    awaits `recorder.start()` without a `to_thread` -- so every second it
+    spends is a second the whole backend is frozen, which is the freeze JS-99
+    already filed. A per-reader budget multiplies that by however many readers
+    there are, and it kept evaluating readers after one was already known
+    stuck.
+    """
+    monkeypatch.setattr(macos_tap, "_READER_JOIN_TIMEOUT_SECONDS", 0.5)
+    process = _PipedTapProcess()
+    parked = [_ParkedReader(f"parked-{index}") for index in range(4)]
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+
+    started = time.monotonic()
+    source._shutdown(process, [reader.thread for reader in parked])
+    elapsed = time.monotonic() - started
+
+    for reader in parked:
+        reader.released.set()
+        reader.thread.join(timeout=5.0)
+    process.close_writes()
+    process.close_reads()
+
+    assert elapsed < 1.0, (
+        f"_shutdown took {elapsed:.2f}s over four parked readers, so each one "
+        "is being given the full join budget on the thread that owns the app"
+    )
+
+
+@pytest.mark.timeout(30)
+def test_a_pipe_left_open_for_a_parked_reader_is_closed_once_it_leaves(
+    tap_settings, monkeypatch
+):
+    """AC: a stuck reader delays the close instead of leaking the descriptor.
+
+    `stop()` drops `_process`, `_reader` and `_stderr_reader` before
+    `_shutdown` runs, so a `_shutdown` that returned without closing left two
+    pipe descriptors with nothing in the object able to reach them again --
+    open until the `Popen` was collected, which a thread still parked on the
+    pipe prevents. The wait is handed to a thread of its own so it can be
+    unbounded without freezing the caller.
+    """
+    monkeypatch.setattr(macos_tap, "_READER_JOIN_TIMEOUT_SECONDS", 0.2)
+    process = _PipedTapProcess()
+    parked = _ParkedReader("parked-drain")
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+
+    source._shutdown(process, [parked.thread])
+
+    assert not process.stdout.closed, (
+        "the pipe was closed while a reader was still parked on it, which is "
+        "the close-into-a-blocked-read deadlock ADR 052 records"
+    )
+    parked.released.set()
+    parked.thread.join(timeout=5.0)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not process.stdout.closed:
+        time.sleep(0.02)
+    process.close_writes()
+
+    assert process.stdout.closed and process.stderr.closed, (
+        "the reader left and nothing ever closed the helper's pipes, so two "
+        "descriptors leak for every meeting that stopped with a stuck reader"
+    )
+
+
+def test_one_long_line_costs_the_buffer_one_entry_not_twenty_five(tap_settings):
+    """AC: what is bounded is what is kept, not what is read.
+
+    Reading in `_STDERR_MAX_LINE_BYTES` slices and appending every slice turns
+    a single 100 KB Core Audio dump into 25 deque entries, which evicts the
+    `fail(...)` line the buffer exists to preserve -- the buffer doing the
+    opposite of its job. The remainder of an over-long line is read (the pipe
+    still has to drain) and dropped.
+    """
+    filler = b"x" * (_STDERR_MAX_LINE_BYTES * 25) + NEWLINE
+    lines = [b"the first thing the helper said" + NEWLINE, filler]
+    lines += [b"noise %d" % index + NEWLINE for index in range(_STDERR_TAIL_LINES - 3)]
+    lines.append(b"fail: system audio recording permission denied" + NEWLINE)
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+
+    source._drain_stderr(io.BytesIO(b"".join(lines)))
+    tail = source._stderr_text().split(NEWLINE.decode())
+
+    assert tail[0] == "the first thing the helper said", (
+        f"the long line evicted everything written before it: {tail[:3]}"
+    )
+    assert tail[-1].startswith("fail:"), tail[-1]
+    assert len(tail) == _STDERR_TAIL_LINES
+
+
+@pytest.mark.timeout(30)
+def test_a_deliberate_stop_is_not_reported_as_a_failed_capture(tap_settings, caplog):
+    """AC: `stop()` kills the helper, so its exit code is not a diagnostic.
+
+    `_terminate` is what ends the helper, and a terminated child exits
+    non-zero, so the exit path fired on every normal stop -- telling the user a
+    meeting had been recorded without system audio when nothing had gone wrong.
+    It also put the block reader inside a join while `_shutdown` was joining
+    the block reader, spending the shutdown's whole budget on the thread that
+    owns the app and then classifying it as parked on a pipe it had finished
+    reading.
+    """
+    process = _PipedTapProcess(returncode=-15)
+    os.write(process.stdout_write, header_line())
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+
+    with caplog.at_level(logging.ERROR, logger="app.audio.macos_tap"):
+        with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
+            source.start(lambda arrival, mono: None)
+            readers = [source._reader, source._stderr_reader]
+            source.stop()
+            process.close_writes()
+            for reader in readers:
+                reader.join(timeout=5.0)
+
+    process.close_reads()
+    messages = [record.getMessage() for record in caplog.records]
+    assert not any("recorded without system audio" in message for message in messages), (
+        f"a deliberate stop was reported to the user as a failed capture: {messages}"
+    )
