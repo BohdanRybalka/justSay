@@ -25,16 +25,35 @@ import { describe, expect, it } from "vitest";
 
 const SRC_DIR = fileURLToPath(new URL(".", import.meta.url));
 const API_FILE = resolve(SRC_DIR, "api.ts");
+const API_LITERAL_OPENER = "export const api = {";
+const MEMBER_DECLARATION = /^ {2}(?:async +)?([A-Za-z_$][\w$]*)\s*[:(]/;
 
 /**
- * The last member declared in the real `api` literal.
+ * The last member declared in the real `api` literal, found without counting
+ * brackets.
  *
  * A count threshold only fires on total collapse: with 25 members, a depth
  * counter that stops after the eleventh still clears it. Requiring the final
- * member is what "the extractor read the whole literal" actually means, and it
- * fails the moment truncation starts anywhere before the end.
+ * member is what "the extractor read the whole literal" actually means. The
+ * name cannot be a constant in this file: a member appended after it would
+ * leave the anchor satisfied and the new member unchecked, which is the
+ * staleness `ALLOWED_WITHOUT_PRODUCTION_CALLER` is guarded against below. It is
+ * read instead by scanning to the literal's closing `};` at column zero, which
+ * is the one thing the depth counter it anchors cannot get wrong.
  */
-const LAST_DECLARED_MEMBER = "clearHistory";
+function lastDeclaredMember(source: string): string | null {
+  const code = blankCommentsAndStrings(source);
+  const start = code.indexOf(API_LITERAL_OPENER);
+  if (start === -1) return null;
+
+  let last: string | null = null;
+  for (const line of code.slice(start).split("\n").slice(1)) {
+    if (line.startsWith("};")) return last;
+    const match = MEMBER_DECLARATION.exec(line);
+    if (match) last = match[1];
+  }
+  return null;
+}
 
 /**
  * Members of `api` with no caller in production code, each with the reason it
@@ -126,7 +145,7 @@ function blankCommentsAndStrings(source: string): string {
  */
 function apiMemberNames(source: string): string[] {
   const code = blankCommentsAndStrings(source);
-  const start = code.indexOf("export const api = {");
+  const start = code.indexOf(API_LITERAL_OPENER);
   if (start === -1) return [];
 
   const names: string[] = [];
@@ -134,7 +153,7 @@ function apiMemberNames(source: string): string[] {
   for (const line of code.slice(start).split("\n").slice(1)) {
     if (depth === 0 && line.startsWith("}")) break;
     if (depth === 0) {
-      const match = /^ {2}(?:async +)?([A-Za-z_$][\w$]*)\s*[:(]/.exec(line);
+      const match = MEMBER_DECLARATION.exec(line);
       if (match) names.push(match[1]);
     }
     for (const char of line) {
@@ -163,9 +182,20 @@ function productionSources(): Map<string, string> {
   return sources;
 }
 
+/**
+ * Members with no `api.<member>` reference in any production source.
+ *
+ * The reference has to be qualified. A bare identifier match counts a local
+ * variable, an interface property or the word inside a doc comment as a caller,
+ * which is not what the assertion claims and would hide a dead member behind an
+ * unrelated coincidence. Every call site in `src/` is written `api.<member>`, so
+ * requiring the qualifier costs nothing today; an alias (`const a = api`) would
+ * be reported as an orphan, which is a loud failure asking for a rule rather
+ * than a silent pass.
+ */
 function membersWithoutCaller(members: string[], sources: Map<string, string>): string[] {
   return members.filter((member) => {
-    const used = new RegExp(String.raw`(?<![\w$])${member}(?![\w$])`);
+    const used = new RegExp(String.raw`\bapi\s*\.\s*` + member + String.raw`(?![\w$])`);
     return ![...sources.values()].some((source) => used.test(source));
   });
 }
@@ -174,12 +204,19 @@ describe("the exported api object (src/api.ts)", () => {
   const members = apiMemberNames(readFileSync(API_FILE, "utf8"));
 
   it("is read to its last declared member", () => {
+    const last = lastDeclaredMember(readFileSync(API_FILE, "utf8"));
+
+    expect(
+      last,
+      "no closing `};` was found for `export const api = {`, so there is nothing to " +
+        "anchor the extractor against and the assertions below prove nothing",
+    ).not.toBeNull();
     expect(
       members,
-      `the extractor did not reach \`${LAST_DECLARED_MEMBER}\`, the last member of ` +
+      `the extractor did not reach \`${last}\`, the last member of ` +
         "`export const api = {`. It stopped early, so every member after the cut is " +
         "unchecked and the assertions below are silently incomplete",
-    ).toContain(LAST_DECLARED_MEMBER);
+    ).toContain(last);
   });
 
   it("has a production caller for every member", () => {
