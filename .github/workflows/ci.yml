@@ -11,7 +11,7 @@
 #                   accepts for ruff vs. vulture.
 #   frontend-test — Node only: vitest.
 #   backend-lint  — Node entry point + Python[dev]: ruff + vulture.
-#   backend-test  — Node entry point + Python[dev,audio]: pytest.
+#   backend-test  — Node entry point + Python[dev,audio,cloud]: pytest.
 #
 # backend-lint installs only backend[dev] and skips PortAudio: neither ruff nor
 # vulture imports the app. Both backend jobs drop `npm ci` — their npm scripts
@@ -136,8 +136,12 @@ jobs:
       - name: Install PortAudio
         run: sudo apt-get update && sudo apt-get install -y libportaudio2
 
+      # The cloud extra is here for the gates, not for the app: without
+      # google-genai installed, the Gemini timeout tests either skip outright
+      # or fall back to a sys.modules stub that accepts any keyword, so CI
+      # verified neither Gemini acceptance criterion while reporting green.
       - name: Install backend deps
-        run: pip install -e "backend[dev,audio]"
+        run: pip install -e "backend[dev,audio,cloud]"
 
       - name: Run backend tests (pytest, not slow)
         run: npm run test -- -m "not slow"
