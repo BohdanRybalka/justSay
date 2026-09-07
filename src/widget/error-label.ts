@@ -1,4 +1,4 @@
-import { ApiAuthError } from "../api";
+import { ApiAuthError, ApiRequestError } from "../api";
 
 export interface DictationErrorLabel {
   /** Compact widget text — the pill is ~240 px wide, so keep it short. */
@@ -37,6 +37,32 @@ export function startErrorLabel(error: unknown): DictationErrorLabel {
   return { label: "Start failed", toast: "Couldn't start recording — try again." };
 }
 
+/** Something else is holding the microphone, and this window may not end it.
+ *
+ *  A new outcome as of spec 119: the recorder answers 403 to a session that
+ *  does not own it, which happens when the Settings microphone test or another
+ *  window took the device between this dictation's start and its stop. Naming
+ *  it is the whole point — "Dictation failed — try again" invites a retry that
+ *  fails identically until the other surface lets go. */
+const NOT_YOURS: DictationErrorLabel = {
+  label: "Recording is busy",
+  toast: "Another window is using the microphone — stop it there and try again.",
+};
+
+/** The dictation was never processed, and that is now a fact rather than a
+ *  guess.
+ *
+ *  `POST /pipeline/dictate` stops the recorder as its first act, so a session
+ *  the backend was still holding when `POST /audio/discard` answered 200 is a
+ *  dictation whose handler had not run. The discard also ended the capture, so
+ *  the handler now cannot run: nothing was transcribed, nothing was copied and
+ *  the microphone is closed. Before spec 119 this case sat in `processing` for
+ *  the 600 s dictation budget with the recorder still filling its buffer. */
+export const DICTATION_NEVER_PROCESSED: DictationErrorLabel = {
+  label: "No answer",
+  toast: "The backend never answered — nothing was transcribed and the microphone is closed.",
+};
+
 /**
  * Decides what the widget shows after a failed dictation.
  *
@@ -49,6 +75,10 @@ export function startErrorLabel(error: unknown): DictationErrorLabel {
 export function dictationErrorLabel(error: unknown): DictationErrorLabel {
   if (error instanceof ApiAuthError) {
     return AUTH_FAILED;
+  }
+
+  if (error instanceof ApiRequestError && error.status === 403) {
+    return NOT_YOURS;
   }
 
   const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();

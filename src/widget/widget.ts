@@ -5,7 +5,7 @@ import {
   shortcutFailureMessage,
   shouldReapplyShortcut,
 } from "../accelerator";
-import { api } from "../api";
+import { api, REQUEST_TIMEOUT_MS } from "../api";
 import {
   EVENT_MEETING_TOGGLE,
   EVENT_SETTINGS_CHANGED,
@@ -16,10 +16,17 @@ import {
 } from "../contracts";
 import { formatStopwatch } from "../format";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
+import { newSessionId } from "../session";
 import { isStaleStatusResponse } from "../stale-response";
-import { withTimeout } from "../timeout";
+import { TimedOutError, withTimeout } from "../timeout";
+import { createAbandonedSessions } from "./abandoned-request";
 import { computeDoneStatus } from "./done-status";
-import { dictationErrorLabel, startErrorLabel, type DictationErrorLabel } from "./error-label";
+import {
+  DICTATION_NEVER_PROCESSED,
+  dictationErrorLabel,
+  startErrorLabel,
+  type DictationErrorLabel,
+} from "./error-label";
 import { MEETING_STATE_CLASS, renderMeetingIndicator } from "./meeting-indicator";
 import { type MeetingToggleActions, runMeetingToggle } from "./meeting-toggle";
 import { createRecordingIntentQueue } from "./recording-intent";
@@ -132,8 +139,17 @@ function setState(newState: WidgetState, message?: string, durationLabel?: strin
   }
 }
 
-function startDurationTimer() {
-  const start = Date.now();
+/** `start` exists so an adopted recording shows the backend's elapsed time
+ *  rather than restarting the stopwatch at zero: when a start times out and the
+ *  backend turns out to be holding this window's own session, the capture began
+ *  before the budget ran out.
+ *
+ *  It clears the interval it is about to replace, so the one function that
+ *  creates the stopwatch is also the one that owns there being only one of it:
+ *  the adoption path calls this while `setState("recording")` has already armed
+ *  an interval, and two of them would write to the same node. */
+function startDurationTimer(start = Date.now()) {
+  if (durationInterval) clearInterval(durationInterval);
   const update = () => {
     const elapsed = (Date.now() - start) / 1000;
     durationEl.textContent = formatStopwatch(elapsed);
@@ -143,17 +159,70 @@ function startDurationTimer() {
 }
 
 
+/** The sessions this window started and cannot account for.
+ *
+ *  Discharged on the connection poll, which is the only thing that keeps
+ *  running while the backend is unreachable — the timeout site itself has just
+ *  proved the backend is not answering, so a probe sent there would go into the
+ *  same silence. */
+const abandoned = createAbandonedSessions({
+  discard: (sessionId) => api.audioDiscard(sessionId),
+});
+
+/** The session backing the dictation currently on screen. */
+let currentSession = "";
+
 async function startRecording() {
   if (state === "recording" || state === "processing") return;
 
+  const session = newSessionId();
+  currentSession = session;
   setState("recording");
 
   try {
-    await api.audioStart();
+    await api.audioStart(session);
   } catch (e) {
+    if (e instanceof TimedOutError && (await adoptTimedOutStart(session))) {
+      console.warn("Start recording timed out but the backend holds this session; adopted it", e);
+      return;
+    }
     reportTransitionFailure(startErrorLabel(e));
     console.error("Start recording failed:", e);
   }
+}
+
+/** Decide what an abandoned start actually did, from the id it carried.
+
+ *  One rule, because there is exactly one thing the backend can prove here: it
+ *  is holding this window's own session, so the capture is running and is
+ *  adopted with the stopwatch continuing from the reported elapsed time.
+ *
+ *  Every other answer proves nothing, so the session is owed. Nothing
+ *  serializes the queued `POST /audio/start` against the rest of the event
+ *  loop: an idle recorder can still be taken by it a moment later, and a
+ *  recorder held by somebody else can be released by that owner's stop before
+ *  the handler runs, which leaves the same device open under a name the app no
+ *  longer holds. A status read that failed proves less still. What settles the
+ *  debt is the discard's own answer — 200 if the start did land, 403 or 409 if
+ *  it never did — rather than a status read taken before the handler ran.
+ *
+ *  The debt waits `REQUEST_TIMEOUT_MS`, the same eligibility wait a dictation
+ *  gets, so the probe cannot beat the queued handler to the recorder's lock and
+ *  then read its own earliness as proof.
+ *
+ *  A start that failed with an *answer* — a refused connection, a 409, a 422 —
+ *  never reaches this function, and must not: those are decisive on their own
+ *  and owing them would turn a settled failure into debt. */
+async function adoptTimedOutStart(session: string): Promise<boolean> {
+  const status = await api.audioStatus().catch(() => null);
+
+  if (status?.is_recording && status.session_id === session) {
+    startDurationTimer(Date.now() - status.duration_seconds * 1000);
+    return true;
+  }
+
+  void abandoned.owe(session, Date.now() + REQUEST_TIMEOUT_MS);
+  return false;
 }
 
 /** Reports a failed start or a failed dictation. The label is the caller's —
@@ -165,25 +234,60 @@ function reportTransitionFailure({ label, toast }: DictationErrorLabel) {
   notifyError(toast);
 }
 
+/** Stop, transcribe, and stop waiting once the dictation is proved dead.
+ *
+ *  `/pipeline/dictate` has no budget and cannot honestly be given one — a local
+ *  transcription is legitimately slow and no measured upper bound for it exists
+ *  — so before spec 119 an accepted-and-never-answered dictate parked the
+ *  widget in `processing` for the 600 s budget with the recorder still
+ *  appending frames the whole time.
+ *
+ *  The session id answers the question that budget was dodging: *has this
+ *  request been processed at all?* The dictate handler's first act is
+ *  `recorder.stop()`, so a backend still holding this session has not run it.
+ *  The obligation is recorded before the request goes out and raced against it;
+ *  the discard that resolves it is not eligible until `REQUEST_TIMEOUT_MS` has
+ *  passed, which is what stops a probe beating a healthy handler to the lock.
+ *  Worst case in `processing`: that wait, plus one 5 s poll period, plus the
+ *  probe's own 15 s budget. */
 async function stopAndProcess() {
   if (state !== "recording") return;
 
+  const session = currentSession;
   setState("processing");
 
-  try {
-    const result = await api.dictate(currentLanguage);
-    const outcome = computeDoneStatus(result);
-    if (outcome) {
-      setState("done", outcome.label, formatStopwatch(outcome.elapsedSeconds));
-      if (result.discarded_reason !== "silence") {
-        renderRouteBadge(result);
-      }
-    } else {
-      setState("idle");
-    }
-  } catch (e) {
-    reportTransitionFailure(dictationErrorLabel(e));
-    console.error("Pipeline failed:", e);
+  const neverProcessed = abandoned.owe(session, Date.now() + REQUEST_TIMEOUT_MS);
+  const dictated = api.dictate(session, currentLanguage).then(
+    (result) => ({ kind: "answered", result }) as const,
+    (error) => ({ kind: "failed", error }) as const,
+  );
+
+  const outcome = await Promise.race([
+    dictated,
+    neverProcessed.then(() => ({ kind: "never-processed" }) as const),
+  ]);
+
+  if (outcome.kind === "never-processed") {
+    reportTransitionFailure(DICTATION_NEVER_PROCESSED);
+    return;
+  }
+
+  abandoned.forget(session);
+
+  if (outcome.kind === "failed") {
+    reportTransitionFailure(dictationErrorLabel(outcome.error));
+    console.error("Pipeline failed:", outcome.error);
+    return;
+  }
+
+  const status = computeDoneStatus(outcome.result);
+  if (!status) {
+    setState("idle");
+    return;
+  }
+  setState("done", status.label, formatStopwatch(status.elapsedSeconds));
+  if (outcome.result.discarded_reason !== "silence") {
+    renderRouteBadge(outcome.result);
   }
 }
 
@@ -529,6 +633,8 @@ let latestConnectionProbeToken = 0;
  *  tick before it notices the backend came back. Same guard, same shape, as the
  *  Settings window's badge and the Models tab's status read. */
 async function checkConnection() {
+  void abandoned.settle(Date.now());
+
   const token = ++latestConnectionProbeToken;
   let healthOk = true;
   try {
