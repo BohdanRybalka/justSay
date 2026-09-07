@@ -226,3 +226,26 @@ def test_factory_module_imports_no_third_party_at_module_level():
     assert_module_binds_no_third_party(
         "app.stt.local_factory", ("faster_whisper", "local_whisper_cpp")
     )
+
+
+@pytest.mark.parametrize(
+    "device,expected",
+    [
+        ("cuda", "float16"),
+        ("metal", "float16"),
+        ("vulkan", "float16"),
+        ("cpu", "int8"),
+        ("auto", "int8"),
+        ("", "int8"),
+    ],
+)
+def test_compute_type_for_device(device: str, expected: str):
+    """The one declaration of the device-to-compute-type rule.
+
+    `"auto"` and `""` are here because `whisper_device` is an unconstrained
+    `str` (`stt/config.py`): an unresolved or unrecognized device must fall to
+    `int8`, never to a GPU compute type the backend cannot honour.
+    """
+    from app.stt.local_factory import compute_type_for_device
+
+    assert compute_type_for_device(device) == expected

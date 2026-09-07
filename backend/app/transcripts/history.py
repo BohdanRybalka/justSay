@@ -29,6 +29,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -285,19 +286,11 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             return RelocateOutcome.FAILED, f"Could not create target directory: {e}"
 
         if new_path.exists():
-            _close_conn_locked()
-            _output_dir = new_dir
-            _conn = _connect(new_path)
-            _init_schema(_conn)
-            invalidate_derived_caches_locked()
+            _reopen_at_locked(new_dir)
             return RelocateOutcome.NEW_ALREADY_HAS_FILE, None
 
         if not old_path.exists():
-            _close_conn_locked()
-            _output_dir = new_dir
-            _conn = _connect(new_path)
-            _init_schema(_conn)
-            invalidate_derived_caches_locked()
+            _reopen_at_locked(new_dir)
             return RelocateOutcome.NO_OLD_FILE, None
 
         _close_conn_locked()
@@ -306,9 +299,7 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             shutil.copy2(old_path, new_path)
             if not _verify_db_row_count(old_path, new_path):
                 new_path.unlink(missing_ok=True)
-                _conn = _connect(old_path)
-                _init_schema(_conn)
-                invalidate_derived_caches_locked()
+                _reopen_at_locked(old_dir)
                 return RelocateOutcome.FAILED, "Verification failed: entry count mismatch"
 
             new_conn = _connect(new_path)
@@ -339,7 +330,7 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             return RelocateOutcome.FAILED, f"Move failed: {e}"
 
 
-_ENTRY_COLUMNS = (
+ENTRY_COLUMNS = (
     "id",
     "ts",
     "language",
@@ -352,6 +343,18 @@ _ENTRY_COLUMNS = (
     "model_name",
     "tokens_used",
 )
+
+ENTRY_READ_COLUMNS = tuple(c for c in ENTRY_COLUMNS if c != "cleaned_text")
+
+
+def columns_sql(columns: Sequence[str], prefix: str = "") -> str:
+    """The column list for a SELECT or INSERT, optionally table-qualified.
+
+    Only module-level declarations and literal aliases are ever passed here;
+    a request value must never reach it, since the result is interpolated
+    into SQL that sqlite cannot parameterise.
+    """
+    return ", ".join(f"{prefix}{name}" for name in columns)
 
 
 def _premigration_path(target_dir: Path) -> Path:
@@ -408,7 +411,7 @@ def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateOut
         if "id" not in source_columns:
             return ConsolidateOutcome.FAILED, "Source database has no entries table"
 
-        shared = [name for name in _ENTRY_COLUMNS if name in source_columns]
+        shared = [name for name in ENTRY_COLUMNS if name in source_columns]
         column_list = ", ".join(shared)
         conn.execute("BEGIN")
         cursor = conn.execute(
@@ -476,9 +479,8 @@ def save_entry(
         conn.execute("BEGIN")
         try:
             conn.execute(
-                "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, "
-                "duration_ms, audio_duration_seconds, word_count, model_name, tokens_used) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO entries({columns_sql(ENTRY_COLUMNS)}) "
+                f"VALUES ({', '.join('?' * len(ENTRY_COLUMNS))})",
                 (
                     entry.id, ts_ms, entry.language, entry.style,
                     entry.text, entry.text, entry.duration_ms,
@@ -508,8 +510,7 @@ def get_entries(limit: int = 50, offset: int = 0) -> list[HistoryEntry]:
     with _lock:
         conn = _ensure_conn_locked()
         rows = conn.execute(
-            "SELECT id, ts, language, style, raw_text, duration_ms, "
-            "audio_duration_seconds, word_count, model_name, tokens_used "
+            f"SELECT {columns_sql(ENTRY_READ_COLUMNS)} "
             "FROM entries ORDER BY ts DESC LIMIT ? OFFSET ?",
             (clamped_limit, clamped_offset),
         ).fetchall()
@@ -655,6 +656,22 @@ def _ensure_conn_locked() -> sqlite3.Connection:
         _conn = _connect(_resolve_output_dir() / HISTORY_FILENAME)
         _init_schema(_conn)
     return _conn
+
+
+def _reopen_at_locked(directory: Path) -> None:
+    """Point the store at ``directory``, reopening the connection there.
+
+    Caller MUST hold ``_lock``. Closes the current connection (a no-op when
+    there is none), makes ``directory`` the output directory, connects to the
+    history file inside it, applies the schema and invalidates the derived
+    caches -- the sequence every clean ``relocate`` outcome ends with.
+    """
+    global _output_dir, _conn
+    _close_conn_locked()
+    _output_dir = directory
+    _conn = _connect(directory / HISTORY_FILENAME)
+    _init_schema(_conn)
+    invalidate_derived_caches_locked()
 
 
 def _close_conn_locked() -> None:

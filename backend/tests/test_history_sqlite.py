@@ -969,3 +969,60 @@ def test_get_entries_clamps_its_own_limit(isolated_storage, tmp_path):
     assert len(history.get_entries(limit=0)) == 1
     assert len(history.get_entries(limit=5, offset=-3)) == 5
 
+
+
+def test_entry_columns_match_the_bootstrapped_schema(isolated_storage, tmp_path):
+    """`ENTRY_COLUMNS` is checked against the DDL, not against another copy of itself.
+
+    Adding a column to `_DDL_*` without listing it here -- or reordering the
+    declaration away from the table -- breaks the INSERT that builds its
+    placeholder run from `len(ENTRY_COLUMNS)`, so the drift fails here first.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    conn = sqlite3.connect(target / "history.db")
+    try:
+        schema_columns = tuple(
+            row[1] for row in conn.execute("PRAGMA table_info(entries)").fetchall()
+        )
+    finally:
+        conn.close()
+    assert history.ENTRY_COLUMNS == schema_columns
+
+
+def test_entry_read_columns_are_exactly_what_row_to_entry_reads(
+    isolated_storage, tmp_path
+):
+    """The read list drops `cleaned_text` and nothing else.
+
+    `get_entries` builds its SELECT from `ENTRY_READ_COLUMNS`, so a column
+    dropped from it becomes a `KeyError` in `_row_to_entry` at runtime.
+
+    The expectation comes from the table rather than from `ENTRY_COLUMNS`.
+    `ENTRY_READ_COLUMNS` is *defined* as `ENTRY_COLUMNS` minus `cleaned_text`,
+    so comparing the two restates the definition and holds no matter what the
+    schema does; reading `PRAGMA table_info(entries)` is what makes a column
+    added to the DDL and left out of the read list fail here.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    history.save_entry("hello world", 1200, language="uk", style="normal")
+    entries = history.get_entries()
+
+    conn = sqlite3.connect(target / "history.db")
+    try:
+        schema_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(entries)").fetchall()
+        }
+    finally:
+        conn.close()
+
+    assert set(history.ENTRY_READ_COLUMNS) == schema_columns - {"cleaned_text"}
+    assert len(entries) == 1
+    assert entries[0].text == "hello world"
+
+
+def test_columns_sql_qualifies_every_name_with_the_prefix():
+    """The FTS lane joins `entries` as `e`, so every name must carry the alias."""
+    assert history.columns_sql(("id", "ts")) == "id, ts"
+    assert history.columns_sql(("id", "ts"), prefix="e.") == "e.id, e.ts"

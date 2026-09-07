@@ -14,7 +14,12 @@ from app.core import tasks
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
 from app.stt.config import STTSettings
-from app.stt.local_factory import LocalProviderKind, get_local_provider_kind, is_macos_arm64
+from app.stt.local_factory import (
+    LocalProviderKind,
+    compute_type_for_device,
+    get_local_provider_kind,
+    is_macos_arm64,
+)
 
 log = logging.getLogger(__name__)
 
@@ -68,19 +73,18 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
 
     if is_macos_arm64():
         device = "metal"
-        compute_type = "float16"
     else:
         from app.core.gpu_probe import GpuVendor
 
         kind = get_local_provider_kind(GpuVendor(gpu_vendor))
         if kind == LocalProviderKind.WHISPER_CPP_SERVER:
             device = "vulkan"
-            compute_type = "float16"
         else:
             device = stt_settings.whisper_device
             if device == "auto":
                 device = "cuda" if cuda_probe_available else "cpu"
-            compute_type = "float16" if device == "cuda" else "int8"
+
+    compute_type = compute_type_for_device(device)
 
     gpu_available = device in ("cuda", "vulkan", "metal")
 

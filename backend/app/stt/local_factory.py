@@ -32,6 +32,18 @@ class LocalProviderKind(str, Enum):
     WHISPER_CPP_SERVER = "whisper_cpp_server"
 
 
+_FLOAT16_DEVICES = frozenset({"cuda", "metal", "vulkan"})
+
+
+def compute_type_for_device(device: str) -> str:
+    """The compute type a resolved device string implies.
+
+    The one declaration of the rule: every other device -- `"cpu"`, and any
+    unrecognized `whisper_device` the user typed -- gets `"int8"`.
+    """
+    return "float16" if device in _FLOAT16_DEVICES else "int8"
+
+
 def is_macos_arm64() -> bool:
     """True only when running natively on Apple Silicon.
 

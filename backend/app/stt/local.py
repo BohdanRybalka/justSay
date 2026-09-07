@@ -19,6 +19,7 @@ from app.stt.base import (
     normalize_detected_language,
 )
 from app.stt.config import STTSettings
+from app.stt.local_factory import compute_type_for_device
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ class LocalSTTProvider(STTProvider):
                     if device == "auto":
                         device = self._detect_device()
 
-                    compute_type = "float16" if device == "cuda" else "int8"
+                    compute_type = compute_type_for_device(device)
 
                     log.info(
                         "Loading whisper: model=%s device=%s compute=%s",

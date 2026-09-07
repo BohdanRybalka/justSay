@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import socket
 import threading
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
+from app.core.constants import GEMINI_TIMEOUT_SECONDS
 from app.core.types import ProviderMode
 from app.stt import clear_cache, get_provider
 from app.stt.base import (
@@ -20,6 +22,8 @@ from app.stt.base import (
 from app.stt.cloud import GeminiSTTProvider
 from app.stt.config import STTSettings
 from app.stt.local import LocalSTTProvider
+
+_UNANSWERED_REQUEST_TIMEOUT_MS = 500
 
 
 @pytest.fixture(autouse=True)
@@ -965,3 +969,77 @@ def test_clear_cache_records_a_provider_cleanup_failure(caplog):
     assert len(failures) == 1
     assert not stt_module._providers
 
+def test_gemini_client_carries_a_timeout_in_milliseconds():
+    """AC: the budget reaches the SDK in the unit it documents.
+
+    `HttpOptions.timeout` is milliseconds (google/genai/types.py), and
+    `_api_client.get_timeout_in_seconds` divides it by 1000 before handing it
+    to httpx. Passing `GEMINI_TIMEOUT_SECONDS` unscaled would give the client a
+    300 ms budget and break every cloud dictation, so the assertion is on the
+    scaled number rather than on "a timeout is set".
+    """
+    settings = STTSettings(mode=ProviderMode.CLOUD, gemini_api_key="test-key")
+    provider = GeminiSTTProvider(settings)
+
+    with patch("google.genai.Client") as client_class:
+        provider._get_client()
+
+    http_options = client_class.call_args.kwargs["http_options"]
+    assert http_options.timeout == int(GEMINI_TIMEOUT_SECONDS * 1000)
+    assert GEMINI_TIMEOUT_SECONDS == 300.0
+
+
+def test_a_gemini_request_that_is_never_answered_raises_a_timeout():
+    """AC: an unanswered Gemini call ends, instead of hanging the dictation.
+
+    The socket is bound and listening but never accepted, so the kernel
+    completes the TCP handshake out of the backlog and the request then waits
+    on a response that never comes -- the shape of the hang this bounds, which
+    a refused connection would not reproduce. Asserting the caught error is a
+    timeout rather than a connection failure is what establishes that premise.
+
+    The call runs on a worker joined with a hard cap, so dropping
+    `http_options` fails this test on `is_alive()` instead of hanging the suite
+    forever.
+    """
+    import httpx
+    from google import genai
+    from google.genai import types
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    caught: list[BaseException] = []
+
+    def _call() -> None:
+        client = genai.Client(
+            api_key="test-key",
+            http_options=types.HttpOptions(
+                base_url=f"http://127.0.0.1:{port}",
+                timeout=_UNANSWERED_REQUEST_TIMEOUT_MS,
+            ),
+        )
+        try:
+            client.models.generate_content(model="gemini-2.5-flash", contents="hi")
+        except BaseException as e:
+            caught.append(e)
+
+    worker = threading.Thread(target=_call, name="gemini-timeout-probe", daemon=True)
+    worker.start()
+    worker.join(timeout=5.0)
+    finished = not worker.is_alive()
+    listener.close()
+
+    assert finished, (
+        "the Gemini call was still waiting after 5 s, so the client carries no "
+        "timeout and a dictation against an unanswering endpoint never returns"
+    )
+    assert caught, "the call returned a result from a server that never answered"
+    assert isinstance(caught[0], httpx.ReadTimeout), (
+        f"the call ended on {caught[0]!r} rather than a read timeout, so it "
+        "proves nothing about the budget on a request that was accepted; on "
+        "Windows an unreachable port raises ConnectTimeout, which is also a "
+        "TimeoutException and would make a looser assertion vacuous"
+    )

@@ -28,6 +28,7 @@ See docs/adr/041-macos-system-audio-comes-from-a-core-audio-tap.md.
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import subprocess
@@ -50,6 +51,7 @@ _TERMINATE_TIMEOUT_SECONDS = 0.5
 _KILL_TIMEOUT_SECONDS = 0.5
 _READER_JOIN_TIMEOUT_SECONDS = 0.5
 _HEADER_TIMEOUT_SECONDS = 5.0
+_STDERR_TAIL_LINES = 20
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _DEV_TAP_PATH = (
@@ -157,7 +159,12 @@ class MacOSTapSource(SystemAudioSource):
         self._tap_path = Path(tap_path)
         self._process: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
+        self._stderr_reader: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._stderr_lock = threading.Lock()
+        self._stderr_tail: collections.deque[str] = collections.deque(
+            maxlen=_STDERR_TAIL_LINES
+        )
         self._on_block: BlockSink | None = None
         self._native_sample_rate = settings.sample_rate
         self._channels = 1
@@ -183,6 +190,13 @@ class MacOSTapSource(SystemAudioSource):
         with self._lock:
             self._on_block = on_block
         self._process = process
+        self._stderr_reader = threading.Thread(
+            target=self._drain_stderr,
+            args=(process.stderr,),
+            name="macos-audio-tap-stderr",
+            daemon=True,
+        )
+        self._stderr_reader.start()
         self._reader = threading.Thread(
             target=self._read_blocks, args=(process,), name="macos-audio-tap", daemon=True
         )
@@ -220,12 +234,39 @@ class MacOSTapSource(SystemAudioSource):
 
         code = process.poll()
         if code is not None and code != 0:
+            stderr_reader = self._stderr_reader
+            if stderr_reader is not None:
+                stderr_reader.join(timeout=_READER_JOIN_TIMEOUT_SECONDS)
             log.error(
                 "The macOS system-audio helper exited with code %d, so this meeting "
                 "is being recorded without system audio: %s",
                 code,
-                _drain_stderr(process),
+                self._stderr_text(),
             )
+
+    def _drain_stderr(self, stream: object) -> None:
+        """Read the helper's stderr for the life of the process.
+
+        A pipe nobody reads fills, and the helper then blocks inside its own
+        write instead of producing audio (ADR 052). Only the last
+        `_STDERR_TAIL_LINES` lines are kept, which is what the exit log
+        reports. Returns when `stop()`'s `_terminate` closes the stream.
+        """
+        if stream is None:
+            return
+        try:
+            for line in iter(stream.readline, b""):
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    with self._stderr_lock:
+                        self._stderr_tail.append(text)
+        except (OSError, ValueError):
+            pass
+
+    def _stderr_text(self) -> str:
+        """The buffered tail of what the helper wrote to stderr."""
+        with self._stderr_lock:
+            return "\n".join(self._stderr_tail)
 
     def stop(self) -> None:
         with self._lock:
@@ -234,11 +275,15 @@ class MacOSTapSource(SystemAudioSource):
         self._process = None
         reader = self._reader
         self._reader = None
+        stderr_reader = self._stderr_reader
+        self._stderr_reader = None
 
         if process is not None:
             self._terminate(process)
         if reader is not None:
             reader.join(timeout=_READER_JOIN_TIMEOUT_SECONDS)
+        if stderr_reader is not None:
+            stderr_reader.join(timeout=_READER_JOIN_TIMEOUT_SECONDS)
 
     def _terminate(self, process: subprocess.Popen) -> None:
         try:
@@ -273,12 +318,3 @@ def _read_exactly(stream: object, size: int) -> bytes | None:
         remaining -= len(chunk)
     return b"".join(parts)
 
-
-def _drain_stderr(process: subprocess.Popen) -> str:
-    stream = process.stderr
-    if stream is None:
-        return ""
-    try:
-        return stream.read().decode("utf-8", errors="replace").strip()
-    except (OSError, ValueError):
-        return ""

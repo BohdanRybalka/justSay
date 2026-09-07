@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import io
 import json
+import logging
+import os
 import sys
 import threading
 import time
@@ -385,3 +387,102 @@ def test_the_factory_reads_sys_platform_when_none_is_injected(monkeypatch, tap_s
     monkeypatch.setattr(sys, "platform", "linux")
 
     assert create_system_audio_source(tap_settings) is None
+
+
+_STDERR_LINE_BYTES = 1024
+_STDERR_LINE_COUNT = 1024
+
+
+def _stderr_writer(write_fd: int, last_line: bytes) -> None:
+    """Write 1 MB of log lines into the helper's end of a real OS pipe."""
+    filler = b"x" * (_STDERR_LINE_BYTES - 1) + b"\n"
+    with os.fdopen(write_fd, "wb") as stream:
+        for _ in range(_STDERR_LINE_COUNT - 1):
+            stream.write(filler)
+        stream.write(last_line)
+
+
+def test_a_helper_writing_more_stderr_than_the_pipe_holds_is_not_blocked(tap_settings):
+    """AC: the drain runs for the life of the process, not only after it dies.
+
+    The pipe here is a real `os.pipe()`, so its buffer is the OS one -- a few
+    tens of kilobytes. A writer pushing 1 MB through it finishes only if
+    something is reading concurrently; without the drain thread it parks in
+    `write` forever, which is the defect ADR 052 records (the Swift helper
+    would stop producing audio instead of stopping its logging).
+
+    The tail assertion is what stops this passing vacuously: a platform whose
+    pipe buffer swallowed the whole megabyte would let the writer finish with
+    no reader at all, and could not also produce the last line here.
+    """
+    read_fd, write_fd = os.pipe()
+    last_line = b"y" * (_STDERR_LINE_BYTES - 1) + b"\n"
+    process = _FakeTapProcess(tap_stdout(blocks=1))
+    process.stderr = os.fdopen(read_fd, "rb")
+    writer = threading.Thread(
+        target=_stderr_writer, args=(write_fd, last_line), name="fake-helper", daemon=True
+    )
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+
+    with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
+        source.start(lambda arrival, mono: None)
+        writer.start()
+        writer.join(timeout=5.0)
+        writer_finished = not writer.is_alive()
+        source._reader.join(timeout=2.0)
+        source.stop()
+
+    assert writer_finished, (
+        "the helper's 1 MB of stderr filled the pipe and blocked its writer, "
+        "which is exactly what the drain thread exists to prevent"
+    )
+    assert source._stderr_text().endswith(last_line.decode().rstrip()), (
+        "the drain read the pipe but kept nothing, so the assertion above "
+        "would have passed on a pipe buffer large enough to swallow 1 MB"
+    )
+
+
+def test_a_nonzero_exit_is_logged_with_what_the_helper_wrote(tap_settings, caplog):
+    """AC: the exit diagnostic still carries the helper's own stderr text.
+
+    Draining into a bounded buffer replaced the read-it-all-at-exit call, so
+    this pins that the replacement did not turn the error log into an empty
+    tail -- the only place a user-visible reason for a failed capture appears.
+
+    The stderr here is a real `os.pipe()` whose writer sleeps before writing,
+    and that is the point of the test rather than a detail. Against an
+    `io.BytesIO` the line is in the buffer before the reader thread even starts,
+    so the log carries it whether or not `_read_blocks` joins the drain first --
+    the test passed identically with the join deleted, over ten consecutive runs.
+    A late write reproduces the race the join exists to close: the helper's last
+    words arrive after its exit is observed, and without the join they are logged
+    as an empty tail.
+    """
+    read_fd, write_fd = os.pipe()
+    process = _FakeTapProcess(tap_stdout(blocks=1), returncode=3)
+    process.stderr = os.fdopen(read_fd, "rb")
+
+    def write_after_the_exit_is_observed() -> None:
+        time.sleep(0.1)
+        os.write(write_fd, b"tap died: no permission\n")
+        os.close(write_fd)
+
+    writer = threading.Thread(
+        target=write_after_the_exit_is_observed, name="fake-helper-stderr", daemon=True
+    )
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+
+    with caplog.at_level(logging.ERROR, logger="app.audio.macos_tap"):
+        with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
+            source.start(lambda arrival, mono: None)
+            writer.start()
+            source._reader.join(timeout=2.0)
+            source.stop()
+
+    writer.join(timeout=2.0)
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("tap died: no permission" in message for message in messages), (
+        "the exit was logged before the drain had the helper's last line, so the "
+        f"user is told a capture failed with no reason attached: {messages}"
+    )
+    assert any("exited with code 3" in message for message in messages), messages
