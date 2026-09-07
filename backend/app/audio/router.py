@@ -4,9 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.audio import (
-    MeetingRecorder,
-    MicrophoneRecorder,
+from app.audio.dependencies import (
     get_active_meeting_recorder,
     get_active_recorder,
     get_meeting_recorder,
@@ -16,8 +14,10 @@ from app.audio.meeting_recorder import (
     MEETING_BUSY_DETAIL,
     MeetingCaptureAbortedError,
     MeetingCaptureEmptyError,
+    MeetingRecorder,
     MeetingWriteFailedError,
 )
+from app.audio.recorder import MicrophoneRecorder
 from app.audio.system_source import SystemAudioUnavailableError
 from app.core.utils import sse_event
 from app.preferences.user_settings import get_user_settings

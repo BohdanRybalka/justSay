@@ -3,7 +3,7 @@
 `docs/style-guide.md` §1a states where a backend module goes, and ADR 044
 records why. Prose rots; this file fails.
 
-Four properties are pinned here:
+Six properties are pinned here:
 
 1. `app.core` is a leaf. Only `config.py` (the composition root) and
    `router.py` (operational endpoints) may import a feature package. Letting a
@@ -13,15 +13,50 @@ Four properties are pinned here:
    and is imported *from* rather than importing — its own docstring names the
    libraries that would break the packaged build, and ADR 015 depends on it.
    A violation here ships broken; only a tag push would otherwise reveal it.
-3. No provider package acquires a web framework.
+3. No package acquires a web framework, `fastapi` and `starlette` alike,
+   outside the modules each package's exempt set names. Every directory under
+   `app/` holding any `.py` file is a key in that allowlist — an `__init__.py`
+   is not required, so a PEP 420 namespace package cannot be exempt by being
+   forgotten — and no exemption survives the import it covers, nor the package
+   it names. The modules sitting directly under `app/` are checked at the same
+   time, with `main.py` the one exemption: it is the composition root and
+   building the FastAPI app is its job.
 4. The set of package-level cycles does not grow, and does not outlive the
    cycles it lists.
+5. `app/audio/__init__.py` holds a docstring and nothing else, so reaching
+   any module in the package costs only that module. Nothing else means
+   nothing else: a lazy `__getattr__` re-export defers the cost rather than
+   removing it, and puts the package surface this rule deletes straight back.
+6. Importing a pure DSP module does not load the capture stack.
 
-Every assertion below was mutation-checked when written: a core module made to
-import a feature package, `import fastapi` planted in the base DSP module, the
-analysis/timeline direction reversed, a fresh `transcripts <-> pipeline` cycle,
-a provider given `HTTPException`, and a fictional entry added to the known-cycle
-list each turned exactly one test red.
+Every assertion below was mutation-checked when written. The list below is a
+ledger of mutations that were actually run, against the module actually named,
+with the number of tests each one reddens:
+
+- a core module made to import a feature package, in the absolute
+  (`from app.audio import analysis`) and the relative (`from ..audio import
+  analysis`) spelling alike -- one test each
+- `import fastapi` planted in `app/audio/analysis.py`, the base DSP module --
+  three tests, because that module is a non-exempt file of a
+  web-framework-free package, is the module property 2 guards, and sits on
+  `app.audio.timeline`'s import path
+- `from starlette.requests import Request` planted in the same module -- two
+  tests, the same first two
+- `app/audio/analysis.py` made to import `app.audio.timeline`, absolutely and
+  relatively (`from .timeline import ...`) -- one test each
+- a fresh `transcripts <-> pipeline` cycle, and a fictional entry added to the
+  known-cycle list -- one test each
+- a provider given `HTTPException` -- one test
+- a `fastapi` importer added as `app/handlers.py`, directly under `app/`, and
+  as `app/newpkg/thing.py` in a directory with no `__init__.py` -- one test
+  each
+- a package key deleted from the web-framework allowlist, a fictional file
+  added to an exempt set, and a fictional package key carrying an empty exempt
+  set -- one test each
+- a recorder import planted in `app/audio/__init__.py` -- two tests, since it
+  both grows the package surface and puts the capture stack back on
+  `timeline`'s import path -- and a `__getattr__` re-export of the same, one
+  test
 
 Each list below is an allowlist, not a description: adding an entry is a
 deliberate act a reviewer can see in the diff.
@@ -32,6 +67,8 @@ from __future__ import annotations
 import ast
 from collections import defaultdict
 from pathlib import Path
+
+from tests.conftest import assert_import_loads_no_module
 
 _APP_DIR = Path(__file__).resolve().parent.parent / "app"
 
@@ -48,6 +85,7 @@ _SIDECAR_ABSENT_LIBRARIES = {
         "silero_vad",
         "onnxruntime",
         "fastapi",
+        "starlette",
     },
 }
 
@@ -55,11 +93,22 @@ _MUST_NOT_IMPORT_APP_MODULE = {
     "audio/analysis.py": {"app.audio.timeline"},
 }
 
+_WEB_FRAMEWORK_ROOTS = frozenset({"fastapi", "starlette"})
+
 _WEB_FRAMEWORK_FREE_PACKAGES = {
-    "stt": {"router.py"},
+    "audio": {"router.py", "dependencies.py"},
+    "core": {"router.py", "auth_middleware.py"},
     "embeddings": set(),
+    "llm": set(),
+    "pipeline": {"router.py", "service.py", "upload_validation.py"},
+    "preferences": {"router.py"},
+    "stt": {"router.py"},
     "transcripts": {"history_router.py", "words_router.py", "store_errors.py"},
 }
+
+_WEB_FRAMEWORK_FREE_APP_ROOT_EXCEPT = {"main.py"}
+
+_IMPORT_FREE_PACKAGE_INITS = {"audio"}
 
 _KNOWN_PACKAGE_CYCLES = {
     ("app.core", "app.audio"),
@@ -90,12 +139,34 @@ def _modules() -> dict[str, Path]:
     return found
 
 
+def _containing_package(path: Path) -> str:
+    parts = list(path.relative_to(_APP_DIR.parent).with_suffix("").parts)
+    return ".".join(parts[:-1])
+
+
+def _import_from_names(node: ast.ImportFrom, package: str) -> list[str]:
+    """Resolve one `from ... import ...` to absolute dotted names.
+
+    A relative import names the same module as its absolute spelling, so both
+    must reach the allowlists below as the same string; otherwise one
+    `from ..audio import analysis` walks past every gate in this file.
+    """
+    if not node.level:
+        return [node.module] if node.module else []
+    parts = package.split(".") if package else []
+    parts = parts[: max(len(parts) - node.level + 1, 0)]
+    if node.module:
+        return [".".join(parts + node.module.split("."))]
+    return [".".join(parts + [alias.name]) for alias in node.names]
+
+
 def _imported_names(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    package = _containing_package(path)
     names = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            names.append(node.module)
+        if isinstance(node, ast.ImportFrom):
+            names.extend(_import_from_names(node, package))
         elif isinstance(node, ast.Import):
             names.extend(alias.name for alias in node.names)
     return names
@@ -170,25 +241,188 @@ def test_the_base_dsp_module_is_imported_from_rather_than_importing():
     )
 
 
+def _package_directories() -> list[str]:
+    """Every directory under `app/` that holds a Python module at any depth.
+
+    An `__init__.py` is deliberately not required: PEP 420 makes
+    `app/newpkg/thing.py` importable without one, so keying on `__init__.py`
+    would hand a whole directory the "exempt by being forgotten" pass this
+    file exists to remove.
+    """
+    return sorted(
+        path.name
+        for path in _APP_DIR.iterdir()
+        if path.is_dir() and any(path.rglob("*.py"))
+    )
+
+
+def _imports_a_web_framework(path: Path) -> bool:
+    return any(
+        name.split(".")[0] in _WEB_FRAMEWORK_ROOTS for name in _imported_names(path)
+    )
+
+
 def test_providers_do_not_acquire_a_web_framework():
     """A provider executes the Audio-In/Text-Out contract; it has no business
-    knowing about HTTP. Keeping fastapi out of these packages is also what lets
-    the STT modules import cleanly in the lint job, which installs no audio
-    extra."""
+    knowing about HTTP. Keeping the web framework out of these packages is also
+    what lets the STT modules import cleanly in the lint job, which installs no
+    audio extra.
+
+    Both `fastapi` and `starlette` count. `fastapi.Request` *is*
+    `starlette.requests.Request`, re-exported, so a check that matched the
+    literal name `fastapi` alone left every module one import line away from
+    the same object with the gate still green.
+
+    The modules sitting directly under `app/` are checked here too. They are
+    in no package and were therefore in no allowlist, so `app/handlers.py`
+    could hold an endpoint and stay green. `main.py` is the single exemption:
+    it is the composition root, and building the FastAPI app is what it is
+    for."""
     offenders = []
     for package, exempt in _WEB_FRAMEWORK_FREE_PACKAGES.items():
         package_dir = _APP_DIR / package
-        if not package_dir.exists():
-            continue
         for path in sorted(package_dir.rglob("*.py")):
-            if path.name in exempt:
+            if path.relative_to(package_dir).as_posix() in exempt:
                 continue
-            if any(name.split(".")[0] == "fastapi" for name in _imported_names(path)):
+            if _imports_a_web_framework(path):
                 offenders.append(path.relative_to(_APP_DIR).as_posix())
 
+    for path in sorted(_APP_DIR.glob("*.py")):
+        if path.name in _WEB_FRAMEWORK_FREE_APP_ROOT_EXCEPT:
+            continue
+        if _imports_a_web_framework(path):
+            offenders.append(path.name)
+
     assert not offenders, (
-        f"These modules import fastapi: {offenders}. Raise a plain exception "
-        "and let the router map it, per docs/style-guide.md §3.2."
+        f"These modules import {sorted(_WEB_FRAMEWORK_ROOTS)}: {offenders}. Raise "
+        "a plain exception and let the router map it, per "
+        "docs/style-guide.md §3.2."
+    )
+
+
+def test_every_backend_package_is_covered_by_the_web_framework_allowlist():
+    """The gate above only sees the packages named in the dict, so an
+    unlisted package is exempt in full rather than checked with exceptions.
+    That is the defect spec 104 opened on: `core` and `audio` broke the rule
+    for as long as they were absent from it. Every directory under `app/` that
+    holds a Python module is a key here, with an explicit exempt set — empty
+    when the package holds no HTTP-facing module. The modules directly under
+    `app/` are covered by the gate itself, not by this dict."""
+    missing = [
+        package
+        for package in _package_directories()
+        if package not in _WEB_FRAMEWORK_FREE_PACKAGES
+    ]
+
+    assert not missing, (
+        f"These packages are in no allowlist, so nothing checks them: {missing}. "
+        "Add each one to _WEB_FRAMEWORK_FREE_PACKAGES — with an empty exempt "
+        "set if it imports no web framework, or with the package-relative path "
+        "of every module that legitimately does."
+    )
+
+
+def test_no_web_framework_exemption_outlives_the_import_it_covers():
+    """The mirror of `test_the_known_cycle_list_does_not_outlive_the_cycles`,
+    for the other allowlist in this file. An exemption whose module has been
+    deleted, or which has since dropped its web-framework import, hands a free
+    pass to whatever next takes that path.
+
+    A package key outlives its package the same way, and does it more quietly:
+    `rglob` on a directory that no longer exists yields nothing, so the gate
+    above stays green while a whole key describes nothing. A key with an empty
+    exempt set has no other check on it at all."""
+    stale = []
+    for package, exempt in sorted(_WEB_FRAMEWORK_FREE_PACKAGES.items()):
+        package_dir = _APP_DIR / package
+        if not package_dir.is_dir():
+            stale.append(f"{package}: no such package")
+            continue
+        for relative in sorted(exempt):
+            path = package_dir / relative
+            if not path.exists():
+                stale.append(f"{package}/{relative}: no such module")
+            elif not _imports_a_web_framework(path):
+                stale.append(f"{package}/{relative}: imports no web framework")
+
+    for name in sorted(_WEB_FRAMEWORK_FREE_APP_ROOT_EXCEPT):
+        path = _APP_DIR / name
+        if not path.exists():
+            stale.append(f"{name}: no such module")
+        elif not _imports_a_web_framework(path):
+            stale.append(f"{name}: imports no web framework")
+
+    assert not stale, (
+        f"These exemptions no longer cover anything: {stale}. Remove each from "
+        "_WEB_FRAMEWORK_FREE_PACKAGES or _WEB_FRAMEWORK_FREE_APP_ROOT_EXCEPT — "
+        "an exemption that outlives its import silently exempts the next module "
+        "to take that path, and a package key that outlives its package checks "
+        "nothing while looking like it does."
+    )
+
+
+def _statement_description(node: ast.stmt) -> str:
+    if isinstance(node, ast.Import):
+        return "import " + ", ".join(alias.name for alias in node.names)
+    if isinstance(node, ast.ImportFrom):
+        module = "." * node.level + (node.module or "")
+        names = ", ".join(alias.name for alias in node.names)
+        return f"from {module} import {names}"
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return f"def {node.name}"
+    if isinstance(node, ast.ClassDef):
+        return f"class {node.name}"
+    return type(node).__name__
+
+
+def test_the_audio_package_surface_holds_nothing_but_a_docstring():
+    """A package `__init__.py` executes on every `app.<package>.<module>`
+    import, so anything it holds is paid for by every consumer. `app.audio`
+    once re-exported both recorders, which made the pure numpy module
+    `app.audio.timeline` drag the whole capture stack behind it.
+
+    Checked as "nothing but a docstring" rather than "no import statements",
+    because a module-level `__getattr__` restores the same re-export while
+    leaving the import statements absent — it defers the cost to the first
+    attribute read instead of removing it, and the runtime test below cannot
+    see it either, since importing a submodule never invokes it."""
+    offenders = []
+    for package in sorted(_IMPORT_FREE_PACKAGE_INITS):
+        path = _APP_DIR / package / "__init__.py"
+        assert path.exists(), (
+            f"{package}/__init__.py no longer exists — deleting it turns "
+            f"{package} into a namespace package, which changes the pinned "
+            "property rather than satisfying it. Update this test."
+        )
+        body = list(ast.parse(path.read_text(encoding="utf-8")).body)
+        if body and ast.get_docstring(ast.Module(body=body, type_ignores=[])):
+            body = body[1:]
+        for node in body:
+            offenders.append(f"{package}/__init__.py: {_statement_description(node)}")
+
+    assert not offenders, (
+        f"These package surfaces hold more than a docstring: {offenders}. The "
+        "packages listed in _IMPORT_FREE_PACKAGE_INITS pay their __init__.py "
+        "cost on every consumer's import, so theirs holds a docstring and "
+        "nothing else — not an import, not a lazy __getattr__; import the "
+        "submodule directly instead. This is not a project-wide rule: "
+        "`app/stt` and `app/embeddings` deliberately re-export from theirs and "
+        "are deliberately absent from that set. See docs/style-guide.md §1a."
+    )
+
+
+def test_importing_a_dsp_module_does_not_load_the_capture_stack():
+    """The static check above cannot see a transitive acquisition — a recorder
+    import appearing in `app/audio/analysis.py` or `app/audio/config.py` would
+    cost `timeline` the same 133 modules with `__init__.py` still empty."""
+    assert_import_loads_no_module(
+        "app.audio.timeline",
+        (
+            "fastapi",
+            "sounddevice",
+            "app.audio.recorder",
+            "app.audio.meeting_recorder",
+        ),
     )
 
 

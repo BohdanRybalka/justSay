@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.audio import get_recorder
+from app.audio.dependencies import get_recorder
 from app.main import app
 
 

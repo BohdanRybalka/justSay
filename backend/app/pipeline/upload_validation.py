@@ -21,11 +21,17 @@ The validator here:
 The tables and the detector itself live in ``app.core.audio_formats``, which
 carries no web-framework dependency so the STT providers can read the MIME
 map without acquiring one.
+
+This module also owns the upload size limit — a transport concern that sits
+alongside content validation rather than in a shared utility drawer.
+``read_upload_with_limit`` is the 413 to ``validate_audio_upload``'s 400: one
+refuses a payload that is too big to read, the other refuses one whose bytes
+are not what the filename claims.
 """
 
 from pathlib import Path
 
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 
 from app.core.audio_formats import (
     ALLOWED_AUDIO_EXTENSIONS,
@@ -83,3 +89,24 @@ def validate_audio_upload(content: bytes, filename: str | None) -> str:
         )
 
     return expected_mime
+
+
+async def read_upload_with_limit(file: UploadFile, max_size: int) -> bytes:
+    """Stream-read an UploadFile in 64 KB chunks, raising HTTP 413 when exceeded."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "File too large (max "
+                    f"{round(max_size / (1024 * 1024), 1):g}MB)"
+                ),
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)

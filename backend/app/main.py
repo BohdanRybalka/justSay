@@ -62,7 +62,8 @@ async def lifespan(app: FastAPI):
     tasks.spawn_background_task(_warm_gpu_probe_cache(), name="gpu-probe-warmup")
     from app.transcripts import vector_store
     tasks.spawn_background_task(vector_store.run_background_indexer(), name="vector-store-indexer")
-    from app.audio import MeetingRecorder, MicrophoneRecorder
+    from app.audio.meeting_recorder import MeetingRecorder
+    from app.audio.recorder import MicrophoneRecorder
     app.state.recorder = MicrophoneRecorder(settings.audio)
     app.state.meeting_recorder = MeetingRecorder(settings.audio)
     yield
