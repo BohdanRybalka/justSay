@@ -75,12 +75,12 @@ paths = ["app"]
 min_confidence = 60
 ignore_decorators = ["@router.*"]
 ignore_names = [
-    "time_info", "status", "frame_count",
+    "time_info", "frame_count",
     "model_config", "stt_model", "size_bytes",
     "copied_to_clipboard", "discarded_reason",
     "temp_size_bytes", "freed_bytes", "gemini_key_set", "groq_key_set",
     "shortcut", "package_installed", "model_loaded", "model_ram_mb",
     "total_audio_seconds", "word", "highlighted_text",
     "row_factory", "LimitFlags",
-    "log_file_path", "init_output_dir", "_reset_library_cache",
+    "log_file_path", "_reset_library_cache",
 ]

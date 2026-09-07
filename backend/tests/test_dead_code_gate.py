@@ -17,7 +17,7 @@ positional path that overrides the config's own `paths`, so what is exercised
 is the shipped table rather than a copy of its values.
 """
 
-import ast
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +33,8 @@ _APP_DIR = _BACKEND_DIR / "app"
 
 _VULTURE_FOUND_DEAD_CODE = 3
 _VULTURE_TIMEOUT_SECONDS = 60
+
+_REPORTED_NAME = re.compile(r"unused \w+ '([^']+)'")
 
 
 def _vulture_table() -> dict:
@@ -141,85 +143,70 @@ def test_min_confidence_is_low_enough_to_see_an_unused_function():
     )
 
 
-def _bound_names(path: Path) -> set[str]:
-    """Every name `path` actually binds, collected from its AST.
+def _names_vulture_reports_without_the_allowlist(cwd: Path) -> set[str]:
+    """Every name vulture reports over `app` with `ignore_names` emptied.
 
-    A textual scan cannot tell a field declaration from the same word inside
-    a docstring, so it reports an entry as live when only prose mentions it.
-    The node kinds below are what the allowlist's own four groups need:
-    definitions and imports, `Store`-context names (assignments, annotated
-    pydantic fields, `for`/`with`/walrus/comprehension targets), `Store`
-    attributes (`conn.row_factory = ...`), and arguments (the sounddevice
-    callback contract's `time_info`/`status`/`frame_count`).
-
-    A name can also be declared as data rather than as syntax -- the Win32
-    job-object struct declares `LimitFlags` as a string inside
-    `ctypes.Structure._fields_` (`app/stt/local_whisper_cpp.py:124`), and
-    `__slots__` and pydantic aliases do the same. A string constant that is
-    exactly an identifier therefore counts as a binding, except where it is a
-    docstring: that exception is what keeps this check structural, since the
-    prose it must not match is never a bare identifier.
+    The shipped `min_confidence` and `ignore_decorators` are passed as flags so
+    the run matches the gate in every respect but the allowlist. `--config` is
+    deliberately not passed and `cwd` is a directory holding no
+    `pyproject.toml`, because vulture auto-discovers one from the working
+    directory and would re-apply the very `ignore_names` this run must not see.
     """
+    table = _vulture_table()
+    command = [
+        sys.executable,
+        "-m",
+        "vulture",
+        str(_APP_DIR),
+        "--min-confidence",
+        str(table["min_confidence"]),
+    ]
+    decorators = table.get("ignore_decorators", [])
+    if decorators:
+        command += ["--ignore-decorators", ",".join(decorators)]
+
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    except SyntaxError as error:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=_VULTURE_TIMEOUT_SECONDS, cwd=str(cwd)
+        )
+    except subprocess.TimeoutExpired as expired:
         raise AssertionError(
-            f"{path} could not be parsed, so its bound names are invisible to this "
-            f"check and any allowlist entry living there would read as stale: {error}"
-        ) from error
+            f"vulture did not finish within {_VULTURE_TIMEOUT_SECONDS}s over {_APP_DIR} -- "
+            "it wedged rather than reporting, which would otherwise hang the whole suite"
+        ) from expired
 
-    docstrings = {
-        id(node.body[0].value)
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.body
-        and isinstance(node.body[0], ast.Expr)
-        and isinstance(node.body[0].value, ast.Constant)
-        and isinstance(node.body[0].value.value, str)
-    }
-
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-        elif isinstance(node, ast.arg):
-            names.add(node.arg)
-        elif isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Store):
-            names.add(node.id if isinstance(node, ast.Name) else node.attr)
-        elif isinstance(node, ast.alias):
-            names.add(node.asname or node.name)
-        elif (
-            isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and node.value.isidentifier()
-            and id(node) not in docstrings
-        ):
-            names.add(node.value)
-    return names
+    assert result.returncode in (0, _VULTURE_FOUND_DEAD_CODE), (
+        f"vulture failed to run (exit {result.returncode}):\n{result.stdout}{result.stderr}"
+    )
+    return set(_REPORTED_NAME.findall(result.stdout))
 
 
-def test_no_ignore_names_entry_has_outlived_its_symbol():
-    """An allowlist entry whose symbol is gone silently widens the gate.
+def test_ignore_names_lists_exactly_what_the_gate_would_otherwise_report(tmp_path):
+    """The allowlist must equal the findings it exists to suppress.
 
-    `ignore_names` suppresses a name everywhere under `app`, so a stale entry
-    is a permanent blind spot for any future symbol that happens to reuse the
-    name. Nothing else notices one, because removing the symbol is exactly
-    what leaves the gate green.
+    vulture already answers this exactly: run the shipped table with
+    `ignore_names` emptied and it prints precisely the names the allowlist
+    silences. Set equality against that run catches both failure directions at
+    once -- an entry whose symbol is gone (a permanent blind spot for whatever
+    future symbol reuses the name) and a name the gate reports that nobody
+    listed (real dead code, or an allowlist entry someone forgot to add).
 
-    The check is structural rather than textual: an entry counts as live only
-    while some file under `app` still *binds* that name. Matching raw text
-    instead would let a docstring keep an entry alive after its symbol was
-    deleted, which is the one failure this test exists to catch.
+    This replaces an AST collector that approximated the same question and got
+    it wrong in three ways: counting any parameter anywhere made `status` and
+    `word` unfalsifiable, an identifier-shaped string constant counted as a
+    binding, and an `fnmatch` glob entry -- a form vulture supports -- would
+    have read as stale.
     """
-    bound = set()
-    for path in sorted(_APP_DIR.rglob("*.py")):
-        bound |= _bound_names(path)
+    reported = _names_vulture_reports_without_the_allowlist(tmp_path)
+    allowlisted = set(_vulture_table()["ignore_names"])
 
-    stale = [name for name in _vulture_table()["ignore_names"] if name not in bound]
+    stale = sorted(allowlisted - reported)
+    unlisted = sorted(reported - allowlisted)
 
-    assert not stale, (
-        f"these [tool.vulture] ignore_names entries are bound by no file under "
-        f"{_APP_DIR.name}/: {stale}. The symbol each was added for is gone, so the "
-        "entry now only suppresses whatever future symbol reuses the name. "
-        "Delete the entry."
+    assert not stale and not unlisted, (
+        "[tool.vulture] ignore_names no longer matches what the gate reports.\n"
+        f"  Stale -- listed but no longer reported, so the entry now only suppresses "
+        f"whatever future symbol reuses the name; delete it: {stale}\n"
+        f"  Unlisted -- reported but not listed, so this is either dead code to delete "
+        f"or a false positive to add with its reason: {unlisted}"
     )

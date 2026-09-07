@@ -142,6 +142,15 @@ def _probe_nvidia_smi() -> GpuProbeResult | None:
     Checked before any AMD/Intel source so an NVIDIA box is never
     misclassified by an AMD/Intel-oriented probe finding an unrelated
     secondary adapter.
+
+    An unparseable `memory.total` (`[N/A]`, `[Not Supported]`, a driver that
+    omits the column) yields `vram_total_mb=None` and still reports NVIDIA.
+    `nvidia-smi` having answered at all is the evidence that decides the
+    vendor; discarding the whole result over one number would fall through to
+    the AMD/Intel registry probe and route Local STT to the Vulkan provider on
+    a CUDA box. Nothing reads an NVIDIA `vram_total_mb` — only
+    `_probe_windows_registry()`'s max-VRAM pick reads the field at all, and it
+    never sees an NVIDIA result.
     """
     try:
         result = subprocess.run(
@@ -158,12 +167,13 @@ def _probe_nvidia_smi() -> GpuProbeResult | None:
         return None
 
     first_line = result.stdout.strip().splitlines()[0]
+    name, _, total_str = (part.strip() for part in first_line.partition(","))
+    vram_total_mb: int | None
     try:
-        name, total_str = (part.strip() for part in first_line.split(",", 1))
         vram_total_mb = int(float(total_str))
-    except (ValueError, IndexError) as e:
-        log.warning("nvidia-smi output malformed: %r (%s)", first_line, e)
-        return None
+    except ValueError as e:
+        log.warning("nvidia-smi VRAM value malformed: %r (%s)", first_line, e)
+        vram_total_mb = None
 
     return GpuProbeResult(vendor=GpuVendor.NVIDIA, name=name, vram_total_mb=vram_total_mb)
 
