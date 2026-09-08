@@ -26,6 +26,7 @@ names, which have exactly two parties and one definer.
 
 from __future__ import annotations
 
+import functools
 import re
 from pathlib import Path
 
@@ -35,23 +36,12 @@ CONFIG_PY = REPO_ROOT / "backend" / "app" / "core" / "config.py"
 CONSTANTS_PY = REPO_ROOT / "backend" / "app" / "core" / "constants.py"
 AUDIO_FORMATS_PY = REPO_ROOT / "backend" / "app" / "core" / "audio_formats.py"
 APP_PATHS_PY = REPO_ROOT / "backend" / "app" / "core" / "app_paths.py"
+SESSION_PY = REPO_ROOT / "backend" / "app" / "audio" / "session.py"
 CONTRACTS_TS = REPO_ROOT / "src" / "contracts.ts"
 LIB_RS = REPO_ROOT / "src-tauri" / "src" / "lib.rs"
 BACKEND_RS = REPO_ROOT / "src-tauri" / "src" / "backend.rs"
 
-
-def _read(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
-
-
-def _extract(path: Path, pattern: str) -> list[str]:
-    matches = re.findall(pattern, _read(path), re.MULTILINE)
-    assert matches, f"no declaration matching {pattern!r} found in {path}"
-    values: list[str] = []
-    for match in matches:
-        values.extend([match] if isinstance(match, str) else match)
-    return values
-
+RUST_SOURCE_DIR = REPO_ROOT / "src-tauri" / "src"
 
 _PORT_SITES: dict[Path, str] = {
     CONFIG_PY: r"^    port: int = (\d+)$",
@@ -109,6 +99,55 @@ _TYPESCRIPT_EMITTER_TEMPLATES: tuple[str, ...] = (
     r"\bemitTo\s*(?:<[^>]*>)?\s*\(\s*\"[^\"]*\"\s*,\s*{constant}\b",
 )
 
+_TYPESCRIPT_INVOKE_PATTERN = "\\binvoke\\w*\\s*(?:<[^>]*>)?\\s*\\(\\s*[\"']([^\"']+)[\"']"
+
+_RUST_COMMAND_PATTERN = r"#\[tauri::command\]\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)"
+
+_RUST_HANDLER_PATTERN = r"tauri::generate_handler!\[(.*?)\]"
+
+_RUST_HANDLER_ENTRY_PATTERN = r"[A-Za-z_][\w:]*"
+
+_RUST_DATA_DIR_PATTERN = r'force_dev_data_dir\s*\{\s*"([^"]*)"\s*\}\s*else\s*\{\s*"([^"]*)"\s*\}'
+
+_SHARED_MODEL_CACHE_ALLOWLIST: dict[tuple[str, str], str] = {
+    (
+        "backend/app/stt/local_whisper_cpp_cmd.py",
+        'return Path.home() / ".justsay" / "models" / "whisper-cpp"'
+        ' / f"ggml-{model_size}.bin"',
+    ): (
+        "the downloaded GGML model cache is deliberately shared between dev and "
+        "production -- docs/adr/012-dev-mode-data-directory-isolation.md, pinned by "
+        "test_model_cache_stays_shared_between_dev_and_production"
+    ),
+}
+
+
+@functools.cache
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _extract(path: Path, pattern: str) -> list[str]:
+    matches = re.findall(pattern, _read(path), re.MULTILINE)
+    assert matches, f"no declaration matching {pattern!r} found in {path}"
+    values: list[str] = []
+    for match in matches:
+        values.extend([match] if isinstance(match, str) else match)
+    return values
+
+
+def _extract_groups(path: Path, pattern: str) -> list[tuple[str, ...]]:
+    """Every match of ``pattern`` as its own tuple of groups.
+
+    ``_extract`` flattens the groups of every match into one list, which is
+    what a single-value declaration wants. A declaration carrying two values
+    at once needs them kept together, so that a second declaration in the same
+    file is reported as a disagreement rather than unpacked into a crash.
+    """
+    matches = re.findall(pattern, _read(path), re.MULTILINE)
+    assert matches, f"no declaration matching {pattern!r} found in {path}"
+    return [match if isinstance(match, tuple) else (match,) for match in matches]
+
 
 def _scanned_files() -> list[Path]:
     found: list[Path] = []
@@ -116,6 +155,51 @@ def _scanned_files() -> list[Path]:
         found.extend(sorted((REPO_ROOT / directory).glob(glob)))
     assert found, "the enumerated scan set matched no files at all"
     return found
+
+
+def _quoted_literal_strays(
+    names: tuple[str, ...],
+    declaring: tuple[Path, ...],
+    allowlist: dict[tuple[str, str], str],
+) -> tuple[list[str], list[str]]:
+    """Quoted occurrences of ``names`` outside the files that declare them.
+
+    Shared by the masked-key sentinel and the data directory names: one walk
+    over the enumerated scan set, skipping the declaring files and test files,
+    requiring a quote character immediately before and immediately after the
+    value -- the closing quote is what separates a declaration from prose.
+    Either quote style matches, because nothing in this repository normalises
+    quotes in Python or TypeScript.
+
+    The allowlist is keyed by ``(path, exact stripped source line)`` rather
+    than by path, so it exempts one site instead of a whole file: a second
+    stray in an allowlisted file is still reported, and an entry whose line has
+    changed or gone stops matching and comes back in the second list as stale,
+    rather than exempting that file forever with nobody noticing.
+    """
+    quoted = re.compile("|".join("[\"']" + re.escape(name) + "[\"']" for name in names))
+    strays: list[str] = []
+    matched: set[tuple[str, str]] = set()
+    for path in _scanned_files():
+        if path in declaring or path.name.startswith("test_"):
+            continue
+        if path.name.endswith((".test.ts", "_test.py")):
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        for lineno, line in enumerate(_read(path).splitlines(), start=1):
+            if not quoted.search(line):
+                continue
+            site = (rel, line.strip())
+            if site in allowlist:
+                matched.add(site)
+                continue
+            strays.append(f"{rel}:{lineno}")
+    stale = [
+        f"{rel} carries no line {line!r} any more"
+        for rel, line in allowlist
+        if (rel, line) not in matched
+    ]
+    return strays, stale
 
 
 def _canonical_port() -> str:
@@ -200,16 +284,7 @@ def test_the_masked_key_sentinel_agrees_across_languages() -> None:
         f"{CONTRACTS_TS} declares it as {typescript_value!r}"
     )
 
-    strays: list[str] = []
-    quoted = re.compile(f"[\"']{re.escape(python_value)}[\"']")
-    for path in _scanned_files():
-        if path in (CONSTANTS_PY, CONTRACTS_TS) or path.name.endswith((".test.ts", "_test.py")):
-            continue
-        if path.name.startswith("test_"):
-            continue
-        for lineno, line in enumerate(_read(path).splitlines(), start=1):
-            if quoted.search(line):
-                strays.append(f"{path.relative_to(REPO_ROOT).as_posix()}:{lineno}")
+    strays, _ = _quoted_literal_strays((python_value,), (CONSTANTS_PY, CONTRACTS_TS), {})
     assert not strays, (
         f"the masked-key sentinel {python_value!r} is written out, in either quote style, "
         "away from its two declarations "
@@ -261,15 +336,21 @@ def test_the_upload_allowlist_and_cap_agree_across_languages() -> None:
     )
 
 
-def _typescript_event_sites() -> list[tuple[Path, str, int, str]]:
-    sites: list[tuple[Path, str, int, str]] = []
-    for path in sorted((REPO_ROOT / "src").glob("**/*.ts")):
-        if path.name.endswith(".test.ts") or path == CONTRACTS_TS:
-            continue
+def _typescript_source_files() -> list[Path]:
+    return [
+        path
+        for path in sorted((REPO_ROOT / "src").glob("**/*.ts"))
+        if not path.name.endswith(".test.ts") and path != CONTRACTS_TS
+    ]
+
+
+def _typescript_source_lines() -> list[tuple[Path, str, int, str]]:
+    lines: list[tuple[Path, str, int, str]] = []
+    for path in _typescript_source_files():
         rel = path.relative_to(REPO_ROOT).as_posix()
         for lineno, line in enumerate(_read(path).splitlines(), start=1):
-            sites.append((path, rel, lineno, line))
-    return sites
+            lines.append((path, rel, lineno, line))
+    return lines
 
 
 def test_every_tauri_event_name_is_declared_once() -> None:
@@ -305,7 +386,7 @@ def test_every_tauri_event_name_is_declared_once() -> None:
     declared: dict[str, str] = dict(declared_pairs)
     values = set(declared.values())
 
-    typescript_lines = _typescript_event_sites()
+    typescript_lines = _typescript_source_lines()
 
     used: list[tuple[str, int, str]] = []
     for _, rel, lineno, line in typescript_lines:
@@ -313,7 +394,7 @@ def test_every_tauri_event_name_is_declared_once() -> None:
             for name in re.findall(pattern, line):
                 used.append((rel, lineno, name))
     rust_emits: list[tuple[str, int, str]] = []
-    for path in sorted((REPO_ROOT / "src-tauri" / "src").glob("*.rs")):
+    for path in sorted(RUST_SOURCE_DIR.glob("*.rs")):
         rel = path.relative_to(REPO_ROOT).as_posix()
         for lineno, line in enumerate(_read(path).splitlines(), start=1):
             for pattern in _RUST_EMIT_PATTERNS:
@@ -362,7 +443,6 @@ def test_every_tauri_event_name_is_declared_once() -> None:
         "declared name needs at least one emitter and at least one listener, or it is a dead "
         "string and does not belong in this module: " + "; ".join(unpaired)
     )
-SESSION_PY = REPO_ROOT / "backend" / "app" / "audio" / "session.py"
 
 
 def test_the_session_id_alphabet_agrees_across_languages() -> None:
@@ -384,11 +464,59 @@ def test_the_session_id_alphabet_agrees_across_languages() -> None:
         f"{CONTRACTS_TS.name} mints them against {typescript_pattern!r}"
     )
 
-_TYPESCRIPT_INVOKE_PATTERN = "\\binvoke\\w*\\s*(?:<[^>]*>)?\\s*\\(\\s*[\"']([^\"']+)[\"']"
 
-_RUST_COMMAND_PATTERN = r"#\[tauri::command\]\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)"
+def _rust_command_definitions() -> dict[str, str]:
+    """Every ``#[tauri::command]`` function under src-tauri/src/, and its file.
 
-_RUST_HANDLER_PATTERN = r"tauri::generate_handler!\[(.*?)\]"
+    The whole directory is globbed rather than lib.rs alone, the way the event
+    pin's Rust half already does: a command defined in backend.rs or main.rs is
+    as real as one defined in lib.rs, and reading only lib.rs would report its
+    correct TypeScript caller as invoking an undefined name.
+    """
+    defined: dict[str, str] = {}
+    for path in sorted(RUST_SOURCE_DIR.glob("*.rs")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        for name in re.findall(_RUST_COMMAND_PATTERN, _read(path)):
+            defined[name] = rel
+    assert defined, "no #[tauri::command] function was found under src-tauri/src/"
+    return defined
+
+
+def _rust_registered_commands() -> set[str]:
+    """Every name listed in a ``tauri::generate_handler!`` macro, unqualified.
+
+    All occurrences of the macro are read, not the first: a second builder --
+    a mobile entry point, a second window -- registers its own commands, and
+    stopping at the first would report every one of them as unregistered. Each
+    entry is reduced to its last path segment, because
+    ``tauri::generate_handler![commands::widget_ready]`` is legal and registers
+    the function named ``widget_ready``.
+    """
+    registered: set[str] = set()
+    for path in sorted(RUST_SOURCE_DIR.glob("*.rs")):
+        for block in re.findall(_RUST_HANDLER_PATTERN, _read(path), re.DOTALL):
+            for entry in re.findall(_RUST_HANDLER_ENTRY_PATTERN, block):
+                registered.add(entry.split("::")[-1])
+    assert registered, "no tauri::generate_handler! macro was found under src-tauri/src/"
+    return registered
+
+
+def _typescript_invoke_sites() -> list[tuple[str, int, str]]:
+    """Every literal command name passed to an ``invoke``-prefixed call.
+
+    The scan is over the whole file text rather than line by line, and the line
+    number comes from the match offset. A call reformatted across several lines
+    -- which prettier, an editor or a hand edit can produce at any time and
+    nothing here forbids -- would otherwise read as no call at all, and the
+    test would name a working caller as missing.
+    """
+    sites: list[tuple[str, int, str]] = []
+    for path in _typescript_source_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        text = _read(path)
+        for match in re.finditer(_TYPESCRIPT_INVOKE_PATTERN, text):
+            sites.append((rel, text.count("\n", 0, match.start()) + 1, match.group(1)))
+    return sites
 
 
 def test_every_tauri_command_name_is_defined_and_registered() -> None:
@@ -414,55 +542,54 @@ def test_every_tauri_command_name_is_defined_and_registered() -> None:
     through a wrapper whose name does not start with ``invoke``, to a command
     that already has a correct call site elsewhere, passes all three.
 
-    Mutation-checked four times, each applied alone: misspelling the
+    Mutation-checked eight times, each applied alone. Misspelling the
     widget-ready command name at src/widget/widget.ts fails this test naming
     that file and line; deleting the settings-window call fails it naming the
     command as defined but never called; removing a name from
-    ``generate_handler!`` fails it naming that command as unregistered; and
+    ``generate_handler!`` fails it naming that command as unregistered;
     renaming ``invokeShell`` throughout widget.ts fails it naming the three
-    commands that wrapper reaches.
+    commands that wrapper reaches. Planting a ``#[tauri::command]`` function in
+    src-tauri/src/backend.rs fails it naming backend.rs as the definer of an
+    uncalled command, where reading lib.rs alone would have missed it. A second
+    ``tauri::generate_handler!`` macro carrying the four names keeps it green,
+    where reading only the first occurrence of the macro made the four read as
+    unregistered. Writing one registration path-qualified as
+    ``commands::widget_ready`` keeps it green, where splitting the macro body
+    on commas alone made that correct registration fail. Reformatting the
+    src/api.ts call across three lines keeps it green, where the line-by-line
+    scan reported its command as never invoked.
     """
-    defined = set(_extract(LIB_RS, _RUST_COMMAND_PATTERN))
-    registered_block = re.search(_RUST_HANDLER_PATTERN, _read(LIB_RS), re.DOTALL)
-    assert registered_block, f"no tauri::generate_handler! macro found in {LIB_RS}"
-    registered = {name.strip() for name in registered_block.group(1).split(",") if name.strip()}
-
-    called: list[tuple[str, int, str]] = []
-    for _, rel, lineno, line in _typescript_event_sites():
-        for name in re.findall(_TYPESCRIPT_INVOKE_PATTERN, line):
-            called.append((rel, lineno, name))
+    defined = _rust_command_definitions()
+    registered = _rust_registered_commands()
+    called = _typescript_invoke_sites()
     assert called, "no invoke() call site with a literal command name was found under src/"
+
+    declaring_files = sorted(set(defined.values()))
 
     undefined = [
         f"{rel}:{lineno} invokes {name!r}" for rel, lineno, name in called if name not in defined
     ]
     assert not undefined, (
-        f"{LIB_RS.name} defines the commands {sorted(defined)}; these sites invoke a name it "
-        "does not define, so the call reaches no command and fails only at runtime: "
+        f"{declaring_files} define the commands {sorted(defined)}; these sites invoke a name "
+        "none of them defines, so the call reaches no command and fails only at runtime: "
         + "; ".join(undefined)
     )
 
-    uncalled = sorted(defined - {name for _, _, name in called})
+    invoked = {name for _, _, name in called}
+    uncalled = sorted(name for name in defined if name not in invoked)
     assert not uncalled, (
-        f"{LIB_RS.name} defines commands no TypeScript site invokes by literal name: "
-        f"{uncalled}. Either the caller is gone, or a wrapper stopped being recognised by "
-        "the invoke pattern this test extracts with"
+        "these Rust commands are invoked by no TypeScript site by literal name: "
+        + "; ".join(f"{name} (defined in {defined[name]})" for name in uncalled)
+        + ". Either the caller is gone, or a wrapper stopped being recognised by the invoke "
+        "pattern this test extracts with"
     )
 
-    unregistered = sorted(defined - registered)
+    unregistered = sorted(name for name in defined if name not in registered)
     assert not unregistered, (
-        f"{LIB_RS.name} defines commands that tauri::generate_handler! does not register, so "
-        f"they are unreachable at runtime with no error anywhere: {unregistered}"
+        "tauri::generate_handler! registers none of these commands, so they are unreachable "
+        "at runtime with no error anywhere: "
+        + "; ".join(f"{name} (defined in {defined[name]})" for name in unregistered)
     )
-
-
-_SHARED_MODEL_CACHE_ALLOWLIST: dict[str, str] = {
-    "backend/app/stt/local_whisper_cpp_cmd.py": (
-        "the downloaded GGML model cache is deliberately shared between dev and "
-        "production -- docs/adr/012-dev-mode-data-directory-isolation.md, pinned by "
-        "test_model_cache_stays_shared_between_dev_and_production"
-    ),
-}
 
 
 def test_the_app_data_directory_names_agree_across_languages() -> None:
@@ -477,57 +604,76 @@ def test_the_app_data_directory_names_agree_across_languages() -> None:
     the one backend.rs promises out loud: the sidecar log landing in a
     different directory from the sidecar's own history and settings files.
 
-    **Unpinned and named as such:** that ``cfg!(debug_assertions)`` and
-    ``sys.frozen`` agree on any given launch is a runtime property no text pin
-    can check.
+    **Unpinned and named as such**, three ways the two sides can still land in
+    different directories at runtime, none of them visible to a text pin:
+
+    - That ``cfg!(debug_assertions)`` and ``sys.frozen`` agree on any given
+      launch is a runtime property.
+    - With ``JUSTSAY_DATA_DIR`` set, Python resolves that override while Rust
+      writes to ``~/<name>/logs/sidecar.log`` regardless, because
+      ``append_sidecar_log`` reads only ``USERPROFILE``/``HOME`` and never
+      reads ``JUSTSAY_DATA_DIR``.
+    - In a release build, a child process inheriting an externally set
+      ``JUSTSAY_FORCE_DEV_DATA_DIR=1`` makes Python resolve the development
+      name while Rust has already chosen the production one.
 
     The Rust pattern tolerates arbitrary whitespace because ``cargo fmt`` runs
-    in no CI job here. The orphan scan requires a quote character immediately
-    before and immediately after the name, which is what separates a
-    declaration from prose, and it skips test files following the masked-key
-    precedent -- test_app_paths.py writes both names out on purpose.
+    in no CI job here. Its matches are kept as pairs, so a second declaration
+    in backend.rs is reported as a disagreement instead of unpacked into a
+    ValueError naming neither the file nor the values.
 
-    Mutation-checked four times, each applied alone: changing the production
+    The orphan scan requires a quote character immediately before and
+    immediately after the name, which is what separates a declaration from
+    prose, and it skips test files following the masked-key precedent --
+    test_app_paths.py writes both names out on purpose. The allowlist exempts
+    one exact source line rather than a whole file, so the shared model cache
+    stays legal without the file becoming a blind spot.
+
+    Mutation-checked seven times, each applied alone: changing the production
     name in app_paths.py fails this test naming src-tauri/src/backend.rs;
     planting a double-quoted production-directory path literal in a non-test
     file under backend/app/ fails it naming that file and line; the same
-    literal single-quoted fails it too; and deleting the allowlist entry fails
-    it naming backend/app/stt/local_whisper_cpp_cmd.py.
+    literal single-quoted fails it too; deleting the allowlist entry fails it
+    naming backend/app/stt/local_whisper_cpp_cmd.py; a *second* quoted literal
+    added to that same allowlisted file fails it naming that new line; editing
+    the allowlisted line fails it naming the entry as stale; and a second,
+    disagreeing ``force_dev_data_dir`` block in backend.rs fails it printing
+    both pairs.
     """
     production = _extract(APP_PATHS_PY, r'^PROD_DIR_NAME = "([^"]*)"$')[0]
     development = _extract(APP_PATHS_PY, r'^DEV_DIR_NAME = "([^"]*)"$')[0]
-    rust_development, rust_production = _extract(
-        BACKEND_RS,
-        r'force_dev_data_dir\s*\{\s*"([^"]*)"\s*\}\s*else\s*\{\s*"([^"]*)"\s*\}',
+    backend_rel = BACKEND_RS.relative_to(REPO_ROOT).as_posix()
+
+    rust_declarations = set(_extract_groups(BACKEND_RS, _RUST_DATA_DIR_PATTERN))
+    assert len(rust_declarations) == 1, (
+        f"{backend_rel} declares the data directory name pair more than once and the copies "
+        f"disagree: {sorted(rust_declarations)}"
     )
+    rust_development, rust_production = next(iter(rust_declarations))
+
     assert (development, production) == (rust_development, rust_production), (
         f"{APP_PATHS_PY.name} names the data directories "
         f"({development!r} dev, {production!r} production) but "
-        f"{BACKEND_RS.relative_to(REPO_ROOT).as_posix()} names them "
+        f"{backend_rel} names them "
         f"({rust_development!r} dev, {rust_production!r} production), so the sidecar log "
         "would be written beside a different history database than the sidecar's own"
     )
 
-    quoted = re.compile(
-        "|".join("[\"']" + re.escape(name) + "[\"']" for name in (production, development))
+    strays, stale = _quoted_literal_strays(
+        (production, development), (APP_PATHS_PY, BACKEND_RS), _SHARED_MODEL_CACHE_ALLOWLIST
     )
-    strays: list[str] = []
-    for path in _scanned_files():
-        if path in (APP_PATHS_PY, BACKEND_RS) or path.name.startswith("test_"):
-            continue
-        if path.name.endswith((".test.ts", "_test.py")):
-            continue
-        rel = path.relative_to(REPO_ROOT).as_posix()
-        if rel in _SHARED_MODEL_CACHE_ALLOWLIST:
-            continue
-        for lineno, line in enumerate(_read(path).splitlines(), start=1):
-            if quoted.search(line):
-                strays.append(f"{rel}:{lineno}")
+    assert not stale, (
+        "an allowlisted shared-model-cache site no longer exists, so its entry would exempt "
+        "that file forever with nobody noticing; delete the entry or update it to the line "
+        "that replaced it: " + "; ".join(stale)
+    )
     assert not strays, (
         f"the data directory names ({production!r}, {development!r}) are written out, in "
         f"either quote style, away from their two declarations ({APP_PATHS_PY.name}, "
         f"{BACKEND_RS.name}); call resolve_app_data_root() instead. Allowlisted elsewhere: "
-        + "; ".join(f"{path} = {why}" for path, why in _SHARED_MODEL_CACHE_ALLOWLIST.items())
+        + "; ".join(
+            f"{rel}:{line!r} = {why}" for (rel, line), why in _SHARED_MODEL_CACHE_ALLOWLIST.items()
+        )
         + ". Undeclared: "
         + ", ".join(strays)
     )

@@ -290,17 +290,41 @@ def test_every_endpoint_role_is_declared_in_all_three_places() -> None:
     add a fourth declaration-shaped name to the set this pin exists to hold
     together.
 
-    Mutation-checked three times, each applied alone: adding a third member to
+    ENDPOINT_ROLES is the one of the three whose *order* is load-bearing:
+    ``_roles_in_preference_order`` appends its members in declaration order
+    after the preferred role, so the tuple decides which role is tried next
+    when the preferred one reports no endpoint. ADR 042 puts communications
+    first. With two roles that tail is one element long and no permutation is
+    observable -- but at exactly the mutation this docstring uses to prove the
+    test, a third role, the tail becomes two long and a membership-only
+    comparison would pass for any ordering. The Literal is pinned to the same
+    order so a permutation of either side is caught; _ROLE_VALUES is a mapping
+    of external ERole integers and its order means nothing, so it is compared
+    as a set.
+
+    Mutation-checked five times, each applied alone: adding a third member to
     the EndpointRole Literal fails this test naming ENDPOINT_ROLES and
     _ROLE_VALUES; dropping "console" from ENDPOINT_ROLES fails it; dropping
-    "console" from _ROLE_VALUES fails it.
+    "console" from _ROLE_VALUES fails it; reversing ENDPOINT_ROLES fails it
+    naming the order; and reversing the Literal's members fails it the same
+    way.
     """
-    annotated = set(get_args(EndpointRole))
-    ordered = set(ENDPOINT_ROLES)
+    annotated = get_args(EndpointRole)
     com_values = set(windows_endpoints._ROLE_VALUES)
 
-    assert annotated == ordered == com_values, (
+    assert set(annotated) == set(ENDPOINT_ROLES) == com_values, (
         "the endpoint roles disagree across their three declarations: "
         f"EndpointRole declares {sorted(annotated)}, ENDPOINT_ROLES declares "
-        f"{sorted(ordered)}, and _ROLE_VALUES declares {sorted(com_values)}"
+        f"{sorted(ENDPOINT_ROLES)}, and _ROLE_VALUES declares {sorted(com_values)}"
+    )
+
+    assert ENDPOINT_ROLES == annotated, (
+        "ENDPOINT_ROLES is the preference order the fallback walks, so its order is not "
+        f"interchangeable: it declares {list(ENDPOINT_ROLES)} while EndpointRole declares "
+        f"{list(annotated)}"
+    )
+
+    assert ENDPOINT_ROLES[0] == "communications", (
+        "ADR 042 makes the communications endpoint the one loopback follows first, but "
+        f"ENDPOINT_ROLES starts with {ENDPOINT_ROLES[0]!r}"
     )

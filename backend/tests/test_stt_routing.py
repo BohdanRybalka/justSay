@@ -111,7 +111,7 @@ def test_wav_short_normal_uses_groq():
     assert isinstance(p, GroqWhisperSTTProvider)
 
 
-def test_format_supports_sets_are_consistent():
+def test_groq_advertises_no_extension_the_upload_allowlist_rejects():
     """Groq's table is the routing input, and it can only narrow the allowlist.
 
     A provider advertising an extension the upload validator rejects is a
