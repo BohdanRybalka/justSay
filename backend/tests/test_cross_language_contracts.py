@@ -108,7 +108,9 @@ _RUST_COMMAND_PATTERN = (
     r"\s*(?:pub\s*(?:\([^)]*\)\s*)?)?(?:async\s+)?fn\s+(\w+)"
 )
 
-_RUST_HANDLER_PATTERN = r"tauri::generate_handler!\[(.*?)\]"
+_RUST_HANDLER_OPENING = "tauri::generate_handler!["
+
+_RUST_ENTRY_ATTRIBUTE_PATTERN = r"#\[[^\]]*\]"
 
 _RUST_HANDLER_ENTRY_PATTERN = r"(?:[A-Za-z_]\w*\s*::\s*)*([A-Za-z_]\w*)"
 
@@ -584,6 +586,40 @@ def _rust_command_definitions() -> dict[str, list[str]]:
     return defined
 
 
+def _handler_macro_bodies(path: Path) -> list[str]:
+    """The text inside each ``tauri::generate_handler![...]`` in one file.
+
+    Bracket depth is counted rather than matched with a regex. A non-greedy
+    bracket group ends at the first closing bracket, which is the one closing
+    an attribute written on an entry -- ``#[cfg(desktop)]`` is legal inside the
+    macro, ``tauri-macros`` parses it, and the truncated body then yields no
+    entry at all, so every registration in the file disappeared and the caller
+    reported "no macro was found". Depth counting reads the whole body instead.
+
+    An unterminated macro is a file that does not compile; it raises here
+    naming the file rather than contributing a silently empty body.
+    """
+    text = _read(path)
+    bodies: list[str] = []
+    start = text.find(_RUST_HANDLER_OPENING)
+    while start != -1:
+        cursor = start + len(_RUST_HANDLER_OPENING)
+        depth = 1
+        while cursor < len(text) and depth:
+            if text[cursor] == "[":
+                depth += 1
+            elif text[cursor] == "]":
+                depth -= 1
+            cursor += 1
+        assert not depth, (
+            f"{path.relative_to(REPO_ROOT).as_posix()} opens a tauri::generate_handler! "
+            "macro that is never closed; the file cannot compile"
+        )
+        bodies.append(text[start + len(_RUST_HANDLER_OPENING) : cursor - 1])
+        start = text.find(_RUST_HANDLER_OPENING, cursor)
+    return bodies
+
+
 def _rust_registered_commands() -> set[str]:
     """Every name listed in a ``tauri::generate_handler!`` macro, unqualified.
 
@@ -601,12 +637,26 @@ def _rust_registered_commands() -> set[str]:
     rather than passing silently. Each entry is reduced to its last path
     segment, because ``tauri::generate_handler![commands::widget_ready]`` is
     legal and registers the function named ``widget_ready``.
+
+    An attribute on an entry is stripped before the path is read, so a gated
+    registration still contributes its name. What that does **not** distinguish
+    is which platform the gate names: a command registered only under
+    ``#[cfg(mobile)]`` counts as registered here while being unreachable on a
+    desktop build. Pinning that needs the build's own target, which this module
+    has no way to read -- it reads text and runs on the Linux CI box with no
+    Rust toolchain at all (ADR 045).
+
+    Mutation-checked: gating one entry with ``#[cfg(desktop)]`` keeps this test
+    green and every other test in the module green, where before the whole
+    registration set came back empty and the failure named no macro at all; and
+    a genuinely unregistered command still fails naming that command.
     """
     registered: set[str] = set()
     for path in _rust_source_files():
-        for block in re.findall(_RUST_HANDLER_PATTERN, _read(path), re.DOTALL):
-            for entry in block.split(","):
-                match = re.fullmatch(_RUST_HANDLER_ENTRY_PATTERN, entry.strip())
+        for body in _handler_macro_bodies(path):
+            for entry in body.split(","):
+                bare = re.sub(_RUST_ENTRY_ATTRIBUTE_PATTERN, "", entry).strip()
+                match = re.fullmatch(_RUST_HANDLER_ENTRY_PATTERN, bare)
                 if match:
                     registered.add(match.group(1))
     assert registered, "no tauri::generate_handler! macro was found under src-tauri/src/"
