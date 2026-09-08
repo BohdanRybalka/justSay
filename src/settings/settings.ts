@@ -8,6 +8,7 @@ import {
   type CloudKeyStatus,
   type UserSettings,
 } from "../api";
+import { EVENT_SETTINGS_HIDDEN } from "../contracts";
 import { TimedOutError, withTimeout } from "../timeout";
 import { isStaleStatusResponse } from "../stale-response";
 import { renderGeneral } from "./tabs/general";
@@ -21,7 +22,7 @@ import { renderTranscribe } from "./tabs/transcribe";
 let currentTab = "general";
 let settings: UserSettings | null = null;
 let cloudStatus: CloudKeyStatus | null = null;
-let destroyFn: (() => void) | null = null;
+let activeTab: TabLifecycle | null = null;
 let settingsError: string | null = null;
 let backendReachable = true;
 let settingsLoadInFlight = false;
@@ -34,7 +35,29 @@ const navButtons = document.querySelectorAll<HTMLButtonElement>(".nav-btn");
 const backendStatus = document.getElementById("backend-status")!;
 
 
-const tabs: Record<string, (container: HTMLElement, settings: UserSettings) => (() => void) | void> = {
+/** What a tab hands back so this window can let go of what it is holding.
+ *
+ *  Two different moments, and a tab that conflates them loses work. `destroy`
+ *  runs when the tab is leaving the DOM — a switch, a re-render — and may tear
+ *  everything down. `releaseResources` runs when the *window* is dismissed
+ *  while the tab stays mounted: the shell prevents the close and hides the
+ *  window (`src-tauri/src/lib.rs`), so the tab must give up a device it holds
+ *  and still work when the window is shown again.
+ *
+ *  A tab with nothing to release returns its destroy function as before. */
+export interface TabLifecycle {
+  destroy: () => void;
+  releaseResources?: () => void;
+}
+
+type TabTeardown = (() => void) | TabLifecycle | void;
+
+function asLifecycle(teardown: TabTeardown): TabLifecycle | null {
+  if (!teardown) return null;
+  return typeof teardown === "function" ? { destroy: teardown } : teardown;
+}
+
+const tabs: Record<string, (container: HTMLElement, settings: UserSettings) => TabTeardown> = {
   general: renderGeneral,
   models: renderModels,
   transcribe: (container) => renderTranscribe(container),
@@ -96,9 +119,9 @@ function settingsUnavailableMessage(error: unknown, reachable: boolean): string 
  * the whole app.
  */
 function renderSettingsUnavailable(container: HTMLElement) {
-  if (destroyFn) {
-    destroyFn();
-    destroyFn = null;
+  if (activeTab) {
+    activeTab.destroy();
+    activeTab = null;
   }
   container.innerHTML = "";
 
@@ -181,9 +204,9 @@ async function loadSettingsIntoUi(): Promise<void> {
 }
 
 function switchTab(tabName: string) {
-  if (destroyFn) {
-    destroyFn();
-    destroyFn = null;
+  if (activeTab) {
+    activeTab.destroy();
+    activeTab = null;
   }
 
   currentTab = tabName;
@@ -201,7 +224,7 @@ function switchTab(tabName: string) {
 
   const renderFn = tabs[tabName];
   if (renderFn) {
-    destroyFn = renderFn(tabContent, settings) || null;
+    activeTab = asLifecycle(renderFn(tabContent, settings));
   }
 }
 
@@ -326,8 +349,34 @@ navButtons.forEach((btn) => {
 });
 
 
+/** Release whatever the active tab is holding when the window is dismissed.
+ *
+ *  The shell prevents the close and hides the window instead, so the webview
+ *  stays mounted and no tab's teardown runs — the General tab's microphone test
+ *  outlived the window and was reachable only by opening Settings again
+ *  ([JS-121]). Only the release runs: re-mounting the tab, which is what the
+ *  first version of this did, throws away everything the mounted tab was
+ *  holding that is not a resource — a debounced save the user had just typed, a
+ *  downloaded update waiting to be installed — and re-runs the tab's whole
+ *  network fan-out while the window is invisible.
+ *
+ *  A failed listener attach is swallowed for the same reason every other one
+ *  here is: outside Tauri there is no event bus, and a settings screen that
+ *  refuses to load because it could not subscribe to a hide is worse than one
+ *  that never hears it. */
+async function releaseTabOnWindowHide() {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    await listen(EVENT_SETTINGS_HIDDEN, () => {
+      activeTab?.releaseResources?.();
+    });
+  } catch {}
+}
+
+
 async function init() {
   void initAppVersion();
+  void releaseTabOnWindowHide();
   renderSettingsUnavailable(tabContent);
   setInterval(probeBackend, 5000);
   await loadSettingsIntoUi();

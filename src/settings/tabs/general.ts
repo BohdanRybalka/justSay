@@ -4,7 +4,7 @@ import {
   formatAccelerator,
   modifierHint,
 } from "../../accelerator";
-import { api, levelStream, type UserSettings } from "../../api";
+import { api, ApiRequestError, levelStream, type UserSettings } from "../../api";
 import {
   EVENT_SETTINGS_CHANGED,
   EVENT_SHORTCUT_APPLIED,
@@ -12,24 +12,30 @@ import {
   type ShortcutApplied,
   type ShortcutRequested,
 } from "../../contracts";
-import { saveSettings, getCloudKeyStatus, cachePersistedShortcut } from "../settings";
+import { saveSettings, getCloudKeyStatus, cachePersistedShortcut, type TabLifecycle } from "../settings";
 import { escapeHtml, meetingDisclosureHtml } from "../html";
+import { isDecisiveRefusal, newSessionId } from "../../session";
 import { renderKeys } from "./keys";
 import { notifyError } from "../../notify";
+import { TimedOutError } from "../../timeout";
 
 const UPDATES_CHECK_LABEL = "Check for updates";
 
-/** A stop that failed states what is known and promises nothing: whether the
- *  device was released is exactly what this window cannot find out. That is
- *  true of every failed stop, whatever failed it — `recorder.stop()` is reached
- *  before the handler can raise, so a 500 and a refused connection leave the
- *  device in the same unknown state. `POST /audio/stop` carries no budget
- *  (ADR 049), so a stop cannot be abandoned here; it is waited out, and only a
- *  real failure reaches this label. The button is left on `Stop` so the user can
- *  try again, and this label must not tell them that pressing it closes anything
- *  — nothing here can establish that it did. */
+/** A discard that could not be delivered states what is known and promises
+ *  nothing: whether the device was released is exactly what this window cannot
+ *  find out. That is true whatever failed it — `recorder.discard()` is reached
+ *  before the handler can raise, so a 500, a timeout and a refused connection
+ *  leave the device in the same unknown state.
+ *
+ *  The session id is kept when this label goes up, so the button stays on
+ *  `Stop` and the next press sends the same discard again; so does closing the
+ *  window, which now tears the tab down ([JS-121]). This window is the only one
+ *  that can: the widget does not own this session and the whole point of the
+ *  ownership guard is that it may not end what it does not own. The label must
+ *  therefore not tell the user that pressing Stop closes anything — nothing
+ *  here can establish that it did. */
 const MICROPHONE_UNCONFIRMED_LABEL =
-  "Stopping the microphone failed — it may still be open";
+  "The backend did not answer — the microphone may still be open";
 
 /** The subset of the updater plugin's `Update` this module actually uses. */
 interface PendingUpdate {
@@ -82,7 +88,7 @@ const LANGUAGES = [
   { code: "zh", label: "Chinese" },
 ];
 
-export function renderGeneral(container: HTMLElement, settings: UserSettings): () => void {
+export function renderGeneral(container: HTMLElement, settings: UserSettings): TabLifecycle {
   const platform = detectShortcutPlatform(navigator);
 
   container.innerHTML = `
@@ -184,6 +190,12 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   const levelFill = container.querySelector<HTMLElement>("#level-fill")!;
 
   let isRecording = false;
+  /** The session this tab started and has not seen released. Kept across a
+   *  failed discard on purpose: it is the only handle anything has on that
+   *  capture, and dropping it would leave a microphone open that no surface in
+   *  the app can reach. A teardown hands it to `sessionAwaitingRelease`, which
+   *  outlives this closure, rather than dropping it. */
+  let heldSession = "";
   let levelStreamAbort: AbortController | null = null;
 
   /** Both callbacks check that they are still the current stream before they
@@ -216,41 +228,119 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     }
   }
 
-  btnTest.addEventListener("click", async () => {
-    if (isRecording) {
-      try {
-        await api.audioStop();
-      } catch (e) {
+  /** Whether the backend is holding *this* tab's capture.
+   *
+   *  Asked only after a start ran out of its budget — never after a refusal,
+   *  which already answers the question and whose caller would otherwise wait
+   *  a second 15 s budget before the label changed — and answered by the id
+   *  rather than by `is_recording`: the recorder is process-wide, so a bare
+   *  "something is recording" would let this window's Stop button end a
+   *  dictation the user is in the middle of speaking. A read that fails proves
+   *  nothing and is not adoption. */
+  async function backendHoldsSession(session: string): Promise<boolean> {
+    try {
+      const status = await api.audioStatus();
+      return status.is_recording && status.session_id === session;
+    } catch {
+      return false;
+    }
+  }
+
+  function showRecording() {
+    isRecording = true;
+    btnTest.textContent = "Stop";
+    recLabel.textContent = "Recording...";
+    startLevelStream(levelFill);
+  }
+
+  /** The microphone test never wanted a file. `POST /audio/stop` wrote one WAV
+   *  per press into the scratch directory whose size this same tab then
+   *  displays, and only `/pipeline/dictate` ever deletes such a file, so every
+   *  test left audio of the room on disk ([JS-122]). `POST /audio/discard`
+   *  writes nothing, so there is nothing to delete and nothing to announce. */
+  function showIdle() {
+    heldSession = "";
+    isRecording = false;
+    btnTest.textContent = "Record";
+    recLabel.textContent = "Click to test microphone";
+    stopLevelStream();
+    levelFill.style.width = "0%";
+  }
+
+  /** A refusal the recorder produced from inside its own lock is an answer, not
+   *  silence: `403` says another session holds the device and `409` says
+   *  nothing is being recorded, and either way this tab's capture is closed.
+   *  Reporting those as "the backend did not answer" was factually wrong and
+   *  left the button on `Stop` with nothing that could ever clear it. */
+  async function stopMicrophoneTest() {
+    const session = heldSession;
+    try {
+      await api.audioDiscard(session);
+    } catch (e) {
+      console.error(e);
+      if (destroyed) return;
+      if (!isDecisiveRefusal(e)) {
         stopLevelStream();
         levelFill.style.width = "0%";
         recLabel.textContent = MICROPHONE_UNCONFIRMED_LABEL;
-        console.error(e);
         return;
       }
-      isRecording = false;
-      btnTest.textContent = "Record";
-      recLabel.textContent = "Click to test microphone";
-      stopLevelStream();
-      levelFill.style.width = "0%";
-    } else {
-      try {
-        const status = await api.audioStatus();
-        if (status.is_recording) {
-          recLabel.textContent = "Microphone busy (widget recording)";
+    }
+    if (destroyed) return;
+    showIdle();
+  }
+
+  /** There is no pre-flight `GET /audio/status` any more.
+   *
+   *  `POST /audio/start`'s own 409 is the authoritative answer to "is the
+   *  microphone busy" and, unlike a separate read, it cannot be stale by the
+   *  time it is acted on. The read that replaced it — the one above — asks a
+   *  different question, about a request this tab already issued.
+   *
+   *  A start that runs out of its budget leaves the device open whichever way
+   *  it ends, so the session is held from the moment the request goes out. The
+   *  level stream is deliberately not started on the unconfirmed branch: it
+   *  would report an error over the one instruction the user has for closing a
+   *  microphone that may still be open. */
+  async function startMicrophoneTest() {
+    const session = newSessionId();
+    heldSession = session;
+    try {
+      await api.audioStart(session);
+    } catch (e) {
+      console.error(e);
+      if (destroyed) return;
+      if (e instanceof TimedOutError) {
+        const held = await backendHoldsSession(session);
+        if (destroyed) return;
+        if (held) {
+          showRecording();
           return;
         }
-      } catch {}
-
-      try {
-        await api.audioStart();
         isRecording = true;
         btnTest.textContent = "Stop";
-        recLabel.textContent = "Recording...";
-        startLevelStream(levelFill);
-      } catch (e) {
-        recLabel.textContent = "Failed to start";
-        console.error(e);
+        recLabel.textContent = MICROPHONE_UNCONFIRMED_LABEL;
+        return;
       }
+      heldSession = "";
+      recLabel.textContent =
+        e instanceof ApiRequestError && e.status === 409
+          ? "Microphone busy (widget recording)"
+          : "Failed to start";
+      return;
+    }
+    if (destroyed) {
+      releaseAndRemember(session);
+      return;
+    }
+    showRecording();
+  }
+
+  btnTest.addEventListener("click", async () => {
+    if (isRecording) {
+      await stopMicrophoneTest();
+    } else {
+      await startMicrophoneTest();
     }
   });
 
@@ -268,6 +358,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let destroyed = false;
   loadFilesInfo(tempSize, () => destroyed);
+  if (sessionAwaitingRelease) releaseAndRemember(sessionAwaitingRelease);
 
   const consentGroup = container.querySelector<HTMLElement>("#meeting-consent-group")!;
   consentGroup
@@ -520,20 +611,66 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): (
     } catch {}
   })();
 
-  return () => {
-    destroyed = true;
-    stopCapture();
-    if (debounceTimer) clearTimeout(debounceTimer);
-    stopLevelStream();
-    if (isRecording) {
-      api.audioStop().catch(() => {});
-    }
-    if (unlistenShortcutApplied) {
-      unlistenShortcutApplied();
-      unlistenShortcutApplied = null;
-    }
-    destroyKeys();
-  };
+  /** A debounced save is work the user has already typed, so a teardown flushes
+   *  it rather than clearing the timer and losing it. Dismissing the window
+   *  inside the 600 ms window used to discard the edit silently — no save, no
+   *  error, and the old path back on screen from the re-render. */
+  function flushPendingOutputDir() {
+    if (!debounceTimer) return;
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+    void persistOutputDir(outputDir.value);
+  }
+
+  /** The window was dismissed while this tab stays mounted, so everything that
+   *  is not a held resource — an update this tab has found, the values on
+   *  screen, the reads it has already paid for — is left exactly as it is. The
+   *  discard follows the same path a press of `Stop` does, including the label
+   *  it leaves when the backend does not answer. */
+  function releaseResources() {
+    flushPendingOutputDir();
+    if (heldSession) void stopMicrophoneTest();
+  }
+
+  return {
+    destroy: () => {
+      destroyed = true;
+      stopCapture();
+      flushPendingOutputDir();
+      stopLevelStream();
+      if (heldSession) {
+        releaseAndRemember(heldSession);
+        heldSession = "";
+      }
+      if (unlistenShortcutApplied) {
+        unlistenShortcutApplied();
+        unlistenShortcutApplied = null;
+      }
+      destroyKeys();
+    },
+    releaseResources,
+  } satisfies TabLifecycle;
+}
+
+/** A capture whose release has not been confirmed, held outside any tab
+ *  instance because the id is the only handle this app has on that device and
+ *  a teardown would otherwise drop it. The next render of this tab retries it,
+ *  which is what makes `heldSession`'s stated invariant true rather than
+ *  aspirational. It is cleared only by an answer about that session: a 200, or
+ *  a refusal the recorder gave from inside its own lock. */
+let sessionAwaitingRelease = "";
+
+function releaseAndRemember(sessionId: string): void {
+  sessionAwaitingRelease = sessionId;
+  void api.audioDiscard(sessionId).then(
+    () => {
+      if (sessionAwaitingRelease === sessionId) sessionAwaitingRelease = "";
+    },
+    (e) => {
+      console.error(e);
+      if (isDecisiveRefusal(e) && sessionAwaitingRelease === sessionId) sessionAwaitingRelease = "";
+    },
+  );
 }
 
 async function loadFilesInfo(tempSize: HTMLElement, isDestroyed: () => boolean) {

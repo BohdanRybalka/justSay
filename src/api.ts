@@ -96,6 +96,19 @@ const REREADABLE: Budget = { ms: REQUEST_TIMEOUT_MS };
  *  adds. Until then no budget, rather than a wrong one. */
 const UNRECONCILED: Budget = { ms: null };
 
+/** A state-mutating call the client can find out the outcome of after
+ *  abandoning it, because it names the recording it means.
+ *
+ *  This is the row ADR 049's fourth amendment said did not exist yet, and spec
+ *  119 is what created it: `POST /audio/start` carries a client-minted session
+ *  id which `GET /audio/status` echoes, and `POST /audio/discard` answers
+ *  whether the backend still holds a given session. Abandoning either is
+ *  therefore no longer a guess — the widget reads the id back and adopts, owes
+ *  or drops on certainty. Nothing else may move onto this row without the same
+ *  proof; `dictate` in particular stays `UNRECONCILED`, because it is bounded
+ *  by the discard probe rather than by a budget nobody has measured. */
+const RECONCILABLE: Budget = { ms: REQUEST_TIMEOUT_MS };
+
 let cachedToken: string | null = null;
 let tokenPromise: Promise<string | null> | null = null;
 /** The outstanding `get_backend_token` IPC call and the outstanding bridge
@@ -454,6 +467,14 @@ export interface RecordingStatus {
   is_recording: boolean;
   duration_seconds: number;
   level_db: number;
+  /** The client-minted id of the live capture, or `null` when nothing is
+   *  recording. A window compares it against what it minted; anything else is
+   *  somebody else's recording and not this window's to end. */
+  session_id: string | null;
+}
+
+export interface DiscardResponse {
+  duration_seconds: number;
 }
 
 /** The meeting endpoints' own response shape. Deliberately separate from
@@ -649,20 +670,33 @@ export const api = {
     ),
 
   /** `POST /audio/start` calls `await recorder.start()` before it answers, so
-   *  the microphone may be open whichever way this ends — and a budget makes
-   *  that worse rather than better. A timed-out start leaves the widget in
-   *  `error`, where `recording-intent.ts` drops the release the user had already
-   *  queued as matching the current state; the next press starts again, is
-   *  refused `409 Already recording`, and nothing recovers the intent. Waiting
-   *  parks it instead (ADR 049, fourth amendment). */
-  audioStart: () => request<RecordingStatus>("POST", "/audio/start", undefined, UNRECONCILED),
-
-  audioStop: () =>
-    request<{ filename: string; duration_seconds: number }>(
+   *  the microphone may be open whichever way this ends. That is why abandoning
+   *  it was wrong until spec 119 and is right now: the caller mints
+   *  `sessionId`, and `GET /audio/status` echoes whichever session owns the
+   *  recorder, so a timed-out start is followed by a read that says whether
+   *  this window's capture is running. Waiting instead parks the widget in
+   *  `recording` for as long as a wedged backend cares to hold it. */
+  audioStart: (sessionId: string) =>
+    request<RecordingStatus>(
       "POST",
-      "/audio/stop",
-      undefined,
-      UNRECONCILED,
+      "/audio/start",
+      { session_id: sessionId },
+      RECONCILABLE,
+    ),
+
+  /** End a capture this window started and write no file.
+   *
+   *  Also the probe that answers "was the request I abandoned ever
+   *  processed?": a 200 means the backend still held that session, so nothing
+   *  downstream of the start had run, while a 403 or a 409 means something
+   *  already happened to it. Both are answers, which is why the caller drops
+   *  the obligation on either. */
+  audioDiscard: (sessionId: string) =>
+    request<DiscardResponse>(
+      "POST",
+      "/audio/discard",
+      { session_id: sessionId },
+      RECONCILABLE,
     ),
 
   /** Opens both devices before it answers — spec 099 measured up to six seconds
@@ -685,11 +719,11 @@ export const api = {
    *  possibly already in History. Transcription is legitimately slow — the local
    *  path alone waits up to 300 s for readiness before it starts — so any budget
    *  short enough to be useful fires on work that was going to finish. */
-  dictate: (language = "uk") =>
+  dictate: (sessionId: string, language = "uk") =>
     request<DictateResponse>(
       "POST",
       `/pipeline/dictate?language=${language}`,
-      undefined,
+      { session_id: sessionId },
       UNRECONCILED,
     ),
 

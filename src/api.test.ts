@@ -30,6 +30,10 @@ function headerOf(callIndex: number): Record<string, string> {
   return (opts.headers ?? {}) as Record<string, string>;
 }
 
+/** A session id of the shape the backend validates against, so a request built
+ *  in these tests is one the real endpoint would accept. */
+const SESSION_ID = "0123456789abcdef0123456789abcdef";
+
 function aborted() {
   return new DOMException("The operation was aborted.", "AbortError");
 }
@@ -627,11 +631,9 @@ describe("a backend that accepts a request and never answers", () => {
   });
 
   it.each([
-    ["audioStop", (a: Api) => a.audioStop()],
-    ["audioStart", (a: Api) => a.audioStart()],
     ["startMeetingRecording", (a: Api) => a.startMeetingRecording()],
     ["stopMeetingRecording", (a: Api) => a.stopMeetingRecording()],
-    ["dictate", (a: Api) => a.dictate("uk")],
+    ["dictate", (a: Api) => a.dictate(SESSION_ID, "uk")],
     ["processFile", (a: Api) => a.processFile(new ArrayBuffer(8), "call.wav")],
     ["updateSettings", (a: Api) => a.updateSettings({ language: "uk" })],
     ["setSttMode", (a: Api) => a.setSttMode("local")],
@@ -657,6 +659,8 @@ describe("a backend that accepts a request and never answers", () => {
 
   it.each([
     ["sttLocalPrewarm", (a: Api) => a.sttLocalPrewarm(), "/stt/local/prewarm", 15_000],
+    ["audioStart", (a: Api) => a.audioStart(SESSION_ID), "/audio/start", 15_000],
+    ["audioDiscard", (a: Api) => a.audioDiscard(SESSION_ID), "/audio/discard", 15_000],
   ])(
     "abandons %s at its own budget rather than leaving the surface that called it dead",
     async (_name, call, path, budgetMs) => {
@@ -1054,5 +1058,56 @@ describe("a status read against a bridge that is slow but alive", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await expect(pending).resolves.toMatchObject({ is_recording: false });
+  });
+});
+
+describe("session-carrying calls", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    fetchMock.mockReset();
+    invokeMock.mockReset();
+    removeBridge();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("sends the session id as a JSON body on start, discard and dictate", async () => {
+    const { api } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({}));
+
+    await api.audioStart(SESSION_ID);
+    await api.audioDiscard(SESSION_ID);
+    await api.dictate(SESSION_ID, "uk");
+
+    const bodies = fetchMock.mock.calls.map((call) =>
+      JSON.parse((call[1] as RequestInit).body as string),
+    );
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "http://127.0.0.1:9377/audio/start",
+      "http://127.0.0.1:9377/audio/discard",
+      "http://127.0.0.1:9377/pipeline/dictate?language=uk",
+    ]);
+    expect(bodies).toEqual([
+      { session_id: SESSION_ID },
+      { session_id: SESSION_ID },
+      { session_id: SESSION_ID },
+    ]);
+  });
+
+  it("keeps the dictation unbounded while the start it follows is bounded", async () => {
+    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
+    fetchMock.mockImplementation(deafFetch());
+
+    const dictating = api.dictate(SESSION_ID, "uk");
+    const settled = vi.fn();
+    dictating.then(settled, settled);
+
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS * 4);
+
+    expect(settled).not.toHaveBeenCalled();
+    expect((fetchMock.mock.calls[0][1] as RequestInit).signal ?? null).toBeNull();
   });
 });

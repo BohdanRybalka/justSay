@@ -822,6 +822,7 @@ class _FakeRecorder:
         self.level_db = float("-inf")
         self.system_level_db = float("-inf")
         self.system_endpoint = None
+        self.session_id = None
         self.started = False
 
     def status_snapshot(self):
@@ -833,12 +834,13 @@ class _FakeRecorder:
             system_level_db=self.system_level_db,
         )
 
-    async def start(self):
+    async def start(self, session_id: str | None = None):
         self.started = True
         self.is_recording = True
         self.is_busy = True
+        self.session_id = session_id
 
-    async def stop(self):
+    async def stop(self, session_id: str | None = None):
         self.is_recording = False
         self.is_busy = False
         raise AssertionError("this stub is not expected to stop")
@@ -949,7 +951,7 @@ async def test_instant_prompt_stop_response_has_no_meeting_fields(client, tmp_pa
         def __init__(self):
             super().__init__(is_recording=True)
 
-        async def stop(self):
+        async def stop(self, session_id: str | None = None):
             self.is_recording = False
             path = tmp_path / "rec_abc123.wav"
             path.write_bytes(b"")
@@ -966,7 +968,14 @@ async def test_instant_prompt_stop_response_has_no_meeting_fields(client, tmp_pa
 @pytest.mark.anyio
 @pytest.mark.parametrize("path", ["/audio/status", "/audio/start"])
 async def test_the_dictation_status_shape_did_not_move(client, path):
-    """AC: RecordingStatus has exactly the fields it has today."""
+    """AC: RecordingStatus has exactly the fields it has today.
+
+    `session_id` joined the set in spec 119 and is the one field this pin has
+    ever gained: it names which window owns the live capture, without which
+    `/audio/stop` and `/audio/discard` cannot refuse a stranger. The pin still
+    does what spec 066 wrote it for — it fails if the meeting feature's
+    `system_endpoint` or `system_level_db` leak onto the dictation contract.
+    """
     from app.audio.dependencies import get_recorder
 
     app.dependency_overrides[get_recorder] = lambda: _FakeRecorder()
@@ -974,7 +983,7 @@ async def test_the_dictation_status_shape_did_not_move(client, path):
     resp = await client.request("POST" if path == "/audio/start" else "GET", path)
 
     assert resp.status_code == 200
-    assert set(resp.json()) == {"is_recording", "duration_seconds", "level_db"}
+    assert set(resp.json()) == {"is_recording", "duration_seconds", "level_db", "session_id"}
 
 
 @pytest.mark.anyio

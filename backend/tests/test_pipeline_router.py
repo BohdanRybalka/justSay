@@ -19,6 +19,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.audio.dependencies import get_recorder
+from app.audio.session import SessionMismatchError
 from app.main import app
 
 
@@ -185,4 +186,76 @@ async def test_process_file_removes_its_scratch_file_on_the_success_path(client)
     assert resp.status_code == 200
     scratch_path = mock_process_audio.call_args.args[0]
     assert not scratch_path.exists()
+_DICTATE_SESSION_ID = "0123456789abcdef0123456789abcdef"
 
+
+def _stopping_recorder(recording: Path) -> MagicMock:
+    recorder = MagicMock()
+    recorder.is_recording = True
+    recorder.stop = AsyncMock(return_value=recording)
+    recorder.last_duration_seconds = 3.0
+    return recorder
+
+
+@pytest.mark.anyio
+async def test_dictate_forwards_the_session_id_to_the_stop_it_opens_with(
+    client, tmp_path, monkeypatch
+):
+    """The guard has to reach the recorder to be a guard at all.
+
+    `recorder.stop()` decides ownership inside its own lock, so a router that
+    validated the body and then called `stop()` with nothing would answer 200
+    for a stranger — the race this spec closes, moved one layer up.
+    """
+    recording = tmp_path / "rec.wav"
+    recording.write_bytes(_wav_bytes())
+    recorder = _stopping_recorder(recording)
+    app.dependency_overrides[get_recorder] = lambda: recorder
+    monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: None)
+
+    with patch("app.pipeline.router.process_audio", AsyncMock(return_value=_fake_result())):
+        resp = await client.post("/pipeline/dictate", json={"session_id": _DICTATE_SESSION_ID})
+
+    assert resp.status_code == 200
+    recorder.stop.assert_awaited_once_with(_DICTATE_SESSION_ID)
+
+
+@pytest.mark.anyio
+async def test_dictate_without_a_session_id_stops_unconditionally(client, tmp_path, monkeypatch):
+    """Spec 119 AC 5 on this endpoint: no body means the pre-spec-119 call.
+
+    `smoke_sidecar.py` and any curl caller drive the dictation path with no
+    body at all, and a `None` reaching `stop()` is what keeps their capture
+    stoppable.
+    """
+    recording = tmp_path / "rec.wav"
+    recording.write_bytes(_wav_bytes())
+    recorder = _stopping_recorder(recording)
+    app.dependency_overrides[get_recorder] = lambda: recorder
+    monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: None)
+
+    with patch("app.pipeline.router.process_audio", AsyncMock(return_value=_fake_result())):
+        resp = await client.post("/pipeline/dictate")
+
+    assert resp.status_code == 200
+    recorder.stop.assert_awaited_once_with(None)
+
+
+@pytest.mark.anyio
+async def test_a_refused_dictate_transcribes_nothing(client, tmp_path):
+    """A 403 has to arrive before the pipeline runs, not after it.
+
+    Transcribing somebody else's capture and then refusing to answer would
+    still have copied it to the clipboard and written a History row — the
+    zero-leak posture broken by an endpoint that was only trying to be safe.
+    """
+    recorder = _stopping_recorder(tmp_path / "rec.wav")
+    recorder.stop = AsyncMock(side_effect=SessionMismatchError("not yours"))
+    app.dependency_overrides[get_recorder] = lambda: recorder
+    mock_process_audio = AsyncMock(return_value=_fake_result())
+
+    with patch("app.pipeline.router.process_audio", mock_process_audio):
+        resp = await client.post("/pipeline/dictate", json={"session_id": _DICTATE_SESSION_ID})
+
+    assert resp.status_code == 403
+    mock_process_audio.assert_not_awaited()

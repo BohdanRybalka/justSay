@@ -354,3 +354,24 @@ def test_every_tauri_event_name_is_declared_once() -> None:
         "declared name needs at least one emitter and at least one listener, or it is a dead "
         "string and does not belong in this module: " + "; ".join(unpaired)
     )
+SESSION_PY = REPO_ROOT / "backend" / "app" / "audio" / "session.py"
+
+
+def test_the_session_id_alphabet_agrees_across_languages() -> None:
+    """The regex a client mints against and the one the backend validates with.
+
+    A drift here is not a wrong id, it is every id wrong: the client mints to
+    its own spelling and the backend answers 422 to all of them, so dictation
+    stops working entirely on a one-character edit that nothing else notices.
+    The TypeScript side is a regex literal and the Python side a string, so the
+    comparison is of the pattern text between the delimiters.
+
+    Mutation-checked: widening the Python pattern to ``[0-9a-fA-F]`` and
+    leaving src/contracts.ts alone fails this test printing both spellings.
+    """
+    python_pattern = _extract(SESSION_PY, r'^SESSION_ID_PATTERN = "([^"]*)"$')[0]
+    typescript_pattern = _extract(CONTRACTS_TS, r"^export const SESSION_ID_PATTERN = /(.*)/;$")[0]
+    assert python_pattern == typescript_pattern, (
+        f"{SESSION_PY.name} validates session ids against {python_pattern!r} but "
+        f"{CONTRACTS_TS.name} mints them against {typescript_pattern!r}"
+    )

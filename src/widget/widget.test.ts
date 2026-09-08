@@ -21,10 +21,52 @@ const apiMock = {
   startMeetingRecording: vi.fn(),
   stopMeetingRecording: vi.fn(),
   audioStart: vi.fn(),
-  audioStop: vi.fn(),
+  audioDiscard: vi.fn(),
   audioStatus: vi.fn(),
   dictate: vi.fn(),
 };
+
+const SESSION_PATTERN = /^[0-9a-f]{32}$/;
+
+/** The id the widget minted for the start it has just issued. Read back off
+ *  the mock rather than injected, because the whole point of the design is
+ *  that the client chooses the name and nothing else gets to. */
+function mintedSession(): string {
+  return apiMock.audioStart.mock.calls[0][0] as string;
+}
+
+/** `vi.resetModules()` runs before every test, so the widget under test holds a
+ *  *different* copy of `../timeout` than a static import here would. An
+ *  `instanceof` against the wrong copy is always false, and the branch being
+ *  tested is chosen by exactly that check — so the error is built from the same
+ *  module instance the widget loaded. */
+async function timedOut(subject: string) {
+  const { TimedOutError } = await import("../timeout");
+  return new TimedOutError(15_000, subject);
+}
+
+/** How long the widget may sit in `processing` against a backend that accepts
+ *  a dictation and never answers: the probe's 15 s eligibility wait, one 5 s
+ *  poll period, and the probe's own 15 s budget. */
+const PROCESSING_CEILING_MS = 35_000;
+
+async function advanceUntil(predicate: () => boolean, budgetMs: number): Promise<number> {
+  for (let elapsed = 0; elapsed <= budgetMs; elapsed += 1_000) {
+    if (predicate()) return elapsed;
+    await vi.advanceTimersByTimeAsync(1_000);
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
+function recordingStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    is_recording: true,
+    duration_seconds: 0,
+    level_db: -60,
+    session_id: null,
+    ...overrides,
+  };
+}
 
 const listeners = new Map<string, (event: unknown) => unknown>();
 
@@ -168,8 +210,7 @@ describe("a start the backend refuses", () => {
 describe("two dictations finishing within three seconds of each other", () => {
   it("does not let the first one's auto-revert cut the second one's result short", async () => {
     await loadWidget();
-    apiMock.audioStart.mockResolvedValue({ is_recording: true, duration_seconds: 0, level_db: -60 });
-    apiMock.audioStop.mockResolvedValue({ filename: "a.wav", duration_seconds: 1 });
+    apiMock.audioStart.mockResolvedValue(recordingStatus());
     apiMock.dictate.mockResolvedValue({
       text: "one",
       duration_ms: 100,
@@ -224,5 +265,200 @@ describe("a Tauri bridge that stops answering", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(apiMock.stopMeetingRecording).toHaveBeenCalledOnce();
+  });
+});
+
+describe("a start that runs out of its budget", () => {
+  it("adopts the recording when the backend names this window's own session", async () => {
+    await loadWidget();
+    apiMock.audioStart.mockRejectedValue(await timedOut("/audio/start"));
+    apiMock.audioStatus.mockImplementation(async () =>
+      recordingStatus({ duration_seconds: 12, session_id: mintedSession() }),
+    );
+
+    document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(apiMock.audioStatus).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(document.getElementById("widget-text")!.textContent).toBe("Recording");
+    expect(document.getElementById("widget-duration")!.textContent).toBe("12.0s");
+    expect(apiMock.audioDiscard).not.toHaveBeenCalled();
+  });
+
+  it("mints a session id of the shape the backend validates against", async () => {
+    await loadWidget();
+    apiMock.audioStart.mockResolvedValue(recordingStatus());
+
+    document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(apiMock.audioStart).toHaveBeenCalledOnce());
+
+    expect(mintedSession()).toMatch(SESSION_PATTERN);
+  });
+
+  it("still owes the session when the status names somebody else", async () => {
+    await loadWidget();
+    apiMock.audioStart.mockRejectedValue(await timedOut("/audio/start"));
+    apiMock.audioStatus.mockResolvedValue(
+      recordingStatus({ session_id: "ffffffffffffffffffffffffffffffff" }),
+    );
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 0 });
+    const { REQUEST_TIMEOUT_MS } = await import("../api");
+
+    document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() =>
+      expect(document.getElementById("widget-text")!.textContent).toBe("Start failed"),
+    );
+
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + CONNECTION_POLL_MS * 2);
+
+    expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession());
+  });
+
+  it("discards the capture when the named owner stops and the queued start lands", async () => {
+    await loadWidget();
+    apiMock.audioStart.mockRejectedValue(await timedOut("/audio/start"));
+    apiMock.audioStatus.mockResolvedValue(
+      recordingStatus({ session_id: "ffffffffffffffffffffffffffffffff" }),
+    );
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 7 });
+    const { REQUEST_TIMEOUT_MS } = await import("../api");
+
+    document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() =>
+      expect(document.getElementById("widget-text")!.textContent).toBe("Start failed"),
+    );
+
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + CONNECTION_POLL_MS * 2);
+
+    expect(apiMock.audioDiscard).toHaveBeenCalledTimes(1);
+    expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession());
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS * 3);
+
+    expect(apiMock.audioDiscard).toHaveBeenCalledTimes(1);
+  });
+
+  it("owes the session when the status is idle, because the start may still be queued", async () => {
+    await loadWidget();
+    apiMock.audioStart.mockRejectedValue(await timedOut("/audio/start"));
+    apiMock.audioStatus.mockResolvedValue(
+      recordingStatus({ is_recording: false, session_id: null }),
+    );
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 3 });
+    const { REQUEST_TIMEOUT_MS } = await import("../api");
+
+    document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() =>
+      expect(document.getElementById("widget-text")!.textContent).toBe("Start failed"),
+    );
+
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + CONNECTION_POLL_MS * 2);
+
+    expect(apiMock.audioDiscard).toHaveBeenCalledTimes(1);
+    expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession());
+  });
+
+  it("waits from the moment the start was issued, so the status read's budget does not stack", async () => {
+    await loadWidget();
+    const { REQUEST_TIMEOUT_MS } = await import("../api");
+    const started = await timedOut("/audio/start");
+    const read = await timedOut("/audio/status");
+    apiMock.audioStart.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => setTimeout(() => reject(started), REQUEST_TIMEOUT_MS)),
+    );
+    apiMock.audioStatus.mockImplementation(
+      () => new Promise((_resolve, reject) => setTimeout(() => reject(read), REQUEST_TIMEOUT_MS)),
+    );
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 0 });
+
+    document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS * 2 + CONNECTION_POLL_MS * 2);
+
+    expect(apiMock.audioDiscard).toHaveBeenCalledTimes(1);
+    expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession());
+  });
+
+  it("owes the session when the status read fails, and probes it against a dead /health", async () => {
+    await loadWidget();
+    apiMock.audioStart.mockRejectedValue(await timedOut("/audio/start"));
+    apiMock.audioStatus.mockRejectedValue(await timedOut("/audio/status"));
+    apiMock.audioDiscard.mockImplementation(() => new Promise(() => {}));
+    apiMock.health.mockImplementation(() => new Promise(() => {}));
+    const { REQUEST_TIMEOUT_MS } = await import("../api");
+
+    document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() =>
+      expect(document.getElementById("widget-text")!.textContent).toBe("Start failed"),
+    );
+
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + CONNECTION_POLL_MS * 2);
+
+    expect(apiMock.audioDiscard).toHaveBeenCalledTimes(1);
+    expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession());
+  });
+});
+
+describe("a dictation the backend accepts and never answers", () => {
+  it("leaves processing within 35 seconds and discards the capture", async () => {
+    await loadWidget();
+    apiMock.audioStart.mockResolvedValue(recordingStatus());
+    apiMock.dictate.mockImplementation(() => new Promise(() => {}));
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 4 });
+    const widget = document.getElementById("widget")!;
+    const text = document.getElementById("widget-text")!;
+
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(text.textContent).toBe("Recording"));
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(text.textContent).toBe("Processing"));
+
+    const elapsed = await advanceUntil(
+      () => text.textContent === "No answer",
+      PROCESSING_CEILING_MS,
+    );
+
+    expect(elapsed).toBeLessThanOrEqual(PROCESSING_CEILING_MS);
+    expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession());
+  });
+
+  it("keeps waiting while the probe has not yet come due", async () => {
+    await loadWidget();
+    apiMock.audioStart.mockResolvedValue(recordingStatus());
+    apiMock.dictate.mockImplementation(() => new Promise(() => {}));
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 4 });
+    const widget = document.getElementById("widget")!;
+    const text = document.getElementById("widget-text")!;
+
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(text.textContent).toBe("Recording"));
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(text.textContent).toBe("Processing"));
+
+    await vi.advanceTimersByTimeAsync(14_000);
+
+    expect(apiMock.audioDiscard).not.toHaveBeenCalled();
+    expect(text.textContent).toBe("Processing");
+  });
+
+  it("owes nothing once the dictation answers", async () => {
+    await loadWidget();
+    apiMock.audioStart.mockResolvedValue(recordingStatus());
+    apiMock.dictate.mockResolvedValue({
+      text: "one",
+      duration_ms: 100,
+      copied_to_clipboard: true,
+    });
+    const widget = document.getElementById("widget")!;
+    const text = document.getElementById("widget-text")!;
+
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(text.textContent).toBe("Recording"));
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(text.textContent).toBe("Copied"));
+
+    await vi.advanceTimersByTimeAsync(40_000);
+
+    expect(apiMock.audioDiscard).not.toHaveBeenCalled();
   });
 });
