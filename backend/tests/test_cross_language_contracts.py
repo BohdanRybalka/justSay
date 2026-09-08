@@ -1,4 +1,4 @@
-"""Four values exist in two or three languages at once; the copies must agree.
+"""Seven values exist in two or three languages at once; the copies must agree.
 
 Each value has exactly one nominated declaration per language, and this module
 reads every declaration as **text** so it needs no TypeScript compiler, no Rust
@@ -15,7 +15,13 @@ because ``backend/build/`` is gitignored and holds a stale copy of
 ``app/core/config.py``: an unbounded walk would fail on any machine that has run
 ``pip install -e`` and pass in CI.
 
-ADR 045 records why these values are pinned rather than generated.
+The seven are the backend port, the masked-key sentinel, the upload allowlist
+and its cap, the Tauri event names, the session-id alphabet, the Tauri command
+names, and the two application data directory names.
+
+ADR 045 records why these values are pinned rather than generated. Its
+amendment nominates Rust as the canonical declaration for the Tauri command
+names, which have exactly two parties and one definer.
 """
 
 from __future__ import annotations
@@ -28,8 +34,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PY = REPO_ROOT / "backend" / "app" / "core" / "config.py"
 CONSTANTS_PY = REPO_ROOT / "backend" / "app" / "core" / "constants.py"
 AUDIO_FORMATS_PY = REPO_ROOT / "backend" / "app" / "core" / "audio_formats.py"
+APP_PATHS_PY = REPO_ROOT / "backend" / "app" / "core" / "app_paths.py"
 CONTRACTS_TS = REPO_ROOT / "src" / "contracts.ts"
 LIB_RS = REPO_ROOT / "src-tauri" / "src" / "lib.rs"
+BACKEND_RS = REPO_ROOT / "src-tauri" / "src" / "backend.rs"
 
 
 def _read(path: Path) -> str:
@@ -48,7 +56,7 @@ def _extract(path: Path, pattern: str) -> list[str]:
 _PORT_SITES: dict[Path, str] = {
     CONFIG_PY: r"^    port: int = (\d+)$",
     CONTRACTS_TS: r"^export const BACKEND_PORT = (\d+);$",
-    REPO_ROOT / "src-tauri" / "src" / "backend.rs": r"^pub const PORT: u16 = (\d+);$",
+    BACKEND_RS: r"^pub const PORT: u16 = (\d+);$",
     REPO_ROOT / "src-tauri" / "tauri.conf.json": (
         r'connect-src [^";]*http://127\.0\.0\.1:(\d+) http://localhost:(\d+)'
     ),
@@ -374,4 +382,152 @@ def test_the_session_id_alphabet_agrees_across_languages() -> None:
     assert python_pattern == typescript_pattern, (
         f"{SESSION_PY.name} validates session ids against {python_pattern!r} but "
         f"{CONTRACTS_TS.name} mints them against {typescript_pattern!r}"
+    )
+
+_TYPESCRIPT_INVOKE_PATTERN = "\\binvoke\\w*\\s*(?:<[^>]*>)?\\s*\\(\\s*[\"']([^\"']+)[\"']"
+
+_RUST_COMMAND_PATTERN = r"#\[tauri::command\]\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)"
+
+_RUST_HANDLER_PATTERN = r"tauri::generate_handler!\[(.*?)\]"
+
+
+def test_every_tauri_command_name_is_defined_and_registered() -> None:
+    """Every Tauri command name is defined in Rust, called, and registered.
+
+    Rust is the canonical declaration here, unlike the event names: a
+    ``#[tauri::command] fn`` *is* the definition and there are exactly two
+    parties, one of which unambiguously defines. ADR 045's amendment records
+    that carve-out.
+
+    Three assertions, because a command name goes wrong in three ways and none
+    of them raises at build time -- a misspelt call reaches no command, an
+    unreferenced command is dead, and an unregistered command is unreachable at
+    runtime with nothing said anywhere.
+
+    The invoke pattern accepts trailing word characters, which is what reaches
+    the local ``invokeShell`` wrapper in src/widget/widget.ts, and an optional
+    generic parameter list, which src/api.ts needs. Both quote styles are
+    accepted for the reason the masked-key test already records: no eslint,
+    prettier or biome is installed, so nothing normalises quotes in TypeScript.
+
+    The known gap, accepted rather than closed: a *misspelt duplicate* call
+    through a wrapper whose name does not start with ``invoke``, to a command
+    that already has a correct call site elsewhere, passes all three.
+
+    Mutation-checked four times, each applied alone: misspelling the
+    widget-ready command name at src/widget/widget.ts fails this test naming
+    that file and line; deleting the settings-window call fails it naming the
+    command as defined but never called; removing a name from
+    ``generate_handler!`` fails it naming that command as unregistered; and
+    renaming ``invokeShell`` throughout widget.ts fails it naming the three
+    commands that wrapper reaches.
+    """
+    defined = set(_extract(LIB_RS, _RUST_COMMAND_PATTERN))
+    registered_block = re.search(_RUST_HANDLER_PATTERN, _read(LIB_RS), re.DOTALL)
+    assert registered_block, f"no tauri::generate_handler! macro found in {LIB_RS}"
+    registered = {name.strip() for name in registered_block.group(1).split(",") if name.strip()}
+
+    called: list[tuple[str, int, str]] = []
+    for _, rel, lineno, line in _typescript_event_sites():
+        for name in re.findall(_TYPESCRIPT_INVOKE_PATTERN, line):
+            called.append((rel, lineno, name))
+    assert called, "no invoke() call site with a literal command name was found under src/"
+
+    undefined = [
+        f"{rel}:{lineno} invokes {name!r}" for rel, lineno, name in called if name not in defined
+    ]
+    assert not undefined, (
+        f"{LIB_RS.name} defines the commands {sorted(defined)}; these sites invoke a name it "
+        "does not define, so the call reaches no command and fails only at runtime: "
+        + "; ".join(undefined)
+    )
+
+    uncalled = sorted(defined - {name for _, _, name in called})
+    assert not uncalled, (
+        f"{LIB_RS.name} defines commands no TypeScript site invokes by literal name: "
+        f"{uncalled}. Either the caller is gone, or a wrapper stopped being recognised by "
+        "the invoke pattern this test extracts with"
+    )
+
+    unregistered = sorted(defined - registered)
+    assert not unregistered, (
+        f"{LIB_RS.name} defines commands that tauri::generate_handler! does not register, so "
+        f"they are unreachable at runtime with no error anywhere: {unregistered}"
+    )
+
+
+_SHARED_MODEL_CACHE_ALLOWLIST: dict[str, str] = {
+    "backend/app/stt/local_whisper_cpp_cmd.py": (
+        "the downloaded GGML model cache is deliberately shared between dev and "
+        "production -- docs/adr/012-dev-mode-data-directory-isolation.md, pinned by "
+        "test_model_cache_stays_shared_between_dev_and_production"
+    ),
+}
+
+
+def test_the_app_data_directory_names_agree_across_languages() -> None:
+    """Both application data directory names are declared once per language.
+
+    What is comparable across this boundary is the two name strings, not the
+    resolution logic: Python resolves the data root from an env override,
+    ``sys.frozen`` and a force-dev flag, while Rust picks a name from
+    ``cfg!(debug_assertions)`` and uses it for exactly one thing, the sidecar
+    log directory. Rust does not decide Python's data root -- it passes the
+    force-dev flag and lets Python resolve. The failure this pin prevents is
+    the one backend.rs promises out loud: the sidecar log landing in a
+    different directory from the sidecar's own history and settings files.
+
+    **Unpinned and named as such:** that ``cfg!(debug_assertions)`` and
+    ``sys.frozen`` agree on any given launch is a runtime property no text pin
+    can check.
+
+    The Rust pattern tolerates arbitrary whitespace because ``cargo fmt`` runs
+    in no CI job here. The orphan scan requires a quote character immediately
+    before and immediately after the name, which is what separates a
+    declaration from prose, and it skips test files following the masked-key
+    precedent -- test_app_paths.py writes both names out on purpose.
+
+    Mutation-checked four times, each applied alone: changing the production
+    name in app_paths.py fails this test naming src-tauri/src/backend.rs;
+    planting a double-quoted production-directory path literal in a non-test
+    file under backend/app/ fails it naming that file and line; the same
+    literal single-quoted fails it too; and deleting the allowlist entry fails
+    it naming backend/app/stt/local_whisper_cpp_cmd.py.
+    """
+    production = _extract(APP_PATHS_PY, r'^PROD_DIR_NAME = "([^"]*)"$')[0]
+    development = _extract(APP_PATHS_PY, r'^DEV_DIR_NAME = "([^"]*)"$')[0]
+    rust_development, rust_production = _extract(
+        BACKEND_RS,
+        r'force_dev_data_dir\s*\{\s*"([^"]*)"\s*\}\s*else\s*\{\s*"([^"]*)"\s*\}',
+    )
+    assert (development, production) == (rust_development, rust_production), (
+        f"{APP_PATHS_PY.name} names the data directories "
+        f"({development!r} dev, {production!r} production) but "
+        f"{BACKEND_RS.relative_to(REPO_ROOT).as_posix()} names them "
+        f"({rust_development!r} dev, {rust_production!r} production), so the sidecar log "
+        "would be written beside a different history database than the sidecar's own"
+    )
+
+    quoted = re.compile(
+        "|".join("[\"']" + re.escape(name) + "[\"']" for name in (production, development))
+    )
+    strays: list[str] = []
+    for path in _scanned_files():
+        if path in (APP_PATHS_PY, BACKEND_RS) or path.name.startswith("test_"):
+            continue
+        if path.name.endswith((".test.ts", "_test.py")):
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel in _SHARED_MODEL_CACHE_ALLOWLIST:
+            continue
+        for lineno, line in enumerate(_read(path).splitlines(), start=1):
+            if quoted.search(line):
+                strays.append(f"{rel}:{lineno}")
+    assert not strays, (
+        f"the data directory names ({production!r}, {development!r}) are written out, in "
+        f"either quote style, away from their two declarations ({APP_PATHS_PY.name}, "
+        f"{BACKEND_RS.name}); call resolve_app_data_root() instead. Allowlisted elsewhere: "
+        + "; ".join(f"{path} = {why}" for path, why in _SHARED_MODEL_CACHE_ALLOWLIST.items())
+        + ". Undeclared: "
+        + ", ".join(strays)
     )
