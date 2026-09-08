@@ -290,24 +290,25 @@ def test_every_endpoint_role_is_declared_in_all_three_places() -> None:
     add a fourth declaration-shaped name to the set this pin exists to hold
     together.
 
-    ENDPOINT_ROLES is the one of the three whose *order* is load-bearing:
-    ``_roles_in_preference_order`` appends its members in declaration order
-    after the preferred role, so the tuple decides which role is tried next
-    when the preferred one reports no endpoint. ADR 042 puts communications
-    first. With two roles that tail is one element long and no permutation is
-    observable -- but at exactly the mutation this docstring uses to prove the
-    test, a third role, the tail becomes two long and a membership-only
-    comparison would pass for any ordering. The Literal is pinned to the same
-    order so a permutation of either side is caught; _ROLE_VALUES is a mapping
-    of external ERole integers and its order means nothing, so it is compared
-    as a set.
+    **Membership is pinned and order deliberately is not.** Which endpoint
+    loopback follows first is decided by the ``meeting_system_endpoint_role``
+    setting, not by the position of a name in ENDPOINT_ROLES, and ADR 042's
+    guarantee that the default is the communications endpoint is already pinned
+    by test_the_default_role_preference_is_communications in this file.
+    ENDPOINT_ROLES only supplies the fallback tail after that preferred role,
+    and with two roles the tail is one element long, so no permutation of it is
+    observable in behaviour at all. Freezing the member order of a Literal is
+    worse still: member order carries no semantics in Python, so alphabetising
+    the annotation would be a no-op edit that reddened the suite. Reversing
+    both declarations consistently leaves every behavioural test in this file
+    green, which is the proof that order is not what this pin is for.
 
-    Mutation-checked five times, each applied alone: adding a third member to
+    Mutation-checked four times, each applied alone: adding a third member to
     the EndpointRole Literal fails this test naming ENDPOINT_ROLES and
     _ROLE_VALUES; dropping "console" from ENDPOINT_ROLES fails it; dropping
-    "console" from _ROLE_VALUES fails it; reversing ENDPOINT_ROLES fails it
-    naming the order; and reversing the Literal's members fails it the same
-    way.
+    "console" from _ROLE_VALUES fails it; and reversing both EndpointRole and
+    ENDPOINT_ROLES together leaves it green, along with the other 22 tests in
+    this file.
     """
     annotated = get_args(EndpointRole)
     com_values = set(windows_endpoints._ROLE_VALUES)
@@ -316,15 +317,4 @@ def test_every_endpoint_role_is_declared_in_all_three_places() -> None:
         "the endpoint roles disagree across their three declarations: "
         f"EndpointRole declares {sorted(annotated)}, ENDPOINT_ROLES declares "
         f"{sorted(ENDPOINT_ROLES)}, and _ROLE_VALUES declares {sorted(com_values)}"
-    )
-
-    assert ENDPOINT_ROLES == annotated, (
-        "ENDPOINT_ROLES is the preference order the fallback walks, so its order is not "
-        f"interchangeable: it declares {list(ENDPOINT_ROLES)} while EndpointRole declares "
-        f"{list(annotated)}"
-    )
-
-    assert ENDPOINT_ROLES[0] == "communications", (
-        "ADR 042 makes the communications endpoint the one loopback follows first, but "
-        f"ENDPOINT_ROLES starts with {ENDPOINT_ROLES[0]!r}"
     )
