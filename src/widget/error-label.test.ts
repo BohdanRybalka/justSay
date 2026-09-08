@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ApiAuthError } from "../api";
+import { ApiAuthError, ApiRequestError } from "../api";
 import { dictationErrorLabel, startErrorLabel } from "./error-label";
 
 describe("dictationErrorLabel", () => {
@@ -25,6 +25,26 @@ describe("dictationErrorLabel", () => {
 
     expect(label).toBe("Failed");
     expect(toast).toBe("Dictation failed — try again.");
+  });
+
+  it("names the 403 as somebody else's recording instead of inviting a retry", () => {
+    const { label, toast } = dictationErrorLabel(new ApiRequestError("Recording is owned by another session", 403));
+
+    expect(label).toBe("Recording is busy");
+    expect(toast).toBe("Another window is using the microphone — stop it there and try again.");
+  });
+
+  it("reads the 403 by its status, not by what its body happens to say", () => {
+    const { label } = dictationErrorLabel(
+      new ApiRequestError("Recording is missing an owning session", 403),
+    );
+
+    expect(label).toBe("Recording is busy");
+    expect(label).not.toBe("Add key in Settings");
+  });
+
+  it("leaves a refusal that is not a 403 on the generic label", () => {
+    expect(dictationErrorLabel(new ApiRequestError("Not recording", 409)).label).toBe("Failed");
   });
 
   it("a non-Error rejection is stringified rather than crashing the handler", () => {

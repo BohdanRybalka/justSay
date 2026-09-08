@@ -8,7 +8,7 @@ const apiMock = {
   updateSettings: vi.fn(),
   cloudKeyStatus: vi.fn(),
   getStorageInfo: vi.fn(),
-  audioStop: vi.fn(),
+  audioDiscard: vi.fn(),
   audioStatus: vi.fn(),
   audioStart: vi.fn(),
   cleanupTemp: vi.fn(),
@@ -30,6 +30,16 @@ vi.mock("../api", async (importOriginal) => {
 
 vi.mock("./tabs/models", () => ({
   renderModels: vi.fn(() => () => {}),
+}));
+
+const eventListeners = new Map<string, (event: unknown) => unknown>();
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (event: string, handler: (payload: unknown) => unknown) => {
+    eventListeners.set(event, handler);
+    return () => {};
+  }),
+  emit: vi.fn(async () => {}),
 }));
 
 function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
@@ -59,6 +69,7 @@ beforeEach(() => {
   sawAuthFailureMock.mockReturnValue(false);
   lastBridgeDiagnosisMock.mockReturnValue({ kind: "ok" });
   vi.resetModules();
+  eventListeners.clear();
   document.body.innerHTML = `
     <ul class="sidebar-nav">
       <li><button class="nav-btn active" data-tab="general">General</button></li>
@@ -700,5 +711,81 @@ describe("the Settings window's own health poll", () => {
 
     vi.useRealTimers();
     consoleError.mockRestore();
+  });
+});
+
+describe("the Settings window being dismissed", () => {
+  it("releases the microphone the General tab was holding", async () => {
+    const { EVENT_SETTINGS_HIDDEN } = await import("../contracts");
+    apiMock.health.mockResolvedValue({
+      status: "ok",
+      version: "0.0.0",
+      stt_mode: "cloud",
+      llm_mode: "cloud",
+    });
+    apiMock.getSettings.mockResolvedValue(buildSettings());
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
+    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+    apiMock.audioStart.mockResolvedValue({
+      is_recording: true,
+      duration_seconds: 0,
+      level_db: -60,
+      session_id: null,
+    });
+    apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 2 });
+
+    await import("./settings");
+    await vi.waitFor(() => expect(document.getElementById("btn-test-mic")).not.toBeNull());
+
+    const button = document.getElementById("btn-test-mic") as HTMLButtonElement;
+    button.click();
+    await vi.waitFor(() => expect(apiMock.audioStart).toHaveBeenCalledOnce());
+
+    await vi.waitFor(() => expect(eventListeners.get(EVENT_SETTINGS_HIDDEN)).toBeTypeOf("function"));
+    await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
+
+    await vi.waitFor(() =>
+      expect(apiMock.audioDiscard).toHaveBeenCalledWith(apiMock.audioStart.mock.calls[0][0]),
+    );
+  });
+
+  it("releases without re-mounting the tab, so its reads do not run again while it is invisible", async () => {
+    const { EVENT_SETTINGS_HIDDEN } = await import("../contracts");
+    apiMock.health.mockResolvedValue({
+      status: "ok",
+      version: "0.0.0",
+      stt_mode: "cloud",
+      llm_mode: "cloud",
+    });
+    apiMock.getSettings.mockResolvedValue(buildSettings());
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
+    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+
+    await import("./settings");
+    await vi.waitFor(() => expect(document.getElementById("btn-test-mic")).not.toBeNull());
+    const readsBefore = apiMock.getStorageInfo.mock.calls.length;
+    const button = document.getElementById("btn-test-mic") as HTMLButtonElement;
+
+    await vi.waitFor(() => expect(eventListeners.get(EVENT_SETTINGS_HIDDEN)).toBeTypeOf("function"));
+    await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
+    await vi.waitFor(() => expect(apiMock.cloudKeyStatus).toHaveBeenCalled());
+
+    expect(apiMock.getStorageInfo.mock.calls.length).toBe(readsBefore);
+    expect(document.getElementById("btn-test-mic")).toBe(button);
+  });
+
+  it("asks for nothing at all when no tab was ever mounted, because no settings loaded", async () => {
+    const { EVENT_SETTINGS_HIDDEN } = await import("../contracts");
+    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+    apiMock.getSettings.mockRejectedValue(new TypeError("Failed to fetch"));
+    apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await import("./settings");
+    await vi.waitFor(() => expect(eventListeners.get(EVENT_SETTINGS_HIDDEN)).toBeTypeOf("function"));
+
+    await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
+
+    expect(apiMock.getStorageInfo).not.toHaveBeenCalled();
+    expect(apiMock.audioDiscard).not.toHaveBeenCalled();
   });
 });

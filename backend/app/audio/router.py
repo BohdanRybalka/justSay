@@ -17,7 +17,8 @@ from app.audio.meeting_recorder import (
     MeetingRecorder,
     MeetingWriteFailedError,
 )
-from app.audio.recorder import MicrophoneRecorder
+from app.audio.recorder import MicrophoneRecorder, NotRecordingError
+from app.audio.session import SessionMismatchError, SessionRef
 from app.audio.system_source import SystemAudioUnavailableError
 from app.core.utils import sse_event
 from app.preferences.user_settings import get_user_settings
@@ -26,13 +27,34 @@ router = APIRouter()
 
 
 class RecordingStatus(BaseModel):
+    """`session_id` is the live capture's owner, or `null` when idle.
+
+    Echoed rather than compared here: a caller that minted the id compares it
+    locally, which is what lets a window tell its own abandoned start from
+    somebody else's recording without the backend knowing anything about
+    windows. It is an identity, not a secret — any caller holding the launch
+    token can read it — so ADR 026's per-launch shared secret remains the
+    security boundary.
+    """
+
     is_recording: bool
     duration_seconds: float
     level_db: float
+    session_id: str | None = None
 
 
 class StopResponse(BaseModel):
     filename: str
+    duration_seconds: float
+
+
+class DiscardResponse(BaseModel):
+    """What a discarded capture leaves behind: its length, and no file.
+
+    Deliberately not `StopResponse` without the filename — there is no file,
+    and a model with an empty `filename` would invite a caller to look for one.
+    """
+
     duration_seconds: float
 
 
@@ -69,6 +91,17 @@ _CONSENT_REQUIRED_DETAIL = (
 )
 
 
+def _recording_status(recorder: MicrophoneRecorder) -> RecordingStatus:
+    """The dictation status, built in one place so `/start` and `/status`
+    cannot answer with different fields."""
+    return RecordingStatus(
+        is_recording=recorder.is_recording,
+        duration_seconds=recorder.duration_seconds,
+        level_db=recorder.level_db,
+        session_id=recorder.session_id,
+    )
+
+
 def _meeting_status(recorder: MeetingRecorder) -> MeetingStatus:
     """Build the response from one snapshot rather than five property reads.
 
@@ -90,40 +123,79 @@ def _meeting_status(recorder: MeetingRecorder) -> MeetingStatus:
 
 @router.post("/start", response_model=RecordingStatus)
 async def start_recording(
+    ref: SessionRef | None = None,
     recorder: MicrophoneRecorder = Depends(get_recorder),
     meeting_recorder: MeetingRecorder | None = Depends(get_active_meeting_recorder),
 ):
+    """Open the microphone, recording the caller's session id as its owner.
+
+    The body is optional and its absence is the pre-spec-119 contract: a
+    request with no body at all, and one with `Content-Type: application/json`
+    and an empty body, both bind `None` and start an unowned capture.
+    """
     if meeting_recorder is not None and meeting_recorder.is_busy:
         raise HTTPException(status_code=409, detail="A meeting recording is in progress")
     if recorder.is_recording:
         raise HTTPException(status_code=409, detail="Already recording")
-    await recorder.start()
-    return RecordingStatus(
-        is_recording=recorder.is_recording,
-        duration_seconds=recorder.duration_seconds,
-        level_db=recorder.level_db,
-    )
+    await recorder.start(ref.session_id if ref else None)
+    return _recording_status(recorder)
 
 
 @router.post("/stop", response_model=StopResponse)
-async def stop_recording(recorder: MicrophoneRecorder = Depends(get_recorder)):
+async def stop_recording(
+    ref: SessionRef | None = None,
+    recorder: MicrophoneRecorder = Depends(get_recorder),
+):
+    """Harvest the capture to a WAV, refusing a stranger's session.
+
+    Kept guarded although no frontend caller remains — the Settings
+    microphone test moved to `/discard` and the widget dictates — because this
+    is the documented Audio-In contract and an unguarded third mutating
+    endpoint is exactly how the ownership race would come back.
+    """
     if not recorder.is_recording:
         raise HTTPException(status_code=409, detail="Not recording")
     duration = recorder.duration_seconds
-    audio_path = await recorder.stop()
+    try:
+        audio_path = await recorder.stop(ref.session_id if ref else None)
+    except SessionMismatchError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
     return StopResponse(
         filename=audio_path.name,
         duration_seconds=duration,
     )
 
 
+@router.post("/discard", response_model=DiscardResponse)
+async def discard_recording(
+    ref: SessionRef,
+    recorder: MicrophoneRecorder = Depends(get_recorder),
+):
+    """End the caller's own capture and write nothing.
+
+    The session id is required here because there is no legacy caller to keep
+    compatible, and because an unowned discard would be a way for any window
+    to end any capture — the race this spec closes, reopened at a new
+    endpoint.
+
+    Both refusals are answers, which is what makes this the probe a client
+    uses to find out whether a request it abandoned was ever processed: 200
+    means the backend still held that session, so nothing downstream of the
+    start had run; 403 and 409 mean it did not, so something else already
+    happened to it.
+    """
+    try:
+        dropped_seconds = await recorder.discard(ref.session_id)
+    except SessionMismatchError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except NotRecordingError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    return DiscardResponse(duration_seconds=dropped_seconds)
+
+
 @router.get("/status", response_model=RecordingStatus)
 async def recording_status(recorder: MicrophoneRecorder = Depends(get_recorder)):
-    return RecordingStatus(
-        is_recording=recorder.is_recording,
-        duration_seconds=recorder.duration_seconds,
-        level_db=recorder.level_db,
-    )
+    return _recording_status(recorder)
 
 
 @router.post("/meeting/start", response_model=MeetingStatus)

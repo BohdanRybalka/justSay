@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import hashlib
 import logging
@@ -5,7 +6,8 @@ import sys
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -15,6 +17,7 @@ from pydantic import ValidationError
 from app.audio.analysis import SilenceAnalysis, analyze_silence, rms_dbfs
 from app.audio.config import AudioSettings
 from app.audio.recorder import MicrophoneRecorder
+from app.audio.session import SessionMismatchError
 from app.audio.system_source import SystemAudioUnavailableError
 
 
@@ -955,4 +958,343 @@ async def test_dictation_stop_leaves_the_event_loop_free(tmp_path):
     assert ticks > 100, (
         f"the loop ticked {ticks} times while stop() blocked for "
         f"{blocked_seconds}s -- the concatenate and write are still on the event loop"
+    )
+OWNER_SESSION_ID = "0123456789abcdef0123456789abcdef"
+OTHER_SESSION_ID = "fedcba9876543210fedcba9876543210"
+
+HOSTILE_SESSION_IDS = [
+    "",
+    "0123456789abcdef0123456789abcdefa",
+    "0123456789ABCDEF0123456789ABCDEF",
+    "../../etc/passwd",
+    "<script>",
+    "0123456789abcdef0123456789abcd\ne",
+    "a" * 10_000,
+    12345,
+]
+
+def _transcription_the_provider_would_have_returned() -> SimpleNamespace:
+    """Stands in for `ProcessingResult`, whose fields the router splats into
+    `DictateResponse`. Mirrors `test_pipeline_router.py`'s `_fake_result`."""
+    return SimpleNamespace(
+        text="hello",
+        duration_ms=100,
+        copied_to_clipboard=True,
+        model_name="mock/provider",
+        fallback_reason=None,
+    )
+
+
+_MUTATING_ENDPOINTS = ["/audio/start", "/audio/stop", "/audio/discard", "/pipeline/dictate"]
+
+
+@pytest.fixture
+def wired_recorder(audio_settings, mock_stream):
+    """A `MicrophoneRecorder` with a fake device, reachable through the API.
+
+    Both halves matter: the ownership rules are decided inside the recorder's
+    lock, so a fake recorder object would assert the router's opinion rather
+    than the guard, and every test below then reads state off the same
+    instance the endpoint mutated.
+    """
+    from app.audio.dependencies import get_recorder
+    from app.main import app as fastapi_app
+
+    mock_cls, _ = mock_stream
+    recorder = MicrophoneRecorder(audio_settings)
+    fastapi_app.dependency_overrides[get_recorder] = lambda: recorder
+    try:
+        yield recorder, mock_cls
+    finally:
+        recorder.cleanup()
+
+
+@pytest.mark.anyio
+async def test_a_started_session_is_echoed_back_and_cleared_by_a_discard(client, wired_recorder):
+    """Spec 119 AC 1: the id the client minted is what identifies the capture."""
+    started = await client.post("/audio/start", json={"session_id": OWNER_SESSION_ID})
+    assert started.status_code == 200
+    assert started.json()["session_id"] == OWNER_SESSION_ID
+
+    status = await client.get("/audio/status")
+    assert status.json()["is_recording"] is True
+    assert status.json()["session_id"] == OWNER_SESSION_ID
+
+    discarded = await client.post("/audio/discard", json={"session_id": OWNER_SESSION_ID})
+    assert discarded.status_code == 200
+
+    after = await client.get("/audio/status")
+    assert after.json()["is_recording"] is False
+    assert after.json()["session_id"] is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("path", ["/audio/stop", "/audio/discard", "/pipeline/dictate"])
+async def test_a_stranger_cannot_end_a_recording_it_does_not_own(client, wired_recorder, path):
+    """Spec 119 AC 2: 403, and the owner's capture is untouched.
+
+    A stranger's stop used to be indistinguishable from the owner's, which is
+    how the Settings microphone test could end a dictation the user was in the
+    middle of speaking.
+    """
+    await client.post("/audio/start", json={"session_id": OWNER_SESSION_ID})
+
+    resp = await client.post(path, json={"session_id": OTHER_SESSION_ID})
+
+    assert resp.status_code == 403
+    status = await client.get("/audio/status")
+    assert status.json()["is_recording"] is True
+    assert status.json()["session_id"] == OWNER_SESSION_ID
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("session_id", HOSTILE_SESSION_IDS)
+@pytest.mark.parametrize(
+    "path", ["/audio/start", "/audio/stop", "/audio/discard", "/pipeline/dictate"]
+)
+async def test_a_session_id_outside_the_alphabet_never_reaches_the_recorder(
+    client, wired_recorder, path, session_id
+):
+    """Spec 119 AC 3: pydantic answers 422 before any handler code runs.
+
+    The recorder is deliberately left recording under a known owner, so the
+    assertion covers both readings of "never touched": the stream constructor
+    is not called again, and the live capture keeps its identity.
+    """
+    recorder, mock_cls = wired_recorder
+    await client.post("/audio/start", json={"session_id": OWNER_SESSION_ID})
+    mock_cls.reset_mock()
+
+    resp = await client.post(path, json={"session_id": session_id})
+
+    assert resp.status_code == 422
+    mock_cls.assert_not_called()
+    assert recorder.is_recording is True
+    assert recorder.session_id == OWNER_SESSION_ID
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("path", _MUTATING_ENDPOINTS)
+async def test_a_body_less_request_keeps_the_pre_session_contract(client, wired_recorder, path):
+    """Spec 119 AC 5: absence of a session id is not a validation failure.
+
+    `/audio/discard` is in the list on purpose: it requires the body, so its
+    answer is 422, and the point of asserting it here is that the *shape* of
+    every mutating endpoint's no-body answer is pinned in one place rather
+    than discovered by a curl caller.
+
+    `process_audio` is stubbed because this asserts the *binding*, not the
+    transcription: without the stub `/pipeline/dictate` reaches a real STT
+    provider, which answers 500 wherever no cloud key is configured. That is
+    a fact about the machine rather than about the contract, and it passed
+    locally and failed on CI for exactly that reason.
+    """
+    recorder, _ = wired_recorder
+    if path != "/audio/start":
+        await client.post("/audio/start")
+        assert recorder.session_id is None
+        _simulate_audio_callback(recorder)
+
+    with patch(
+        "app.pipeline.router.process_audio",
+        AsyncMock(return_value=_transcription_the_provider_would_have_returned()),
+    ):
+        resp = await client.post(path)
+
+    assert resp.status_code == (422 if path == "/audio/discard" else 200)
+
+
+@pytest.mark.anyio
+async def test_an_empty_json_body_binds_no_session_rather_than_failing(client, wired_recorder):
+    """The other half of the compatibility hinge: a JSON content type with no
+    body binds `None` too, which is what a caller sending an empty object
+    through `src/api.ts`'s `request()` would produce."""
+    resp = await client.post(
+        "/audio/start", content=b"", headers={"Content-Type": "application/json"}
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["session_id"] is None
+
+
+@pytest.mark.anyio
+async def test_a_discard_writes_no_file_and_reports_what_was_dropped(
+    client, wired_recorder, audio_settings
+):
+    """Spec 119 AC 6, and the whole of [JS-122].
+
+    `POST /audio/stop` harvests a WAV that only `/pipeline/dictate` ever
+    deletes, so every compensating stop used to leave audio of the room in the
+    scratch directory with nothing to announce or remove it.
+    """
+    recorder, _ = wired_recorder
+    await client.post("/audio/start", json={"session_id": OWNER_SESSION_ID})
+    _simulate_audio_callback(recorder)
+
+    resp = await client.post("/audio/discard", json={"session_id": OWNER_SESSION_ID})
+
+    assert resp.status_code == 200
+    assert resp.json()["duration_seconds"] >= 0.0
+    assert list(audio_settings.temp_dir.glob("rec_*.wav")) == []
+    assert recorder.is_recording is False
+
+
+@pytest.mark.anyio
+async def test_a_discard_of_nothing_is_an_answer_rather_than_a_crash(client, wired_recorder):
+    """409, because the client that probes with a discard branches on it: a
+    refusal proves the session is not running, which is exactly as decisive as
+    the 200 that proves it is."""
+    resp = await client.post("/audio/discard", json={"session_id": OWNER_SESSION_ID})
+
+    assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_recorder_never_names_an_owner(audio_settings, mock_stream):
+    """Spec 119 AC 7: `is_recording is False` implies `session_id is None`.
+
+    Asserted on all four exit paths, because a stale owner is worse than no
+    owner: it would let the next window's discard of its own abandoned session
+    be refused by a name nothing is holding any more.
+    """
+    recorder = MicrophoneRecorder(audio_settings)
+
+    await recorder.start(OWNER_SESSION_ID)
+    _simulate_audio_callback(recorder)
+    await recorder.stop(OWNER_SESSION_ID)
+    assert (recorder.is_recording, recorder.session_id) == (False, None)
+
+    await recorder.start(OWNER_SESSION_ID)
+    await recorder.discard(OWNER_SESSION_ID)
+    assert (recorder.is_recording, recorder.session_id) == (False, None)
+
+    await recorder.start(OWNER_SESSION_ID)
+    recorder.cleanup()
+    assert (recorder.is_recording, recorder.session_id) == (False, None)
+
+    with patch("app.audio.recorder.sd.InputStream", side_effect=OSError("no mic")):
+        with pytest.raises(OSError):
+            await recorder.start(OWNER_SESSION_ID)
+    assert (recorder.is_recording, recorder.session_id) == (False, None)
+
+
+@pytest.mark.asyncio
+async def test_a_live_capture_keeps_the_owner_it_was_opened_with(audio_settings, mock_stream):
+    """A second `start()` does not re-title a capture that is already open.
+
+    The id names the capture, so writing a later caller's id over a live one
+    would hand that capture to a window which never opened it and could then
+    stop or discard it. `POST /audio/start` refuses the case with 409 before
+    the recorder is reached, so this pins the layer below that refusal rather
+    than a reachable path.
+    """
+    recorder = MicrophoneRecorder(audio_settings)
+
+    await recorder.start(OWNER_SESSION_ID)
+    await recorder.start(OTHER_SESSION_ID)
+
+    assert recorder.session_id == OWNER_SESSION_ID
+    with pytest.raises(SessionMismatchError):
+        await recorder.discard(OTHER_SESSION_ID)
+
+
+@pytest.mark.asyncio
+async def test_an_unowned_recording_answers_to_an_unnamed_caller_only(audio_settings, mock_stream):
+    """A capture started with no session id keeps today's semantics for the
+    callers that have none — a curl caller and `smoke_sidecar.py` still stop
+    what they started — and is still not somebody else's to end.
+
+    "No owner" is not "any owner": a window that minted an id never started
+    this capture, so its discard is refused by the same guard that refuses a
+    stranger's, which is what keeps a probe from destroying a recording the
+    client has no claim on.
+    """
+    recorder = MicrophoneRecorder(audio_settings)
+    await recorder.start()
+
+    with pytest.raises(SessionMismatchError):
+        await recorder.discard(OTHER_SESSION_ID)
+    assert recorder.is_recording is True
+
+    await recorder.discard()
+    assert recorder.is_recording is False
+
+
+def _lock_blocks(function: ast.AST) -> list[ast.With]:
+    return [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Attribute)
+            and item.context_expr.attr == "_lock"
+            and isinstance(item.context_expr.value, ast.Name)
+            and item.context_expr.value.id == "self"
+            for item in node.items
+        )
+    ]
+
+
+def _session_state_sites(node: ast.AST) -> set[tuple[int, int]]:
+    return {
+        (child.lineno, child.col_offset)
+        for child in ast.walk(node)
+        if isinstance(child, ast.Attribute)
+        and child.attr in ("_recording", "_session_id")
+        and isinstance(child.value, ast.Name)
+        and child.value.id == "self"
+    }
+
+
+def test_the_ownership_guard_cannot_be_separated_from_the_state_it_guards():
+    """Spec 119 AC 8: the structural claim the whole spec rests on.
+
+    A guard that reads `_session_id` and a mutation that clears `_recording`
+    are one decision only while they share a single `with self._lock`
+    acquisition, and only while nothing yields the thread between them. Both
+    facts are asked of the syntax tree rather than of a reviewer, in the shape
+    of `test_event_loop_bound_locks.py`: moving the check out of the lock, or
+    putting an `await` inside one, turns this red.
+
+    Mutation-checked twice: hoisting the `session_id != self._session_id`
+    comparison in `discard` above its `with self._lock` fails this test naming
+    `discard`, and inserting `await asyncio.sleep(0)` inside `stop`'s locked
+    block fails it naming the line.
+    """
+    source = (Path(__file__).parent.parent / "app" / "audio" / "recorder.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+
+    awaited_inside = [
+        f"line {statement.lineno}"
+        for block in _lock_blocks(tree)
+        for statement in block.body
+        if any(isinstance(child, ast.Await) for child in ast.walk(statement))
+    ]
+    assert not awaited_inside, (
+        "an `await` inside `with self._lock` releases the thread between the ownership "
+        f"check and the state change it protects: {awaited_inside}"
+    )
+
+    unprotected: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef) or node.name not in (
+            "start",
+            "stop",
+            "discard",
+        ):
+            continue
+        protected: set[tuple[int, int]] = set()
+        for block in _lock_blocks(node):
+            for statement in block.body:
+                protected |= _session_state_sites(statement)
+        unprotected.extend(
+            f"{node.name} at line {line}, column {column}"
+            for line, column in sorted(_session_state_sites(node) - protected)
+        )
+    assert not unprotected, (
+        "every read and write of `_recording` and `_session_id` in the three transitions "
+        "must sit inside a `with self._lock` block, or the ownership guard and the state "
+        f"it guards are two decisions rather than one: {unprotected}"
     )
