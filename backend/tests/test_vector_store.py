@@ -693,3 +693,55 @@ def test_selftest_fails_a_bundle_whose_sqlite_predates_row_values(monkeypatch):
 def test_selftest_accepts_this_environments_sqlite():
     assert sqlite3.sqlite_version_info >= history.ROW_VALUE_MIN_SQLITE_VERSION
     assert vector_store.selftest() == (True, "ok")
+
+
+def test_selftest_reports_the_extension_outcome_even_on_an_old_sqlite(monkeypatch):
+    """An old bundled library is exactly the build whose sqlite-vec status is worth
+    knowing, so the version check must not short-circuit the extension probe: one
+    release run has to answer both questions rather than hide the second behind the
+    first."""
+
+    def boom(_conn):
+        raise RuntimeError("extension load disabled on this platform")
+
+    monkeypatch.setattr(vector_store.sqlite3, "sqlite_version_info", (3, 14, 0))
+    monkeypatch.setattr(vector_store.sqlite3, "sqlite_version", "3.14.0")
+    monkeypatch.setattr(vector_store.sqlite_vec, "load", boom)
+
+    ok, msg = vector_store.selftest()
+
+    assert ok is False
+    assert "3.14.0" in msg
+    assert "extension load disabled" in msg
+
+
+def test_selftest_fails_a_bundle_whose_planner_walks_the_cursor_read(monkeypatch):
+    """The version floor names the release that *introduced* row values, not one at
+    which the planner is known to seek ``entries_ts_id_idx`` for
+    ``(ts, id) < (?, ?)``. A library that parses the predicate and then walks the
+    index from the top gives back the whole property this paging buys, silently and
+    without an error, so the gate takes a real plan from the loaded library."""
+    monkeypatch.setattr(
+        vector_store.history, "cursor_seek_plan_failure", lambda: "SCAN entries"
+    )
+
+    ok, msg = vector_store.selftest()
+
+    assert ok is False
+    assert "SCAN entries" in msg
+
+
+def test_selftest_never_raises_when_the_seek_probe_does(monkeypatch):
+    def boom():
+        raise RuntimeError("no such table: entries")
+
+    monkeypatch.setattr(vector_store.history, "cursor_seek_plan_failure", boom)
+
+    ok, msg = vector_store.selftest()
+
+    assert ok is False
+    assert "no such table: entries" in msg
+
+
+def test_the_cursor_seek_probe_passes_on_this_environments_sqlite():
+    assert history.cursor_seek_plan_failure() is None

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from app.transcripts import history, vector_store
 
@@ -1331,6 +1332,30 @@ def test_an_exactly_full_last_page_costs_no_extra_request(isolated_storage, tmp_
     assert [len(p.entries) for p in pages] == [30, 30]
     assert pages[0].next_cursor is not None
     assert pages[-1].next_cursor is None
+
+
+def test_a_cursor_cannot_be_built_outside_the_bounds_sqlite_can_hold(isolated_storage, tmp_path):
+    """The bounds belong to ``HistoryCursor``, not only to the router's signature.
+
+    A ``ts`` wider than a signed 64-bit integer reaches ``conn.execute`` and raises
+    ``OverflowError`` out of the driver, which is the failure ``_entries_locked``'s
+    docstring says the caller never causes; and a bound that lives only in a
+    FastAPI signature is not a bound on the function, which is the reasoning
+    ``_clamp_limit`` already carries about ``limit``. So a non-router caller is
+    refused at construction rather than at the driver.
+    """
+    history.bootstrap(tmp_path / "target")
+    history.save_entry(text="x", duration_ms=1)
+
+    with pytest.raises(ValidationError):
+        history.HistoryCursor(ts=history.CURSOR_TS_MAX + 1, id="x")
+    with pytest.raises(ValidationError):
+        history.HistoryCursor(ts=history.CURSOR_TS_MIN - 1, id="x")
+    with pytest.raises(ValidationError):
+        history.HistoryCursor(ts=0, id="a" * (history.CURSOR_ID_MAX_LENGTH + 1))
+
+    at_the_edge = history.HistoryCursor(ts=history.CURSOR_TS_MAX, id="x")
+    assert history.get_page(limit=5, before=at_the_edge).entries != []
 
 
 def test_a_saved_id_fits_the_cursor_id_bound(isolated_storage, tmp_path):

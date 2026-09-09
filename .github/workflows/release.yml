@@ -154,7 +154,7 @@ jobs:
       # both platforms verified on every release, not just once). Runs the
       # real shipped artifact, not the CI runner's own Python. A failure
       # here stops the release build before any installer is produced.
-      - name: Verify sqlite-vec loads in frozen sidecar
+      - name: Verify the frozen sidecar's SQLite pages history and loads sqlite-vec
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then

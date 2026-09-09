@@ -284,29 +284,31 @@ async def run_background_indexer() -> None:
         log.warning("Background indexer sweep failed unexpectedly", exc_info=True)
 
 
-def selftest() -> tuple[bool, str]:
-    """``--selftest-sqlite-vec`` backend. Never raises.
+def _row_value_version_failure() -> str | None:
+    """The bundled library is new enough to parse ``(ts, id) < (?, ?)`` at all.
 
-    Two assertions about the SQLite the frozen sidecar actually bundles, which
-    only a packaged build can answer.
-
-    First the library version: history paging seeks with the row-value predicate
-    ``(ts, id) < (?, ?)``, added in SQLite 3.15.0, and below that the statement is
-    a syntax error rather than a wrong answer, so every history read would fail
-    for that user. It is checked here rather than at startup or on the request
-    path, where a version failure would take dictation and settings down with it.
-
-    Then the extension: opens an in-memory connection independent of
-    ``history``'s shared connection (this must work even if the sidecar has never
-    bootstrapped history), loads the extension, creates a 3-dim ``vec0`` table,
-    inserts and queries one vector, and asserts the inserted row comes back.
+    Row values arrived in SQLite 3.15.0; below that the shipped history page read
+    is a syntax error rather than a wrong answer, so every history read would fail
+    for that user. Checked here rather than at startup or on the request path,
+    where it would take dictation and settings down with it.
     """
-    if sqlite3.sqlite_version_info < history.ROW_VALUE_MIN_SQLITE_VERSION:
-        wanted = ".".join(str(part) for part in history.ROW_VALUE_MIN_SQLITE_VERSION)
-        return False, (
-            f"SQLite {sqlite3.sqlite_version} predates row-value support "
-            f"(needs >= {wanted}), so history paging cannot run"
-        )
+    if sqlite3.sqlite_version_info >= history.ROW_VALUE_MIN_SQLITE_VERSION:
+        return None
+    wanted = ".".join(str(part) for part in history.ROW_VALUE_MIN_SQLITE_VERSION)
+    return (
+        f"SQLite {sqlite3.sqlite_version} predates row-value support "
+        f"(needs >= {wanted}), so history paging cannot run"
+    )
+
+
+def _vec_extension_failure() -> str | None:
+    """sqlite-vec loads and answers a KNN query inside this build.
+
+    Opens an in-memory connection independent of ``history``'s shared connection
+    (this must work even if the sidecar has never bootstrapped history), loads the
+    extension, creates a 3-dim ``vec0`` table, inserts and queries one vector, and
+    asserts the inserted row comes back.
+    """
     try:
         conn = sqlite3.connect(":memory:")
         try:
@@ -325,7 +327,38 @@ def selftest() -> tuple[bool, str]:
         finally:
             conn.close()
         if row is None or row[0] != 1:
-            return False, "KNN query did not return the inserted row"
-        return True, "ok"
+            return "KNN query did not return the inserted row"
+        return None
     except Exception as e:
-        return False, str(e)
+        return str(e)
+
+
+def _cursor_seek_plan_failure() -> str | None:
+    """The bundled planner answers the cursor predicate with a seek, not a walk."""
+    try:
+        return history.cursor_seek_plan_failure()
+    except Exception as e:
+        return f"cursor seek probe failed: {e}"
+
+
+def selftest() -> tuple[bool, str]:
+    """``--selftest-sqlite-vec`` backend. Never raises.
+
+    Three assertions about the SQLite the frozen sidecar actually bundles, which
+    only a packaged build can answer: the library parses row values, its planner
+    seeks ``entries_ts_id_idx`` for the cursored history read, and sqlite-vec
+    loads. **Every check runs**, and a failure reports all of them -- an old
+    library is exactly the build whose sqlite-vec status is worth knowing, so
+    stopping at the first failure would throw that answer away.
+    """
+    checks = (
+        _row_value_version_failure,
+        _cursor_seek_plan_failure,
+        _vec_extension_failure,
+    )
+    outcomes = [check() for check in checks]
+    failures = [outcome for outcome in outcomes if outcome is not None]
+    if failures:
+        return False, "; ".join(failures)
+    return True, "ok"
+

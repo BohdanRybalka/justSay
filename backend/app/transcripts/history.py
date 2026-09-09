@@ -35,7 +35,7 @@ from enum import Enum
 from pathlib import Path
 
 import sqlite_vec
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.app_paths import resolve_app_data_root
 
@@ -92,10 +92,17 @@ class HistoryCursor(BaseModel):
     A cursor is not a count, so nothing under it moves when a row is inserted or
     deleted. ``id`` is only a tiebreaker: it makes the ordering total, which is
     what a position needs to identify one row. See ADR 053.
+
+    Both halves are bounded on the model rather than only in the router's
+    signature, for the reason ``_clamp_limit``'s docstring gives about ``limit``:
+    a bound that lives only in a FastAPI signature is not a bound on the
+    function. ``ts`` outside the signed 64-bit range SQLite stores an INTEGER in
+    raises ``OverflowError`` out of the driver, so any caller that builds a
+    cursor by hand gets a ``ValidationError`` here instead.
     """
 
-    ts: int
-    id: str
+    ts: int = Field(ge=CURSOR_TS_MIN, le=CURSOR_TS_MAX)
+    id: str = Field(max_length=CURSOR_ID_MAX_LENGTH)
 
 
 class HistoryPage(BaseModel):
@@ -169,6 +176,9 @@ CREATE TABLE IF NOT EXISTS entries (
   model_name TEXT,
   tokens_used INTEGER
 );
+"""
+
+_REPLACE_TS_INDEX_WITH_TS_ID_INDEX = """
 CREATE INDEX IF NOT EXISTS entries_ts_id_idx ON entries(ts DESC, id DESC);
 DROP INDEX IF EXISTS entries_ts_idx;
 """
@@ -198,15 +208,16 @@ END;
 def _init_schema(conn: sqlite3.Connection) -> None:
     """Version-aware migrator. Run on every connection open.
 
-    ``_DDL_V1`` runs unconditionally and idempotently, which is how the
-    ``entries_ts_idx`` -> ``entries_ts_id_idx`` swap reaches an existing database:
-    ``SCHEMA_VERSION`` is deliberately not bumped for it, because the
-    ``current < SCHEMA_VERSION`` branch below rebuilds the whole FTS index, and an
-    index swap needs no row touched. Nothing therefore *records* that a database
-    has been swapped: ``user_version`` still reads 3 either way, and an older build
-    opened against the same file re-creates ``entries_ts_idx`` from its own DDL, so
-    a downgrade and a re-upgrade leave both indexes present. Accepted rather than
-    fixed -- see ADR 053, "What it leaves unrecorded".
+    ``_DDL_V1`` and ``_REPLACE_TS_INDEX_WITH_TS_ID_INDEX`` both run
+    unconditionally and idempotently, which is how the ``entries_ts_idx`` ->
+    ``entries_ts_id_idx`` swap reaches an existing database: ``SCHEMA_VERSION`` is
+    deliberately not bumped for it, because the ``current < SCHEMA_VERSION``
+    branch below rebuilds the whole FTS index, and an index swap needs no row
+    touched. Nothing therefore *records* that a database has been swapped:
+    ``user_version`` reads 3 either way, so no database can be asked whether the
+    swap has happened -- the only way to observe it is to create the old index by
+    hand and reopen the file. Accepted rather than fixed -- see ADR 053, "What it
+    leaves unrecorded".
 
     Branches:
       - fresh v0 / upgrade from v1 or v2 → run v2 DDL, rebuild FTS from
@@ -222,6 +233,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     from app.transcripts import vector_store
 
     conn.executescript(_DDL_V1)
+    conn.executescript(_REPLACE_TS_INDEX_WITH_TS_ID_INDEX)
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     if current < SCHEMA_VERSION:
         conn.executescript(_DDL_V2)
@@ -565,6 +577,10 @@ def _clamp_limit(limit: int) -> int:
     return max(1, min(int(limit), HISTORY_LIMIT_MAX))
 
 
+_CURSOR_PAGE_WHERE = "WHERE (ts, id) < (:before_ts, :before_id) "
+_CURSOR_PAGE_ORDER = "ORDER BY ts DESC, id DESC LIMIT :limit_plus_one"
+
+
 def _entries_locked(
     conn: sqlite3.Connection, limit: int, before: HistoryCursor | None
 ) -> list[sqlite3.Row]:
@@ -579,20 +595,63 @@ def _entries_locked(
     because the predicate is the only reason the floor exists; it is asserted
     against the frozen sidecar by ``vector_store.selftest``.
 
-    ``before.ts`` is bound to ``CURSOR_TS_MIN``..``CURSOR_TS_MAX`` by the router:
-    SQLite stores an INTEGER as a signed 64-bit value, and binding anything wider
-    raises ``OverflowError`` out of the driver rather than answering.
+    ``before.ts`` is bound to ``CURSOR_TS_MIN``..``CURSOR_TS_MAX`` by
+    ``HistoryCursor`` itself: SQLite stores an INTEGER as a signed 64-bit value,
+    and binding anything wider raises ``OverflowError`` out of the driver rather
+    than answering.
     """
-    where = "WHERE (ts, id) < (:before_ts, :before_id) " if before is not None else ""
+    where = _CURSOR_PAGE_WHERE if before is not None else ""
     params: dict[str, object] = {"limit_plus_one": limit + 1}
     if before is not None:
         params["before_ts"] = before.ts
         params["before_id"] = before.id
     return conn.execute(
         f"SELECT {columns_sql(ENTRY_READ_COLUMNS)} FROM entries "
-        f"{where}ORDER BY ts DESC, id DESC LIMIT :limit_plus_one",
+        f"{where}{_CURSOR_PAGE_ORDER}",
         params,
     ).fetchall()
+
+
+def cursor_seek_plan_failure() -> str | None:
+    """Whether the SQLite actually loaded plans the cursor read as a seek.
+
+    ``None`` when it does; otherwise a message naming the plan it produced
+    instead. ``ROW_VALUE_MIN_SQLITE_VERSION`` is the release that *introduced*
+    row values, not one at which the planner is known to answer
+    ``(ts, id) < (?, ?)`` by seeking ``entries_ts_id_idx``, and a library that
+    parses the predicate but walks the index from the top gives back the whole
+    property this paging exists to buy, silently. Only a plan taken from the
+    loaded library answers that, so this is run against the frozen sidecar by
+    ``vector_store.selftest``.
+
+    The probe builds its own miniature ``entries`` -- a key pair and one payload
+    column, so the plan is not a covering-index special case -- and reuses the
+    same index DDL, predicate and ordering the shipped read uses, rather than a
+    second spelling of them.
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            "CREATE TABLE entries "
+            "(id TEXT PRIMARY KEY, ts INTEGER NOT NULL, raw_text TEXT NOT NULL)"
+        )
+        conn.executescript(_REPLACE_TS_INDEX_WITH_TS_ID_INDEX)
+        plan = " ".join(
+            str(row[3])
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT id, raw_text FROM entries "
+                f"{_CURSOR_PAGE_WHERE}{_CURSOR_PAGE_ORDER}",
+                {"before_ts": 0, "before_id": "", "limit_plus_one": 1},
+            ).fetchall()
+        )
+    finally:
+        conn.close()
+    if "SEARCH" in plan and "entries_ts_id_idx" in plan:
+        return None
+    return (
+        f"SQLite {sqlite3.sqlite_version} does not seek entries_ts_id_idx for a "
+        f"cursored history page: {plan}"
+    )
 
 
 def _count_locked(conn: sqlite3.Connection) -> int:

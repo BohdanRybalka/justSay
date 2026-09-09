@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryCursor, HistoryEntry, HistoryPageResponse } from "../api";
+import type { HistoryCursor, HistoryPageResponse } from "../api";
+import { buildEntry } from "./history-page-stub.test-helper";
 
 const confirmMock = vi.fn();
 
@@ -38,21 +39,6 @@ describe("formatEntryCount — the two tabs keep their own wording", () => {
     expect(formatEntryCount(2, ENTRIES)).toBe("2 entries");
   });
 });
-
-function buildEntry(id: string): HistoryEntry {
-  return {
-    id,
-    timestamp: "2026-08-01T10:00:00Z",
-    language: "uk",
-    style: "normal",
-    text: `transcript ${id}`,
-    duration_ms: 1200,
-    model_name: "whisper",
-    tokens_used: null,
-    audio_duration_seconds: 3.5,
-    word_count: null,
-  };
-}
 
 interface Harness {
   elements: {
@@ -297,6 +283,88 @@ describe("createHistoryList — one request at a time decides the rows and the c
     h.elements.loadMoreButton.click();
     await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(4));
     expect(sentCursors()).toEqual([null, cursor, null, cursor]);
+  });
+
+  it("keeps Load more refused while the reload that superseded an append is outstanding", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
+    const append = deferredPage();
+    const reload = deferredPage();
+    let calls = 0;
+    apiMock.getHistory.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 2) return append.promise;
+      if (calls === 3) return reload.promise;
+      return { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor };
+    });
+
+    const list = listOver(h);
+    await list.load();
+    h.elements.loadMoreButton.click();
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
+    void list.load();
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(3));
+    append.release({ entries: [buildEntry("c")], total: 4, next_cursor: null });
+    await flush();
+
+    expect(h.elements.loadMoreButton.disabled).toBe(true);
+    h.elements.loadMoreButton.click();
+    expect(apiMock.getHistory).toHaveBeenCalledTimes(3);
+  });
+
+  it("leaves the rows, the cursor and Load more untouched when a reload fails", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
+    let calls = 0;
+    apiMock.getHistory.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 2) throw new Error("503 store busy");
+      if (calls === 3) {
+        return { entries: [buildEntry("c"), buildEntry("d")], total: 4, next_cursor: null };
+      }
+      return { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor };
+    });
+
+    const list = listOver(h);
+    await list.load();
+    await list.load();
+
+    expect(h.paintedIds()).toEqual(["a", "b"]);
+    expect(h.loadMoreVisible()).toBe(true);
+
+    h.elements.loadMoreButton.click();
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(3));
+
+    expect(sentCursors()).toEqual([null, null, cursor]);
+    expect(h.paintedIds()).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("leaves Load more clickable after clearAll() superseded an outstanding append", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
+    const append = deferredPage();
+    confirmMock.mockResolvedValue(true);
+    apiMock.clearHistory.mockResolvedValue({ deleted: 4 });
+    let calls = 0;
+    apiMock.getHistory.mockImplementation(async () => {
+      calls += 1;
+      return calls === 2
+        ? append.promise
+        : { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor };
+    });
+
+    const list = listOver(h);
+    await list.load();
+    h.elements.loadMoreButton.click();
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
+    h.elements.clearButton.click();
+    await vi.waitFor(() => expect(h.countText()).toBe("0 transcripts"));
+    append.release({ entries: [buildEntry("c")], total: 4, next_cursor: null });
+    await flush();
+
+    h.elements.loadMoreButton.click();
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(3));
+    expect(sentCursors()).toEqual([null, cursor, null]);
   });
 
   it("lets clearAll() supersede an append that is still in flight", async () => {

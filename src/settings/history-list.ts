@@ -1,5 +1,6 @@
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { api, type HistoryCursor, type HistoryEntry } from "../api";
+import { isStaleStatusResponse } from "../stale-response";
 
 /** The singular/plural pair a tab uses when it names its own rows. */
 export interface HistoryListNoun {
@@ -27,7 +28,11 @@ export interface HistoryListOptions {
 }
 
 export interface HistoryList {
-  /** Loads the first page, dropping any cursor, and replaces whatever is painted. */
+  /**
+   * Asks for the first page with no cursor and, once it arrives, replaces
+   * whatever is painted and adopts the cursor the response carried. A request
+   * that fails changes nothing.
+   */
   load(): Promise<void>;
   /** Overrides the count text — for a tab lane the list does not own, such as History's search. */
   renderCount(text: string): void;
@@ -49,8 +54,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
   let cursor: HistoryCursor | null = null;
   let total = 0;
-  let pageSeq = 0;
-  let pageInFlight = false;
+  let latestIssuedToken = 0;
 
   function renderCount(text: string): void {
     elements.count.textContent = text;
@@ -61,22 +65,29 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
   }
 
   /**
-   * One page, appended or replacing. A request that has been superseded -- by a
-   * reload, by Clear All, or by a second "Load more" -- paints nothing and leaves
-   * the cursor alone, so whichever request is current decides both, rather than
-   * whichever answered last.
+   * One page, appended or replacing. A reload asks with no cursor without
+   * discarding the stored one: nothing painted is destroyed before its
+   * replacement has arrived, so a request that fails or is superseded leaves the
+   * rows, the cursor and "Load more" exactly as they were. A reload whose
+   * request 503s would otherwise leave the button visible over a null cursor,
+   * and the next click would re-fetch and re-append the first page -- the
+   * duplicate this whole spec exists to remove.
+   *
+   * Staleness is `isStaleStatusResponse`, the one mechanism this app uses for a
+   * late answer, and a second click is refused by disabling the button rather
+   * than by a flag beside it: the condition then lives on the element it
+   * governs and cannot drift out of step with a counter.
    *
    * `next_cursor` is normalised at the edge because `request` casts the response
    * rather than validating it: a backend that predates the cursor contract omits
-   * the field, and `undefined !== null` would leave "Load more" visible forever
-   * with every click re-fetching and re-appending the first page.
+   * the field, and `undefined !== null` would leave "Load more" visible forever.
    */
   async function loadPage(append: boolean): Promise<void> {
-    const seq = ++pageSeq;
-    pageInFlight = true;
+    const token = ++latestIssuedToken;
+    elements.loadMoreButton.disabled = true;
     try {
-      const response = await api.getHistory(pageSize, cursor);
-      if (isDestroyed() || seq !== pageSeq) return;
+      const response = await api.getHistory(pageSize, append ? cursor : null);
+      if (isDestroyed() || isStaleStatusResponse(token, latestIssuedToken)) return;
 
       total = response.total;
       renderCount(formatEntryCount(total, noun));
@@ -95,16 +106,22 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
       cursor = nextCursor;
       renderLoadMore(nextCursor !== null);
     } catch (error) {
-      if (isDestroyed() || seq !== pageSeq) return;
+      if (isDestroyed() || isStaleStatusResponse(token, latestIssuedToken)) return;
       renderCount("Failed to load");
       console.error(error);
     } finally {
-      if (seq === pageSeq) {
-        pageInFlight = false;
+      if (!isDestroyed() && !isStaleStatusResponse(token, latestIssuedToken)) {
+        elements.loadMoreButton.disabled = false;
       }
     }
   }
 
+  /**
+   * Deletes everything and puts the list back in its opening state. It supersedes
+   * any outstanding page without issuing a request of its own, so it re-enables
+   * the button itself -- the superseded `loadPage` sees a newer token and will
+   * not.
+   */
   async function clearAll(): Promise<void> {
     if (total === 0) return;
     elements.clearButton.disabled = true;
@@ -124,7 +141,8 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     try {
       await api.clearHistory();
       if (isDestroyed()) return;
-      ++pageSeq;
+      ++latestIssuedToken;
+      elements.loadMoreButton.disabled = false;
       cursor = null;
       total = 0;
       elements.rows.innerHTML = "";
@@ -143,7 +161,6 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
   }
 
   elements.loadMoreButton.addEventListener("click", () => {
-    if (pageInFlight) return;
     void loadPage(true);
   });
 
@@ -153,7 +170,6 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
   return {
     load() {
-      cursor = null;
       return loadPage(false);
     },
     renderCount,
