@@ -84,8 +84,8 @@ APP_DIR = REPO_ROOT / "backend" / "app"
 
 HTTP_VERB_DECORATORS = frozenset({"get", "post", "put", "delete", "patch", "head", "options"})
 
-LITERAL_OPENER = r"[\"'`]"
-LITERAL_TERMINATOR = r"[\"'`?&#]"
+LITERAL_OPENER = r"([\"'`])"
+LITERAL_TERMINATOR = r"(?:\1|[?&#])"
 INTERPOLATED_SEGMENT = r"\$\{[^}]*\}"
 
 CONSUMED_OUTSIDE_TYPESCRIPT: dict[str, tuple[tuple[Path, str], ...]] = {
@@ -179,14 +179,17 @@ def route_is_named_in(route_path: str, source: str) -> bool:
     """Whether ``source`` writes ``route_path`` as the path of a request.
 
     The path must sit inside a string or template literal and occupy the whole of
-    it up to a query separator: a quote or backtick immediately before it, and a
-    quote, backtick, ``?``, ``&`` or ``#`` immediately after. **Both boundaries
-    are load-bearing and each was added after a mutation proved the other alone
-    is not enough.** Without the right one, a deleted ``/history`` reads as live
-    because ``/history/stats`` contains it. Without the left one, a deleted
-    ``/cloud-status`` reads as live because ``/settings/cloud-status`` ends with
-    it -- a route being a text suffix of an unrelated live path is not rare, it is
-    what a shared final segment looks like.
+    it up to a query separator: a quote or backtick immediately before it, and
+    either that same quote or a ``?``, ``&`` or ``#`` immediately after.
+
+    **All three conditions are load-bearing and each was added after a mutation
+    proved the others alone are not enough.** Without the closing one, a deleted
+    ``/history`` reads as live because ``/history/stats`` contains it. Without
+    the opening one, a deleted ``/cloud-status`` reads as live because
+    ``/settings/cloud-status`` ends with it -- a route being a text suffix of an
+    unrelated live path is not rare, it is what a shared final segment looks
+    like. Without requiring the closing quote to be the one that opened, an
+    escaped quote inside a string can be read as an opener.
 
     A path parameter is matched as an interpolation in the same position rather
     than by truncating the path at the placeholder: ``/history/{entry_id}`` is
@@ -379,6 +382,14 @@ def test_a_parameterised_route_is_not_named_by_a_different_shape():
         "happens when a parameterised path is truncated at its placeholder instead of "
         "matched in position, and it certifies every route with an interpolated first "
         "segment as live"
+    )
+
+
+def test_a_path_closed_by_a_different_quote_is_not_named():
+    assert not route_is_named_in("/x", 'const a = "/x`;'), (
+        "`/x` was read as named by text that opens with one quote and closes with "
+        "another, so an escaped quote inside a string can act as an opener and certify "
+        "a dead route"
     )
 
 
