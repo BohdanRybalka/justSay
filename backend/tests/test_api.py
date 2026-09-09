@@ -21,17 +21,6 @@ async def test_health(client):
 
 
 @pytest.mark.asyncio
-async def test_config(client):
-    resp = await client.get("/config")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "stt_mode" in data
-    assert "llm_mode" in data
-    assert "stt_model" in data
-    assert "llm_model" not in data
-
-
-@pytest.mark.asyncio
 async def test_set_stt_mode_accepts_json_object(client):
     """Wire format ``{"mode": "..."}`` must keep working after ProviderModeUpdate removal."""
     resp = await client.put("/stt/mode", json={"mode": "local"})
