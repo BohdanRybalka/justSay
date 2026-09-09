@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryEntry } from "../../api";
+import type { HistoryEntry, HistoryPageResponse } from "../../api";
 
 const confirmMock = vi.fn();
 
@@ -38,10 +38,16 @@ function buildEntry(id: string): HistoryEntry {
 
 function stubBackend(total: number): HistoryEntry[] {
   const all = Array.from({ length: total }, (_, index) => buildEntry(String(index + 1)));
-  apiMock.getHistory.mockImplementation(async (limit: number, offset: number) => ({
-    entries: all.slice(offset, offset + limit),
-    total,
-  }));
+  let handed = 0;
+  apiMock.getHistory.mockImplementation(async (limit: number) => {
+    const entries = all.slice(handed, handed + limit);
+    handed += entries.length;
+    return {
+      entries,
+      total,
+      next_cursor: handed < all.length ? { ts: handed, id: entries[entries.length - 1].id } : null,
+    };
+  });
   return all;
 }
 
@@ -71,7 +77,7 @@ describe("renderMetrics — paging over the history endpoint", () => {
   it("asks for 50 rows on the first paint", async () => {
     const container = await renderWith(60);
 
-    expect(apiMock.getHistory.mock.calls[0]).toEqual([50, 0]);
+    expect(apiMock.getHistory.mock.calls[0]).toEqual([50, null]);
     expect(rowCount(container)).toBe(50);
     expect(container.querySelector<HTMLElement>("#metrics-load-more")!.style.display).toBe("block");
   });
@@ -84,7 +90,8 @@ describe("renderMetrics — paging over the history endpoint", () => {
     await vi.waitFor(() => {
       expect(rowCount(container)).toBe(60);
     });
-    expect(apiMock.getHistory.mock.calls[1]).toEqual([50, 50]);
+    expect(apiMock.getHistory.mock.calls[1][0]).toBe(50);
+    expect(apiMock.getHistory.mock.calls[1][1]).toEqual({ ts: 50, id: "50" });
     expect(container.querySelector<HTMLElement>("#metrics-load-more")!.style.display).toBe("none");
   });
 
@@ -162,7 +169,7 @@ describe("renderMetrics — Clear All asks before deleting everything", () => {
 
 describe("renderMetrics — teardown", () => {
   it("a response arriving after teardown writes nothing", async () => {
-    let release: (value: { entries: HistoryEntry[]; total: number }) => void = () => {};
+    let release: (value: HistoryPageResponse) => void = () => {};
     apiMock.getHistory.mockReturnValue(
       new Promise((resolve) => {
         release = resolve;
@@ -173,7 +180,7 @@ describe("renderMetrics — teardown", () => {
 
     const before = container.querySelector("#metrics-count")!.textContent;
     teardown();
-    release({ entries: [buildEntry("1")], total: 1 });
+    release({ entries: [buildEntry("1")], total: 1, next_cursor: null });
     await Promise.resolve();
     await Promise.resolve();
 

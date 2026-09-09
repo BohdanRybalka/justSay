@@ -45,6 +45,7 @@ HISTORY_FILENAME = "history.db"
 SCHEMA_VERSION = 3
 STATS_TTL_SECONDS = 5.0
 HISTORY_LIMIT_MAX = 200
+CURSOR_ID_MAX_LENGTH = 64
 
 _lock = threading.Lock()
 _output_dir: Path | None = None
@@ -80,6 +81,31 @@ class HistoryEntry(BaseModel):
     tokens_used: int | None = None
     audio_duration_seconds: float | None = None
     word_count: int | None = None
+
+
+class HistoryCursor(BaseModel):
+    """A position in the total order ``(ts DESC, id DESC)``, minted by the server.
+
+    A cursor is not a count, so nothing under it moves when a row is inserted or
+    deleted. ``id`` is only a tiebreaker: it makes the ordering total, which is
+    what a position needs to identify one row. See ADR 053.
+    """
+
+    ts: int
+    id: str
+
+
+class HistoryPage(BaseModel):
+    """One page, the total it is a page of, and where the next one starts.
+
+    ``next_cursor`` is ``None`` on the last page. ``total`` is what the user
+    reads on screen; it is no longer how the client decides whether more rows
+    exist.
+    """
+
+    entries: list[HistoryEntry]
+    total: int
+    next_cursor: HistoryCursor | None = None
 
 
 class HistoryStats(BaseModel):
@@ -140,7 +166,8 @@ CREATE TABLE IF NOT EXISTS entries (
   model_name TEXT,
   tokens_used INTEGER
 );
-CREATE INDEX IF NOT EXISTS entries_ts_idx ON entries(ts DESC);
+CREATE INDEX IF NOT EXISTS entries_ts_id_idx ON entries(ts DESC, id DESC);
+DROP INDEX IF EXISTS entries_ts_idx;
 """
 
 _DDL_V2 = """
@@ -167,6 +194,12 @@ END;
 
 def _init_schema(conn: sqlite3.Connection) -> None:
     """Version-aware migrator. Run on every connection open.
+
+    ``_DDL_V1`` runs unconditionally and idempotently, which is how the
+    ``entries_ts_idx`` -> ``entries_ts_id_idx`` swap reaches an existing database:
+    ``SCHEMA_VERSION`` is deliberately not bumped for it, because the
+    ``current < SCHEMA_VERSION`` branch below rebuilds the whole FTS index, and an
+    index swap needs no row touched.
 
     Branches:
       - fresh v0 / upgrade from v1 or v2 → run v2 DDL, rebuild FTS from
@@ -514,23 +547,39 @@ def save_entry(
     return entry
 
 
-def _clamp_window(limit: int, offset: int) -> tuple[int, int]:
-    """``get_page``'s own bounds, applied before the router's are trusted.
+def _clamp_limit(limit: int) -> int:
+    """``get_page``'s own bound, applied before the router's is trusted.
 
     ``words.top_words`` and ``words.search_history`` each clamp their own against
     their own maximum rather than sharing this one. What they have in common is
     the reason, not the numbers: a bound that lives only in a FastAPI signature is
     not a bound on the function, and ``LIMIT -1`` materialises every row.
     """
-    return max(1, min(int(limit), HISTORY_LIMIT_MAX)), max(0, int(offset))
+    return max(1, min(int(limit), HISTORY_LIMIT_MAX))
 
 
-def _entries_locked(conn: sqlite3.Connection, limit: int, offset: int) -> list[sqlite3.Row]:
-    """Caller MUST hold ``_lock``. Newest first, full rows."""
+def _entries_locked(
+    conn: sqlite3.Connection, limit: int, before: HistoryCursor | None
+) -> list[sqlite3.Row]:
+    """Caller MUST hold ``_lock``. Newest first, up to ``limit + 1`` full rows.
+
+    The extra row is the probe that answers "is there another page": it is read
+    and dropped rather than returned. The row-value predicate ``(ts, id) < (?, ?)``
+    is a seek into ``entries_ts_id_idx``; the portable
+    ``ts < ? OR (ts = ? AND id < ?)`` spelling plans as a scan from the top of the
+    index on every page, which is the property this paging exists to buy. It needs
+    SQLite >= 3.15, asserted against the frozen sidecar by
+    ``vector_store.selftest``.
+    """
+    where = "WHERE (ts, id) < (:before_ts, :before_id) " if before is not None else ""
+    params: dict[str, object] = {"limit_plus_one": limit + 1}
+    if before is not None:
+        params["before_ts"] = before.ts
+        params["before_id"] = before.id
     return conn.execute(
-        f"SELECT {columns_sql(ENTRY_READ_COLUMNS)} "
-        "FROM entries ORDER BY ts DESC LIMIT ? OFFSET ?",
-        (limit, offset),
+        f"SELECT {columns_sql(ENTRY_READ_COLUMNS)} FROM entries "
+        f"{where}ORDER BY ts DESC, id DESC LIMIT :limit_plus_one",
+        params,
     ).fetchall()
 
 
@@ -539,20 +588,24 @@ def _count_locked(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
 
 
-def get_page(limit: int = 50, offset: int = 0) -> tuple[list[HistoryEntry], int]:
-    """A window of entries and the total it is a window into, read together.
+def get_page(limit: int = 50, before: HistoryCursor | None = None) -> HistoryPage:
+    """The page starting strictly after ``before``, the total, and the next position.
 
-    One acquisition of ``_lock`` covers both reads on purpose. Taken separately, a
-    write landing between them returns a total that counts the new row and a page
-    that does not, so the next page starts one row too late and the entry last on
-    this one appears again at the top of it.
+    One acquisition of ``_lock`` covers the page read, the "is there more" probe and
+    the total on purpose. Taken separately, a write landing between them returns a
+    total that counts the new row and a page that does not.
     """
-    clamped_limit, clamped_offset = _clamp_window(limit, offset)
+    clamped_limit = _clamp_limit(limit)
     with _lock:
         conn = _ensure_conn_locked()
-        rows = _entries_locked(conn, clamped_limit, clamped_offset)
+        rows = _entries_locked(conn, clamped_limit, before)
         total = _count_locked(conn)
-    return [_row_to_entry(r) for r in rows], total
+    has_more = len(rows) > clamped_limit
+    page = rows[:clamped_limit]
+    next_cursor = HistoryCursor(ts=page[-1]["ts"], id=page[-1]["id"]) if has_more else None
+    return HistoryPage(
+        entries=[_row_to_entry(r) for r in page], total=total, next_cursor=next_cursor
+    )
 
 
 def delete_entry(entry_id: str) -> bool:

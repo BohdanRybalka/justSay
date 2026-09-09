@@ -670,3 +670,26 @@ def test_selftest_never_raises_on_broken_extension(monkeypatch):
     ok, msg = vector_store.selftest()
     assert ok is False
     assert "extension load disabled" in msg
+
+
+def test_selftest_fails_a_bundle_whose_sqlite_predates_row_values(monkeypatch):
+    """History paging seeks with ``(ts, id) < (?, ?)``, which SQLite gained in
+    3.15.0; below that every history read is a syntax error rather than a wrong
+    answer. Which library a PyInstaller build embeds only a packaged build can
+    answer, so the floor is asserted where ``release.yml`` already runs the frozen
+    binary on both platforms -- not on a startup or request path, where a version
+    failure would take dictation and settings down with it.
+    """
+    monkeypatch.setattr(vector_store.sqlite3, "sqlite_version_info", (3, 14, 0))
+    monkeypatch.setattr(vector_store.sqlite3, "sqlite_version", "3.14.0")
+
+    ok, msg = vector_store.selftest()
+
+    assert ok is False
+    assert "3.14.0" in msg
+    assert "3.15" in msg
+
+
+def test_selftest_accepts_this_environments_sqlite():
+    assert sqlite3.sqlite_version_info >= vector_store.ROW_VALUE_MIN_SQLITE_VERSION
+    assert vector_store.selftest() == (True, "ok")

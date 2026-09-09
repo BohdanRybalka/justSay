@@ -604,6 +604,20 @@ export interface HistoryListResponse {
   total: number;
 }
 
+/** Where the next page starts. Minted by the backend, echoed back verbatim, never
+ *  built here — the ordering rule it encodes has exactly one implementation, in SQL
+ *  (ADR 053). */
+export interface HistoryCursor {
+  ts: number;
+  id: string;
+}
+
+export interface HistoryPageResponse {
+  entries: HistoryEntry[];
+  total: number;
+  next_cursor: HistoryCursor | null;
+}
+
 export interface WordCount {
   word: string;
   count: number;
@@ -643,10 +657,15 @@ export const api = {
   cloudKeyStatus: () =>
     request<CloudKeyStatus>("GET", "/settings/cloud-status", undefined, REREADABLE),
 
-  getHistory: (limit = 50, offset = 0) =>
-    request<HistoryListResponse>(
+  /** Pass `null` for the first page, then whatever `next_cursor` the previous
+   *  response carried. A cursor is a position rather than a count, so nothing
+   *  under it shifts when an entry is saved or deleted between two pages. */
+  getHistory: (limit = 50, cursor: HistoryCursor | null = null) =>
+    request<HistoryPageResponse>(
       "GET",
-      `/history?limit=${limit}&offset=${offset}`,
+      cursor === null
+        ? `/history?limit=${limit}`
+        : `/history?limit=${limit}&before_ts=${cursor.ts}&before_id=${encodeURIComponent(cursor.id)}`,
       undefined,
       REREADABLE,
     ),

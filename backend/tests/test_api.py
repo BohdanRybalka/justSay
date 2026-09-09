@@ -249,5 +249,70 @@ async def test_history_limit_is_bounded(client):
     assert (await client.get(f"/history?limit={HISTORY_LIMIT_MAX}")).status_code == 200
     assert (await client.get(f"/history?limit={HISTORY_LIMIT_MAX + 1}")).status_code == 422
     assert (await client.get("/history?limit=0")).status_code == 422
-    assert (await client.get("/history?offset=-1")).status_code == 422
 
+
+
+@pytest.mark.asyncio
+async def test_history_rejects_half_a_cursor(client):
+    """A cursor is a position in ``(ts DESC, id DESC)``, so half of one names
+    nothing. FastAPI cannot say "both or neither" in a signature, which is why the
+    handler checks it and answers 422 rather than quietly paging from the top.
+
+    An empty ``before_id`` is a whole cursor, not half of one: ``(ts, "")`` sorts
+    below every real id at that ``ts``, so it names a well-defined position and
+    answers 200, exactly as a cursor naming a row that never existed does."""
+    from app.transcripts.history import CURSOR_ID_MAX_LENGTH
+
+    assert (await client.get("/history?limit=30&before_ts=1700000000000")).status_code == 422
+    assert (await client.get("/history?limit=30&before_id=abc")).status_code == 422
+    assert (await client.get("/history?limit=30&before_ts=abc&before_id=x")).status_code == 422
+    long_id = "a" * (CURSOR_ID_MAX_LENGTH + 1)
+    assert (
+        await client.get(f"/history?limit=30&before_ts=1700000000000&before_id={long_id}")
+    ).status_code == 422
+    assert (
+        await client.get("/history?limit=30&before_ts=1700000000000&before_id=nosuchrow")
+    ).status_code == 200
+    assert (
+        await client.get("/history?limit=30&before_ts=1700000000000&before_id=")
+    ).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_history_pages_over_http_without_repeating_an_entry(client):
+    """The whole contract end to end: two page-30 requests over a 60-entry store
+    with a dictation saved between them return 60 distinct ids, and the client
+    only ever echoes the cursor it was handed."""
+    from app.transcripts import history
+
+    for index in range(60):
+        history.save_entry(text=f"entry {index}", duration_ms=1)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.execute("BEGIN")
+        for offset, row in enumerate(
+            conn.execute("SELECT id FROM entries ORDER BY rowid").fetchall()
+        ):
+            conn.execute(
+                "UPDATE entries SET ts = ? WHERE id = ?", (1_700_000_000_000 + offset, row[0])
+            )
+        conn.execute("COMMIT")
+
+    first = (await client.get("/history?limit=30")).json()
+    assert first["total"] == 60
+    assert first["next_cursor"] is not None
+
+    history.save_entry(text="landed between the two pages", duration_ms=1)
+
+    cursor = first["next_cursor"]
+    second = (
+        await client.get(
+            f"/history?limit=30&before_ts={cursor['ts']}&before_id={cursor['id']}"
+        )
+    ).json()
+
+    ids = [e["id"] for e in first["entries"]] + [e["id"] for e in second["entries"]]
+    assert len(ids) == 60
+    assert len(set(ids)) == 60
+    assert second["next_cursor"] is None
+    assert second["total"] == 61

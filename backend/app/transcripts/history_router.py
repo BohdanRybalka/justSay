@@ -7,8 +7,10 @@ from pydantic import BaseModel
 
 from app.transcripts import words as words_service
 from app.transcripts.history import (
+    CURSOR_ID_MAX_LENGTH,
     HISTORY_LIMIT_MAX,
-    HistoryEntry,
+    HistoryCursor,
+    HistoryPage,
     HistoryStats,
     clear_all,
     compute_stats,
@@ -19,11 +21,6 @@ from app.transcripts.store_errors import store_busy_as_503
 from app.transcripts.words import HistorySearchHit
 
 router = APIRouter(prefix="/history", tags=["History"])
-
-
-class HistoryListResponse(BaseModel):
-    entries: list[HistoryEntry]
-    total: int
 
 
 class HistorySearchResponse(BaseModel):
@@ -54,14 +51,26 @@ def _is_fts_syntax_error(e: sqlite3.OperationalError) -> bool:
     return any(marker in msg for marker in _FTS_QUERY_ERROR_MARKERS)
 
 
-@router.get("", response_model=HistoryListResponse)
+@router.get("", response_model=HistoryPage)
 async def list_history(
     limit: int = Query(50, ge=1, le=HISTORY_LIMIT_MAX),
-    offset: int = Query(0, ge=0),
+    before_ts: int | None = Query(None),
+    before_id: str | None = Query(None, max_length=CURSOR_ID_MAX_LENGTH),
 ):
+    """One page of history, newest first, positioned by the cursor the previous
+    response handed back (ADR 053).
+
+    Exactly two request shapes are accepted: both cursor parameters absent, which
+    asks for the first page, or both present, which is a complete position. A half
+    a cursor is 422 because FastAPI cannot say "both or neither" in a signature.
+    """
+    if (before_ts is None) != (before_id is None):
+        raise HTTPException(
+            status_code=422, detail="before_ts and before_id must be sent together"
+        )
+    before = None if before_ts is None else HistoryCursor(ts=before_ts, id=before_id)
     with store_busy_as_503():
-        entries, total = get_page(limit=limit, offset=offset)
-    return HistoryListResponse(entries=entries, total=total)
+        return get_page(limit=limit, before=before)
 
 
 @router.get("/stats", response_model=HistoryStats)

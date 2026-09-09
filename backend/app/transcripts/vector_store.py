@@ -29,6 +29,7 @@ from app.transcripts import history
 log = logging.getLogger(__name__)
 
 BACKFILL_BATCH_MAX = 200
+ROW_VALUE_MIN_SQLITE_VERSION = (3, 15)
 
 _DDL_V3 = """
 CREATE TABLE IF NOT EXISTS embeddings_meta (
@@ -287,11 +288,26 @@ async def run_background_indexer() -> None:
 def selftest() -> tuple[bool, str]:
     """``--selftest-sqlite-vec`` backend. Never raises.
 
-    Opens an in-memory connection independent of ``history``'s shared
-    connection (this must work even if the sidecar has never bootstrapped
-    history), loads the extension, creates a 3-dim ``vec0`` table, inserts
-    and queries one vector, and asserts the inserted row comes back.
+    Two assertions about the SQLite the frozen sidecar actually bundles, which
+    only a packaged build can answer.
+
+    First the library version: history paging seeks with the row-value predicate
+    ``(ts, id) < (?, ?)``, added in SQLite 3.15.0, and below that the statement is
+    a syntax error rather than a wrong answer, so every history read would fail
+    for that user. It is checked here rather than at startup or on the request
+    path, where a version failure would take dictation and settings down with it.
+
+    Then the extension: opens an in-memory connection independent of
+    ``history``'s shared connection (this must work even if the sidecar has never
+    bootstrapped history), loads the extension, creates a 3-dim ``vec0`` table,
+    inserts and queries one vector, and asserts the inserted row comes back.
     """
+    if sqlite3.sqlite_version_info < ROW_VALUE_MIN_SQLITE_VERSION:
+        wanted = ".".join(str(part) for part in ROW_VALUE_MIN_SQLITE_VERSION)
+        return False, (
+            f"SQLite {sqlite3.sqlite_version} predates row-value support "
+            f"(needs >= {wanted}), so history paging cannot run"
+        )
     try:
         conn = sqlite3.connect(":memory:")
         try:

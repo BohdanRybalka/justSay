@@ -1,5 +1,5 @@
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { api, type HistoryEntry } from "../api";
+import { api, type HistoryCursor, type HistoryEntry } from "../api";
 
 /** The singular/plural pair a tab uses when it names its own rows. */
 export interface HistoryListNoun {
@@ -27,7 +27,7 @@ export interface HistoryListOptions {
 }
 
 export interface HistoryList {
-  /** Loads the first page from offset 0, replacing whatever is painted. */
+  /** Loads the first page, dropping any cursor, and replaces whatever is painted. */
   load(): Promise<void>;
   /** Overrides the count text — for a tab lane the list does not own, such as History's search. */
   renderCount(text: string): void;
@@ -47,7 +47,7 @@ export function formatEntryCount(total: number, noun: HistoryListNoun): string {
 export function createHistoryList(options: HistoryListOptions): HistoryList {
   const { pageSize, noun, elements, createRow, renderEmptyState, isDestroyed, onCleared } = options;
 
-  let offset = 0;
+  let cursor: HistoryCursor | null = null;
   let total = 0;
 
   function renderCount(text: string): void {
@@ -60,7 +60,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
   async function loadPage(append: boolean): Promise<void> {
     try {
-      const response = await api.getHistory(pageSize, offset);
+      const response = await api.getHistory(pageSize, cursor);
       if (isDestroyed()) return;
 
       total = response.total;
@@ -76,8 +76,8 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
       renderEmptyState(response.entries.length === 0 && !append);
 
-      offset += response.entries.length;
-      renderLoadMore(offset < total);
+      cursor = response.next_cursor;
+      renderLoadMore(response.next_cursor !== null);
     } catch (error) {
       if (isDestroyed()) return;
       renderCount("Failed to load");
@@ -104,7 +104,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     try {
       await api.clearHistory();
       if (isDestroyed()) return;
-      offset = 0;
+      cursor = null;
       total = 0;
       elements.rows.innerHTML = "";
       renderEmptyState(true);
@@ -131,7 +131,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
   return {
     load() {
-      offset = 0;
+      cursor = null;
       return loadPage(false);
     },
     renderCount,
