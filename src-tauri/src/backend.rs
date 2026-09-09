@@ -20,7 +20,7 @@
 //! exponential backoff — see `docs/adr/006-backend-watchdog-respawn-on-crash.md`
 //! for the `SHUTDOWN_REQUESTED` race-closure rationale.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -61,10 +61,13 @@ use tauri_plugin_shell::ShellExt;
 /// The shell plugin's `Command` builder does NOT expose `creation_flags`;
 /// for the frozen-sidecar production path the console window is suppressed
 /// by building the sidecar with `console=False` (see
-/// `backend/build_sidecar.spec`) plus the Python entrypoint redirecting
-/// stdout/stderr to `~/<data_dir_name>/logs/sidecar.log`, where
-/// `data_dir_name` is `.justsay` or `.justsay-dev` depending on `spawn()`'s
-/// `force_dev_data_dir` flag — see `append_sidecar_log()` below and
+/// `backend/build_sidecar.spec`). The sidecar's stdout and stderr are
+/// captured here and appended to `<data root>/logs/sidecar.log` — nothing on
+/// the Python side redirects them — where the data root is
+/// resolved the way the backend resolves its own — `JUSTSAY_DATA_DIR` first,
+/// otherwise the home directory joined with `.justsay` or `.justsay-dev`
+/// depending on `spawn()`'s `force_dev_data_dir` flag — see
+/// `sidecar_log_dir_from()` and `append_sidecar_log()` below and
 /// `docs/adr/012-dev-mode-data-directory-isolation.md`.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -289,20 +292,106 @@ fn http_client() -> Result<&'static reqwest::Client, String> {
         .map_err(|e| e.clone())
 }
 
-/// Append a stderr line from the production sidecar to
-/// `~/<data_dir_name>/logs/sidecar.log`. `data_dir_name` is `.justsay` or
-/// `.justsay-dev`, matching `spawn()`'s `force_dev_data_dir` flag — see
-/// `docs/adr/012-dev-mode-data-directory-isolation.md` — so a
-/// `tauri:dev:frozen` smoke-test run's captured sidecar output lands under
-/// the same dev directory as the sidecar's own history.db/settings.json.
+/// Where the sidecar log goes, mirroring `resolve_app_data_root()` in
+/// `backend/app/core/app_paths.py`. Pure so each branch is testable without
+/// touching the process environment, which `sidecar_log_dir` reads for it.
+///
+/// The order is Python's and has to stay Python's: an explicit
+/// `JUSTSAY_DATA_DIR` wins over everything, otherwise the home directory joined
+/// with the name `spawn()` chose. An empty value counts as unset on both
+/// sides, because `std::env::var` returns `Ok("")` for a set-but-empty variable
+/// on Windows and joining it would produce a path relative to whatever the
+/// process happens to have as its working directory.
+///
+/// `None` means "do not write the log", never "write it somewhere else". That
+/// is the whole reason `~user` is refused rather than passed through: Python's
+/// `Path.expanduser()` resolves `~someone/data` to a real directory on both
+/// platforms, this side cannot, and a literal `~someone/data` is a *relative*
+/// path that `create_dir_all` would cheerfully create next to the app. Losing
+/// the log is recoverable; writing it somewhere nobody will look is not.
+fn sidecar_log_dir_from(
+    data_dir_override: Option<&str>,
+    home: Option<&str>,
+    data_dir_name: &str,
+) -> Option<PathBuf> {
+    let home = home.filter(|value| !value.is_empty());
+    if let Some(root) = data_dir_override.filter(|value| !value.is_empty()) {
+        return expand_leading_tilde(root, home).map(|path| path.join("logs"));
+    }
+    Some(PathBuf::from(home?).join(data_dir_name).join("logs"))
+}
+
+fn expand_leading_tilde(path: &str, home: Option<&str>) -> Option<PathBuf> {
+    if !path.starts_with('~') {
+        return Some(PathBuf::from(path));
+    }
+    if path != "~" && !path.starts_with("~/") && !path.starts_with("~\\") {
+        return None;
+    }
+    let rest = path[1..].trim_start_matches(['/', '\\']);
+    let home = PathBuf::from(home?);
+    Some(if rest.is_empty() { home } else { home.join(rest) })
+}
+
+/// The home directory, resolved the way `Path.home()` resolves it on this
+/// platform, so the two sides agree when `JUSTSAY_DATA_DIR` is unset.
+///
+/// Python's `ntpath.expanduser` reads `USERPROFILE` and then `HOMEDRIVE` +
+/// `HOMEPATH`; `posixpath.expanduser` reads `HOME` and then falls back to
+/// `pwd.getpwuid()`. Reading `USERPROFILE` on Unix or `HOME` on Windows, which
+/// an earlier draft of this did on both, splits the two sides under git-bash,
+/// where `HOME` is set and `USERPROFILE` may not be. The `pwd` fallback has no
+/// equivalent in `std`: a Unix process with no `HOME` gets no sidecar log, and
+/// that is stated rather than approximated.
+fn home_dir() -> Option<String> {
+    fn non_empty(value: Result<String, std::env::VarError>) -> Option<String> {
+        value.ok().filter(|v| !v.is_empty())
+    }
+    #[cfg(windows)]
+    {
+        if let Some(profile) = non_empty(std::env::var("USERPROFILE")) {
+            return Some(profile);
+        }
+        match (
+            non_empty(std::env::var("HOMEDRIVE")),
+            non_empty(std::env::var("HOMEPATH")),
+        ) {
+            (Some(drive), Some(path)) => Some(format!("{}{}", drive, path)),
+            _ => None,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        non_empty(std::env::var("HOME"))
+    }
+}
+
+fn sidecar_log_dir(data_dir_name: &str) -> Option<PathBuf> {
+    let data_dir_override = std::env::var("JUSTSAY_DATA_DIR").ok();
+    sidecar_log_dir_from(
+        data_dir_override.as_deref(),
+        home_dir().as_deref(),
+        data_dir_name,
+    )
+}
+
+/// Append one captured line from the production sidecar to `sidecar.log` under
+/// the directory `spawn()` resolved once through `sidecar_log_dir` — see
+/// `sidecar_log_dir_from` and
+/// `docs/adr/012-dev-mode-data-directory-isolation.md`, so that a
+/// `tauri:dev:frozen` smoke-test run's captured output, and a run with
+/// `JUSTSAY_DATA_DIR` set, both land beside the sidecar's own
+/// history.db/settings.json rather than in the default location.
+///
+/// The directory is passed in rather than resolved here because this runs once
+/// per captured line, and a uvicorn start is dozens of them.
 /// Failure to open the log file is silent to avoid spamming on shutdown
 /// when the FS is racing.
-fn append_sidecar_log(line: &[u8], data_dir_name: &str) {
-    let home = match std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
-        Ok(h) => h,
-        Err(_) => return,
+fn append_sidecar_log(line: &[u8], log_dir: Option<&Path>) {
+    let log_dir = match log_dir {
+        Some(dir) => dir,
+        None => return,
     };
-    let log_dir = PathBuf::from(home).join(data_dir_name).join("logs");
     if std::fs::create_dir_all(&log_dir).is_err() {
         return;
     }
@@ -588,8 +677,10 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
     let prefer_python_source =
         cfg!(debug_assertions) && std::env::var("JUSTSAY_USE_FROZEN_SIDECAR").is_err();
 
-    let force_dev_data_dir = cfg!(debug_assertions);
+    let force_dev_data_dir =
+        cfg!(debug_assertions) || std::env::var("JUSTSAY_FORCE_DEV_DATA_DIR").is_ok_and(|v| v == "1");
     let data_dir_name: &'static str = if force_dev_data_dir { ".justsay-dev" } else { ".justsay" };
+    let log_dir = sidecar_log_dir(data_dir_name);
 
     let resolved_sidecar = if prefer_python_source {
         None
@@ -631,10 +722,10 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         tauri::async_runtime::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
-                    CommandEvent::Stderr(bytes) => append_sidecar_log(&bytes, data_dir_name),
-                    CommandEvent::Stdout(bytes) => append_sidecar_log(&bytes, data_dir_name),
+                    CommandEvent::Stderr(bytes) => append_sidecar_log(&bytes, log_dir.as_deref()),
+                    CommandEvent::Stdout(bytes) => append_sidecar_log(&bytes, log_dir.as_deref()),
                     CommandEvent::Error(msg) => {
-                        append_sidecar_log(format!("[shell error] {}", msg).as_bytes(), data_dir_name);
+                        append_sidecar_log(format!("[shell error] {}", msg).as_bytes(), log_dir.as_deref());
                         alive_clone.store(false, Ordering::Release);
                         break;
                     }
@@ -643,7 +734,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
                             "[terminated] code={:?} signal={:?}",
                             payload.code, payload.signal
                         );
-                        append_sidecar_log(line.as_bytes(), data_dir_name);
+                        append_sidecar_log(line.as_bytes(), log_dir.as_deref());
                         alive_clone.store(false, Ordering::Release);
                         break;
                     }
@@ -1268,6 +1359,80 @@ pub fn spawn_watchdog(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_explicit_data_dir_override_wins_over_the_home_directory() {
+        assert_eq!(
+            sidecar_log_dir_from(Some("D:/scratch/js"), Some("C:/Users/me"), ".justsay"),
+            Some(PathBuf::from("D:/scratch/js").join("logs")),
+            "JUSTSAY_DATA_DIR is first in resolve_app_data_root()'s order and must be first here"
+        );
+    }
+
+    #[test]
+    fn an_empty_override_is_ignored_the_way_an_unset_one_is() {
+        assert_eq!(
+            sidecar_log_dir_from(Some(""), Some("C:/Users/me"), ".justsay-dev"),
+            Some(PathBuf::from("C:/Users/me").join(".justsay-dev").join("logs"))
+        );
+    }
+
+    #[test]
+    fn no_override_falls_back_to_the_home_directory_and_the_chosen_name() {
+        assert_eq!(
+            sidecar_log_dir_from(None, Some("/home/me"), ".justsay-dev"),
+            Some(PathBuf::from("/home/me").join(".justsay-dev").join("logs"))
+        );
+    }
+
+    #[test]
+    fn a_leading_tilde_in_the_override_expands_the_way_path_expanduser_does() {
+        assert_eq!(
+            sidecar_log_dir_from(Some("~"), Some("/home/me"), ".justsay"),
+            Some(PathBuf::from("/home/me").join("logs"))
+        );
+        assert_eq!(
+            sidecar_log_dir_from(Some("~/data"), Some("/home/me"), ".justsay"),
+            Some(PathBuf::from("/home/me").join("data").join("logs"))
+        );
+    }
+
+    #[test]
+    fn a_tilde_naming_another_account_gives_up_rather_than_writing_somewhere_relative() {
+        assert_eq!(
+            sidecar_log_dir_from(Some("~someone/data"), Some("/home/me"), ".justsay"),
+            None,
+            "Path.expanduser() resolves this to a real directory and this side cannot, so the              only honest answers are that one or none -- a literal ~someone/data is relative"
+        );
+    }
+
+    #[test]
+    fn a_windows_separator_after_the_tilde_expands_too() {
+        assert_eq!(
+            sidecar_log_dir_from(Some("~\\data"), Some("C:/Users/me"), ".justsay"),
+            Some(PathBuf::from("C:/Users/me").join("data").join("logs"))
+        );
+    }
+
+    #[test]
+    fn a_tilde_override_with_no_home_to_expand_it_writes_nothing() {
+        assert_eq!(sidecar_log_dir_from(Some("~/data"), None, ".justsay"), None);
+    }
+
+    #[test]
+    fn an_empty_home_counts_as_unset_the_way_an_empty_override_does() {
+        assert_eq!(sidecar_log_dir_from(None, Some(""), ".justsay"), None);
+        assert_eq!(
+            sidecar_log_dir_from(Some("~/data"), Some(""), ".justsay"),
+            None,
+            "an empty USERPROFILE would otherwise expand to a path relative to the CWD"
+        );
+    }
+
+    #[test]
+    fn without_an_override_or_a_home_there_is_nowhere_to_write() {
+        assert_eq!(sidecar_log_dir_from(None, None, ".justsay"), None);
+    }
 
     #[test]
     fn respawn_backoff_follows_2_4_8_second_sequence() {
