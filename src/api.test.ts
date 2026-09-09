@@ -334,8 +334,6 @@ describe("bridge diagnosis", () => {
     mod = await import("./api");
     await mod.api.health();
     kinds.add(mod.lastBridgeDiagnosis().kind);
-    vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-    vi.resetModules();
 
     expect([...kinds].sort()).toEqual([
       "bridge-failed",
@@ -399,12 +397,6 @@ describe("an invoke that never settles", () => {
     installBridge();
     vi.useFakeTimers();
     invokeMock.mockImplementation(() => new Promise(() => {}));
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-    invokeMock.mockReset();
-    vi.resetModules();
   });
 
   it("reports the same unanswered call once per reuse window, not once per joined caller", async () => {
@@ -1023,11 +1015,6 @@ describe("a status read against a bridge that is slow but alive", () => {
         setTimeout(() => resolve({ invoke: invokeMock }), 2500);
       });
     });
-  });
-
-  afterEach(() => {
-    vi.doUnmock("@tauri-apps/api/core");
-    vi.resetModules();
   });
 
   it("still issues its request, because the budget contains the token path it waits on", async () => {

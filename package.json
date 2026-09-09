@@ -14,7 +14,7 @@
     "backend:install": "cd backend && pip install -e \".[dev,audio,cloud]\"",
     "setup": "npm install && npm run backend:install",
     "test": "cd backend && python -m pytest tests/ -v",
-    "test:frontend": "vitest run --sequence.shuffle",
+    "test:frontend": "vitest run",
     "test:rust": "cd src-tauri && cargo test",
     "typecheck": "tsc --noEmit",
     "lint:ruff": "cd backend && python -m ruff check .",

@@ -73,7 +73,7 @@ vi.mock("@tauri-apps/api/app", () => ({
   getVersion: vi.fn(async () => "0.13.0"),
 }));
 
-const { renderGeneral } = await import("./general");
+let renderGeneral: typeof import("./general").renderGeneral;
 const { REQUEST_TIMEOUT_MS } = await import("../../api");
 
 function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
@@ -102,30 +102,39 @@ type DocumentListener = Parameters<typeof document.addEventListener>;
 const addedDocumentListeners: DocumentListener[] = [];
 const realAddEventListener = document.addEventListener.bind(document);
 
-/** Removes every `document` listener a test left armed.
+/** Undoes what a test leaves behind on objects it does not own.
+ *
+ *  Two things outlive a test here, and both are order-dependent by construction,
+ *  so both stay invisible until the suite is shuffled.
  *
  *  `renderGeneral` arms a `document` keydown listener the moment `#btn-shortcut`
  *  is clicked, and only `TabLifecycle.destroy` takes it off again — which most
- *  tests here never call, and which cannot simply be called for all of them:
- *  tearing a whole tab down between tests disturbs the microphone block's
- *  deliberately module-level `heldSession`. A test that ends
- *  mid-capture therefore leaves a live handler bound to a container nobody can
- *  reach: it answers the *next* test's `capture()`, consumes the outcome that
- *  test queued on `emitMock`, and leaves the container being asserted on waiting
- *  for an event that never arrives. Order-dependent by construction, so it stays
- *  invisible until the suite is shuffled. `document` is the only object shared
- *  across tests here — every other listener dies with its container. */
-const consoleErrorMock = vi.fn();
-
-afterEach(() => {
-  document.addEventListener = realAddEventListener;
+ *  tests never call. A test ending mid-capture leaves a live handler bound to a
+ *  container nobody can reach: it answers the *next* test's `capture()`, consumes
+ *  the outcome that test queued on `emitMock`, and strands the container being
+ *  asserted on. `document` cannot be re-imported, so its listeners are tracked.
+ *
+ *  `general.ts` also keeps `sessionAwaitingRelease` at module scope. A test whose
+ *  `audioDiscard` rejects non-decisively leaves it set, and the next render reads
+ *  it and issues a discard nobody asked for. That one is closed by re-importing
+ *  the module per test rather than by undoing anything. */
+async function undoWhatTheTestLeftBehind(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  vi.restoreAllMocks();
+  delete (document as Partial<Document>).addEventListener;
   while (addedDocumentListeners.length) {
     const [type, listener, options] = addedDocumentListeners.pop()!;
     document.removeEventListener(type, listener, options);
   }
-});
+}
 
-beforeEach(() => {
+const consoleErrorMock = vi.fn();
+
+afterEach(undoWhatTheTestLeftBehind);
+
+beforeEach(async () => {
+  vi.resetModules();
+  ({ renderGeneral } = await import("./general"));
   document.addEventListener = ((...args: DocumentListener) => {
     addedDocumentListeners.push(args);
     realAddEventListener(...args);
