@@ -13,8 +13,7 @@ Two modules deliberately break that rule:
   `app.stt`, `app.llm` and `app.embeddings`. It sits *above* every package
   rather than beneath them, and lives here only because that is where callers
   already look for `settings`. See ADR 044.
-- `router.py` serves the operational endpoints (`/health`, `/config`,
-  `/shutdown`) and reads the active STT provider to report it.
+- `router.py` serves the operational endpoints (`/health`, `/shutdown`).
 
 Until spec 076 this package also held the transcript store, the user
 preferences and four HTTP routers, which made it simultaneously above and below
