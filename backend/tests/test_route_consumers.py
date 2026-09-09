@@ -8,13 +8,21 @@ the other half of the pair -- it reports an ``api`` member with no caller, never
 a backend route with no client. This module closes the remaining half. ADR 054
 records the design and its rejected alternatives.
 
-**What it sees.** Every route registered on ``app.main.app`` whose endpoint is
-not defined inside FastAPI itself, matched by path against the string and
-template literals scanned out of ``src/api.ts``. Paths arrive from FastAPI with
-every router prefix already applied, which is why the gate lives on the Python
-side: prefixes are declared both at ``app.include_router(...)`` and on
-``APIRouter(prefix=...)``, so reading decorator strings would yield the wrong
-path for six of the seven routers.
+**What it sees.** Every path in the OpenAPI schema ``app.main.app`` serves,
+matched against the string and template literals scanned out of ``src/api.ts``.
+Paths arrive from the schema with every router prefix already applied, which is
+why the gate lives on the Python side: prefixes are declared both at
+``app.include_router(...)`` and on ``APIRouter(prefix=...)``, so reading
+decorator strings would yield the wrong path for six of the seven routers.
+
+**Why the schema rather than ``app.routes``.** Walking ``app.routes`` reads a
+private structure, and it moved: a FastAPI newer than the one installed here
+stopped flattening ``include_router`` into that list and nests the children
+inside an ``_IncludedRouter`` wrapper, so the walk found four routes on CI and
+thirty locally. ``app.openapi()`` is the public, documented surface the
+application itself serves and does not depend on how routes are stored. The
+unpinned ``fastapi>=0.115.0`` requirement that let local and CI diverge is
+filed as JS-141.
 
 **What it cannot see, stated rather than implied.**
 
@@ -24,6 +32,12 @@ path for six of the seven routers.
   invisible. ``src/api.ts`` puts the verb in three different positions relative
   to the path, so every pairing rule covering all three is positional and
   approximate.
+* **A static literal segment standing in a parameter position.** ``/history/staats``
+  matches ``/history/{entry_id}`` and keeps it alive. That is not a defect to
+  be fixed: such a request is structurally valid and the route really would
+  answer it, so nothing here can know the segment was a typo rather than an
+  identifier. An interpolated segment is the opposite case and is *not*
+  permitted to stand in for a static one -- see ``paths_match``.
 * **A path the client never spells as a literal.** One assembled by
   concatenation makes its route look dead -- a loud failure toward an exemption
   rather than a silent pass.
@@ -31,6 +45,19 @@ path for six of the seven routers.
   ``src/api.ts``.** knip does not report unexported symbols and
   ``tsconfig.json`` sets ``strict`` without ``noUnusedLocals``, so nothing in
   the repository would report such a helper.
+* **A client reaching the backend by a mechanism outside
+  ``CLIENT_REQUEST_OPENERS``.** That tuple is what
+  ``test_api_ts_is_the_whole_client_surface`` looks for, and a transport nobody
+  listed there -- a future ``navigator.sendBeacon``, say -- would let a second
+  client surface grow outside ``src/api.ts`` unseen, and every route it alone
+  consumes would be reported dead.
+* **Two literals collapsing to one path.** Whether a route is consumed is
+  decided per literal, and the caller-less members of
+  ``CLIENT_MEMBERS_WITHOUT_CALLER`` are excluded by the member that spells
+  them, not by the path they name. A dead member and a live one may therefore
+  address the same route, and the live one keeps it alive -- which is the
+  point. What stays invisible is the reverse: a route whose only live literal
+  is a coincidence of query-string trimming.
 
 **Why every file it reads is named explicitly.** ``backend/build/`` and
 ``backend/.venv-build/Lib/site-packages/app/`` hold stale full copies of
@@ -44,8 +71,11 @@ is the same constraint ``test_cross_language_contracts.py`` records.
 
 from __future__ import annotations
 
+import ast
+import functools
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 from app.main import app
 
@@ -59,6 +89,8 @@ APP_DIR = REPO_ROOT / "backend" / "app"
 
 INTERPOLATION_WILDCARD = "\x00interpolation\x00"
 
+HTTP_VERB_DECORATORS = frozenset({"get", "post", "put", "delete", "patch", "head", "options"})
+
 CONSUMED_OUTSIDE_TYPESCRIPT: dict[str, tuple[tuple[Path, str], ...]] = {
     "/shutdown": ((BACKEND_RS, r'format!\("http://127\.0\.0\.1:\{\}/shutdown", PORT\)'),),
 }
@@ -66,15 +98,15 @@ CONSUMED_OUTSIDE_TYPESCRIPT: dict[str, tuple[tuple[Path, str], ...]] = {
 regular expression that file must still match.
 
 A regular expression rather than a substring search: ``/shutdown`` also appears
-in doc comments in the same Rust file (``src-tauri/src/backend.rs:972``,
-``:990``) that call nothing, so a substring search would pass on a file whose
-only real call site had been deleted. This is the declared-sites shape
-``test_cross_language_contracts.py`` uses.
+in doc comments in the same Rust file that call nothing, so a substring search
+would pass on a file whose only real call site had been deleted. This is the
+declared-sites shape ``test_cross_language_contracts.py`` uses.
 
-``/health`` needs no entry despite its Rust (``src-tauri/src/backend.rs:838``)
-and Python (``backend/scripts/smoke_sidecar.py:94``) consumers, because
-``src/api.ts:644`` already calls it -- and an entry here whose route turns out
-to have a client literal after all is reported as redundant below.
+``/health`` needs no entry despite its Rust and Python consumers
+(``src-tauri/src/backend.rs``, ``backend/scripts/smoke_sidecar.py``), because
+the ``health`` member of ``src/api.ts`` already calls it -- and an entry here
+whose route turns out to have a client literal after all is reported as
+redundant below.
 """
 
 UNCONSUMED_PENDING_A_DECISION: dict[str, str] = {
@@ -116,82 +148,176 @@ to the route each one names.
 
 Both members spell their path in ``src/api.ts``, so a literal scan alone would
 certify their routes as live while the neighbouring gate calls their only
-callers dead. Their routes are subtracted from the consumed set before the main
-assertion runs, and the key set is asserted equal to the array read out of
-``src/api-surface.test.ts`` so the two gates cannot drift apart.
+callers dead. The exclusion is by member rather than by path: a literal is
+dropped because of where it sits, so a second, genuinely called member spelling
+the same path still consumes the route and the entry in
+``UNCONSUMED_PENDING_A_DECISION`` fires as it advertises. The key set is
+asserted equal to the array read out of ``src/api-surface.test.ts`` so the two
+gates cannot drift apart.
 """
 
-ROUTER_DECORATOR = re.compile(r"@router\.(?:get|post|put|delete|patch)\(")
+CLIENT_REQUEST_OPENERS = ("fetch(", "EventSource(", "WebSocket(", "XMLHttpRequest(")
+"""Every way a module in ``src/`` can open a request to the backend.
+
+``fetch(`` alone would miss ``src/api.ts``'s own level-stream client if it were
+ever rewritten onto ``EventSource``, which is the natural transport for the
+``text/event-stream`` that route serves, and any module that grew such a client
+outside ``src/api.ts`` would then be invisible to the scope check below.
+"""
+
+BACKEND_ADDRESS_TOKENS = ("BACKEND_BASE_URL", "127.0.0.1", "localhost")
+
+NON_PRODUCTION_TYPESCRIPT_SUFFIXES = (".test.ts", ".test-helper.ts", ".d.ts")
+"""Suffixes that mark a TypeScript module as something other than production
+code.
+
+``src/api-surface.test.ts`` names only ``.test.ts``, which makes
+``src/settings/history-page-stub.test-helper.ts`` and any future ``*.d.ts``
+production modules by its rule. This tuple is a superset of that rule, and
+``test_the_production_module_rule_covers_the_typescript_gate_s_own`` pins the
+relationship so the two gates cannot end up disagreeing about which files count.
+"""
 
 TYPESCRIPT_ALLOWLIST = re.compile(
     r"const\s+ALLOWED_WITHOUT_PRODUCTION_CALLER\s*=\s*\[(.*?)\]",
     re.DOTALL,
 )
 
+TYPESCRIPT_PRODUCTION_RULE = re.compile(
+    r"function\s+productionSources\b.*?"
+    r"!entry\.endsWith\(\"\.ts\"\)"
+    r"((?:\s*\|\|\s*entry\.endsWith\(\"[^\"]+\"\))+)",
+    re.DOTALL,
+)
 
-def application_route_registrations() -> list[tuple[str, frozenset[str]]]:
-    """Every route registration whose endpoint is defined under the ``app``
-    package, as a path and the HTTP verbs that registration carries.
+API_MEMBER_KEY = re.compile(r"^  ([A-Za-z_$][\w$]*)\s*:", re.MULTILINE)
 
-    Origin, not a name list: FastAPI's own ``/docs``, ``/docs/oauth2-redirect``,
-    ``/redoc`` and ``/openapi.json`` are defined inside ``fastapi`` and are
-    dropped by the rule, so a fifth built-in needs no edit here.
 
-    The rule names what is dropped rather than what is kept, and that direction
-    is load-bearing. Keeping endpoints whose ``__module__`` starts with ``app.``
-    assumes the application is imported under that exact top-level name; under
-    an editable install on CI it need not be, and the whole set then filters
-    away, leaving every assertion below trivially true over nothing. Dropping
-    FastAPI's own is the half that is certain wherever the package is imported
-    from.
+class RouterDecorator(NamedTuple):
+    """One ``@router.<attribute>(...)`` decorator found under ``backend/app``."""
 
-    One entry per registration rather than per path, because the decorator
-    cross-check below counts declaration sites: two registrations of the same
-    path collapse into one key and would leave that check reading a count it
-    could not distinguish from a missing route.
+    module: str
+    attribute: str
+    keywords: tuple[str, ...]
+
+
+class ScannedSource(NamedTuple):
+    """A TypeScript source read once: its literals, its code, and where it ended."""
+
+    literals: tuple[tuple[int, str], ...]
+    code_only: str
+    final_mode: str
+
+
+@functools.cache
+def application_schema_paths() -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Every path in the served OpenAPI schema, with the verbs declared on it.
+
+    ``app.openapi()`` is FastAPI's public surface and applies every router
+    prefix itself, so this needs no knowledge of how the application wires its
+    routers together. A path item may also carry non-operation keys
+    (``parameters``, ``summary``, ``$ref``), which is why the verbs are filtered
+    against ``HTTP_VERB_DECORATORS`` rather than taken as the whole key set.
     """
-    registrations: list[tuple[str, frozenset[str]]] = []
-    for route in app.routes:
-        methods = getattr(route, "methods", None)
-        endpoint = getattr(route, "endpoint", None)
-        if methods is None or endpoint is None:
-            continue
-        if getattr(endpoint, "__module__", "").startswith("fastapi."):
-            continue
-        registrations.append((route.path, frozenset(methods - {"HEAD", "OPTIONS"})))
-    return registrations
+    schema = app.openapi()
+    return tuple(
+        (path, tuple(sorted(key.upper() for key in item if key in HTTP_VERB_DECORATORS)))
+        for path, item in sorted(schema.get("paths", {}).items())
+    )
 
 
-def application_routes() -> dict[str, frozenset[str]]:
-    """Application route paths, each mapped to every verb registered on it."""
-    routes: dict[str, set[str]] = {}
-    for path, verbs in application_route_registrations():
-        routes.setdefault(path, set()).update(verbs)
-    return {path: frozenset(verbs) for path, verbs in routes.items()}
+@functools.cache
+def application_paths() -> frozenset[str]:
+    """The application's route paths."""
+    return frozenset(path for path, _ in application_schema_paths())
 
 
-def scan_string_literals(source: str) -> tuple[list[str], str]:
-    """Every string, single-quoted and template literal in ``source``, plus the
+@functools.cache
+def router_decorators() -> tuple[RouterDecorator, ...]:
+    """Every ``@router.<attribute>(...)`` decorator declared under ``backend/app``.
+
+    Read with ``ast`` rather than a text pattern: a decorator spelled inside a
+    docstring is not a node, and the attribute name is available exactly rather
+    than as whatever a regular expression was told to look for -- which is how
+    ``@router.api_route`` becomes visible instead of silently uncounted.
+    """
+    found: list[RouterDecorator] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                call = decorator if isinstance(decorator, ast.Call) else None
+                target = call.func if call is not None else decorator
+                if not isinstance(target, ast.Attribute):
+                    continue
+                if not isinstance(target.value, ast.Name) or target.value.id != "router":
+                    continue
+                keywords = tuple(
+                    keyword.arg
+                    for keyword in (call.keywords if call is not None else [])
+                    if keyword.arg is not None
+                )
+                found.append(
+                    RouterDecorator(
+                        module=path.relative_to(REPO_ROOT).as_posix(),
+                        attribute=target.attr,
+                        keywords=keywords,
+                    )
+                )
+    return tuple(found)
+
+
+def _starts_a_regular_expression(previous: str) -> bool:
+    """Whether a ``/`` following ``previous`` opens a regex rather than divides.
+
+    The full JavaScript rule needs the parser's state; this is the practical
+    half of it -- a regex can only begin where a value can, so it is division
+    exactly when the last thing before it could end one.
+    """
+    return previous == "" or previous in "([{,;:=!&|?+-*%^~<>"
+
+
+def scan_source(source: str) -> ScannedSource:
+    """Every string, single-quoted and template literal in ``source`` with its
+    offset, the source with comments and literal contents blanked out, and the
     mode the scanner ended in.
 
-    Comments are skipped *before* quotes are honoured. ``src/api.ts`` carries
-    prose apostrophes inside ``/** ... */`` blocks (``Tauri's``, ``ADR 049's``),
-    and a scanner that enters single-quote mode on one of them desynchronises
-    and silently loses every literal after it.
+    Comments and regular-expression literals are skipped *before* quotes are
+    honoured. ``src/api.ts`` carries prose apostrophes inside ``/** ... */``
+    blocks (``Tauri's``, ``ADR 049's``), and a character class such as
+    ``/['"]/g`` carries them in code; a scanner that enters quote mode on either
+    desynchronises and silently loses literals -- and with an even number of
+    quote characters it resynchronises further down, so the file still reads to
+    its end and the loss leaves no trace.
 
     A template literal is read whole, interpolations included: its contents are
     matched as a pattern later rather than parsed here, so a ``{``, ``)`` or
     ``;`` inside one is data. An escaped character inside any literal is
     consumed as a pair, so ``\\"`` does not end the literal.
 
+    The blanked source preserves offsets and line structure, so a pattern run
+    over it -- the ``api`` member keys, here -- cannot match inside a comment or
+    a string. It is the shape ``blankCommentsAndStrings`` in
+    ``src/api-surface.test.ts`` uses for the same reason.
+
     The returned mode is the precise statement of "the scanner read the whole
     file rather than a prefix": anything but ``code`` means an unterminated
     literal or comment swallowed the tail.
     """
-    literals: list[str] = []
+    literals: list[tuple[int, str]] = []
+    blanked: list[str] = []
     current: list[str] = []
+    start = 0
     mode = "code"
+    previous_code_char = ""
     index = 0
+
+    def blank(count: int) -> None:
+        for offset in range(count):
+            char = source[index + offset]
+            blanked.append("\n" if char == "\n" else " ")
 
     while index < len(source):
         char = source[index]
@@ -200,55 +326,122 @@ def scan_string_literals(source: str) -> tuple[list[str], str]:
         if mode == "code":
             if char == "/" and following == "/":
                 mode = "line-comment"
+                blank(2)
                 index += 2
             elif char == "/" and following == "*":
                 mode = "block-comment"
+                blank(2)
                 index += 2
+            elif char == "/" and _starts_a_regular_expression(previous_code_char):
+                mode = "regex"
+                blank(1)
+                index += 1
             elif char in ("'", '"', "`"):
                 mode = char
                 current = []
+                start = index
+                blank(1)
                 index += 1
             else:
+                blanked.append(char)
+                if not char.isspace():
+                    previous_code_char = char
                 index += 1
             continue
 
         if mode == "line-comment":
             if char == "\n":
                 mode = "code"
+            blank(1)
             index += 1
             continue
 
         if mode == "block-comment":
             if char == "*" and following == "/":
                 mode = "code"
+                blank(2)
                 index += 2
             else:
+                blank(1)
                 index += 1
+            continue
+
+        if mode == "regex":
+            if char == "\\":
+                blank(2)
+                index += 2
+                continue
+            if char == "/":
+                mode = "code"
+                previous_code_char = "/"
+            blank(1)
+            index += 1
             continue
 
         if char == "\\":
             current.append(source[index : index + 2])
+            blank(2)
             index += 2
             continue
         if char == mode:
-            literals.append("".join(current))
+            literals.append((start, "".join(current)))
             mode = "code"
+            previous_code_char = char
+            blank(1)
             index += 1
             continue
         current.append(char)
+        blank(1)
         index += 1
 
-    return literals, mode
+    return ScannedSource(tuple(literals), "".join(blanked), mode)
 
 
-def client_path_literals(source: str) -> set[str]:
-    """The literals from ``source`` that look like a backend path.
+def _is_backend_path(value: str) -> bool:
+    """Whether a literal looks like a backend path.
 
     A leading ``/`` and not ``//``: relative imports start with ``.`` and URLs
     with ``h``, so the filter yields no false candidates on ``src/api.ts``.
     """
-    literals, _ = scan_string_literals(source)
-    return {value for value in literals if value.startswith("/") and not value.startswith("//")}
+    return value.startswith("/") and not value.startswith("//")
+
+
+def _owning_member(members: tuple[tuple[int, str], ...], offset: int) -> str | None:
+    """The ``api`` member a literal at ``offset`` belongs to, if any."""
+    owner: str | None = None
+    for start, name in members:
+        if start > offset:
+            break
+        owner = name
+    return owner
+
+
+def client_path_literals(source: str, dead_members: frozenset[str] = frozenset()) -> set[str]:
+    """The literals from ``source`` that look like a backend path, excluding
+    those spelled inside a member of ``dead_members``.
+
+    A literal is attributed to the nearest preceding two-space-indented object
+    key in the blanked source, which is how every member of ``api`` is written.
+    The attribution is what makes the exclusion per literal rather than per
+    path: a route named by both a caller-less member and a live one stays
+    consumed, so ``UNCONSUMED_PENDING_A_DECISION`` still fires when its route
+    acquires a real caller.
+    """
+    scanned = scan_source(source)
+    members = tuple(
+        (match.start(), match.group(1)) for match in API_MEMBER_KEY.finditer(scanned.code_only)
+    )
+    return {
+        value
+        for offset, value in scanned.literals
+        if _is_backend_path(value) and _owning_member(members, offset) not in dead_members
+    }
+
+
+@functools.cache
+def api_ts_source() -> str:
+    """``src/api.ts``, read once."""
+    return API_TS.read_text(encoding="utf-8")
 
 
 def normalise_path(path: str) -> tuple[str, ...]:
@@ -262,65 +455,67 @@ def normalise_path(path: str) -> tuple[str, ...]:
     return tuple(collapsed.split("?", 1)[0].split("/"))
 
 
+def _is_parameter(route_segment: str) -> bool:
+    """Whether a route segment is a FastAPI ``{param}`` placeholder."""
+    return route_segment.startswith("{") and route_segment.endswith("}")
+
+
 def paths_match(route_path: str, literal: str) -> bool:
     """Whether ``literal`` addresses ``route_path``.
 
     Segment by segment over lists of equal length. A FastAPI ``{param}``
-    placeholder matches any literal segment, and an interpolation inside a
-    literal segment matches any run of characters *within* that segment -- the
-    two rules are independent, since either side alone can be the variable one.
-    This resolves ``/history/${id}`` against ``/history/{entry_id}`` and
-    ``/words/top?lang=${lang}`` against ``/words/top``.
+    placeholder matches any literal segment, and a literal segment carrying an
+    interpolation matches a ``{param}`` placeholder and nothing else.
 
-    The interpolation is a bounded wildcard rather than a whole-segment one on
-    purpose. Letting a segment that merely contains an interpolation match
-    anything makes ``/history?limit=${limit}&…`` certify ``/shutdown`` as
-    consumed, which is a silent false negative in the one direction this gate
-    exists to catch.
+    That second rule is the whole of the gate's soundness. A segment containing
+    a value the client computes at run time cannot be claimed to address a
+    static route: letting ``/history/${id}`` stand for any ``/history/<x>``
+    certified ``/history/search``, ``/history/stats`` and every future sibling
+    as consumed on the strength of one unrelated literal -- a silent false
+    negative in the one direction this gate exists to catch. The reverse
+    direction stays permissive on purpose and is stated in the module docstring:
+    a static literal in a parameter position really does reach that route.
     """
     route_segments = normalise_path(route_path)
     literal_segments = normalise_path(literal)
     if len(route_segments) != len(literal_segments):
         return False
     return all(
-        (route_segment.startswith("{") and route_segment.endswith("}"))
-        or _segment_matches(route_segment, literal_segment)
+        _is_parameter(route_segment)
+        or (INTERPOLATION_WILDCARD not in literal_segment and route_segment == literal_segment)
         for route_segment, literal_segment in zip(route_segments, literal_segments)
     )
 
 
-def _segment_matches(route_segment: str, literal_segment: str) -> bool:
-    """Whether one path segment of a client literal addresses one route segment."""
-    if INTERPOLATION_WILDCARD not in literal_segment:
-        return route_segment == literal_segment
-    pattern = ".*".join(re.escape(part) for part in literal_segment.split(INTERPOLATION_WILDCARD))
-    return re.fullmatch(pattern, route_segment) is not None
+def routes_addressed_by(literal: str, paths: frozenset[str]) -> set[str]:
+    """The routes in ``paths`` that ``literal`` consumes.
 
-
-def consumed_routes() -> set[str]:
-    """Route paths a live client literal addresses.
-
-    The routes named by ``CLIENT_MEMBERS_WITHOUT_CALLER`` are subtracted: their
-    literals sit inside ``api`` members the neighbouring gate already reports as
-    having no production caller, so a literal there does not make a route live.
-
-    That subtraction is by path rather than per literal, which is a stated limit:
-    a second, genuinely called member whose literal collapsed to the same path as
-    a caller-less one would be subtracted with it, and the route would then demand
-    an allowlist entry it does not need. No path is reachable that way today --
-    each entry's path is addressed by exactly one literal -- and the failure is a
-    false alarm asking for a rule, never a route waved through.
+    An exact match wins outright. ``/history/search`` is a route in its own
+    right and also a structurally valid request to ``/history/{entry_id}``;
+    without this rule the literal that names the first would keep the second
+    alive as well, which is the parameter-position permissiveness leaking into
+    routes that have their own consumer question to answer.
     """
-    literals = client_path_literals(API_TS.read_text(encoding="utf-8"))
-    matched = {
-        path
-        for path in application_routes()
-        if any(paths_match(path, literal) for literal in literals)
-    }
-    return matched - set(CLIENT_MEMBERS_WITHOUT_CALLER.values())
+    literal_segments = normalise_path(literal)
+    exact = {path for path in paths if normalise_path(path) == literal_segments}
+    if exact:
+        return exact
+    return {path for path in paths if paths_match(path, literal)}
 
 
-def typescript_allowlist_members() -> list[str]:
+@functools.cache
+def consumed_routes() -> frozenset[str]:
+    """Route paths a live client literal addresses."""
+    paths = application_paths()
+    literals = client_path_literals(api_ts_source(), frozenset(CLIENT_MEMBERS_WITHOUT_CALLER))
+    consumed: set[str] = set()
+    for literal in literals:
+        consumed |= routes_addressed_by(literal, paths)
+    return frozenset(consumed)
+
+
+@functools.cache
+def typescript_allowlist_members() -> tuple[str, ...]:
     """``ALLOWED_WITHOUT_PRODUCTION_CALLER`` as declared in
     ``src/api-surface.test.ts``.
 
@@ -335,52 +530,58 @@ def typescript_allowlist_members() -> list[str]:
         f"{API_SURFACE_TEST_TS.name}. It was renamed or removed, and the mirror below "
         f"cannot check two gates agree while it cannot read one of them"
     )
-    return re.findall(r'"([^"]*)"', match.group(1))
+    return tuple(re.findall(r'"([^"]*)"', match.group(1)))
 
 
-def production_typescript_modules() -> dict[Path, str]:
-    """Every non-test TypeScript module under ``src/``, by path."""
-    return {
-        path: path.read_text(encoding="utf-8")
+@functools.cache
+def production_typescript_modules() -> tuple[tuple[Path, str], ...]:
+    """Every production TypeScript module under ``src/``, by path."""
+    return tuple(
+        (path, path.read_text(encoding="utf-8"))
         for path in sorted(SRC_DIR.rglob("*.ts"))
-        if not path.name.endswith(".test.ts")
-    }
+        if not path.name.endswith(NON_PRODUCTION_TYPESCRIPT_SUFFIXES)
+    )
+
+
+def _addresses_the_backend(source: str) -> bool:
+    """Whether a module opens a request to the backend at all, however it names
+    the host and whatever transport it uses.
+
+    ``BACKEND_BASE_URL`` alone would miss a module that hardcodes the host
+    instead of importing the constant -- the seam ``docs/style-guide.md`` already
+    names -- and that module's routes would be reported dead by this file.
+    """
+    return any(opener in source for opener in CLIENT_REQUEST_OPENERS) and any(
+        token in source for token in BACKEND_ADDRESS_TOKENS
+    )
 
 
 def test_the_scanner_reads_api_ts_to_its_end():
-    literals, final_mode = scan_string_literals(API_TS.read_text(encoding="utf-8"))
+    scanned = scan_source(api_ts_source())
 
-    assert final_mode == "code", (
-        f"the literal scanner ended {API_TS.name} in `{final_mode}` mode, so it read a "
-        f"prefix of the file and stopped. Every path literal after the cut is missing and "
-        f"every assertion in this module is silently incomplete"
+    assert scanned.final_mode == "code", (
+        f"the literal scanner ended {API_TS.name} in `{scanned.final_mode}` mode, so it "
+        f"read a prefix of the file and stopped. Every path literal after the cut is "
+        f"missing and every assertion in this module is silently incomplete"
     )
-    assert literals, f"the scanner found no string literals at all in {API_TS.name}"
+    assert scanned.literals, f"the scanner found no string literals at all in {API_TS.name}"
 
 
 def test_every_application_route_has_a_consumer():
-    routes = application_routes()
+    paths = application_paths()
 
-    endpoint_modules = sorted(
-        getattr(getattr(route, "endpoint", None), "__module__", "<no endpoint>")
-        for route in app.routes
-    )
-
-    assert routes, (
-        "app.main.app registered no application route at all, so every assertion in "
-        "this module is trivially true over an empty set. The enumeration rule in "
-        "application_route_registrations() no longer matches how this application is "
-        "imported here -- it is the gate that is broken, not the routes. "
-        f"app.routes holds {len(app.routes)} entries, of types "
-        f"{sorted({type(r).__name__ for r in app.routes})}, with endpoint modules "
-        f"{sorted(set(endpoint_modules))} "
-        f"and {sum(1 for r in app.routes if getattr(r, 'methods', None) is not None)} "
-        f"carrying a methods attribute. app.main was imported from "
+    assert paths, (
+        "app.main.app serves an OpenAPI schema with no paths at all, so every assertion "
+        "in this module is trivially true over an empty set. It is the gate that is "
+        "broken, not the routes. The schema holds "
+        f"{sorted(app.openapi().keys())} at the top level, app.routes holds "
+        f"{len(app.routes)} entries of types {sorted({type(r).__name__ for r in app.routes})}, "
+        f"and app.main was imported from "
         f"{getattr(__import__('app.main', fromlist=['__file__']), '__file__', '<unknown>')}"
     )
 
     unconsumed = (
-        set(routes)
+        set(paths)
         - consumed_routes()
         - set(CONSUMED_OUTSIDE_TYPESCRIPT)
         - set(UNCONSUMED_PENDING_A_DECISION)
@@ -397,12 +598,11 @@ def test_every_application_route_has_a_consumer():
 
 
 def test_every_client_literal_addresses_a_route():
-    routes = application_routes()
-    literals = client_path_literals(API_TS.read_text(encoding="utf-8"))
+    paths = application_paths()
     orphans = sorted(
         literal
-        for literal in literals
-        if not any(paths_match(path, literal) for path in routes)
+        for literal in client_path_literals(api_ts_source())
+        if not routes_addressed_by(literal, paths)
     )
 
     assert orphans == [], (
@@ -413,15 +613,13 @@ def test_every_client_literal_addresses_a_route():
 
 def test_the_route_set_matches_the_router_decorator_sites():
     decorator_sites = sum(
-        len(ROUTER_DECORATOR.findall(path.read_text(encoding="utf-8")))
-        for path in sorted(APP_DIR.rglob("*.py"))
+        1 for decorator in router_decorators() if decorator.attribute in HTTP_VERB_DECORATORS
     )
-
-    registered_verbs = sum(len(verbs) for _, verbs in application_route_registrations())
+    registered_verbs = sum(len(verbs) for _, verbs in application_schema_paths())
 
     assert decorator_sites == registered_verbs, (
         f"{decorator_sites} `@router.<verb>` decorator sites under backend/app do not "
-        f"account for the {registered_verbs} verbs app.main.app registers. A route "
+        f"account for the {registered_verbs} verbs app.main.app publishes. A route "
         f"reached this application by some other mechanism -- registered directly on the "
         f"app object, "
         f"or added with app.add_api_route -- and this module's rule has to be extended to "
@@ -429,9 +627,38 @@ def test_the_route_set_matches_the_router_decorator_sites():
     )
 
 
+def test_no_router_decorator_registers_verbs_this_module_cannot_count():
+    uncountable = sorted(
+        f"{decorator.module}: @router.{decorator.attribute}"
+        for decorator in router_decorators()
+        if decorator.attribute not in HTTP_VERB_DECORATORS
+    )
+
+    assert uncountable == [], (
+        f"these decorators register routes without being one verb each: {uncountable}. "
+        f"`@router.api_route(methods=[...])` is the shape that does it -- it adds as many "
+        f"verbs as its list holds while the count above sees a single site, so the "
+        f"decorator cross-check would read a mismatch it cannot explain"
+    )
+
+
+def test_no_route_hides_itself_from_the_schema():
+    hidden = sorted(
+        f"{decorator.module}: @router.{decorator.attribute}"
+        for decorator in router_decorators()
+        if "include_in_schema" in decorator.keywords
+    )
+
+    assert hidden == [], (
+        f"these routes pass include_in_schema to their decorator: {hidden}. This module "
+        f"enumerates routes from the served OpenAPI schema, so a route excluded from it "
+        f"is invisible here and would be exempt from the consumer check without anything "
+        f"saying so"
+    )
+
+
 def test_no_declared_outside_consumer_has_outlived_its_route():
-    routes = application_routes()
-    stale = sorted(path for path in CONSUMED_OUTSIDE_TYPESCRIPT if path not in routes)
+    stale = sorted(path for path in CONSUMED_OUTSIDE_TYPESCRIPT if path not in application_paths())
 
     assert stale == [], (
         f"these CONSUMED_OUTSIDE_TYPESCRIPT entries name routes that no longer exist: "
@@ -464,8 +691,9 @@ def test_no_declared_outside_consumer_is_redundant():
 
 
 def test_no_pending_decision_entry_has_outlived_its_route():
-    routes = application_routes()
-    stale = sorted(path for path in UNCONSUMED_PENDING_A_DECISION if path not in routes)
+    stale = sorted(
+        path for path in UNCONSUMED_PENDING_A_DECISION if path not in application_paths()
+    )
 
     assert stale == [], (
         f"these UNCONSUMED_PENDING_A_DECISION entries name routes that no longer exist: "
@@ -498,39 +726,57 @@ def test_the_caller_less_client_members_mirror_the_typescript_allowlist():
 
 
 def test_every_caller_less_client_member_names_a_real_route():
-    routes = application_routes()
+    paths = application_paths()
     stale = sorted(
         f"{member} -> {path}"
         for member, path in CLIENT_MEMBERS_WITHOUT_CALLER.items()
-        if path not in routes
+        if path not in paths
     )
 
     assert stale == [], (
         f"these CLIENT_MEMBERS_WITHOUT_CALLER entries name routes that no longer exist: "
-        f"{stale}. The mapping subtracts these paths from the consumed set, so a stale one "
-        f"subtracts nothing and hides its member's real route"
+        f"{stale}. The mapping excludes these members' literals from the consumed set, so "
+        f"a stale one excludes nothing and hides its member's real route"
     )
 
 
-BACKEND_ADDRESS_TOKENS = ("BACKEND_BASE_URL", "127.0.0.1", "localhost")
+def test_every_caller_less_client_member_is_found_in_api_ts():
+    scanned = scan_source(api_ts_source())
+    declared = {match.group(1) for match in API_MEMBER_KEY.finditer(scanned.code_only)}
+    missing = sorted(set(CLIENT_MEMBERS_WITHOUT_CALLER) - declared)
+
+    assert missing == [], (
+        f"these CLIENT_MEMBERS_WITHOUT_CALLER members are not spelled as an object key in "
+        f"src/api.ts: {missing}. Their literals are excluded by the member that owns "
+        f"them, so a member this file cannot locate excludes nothing and its route is "
+        f"certified live by a caller the neighbouring gate reports as dead"
+    )
 
 
-def _addresses_the_backend(source: str) -> bool:
-    """Whether a module reaches the backend at all, however it names the host.
+def test_the_production_module_rule_covers_the_typescript_gate_s_own():
+    source = API_SURFACE_TEST_TS.read_text(encoding="utf-8")
+    match = TYPESCRIPT_PRODUCTION_RULE.search(source)
 
-    ``BACKEND_BASE_URL`` alone would miss a module that hardcodes the host
-    instead of importing the constant -- the seam ``docs/style-guide.md`` already
-    names -- and that module's routes would be reported dead by this file.
-    """
-    return "fetch(" in source and any(
-        token in source for token in BACKEND_ADDRESS_TOKENS
+    assert match is not None, (
+        f"no `!entry.endsWith(\".ts\") || entry.endsWith(...)` rule was found inside "
+        f"productionSources() in {API_SURFACE_TEST_TS.name}. That function is this "
+        f"repository's definition of a production module and this one cannot be checked "
+        f"against it unread"
+    )
+    excluded = re.findall(r'entry\.endsWith\("([^"]+)"\)', match.group(1))
+    unmirrored = sorted(set(excluded) - set(NON_PRODUCTION_TYPESCRIPT_SUFFIXES))
+
+    assert unmirrored == [], (
+        f"src/api-surface.test.ts excludes {unmirrored} from its production modules and "
+        f"NON_PRODUCTION_TYPESCRIPT_SUFFIXES does not, so this gate would scan a file that "
+        f"one calls a test. The two must not disagree about the same file set"
     )
 
 
 def test_api_ts_is_the_whole_client_surface():
     others = sorted(
         path.relative_to(REPO_ROOT).as_posix()
-        for path, source in production_typescript_modules().items()
+        for path, source in production_typescript_modules()
         if path != API_TS and _addresses_the_backend(source)
     )
 
@@ -572,6 +818,23 @@ the other to close against, and the tail would resynchronise -- so disabling
 either branch would leave every assertion green.
 """
 
+SYNTHETIC_REGEX_LITERAL = "\n".join(
+    [
+        "const CONTROL = /['\"]/g;",
+        'const path = "/plain";',
+        "const TRAILING = /\"'/;",
+    ]
+)
+"""A character class holding both quote characters, a real literal after it, and
+a second regex closing the apostrophe count.
+
+Two apostrophes rather than one on purpose: a scanner with no regex state opens
+a single-quoted literal on the first and closes it on the second, so it ends in
+``code`` mode having read the whole file, and ``final_mode`` reports nothing
+wrong. The only visible damage is that ``/plain`` was swallowed as literal
+content, which is exactly the silent loss this case pins.
+"""
+
 SYNTHETIC_LITERAL_SHAPES = "\n".join(
     [
         "const paths = {",
@@ -603,26 +866,66 @@ synchronised, and an unclosed quote would swallow these paths before the filter
 ever saw them -- leaving the assertion green for the wrong reason.
 """
 
+SYNTHETIC_DEAD_MEMBER_ONLY = "\n".join(
+    [
+        "export const api = {",
+        '  sttLocalLoad: () => request("POST", "/stt/local/load", undefined, UNRECONCILED),',
+        "};",
+    ]
+)
+"""The route named only by the member ``src/api-surface.test.ts`` calls dead."""
+
+SYNTHETIC_DEAD_MEMBER_AND_A_LIVE_ONE = "\n".join(
+    [
+        "export const api = {",
+        '  sttLocalLoad: () => request("POST", "/stt/local/load", undefined, UNRECONCILED),',
+        "",
+        "  loadTheEngineFromTheWidget: () =>",
+        '    request("POST", "/stt/local/load", undefined, UNRECONCILED),',
+        "};",
+    ]
+)
+"""The same route, named a second time by a member with a real caller.
+
+This is the shape ``UNCONSUMED_PENDING_A_DECISION`` advertises it will catch:
+the entry must stop being pending anything the moment a live client addresses
+its route, and it cannot do that while the exclusion is applied to the path
+rather than to the member that spells it.
+"""
+
 
 def test_a_prose_apostrophe_in_a_line_comment_does_not_desynchronise_the_scanner():
-    literals, final_mode = scan_string_literals(SYNTHETIC_LINE_COMMENT)
+    scanned = scan_source(SYNTHETIC_LINE_COMMENT)
 
-    assert final_mode == "code", (
-        f"an apostrophe inside a `//` comment left the scanner in `{final_mode}` mode. "
-        f"On src/api.ts that means silently losing every path literal after the first "
-        f"piece of prose that contains one"
+    assert scanned.final_mode == "code", (
+        f"an apostrophe inside a `//` comment left the scanner in `{scanned.final_mode}` "
+        f"mode. On src/api.ts that means silently losing every path literal after the "
+        f"first piece of prose that contains one"
     )
-    assert literals == ["/plain"]
+    assert [value for _, value in scanned.literals] == ["/plain"]
 
 
 def test_a_prose_apostrophe_in_a_block_comment_does_not_desynchronise_the_scanner():
-    literals, final_mode = scan_string_literals(SYNTHETIC_BLOCK_COMMENT)
+    scanned = scan_source(SYNTHETIC_BLOCK_COMMENT)
 
-    assert final_mode == "code", (
-        f"an apostrophe inside a `/** */` block left the scanner in `{final_mode}` mode. "
-        f"src/api.ts carries `Tauri's` and `ADR 049's` in exactly such blocks"
+    assert scanned.final_mode == "code", (
+        f"an apostrophe inside a `/** */` block left the scanner in `{scanned.final_mode}` "
+        f"mode. src/api.ts carries `Tauri's` and `ADR 049's` in exactly such blocks"
     )
-    assert literals == ["/plain"]
+    assert [value for _, value in scanned.literals] == ["/plain"]
+
+
+def test_a_quote_inside_a_regex_literal_does_not_desynchronise_the_scanner():
+    scanned = scan_source(SYNTHETIC_REGEX_LITERAL)
+
+    assert [value for _, value in scanned.literals] == ["/plain"], (
+        f"a quote character inside a regular-expression literal was honoured as the start "
+        f"of a string, and the scanner read {[value for _, value in scanned.literals]} "
+        f"instead. With an even number of such characters it resynchronises further down, "
+        f"so the file still reads to its end and every literal in between is lost with "
+        f"nothing reporting it"
+    )
+    assert scanned.final_mode == "code"
 
 
 def test_a_path_named_only_in_a_comment_is_not_a_consumer():
@@ -644,21 +947,54 @@ def test_the_scanner_reads_every_literal_shape_whole():
     }
 
 
+def test_a_literal_inside_a_caller_less_member_is_not_a_consumer():
+    assert client_path_literals(
+        SYNTHETIC_DEAD_MEMBER_ONLY, frozenset(CLIENT_MEMBERS_WITHOUT_CALLER)
+    ) == set(), (
+        "the literal spelled inside a member src/api-surface.test.ts reports as having no "
+        "production caller was counted as a consumer, which would certify its route live "
+        "while the only code naming it is dead"
+    )
+
+
+def test_a_second_live_member_revives_a_route_a_caller_less_one_names():
+    assert client_path_literals(
+        SYNTHETIC_DEAD_MEMBER_AND_A_LIVE_ONE, frozenset(CLIENT_MEMBERS_WITHOUT_CALLER)
+    ) == {"/stt/local/load"}, (
+        "a route named by both a caller-less member and a live one was still treated as "
+        "unconsumed. UNCONSUMED_PENDING_A_DECISION advertises that it fails when its route "
+        "acquires a consumer, and it cannot do that while the exclusion is by path"
+    )
+
+
 def test_an_interpolated_segment_matches_a_route_parameter():
     assert paths_match("/history/{entry_id}", "/history/${entry.id}")
     assert not paths_match("/history/{entry_id}", "/history/${entry.id}/extra")
+
+
+def test_an_interpolated_segment_does_not_certify_a_static_sibling_route():
+    siblings = frozenset({"/history/{entry_id}", "/history/search", "/history/canary-dead"})
+
+    assert routes_addressed_by("/history/${entry.id}", siblings) == {"/history/{entry_id}"}, (
+        "an interpolated segment matched static sibling routes. One literal spelling "
+        "`/history/${id}` then certifies /history/search, /history/stats and every route "
+        "added under /history as consumed, which is the silent false negative this gate "
+        "exists to catch"
+    )
+    assert not paths_match("/audio/level-stream", "/audio/${kind}-stream")
 
 
 def test_a_route_parameter_matches_a_plain_literal_segment():
     assert paths_match("/history/{entry_id}", "/history/42")
 
 
-def test_an_interpolation_matches_a_fixed_route_segment():
-    assert paths_match("/audio/level-stream", "/audio/${kind}-stream")
-    assert not paths_match("/audio/level-stream-extra", "/audio/${kind}-stream"), (
-        "an interpolated segment matched a route segment it is only a prefix of. The "
-        "wildcard has to span the whole segment, or every route sharing a prefix with a "
-        "consumed one is certified live by association"
+def test_an_exact_literal_consumes_only_the_route_it_names():
+    routes = frozenset({"/history/search", "/history/{entry_id}"})
+
+    assert routes_addressed_by("/history/search", routes) == {"/history/search"}, (
+        "a literal naming a static route also kept its parameterised sibling alive. Every "
+        "static route under /history would then consume /history/{entry_id}, and that "
+        "route's own consumer question could never be asked"
     )
 
 
