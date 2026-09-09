@@ -691,5 +691,5 @@ def test_selftest_fails_a_bundle_whose_sqlite_predates_row_values(monkeypatch):
 
 
 def test_selftest_accepts_this_environments_sqlite():
-    assert sqlite3.sqlite_version_info >= vector_store.ROW_VALUE_MIN_SQLITE_VERSION
+    assert sqlite3.sqlite_version_info >= history.ROW_VALUE_MIN_SQLITE_VERSION
     assert vector_store.selftest() == (True, "ok")

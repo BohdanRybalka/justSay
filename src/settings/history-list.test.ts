@@ -209,6 +209,125 @@ describe("createHistoryList — the client echoes cursors and never builds one",
   });
 });
 
+/**
+ * A response the list is still waiting on. `release` hands it the page, so a test
+ * can drive what happens while a request is outstanding.
+ */
+function deferredPage(): {
+  promise: Promise<HistoryPageResponse>;
+  release: (page: HistoryPageResponse) => void;
+} {
+  let release: (page: HistoryPageResponse) => void = () => {};
+  const promise = new Promise<HistoryPageResponse>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+describe("createHistoryList — one request at a time decides the rows and the cursor", () => {
+  it("treats a response with no next_cursor field as the last page", async () => {
+    const h = harness();
+    queueResponses(
+      { entries: [buildEntry("a")], total: 99 } as unknown as HistoryPageResponse,
+      { entries: [buildEntry("b")], total: 99, next_cursor: null }
+    );
+
+    const list = listOver(h);
+    await list.load();
+    h.elements.loadMoreButton.click();
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
+
+    expect(h.loadMoreVisible()).toBe(false);
+    expect(sentCursors()).toEqual([null, null]);
+  });
+
+  it("ignores a second Load more click while the first is still outstanding", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
+    const second = deferredPage();
+    let calls = 0;
+    apiMock.getHistory.mockImplementation(async () => {
+      calls += 1;
+      return calls === 1
+        ? { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor }
+        : second.promise;
+    });
+
+    const list = listOver(h);
+    await list.load();
+    h.elements.loadMoreButton.click();
+    h.elements.loadMoreButton.click();
+    second.release({
+      entries: [buildEntry("c"), buildEntry("d")],
+      total: 4,
+      next_cursor: null,
+    });
+    await flush();
+
+    expect(apiMock.getHistory).toHaveBeenCalledTimes(2);
+    expect(h.paintedIds()).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("lets a reload supersede an append that is still in flight", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
+    const append = deferredPage();
+    let calls = 0;
+    apiMock.getHistory.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 2) return append.promise;
+      return { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor };
+    });
+
+    const list = listOver(h);
+    await list.load();
+    h.elements.loadMoreButton.click();
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
+    await list.load();
+    append.release({ entries: [buildEntry("c"), buildEntry("d")], total: 4, next_cursor: null });
+    await flush();
+
+    expect(h.paintedIds()).toEqual(["a", "b"]);
+    expect(h.loadMoreVisible()).toBe(true);
+
+    h.elements.loadMoreButton.click();
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(4));
+    expect(sentCursors()).toEqual([null, cursor, null, cursor]);
+  });
+
+  it("lets clearAll() supersede an append that is still in flight", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
+    const append = deferredPage();
+    confirmMock.mockResolvedValue(true);
+    apiMock.clearHistory.mockResolvedValue({ deleted: 4 });
+    let calls = 0;
+    apiMock.getHistory.mockImplementation(async () => {
+      calls += 1;
+      return calls === 1
+        ? { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor }
+        : append.promise;
+    });
+
+    const list = listOver(h);
+    await list.load();
+    h.elements.loadMoreButton.click();
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
+    h.elements.clearButton.click();
+    await vi.waitFor(() => expect(h.countText()).toBe("0 transcripts"));
+    append.release({ entries: [buildEntry("c"), buildEntry("d")], total: 4, next_cursor: null });
+    await flush();
+
+    expect(h.paintedIds()).toEqual([]);
+    expect(h.countText()).toBe("0 transcripts");
+    expect(h.loadMoreVisible()).toBe(false);
+  });
+});
+
 describe("createHistoryList — Load more tracks next_cursor, not the total", () => {
   it("shows the control when next_cursor is non-null", async () => {
     const h = harness();

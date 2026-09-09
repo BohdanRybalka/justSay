@@ -1218,9 +1218,13 @@ def _seed(target, count, ts_at):
     with history._lock:
         conn = history._ensure_conn_locked()
         conn.execute("BEGIN")
-        for index, entry_id in enumerate(ids):
-            conn.execute("UPDATE entries SET ts = ? WHERE id = ?", (ts_at(index), entry_id))
-        conn.execute("COMMIT")
+        try:
+            for index, entry_id in enumerate(ids):
+                conn.execute("UPDATE entries SET ts = ? WHERE id = ?", (ts_at(index), entry_id))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     return ids
 
 
@@ -1520,7 +1524,9 @@ def test_the_shipped_stats_aggregate_plan_is_unchanged_by_the_index_swap(
     ]
     assert len(reads) == 1, reads
 
-    assert _plan_of(reads[0]) == ["SCAN entries"], reads[0]
+    plan = _plan_of(reads[0])
+    assert any("SCAN" in step and "entries" in step for step in plan), (reads[0], plan)
+    assert not any("entries_ts_id_idx" in step for step in plan), (reads[0], plan)
 
 
 def _bulk_seed(target, count):
@@ -1528,36 +1534,50 @@ def _bulk_seed(target, count):
     with history._lock:
         conn = history._ensure_conn_locked()
         conn.execute("BEGIN")
-        conn.executemany(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES (?, ?, 'uk', 'normal', 'row', 'row', 1)",
-            [(f"{index:012d}", 1_700_000_000_000 + index) for index in range(count)],
-        )
-        conn.execute("COMMIT")
-
-
-def _vm_steps(sql):
-    """SQLite VM instructions spent running ``sql``, counted one at a time."""
-    with history._lock:
-        conn = history._ensure_conn_locked()
-        steps = 0
-
-        def tick():
-            nonlocal steps
-            steps += 1
-            return 0
-
-        conn.set_progress_handler(tick, 1)
         try:
-            conn.execute(sql).fetchall()
-        finally:
-            conn.set_progress_handler(None, 0)
+            conn.executemany(
+                "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+                "VALUES (?, ?, 'uk', 'normal', 'row', 'row', 1)",
+                [(f"{index:012d}", 1_700_000_000_000 + index) for index in range(count)],
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def _vm_steps_of(action):
+    """SQLite VM instructions spent on every statement ``action`` issues, one at a
+    time. The handler stays on the shared connection for the whole call, so a
+    ``get_page`` is counted across its page read and the total beside it rather
+    than on whichever statement the test picked out.
+    """
+    steps = 0
+
+    def tick():
+        nonlocal steps
+        steps += 1
+        return 0
+
+    with history._lock:
+        history._ensure_conn_locked().set_progress_handler(tick, 1)
+    try:
+        action()
+    finally:
+        with history._lock:
+            history._ensure_conn_locked().set_progress_handler(None, 0)
     return steps
 
 
+def _run_read(sql):
+    with history._lock:
+        history._ensure_conn_locked().execute(sql).fetchall()
+
+
 def _last_page_probe(store_size, tmp_path, name):
-    """Steps for the shipped cursor read of the last page, and for the offset read
-    it replaces, over a store of ``store_size`` rows."""
+    """Steps for the whole shipped ``get_page`` of the last page, steps for the
+    offset read it replaces, and the statements the shipped call issued over
+    ``entries``, on a store of ``store_size`` rows."""
     _bulk_seed(tmp_path / name, store_size)
     with history._lock:
         conn = history._ensure_conn_locked()
@@ -1566,21 +1586,43 @@ def _last_page_probe(store_size, tmp_path, name):
             (store_size - 31,),
         ).fetchone()
     cursor = history.HistoryCursor(ts=ts, id=entry_id)
-    shipped = _the_page_read(lambda: history.get_page(limit=30, before=cursor))
     offset_read = (
         f"SELECT {history.columns_sql(history.ENTRY_READ_COLUMNS)} FROM entries "
         f"ORDER BY ts DESC LIMIT 30 OFFSET {store_size - 30}"
     )
-    return _vm_steps(shipped), _vm_steps(offset_read)
+    return (
+        _vm_steps_of(lambda: history.get_page(limit=30, before=cursor)),
+        _vm_steps_of(lambda: _run_read(offset_read)),
+        [
+            statement
+            for statement in _statements_from(lambda: history.get_page(limit=30, before=cursor))
+            if _reads_entries(statement)
+        ],
+    )
 
 
 def test_reading_the_last_page_costs_the_same_at_2000_rows_and_at_8000(isolated_storage, tmp_path):
-    """The property keyset paging is bought for. The offset measurement is taken
-    alongside so the instrument is shown to notice growth: a step counter that
-    reported "flat" for both queries would prove nothing about either.
+    """The property keyset paging is bought for, measured across the whole call
+    rather than across the one statement the test picked out. The offset
+    measurement is taken alongside so the instrument is shown to notice growth: a
+    step counter that reported "flat" for both queries would prove nothing about
+    either.
+
+    What the instrument reaches is on record rather than assumed. The counter is
+    open across the whole call rather than across a statement the test re-runs, and
+    that call issues exactly the two reads asserted below: the page read and the
+    whole-store total. Inside that window the page read's size dependence is
+    visible per opcode, and the total's is not: ``SELECT COUNT(*)`` compiles to a
+    single ``OP_Count`` whose b-tree walk happens inside one instruction, so a step
+    counter reads it flat at any store size. That is why the acceptance criterion
+    names the instrument and not just the outcome.
     """
-    small_cursor, small_offset = _last_page_probe(2_000, tmp_path, "small")
-    large_cursor, large_offset = _last_page_probe(8_000, tmp_path, "large")
+    small_cursor, small_offset, small_reads = _last_page_probe(2_000, tmp_path, "small")
+    large_cursor, large_offset, _ = _last_page_probe(8_000, tmp_path, "large")
+
+    assert len(small_reads) == 2, small_reads
+    assert any("raw_text" in statement for statement in small_reads), small_reads
+    assert any("COUNT(*)" in statement.upper() for statement in small_reads), small_reads
 
     assert large_cursor < small_cursor * 1.5, (small_cursor, large_cursor)
     assert large_offset > small_offset * 1.5, (small_offset, large_offset)

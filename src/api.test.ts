@@ -594,7 +594,7 @@ describe("a backend that accepts a request and never answers", () => {
     expect(signal.aborted).toBe(true);
   });
 
-  it("keeps the query string out of the message, since it names what was asked for", async () => {
+  it("keeps the query string out of the message, the cursor's row id included", async () => {
     const { api, REQUEST_TIMEOUT_MS } = await import("./api");
     fetchMock.mockImplementation(deafFetch());
 
@@ -609,6 +609,8 @@ describe("a backend that accepts a request and never answers", () => {
     );
     expect(message).not.toContain("?limit=");
     expect(message).not.toContain("before_ts");
+    expect(message).not.toContain("before_id");
+    expect(message).not.toContain("ff00ff00ff00");
   });
 
   it.each([

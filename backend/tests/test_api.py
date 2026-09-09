@@ -279,6 +279,27 @@ async def test_history_rejects_half_a_cursor(client):
 
 
 @pytest.mark.asyncio
+async def test_history_rejects_a_before_ts_sqlite_cannot_hold(client):
+    """``ts`` is a SQLite INTEGER, so a wider value raises ``OverflowError`` out of
+    the driver, past ``store_busy_as_503``, and answers 500 with a traceback. The
+    bound is in the signature, so it is 422 like an over-long ``before_id``."""
+    from app.transcripts.history import CURSOR_TS_MAX, CURSOR_TS_MIN
+
+    assert (
+        await client.get(f"/history?limit=30&before_ts={CURSOR_TS_MAX}&before_id=x")
+    ).status_code == 200
+    assert (
+        await client.get(f"/history?limit=30&before_ts={CURSOR_TS_MIN}&before_id=x")
+    ).status_code == 200
+    assert (
+        await client.get(f"/history?limit=30&before_ts={CURSOR_TS_MAX + 1}&before_id=x")
+    ).status_code == 422
+    assert (
+        await client.get(f"/history?limit=30&before_ts={CURSOR_TS_MIN - 1}&before_id=x")
+    ).status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_history_pages_over_http_without_repeating_an_entry(client):
     """The whole contract end to end: two page-30 requests over a 60-entry store
     with a dictation saved between them return 60 distinct ids, and the client
@@ -290,13 +311,17 @@ async def test_history_pages_over_http_without_repeating_an_entry(client):
     with history._lock:
         conn = history._ensure_conn_locked()
         conn.execute("BEGIN")
-        for offset, row in enumerate(
-            conn.execute("SELECT id FROM entries ORDER BY rowid").fetchall()
-        ):
-            conn.execute(
-                "UPDATE entries SET ts = ? WHERE id = ?", (1_700_000_000_000 + offset, row[0])
-            )
-        conn.execute("COMMIT")
+        try:
+            for offset, row in enumerate(
+                conn.execute("SELECT id FROM entries ORDER BY rowid").fetchall()
+            ):
+                conn.execute(
+                    "UPDATE entries SET ts = ? WHERE id = ?", (1_700_000_000_000 + offset, row[0])
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     first = (await client.get("/history?limit=30")).json()
     assert first["total"] == 60

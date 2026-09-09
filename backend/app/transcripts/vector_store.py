@@ -29,7 +29,6 @@ from app.transcripts import history
 log = logging.getLogger(__name__)
 
 BACKFILL_BATCH_MAX = 200
-ROW_VALUE_MIN_SQLITE_VERSION = (3, 15)
 
 _DDL_V3 = """
 CREATE TABLE IF NOT EXISTS embeddings_meta (
@@ -302,8 +301,8 @@ def selftest() -> tuple[bool, str]:
     bootstrapped history), loads the extension, creates a 3-dim ``vec0`` table,
     inserts and queries one vector, and asserts the inserted row comes back.
     """
-    if sqlite3.sqlite_version_info < ROW_VALUE_MIN_SQLITE_VERSION:
-        wanted = ".".join(str(part) for part in ROW_VALUE_MIN_SQLITE_VERSION)
+    if sqlite3.sqlite_version_info < history.ROW_VALUE_MIN_SQLITE_VERSION:
+        wanted = ".".join(str(part) for part in history.ROW_VALUE_MIN_SQLITE_VERSION)
         return False, (
             f"SQLite {sqlite3.sqlite_version} predates row-value support "
             f"(needs >= {wanted}), so history paging cannot run"

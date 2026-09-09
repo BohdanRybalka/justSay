@@ -49,6 +49,8 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
   let cursor: HistoryCursor | null = null;
   let total = 0;
+  let pageSeq = 0;
+  let pageInFlight = false;
 
   function renderCount(text: string): void {
     elements.count.textContent = text;
@@ -58,10 +60,23 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     elements.loadMoreWrapper.style.display = visible ? "block" : "none";
   }
 
+  /**
+   * One page, appended or replacing. A request that has been superseded -- by a
+   * reload, by Clear All, or by a second "Load more" -- paints nothing and leaves
+   * the cursor alone, so whichever request is current decides both, rather than
+   * whichever answered last.
+   *
+   * `next_cursor` is normalised at the edge because `request` casts the response
+   * rather than validating it: a backend that predates the cursor contract omits
+   * the field, and `undefined !== null` would leave "Load more" visible forever
+   * with every click re-fetching and re-appending the first page.
+   */
   async function loadPage(append: boolean): Promise<void> {
+    const seq = ++pageSeq;
+    pageInFlight = true;
     try {
       const response = await api.getHistory(pageSize, cursor);
-      if (isDestroyed()) return;
+      if (isDestroyed() || seq !== pageSeq) return;
 
       total = response.total;
       renderCount(formatEntryCount(total, noun));
@@ -76,12 +91,17 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
       renderEmptyState(response.entries.length === 0 && !append);
 
-      cursor = response.next_cursor;
-      renderLoadMore(response.next_cursor !== null);
+      const nextCursor = response.next_cursor ?? null;
+      cursor = nextCursor;
+      renderLoadMore(nextCursor !== null);
     } catch (error) {
-      if (isDestroyed()) return;
+      if (isDestroyed() || seq !== pageSeq) return;
       renderCount("Failed to load");
       console.error(error);
+    } finally {
+      if (seq === pageSeq) {
+        pageInFlight = false;
+      }
     }
   }
 
@@ -104,6 +124,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     try {
       await api.clearHistory();
       if (isDestroyed()) return;
+      ++pageSeq;
       cursor = null;
       total = 0;
       elements.rows.innerHTML = "";
@@ -122,6 +143,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
   }
 
   elements.loadMoreButton.addEventListener("click", () => {
+    if (pageInFlight) return;
     void loadPage(true);
   });
 

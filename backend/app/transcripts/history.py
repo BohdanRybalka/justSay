@@ -46,6 +46,9 @@ SCHEMA_VERSION = 3
 STATS_TTL_SECONDS = 5.0
 HISTORY_LIMIT_MAX = 200
 CURSOR_ID_MAX_LENGTH = 64
+CURSOR_TS_MIN = -(2**63)
+CURSOR_TS_MAX = 2**63 - 1
+ROW_VALUE_MIN_SQLITE_VERSION = (3, 15)
 
 _lock = threading.Lock()
 _output_dir: Path | None = None
@@ -199,7 +202,11 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     ``entries_ts_idx`` -> ``entries_ts_id_idx`` swap reaches an existing database:
     ``SCHEMA_VERSION`` is deliberately not bumped for it, because the
     ``current < SCHEMA_VERSION`` branch below rebuilds the whole FTS index, and an
-    index swap needs no row touched.
+    index swap needs no row touched. Nothing therefore *records* that a database
+    has been swapped: ``user_version`` still reads 3 either way, and an older build
+    opened against the same file re-creates ``entries_ts_idx`` from its own DDL, so
+    a downgrade and a re-upgrade leave both indexes present. Accepted rather than
+    fixed -- see ADR 053, "What it leaves unrecorded".
 
     Branches:
       - fresh v0 / upgrade from v1 or v2 → run v2 DDL, rebuild FTS from
@@ -568,8 +575,13 @@ def _entries_locked(
     is a seek into ``entries_ts_id_idx``; the portable
     ``ts < ? OR (ts = ? AND id < ?)`` spelling plans as a scan from the top of the
     index on every page, which is the property this paging exists to buy. It needs
-    SQLite >= 3.15, asserted against the frozen sidecar by
-    ``vector_store.selftest``.
+    SQLite >= ``ROW_VALUE_MIN_SQLITE_VERSION``, which lives beside this predicate
+    because the predicate is the only reason the floor exists; it is asserted
+    against the frozen sidecar by ``vector_store.selftest``.
+
+    ``before.ts`` is bound to ``CURSOR_TS_MIN``..``CURSOR_TS_MAX`` by the router:
+    SQLite stores an INTEGER as a signed 64-bit value, and binding anything wider
+    raises ``OverflowError`` out of the driver rather than answering.
     """
     where = "WHERE (ts, id) < (:before_ts, :before_id) " if before is not None else ""
     params: dict[str, object] = {"limit_plus_one": limit + 1}

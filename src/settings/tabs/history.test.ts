@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryEntry, HistoryPageResponse } from "../../api";
+import type { HistoryCursor, HistoryEntry, HistoryPageResponse } from "../../api";
 
 const confirmMock = vi.fn();
 
@@ -52,14 +52,20 @@ async function renderWith(total: number): Promise<HTMLElement> {
 
 async function renderPaged(total: number): Promise<HTMLElement> {
   const all = Array.from({ length: total }, (_, index) => buildEntry(String(index + 1)));
-  let handed = 0;
-  apiMock.getHistory.mockImplementation(async (limit: number) => {
-    const entries = all.slice(handed, handed + limit);
-    handed += entries.length;
+  /** Serves the page the cursor names, found by identity rather than by counting
+   *  how many rows the stub has already handed out: a null cursor is the first
+   *  page, and a cursor is the rows strictly after the entry it names. A stub that
+   *  counts cannot tell a client that echoes `next_cursor` from one that sends
+   *  `null` every time, and answers a reset cursor with page 2. */
+  apiMock.getHistory.mockImplementation(async (limit: number, cursor: HistoryCursor | null) => {
+    const start = cursor === null ? 0 : all.findIndex((entry) => entry.id === cursor.id) + 1;
+    const entries = all.slice(start, start + limit);
+    const last = entries[entries.length - 1];
+    const end = start + entries.length;
     return {
       entries,
       total,
-      next_cursor: handed < all.length ? { ts: handed, id: entries[entries.length - 1].id } : null,
+      next_cursor: last && end < all.length ? { ts: end, id: last.id } : null,
     };
   });
   const container = document.createElement("div");
