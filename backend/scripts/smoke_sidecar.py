@@ -17,11 +17,12 @@ can boot without a system Python install:
      settings I/O, ``/settings/cloud-status`` the cloud-key store, and
      ``/audio/status`` sounddevice.
 
-     ``psutil`` is deliberately not covered. Its only importer is
-     ``local_setup._estimate_model_ram_mb()``, reached solely when a whisper
-     model is already loaded — which needs a model on disk that no release
-     runner has. ``/resources``, deleted in spec 105, was the last route
-     that imported it unconditionally.
+     ``psutil`` is proved by step 3 rather than by any route here.
+     ``app.stt.router`` imports ``app.stt.local_setup`` at module scope and
+     that module imports ``psutil`` at module scope, so a bundle built
+     without it raises on import and never answers ``/health`` at all.
+     ``backend/tests/test_local_setup.py`` pins that import so the chain
+     cannot be undone by moving it back inside a function.
   5. Terminate the child (SIGTERM on POSIX, ``taskkill /T /F /PID`` on
      Windows) and wait briefly for exit.
 
