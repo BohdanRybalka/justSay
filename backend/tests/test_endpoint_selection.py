@@ -10,13 +10,18 @@ from __future__ import annotations
 
 import ctypes
 import logging
+from typing import get_args
 from unittest.mock import MagicMock
 
 import pytest
 
 from app.audio import windows_endpoints
 from app.audio.config import AudioSettings
-from app.audio.endpoint_selection import resolve_loopback_device
+from app.audio.endpoint_selection import (
+    ENDPOINT_ROLES,
+    EndpointRole,
+    resolve_loopback_device,
+)
 from app.audio.system_source import SystemAudioUnavailableError
 from app.audio.windows_endpoints import (
     RPC_E_CHANGED_MODE,
@@ -269,3 +274,47 @@ def test_a_refused_friendly_name_read_is_recorded(monkeypatch, com_log):
     assert name is None
     assert len(_com_failures(com_log)) == 1
 
+
+def test_every_endpoint_role_is_declared_in_all_three_places() -> None:
+    """A role exists as a Literal member, a preference-order entry and an ERole.
+
+    The three copies are joined by nothing the toolchain checks: there is no
+    mypy in this repository, so ``_ROLE_VALUES``'s ``dict[EndpointRole, int]``
+    annotation is inert. A role added to the Literal but not to ENDPOINT_ROLES
+    is never tried, because ``_roles_in_preference_order`` iterates the tuple;
+    a role in the tuple but not in ``_ROLE_VALUES`` raises KeyError inside the
+    COM call instead.
+
+    Reaching into a private name is accepted here: this file already drives
+    five private names of the same module, and exposing this one publicly would
+    add a fourth declaration-shaped name to the set this pin exists to hold
+    together.
+
+    **Membership is pinned and order deliberately is not.** Which endpoint
+    loopback follows first is decided by the ``meeting_system_endpoint_role``
+    setting, not by the position of a name in ENDPOINT_ROLES, and ADR 042's
+    guarantee that the default is the communications endpoint is already pinned
+    by test_the_default_role_preference_is_communications in this file.
+    ENDPOINT_ROLES only supplies the fallback tail after that preferred role,
+    and with two roles the tail is one element long, so no permutation of it is
+    observable in behaviour at all. Freezing the member order of a Literal is
+    worse still: member order carries no semantics in Python, so alphabetising
+    the annotation would be a no-op edit that reddened the suite. Reversing
+    both declarations consistently leaves every behavioural test in this file
+    green, which is the proof that order is not what this pin is for.
+
+    Mutation-checked four times, each applied alone: adding a third member to
+    the EndpointRole Literal fails this test naming ENDPOINT_ROLES and
+    _ROLE_VALUES; dropping "console" from ENDPOINT_ROLES fails it; dropping
+    "console" from _ROLE_VALUES fails it; and reversing both EndpointRole and
+    ENDPOINT_ROLES together leaves it green, along with the other 22 tests in
+    this file.
+    """
+    annotated = get_args(EndpointRole)
+    com_values = set(windows_endpoints._ROLE_VALUES)
+
+    assert set(annotated) == set(ENDPOINT_ROLES) == com_values, (
+        "the endpoint roles disagree across their three declarations: "
+        f"EndpointRole declares {sorted(annotated)}, ENDPOINT_ROLES declares "
+        f"{sorted(ENDPOINT_ROLES)}, and _ROLE_VALUES declares {sorted(com_values)}"
+    )

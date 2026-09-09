@@ -10,6 +10,7 @@ what the router forwards to `process_audio`.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,8 @@ from httpx import ASGITransport, AsyncClient
 from app.audio.dependencies import get_recorder
 from app.audio.session import SessionMismatchError
 from app.main import app
+from app.pipeline.router import DictateResponse
+from app.pipeline.service import ProcessingResult
 
 
 def _wav_bytes(payload_size: int = 1024) -> bytes:
@@ -259,3 +262,28 @@ async def test_a_refused_dictate_transcribes_nothing(client, tmp_path):
 
     assert resp.status_code == 403
     mock_process_audio.assert_not_awaited()
+
+
+def test_the_dictate_response_carries_every_processing_result_field() -> None:
+    """The wire shape and the domain model must list the same field names.
+
+    ``process_file`` and ``dictate`` both build the response as
+    ``DictateResponse(**result.__dict__)``, and ``DictateResponse.model_config``
+    is empty, so pydantic 2's default ``extra="ignore"`` applies: a field added
+    to ProcessingResult alone is dropped on the wire with no error raised
+    anywhere. The dead-code gate does not catch it either -- two of the six
+    names are already in vulture's ignore_names.
+
+    Mutation-checked twice, each applied alone: a seventh field added to
+    ProcessingResult fails this test naming that field; a seventh field added
+    to DictateResponse fails it the same way.
+    """
+    domain_fields = {field.name for field in dataclasses.fields(ProcessingResult)}
+    wire_fields = set(DictateResponse.model_fields)
+
+    assert domain_fields == wire_fields, (
+        "ProcessingResult and DictateResponse declare different fields, so a value "
+        "would be dropped on the wire: only in ProcessingResult: "
+        f"{sorted(domain_fields - wire_fields)}; only in DictateResponse: "
+        f"{sorted(wire_fields - domain_fields)}"
+    )

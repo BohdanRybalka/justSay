@@ -2,9 +2,9 @@ from unittest.mock import patch
 
 import pytest
 
+from app.core.audio_formats import ALLOWED_AUDIO_EXTENSIONS
 from app.core.types import ProviderMode
 from app.stt import (
-    GEMINI_SUPPORTED_FORMATS,
     GROQ_SUPPORTED_FORMATS,
     clear_cache,
     get_routed_provider,
@@ -111,11 +111,24 @@ def test_wav_short_normal_uses_groq():
     assert isinstance(p, GroqWhisperSTTProvider)
 
 
-def test_format_supports_sets_are_consistent():
-    """Sanity check on the supported-format tables."""
+def test_groq_advertises_no_extension_the_upload_allowlist_rejects():
+    """Groq's table is the routing input, and it can only narrow the allowlist.
+
+    A provider advertising an extension the upload validator rejects is a
+    routing decision that can never be reached: ``upload_validation`` refuses
+    the file before ``get_routed_provider`` is consulted.
+
+    Mutation-checked: adding ".mkv" to GROQ_SUPPORTED_FORMATS fails this test
+    naming .mkv as an extension the upload allowlist does not accept.
+    """
     assert ".wav" in GROQ_SUPPORTED_FORMATS
     assert ".webm" not in GROQ_SUPPORTED_FORMATS
-    assert ".webm" in GEMINI_SUPPORTED_FORMATS
+    assert ".webm" in ALLOWED_AUDIO_EXTENSIONS
+    unaccepted = GROQ_SUPPORTED_FORMATS - ALLOWED_AUDIO_EXTENSIONS
+    assert not unaccepted, (
+        "GROQ_SUPPORTED_FORMATS advertises extensions the upload allowlist does not "
+        f"accept, so routing to Groq could never be reached for them: {sorted(unaccepted)}"
+    )
 
 
 def test_same_provider_is_cached_across_calls():
