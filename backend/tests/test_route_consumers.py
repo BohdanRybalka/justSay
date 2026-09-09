@@ -45,6 +45,20 @@ assertion here passed over the empty set that produced. The schema is the public
 surface the application actually serves, with every router prefix applied. The
 unpinned dependency behind that difference is JS-141.
 
+**The two allowlists.** ``CONSUMED_OUTSIDE_TYPESCRIPT`` names a route kept alive
+from outside ``src/`` together with the regular expression its consumer file must
+still match -- a regular expression rather than a substring because ``/shutdown``
+also appears in Rust doc comments that call nothing, so a substring search would
+pass on a file whose only real call site had been deleted. ``/health`` needs no
+entry despite its Rust and Python consumers, because ``src/api.ts`` names it, and
+a redundant entry is reported. ``UNCONSUMED_PENDING_A_DECISION`` names a route no
+client names, with the decision that would remove the entry; it is a record
+rather than a suppression, failing both when its route disappears and when its
+path acquires a client literal. ``/stt/local/load`` and ``/stt/local/unload`` are
+deliberately absent -- ``src/api.ts`` does name them, so this gate has nothing to
+say about them, and whether their members have callers is
+``src/api-surface.test.ts``'s question, which it already answers.
+
 **Why every file it reads is named explicitly.** ``backend/build/`` and
 ``backend/.venv-build/Lib/site-packages/app/`` hold stale full copies of ``app/``
 on any machine that has run an editable install, so a glob from the repository
@@ -70,30 +84,13 @@ APP_DIR = REPO_ROOT / "backend" / "app"
 
 HTTP_VERB_DECORATORS = frozenset({"get", "post", "put", "delete", "patch", "head", "options"})
 
-PATH_TERMINATORS = ('"', "'", "`", "?", "&", "#")
-"""What may follow a route path for the text to be naming that route and no other.
-
-Without this, ``/history`` would be satisfied by the ``/history/stats`` literal
-and a deleted ``/history`` endpoint would read as live. A real call writes the
-path at the end of a literal or immediately before a query string, so the next
-character is a quote or a separator -- never another path segment.
-"""
+LITERAL_OPENER = r"[\"'`]"
+LITERAL_TERMINATOR = r"[\"'`?&#]"
+INTERPOLATED_SEGMENT = r"\$\{[^}]*\}"
 
 CONSUMED_OUTSIDE_TYPESCRIPT: dict[str, tuple[tuple[Path, str], ...]] = {
     "/shutdown": ((BACKEND_RS, r'format!\("http://127\.0\.0\.1:\{\}/shutdown", PORT\)'),),
 }
-"""Routes kept alive by a caller outside ``src/``, each site named with the
-regular expression that file must still match.
-
-A regular expression rather than a substring search: ``/shutdown`` also appears
-in doc comments in the same Rust file that call nothing, so a substring search
-would pass on a file whose only real call site had been deleted. This is the
-declared-sites shape ``test_cross_language_contracts.py`` uses.
-
-``/health`` needs no entry despite its Rust and Python consumers, because the
-``health`` member of ``src/api.ts`` names it -- and an entry here whose route
-turns out to be named after all is reported as redundant below.
-"""
 
 UNCONSUMED_PENDING_A_DECISION: dict[str, str] = {
     "/audio/stop": (
@@ -108,15 +105,6 @@ UNCONSUMED_PENDING_A_DECISION: dict[str, str] = {
         "user's decision. Deleting the route would pre-empt it silently."
     ),
 }
-"""Routes no client names, each with the decision that would remove the entry.
-
-This is a record, not a suppression: an entry fails when its route disappears,
-and again when its path acquires a client literal. ``/stt/local/load`` and
-``/stt/local/unload`` are absent on purpose -- ``src/api.ts`` does name them, so
-this gate has nothing to say about them, and the question of whether their
-members have callers belongs to ``src/api-surface.test.ts``, which already
-carries both with the reason they stay.
-"""
 
 
 class RouterDecorator(NamedTuple):
@@ -190,22 +178,25 @@ def router_decorators() -> tuple[RouterDecorator, ...]:
 def route_is_named_in(route_path: str, source: str) -> bool:
     """Whether ``source`` writes ``route_path`` as the path of a request.
 
-    A parameterised route is named by the text up to its first placeholder
-    followed by an interpolation, which is the only way a client can spell a
-    value it does not know: ``/history/{entry_id}`` is named by
-    ``/history/${...}``. A static route is named by its own text followed by one
-    of ``PATH_TERMINATORS``, so a longer sibling never stands in for it.
-    """
-    if "{" in route_path:
-        return f"{route_path[: route_path.index('{')]}${{" in source
+    The path must sit inside a string or template literal and occupy the whole of
+    it up to a query separator: a quote or backtick immediately before it, and a
+    quote, backtick, ``?``, ``&`` or ``#`` immediately after. **Both boundaries
+    are load-bearing and each was added after a mutation proved the other alone
+    is not enough.** Without the right one, a deleted ``/history`` reads as live
+    because ``/history/stats`` contains it. Without the left one, a deleted
+    ``/cloud-status`` reads as live because ``/settings/cloud-status`` ends with
+    it -- a route being a text suffix of an unrelated live path is not rare, it is
+    what a shared final segment looks like.
 
-    index = source.find(route_path)
-    while index != -1:
-        after = index + len(route_path)
-        if source[after : after + 1] in PATH_TERMINATORS:
-            return True
-        index = source.find(route_path, index + 1)
-    return False
+    A path parameter is matched as an interpolation in the same position rather
+    than by truncating the path at the placeholder: ``/history/{entry_id}`` is
+    named by ``/history/${...}`` and by nothing else. Truncating instead would
+    let ``/{entry_id}/dead-canary`` be certified live by any literal beginning
+    with an interpolated first segment.
+    """
+    parts = re.split(r"\{[^}]*\}", route_path)
+    body = INTERPOLATED_SEGMENT.join(re.escape(part) for part in parts)
+    return re.search(LITERAL_OPENER + body + LITERAL_TERMINATOR, source) is not None
 
 
 @functools.cache
@@ -341,6 +332,7 @@ SYNTHETIC_CLIENT = "\n".join(
         "const b = request(`GET`, `/query?limit=${limit}`);",
         "const c = request(`DELETE`, `/thing/${id}`);",
         "const d = request(`GET`, `/prefix/longer`);",
+        'const e = request("GET", "/scoped/tail");',
         "// /commented is mentioned here and called nowhere.",
     ]
 )
@@ -370,6 +362,23 @@ def test_a_sibling_under_a_parameterised_prefix_is_not_named_by_the_interpolatio
         "`/thing/canary-dead` was read as named by the `/thing/${id}` literal. That is the "
         "hole three review rounds found in the parser this rule replaced: one interpolated "
         "literal certified every sibling under the same prefix as live"
+    )
+
+
+def test_a_suffix_of_a_longer_path_is_not_named_by_it():
+    assert not route_is_named_in("/tail", SYNTHETIC_CLIENT), (
+        "`/tail` was read as named by the `/scoped/tail` literal. A route being a text "
+        "suffix of an unrelated live path is what a shared final segment looks like, so "
+        "without the opening boundary a deleted route of that shape reads as live"
+    )
+
+
+def test_a_parameterised_route_is_not_named_by_a_different_shape():
+    assert not route_is_named_in("/{thing_id}/dead-canary", SYNTHETIC_CLIENT), (
+        "`/{thing_id}/dead-canary` was read as named by the `/thing/${id}` literal. That "
+        "happens when a parameterised path is truncated at its placeholder instead of "
+        "matched in position, and it certifies every route with an interpolated first "
+        "segment as live"
     )
 
 
