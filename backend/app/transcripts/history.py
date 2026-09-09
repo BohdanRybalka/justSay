@@ -514,30 +514,45 @@ def save_entry(
     return entry
 
 
-def get_entries(limit: int = 50, offset: int = 0) -> list[HistoryEntry]:
-    """Get history entries newest first. Returns full rows (existing API contract).
+def _clamp_window(limit: int, offset: int) -> tuple[int, int]:
+    """``get_page``'s own bounds, applied before the router's are trusted.
 
-    ``limit`` is clamped here as well as in the router, the way
-    ``words.top_words`` and ``words.search_history`` clamp their own: a bound
-    that lives only in a FastAPI signature is not a bound on the function, and
-    ``LIMIT -1`` materialises every row in the table.
+    ``words.top_words`` and ``words.search_history`` each clamp their own against
+    their own maximum rather than sharing this one. What they have in common is
+    the reason, not the numbers: a bound that lives only in a FastAPI signature is
+    not a bound on the function, and ``LIMIT -1`` materialises every row.
     """
-    clamped_limit = max(1, min(int(limit), HISTORY_LIMIT_MAX))
-    clamped_offset = max(0, int(offset))
-    with _lock:
-        conn = _ensure_conn_locked()
-        rows = conn.execute(
-            f"SELECT {columns_sql(ENTRY_READ_COLUMNS)} "
-            "FROM entries ORDER BY ts DESC LIMIT ? OFFSET ?",
-            (clamped_limit, clamped_offset),
-        ).fetchall()
-    return [_row_to_entry(r) for r in rows]
+    return max(1, min(int(limit), HISTORY_LIMIT_MAX)), max(0, int(offset))
 
 
-def get_count() -> int:
+def _entries_locked(conn: sqlite3.Connection, limit: int, offset: int) -> list[sqlite3.Row]:
+    """Caller MUST hold ``_lock``. Newest first, full rows."""
+    return conn.execute(
+        f"SELECT {columns_sql(ENTRY_READ_COLUMNS)} "
+        "FROM entries ORDER BY ts DESC LIMIT ? OFFSET ?",
+        (limit, offset),
+    ).fetchall()
+
+
+def _count_locked(conn: sqlite3.Connection) -> int:
+    """Caller MUST hold ``_lock``."""
+    return conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+
+
+def get_page(limit: int = 50, offset: int = 0) -> tuple[list[HistoryEntry], int]:
+    """A window of entries and the total it is a window into, read together.
+
+    One acquisition of ``_lock`` covers both reads on purpose. Taken separately, a
+    write landing between them returns a total that counts the new row and a page
+    that does not, so the next page starts one row too late and the entry last on
+    this one appears again at the top of it.
+    """
+    clamped_limit, clamped_offset = _clamp_window(limit, offset)
     with _lock:
         conn = _ensure_conn_locked()
-        return conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+        rows = _entries_locked(conn, clamped_limit, clamped_offset)
+        total = _count_locked(conn)
+    return [_row_to_entry(r) for r in rows], total
 
 
 def delete_entry(entry_id: str) -> bool:
@@ -560,7 +575,7 @@ def delete_entry(entry_id: str) -> bool:
 def clear_all() -> int:
     with _lock:
         conn = _ensure_conn_locked()
-        count = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+        count = _count_locked(conn)
         conn.execute("BEGIN")
         try:
             conn.execute("DELETE FROM entries")

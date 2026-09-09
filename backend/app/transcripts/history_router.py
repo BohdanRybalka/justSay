@@ -13,8 +13,7 @@ from app.transcripts.history import (
     clear_all,
     compute_stats,
     delete_entry,
-    get_count,
-    get_entries,
+    get_page,
 )
 from app.transcripts.store_errors import store_busy_as_503
 from app.transcripts.words import HistorySearchHit
@@ -61,10 +60,8 @@ async def list_history(
     offset: int = Query(0, ge=0),
 ):
     with store_busy_as_503():
-        return HistoryListResponse(
-            entries=get_entries(limit=limit, offset=offset),
-            total=get_count(),
-        )
+        entries, total = get_page(limit=limit, offset=offset)
+    return HistoryListResponse(entries=entries, total=total)
 
 
 @router.get("/stats", response_model=HistoryStats)
