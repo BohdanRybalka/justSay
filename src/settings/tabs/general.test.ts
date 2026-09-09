@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SHORTCUT } from "../../accelerator";
 import type { UserSettings } from "../../api";
 import { TimedOutError } from "../../timeout";
@@ -97,9 +97,39 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
   };
 }
 
+type DocumentListener = Parameters<typeof document.addEventListener>;
+
+const addedDocumentListeners: DocumentListener[] = [];
+const realAddEventListener = document.addEventListener.bind(document);
+
+/** Removes every `document` listener a test left armed.
+ *
+ *  `renderGeneral` arms a `document` keydown listener the moment `#btn-shortcut`
+ *  is clicked, and only `TabLifecycle.destroy` takes it off again — which most
+ *  tests here never call, and which cannot simply be called for all of them:
+ *  tearing a whole tab down between tests disturbs the microphone block's
+ *  deliberately module-level `heldSession`. A test that ends
+ *  mid-capture therefore leaves a live handler bound to a container nobody can
+ *  reach: it answers the *next* test's `capture()`, consumes the outcome that
+ *  test queued on `emitMock`, and leaves the container being asserted on waiting
+ *  for an event that never arrives. Order-dependent by construction, so it stays
+ *  invisible until the suite is shuffled. `document` is the only object shared
+ *  across tests here — every other listener dies with its container. */
 const consoleErrorMock = vi.fn();
 
+afterEach(() => {
+  document.addEventListener = realAddEventListener;
+  while (addedDocumentListeners.length) {
+    const [type, listener, options] = addedDocumentListeners.pop()!;
+    document.removeEventListener(type, listener, options);
+  }
+});
+
 beforeEach(() => {
+  document.addEventListener = ((...args: DocumentListener) => {
+    addedDocumentListeners.push(args);
+    realAddEventListener(...args);
+  }) as typeof document.addEventListener;
   vi.resetAllMocks();
   vi.spyOn(console, "error").mockImplementation(consoleErrorMock);
   listenMock.mockImplementation(async () => unlistenMock);

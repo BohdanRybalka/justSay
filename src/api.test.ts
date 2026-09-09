@@ -64,6 +64,7 @@ function headersThenSilenceFetch(status = 200) {
 
 beforeEach(() => {
   vi.resetModules();
+  vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
   invokeMock.mockReset();
   fetchMock.mockReset();
   installBridge();
@@ -352,11 +353,6 @@ describe("a bridge module that rejects rather than never arriving", () => {
     vi.doMock("@tauri-apps/api/core", () => Promise.reject(new Error("chunk load failed")));
   });
 
-  afterEach(() => {
-    vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-    vi.resetModules();
-  });
-
   it("is bridge-failed, not invoke-failed, because no invoke was ever attempted", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { api, lastBridgeDiagnosis } = await import("./api");
@@ -377,11 +373,6 @@ describe("a bridge module whose import never settles", () => {
     invokeMock.mockResolvedValue("secret-token");
     vi.useFakeTimers();
     vi.doMock("@tauri-apps/api/core", () => new Promise(() => {}));
-  });
-
-  afterEach(() => {
-    vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-    vi.resetModules();
   });
 
   it("reports the same unresolved import once, not once per request that joins it", async () => {
@@ -456,8 +447,6 @@ describe("a bridge import that rejects after a caller has already given up on it
 
   afterEach(() => {
     vi.useRealTimers();
-    vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-    vi.resetModules();
   });
 
   it("does not log the rejection again for the caller that merely joined the import", async () => {
@@ -985,11 +974,6 @@ describe("a token wait that never ends, because the bridge module never loads", 
     invokeMock.mockResolvedValue("secret-token");
     vi.useFakeTimers();
     vi.doMock("@tauri-apps/api/core", () => new Promise(() => {}));
-  });
-
-  afterEach(() => {
-    vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-    vi.resetModules();
   });
 
   it("gives the bridge import its own budget, so the shared token promise settles rather than retaining every later caller", async () => {
