@@ -789,18 +789,14 @@ def test_the_app_data_directory_names_agree_across_languages() -> None:
     the one backend.rs promises out loud: the sidecar log landing in a
     different directory from the sidecar's own history and settings files.
 
-    **Unpinned and named as such**, three ways the two sides can still land in
-    different directories at runtime, none of them visible to a text pin:
+    **One way the two sides can still land in different directories at runtime,
+    and no text pin can see it:** that ``cfg!(debug_assertions)`` and
+    ``sys.frozen`` agree on a given launch is a runtime property.
 
-    - That ``cfg!(debug_assertions)`` and ``sys.frozen`` agree on any given
-      launch is a runtime property.
-    - With ``JUSTSAY_DATA_DIR`` set, Python resolves that override while Rust
-      writes to ``~/<name>/logs/sidecar.log`` regardless, because
-      ``append_sidecar_log`` reads only ``USERPROFILE``/``HOME`` and never
-      reads ``JUSTSAY_DATA_DIR``.
-    - In a release build, a child process inheriting an externally set
-      ``JUSTSAY_FORCE_DEV_DATA_DIR=1`` makes Python resolve the development
-      name while Rust has already chosen the production one.
+    The other two this docstring used to list were closed by JS-131 --
+    ``JUSTSAY_DATA_DIR`` ignored by the shell, and an externally set
+    ``JUSTSAY_FORCE_DEV_DATA_DIR`` splitting a release build -- and the test
+    below is what keeps them closed.
 
     The Rust pattern tolerates arbitrary whitespace because ``cargo fmt`` runs
     in no CI job here. Its matches are kept as pairs, so a second declaration
@@ -887,4 +883,53 @@ def test_the_app_data_directory_names_agree_across_languages() -> None:
         )
         + ". Undeclared: "
         + ", ".join(strays)
+    )
+
+
+def test_the_shell_reads_every_data_directory_variable_the_backend_reads() -> None:
+    """The sidecar log follows ``resolve_app_data_root()``'s order, not its own.
+
+    The two sides resolve the data root independently -- Python in
+    ``app_paths.py``, Rust in ``backend.rs`` for the one thing it writes -- and
+    the sibling test above compares only the two directory *names*. Names
+    agreeing is not enough: before JS-131 both names matched while the shell
+    ignored ``JUSTSAY_DATA_DIR`` entirely, so the file someone opens when the
+    backend will not start was the one file left behind in the default
+    location. What is pinned here is that every variable Python's resolution
+    order reads is read by the Rust side too, at the site that decides.
+
+    The variable names are read out of ``app_paths.py`` rather than written
+    again here, so renaming one there fails this test instead of silently
+    splitting the two sides.
+
+    What this cannot see is whether the Rust side *honours* what it reads.
+    ``backend.rs``'s own ``#[cfg(test)]`` tests cover each branch of the order,
+    and they run under ``npm run test:rust``, which no CI job invokes yet (open
+    question B2) -- which is why the read is pinned here, in a job that does.
+
+    Mutation-checked twice, each applied alone: deleting the
+    ``JUSTSAY_DATA_DIR`` read from ``sidecar_log_dir`` fails this test naming
+    that function, and reverting ``force_dev_data_dir`` to
+    ``cfg!(debug_assertions)`` alone fails it naming that binding.
+    """
+    data_dir_var = _extract(APP_PATHS_PY, r'^_DATA_DIR_ENV_VAR = "([^"]*)"$')[0]
+    force_dev_var = _extract(APP_PATHS_PY, r'^_FORCE_DEV_ENV_VAR = "([^"]*)"$')[0]
+    rust = _read(BACKEND_RS)
+    backend_rel = BACKEND_RS.relative_to(REPO_ROOT).as_posix()
+
+    resolver = re.search(r"^fn sidecar_log_dir\(.*?^\}", rust, re.MULTILINE | re.DOTALL)
+    assert resolver, f"{backend_rel} no longer defines fn sidecar_log_dir"
+    assert data_dir_var in resolver.group(0), (
+        f"{APP_PATHS_PY.name} resolves the data root from {data_dir_var!r} first, but "
+        f"{backend_rel}'s sidecar_log_dir does not read it, so the sidecar log would be "
+        "written outside the directory holding the history and settings it describes"
+    )
+
+    force_dev = re.search(r"^    let force_dev_data_dir = .*?;$", rust, re.MULTILINE | re.DOTALL)
+    assert force_dev, f"{backend_rel} no longer binds force_dev_data_dir"
+    assert force_dev_var in force_dev.group(0), (
+        f"{APP_PATHS_PY.name} lets {force_dev_var!r} force the development directory, but "
+        f"{backend_rel} picks its name from the build profile alone, so a release build that "
+        "inherits that variable writes the log under the production name while the backend "
+        "resolves the development one"
     )

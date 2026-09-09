@@ -62,9 +62,11 @@ use tauri_plugin_shell::ShellExt;
 /// for the frozen-sidecar production path the console window is suppressed
 /// by building the sidecar with `console=False` (see
 /// `backend/build_sidecar.spec`) plus the Python entrypoint redirecting
-/// stdout/stderr to `~/<data_dir_name>/logs/sidecar.log`, where
-/// `data_dir_name` is `.justsay` or `.justsay-dev` depending on `spawn()`'s
-/// `force_dev_data_dir` flag — see `append_sidecar_log()` below and
+/// stdout/stderr to `<data root>/logs/sidecar.log`, where the data root is
+/// resolved the way the backend resolves its own — `JUSTSAY_DATA_DIR` first,
+/// otherwise the home directory joined with `.justsay` or `.justsay-dev`
+/// depending on `spawn()`'s `force_dev_data_dir` flag — see
+/// `sidecar_log_dir_from()` and `append_sidecar_log()` below and
 /// `docs/adr/012-dev-mode-data-directory-isolation.md`.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -289,20 +291,58 @@ fn http_client() -> Result<&'static reqwest::Client, String> {
         .map_err(|e| e.clone())
 }
 
-/// Append a stderr line from the production sidecar to
-/// `~/<data_dir_name>/logs/sidecar.log`. `data_dir_name` is `.justsay` or
-/// `.justsay-dev`, matching `spawn()`'s `force_dev_data_dir` flag — see
-/// `docs/adr/012-dev-mode-data-directory-isolation.md` — so a
-/// `tauri:dev:frozen` smoke-test run's captured sidecar output lands under
-/// the same dev directory as the sidecar's own history.db/settings.json.
+/// Where the sidecar log goes, mirroring `resolve_app_data_root()` in
+/// `backend/app/core/app_paths.py`. Pure so each branch is testable without
+/// touching the process environment, which `sidecar_log_dir` reads for it.
+///
+/// The order is Python's, and has to stay Python's: an explicit
+/// `JUSTSAY_DATA_DIR` wins over everything, otherwise the home directory joined
+/// with the name `spawn()` chose. A leading `~` is expanded because
+/// `Path.expanduser()` expands it on the other side; `~user` is not, because
+/// resolving another account's home is not something this side can do and
+/// leaving it literal fails visibly rather than silently writing elsewhere.
+fn sidecar_log_dir_from(
+    data_dir_override: Option<&str>,
+    home: Option<&str>,
+    data_dir_name: &str,
+) -> Option<PathBuf> {
+    if let Some(root) = data_dir_override.filter(|value| !value.is_empty()) {
+        return expand_leading_tilde(root, home).map(|path| path.join("logs"));
+    }
+    Some(PathBuf::from(home?).join(data_dir_name).join("logs"))
+}
+
+fn expand_leading_tilde(path: &str, home: Option<&str>) -> Option<PathBuf> {
+    if path != "~" && !path.starts_with("~/") && !path.starts_with("~\\") {
+        return Some(PathBuf::from(path));
+    }
+    let rest = path[1..].trim_start_matches(['/', '\\']);
+    let home = PathBuf::from(home?);
+    Some(if rest.is_empty() { home } else { home.join(rest) })
+}
+
+fn sidecar_log_dir(data_dir_name: &str) -> Option<PathBuf> {
+    let data_dir_override = std::env::var("JUSTSAY_DATA_DIR").ok();
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok();
+    sidecar_log_dir_from(data_dir_override.as_deref(), home.as_deref(), data_dir_name)
+}
+
+/// Append a stderr line from the production sidecar to the `logs/sidecar.log`
+/// under whichever directory the backend itself resolved — see
+/// `sidecar_log_dir_from` and
+/// `docs/adr/012-dev-mode-data-directory-isolation.md`, so that a
+/// `tauri:dev:frozen` smoke-test run's captured sidecar output, and a run with
+/// `JUSTSAY_DATA_DIR` set, both land beside the sidecar's own
+/// history.db/settings.json rather than in the default location.
 /// Failure to open the log file is silent to avoid spamming on shutdown
 /// when the FS is racing.
 fn append_sidecar_log(line: &[u8], data_dir_name: &str) {
-    let home = match std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
-        Ok(h) => h,
-        Err(_) => return,
+    let log_dir = match sidecar_log_dir(data_dir_name) {
+        Some(dir) => dir,
+        None => return,
     };
-    let log_dir = PathBuf::from(home).join(data_dir_name).join("logs");
     if std::fs::create_dir_all(&log_dir).is_err() {
         return;
     }
@@ -588,7 +628,8 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
     let prefer_python_source =
         cfg!(debug_assertions) && std::env::var("JUSTSAY_USE_FROZEN_SIDECAR").is_err();
 
-    let force_dev_data_dir = cfg!(debug_assertions);
+    let force_dev_data_dir = cfg!(debug_assertions)
+        || std::env::var("JUSTSAY_FORCE_DEV_DATA_DIR").map(|v| v == "1").unwrap_or(false);
     let data_dir_name: &'static str = if force_dev_data_dir { ".justsay-dev" } else { ".justsay" };
 
     let resolved_sidecar = if prefer_python_source {
@@ -1268,6 +1309,57 @@ pub fn spawn_watchdog(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_explicit_data_dir_override_wins_over_the_home_directory() {
+        assert_eq!(
+            sidecar_log_dir_from(Some("D:/scratch/js"), Some("C:/Users/me"), ".justsay"),
+            Some(PathBuf::from("D:/scratch/js").join("logs")),
+            "JUSTSAY_DATA_DIR is first in resolve_app_data_root()'s order and must be first here"
+        );
+    }
+
+    #[test]
+    fn an_empty_override_is_ignored_the_way_an_unset_one_is() {
+        assert_eq!(
+            sidecar_log_dir_from(Some(""), Some("C:/Users/me"), ".justsay-dev"),
+            Some(PathBuf::from("C:/Users/me").join(".justsay-dev").join("logs"))
+        );
+    }
+
+    #[test]
+    fn no_override_falls_back_to_the_home_directory_and_the_chosen_name() {
+        assert_eq!(
+            sidecar_log_dir_from(None, Some("/home/me"), ".justsay-dev"),
+            Some(PathBuf::from("/home/me").join(".justsay-dev").join("logs"))
+        );
+    }
+
+    #[test]
+    fn a_leading_tilde_in_the_override_expands_the_way_path_expanduser_does() {
+        assert_eq!(
+            sidecar_log_dir_from(Some("~"), Some("/home/me"), ".justsay"),
+            Some(PathBuf::from("/home/me").join("logs"))
+        );
+        assert_eq!(
+            sidecar_log_dir_from(Some("~/data"), Some("/home/me"), ".justsay"),
+            Some(PathBuf::from("/home/me").join("data").join("logs"))
+        );
+    }
+
+    #[test]
+    fn a_tilde_naming_another_account_is_left_literal_rather_than_guessed() {
+        assert_eq!(
+            sidecar_log_dir_from(Some("~someone/data"), Some("/home/me"), ".justsay"),
+            Some(PathBuf::from("~someone/data").join("logs")),
+            "resolving another account's home is not something this side can do"
+        );
+    }
+
+    #[test]
+    fn without_an_override_or_a_home_there_is_nowhere_to_write() {
+        assert_eq!(sidecar_log_dir_from(None, None, ".justsay"), None);
+    }
 
     #[test]
     fn respawn_backoff_follows_2_4_8_second_sequence() {
