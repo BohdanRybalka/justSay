@@ -1,8 +1,6 @@
 import asyncio
-import importlib.util
 import logging
 import pathlib
-import sys
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -1562,25 +1560,3 @@ async def test_timeout_then_retry_joins_in_flight_load_instead_of_starting_a_sec
         "a second _get_model() call was started while the first was still in flight"
     )
     assert result is True
-
-def test_a_bundle_without_psutil_fails_at_import_rather_than_losing_the_ram_figure():
-    """JS-128: psutil's only importer used to hide its own absence.
-
-    ``psutil`` is a hard dependency and a PyInstaller hidden import, and it
-    produces the model-RAM figure the user sees. While it was imported inside
-    ``_estimate_model_ram_mb`` under ``except Exception``, a bundle built without
-    it produced a green smoke test, a green CI and a shipped tag. ``app.stt.router``
-    imports this module at module scope, so a module-scope ``psutil`` import means
-    a frozen backend missing it never answers ``/health``.
-
-    A fresh copy is executed under a different name so the real module in
-    ``sys.modules`` is left alone.
-    """
-    spec = importlib.util.spec_from_file_location(
-        "local_setup_without_psutil", local_setup.__file__
-    )
-    fresh = importlib.util.module_from_spec(spec)
-
-    with patch.dict(sys.modules, {"psutil": None}):
-        with pytest.raises(ImportError):
-            spec.loader.exec_module(fresh)

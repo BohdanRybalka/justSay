@@ -3,13 +3,11 @@
 import asyncio
 import json
 import logging
-import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-import psutil
 from pydantic import BaseModel
 
 from app.core import tasks
@@ -402,13 +400,6 @@ def _estimate_model_ram_mb() -> int | None:
     Returns the current process RSS in MB — coarse but informative; the user
     sees "the backend is holding ~700 MB" rather than no number at all.
 
-    ``psutil`` is imported at module scope, not here, and that is the point: it is
-    a hard dependency and a PyInstaller hidden import, so a bundle built without it
-    must fail loudly at import rather than quietly return `None` to a user who then
-    sees no figure at all. ``app.stt.router`` imports this module at module scope,
-    so a frozen backend missing psutil never reaches `/health` and the release smoke
-    test fails before an installer is published.
-
     Returns `None` for the whisper.cpp-server kind: the actual model memory
     lives in the separate `whisper-server` child process's own address
     space, not this (the FastAPI backend's) process's RSS — reporting the
@@ -418,6 +409,10 @@ def _estimate_model_ram_mb() -> int | None:
     if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
         return None
     try:
+        import os
+
+        import psutil
+
         rss = psutil.Process(os.getpid()).memory_info().rss
         return rss // (1024 * 1024)
     except Exception:

@@ -1144,42 +1144,60 @@ def test_a_relocate_that_raises_mid_copy_leaves_a_working_store_behind(
     ]
 
 
-class _CountingLock:
-    """Delegates to a real lock and counts acquisitions per thread."""
+class _RecordingLock:
+    """Delegates to a real lock and records every acquire and release."""
 
-    def __init__(self, inner):
+    def __init__(self, inner, events: list[str]):
         self._inner = inner
-        self.acquisitions: dict[int, int] = {}
+        self._events = events
 
     def __enter__(self):
-        tid = threading.get_ident()
-        self.acquisitions[tid] = self.acquisitions.get(tid, 0) + 1
+        self._events.append("acquire")
         return self._inner.__enter__()
 
     def __exit__(self, *exc):
+        self._events.append("release")
         return self._inner.__exit__(*exc)
 
 
-def test_get_page_takes_the_store_lock_once_so_a_write_cannot_land_between_the_reads(
-    isolated_storage, tmp_path
-):
-    """JS-126, pinned on the property rather than on a race.
+def test_get_page_never_releases_the_store_lock_between_its_two_reads(isolated_storage, tmp_path):
+    """JS-126's technical half: the page and the total must come from one state.
 
-    Read under two acquisitions, a dictation finishing between them returns a total
-    that counts the new row and a page that does not, so page 2 starts one row too
-    late and the entry last on page 1 appears again at its top. Counting the
-    acquisitions is what separates one lock from two; a racing writer thread does
-    not, because the writer is blocked while either read holds the lock and the
-    window that matters is the instant between them.
+    What has to hold is that no other thread can write between the two reads, and
+    the only thing that guarantees it is the lock staying held across both. Two
+    weaker pins were tried and both passed against a mutant that reintroduces the
+    defect: a writer thread started from inside ``get_page`` is blocked while
+    *either* read holds the lock, and counting acquisitions cannot see a
+    ``_count_locked`` moved out of the ``with`` block entirely. Recording the
+    sequence is what distinguishes them — a release between the two reads is
+    exactly the defect, whether or not a second acquisition follows it.
     """
     target = tmp_path / "target"
     history.bootstrap(target)
     for i in range(3):
         history.save_entry(text=f"entry {i}", duration_ms=1)
 
-    counting = _CountingLock(history._lock)
-    with patch.object(history, "_lock", counting):
-        entries, total = history.get_page(limit=50)
+    events: list[str] = []
+    real_entries_locked = history._entries_locked
+    real_count_locked = history._count_locked
 
-    assert counting.acquisitions[threading.get_ident()] == 1
-    assert len(entries) == total == 3
+    def entries(conn, limit, offset):
+        events.append("read-entries")
+        return real_entries_locked(conn, limit, offset)
+
+    def count(conn):
+        events.append("read-count")
+        return real_count_locked(conn)
+
+    with (
+        patch.object(history, "_lock", _RecordingLock(history._lock, events)),
+        patch.object(history, "_entries_locked", entries),
+        patch.object(history, "_count_locked", count),
+    ):
+        entries_read, total = history.get_page(limit=50)
+
+    assert events == ["acquire", "read-entries", "read-count", "release"], (
+        "the store lock was released between the page read and the total, so a write "
+        f"can land between them: {events}"
+    )
+    assert len(entries_read) == total == 3

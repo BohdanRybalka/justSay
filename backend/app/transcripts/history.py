@@ -515,12 +515,12 @@ def save_entry(
 
 
 def _clamp_window(limit: int, offset: int) -> tuple[int, int]:
-    """The bounds every paged read applies.
+    """``get_page``'s own bounds, applied before the router's are trusted.
 
-    ``limit`` is clamped here as well as in the router, the way
-    ``words.top_words`` and ``words.search_history`` clamp their own: a bound that
-    lives only in a FastAPI signature is not a bound on the function, and
-    ``LIMIT -1`` materialises every row in the table.
+    ``words.top_words`` and ``words.search_history`` each clamp their own against
+    their own maximum rather than sharing this one. What they have in common is
+    the reason, not the numbers: a bound that lives only in a FastAPI signature is
+    not a bound on the function, and ``LIMIT -1`` materialises every row.
     """
     return max(1, min(int(limit), HISTORY_LIMIT_MAX)), max(0, int(offset))
 
@@ -575,7 +575,7 @@ def delete_entry(entry_id: str) -> bool:
 def clear_all() -> int:
     with _lock:
         conn = _ensure_conn_locked()
-        count = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+        count = _count_locked(conn)
         conn.execute("BEGIN")
         try:
             conn.execute("DELETE FROM entries")
