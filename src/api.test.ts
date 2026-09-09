@@ -64,6 +64,7 @@ function headersThenSilenceFetch(status = 200) {
 
 beforeEach(() => {
   vi.resetModules();
+  vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
   invokeMock.mockReset();
   fetchMock.mockReset();
   installBridge();
@@ -333,8 +334,6 @@ describe("bridge diagnosis", () => {
     mod = await import("./api");
     await mod.api.health();
     kinds.add(mod.lastBridgeDiagnosis().kind);
-    vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-    vi.resetModules();
 
     expect([...kinds].sort()).toEqual([
       "bridge-failed",
@@ -350,11 +349,6 @@ describe("a bridge module that rejects rather than never arriving", () => {
   beforeEach(() => {
     invokeMock.mockResolvedValue("secret-token");
     vi.doMock("@tauri-apps/api/core", () => Promise.reject(new Error("chunk load failed")));
-  });
-
-  afterEach(() => {
-    vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-    vi.resetModules();
   });
 
   it("is bridge-failed, not invoke-failed, because no invoke was ever attempted", async () => {
@@ -377,11 +371,6 @@ describe("a bridge module whose import never settles", () => {
     invokeMock.mockResolvedValue("secret-token");
     vi.useFakeTimers();
     vi.doMock("@tauri-apps/api/core", () => new Promise(() => {}));
-  });
-
-  afterEach(() => {
-    vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-    vi.resetModules();
   });
 
   it("reports the same unresolved import once, not once per request that joins it", async () => {
@@ -408,12 +397,6 @@ describe("an invoke that never settles", () => {
     installBridge();
     vi.useFakeTimers();
     invokeMock.mockImplementation(() => new Promise(() => {}));
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-    invokeMock.mockReset();
-    vi.resetModules();
   });
 
   it("reports the same unanswered call once per reuse window, not once per joined caller", async () => {
@@ -456,8 +439,6 @@ describe("a bridge import that rejects after a caller has already given up on it
 
   afterEach(() => {
     vi.useRealTimers();
-    vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-    vi.resetModules();
   });
 
   it("does not log the rejection again for the caller that merely joined the import", async () => {
@@ -987,11 +968,6 @@ describe("a token wait that never ends, because the bridge module never loads", 
     vi.doMock("@tauri-apps/api/core", () => new Promise(() => {}));
   });
 
-  afterEach(() => {
-    vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-    vi.resetModules();
-  });
-
   it("gives the bridge import its own budget, so the shared token promise settles rather than retaining every later caller", async () => {
     const { api, lastBridgeDiagnosis, REQUEST_TIMEOUT_MS } = await import("./api");
     const { TimedOutError } = await import("./timeout");
@@ -1039,11 +1015,6 @@ describe("a status read against a bridge that is slow but alive", () => {
         setTimeout(() => resolve({ invoke: invokeMock }), 2500);
       });
     });
-  });
-
-  afterEach(() => {
-    vi.doUnmock("@tauri-apps/api/core");
-    vi.resetModules();
   });
 
   it("still issues its request, because the budget contains the token path it waits on", async () => {
