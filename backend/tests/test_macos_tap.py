@@ -838,7 +838,7 @@ def test_a_pipe_left_open_for_a_parked_reader_is_closed_once_it_leaves(
     parked.released.set()
     parked.thread.join(timeout=5.0)
     deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and not process.stdout.closed:
+    while time.monotonic() < deadline and not (process.stdout.closed and process.stderr.closed):
         time.sleep(0.02)
     process.close_writes()
 
