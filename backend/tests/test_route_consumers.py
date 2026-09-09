@@ -361,11 +361,22 @@ def test_the_scanner_reads_api_ts_to_its_end():
 def test_every_application_route_has_a_consumer():
     routes = application_routes()
 
+    endpoint_modules = sorted(
+        getattr(getattr(route, "endpoint", None), "__module__", "<no endpoint>")
+        for route in app.routes
+    )
+
     assert routes, (
         "app.main.app registered no application route at all, so every assertion in "
         "this module is trivially true over an empty set. The enumeration rule in "
         "application_route_registrations() no longer matches how this application is "
-        "imported here -- it is the gate that is broken, not the routes"
+        "imported here -- it is the gate that is broken, not the routes. "
+        f"app.routes holds {len(app.routes)} entries, of types "
+        f"{sorted({type(r).__name__ for r in app.routes})}, with endpoint modules "
+        f"{sorted(set(endpoint_modules))} "
+        f"and {sum(1 for r in app.routes if getattr(r, 'methods', None) is not None)} "
+        f"carrying a methods attribute. app.main was imported from "
+        f"{getattr(__import__('app.main', fromlist=['__file__']), '__file__', '<unknown>')}"
     )
 
     unconsumed = (
