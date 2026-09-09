@@ -594,11 +594,11 @@ describe("a backend that accepts a request and never answers", () => {
     expect(signal.aborted).toBe(true);
   });
 
-  it("keeps the query string out of the message, since it names what was asked for", async () => {
+  it("keeps the query string out of the message, the cursor's row id included", async () => {
     const { api, REQUEST_TIMEOUT_MS } = await import("./api");
     fetchMock.mockImplementation(deafFetch());
 
-    const pending = api.getHistory(50, 10);
+    const pending = api.getHistory(50, { ts: 1_700_000_000_000, id: "ff00ff00ff00" });
     pending.catch(() => {});
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
 
@@ -608,7 +608,9 @@ describe("a backend that accepts a request and never answers", () => {
       (e: Error) => e.message,
     );
     expect(message).not.toContain("?limit=");
-    expect(message).not.toContain("offset");
+    expect(message).not.toContain("before_ts");
+    expect(message).not.toContain("before_id");
+    expect(message).not.toContain("ff00ff00ff00");
   });
 
   it.each([
@@ -1080,5 +1082,45 @@ describe("session-carrying calls", () => {
 
     expect(settled).not.toHaveBeenCalled();
     expect((fetchMock.mock.calls[0][1] as RequestInit).signal ?? null).toBeNull();
+  });
+});
+
+describe("the history cursor on the wire", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    fetchMock.mockReset();
+    invokeMock.mockReset();
+    removeBridge();
+  });
+
+  it("sends no cursor parameter at all for the first page", async () => {
+    const { api } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ entries: [], total: 0, next_cursor: null }));
+
+    await api.getHistory(30);
+
+    expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:9377/history?limit=30");
+  });
+
+  it("sends both halves of a cursor together, since the backend rejects half of one", async () => {
+    const { api } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ entries: [], total: 0, next_cursor: null }));
+
+    await api.getHistory(30, { ts: 1_700_000_000_042, id: "ff00ff00ff00" });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "http://127.0.0.1:9377/history?limit=30&before_ts=1700000000042&before_id=ff00ff00ff00",
+    );
+  });
+
+  it("escapes an id rather than pasting it into the query string", async () => {
+    const { api } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ entries: [], total: 0, next_cursor: null }));
+
+    await api.getHistory(30, { ts: 1, id: "a&limit=999" });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "http://127.0.0.1:9377/history?limit=30&before_ts=1&before_id=a%26limit%3D999",
+    );
   });
 });

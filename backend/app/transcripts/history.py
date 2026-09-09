@@ -35,7 +35,7 @@ from enum import Enum
 from pathlib import Path
 
 import sqlite_vec
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.app_paths import resolve_app_data_root
 
@@ -45,6 +45,10 @@ HISTORY_FILENAME = "history.db"
 SCHEMA_VERSION = 3
 STATS_TTL_SECONDS = 5.0
 HISTORY_LIMIT_MAX = 200
+CURSOR_ID_MAX_LENGTH = 64
+CURSOR_TS_MIN = -(2**63)
+CURSOR_TS_MAX = 2**63 - 1
+ROW_VALUE_MIN_SQLITE_VERSION = (3, 15)
 
 _lock = threading.Lock()
 _output_dir: Path | None = None
@@ -80,6 +84,38 @@ class HistoryEntry(BaseModel):
     tokens_used: int | None = None
     audio_duration_seconds: float | None = None
     word_count: int | None = None
+
+
+class HistoryCursor(BaseModel):
+    """A position in the total order ``(ts DESC, id DESC)``, minted by the server.
+
+    A cursor is not a count, so nothing under it moves when a row is inserted or
+    deleted. ``id`` is only a tiebreaker: it makes the ordering total, which is
+    what a position needs to identify one row. See ADR 053.
+
+    Both halves are bounded on the model rather than only in the router's
+    signature, for the reason ``_clamp_limit``'s docstring gives about ``limit``:
+    a bound that lives only in a FastAPI signature is not a bound on the
+    function. ``ts`` outside the signed 64-bit range SQLite stores an INTEGER in
+    raises ``OverflowError`` out of the driver, so any caller that builds a
+    cursor by hand gets a ``ValidationError`` here instead.
+    """
+
+    ts: int = Field(ge=CURSOR_TS_MIN, le=CURSOR_TS_MAX)
+    id: str = Field(max_length=CURSOR_ID_MAX_LENGTH)
+
+
+class HistoryPage(BaseModel):
+    """One page, the total it is a page of, and where the next one starts.
+
+    ``next_cursor`` is ``None`` on the last page. ``total`` is what the user
+    reads on screen; it is no longer how the client decides whether more rows
+    exist.
+    """
+
+    entries: list[HistoryEntry]
+    total: int
+    next_cursor: HistoryCursor | None = None
 
 
 class HistoryStats(BaseModel):
@@ -140,7 +176,11 @@ CREATE TABLE IF NOT EXISTS entries (
   model_name TEXT,
   tokens_used INTEGER
 );
-CREATE INDEX IF NOT EXISTS entries_ts_idx ON entries(ts DESC);
+"""
+
+_REPLACE_TS_INDEX_WITH_TS_ID_INDEX = """
+CREATE INDEX IF NOT EXISTS entries_ts_id_idx ON entries(ts DESC, id DESC);
+DROP INDEX IF EXISTS entries_ts_idx;
 """
 
 _DDL_V2 = """
@@ -168,6 +208,14 @@ END;
 def _init_schema(conn: sqlite3.Connection) -> None:
     """Version-aware migrator. Run on every connection open.
 
+    ``_DDL_V1`` and ``_REPLACE_TS_INDEX_WITH_TS_ID_INDEX`` both run
+    unconditionally and idempotently, so the ``entries_ts_idx`` ->
+    ``entries_ts_id_idx`` swap reaches an existing database without a
+    ``SCHEMA_VERSION`` bump. Why it is not bumped, and what that leaves
+    unrecorded, is ADR 053, "What it leaves unrecorded" -- stated there once,
+    because the version of it that lived in both places had to be corrected in
+    both places.
+
     Branches:
       - fresh v0 / upgrade from v1 or v2 → run v2 DDL, rebuild FTS from
         rows, run v3 DDL (embeddings_meta + entry_embeddings — both start
@@ -182,6 +230,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     from app.transcripts import vector_store
 
     conn.executescript(_DDL_V1)
+    conn.executescript(_REPLACE_TS_INDEX_WITH_TS_ID_INDEX)
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     if current < SCHEMA_VERSION:
         conn.executescript(_DDL_V2)
@@ -514,24 +563,99 @@ def save_entry(
     return entry
 
 
-def _clamp_window(limit: int, offset: int) -> tuple[int, int]:
-    """``get_page``'s own bounds, applied before the router's are trusted.
+def _clamp_limit(limit: int) -> int:
+    """``get_page``'s own bound, applied before the router's is trusted.
 
     ``words.top_words`` and ``words.search_history`` each clamp their own against
     their own maximum rather than sharing this one. What they have in common is
     the reason, not the numbers: a bound that lives only in a FastAPI signature is
     not a bound on the function, and ``LIMIT -1`` materialises every row.
     """
-    return max(1, min(int(limit), HISTORY_LIMIT_MAX)), max(0, int(offset))
+    return max(1, min(int(limit), HISTORY_LIMIT_MAX))
 
 
-def _entries_locked(conn: sqlite3.Connection, limit: int, offset: int) -> list[sqlite3.Row]:
-    """Caller MUST hold ``_lock``. Newest first, full rows."""
+_CURSOR_PAGE_WHERE = "WHERE (ts, id) < (:before_ts, :before_id) "
+_CURSOR_PAGE_ORDER = "ORDER BY ts DESC, id DESC LIMIT :limit_plus_one"
+
+
+def _entries_locked(
+    conn: sqlite3.Connection, limit: int, before: HistoryCursor | None
+) -> list[sqlite3.Row]:
+    """Caller MUST hold ``_lock``. Newest first, up to ``limit + 1`` full rows.
+
+    The extra row is the probe that answers "is there another page": it is read
+    and dropped rather than returned. The row-value predicate ``(ts, id) < (?, ?)``
+    is a seek into ``entries_ts_id_idx``; the portable
+    ``ts < ? OR (ts = ? AND id < ?)`` spelling plans as a scan from the top of the
+    index on every page, which is the property this paging exists to buy. It needs
+    SQLite >= ``ROW_VALUE_MIN_SQLITE_VERSION``, which lives beside this predicate
+    because the predicate is the only reason the floor exists; it is asserted
+    against the frozen sidecar by ``vector_store.selftest``.
+
+    ``before.ts`` is bound to ``CURSOR_TS_MIN``..``CURSOR_TS_MAX`` by
+    ``HistoryCursor`` itself: SQLite stores an INTEGER as a signed 64-bit value,
+    and binding anything wider raises ``OverflowError`` out of the driver rather
+    than answering.
+    """
+    where = _CURSOR_PAGE_WHERE if before is not None else ""
+    params: dict[str, object] = {"limit_plus_one": limit + 1}
+    if before is not None:
+        params["before_ts"] = before.ts
+        params["before_id"] = before.id
     return conn.execute(
-        f"SELECT {columns_sql(ENTRY_READ_COLUMNS)} "
-        "FROM entries ORDER BY ts DESC LIMIT ? OFFSET ?",
-        (limit, offset),
+        f"SELECT {columns_sql(ENTRY_READ_COLUMNS)} FROM entries "
+        f"{where}{_CURSOR_PAGE_ORDER}",
+        params,
     ).fetchall()
+
+
+def cursor_seek_plan_failure() -> str | None:
+    """Whether the SQLite actually loaded plans the cursor read as a seek.
+
+    ``None`` when it does; otherwise a message naming the plan it produced
+    instead. ``ROW_VALUE_MIN_SQLITE_VERSION`` is the release that *introduced*
+    row values, not one at which the planner is known to answer
+    ``(ts, id) < (?, ?)`` by seeking ``entries_ts_id_idx``, and a library that
+    parses the predicate but walks the index from the top gives back the whole
+    property this paging exists to buy, silently. Only a plan taken from the
+    loaded library answers that, so this is run against the frozen sidecar by
+    ``vector_store.selftest``.
+
+    The probe builds its own miniature ``entries`` -- a key pair and one payload
+    column, so the plan is not a covering-index special case -- and reuses the
+    same index DDL, predicate and ordering the shipped read uses, rather than a
+    second spelling of them.
+
+    A seek alone is not the property: a library that seeks and then sorts the
+    result, or that reaches the rows through a table walk, has given the flat
+    cost back. All three are asserted, matching the local pin.
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            "CREATE TABLE entries "
+            "(id TEXT PRIMARY KEY, ts INTEGER NOT NULL, raw_text TEXT NOT NULL)"
+        )
+        conn.executescript(_REPLACE_TS_INDEX_WITH_TS_ID_INDEX)
+        plan = " ".join(
+            str(row[3])
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT id, raw_text FROM entries "
+                f"{_CURSOR_PAGE_WHERE}{_CURSOR_PAGE_ORDER}",
+                {"before_ts": 0, "before_id": "", "limit_plus_one": 1},
+            ).fetchall()
+        )
+    finally:
+        conn.close()
+    seeks_the_index = "SEARCH" in plan and "entries_ts_id_idx" in plan
+    walks_the_table = "SCAN entries" in plan
+    sorts_afterwards = "TEMP B-TREE" in plan.upper()
+    if seeks_the_index and not walks_the_table and not sorts_afterwards:
+        return None
+    return (
+        f"SQLite {sqlite3.sqlite_version} does not seek entries_ts_id_idx for a "
+        f"cursored history page: {plan}"
+    )
 
 
 def _count_locked(conn: sqlite3.Connection) -> int:
@@ -539,20 +663,24 @@ def _count_locked(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
 
 
-def get_page(limit: int = 50, offset: int = 0) -> tuple[list[HistoryEntry], int]:
-    """A window of entries and the total it is a window into, read together.
+def get_page(limit: int = 50, before: HistoryCursor | None = None) -> HistoryPage:
+    """The page starting strictly after ``before``, the total, and the next position.
 
-    One acquisition of ``_lock`` covers both reads on purpose. Taken separately, a
-    write landing between them returns a total that counts the new row and a page
-    that does not, so the next page starts one row too late and the entry last on
-    this one appears again at the top of it.
+    One acquisition of ``_lock`` covers the page read, the "is there more" probe and
+    the total on purpose. Taken separately, a write landing between them returns a
+    total that counts the new row and a page that does not.
     """
-    clamped_limit, clamped_offset = _clamp_window(limit, offset)
+    clamped_limit = _clamp_limit(limit)
     with _lock:
         conn = _ensure_conn_locked()
-        rows = _entries_locked(conn, clamped_limit, clamped_offset)
+        rows = _entries_locked(conn, clamped_limit, before)
         total = _count_locked(conn)
-    return [_row_to_entry(r) for r in rows], total
+    has_more = len(rows) > clamped_limit
+    page = rows[:clamped_limit]
+    next_cursor = HistoryCursor(ts=page[-1]["ts"], id=page[-1]["id"]) if has_more else None
+    return HistoryPage(
+        entries=[_row_to_entry(r) for r in page], total=total, next_cursor=next_cursor
+    )
 
 
 def delete_entry(entry_id: str) -> bool:

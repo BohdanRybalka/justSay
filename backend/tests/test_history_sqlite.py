@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from app.transcripts import history, vector_store
 
@@ -80,7 +81,7 @@ def test_save_then_get_page(isolated_storage, tmp_path):
     target = tmp_path / "target"
     history.bootstrap(target)
     e = history.save_entry(text="hello world", duration_ms=100, language="uk", word_count=2)
-    [out], _ = history.get_page(limit=10)
+    out = history.get_page(limit=10).entries[0]
     assert out.id == e.id
     assert out.text == "hello world"
     assert out.word_count == 2
@@ -91,7 +92,7 @@ def test_delete_entry_removes_row(isolated_storage, tmp_path):
     history.bootstrap(target)
     e = history.save_entry(text="x", duration_ms=1)
     assert history.delete_entry(e.id) is True
-    assert history.get_page()[1] == 0
+    assert history.get_page().total == 0
 
 
 def test_delete_nonexistent_id_returns_false(isolated_storage, tmp_path):
@@ -112,7 +113,7 @@ def test_clear_all_returns_count_and_empties(isolated_storage, tmp_path):
     for _ in range(3):
         history.save_entry(text="x", duration_ms=1)
     assert history.clear_all() == 3
-    assert history.get_page()[1] == 0
+    assert history.get_page().total == 0
 
 
 
@@ -242,7 +243,7 @@ def test_round_trip_through_db_preserves_iso(isolated_storage, tmp_path):
     target = tmp_path / "target"
     history.bootstrap(target)
     e_in = history.save_entry(text="x", duration_ms=1)
-    [e_out], _ = history.get_page(limit=10)
+    e_out = history.get_page(limit=10).entries[0]
     t_in = datetime.fromisoformat(e_in.timestamp.replace("Z", "+00:00"))
     t_out = datetime.fromisoformat(e_out.timestamp.replace("Z", "+00:00"))
     assert abs((t_out - t_in).total_seconds()) < 0.001
@@ -330,8 +331,8 @@ def test_concurrent_saves_no_loss(isolated_storage, tmp_path):
         t.join()
 
     assert errors == []
-    assert history.get_page()[1] == 50
-    entries, _ = history.get_page(limit=100)
+    assert history.get_page().total == 50
+    entries = history.get_page(limit=100).entries
     ids = {e.id for e in entries}
     assert len(ids) == 50
 
@@ -949,7 +950,7 @@ def test_concurrent_save_and_search_serialised(isolated_storage, tmp_path):
 
     assert errors == []
     assert all(0 <= n <= 20 for n in seen)
-    assert history.get_page()[1] == 20
+    assert history.get_page().total == 20
 
 
 def test_get_page_clamps_its_own_limit(isolated_storage, tmp_path):
@@ -958,16 +959,19 @@ def test_get_page_clamps_its_own_limit(isolated_storage, tmp_path):
     call still materialises the whole table into `HistoryEntry` objects under
     the lock. `words.top_words` and `words.search_history` both clamp in the
     service as well as at their routers.
+
+    The clamp also bounds the "is there more" probe: the largest read the store
+    ever issues is `HISTORY_LIMIT_MAX + 1` rows, not `HISTORY_LIMIT_MAX + 100 + 1`.
     """
     for index in range(history.HISTORY_LIMIT_MAX + 5):
         history.save_entry(text=f"entry {index}", duration_ms=1)
 
-    assert len(history.get_page(limit=history.HISTORY_LIMIT_MAX + 100)[0]) == (
+    assert len(history.get_page(limit=history.HISTORY_LIMIT_MAX + 100).entries) == (
         history.HISTORY_LIMIT_MAX
     )
-    assert len(history.get_page(limit=-1)[0]) == 1
-    assert len(history.get_page(limit=0)[0]) == 1
-    assert len(history.get_page(limit=5, offset=-3)[0]) == 5
+    assert len(history.get_page(limit=-1).entries) == 1
+    assert len(history.get_page(limit=0).entries) == 1
+    assert len(history.get_page(limit=5).entries) == 5
 
 
 
@@ -1007,7 +1011,7 @@ def test_entry_read_columns_are_exactly_what_row_to_entry_reads(
     target = tmp_path / "target"
     history.bootstrap(target)
     history.save_entry("hello world", 1200, language="uk", style="normal")
-    entries, _ = history.get_page()
+    entries = history.get_page().entries
 
     conn = sqlite3.connect(target / "history.db")
     try:
@@ -1138,7 +1142,7 @@ def test_a_relocate_that_raises_mid_copy_leaves_a_working_store_behind(
     assert history._stats_cache is None
     assert history._derived_generation != generation_before
     history.save_entry(text="after the failure", duration_ms=1)
-    assert [e.text for e in history.get_page()[0]] == [
+    assert [e.text for e in history.get_page().entries] == [
         "after the failure",
         "before the move",
     ]
@@ -1181,9 +1185,9 @@ def test_get_page_never_releases_the_store_lock_between_its_two_reads(isolated_s
     real_entries_locked = history._entries_locked
     real_count_locked = history._count_locked
 
-    def entries(conn, limit, offset):
+    def entries(conn, limit, before):
         events.append("read-entries")
-        return real_entries_locked(conn, limit, offset)
+        return real_entries_locked(conn, limit, before)
 
     def count(conn):
         events.append("read-count")
@@ -1194,10 +1198,500 @@ def test_get_page_never_releases_the_store_lock_between_its_two_reads(isolated_s
         patch.object(history, "_entries_locked", entries),
         patch.object(history, "_count_locked", count),
     ):
-        entries_read, total = history.get_page(limit=50)
+        page = history.get_page(limit=50)
 
     assert events == ["acquire", "read-entries", "read-count", "release"], (
         "the store lock was released between the page read and the total, so a write "
         f"can land between them: {events}"
     )
-    assert len(entries_read) == total == 3
+    assert len(page.entries) == page.total == 3
+
+
+def _seed(target, count, ts_at):
+    """``count`` entries whose ``ts`` is exactly ``ts_at(index)``, newest last.
+
+    ``save_entry`` stamps wall-clock milliseconds, so two entries written in the
+    same millisecond collide and none of the ordering properties under test could
+    be stated. The timestamps are rewritten to the values the test names.
+    """
+    history.bootstrap(target)
+    ids = [history.save_entry(text=f"entry {index}", duration_ms=1).id for index in range(count)]
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.execute("BEGIN")
+        try:
+            for index, entry_id in enumerate(ids):
+                conn.execute("UPDATE entries SET ts = ? WHERE id = ?", (ts_at(index), entry_id))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return ids
+
+
+def _walk(page_size):
+    """Every page the client would fetch, in order, echoing each ``next_cursor``."""
+    pages = []
+    cursor = None
+    while True:
+        page = history.get_page(limit=page_size, before=cursor)
+        pages.append(page)
+        cursor = page.next_cursor
+        if cursor is None:
+            return pages
+
+
+def test_an_entry_saved_between_two_pages_repeats_and_hides_nothing(isolated_storage, tmp_path):
+    """The defect JS-126 was filed for, at the service level.
+
+    Under offset paging the write shifts every older row down one, so page 2 at
+    offset 30 re-sends the row that ended page 1 and the 60th row is never shown.
+    A cursor is a position rather than a count, so nothing moves under it.
+    """
+    seeded = _seed(tmp_path / "target", 60, lambda index: 1_700_000_000_000 + index)
+
+    first = history.get_page(limit=30)
+    history.save_entry(text="landed between the two pages", duration_ms=1)
+    second = history.get_page(limit=30, before=first.next_cursor)
+
+    ids = [e.id for e in first.entries] + [e.id for e in second.entries]
+    assert len(ids) == 60
+    assert len(set(ids)) == 60
+    assert set(ids) == set(seeded)
+
+
+def test_deleting_the_row_the_cursor_names_hides_no_other_row(isolated_storage, tmp_path):
+    """A cursor keeps working when the row it names is gone.
+
+    ``(ts, id)`` is a point in the order, not a row, so the rows strictly after it
+    are still well defined. The union below is 60 because page 1 was painted
+    before the delete; what the criterion is about is the 59 survivors, and every
+    one of them is returned exactly once.
+    """
+    seeded = _seed(tmp_path / "target", 60, lambda index: 1_700_000_000_000 + index)
+
+    first = history.get_page(limit=30)
+    deleted_id = first.next_cursor.id
+    assert history.delete_entry(deleted_id) is True
+    second = history.get_page(limit=30, before=first.next_cursor)
+
+    ids = [e.id for e in first.entries] + [e.id for e in second.entries]
+    assert len(ids) == len(set(ids))
+    survivors = set(seeded) - {deleted_id}
+    assert len(survivors) == 59
+    assert set(ids) - {deleted_id} == survivors
+
+
+def test_entries_sharing_one_timestamp_page_without_repeat_or_loss(isolated_storage, tmp_path):
+    """``ORDER BY ts DESC`` alone has no tiebreaker, so a page boundary landing
+    inside a same-millisecond group repeats or drops a row against a table nobody
+    is writing to. ``id`` makes the order total."""
+    seeded = _seed(tmp_path / "target", 60, lambda index: 1_700_000_000_000)
+
+    first = history.get_page(limit=30)
+    second = history.get_page(limit=30, before=first.next_cursor)
+
+    ids = [e.id for e in first.entries] + [e.id for e in second.entries]
+    assert len(ids) == 60
+    assert set(ids) == set(seeded)
+
+
+def test_a_cursor_naming_a_row_that_never_existed_answers_from_that_position(
+    isolated_storage, tmp_path
+):
+    seeded = _seed(tmp_path / "target", 60, lambda index: 1_700_000_000_000 + index * 10)
+
+    page = history.get_page(
+        limit=200, before=history.HistoryCursor(ts=1_700_000_000_305, id="nosuchrow")
+    )
+
+    assert [e.id for e in page.entries] == list(reversed(seeded[:31]))
+    assert page.total == 60
+
+
+def test_next_cursor_is_null_only_on_the_last_page(isolated_storage, tmp_path):
+    _seed(tmp_path / "target", 60, lambda index: 1_700_000_000_000 + index)
+
+    pages = _walk(25)
+
+    assert [len(p.entries) for p in pages] == [25, 25, 10]
+    assert [p.next_cursor is None for p in pages] == [False, False, True]
+
+
+def test_an_exactly_full_last_page_costs_no_extra_request(isolated_storage, tmp_path):
+    """60 rows at page size 30 is two requests, not three.
+
+    This is what the ``limit + 1`` probe buys over comparing a count: asking for
+    31 rows and getting 30 is how the second page learns it is the last one, so
+    "Load more" never offers a page that turns out to be empty.
+    """
+    _seed(tmp_path / "target", 60, lambda index: 1_700_000_000_000 + index)
+
+    pages = _walk(30)
+
+    assert [len(p.entries) for p in pages] == [30, 30]
+    assert pages[0].next_cursor is not None
+    assert pages[-1].next_cursor is None
+
+
+def test_a_cursor_cannot_be_built_outside_the_bounds_sqlite_can_hold(isolated_storage, tmp_path):
+    """The bounds belong to ``HistoryCursor``, not only to the router's signature.
+
+    A ``ts`` wider than a signed 64-bit integer reaches ``conn.execute`` and raises
+    ``OverflowError`` out of the driver, which is the failure ``_entries_locked``'s
+    docstring says the caller never causes; and a bound that lives only in a
+    FastAPI signature is not a bound on the function, which is the reasoning
+    ``_clamp_limit`` already carries about ``limit``. So a non-router caller is
+    refused at construction rather than at the driver.
+    """
+    history.bootstrap(tmp_path / "target")
+    history.save_entry(text="x", duration_ms=1)
+
+    with pytest.raises(ValidationError):
+        history.HistoryCursor(ts=history.CURSOR_TS_MAX + 1, id="x")
+    with pytest.raises(ValidationError):
+        history.HistoryCursor(ts=history.CURSOR_TS_MIN - 1, id="x")
+    with pytest.raises(ValidationError):
+        history.HistoryCursor(ts=0, id="a" * (history.CURSOR_ID_MAX_LENGTH + 1))
+
+    at_the_edge = history.HistoryCursor(ts=history.CURSOR_TS_MAX, id="x")
+    assert history.get_page(limit=5, before=at_the_edge).entries != []
+
+
+def test_a_saved_id_fits_the_cursor_id_bound(isolated_storage, tmp_path):
+    """The router caps ``before_id`` so a cursor cannot carry a payload. The cap
+    is stated against what ``save_entry`` actually produces rather than against a
+    ``12`` repeated in prose."""
+    history.bootstrap(tmp_path / "target")
+
+    assert len(history.save_entry(text="x", duration_ms=1).id) < history.CURSOR_ID_MAX_LENGTH
+
+
+def test_the_page_read_asks_for_exactly_one_row_more_than_the_clamped_limit(
+    isolated_storage, tmp_path
+):
+    """The clamp bounds the probe too: the largest read the store ever issues is
+    ``HISTORY_LIMIT_MAX + 1`` rows, not the caller's number plus one."""
+    history.bootstrap(tmp_path / "target")
+    for index in range(history.HISTORY_LIMIT_MAX + 5):
+        history.save_entry(text=f"entry {index}", duration_ms=1)
+
+    real_entries_locked = history._entries_locked
+    read_sizes: list[int] = []
+
+    def entries(conn, limit, before):
+        rows = real_entries_locked(conn, limit, before)
+        read_sizes.append(len(rows))
+        return rows
+
+    with patch.object(history, "_entries_locked", entries):
+        page = history.get_page(limit=history.HISTORY_LIMIT_MAX + 100)
+
+    assert read_sizes == [history.HISTORY_LIMIT_MAX + 1]
+    assert len(page.entries) == history.HISTORY_LIMIT_MAX
+
+
+@contextlib.contextmanager
+def _statement_trace():
+    """Every SQL statement the production code path issues while the block runs.
+
+    The plan pins below read this rather than a SELECT written out in the test.
+    A pin that spells its own query out proves something about that string and
+    nothing about the shipped one -- with the query rewritten here, replacing the
+    row-value seek with the portable ``OR`` form went unnoticed.
+
+    The callback is cleared from the connection it was installed on rather than
+    from whichever one the store resolves to afterwards: a block that reopens the
+    store would otherwise leave a live callback appending into a list that
+    outlives the test.
+    """
+    statements: list[str] = []
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.set_trace_callback(statements.append)
+    try:
+        yield statements
+    finally:
+        with history._lock:
+            conn.set_trace_callback(None)
+
+
+def _statements_from(action):
+    with _statement_trace() as statements:
+        action()
+    return statements
+
+
+def _reads_entries(statement):
+    upper = " ".join(statement.split()).upper()
+    return upper.startswith("SELECT") and "FROM ENTRIES" in upper
+
+
+def _plan_of(statement):
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        return [
+            row[-1]
+            for row in conn.execute(f"EXPLAIN QUERY PLAN {statement}").fetchall()
+        ]
+
+
+def _the_page_read(action):
+    """The one statement that fetches rows, as opposed to the total beside it."""
+    reads = [s for s in _statements_from(action) if _reads_entries(s) and "raw_text" in s]
+    assert len(reads) == 1, reads
+    return reads[0]
+
+
+def test_the_shipped_cursor_read_seeks_and_orders_on_the_full_key(isolated_storage, tmp_path):
+    """Two properties no behavioural or plan assertion in this environment can
+    reach, pinned on the statement the store actually issued.
+
+    ``ORDER BY ts DESC`` alone comes back in the right order against this index
+    today, so results cannot tell the two spellings apart -- the order would only
+    go wrong once the planner chose differently, which is exactly what the second
+    key column is there to prevent.
+
+    And the row-value predicate cannot be told from the portable
+    ``ts < ? OR (ts = ? AND id < ?)`` by ``EXPLAIN QUERY PLAN`` either: the trace
+    callback hands back the statement with its parameters substituted in, and
+    against literals SQLite folds the ``OR`` form into
+    ``SEARCH entries USING INDEX entries_ts_id_idx (ts<?)`` -- measured, not
+    assumed. The row-value form is the one ADR 053 chose and the one
+    ``vector_store.selftest``'s SQLite floor exists for, so the choice is pinned
+    where it is visible.
+    """
+    _seed(tmp_path / "target", 40, lambda index: 1_700_000_000_000 + index)
+    cursor = history.get_page(limit=20).next_cursor
+
+    statement = _the_page_read(lambda: history.get_page(limit=20, before=cursor))
+
+    normalised = " ".join(statement.split()).upper()
+    assert "WHERE (TS, ID) < (" in normalised, statement
+    assert "ORDER BY TS DESC, ID DESC" in normalised, statement
+
+
+def test_the_shipped_cursor_read_is_a_seek_into_the_composite_index(
+    isolated_storage, tmp_path
+):
+    """The property the whole change is bought for, measured on the shipped
+    statement: a page read seeks straight to its position instead of walking the
+    index from the newest row."""
+    _seed(tmp_path / "target", 40, lambda index: 1_700_000_000_000 + index)
+    cursor = history.get_page(limit=20).next_cursor
+
+    plan = _plan_of(_the_page_read(lambda: history.get_page(limit=20, before=cursor)))
+
+    assert any("SEARCH" in step and "entries_ts_id_idx" in step for step in plan), plan
+    assert not any("SCAN entries" in step for step in plan), plan
+    assert not any("TEMP B-TREE" in step for step in plan), plan
+
+
+def test_the_shipped_first_page_read_needs_no_sort(isolated_storage, tmp_path):
+    _seed(tmp_path / "target", 40, lambda index: 1_700_000_000_000 + index)
+
+    plan = _plan_of(_the_page_read(lambda: history.get_page(limit=20)))
+
+    assert any("entries_ts_id_idx" in step for step in plan), plan
+    assert not any("TEMP B-TREE" in step for step in plan), plan
+
+
+def test_the_shipped_word_search_read_keeps_its_ordering_index(isolated_storage, tmp_path):
+    """``entries_ts_idx`` is gone and ``entries_ts_id_idx`` leads with the same
+    column, so ``words.search_history``'s ``LIKE`` lane still gets its ``ts DESC``
+    order from an index instead of a sort. It was never a seek -- a leading-wildcard
+    ``LIKE`` is unindexable -- so what is pinned is the absence of ``TEMP B-TREE``.
+    """
+    from app.transcripts import words
+
+    _seed(tmp_path / "target", 40, lambda index: 1_700_000_000_000 + index)
+
+    reads = [
+        s
+        for s in _statements_from(lambda: words.search_history("ntry", limit=5))
+        if _reads_entries(s) and "LIKE" in s.upper()
+    ]
+    assert reads, "words.search_history issued no LIKE read over entries"
+
+    for statement in reads:
+        plan = _plan_of(statement)
+        assert any("entries_ts_id_idx" in step for step in plan), (statement, plan)
+        assert not any("TEMP B-TREE" in step for step in plan), (statement, plan)
+
+
+@pytest.mark.asyncio
+async def test_the_shipped_embedding_backfill_read_keeps_its_ordering_index(
+    isolated_storage, tmp_path
+):
+    """Same swap, read in the other direction: ``ORDER BY ts ASC`` walks the same
+    index backwards rather than sorting."""
+    _seed(tmp_path / "target", 40, lambda index: 1_700_000_000_000 + index)
+
+    with _statement_trace() as statements:
+        await vector_store.backfill_batch(5)
+
+    reads = [s for s in statements if _reads_entries(s) and "ORDER BY" in s.upper()]
+    assert reads, statements
+
+    for statement in reads:
+        plan = _plan_of(statement)
+        assert any("entries_ts_id_idx" in step for step in plan), (statement, plan)
+        assert not any("TEMP B-TREE" in step for step in plan), (statement, plan)
+
+
+def test_the_shipped_stats_aggregate_plan_is_unchanged_by_the_index_swap(
+    isolated_storage, tmp_path
+):
+    """``compute_stats`` reads every row to sum them, so it never used
+    ``entries_ts_idx`` and does not use its replacement either. Pinned so the swap
+    is on record as having left it alone."""
+    _seed(tmp_path / "target", 40, lambda index: 1_700_000_000_000 + index)
+
+    reads = [
+        s
+        for s in _statements_from(history.compute_stats)
+        if _reads_entries(s) and "CASE WHEN ts >=" in s
+    ]
+    assert len(reads) == 1, reads
+
+    plan = _plan_of(reads[0])
+    assert any("SCAN" in step and "entries" in step for step in plan), (reads[0], plan)
+    assert not any("entries_ts_id_idx" in step for step in plan), (reads[0], plan)
+
+
+def _bulk_seed(target, count):
+    history.bootstrap(target)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.execute("BEGIN")
+        try:
+            conn.executemany(
+                "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+                "VALUES (?, ?, 'uk', 'normal', 'row', 'row', 1)",
+                [(f"{index:012d}", 1_700_000_000_000 + index) for index in range(count)],
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def _vm_steps_of(action):
+    """SQLite VM instructions spent on every statement ``action`` issues, one at a
+    time. The handler stays on the shared connection for the whole call, so a
+    ``get_page`` is counted across its page read and the total beside it rather
+    than on whichever statement the test picked out.
+    """
+    steps = 0
+
+    def tick():
+        nonlocal steps
+        steps += 1
+        return 0
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.set_progress_handler(tick, 1)
+    try:
+        action()
+    finally:
+        with history._lock:
+            conn.set_progress_handler(None, 0)
+    return steps
+
+
+def _run_read(sql):
+    with history._lock:
+        history._ensure_conn_locked().execute(sql).fetchall()
+
+
+def _last_page_probe(store_size, tmp_path, name):
+    """Steps for the whole shipped ``get_page`` of the last page, steps for the
+    offset read it replaces, and the statements the shipped call issued over
+    ``entries``, on a store of ``store_size`` rows."""
+    _bulk_seed(tmp_path / name, store_size)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        ts, entry_id = conn.execute(
+            "SELECT ts, id FROM entries ORDER BY ts DESC, id DESC LIMIT 1 OFFSET ?",
+            (store_size - 31,),
+        ).fetchone()
+    cursor = history.HistoryCursor(ts=ts, id=entry_id)
+    offset_read = (
+        f"SELECT {history.columns_sql(history.ENTRY_READ_COLUMNS)} FROM entries "
+        f"ORDER BY ts DESC LIMIT 30 OFFSET {store_size - 30}"
+    )
+    return (
+        _vm_steps_of(lambda: history.get_page(limit=30, before=cursor)),
+        _vm_steps_of(lambda: _run_read(offset_read)),
+        [
+            statement
+            for statement in _statements_from(lambda: history.get_page(limit=30, before=cursor))
+            if _reads_entries(statement)
+        ],
+    )
+
+
+def test_reading_the_last_page_costs_the_same_at_2000_rows_and_at_8000(isolated_storage, tmp_path):
+    """The property keyset paging is bought for, measured across the whole call
+    rather than across the one statement the test picked out. The offset
+    measurement is taken alongside so the instrument is shown to notice growth: a
+    step counter that reported "flat" for both queries would prove nothing about
+    either.
+
+    What the instrument reaches is on record rather than assumed. The counter is
+    open across the whole call rather than across a statement the test re-runs, and
+    that call issues exactly the two reads asserted below: the page read and the
+    whole-store total. Inside that window the page read's size dependence is
+    visible per opcode, and the total's is not: ``SELECT COUNT(*)`` compiles to a
+    single ``OP_Count`` whose b-tree walk happens inside one instruction, so a step
+    counter reads it flat at any store size. That is why the acceptance criterion
+    names the instrument and not just the outcome.
+    """
+    small_cursor, small_offset, small_reads = _last_page_probe(2_000, tmp_path, "small")
+    large_cursor, large_offset, _ = _last_page_probe(8_000, tmp_path, "large")
+
+    assert len(small_reads) == 2, small_reads
+    assert any("raw_text" in statement for statement in small_reads), small_reads
+    assert any("COUNT(*)" in statement.upper() for statement in small_reads), small_reads
+
+    assert large_cursor < small_cursor * 1.5, (small_cursor, large_cursor)
+    assert large_offset > small_offset * 1.5, (small_offset, large_offset)
+
+
+def test_an_existing_database_swaps_its_index_without_a_schema_bump(isolated_storage, tmp_path):
+    """The swap rides ``_DDL_V1``, which runs unconditionally and idempotently on
+    every open. ``SCHEMA_VERSION`` stays at 3 on purpose: the upgrade branch
+    rebuilds the whole FTS index, and an index swap needs no row touched."""
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    kept = history.save_entry(text="written before the swap", duration_ms=1).id
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.execute("DROP INDEX entries_ts_id_idx")
+        conn.execute("CREATE INDEX entries_ts_idx ON entries(ts DESC)")
+        indexes_before = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+        history._close_conn_locked()
+    assert "entries_ts_idx" in indexes_before
+    assert "entries_ts_id_idx" not in indexes_before
+
+    history.bootstrap(target)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        indexes_after = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert "entries_ts_id_idx" in indexes_after
+    assert "entries_ts_idx" not in indexes_after
+    assert user_version == 3
+    assert [e.id for e in history.get_page().entries] == [kept]

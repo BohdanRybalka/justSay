@@ -346,8 +346,8 @@ def test_search_history_does_not_log_query(caplog):
 @pytest.mark.asyncio
 async def test_search_endpoint_returns_highlighted_text_field(client):
     """Iter-2 BLOCK-1: the ``response_model`` MUST be ``HistorySearchResponse``
-    so FastAPI serializes ``highlighted_text``. With the old
-    ``HistoryListResponse`` model the field would be silently dropped."""
+    so FastAPI serializes ``highlighted_text``. Under a response model built from
+    plain ``HistoryEntry`` rows the field would be silently dropped."""
     history.save_entry(text="правив у файлі", duration_ms=1, language="uk")
     resp = await client.get("/history/search?q=прав")
     assert resp.status_code == 200
