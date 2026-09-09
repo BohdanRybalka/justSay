@@ -76,11 +76,11 @@ def test_check_constraint_rejects_negative_duration(isolated_storage, tmp_path):
 
 
 
-def test_save_then_get_entries(isolated_storage, tmp_path):
+def test_save_then_get_page(isolated_storage, tmp_path):
     target = tmp_path / "target"
     history.bootstrap(target)
     e = history.save_entry(text="hello world", duration_ms=100, language="uk", word_count=2)
-    [out] = history.get_entries(limit=10)
+    [out], _ = history.get_page(limit=10)
     assert out.id == e.id
     assert out.text == "hello world"
     assert out.word_count == 2
@@ -91,7 +91,7 @@ def test_delete_entry_removes_row(isolated_storage, tmp_path):
     history.bootstrap(target)
     e = history.save_entry(text="x", duration_ms=1)
     assert history.delete_entry(e.id) is True
-    assert history.get_count() == 0
+    assert history.get_page()[1] == 0
 
 
 def test_delete_nonexistent_id_returns_false(isolated_storage, tmp_path):
@@ -112,7 +112,7 @@ def test_clear_all_returns_count_and_empties(isolated_storage, tmp_path):
     for _ in range(3):
         history.save_entry(text="x", duration_ms=1)
     assert history.clear_all() == 3
-    assert history.get_count() == 0
+    assert history.get_page()[1] == 0
 
 
 
@@ -242,7 +242,7 @@ def test_round_trip_through_db_preserves_iso(isolated_storage, tmp_path):
     target = tmp_path / "target"
     history.bootstrap(target)
     e_in = history.save_entry(text="x", duration_ms=1)
-    [e_out] = history.get_entries(limit=10)
+    [e_out], _ = history.get_page(limit=10)
     t_in = datetime.fromisoformat(e_in.timestamp.replace("Z", "+00:00"))
     t_out = datetime.fromisoformat(e_out.timestamp.replace("Z", "+00:00"))
     assert abs((t_out - t_in).total_seconds()) < 0.001
@@ -330,8 +330,8 @@ def test_concurrent_saves_no_loss(isolated_storage, tmp_path):
         t.join()
 
     assert errors == []
-    assert history.get_count() == 50
-    entries = history.get_entries(limit=100)
+    assert history.get_page()[1] == 50
+    entries, _ = history.get_page(limit=100)
     ids = {e.id for e in entries}
     assert len(ids) == 50
 
@@ -949,10 +949,10 @@ def test_concurrent_save_and_search_serialised(isolated_storage, tmp_path):
 
     assert errors == []
     assert all(0 <= n <= 20 for n in seen)
-    assert history.get_count() == 20
+    assert history.get_page()[1] == 20
 
 
-def test_get_entries_clamps_its_own_limit(isolated_storage, tmp_path):
+def test_get_page_clamps_its_own_limit(isolated_storage, tmp_path):
     """The router's `Query(..., le=HISTORY_LIMIT_MAX)` bounds the endpoint, not
     the function. `LIMIT -1` is SQLite for "every row", so an unclamped service
     call still materialises the whole table into `HistoryEntry` objects under
@@ -962,12 +962,12 @@ def test_get_entries_clamps_its_own_limit(isolated_storage, tmp_path):
     for index in range(history.HISTORY_LIMIT_MAX + 5):
         history.save_entry(text=f"entry {index}", duration_ms=1)
 
-    assert len(history.get_entries(limit=history.HISTORY_LIMIT_MAX + 100)) == (
+    assert len(history.get_page(limit=history.HISTORY_LIMIT_MAX + 100)[0]) == (
         history.HISTORY_LIMIT_MAX
     )
-    assert len(history.get_entries(limit=-1)) == 1
-    assert len(history.get_entries(limit=0)) == 1
-    assert len(history.get_entries(limit=5, offset=-3)) == 5
+    assert len(history.get_page(limit=-1)[0]) == 1
+    assert len(history.get_page(limit=0)[0]) == 1
+    assert len(history.get_page(limit=5, offset=-3)[0]) == 5
 
 
 
@@ -995,7 +995,7 @@ def test_entry_read_columns_are_exactly_what_row_to_entry_reads(
 ):
     """The read list drops `cleaned_text` and nothing else.
 
-    `get_entries` builds its SELECT from `ENTRY_READ_COLUMNS`, so a column
+    `get_page` builds its SELECT from `ENTRY_READ_COLUMNS`, so a column
     dropped from it becomes a `KeyError` in `_row_to_entry` at runtime.
 
     The expectation comes from the table rather than from `ENTRY_COLUMNS`.
@@ -1007,7 +1007,7 @@ def test_entry_read_columns_are_exactly_what_row_to_entry_reads(
     target = tmp_path / "target"
     history.bootstrap(target)
     history.save_entry("hello world", 1200, language="uk", style="normal")
-    entries = history.get_entries()
+    entries, _ = history.get_page()
 
     conn = sqlite3.connect(target / "history.db")
     try:
@@ -1138,7 +1138,66 @@ def test_a_relocate_that_raises_mid_copy_leaves_a_working_store_behind(
     assert history._stats_cache is None
     assert history._derived_generation != generation_before
     history.save_entry(text="after the failure", duration_ms=1)
-    assert [e.text for e in history.get_entries()] == [
+    assert [e.text for e in history.get_page()[0]] == [
         "after the failure",
         "before the move",
     ]
+
+
+class _RecordingLock:
+    """Delegates to a real lock and records every acquire and release."""
+
+    def __init__(self, inner, events: list[str]):
+        self._inner = inner
+        self._events = events
+
+    def __enter__(self):
+        self._events.append("acquire")
+        return self._inner.__enter__()
+
+    def __exit__(self, *exc):
+        self._events.append("release")
+        return self._inner.__exit__(*exc)
+
+
+def test_get_page_never_releases_the_store_lock_between_its_two_reads(isolated_storage, tmp_path):
+    """JS-126's technical half: the page and the total must come from one state.
+
+    What has to hold is that no other thread can write between the two reads, and
+    the only thing that guarantees it is the lock staying held across both. Two
+    weaker pins were tried and both passed against a mutant that reintroduces the
+    defect: a writer thread started from inside ``get_page`` is blocked while
+    *either* read holds the lock, and counting acquisitions cannot see a
+    ``_count_locked`` moved out of the ``with`` block entirely. Recording the
+    sequence is what distinguishes them — a release between the two reads is
+    exactly the defect, whether or not a second acquisition follows it.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    for i in range(3):
+        history.save_entry(text=f"entry {i}", duration_ms=1)
+
+    events: list[str] = []
+    real_entries_locked = history._entries_locked
+    real_count_locked = history._count_locked
+
+    def entries(conn, limit, offset):
+        events.append("read-entries")
+        return real_entries_locked(conn, limit, offset)
+
+    def count(conn):
+        events.append("read-count")
+        return real_count_locked(conn)
+
+    with (
+        patch.object(history, "_lock", _RecordingLock(history._lock, events)),
+        patch.object(history, "_entries_locked", entries),
+        patch.object(history, "_count_locked", count),
+    ):
+        entries_read, total = history.get_page(limit=50)
+
+    assert events == ["acquire", "read-entries", "read-count", "release"], (
+        "the store lock was released between the page read and the total, so a write "
+        f"can land between them: {events}"
+    )
+    assert len(entries_read) == total == 3
