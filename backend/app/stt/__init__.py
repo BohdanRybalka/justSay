@@ -43,16 +43,11 @@ __all__ = [
     "is_model_loaded",
     "is_local_provider",
     "GROQ_SUPPORTED_FORMATS",
-    "GEMINI_SUPPORTED_FORMATS",
 ]
 
 
 GROQ_SUPPORTED_FORMATS: frozenset[str] = frozenset(
     {".wav", ".mp3", ".flac", ".ogg", ".oga", ".m4a", ".mp4"}
-)
-GEMINI_SUPPORTED_FORMATS: frozenset[str] = frozenset(
-    {".wav", ".mp3", ".ogg", ".oga", ".webm", ".flac", ".m4a", ".mp4",
-     ".aac", ".opus", ".wma", ".aiff", ".aif"}
 )
 
 
