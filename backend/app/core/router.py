@@ -1,4 +1,4 @@
-"""Core routes: health check, config aggregation, graceful shutdown."""
+"""Core routes: health check and graceful shutdown."""
 
 import signal
 
@@ -6,8 +6,7 @@ from fastapi import APIRouter, HTTPException
 
 from app import __version__
 from app.core.config import settings
-from app.core.schemas import ConfigResponse, HealthResponse, ShutdownResponse
-from app.stt import get_provider as get_stt_provider
+from app.core.schemas import HealthResponse, ShutdownResponse
 
 router = APIRouter()
 
@@ -32,14 +31,4 @@ async def request_shutdown() -> ShutdownResponse:
 
 def _raise_stop_signal() -> None:
     signal.raise_signal(signal.SIGTERM)
-
-
-@router.get("/config", response_model=ConfigResponse)
-async def get_config():
-    stt = get_stt_provider(settings.stt.mode, settings.stt)
-    return ConfigResponse(
-        stt_mode=settings.stt.mode,
-        llm_mode=settings.llm.mode,
-        stt_model=stt.model_name,
-    )
 
