@@ -141,9 +141,12 @@ def _cli() -> None:
         "--selftest-sqlite-vec",
         action="store_true",
         help=(
-            "Verify the sqlite-vec extension loads and a KNN query works "
-            "against the actual frozen sidecar binary, then exit. Used by "
-            "release.yml as a permanent CI gate — see ADR 001."
+            "Verify the bundled SQLite is new enough for row-value history "
+            "paging, that its planner seeks the composite index for a cursored "
+            "page rather than walking it, and that the sqlite-vec extension "
+            "loads and a KNN query works — against the actual frozen sidecar "
+            "binary, then exit. Every check runs and all failures are reported. "
+            "Used by release.yml as a permanent CI gate — see ADR 001."
         ),
     )
     args = parser.parse_args()

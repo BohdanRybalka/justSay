@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryEntry } from "../../api";
+import type { HistoryEntry, HistoryPageResponse } from "../../api";
+import { buildEntry, pagesByCursor } from "../history-page-stub.test-helper";
 
 const confirmMock = vi.fn();
 
@@ -21,24 +22,9 @@ vi.mock("../../api", () => ({
 
 const { renderHistory } = await import("./history");
 
-function buildEntry(id: string): HistoryEntry {
-  return {
-    id,
-    timestamp: "2026-08-01T10:00:00Z",
-    language: "uk",
-    style: "normal",
-    text: `transcript ${id}`,
-    duration_ms: 1200,
-    model_name: "whisper",
-    tokens_used: null,
-    audio_duration_seconds: 3.5,
-    word_count: 4,
-  };
-}
-
 async function renderWith(total: number): Promise<HTMLElement> {
   const entries = Array.from({ length: total }, (_, index) => buildEntry(String(index + 1)));
-  apiMock.getHistory.mockResolvedValue({ entries, total });
+  apiMock.getHistory.mockResolvedValue({ entries, total, next_cursor: null });
   const container = document.createElement("div");
   renderHistory(container);
   await vi.waitFor(() => {
@@ -52,10 +38,7 @@ async function renderWith(total: number): Promise<HTMLElement> {
 
 async function renderPaged(total: number): Promise<HTMLElement> {
   const all = Array.from({ length: total }, (_, index) => buildEntry(String(index + 1)));
-  apiMock.getHistory.mockImplementation(async (limit: number, offset: number) => ({
-    entries: all.slice(offset, offset + limit),
-    total,
-  }));
+  apiMock.getHistory.mockImplementation(pagesByCursor(all));
   const container = document.createElement("div");
   renderHistory(container);
   await vi.waitFor(() => {
@@ -76,7 +59,7 @@ describe("renderHistory — paging over the history endpoint", () => {
   it("asks for 30 transcripts on the first paint", async () => {
     const container = await renderPaged(40);
 
-    expect(apiMock.getHistory.mock.calls[0]).toEqual([30, 0]);
+    expect(apiMock.getHistory.mock.calls[0]).toEqual([30, null]);
     expect(container.querySelectorAll(".history-entry")).toHaveLength(30);
     expect(container.querySelector<HTMLElement>("#history-load-more")!.style.display).toBe("block");
   });
@@ -89,7 +72,8 @@ describe("renderHistory — paging over the history endpoint", () => {
     await vi.waitFor(() => {
       expect(container.querySelectorAll(".history-entry")).toHaveLength(40);
     });
-    expect(apiMock.getHistory.mock.calls[1]).toEqual([30, 30]);
+    expect(apiMock.getHistory.mock.calls[1][0]).toBe(30);
+    expect(apiMock.getHistory.mock.calls[1][1]).toEqual({ ts: 30, id: "30" });
     expect(container.querySelector<HTMLElement>("#history-load-more")!.style.display).toBe("none");
   });
 });
@@ -108,7 +92,7 @@ describe("renderHistory — the count names transcripts", () => {
 
 describe("renderHistory — teardown", () => {
   it("a response arriving after teardown writes nothing", async () => {
-    let release: (value: { entries: HistoryEntry[]; total: number }) => void = () => {};
+    let release: (value: HistoryPageResponse) => void = () => {};
     apiMock.getHistory.mockReturnValue(
       new Promise((resolve) => {
         release = resolve;
@@ -119,7 +103,7 @@ describe("renderHistory — teardown", () => {
 
     const before = container.querySelector("#history-count")!.textContent;
     teardown();
-    release({ entries: [buildEntry("1")], total: 1 });
+    release({ entries: [buildEntry("1")], total: 1, next_cursor: null });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -135,7 +119,7 @@ describe("renderHistory — teardown", () => {
       })
     );
     const entries = [buildEntry("1"), buildEntry("2")];
-    apiMock.getHistory.mockResolvedValue({ entries, total: 2 });
+    apiMock.getHistory.mockResolvedValue({ entries, total: 2, next_cursor: null });
     const container = document.createElement("div");
     const teardown = renderHistory(container);
     await vi.waitFor(() => {

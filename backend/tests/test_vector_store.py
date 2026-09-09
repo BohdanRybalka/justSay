@@ -670,3 +670,93 @@ def test_selftest_never_raises_on_broken_extension(monkeypatch):
     ok, msg = vector_store.selftest()
     assert ok is False
     assert "extension load disabled" in msg
+
+
+def test_selftest_fails_a_bundle_whose_sqlite_predates_row_values(monkeypatch):
+    """History paging seeks with ``(ts, id) < (?, ?)``, which SQLite gained in
+    3.15.0; below that every history read is a syntax error rather than a wrong
+    answer. Which library a PyInstaller build embeds only a packaged build can
+    answer, so the floor is asserted where ``release.yml`` already runs the frozen
+    binary on both platforms -- not on a startup or request path, where a version
+    failure would take dictation and settings down with it.
+    """
+    monkeypatch.setattr(vector_store.sqlite3, "sqlite_version_info", (3, 14, 0))
+    monkeypatch.setattr(vector_store.sqlite3, "sqlite_version", "3.14.0")
+
+    ok, msg = vector_store.selftest()
+
+    assert ok is False
+    assert "3.14.0" in msg
+    assert "3.15" in msg
+
+
+def test_selftest_accepts_this_environments_sqlite():
+    assert sqlite3.sqlite_version_info >= history.ROW_VALUE_MIN_SQLITE_VERSION
+    assert vector_store.selftest() == (True, "ok")
+
+
+def test_selftest_reports_the_extension_outcome_even_on_an_old_sqlite(monkeypatch):
+    """An old bundled library is exactly the build whose sqlite-vec status is worth
+    knowing, so the version check must not short-circuit the extension probe: one
+    release run has to answer both questions rather than hide the second behind the
+    first."""
+
+    def boom(_conn):
+        raise RuntimeError("extension load disabled on this platform")
+
+    monkeypatch.setattr(vector_store.sqlite3, "sqlite_version_info", (3, 14, 0))
+    monkeypatch.setattr(vector_store.sqlite3, "sqlite_version", "3.14.0")
+    monkeypatch.setattr(vector_store.sqlite_vec, "load", boom)
+
+    ok, msg = vector_store.selftest()
+
+    assert ok is False
+    assert "3.14.0" in msg
+    assert "extension load disabled" in msg
+
+
+def test_selftest_fails_a_bundle_whose_planner_walks_the_cursor_read(monkeypatch):
+    """The version floor names the release that *introduced* row values, not one at
+    which the planner is known to seek ``entries_ts_id_idx`` for
+    ``(ts, id) < (?, ?)``. A library that parses the predicate and then walks the
+    index from the top gives back the whole property this paging buys, silently and
+    without an error, so the gate takes a real plan from the loaded library."""
+    monkeypatch.setattr(
+        vector_store.history, "cursor_seek_plan_failure", lambda: "SCAN entries"
+    )
+
+    ok, msg = vector_store.selftest()
+
+    assert ok is False
+    assert "SCAN entries" in msg
+
+
+def test_selftest_never_raises_when_the_seek_probe_does(monkeypatch):
+    def boom():
+        raise RuntimeError("no such table: entries")
+
+    monkeypatch.setattr(vector_store.history, "cursor_seek_plan_failure", boom)
+
+    ok, msg = vector_store.selftest()
+
+    assert ok is False
+    assert "no such table: entries" in msg
+
+
+def test_selftest_never_raises_when_a_check_forgets_to_wrap_itself(monkeypatch):
+    """The three checks each guard themselves today, so the loop's own guard is
+    what keeps ``selftest``'s "Never raises" true for the fourth one."""
+
+    def boom():
+        raise RuntimeError("sqlite3 module is unusable")
+
+    monkeypatch.setattr(vector_store, "_row_value_version_failure", boom)
+
+    ok, msg = vector_store.selftest()
+
+    assert ok is False
+    assert "sqlite3 module is unusable" in msg
+
+
+def test_the_cursor_seek_probe_passes_on_this_environments_sqlite():
+    assert history.cursor_seek_plan_failure() is None
