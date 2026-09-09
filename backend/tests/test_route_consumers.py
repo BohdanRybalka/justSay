@@ -8,8 +8,8 @@ the other half of the pair -- it reports an ``api`` member with no caller, never
 a backend route with no client. This module closes the remaining half. ADR 054
 records the design and its rejected alternatives.
 
-**What it sees.** Every route registered on ``app.main.app`` whose endpoint's
-``__module__`` starts with ``app.``, matched by path against the string and
+**What it sees.** Every route registered on ``app.main.app`` whose endpoint is
+not defined inside FastAPI itself, matched by path against the string and
 template literals scanned out of ``src/api.ts``. Paths arrive from FastAPI with
 every router prefix already applied, which is why the gate lives on the Python
 side: prefixes are declared both at ``app.include_router(...)`` and on
@@ -134,8 +134,16 @@ def application_route_registrations() -> list[tuple[str, frozenset[str]]]:
     package, as a path and the HTTP verbs that registration carries.
 
     Origin, not a name list: FastAPI's own ``/docs``, ``/docs/oauth2-redirect``,
-    ``/redoc`` and ``/openapi.json`` live under ``fastapi.applications`` and are
+    ``/redoc`` and ``/openapi.json`` are defined inside ``fastapi`` and are
     dropped by the rule, so a fifth built-in needs no edit here.
+
+    The rule names what is dropped rather than what is kept, and that direction
+    is load-bearing. Keeping endpoints whose ``__module__`` starts with ``app.``
+    assumes the application is imported under that exact top-level name; under
+    an editable install on CI it need not be, and the whole set then filters
+    away, leaving every assertion below trivially true over nothing. Dropping
+    FastAPI's own is the half that is certain wherever the package is imported
+    from.
 
     One entry per registration rather than per path, because the decorator
     cross-check below counts declaration sites: two registrations of the same
@@ -148,7 +156,7 @@ def application_route_registrations() -> list[tuple[str, frozenset[str]]]:
         endpoint = getattr(route, "endpoint", None)
         if methods is None or endpoint is None:
             continue
-        if not getattr(endpoint, "__module__", "").startswith("app."):
+        if getattr(endpoint, "__module__", "").startswith("fastapi."):
             continue
         registrations.append((route.path, frozenset(methods - {"HEAD", "OPTIONS"})))
     return registrations
@@ -352,6 +360,14 @@ def test_the_scanner_reads_api_ts_to_its_end():
 
 def test_every_application_route_has_a_consumer():
     routes = application_routes()
+
+    assert routes, (
+        "app.main.app registered no application route at all, so every assertion in "
+        "this module is trivially true over an empty set. The enumeration rule in "
+        "application_route_registrations() no longer matches how this application is "
+        "imported here -- it is the gate that is broken, not the routes"
+    )
+
     unconsumed = (
         set(routes)
         - consumed_routes()
