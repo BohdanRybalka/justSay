@@ -152,7 +152,7 @@ describe("createHistoryList — the client echoes cursors and never builds one",
     expect(h.paintedIds()).toEqual(["a", "b", "c", "d", "e"]);
   });
 
-  it("load() drops the cursor, so a reload starts from the newest row again", async () => {
+  it("load() asks from the newest row again without discarding the stored cursor", async () => {
     const h = harness();
     const first: HistoryCursor = { ts: 300, id: "second-row" };
     const second: HistoryCursor = { ts: 100, id: "fourth-row" };

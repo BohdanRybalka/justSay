@@ -209,15 +209,12 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     """Version-aware migrator. Run on every connection open.
 
     ``_DDL_V1`` and ``_REPLACE_TS_INDEX_WITH_TS_ID_INDEX`` both run
-    unconditionally and idempotently, which is how the ``entries_ts_idx`` ->
-    ``entries_ts_id_idx`` swap reaches an existing database: ``SCHEMA_VERSION`` is
-    deliberately not bumped for it, because the ``current < SCHEMA_VERSION``
-    branch below rebuilds the whole FTS index, and an index swap needs no row
-    touched. Nothing therefore *records* that a database has been swapped:
-    ``user_version`` reads 3 either way, so no database can be asked whether the
-    swap has happened -- the only way to observe it is to create the old index by
-    hand and reopen the file. Accepted rather than fixed -- see ADR 053, "What it
-    leaves unrecorded".
+    unconditionally and idempotently, so the ``entries_ts_idx`` ->
+    ``entries_ts_id_idx`` swap reaches an existing database without a
+    ``SCHEMA_VERSION`` bump. Why it is not bumped, and what that leaves
+    unrecorded, is ADR 053, "What it leaves unrecorded" -- stated there once,
+    because the version of it that lived in both places had to be corrected in
+    both places.
 
     Branches:
       - fresh v0 / upgrade from v1 or v2 → run v2 DDL, rebuild FTS from
@@ -628,6 +625,10 @@ def cursor_seek_plan_failure() -> str | None:
     column, so the plan is not a covering-index special case -- and reuses the
     same index DDL, predicate and ordering the shipped read uses, rather than a
     second spelling of them.
+
+    A seek alone is not the property: a library that seeks and then sorts the
+    result, or that reaches the rows through a table walk, has given the flat
+    cost back. All three are asserted, matching the local pin.
     """
     conn = sqlite3.connect(":memory:")
     try:
@@ -646,7 +647,10 @@ def cursor_seek_plan_failure() -> str | None:
         )
     finally:
         conn.close()
-    if "SEARCH" in plan and "entries_ts_id_idx" in plan:
+    seeks_the_index = "SEARCH" in plan and "entries_ts_id_idx" in plan
+    walks_the_table = "SCAN entries" in plan
+    sorts_afterwards = "TEMP B-TREE" in plan.upper()
+    if seeks_the_index and not walks_the_table and not sorts_afterwards:
         return None
     return (
         f"SQLite {sqlite3.sqlite_version} does not seek entries_ts_id_idx for a "

@@ -743,5 +743,20 @@ def test_selftest_never_raises_when_the_seek_probe_does(monkeypatch):
     assert "no such table: entries" in msg
 
 
+def test_selftest_never_raises_when_a_check_forgets_to_wrap_itself(monkeypatch):
+    """The three checks each guard themselves today, so the loop's own guard is
+    what keeps ``selftest``'s "Never raises" true for the fourth one."""
+
+    def boom():
+        raise RuntimeError("sqlite3 module is unusable")
+
+    monkeypatch.setattr(vector_store, "_row_value_version_failure", boom)
+
+    ok, msg = vector_store.selftest()
+
+    assert ok is False
+    assert "sqlite3 module is unusable" in msg
+
+
 def test_the_cursor_seek_probe_passes_on_this_environments_sqlite():
     assert history.cursor_seek_plan_failure() is None

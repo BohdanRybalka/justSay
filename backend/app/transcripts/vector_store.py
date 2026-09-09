@@ -349,14 +349,20 @@ def selftest() -> tuple[bool, str]:
     seeks ``entries_ts_id_idx`` for the cursored history read, and sqlite-vec
     loads. **Every check runs**, and a failure reports all of them -- an old
     library is exactly the build whose sqlite-vec status is worth knowing, so
-    stopping at the first failure would throw that answer away.
+    stopping at the first failure would throw that answer away. Each check
+    reports rather than raises, and the loop guards them anyway: the promise in
+    the first line has to survive a fourth check being added by someone who
+    forgets it.
     """
     checks = (
         _row_value_version_failure,
         _cursor_seek_plan_failure,
         _vec_extension_failure,
     )
-    outcomes = [check() for check in checks]
+    try:
+        outcomes = [check() for check in checks]
+    except Exception as e:
+        return False, f"a selftest check raised: {e}"
     failures = [outcome for outcome in outcomes if outcome is not None]
     if failures:
         return False, "; ".join(failures)

@@ -1391,23 +1391,34 @@ def test_the_page_read_asks_for_exactly_one_row_more_than_the_clamped_limit(
     assert len(page.entries) == history.HISTORY_LIMIT_MAX
 
 
-def _statements_from(action):
-    """Every SQL statement the production code path actually issued.
+@contextlib.contextmanager
+def _statement_trace():
+    """Every SQL statement the production code path issues while the block runs.
 
     The plan pins below read this rather than a SELECT written out in the test.
     A pin that spells its own query out proves something about that string and
     nothing about the shipped one -- with the query rewritten here, replacing the
     row-value seek with the portable ``OR`` form went unnoticed.
+
+    The callback is cleared from the connection it was installed on rather than
+    from whichever one the store resolves to afterwards: a block that reopens the
+    store would otherwise leave a live callback appending into a list that
+    outlives the test.
     """
     statements: list[str] = []
     with history._lock:
         conn = history._ensure_conn_locked()
         conn.set_trace_callback(statements.append)
     try:
-        action()
+        yield statements
     finally:
         with history._lock:
-            history._ensure_conn_locked().set_trace_callback(None)
+            conn.set_trace_callback(None)
+
+
+def _statements_from(action):
+    with _statement_trace() as statements:
+        action()
     return statements
 
 
@@ -1516,14 +1527,8 @@ async def test_the_shipped_embedding_backfill_read_keeps_its_ordering_index(
     index backwards rather than sorting."""
     _seed(tmp_path / "target", 40, lambda index: 1_700_000_000_000 + index)
 
-    statements = []
-    with history._lock:
-        history._ensure_conn_locked().set_trace_callback(statements.append)
-    try:
+    with _statement_trace() as statements:
         await vector_store.backfill_batch(5)
-    finally:
-        with history._lock:
-            history._ensure_conn_locked().set_trace_callback(None)
 
     reads = [s for s in statements if _reads_entries(s) and "ORDER BY" in s.upper()]
     assert reads, statements
@@ -1585,12 +1590,13 @@ def _vm_steps_of(action):
         return 0
 
     with history._lock:
-        history._ensure_conn_locked().set_progress_handler(tick, 1)
+        conn = history._ensure_conn_locked()
+        conn.set_progress_handler(tick, 1)
     try:
         action()
     finally:
         with history._lock:
-            history._ensure_conn_locked().set_progress_handler(None, 0)
+            conn.set_progress_handler(None, 0)
     return steps
 
 
