@@ -72,9 +72,21 @@ export function renderHistory(container: HTMLElement): () => void {
     },
   });
 
+  function noMatchesElement(): HTMLElement {
+    const el = document.createElement("div");
+    el.style.cssText = "color: var(--text-muted); padding: 32px; text-align: center;";
+    el.textContent = "No matches";
+    return el;
+  }
+
   /**
    * The search lane, holding a claim on the shared rows for as long as what is on
    * screen is its own paint.
+   *
+   * Every row it paints goes through `claim.replaceRows`, including the empty
+   * state, so the shared list is the only writer of the row container and knows
+   * whose paint is on screen. A search that claims and then fails repaints
+   * nothing, and the list's own count keeps describing the list's own rows.
    *
    * The claim is taken before the request rather than after it, so a page load
    * already in flight is superseded at the moment the user asks for matches and
@@ -101,17 +113,16 @@ export function renderHistory(container: HTMLElement): () => void {
     searchHint.textContent = "Searching...";
     try {
       const resp = await api.searchHistory(q, PAGE_SIZE);
-      if (!claim.isCurrent()) return;
-      listEl.innerHTML = "";
+      claim.replaceRows(
+        resp.entries.length === 0
+          ? [noMatchesElement()]
+          : resp.entries.map((entry) => createEntryElement(entry))
+      );
       claim.renderCount(`${resp.total} match${resp.total !== 1 ? "es" : ""}`);
-      if (resp.entries.length === 0) {
-        listEl.innerHTML = `<div style="color: var(--text-muted); padding: 32px; text-align: center;">No matches</div>`;
-      }
-      for (const entry of resp.entries) {
-        listEl.appendChild(createEntryElement(entry));
-      }
       claim.renderLoadMore(false);
-      searchHint.textContent = "";
+      if (claim.isCurrent()) {
+        searchHint.textContent = "";
+      }
     } catch (e) {
       if (!claim.isCurrent()) return;
       if (e instanceof SidecarTooOldError) {

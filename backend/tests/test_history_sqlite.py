@@ -11,6 +11,7 @@ import contextlib
 import sqlite3
 import threading
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1715,9 +1716,18 @@ def test_closing_the_connection_drops_the_memoised_total(isolated_storage, tmp_p
     assert history._page_total_cache is None
 
 
-def test_the_total_is_counted_once_until_a_write_lands(isolated_storage, tmp_path):
+def test_the_total_is_counted_once_until_a_write_lands(
+    isolated_storage, tmp_path, monkeypatch
+):
     """ADR 055's second half: the only term that grew with the store is now read
-    when it can have changed, not once per page."""
+    when it can have changed, not once per page.
+
+    The clock is pinned rather than raced. The memo's third key is an age against
+    ``time.monotonic``, so on real time these calls would have to finish inside
+    ``STATS_TTL_SECONDS`` and a stalled worker would fail this test for a reason
+    other than the defect it names.
+    """
+    monkeypatch.setattr(history, "time", SimpleNamespace(monotonic=lambda: 1_000.0))
     _seed(tmp_path / "target", 10, lambda index: 1_700_000_000_000 + index)
 
     def counts(action):

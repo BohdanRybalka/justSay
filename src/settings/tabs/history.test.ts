@@ -245,6 +245,58 @@ describe("renderHistory — a reload and a search cannot both own the rows", () 
     expect(container.querySelector("#history-count")!.textContent).toBe("1 match");
   });
 
+  it("a search that failed without repainting leaves the delete moving the transcript total", async () => {
+    const entries = [buildEntry("1"), buildEntry("2")];
+    apiMock.getHistory.mockResolvedValue({ entries, total: 2, next_cursor: null });
+    apiMock.searchHistory.mockRejectedValue(new Error("503 store busy"));
+    apiMock.deleteHistoryEntry.mockResolvedValue({ deleted: true });
+
+    const container = document.createElement("div");
+    renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
+    });
+
+    await typeQuery(container, "hello");
+    await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
+    await flush();
+
+    expect(container.querySelectorAll(".history-entry")).toHaveLength(2);
+
+    await deleteFirstRow(container);
+
+    expect(container.querySelector("#history-count")!.textContent).toBe("1 transcript");
+  });
+
+  it("emptying the box is what gives Load more back after a search that never answers", async () => {
+    const entries = Array.from({ length: 30 }, (_, index) => buildEntry(String(index + 1)));
+    apiMock.getHistory.mockResolvedValue({
+      entries,
+      total: 60,
+      next_cursor: { ts: 30, id: "30" },
+    });
+    apiMock.searchHistory.mockReturnValue(new Promise(() => {}));
+
+    const container = document.createElement("div");
+    renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("60 transcripts");
+    });
+
+    await typeQuery(container, "hello");
+    await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
+
+    expect(container.querySelector("#history-search-hint")!.textContent).toBe("Searching...");
+    expect(container.querySelector<HTMLButtonElement>("#btn-load-more")!.disabled).toBe(true);
+
+    await typeQuery(container, "");
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
+    await flush();
+
+    expect(container.querySelector("#history-search-hint")!.textContent).toBe("");
+    expect(container.querySelector<HTMLButtonElement>("#btn-load-more")!.disabled).toBe(false);
+  });
+
   it("a reload that takes the rows over drops the search answer that arrives after it", async () => {
     const entries = [buildEntry("1"), buildEntry("2")];
     const reload = deferred<HistoryPageResponse>();

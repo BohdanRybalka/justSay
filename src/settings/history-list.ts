@@ -42,11 +42,17 @@ export interface HistoryListOptions {
  * claim disables the button rather than hiding it, so nothing can page under a
  * paint that has not happened yet; releasing is how the button comes back for a
  * lane that ended without painting rows of its own.
+ *
+ * `replaceRows` is the only way to paint the shared row container from outside
+ * this module, and painting through it is what records that the rows on screen
+ * are no longer the list's own page. A lane that claims and then never answers
+ * therefore leaves the list's own rows described by the list's own count.
  */
 export interface HistoryRowsClaim {
   isCurrent(): boolean;
   renderCount(text: string): void;
   renderLoadMore(visible: boolean): void;
+  replaceRows(rows: readonly HTMLElement[]): void;
   release(): void;
 }
 
@@ -69,6 +75,12 @@ export interface HistoryList {
    * without taking the button away from rows the lane may never repaint. The
    * lane calls `release()` when it is done, and a lane that painted its own
    * rows hides the wrapper itself.
+   *
+   * The hold lasts exactly as long as the claiming lane is outstanding, and
+   * nothing bounds that from here. `api.searchHistory` has no client-side
+   * budget, so a backend that never answers a search leaves the button disabled
+   * until some newer lane supersedes the claim -- emptying the search box, which
+   * reloads the page and releases the button, is the recovery.
    */
   claimRows(): HistoryRowsClaim;
   /**
@@ -108,7 +120,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
   let total = 0;
   let latestIssuedToken = 0;
   let backendOmitsCursor = false;
-  let latestClaim: HistoryRowsClaim;
+  let latestClaim: HistoryRowsClaim | null = null;
   let rowsAreOwnPage = false;
 
   function renderCount(text: string): void {
@@ -137,9 +149,14 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
   /**
    * Issues a claim, which supersedes every lane already holding one: the token
-   * is bumped and the new claim is recorded as the list's own writer. Reading
-   * this as a plain factory is the mistake it is named against -- calling it
-   * "just to get a claim" silently invalidates every request in flight.
+   * is bumped, the new claim is recorded as the list's own writer and
+   * "Load more" is disabled for the duration of the lane. Reading this as a
+   * plain factory is the mistake it is named against -- calling it "just to get
+   * a claim" silently invalidates every request in flight.
+   *
+   * The disable lives here rather than in each caller because both of them go
+   * through this one function, and the one place that knows whether the tab is
+   * still mounted is the `isCurrent` this claim is built around.
    */
   function issueClaim(): HistoryRowsClaim {
     const token = ++latestIssuedToken;
@@ -152,20 +169,20 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
       renderLoadMore(visible: boolean) {
         if (isCurrent()) renderLoadMore(visible);
       },
+      replaceRows(rows: readonly HTMLElement[]) {
+        if (!isCurrent()) return;
+        elements.rows.innerHTML = "";
+        for (const row of rows) {
+          elements.rows.appendChild(row);
+        }
+        rowsAreOwnPage = false;
+      },
       release() {
         if (isCurrent()) elements.loadMoreButton.disabled = false;
       },
     };
     latestClaim = claim;
-    return claim;
-  }
-
-  latestClaim = issueClaim();
-
-  function claimRows(): HistoryRowsClaim {
-    const claim = issueClaim();
-    rowsAreOwnPage = false;
-    if (!isDestroyed()) {
+    if (isCurrent()) {
       elements.loadMoreButton.disabled = true;
     }
     return claim;
@@ -195,7 +212,6 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
   async function loadPage(append: boolean): Promise<void> {
     if (append && cursor === null) return;
     const claim = issueClaim();
-    elements.loadMoreButton.disabled = true;
     try {
       const response = await api.getHistory(pageSize, append ? cursor : null);
       if (!claim.isCurrent()) return;
@@ -256,7 +272,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     try {
       await api.clearHistory();
       if (isDestroyed()) return;
-      const claim = claimRows();
+      const claim = issueClaim();
       cursor = null;
       total = 0;
       elements.rows.innerHTML = "";
@@ -288,9 +304,9 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     load() {
       return loadPage(false);
     },
-    claimRows,
+    claimRows: issueClaim,
     entryRemoved() {
-      if (!rowsAreOwnPage) return;
+      if (!rowsAreOwnPage || latestClaim === null) return;
       total--;
       renderTotal(latestClaim);
     },

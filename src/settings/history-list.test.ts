@@ -259,13 +259,21 @@ describe("createHistoryList — one request at a time decides the rows and the c
 
   it("keeps the version-skew warning painted when a row is deleted afterwards", async () => {
     const h = harness();
+    apiMock.getHistory.mockResolvedValueOnce({
+      entries: [buildEntry("a"), buildEntry("b")],
+      total: 2,
+      next_cursor: null,
+    });
     apiMock.getHistory.mockRejectedValue(new SidecarTooOldError("no next_cursor"));
 
     const list = listOver(h);
     await list.load();
+    await list.load();
+    expect(h.countText()).toBe(sidecarTooOldText("History"));
+
     list.entryRemoved();
 
-    expect(h.countText()).toBe("History needs the latest backend — please update JustSay.");
+    expect(h.countText()).toBe(sidecarTooOldText("History"));
   });
 
   it("keeps the ordinary failure text for a failure that is not version skew", async () => {
@@ -371,7 +379,7 @@ describe("createHistoryList — one request at a time decides the rows and the c
     expect(h.countText()).toBe("1 transcript");
   });
 
-  it("keeps the version-skew warning through a Clear All, because the backend is still the old one", async () => {
+  it("keeps the version-skew warning over an emptied store, because the backend is still the old one", async () => {
     const h = harness();
     apiMock.getHistory.mockResolvedValueOnce({
       entries: [buildEntry("a")],

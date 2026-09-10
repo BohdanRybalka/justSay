@@ -776,8 +776,16 @@ def get_page(limit: int = 50, before: HistoryCursor | None = None) -> HistoryPag
     """The page starting strictly after ``before``, the total, and the next position.
 
     One acquisition of ``_lock`` covers the page read, the "is there more" probe and
-    the total on purpose. Taken separately, a write landing between them returns a
-    total that counts the new row and a page that does not.
+    the total on purpose, and what it still guarantees is that no *in-process* write
+    lands between the three reads: taken separately, a ``save_entry`` between them
+    would return a total that counts the new row and a page that does not.
+
+    It no longer makes the three reads describe one state of the file. Since the
+    total became memoised with a TTL (ADR 055), a second process writing the same
+    ``history.db`` bumps no generation and swaps no connection, so the rows are read
+    fresh while the total can be up to ``STATS_TTL_SECONDS`` old --
+    ``test_the_memoised_total_expires_so_a_second_writer_is_picked_up`` pins that
+    bound.
 
     A page that comes back short is the last one, so the probe is skipped entirely
     rather than asked a question its own length already answered.
