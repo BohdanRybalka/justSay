@@ -66,8 +66,8 @@ use tauri_plugin_shell::ShellExt;
 /// the Python side redirects them — where the data root is
 /// resolved the way the backend resolves its own — `JUSTSAY_DATA_DIR` first,
 /// otherwise the home directory joined with `.justsay` or `.justsay-dev`
-/// depending on `spawn()`'s `force_dev_data_dir` flag — see
-/// `sidecar_log_dir_from()` and `append_sidecar_log()` below and
+/// depending on `data_dir_choice()` — see `sidecar_log_dir_from()` and
+/// `append_sidecar_log()` below and
 /// `docs/adr/012-dev-mode-data-directory-isolation.md`.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -375,6 +375,33 @@ fn sidecar_log_dir(data_dir_name: &str) -> Option<PathBuf> {
     )
 }
 
+/// The development-versus-production choice this launch makes: the flag
+/// `spawn()` hands the child, and the directory name the sidecar log is
+/// written under — see `docs/adr/012-dev-mode-data-directory-isolation.md`.
+/// One environment read answers both, because resolving them apart is how the
+/// shell and the backend came to disagree about the log's directory (JS-131).
+///
+/// The `let` binding and the `if`/`else` name pair are read as *text* by
+/// `backend/tests/test_cross_language_contracts.py`, the only check that this
+/// file and `app_paths.py` still agree — `ci.yml` runs no Rust toolchain.
+fn data_dir_choice() -> (bool, &'static str) {
+    let force_dev_data_dir =
+        cfg!(debug_assertions) || std::env::var("JUSTSAY_FORCE_DEV_DATA_DIR").is_ok_and(|v| v == "1");
+    (
+        force_dev_data_dir,
+        if force_dev_data_dir { ".justsay-dev" } else { ".justsay" },
+    )
+}
+
+/// The directory both halves of the startup story are written to: the
+/// sidecar's captured output, and the reasons a backend never produced any.
+/// `spawn()` resolves it once per launch, `report_backend_failure()` once per
+/// failure; what matters is that neither can pick a different one.
+fn startup_log_dir() -> Option<PathBuf> {
+    let (_, data_dir_name) = data_dir_choice();
+    sidecar_log_dir(data_dir_name)
+}
+
 /// Append one captured line from the production sidecar to `sidecar.log` under
 /// the directory `spawn()` resolved once through `sidecar_log_dir` — see
 /// `sidecar_log_dir_from` and
@@ -406,6 +433,28 @@ fn append_sidecar_log(line: &[u8], log_dir: Option<&Path>) {
             let _ = file.write_all(b"\n");
         }
     }
+}
+
+/// Report a reason the backend is not running to both the app log and
+/// `sidecar.log`.
+///
+/// `sidecar.log` holds the output of a sidecar that started. Every reason one
+/// never started, or started and never answered `/health`, reached
+/// `tauri_plugin_log` alone, which writes to an OS log directory no
+/// `JUSTSAY_DATA_DIR` override touches — so the file spec 131 put beside the
+/// user's data answered "why will it not start" only when it had started. The
+/// app log keeps its copy. Which sites report here, and which deliberately do
+/// not, is `specs/135-startup-diagnosis-outside-data-dir/fix.md`.
+pub fn report_backend_failure(message: &str) {
+    report_backend_failure_to(message, startup_log_dir().as_deref());
+}
+
+/// The seam `report_backend_failure` is built on: taking the directory instead
+/// of reading the environment for it keeps the write testable without mutating
+/// a process-global the rest of the suite shares.
+fn report_backend_failure_to(message: &str, log_dir: Option<&Path>) {
+    log::error!("{}", message);
+    append_sidecar_log(format!("[shell] {}", message).as_bytes(), log_dir);
 }
 
 /// Parse `python --version` stdout (e.g. `"Python 3.11.4\n"`) into
@@ -677,10 +726,8 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
     let prefer_python_source =
         cfg!(debug_assertions) && std::env::var("JUSTSAY_USE_FROZEN_SIDECAR").is_err();
 
-    let force_dev_data_dir =
-        cfg!(debug_assertions) || std::env::var("JUSTSAY_FORCE_DEV_DATA_DIR").is_ok_and(|v| v == "1");
-    let data_dir_name: &'static str = if force_dev_data_dir { ".justsay-dev" } else { ".justsay" };
-    let log_dir = sidecar_log_dir(data_dir_name);
+    let (force_dev, _) = data_dir_choice();
+    let log_dir = startup_log_dir();
 
     let resolved_sidecar = if prefer_python_source {
         None
@@ -697,7 +744,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
             .command(sidecar_str)
             .args(["--host", "127.0.0.1", "--port", &port_str])
             .env("JUSTSAY_API_TOKEN", api_token());
-        if force_dev_data_dir {
+        if force_dev {
             shell_cmd = shell_cmd.env("JUSTSAY_FORCE_DEV_DATA_DIR", "1");
         }
         let (mut rx, child) = shell_cmd
@@ -769,7 +816,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .env("JUSTSAY_API_TOKEN", api_token());
-        if force_dev_data_dir {
+        if force_dev {
             cmd.env("JUSTSAY_FORCE_DEV_DATA_DIR", "1");
         }
         #[cfg(windows)]
@@ -1289,7 +1336,10 @@ pub fn spawn_watchdog(app: AppHandle) {
         let mut confirmed_healthy = match wait_for_ready().await {
             Ok(()) => true,
             Err(e) => {
-                log::error!("Backend watchdog: initial backend not ready: {}", e);
+                report_backend_failure(&format!(
+                    "Backend watchdog: initial backend not ready: {}",
+                    e
+                ));
                 false
             }
         };
@@ -1309,10 +1359,10 @@ pub fn spawn_watchdog(app: AppHandle) {
             }
 
             if attempt >= MAX_RESPAWN_ATTEMPTS {
-                log::error!(
+                report_backend_failure(&format!(
                     "Backend watchdog: giving up after {} consecutive failed respawns",
                     MAX_RESPAWN_ATTEMPTS
-                );
+                ));
                 return;
             }
 
@@ -1343,12 +1393,15 @@ pub fn spawn_watchdog(app: AppHandle) {
                         attempt = 0;
                     }
                     Err(e) => {
-                        log::error!("Backend watchdog: respawn did not become ready: {}", e);
+                        report_backend_failure(&format!(
+                            "Backend watchdog: respawn did not become ready: {}",
+                            e
+                        ));
                         attempt += 1;
                     }
                 },
                 Err(e) => {
-                    log::error!("Backend watchdog: respawn failed: {}", e);
+                    report_backend_failure(&format!("Backend watchdog: respawn failed: {}", e));
                     attempt += 1;
                 }
             }
@@ -1432,6 +1485,71 @@ mod tests {
     #[test]
     fn without_an_override_or_a_home_there_is_nowhere_to_write() {
         assert_eq!(sidecar_log_dir_from(None, None, ".justsay"), None);
+    }
+
+    fn scratch_log_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join("justsay-startup-log-tests")
+            .join(format!("{}-{}", label, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("scratch log directory");
+        dir
+    }
+
+    #[test]
+    fn a_startup_failure_joins_the_sidecar_output_in_one_file() {
+        let dir = scratch_log_dir("joins");
+
+        report_backend_failure_to("Backend spawn failed: the port is already in use", Some(&dir));
+        append_sidecar_log(b"INFO:     Application startup complete.\n", Some(&dir));
+
+        let log = std::fs::read_to_string(dir.join("sidecar.log")).expect("sidecar.log");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            log.contains("[shell] Backend spawn failed: the port is already in use"),
+            "the reason a backend never started must reach the file its own output would have \
+             gone to, or half the startup story lands outside the data directory; got {:?}",
+            log
+        );
+        assert!(
+            log.contains("Application startup complete."),
+            "the sidecar's captured output must still reach that same file; got {:?}",
+            log
+        );
+    }
+
+    #[test]
+    fn two_startup_failures_stay_on_two_lines() {
+        let dir = scratch_log_dir("newline");
+
+        report_backend_failure_to("Backend watchdog: respawn failed: first", Some(&dir));
+        report_backend_failure_to("Backend watchdog: respawn failed: second", Some(&dir));
+
+        let log = std::fs::read_to_string(dir.join("sidecar.log")).expect("sidecar.log");
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            log.lines().collect::<Vec<_>>(),
+            vec![
+                "[shell] Backend watchdog: respawn failed: first",
+                "[shell] Backend watchdog: respawn failed: second",
+            ],
+            "these messages carry no trailing newline of their own, so two failures would run \
+             together into one unreadable line"
+        );
+    }
+
+    #[test]
+    fn a_failure_with_nowhere_to_write_writes_nothing_rather_than_somewhere_relative() {
+        let stray = std::env::current_dir().expect("cwd").join("sidecar.log");
+        let existed_before = stray.exists();
+
+        report_backend_failure_to("Backend spawn failed: nowhere to write this", None);
+
+        assert_eq!(
+            stray.exists(),
+            existed_before,
+            "sidecar_log_dir_from returns None to mean do not write the log, never write it \
+             somewhere else -- a relative fallback would put it next to the app instead"
+        );
     }
 
     #[test]
