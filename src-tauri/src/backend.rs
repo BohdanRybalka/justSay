@@ -66,8 +66,8 @@ use tauri_plugin_shell::ShellExt;
 /// the Python side redirects them — where the data root is
 /// resolved the way the backend resolves its own — `JUSTSAY_DATA_DIR` first,
 /// otherwise the home directory joined with `.justsay` or `.justsay-dev`
-/// depending on `spawn()`'s `force_dev_data_dir` flag — see
-/// `sidecar_log_dir_from()` and `append_sidecar_log()` below and
+/// depending on `data_dir_choice()` — see `sidecar_log_dir_from()` and
+/// `append_sidecar_log()` below and
 /// `docs/adr/012-dev-mode-data-directory-isolation.md`.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -298,7 +298,7 @@ fn http_client() -> Result<&'static reqwest::Client, String> {
 ///
 /// The order is Python's and has to stay Python's: an explicit
 /// `JUSTSAY_DATA_DIR` wins over everything, otherwise the home directory joined
-/// with the name `spawn()` chose. An empty value counts as unset on both
+/// with the name `data_dir_choice()` returned. An empty value counts as unset on both
 /// sides, because `std::env::var` returns `Ok("")` for a set-but-empty variable
 /// on Windows and joining it would produce a path relative to whatever the
 /// process happens to have as its working directory.
@@ -375,37 +375,141 @@ fn sidecar_log_dir(data_dir_name: &str) -> Option<PathBuf> {
     )
 }
 
-/// Append one captured line from the production sidecar to `sidecar.log` under
-/// the directory `spawn()` resolved once through `sidecar_log_dir` — see
-/// `sidecar_log_dir_from` and
+/// The development-versus-production choice this launch makes: the flag
+/// `spawn()` hands the child, and the directory name the sidecar log is
+/// written under — see `docs/adr/012-dev-mode-data-directory-isolation.md`.
+/// One environment read answers both, because resolving them apart is how the
+/// shell and the backend came to disagree about the log's directory (JS-131).
+///
+/// The `let` binding and the `if`/`else` name pair are read as *text* by
+/// `backend/tests/test_cross_language_contracts.py`, the only check that this
+/// file and `app_paths.py` still agree — `ci.yml` runs no Rust toolchain.
+fn data_dir_choice() -> (bool, &'static str) {
+    let force_dev_data_dir =
+        cfg!(debug_assertions) || std::env::var("JUSTSAY_FORCE_DEV_DATA_DIR").is_ok_and(|v| v == "1");
+    (
+        force_dev_data_dir,
+        if force_dev_data_dir { ".justsay-dev" } else { ".justsay" },
+    )
+}
+
+/// The directory the reasons a backend never started are written to — the same
+/// one `spawn()` resolves for the sidecar's own captured output, by composing
+/// the same two functions rather than by sharing a resolved value: `spawn()`
+/// runs again on every watchdog respawn, so there is no single per-launch
+/// resolution for a failure report to borrow.
+fn startup_log_dir() -> Option<PathBuf> {
+    let (_, data_dir_name) = data_dir_choice();
+    sidecar_log_dir(data_dir_name)
+}
+
+/// Append one record to `sidecar.log` under the directory the caller resolved
+/// — see `sidecar_log_dir_from` and
 /// `docs/adr/012-dev-mode-data-directory-isolation.md`, so that a
 /// `tauri:dev:frozen` smoke-test run's captured output, and a run with
 /// `JUSTSAY_DATA_DIR` set, both land beside the sidecar's own
 /// history.db/settings.json rather than in the default location.
 ///
-/// The directory is passed in rather than resolved here because this runs once
-/// per captured line, and a uvicorn start is dozens of them.
-/// Failure to open the log file is silent to avoid spamming on shutdown
-/// when the FS is racing.
-fn append_sidecar_log(line: &[u8], log_dir: Option<&Path>) {
+/// Two producers write here from different tasks — the loop draining the
+/// sidecar's captured output, and `report_backend_failure` — so the record and
+/// the newline that terminates it go out as **one** `write_all`. Supplying the
+/// newline as a second append leaves a window for the other writer's chunk to
+/// land inside a record, joining two of them into one unreadable line in the
+/// file someone is told to open when nothing works.
+///
+/// The directory is passed in rather than resolved here because the drain loop
+/// runs this once per captured line, and a uvicorn start is dozens of them.
+///
+/// Returns whether the record reached the file. The drain loop ignores that:
+/// its failures come in dozens and spam a shutdown when the FS is racing.
+/// `report_backend_failure_to` does not, because a diagnosis nobody can find is
+/// the failure this whole path exists to prevent.
+fn append_sidecar_log(line: &[u8], log_dir: Option<&Path>) -> bool {
     let log_dir = match log_dir {
         Some(dir) => dir,
-        None => return,
+        None => return false,
     };
     if std::fs::create_dir_all(&log_dir).is_err() {
-        return;
+        return false;
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
+    let mut record = Vec::with_capacity(line.len() + 1);
+    record.extend_from_slice(line);
+    if !record.ends_with(b"\n") {
+        record.push(b'\n');
+    }
+    match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log_dir.join("sidecar.log"))
     {
-        use std::io::Write;
-        let _ = file.write_all(line);
-        if !line.ends_with(b"\n") {
-            let _ = file.write_all(b"\n");
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(&record).is_ok()
         }
+        Err(_) => false,
     }
+}
+
+/// Report a reason the backend is not running to both the app log and
+/// `sidecar.log`.
+///
+/// `sidecar.log` holds the output of a sidecar that started. Every reason one
+/// never started, or started and never answered `/health`, reached
+/// `tauri_plugin_log` alone, which writes to an OS log directory no
+/// `JUSTSAY_DATA_DIR` override touches — so the file spec 131 put beside the
+/// user's data answered "why will it not start" only when it had started. The
+/// app log keeps its copy. Which sites report here, and which deliberately do
+/// not, is `specs/135-startup-diagnosis-outside-data-dir/fix.md`.
+pub fn report_backend_failure(message: &str) {
+    if is_shutdown_requested() {
+        log::error!("{}", message);
+        return;
+    }
+    report_backend_failure_to(message, startup_log_dir().as_deref());
+}
+
+/// The seam `report_backend_failure` is built on: taking the directory instead
+/// of reading the environment for it keeps the write testable without mutating
+/// a process-global the rest of the suite shares.
+///
+/// A failed write is reported to the app log rather than swallowed:
+/// `append_sidecar_log`'s silence is right for the drain loop's dozens of
+/// lines per start and wrong for the one record that is now the primary
+/// diagnosis, which would otherwise be missing with nothing saying so.
+fn report_backend_failure_to(message: &str, log_dir: Option<&Path>) {
+    log::error!("{}", message);
+    if !append_sidecar_log(log_record("[shell]", message).as_bytes(), log_dir) {
+        log::warn!(
+            "Could not write the startup diagnosis to {:?}; it is in this log only",
+            log_dir
+        );
+    }
+}
+
+/// One `sidecar.log` record: every line carries the marker, and the record ends
+/// itself.
+///
+/// Every line rather than the first, because these messages are built from
+/// `io::Error` and shell-plugin strings, which carry newlines on both platforms
+/// — an unmarked continuation line sitting among the sidecar's own stdout is
+/// exactly the confusion the marker exists to prevent.
+///
+/// One function for all three shell-origin markers. Written out at each site,
+/// as the first two were, a change to the convention gets made in one place and
+/// forgotten in the other two.
+fn log_record(marker: &str, message: &str) -> String {
+    let mut record = String::new();
+    for line in message.lines() {
+        record.push_str(marker);
+        record.push(' ');
+        record.push_str(line);
+        record.push('\n');
+    }
+    if record.is_empty() {
+        record.push_str(marker);
+        record.push('\n');
+    }
+    record
 }
 
 /// Parse `python --version` stdout (e.g. `"Python 3.11.4\n"`) into
@@ -677,9 +781,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
     let prefer_python_source =
         cfg!(debug_assertions) && std::env::var("JUSTSAY_USE_FROZEN_SIDECAR").is_err();
 
-    let force_dev_data_dir =
-        cfg!(debug_assertions) || std::env::var("JUSTSAY_FORCE_DEV_DATA_DIR").is_ok_and(|v| v == "1");
-    let data_dir_name: &'static str = if force_dev_data_dir { ".justsay-dev" } else { ".justsay" };
+    let (force_dev, data_dir_name) = data_dir_choice();
     let log_dir = sidecar_log_dir(data_dir_name);
 
     let resolved_sidecar = if prefer_python_source {
@@ -697,7 +799,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
             .command(sidecar_str)
             .args(["--host", "127.0.0.1", "--port", &port_str])
             .env("JUSTSAY_API_TOKEN", api_token());
-        if force_dev_data_dir {
+        if force_dev {
             shell_cmd = shell_cmd.env("JUSTSAY_FORCE_DEV_DATA_DIR", "1");
         }
         let (mut rx, child) = shell_cmd
@@ -722,19 +824,29 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         tauri::async_runtime::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
-                    CommandEvent::Stderr(bytes) => append_sidecar_log(&bytes, log_dir.as_deref()),
-                    CommandEvent::Stdout(bytes) => append_sidecar_log(&bytes, log_dir.as_deref()),
+                    CommandEvent::Stderr(bytes) => {
+                        append_sidecar_log(&bytes, log_dir.as_deref());
+                    }
+                    CommandEvent::Stdout(bytes) => {
+                        append_sidecar_log(&bytes, log_dir.as_deref());
+                    }
                     CommandEvent::Error(msg) => {
-                        append_sidecar_log(format!("[shell error] {}", msg).as_bytes(), log_dir.as_deref());
+                        append_sidecar_log(
+                            log_record("[shell error]", &msg).as_bytes(),
+                            log_dir.as_deref(),
+                        );
                         alive_clone.store(false, Ordering::Release);
                         break;
                     }
                     CommandEvent::Terminated(payload) => {
                         let line = format!(
-                            "[terminated] code={:?} signal={:?}",
+                            "code={:?} signal={:?}",
                             payload.code, payload.signal
                         );
-                        append_sidecar_log(line.as_bytes(), log_dir.as_deref());
+                        append_sidecar_log(
+                            log_record("[terminated]", &line).as_bytes(),
+                            log_dir.as_deref(),
+                        );
                         alive_clone.store(false, Ordering::Release);
                         break;
                     }
@@ -769,7 +881,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .env("JUSTSAY_API_TOKEN", api_token());
-        if force_dev_data_dir {
+        if force_dev {
             cmd.env("JUSTSAY_FORCE_DEV_DATA_DIR", "1");
         }
         #[cfg(windows)]
@@ -810,27 +922,55 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Check if the child process has exited unexpectedly.
-fn is_process_alive() -> bool {
+/// What `BACKEND_PROCESS` holds right now.
+///
+/// `Missing` and `Exited` were one answer until JS-135, and `wait_for_ready`
+/// turned both into "Backend process exited unexpectedly. Check Python
+/// dependencies." That is a false reason for a spawn that never stored a
+/// process at all — a busy port, no usable Python — and it used to reach the
+/// app log only. It now reaches the file the user is told to open, so it has
+/// to be true.
+///
+/// `Exited` carries the dev child's status where there is one; the sidecar
+/// path has no status to report, only its `alive` flag. Nothing is reported
+/// from here: `try_wait` caches a reaped status and answers with it on every
+/// later call, so a caller that reports what it sees writes the same line once
+/// per poll. `spawn_watchdog` reports at the one place a live backend becomes
+/// a dead one.
+enum BackendLiveness {
+    Running,
+    Exited(Option<std::process::ExitStatus>),
+    Missing,
+}
+
+fn backend_liveness() -> BackendLiveness {
     let mut guard = match BACKEND_PROCESS.lock() {
         Ok(g) => g,
-        Err(_) => return false,
+        Err(_) => return BackendLiveness::Missing,
     };
     match guard.as_mut() {
-        Some(BackendProcess::Sidecar(s)) => s.alive.load(Ordering::Acquire),
-        Some(BackendProcess::Dev(child)) => match child.try_wait() {
-            Ok(None) => true,
-            Ok(Some(status)) => {
-                log::error!("Backend (dev) exited with: {}", status);
-                false
+        Some(BackendProcess::Sidecar(s)) => {
+            if s.alive.load(Ordering::Acquire) {
+                BackendLiveness::Running
+            } else {
+                BackendLiveness::Exited(None)
             }
+        }
+        Some(BackendProcess::Dev(child)) => match child.try_wait() {
+            Ok(None) => BackendLiveness::Running,
+            Ok(Some(status)) => BackendLiveness::Exited(Some(status)),
             Err(e) => {
                 log::warn!("try_wait error (assuming alive): {}", e);
-                true
+                BackendLiveness::Running
             }
         },
-        None => false,
+        None => BackendLiveness::Missing,
     }
+}
+
+/// Check if the child process has exited unexpectedly.
+fn is_process_alive() -> bool {
+    matches!(backend_liveness(), BackendLiveness::Running)
 }
 
 /// Poll /health until the backend responds or timeout.
@@ -839,10 +979,18 @@ pub async fn wait_for_ready() -> Result<(), String> {
     let client = http_client()?;
 
     for attempt in 1..=HEALTH_POLL_MAX_ATTEMPTS {
-        if !is_process_alive() {
-            return Err(
-                "Backend process exited unexpectedly. Check Python dependencies.".to_string(),
-            );
+        match backend_liveness() {
+            BackendLiveness::Running => {}
+            BackendLiveness::Exited(_) => {
+                return Err(
+                    "Backend process exited unexpectedly. Check Python dependencies.".to_string(),
+                );
+            }
+            BackendLiveness::Missing => {
+                return Err(
+                    "No backend process is running; the last spawn did not start one.".to_string(),
+                );
+            }
         }
 
         match client
@@ -1289,7 +1437,10 @@ pub fn spawn_watchdog(app: AppHandle) {
         let mut confirmed_healthy = match wait_for_ready().await {
             Ok(()) => true,
             Err(e) => {
-                log::error!("Backend watchdog: initial backend not ready: {}", e);
+                report_backend_failure(&format!(
+                    "Backend watchdog: initial backend not ready: {}",
+                    e
+                ));
                 false
             }
         };
@@ -1301,18 +1452,23 @@ pub fn spawn_watchdog(app: AppHandle) {
             }
 
             if confirmed_healthy {
-                if is_process_alive() {
-                    continue;
+                match backend_liveness() {
+                    BackendLiveness::Running => continue,
+                    BackendLiveness::Exited(Some(status)) => report_backend_failure(&format!(
+                        "Backend (dev) exited with: {}",
+                        status
+                    )),
+                    BackendLiveness::Exited(None) | BackendLiveness::Missing => {}
                 }
                 confirmed_healthy = false;
                 attempt = 0;
             }
 
             if attempt >= MAX_RESPAWN_ATTEMPTS {
-                log::error!(
+                report_backend_failure(&format!(
                     "Backend watchdog: giving up after {} consecutive failed respawns",
                     MAX_RESPAWN_ATTEMPTS
-                );
+                ));
                 return;
             }
 
@@ -1343,12 +1499,15 @@ pub fn spawn_watchdog(app: AppHandle) {
                         attempt = 0;
                     }
                     Err(e) => {
-                        log::error!("Backend watchdog: respawn did not become ready: {}", e);
+                        report_backend_failure(&format!(
+                            "Backend watchdog: respawn did not become ready: {}",
+                            e
+                        ));
                         attempt += 1;
                     }
                 },
                 Err(e) => {
-                    log::error!("Backend watchdog: respawn failed: {}", e);
+                    report_backend_failure(&format!("Backend watchdog: respawn failed: {}", e));
                     attempt += 1;
                 }
             }
@@ -1434,6 +1593,145 @@ mod tests {
         assert_eq!(sidecar_log_dir_from(None, None, ".justsay"), None);
     }
 
+    fn scratch_log_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join("justsay-startup-log-tests")
+            .join(format!("{}-{}", label, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("scratch log directory");
+        dir
+    }
+
+    fn read_and_discard(dir: &Path) -> String {
+        let log = std::fs::read_to_string(dir.join("sidecar.log"))
+            .unwrap_or_else(|e| panic!("no sidecar.log under {:?}: {}", dir, e));
+        std::fs::remove_dir_all(dir).ok();
+        dir.parent().map(|parent| std::fs::remove_dir(parent).ok());
+        log
+    }
+
+    #[test]
+    fn a_startup_failure_joins_the_sidecar_output_in_one_file() {
+        let dir = scratch_log_dir("joins");
+
+        report_backend_failure_to("Backend spawn failed: the port is already in use", Some(&dir));
+        append_sidecar_log(b"INFO:     Application startup complete.\n", Some(&dir));
+
+        let log = read_and_discard(&dir);
+        assert!(
+            log.contains("[shell] Backend spawn failed: the port is already in use"),
+            "the reason a backend never started must reach the file its own output would have \
+             gone to, or half the startup story lands outside the data directory; got {:?}",
+            log
+        );
+        assert!(
+            log.contains("Application startup complete."),
+            "the sidecar's captured output must still reach that same file; got {:?}",
+            log
+        );
+    }
+
+    #[test]
+    fn two_startup_failures_stay_on_two_lines() {
+        let dir = scratch_log_dir("newline");
+
+        report_backend_failure_to("Backend watchdog: respawn failed: first", Some(&dir));
+        report_backend_failure_to("Backend watchdog: respawn failed: second", Some(&dir));
+
+        let log = read_and_discard(&dir);
+        assert_eq!(
+            log.lines().collect::<Vec<_>>(),
+            vec![
+                "[shell] Backend watchdog: respawn failed: first",
+                "[shell] Backend watchdog: respawn failed: second",
+            ],
+            "these messages carry no trailing newline of their own, so two failures would run \
+             together into one unreadable line"
+        );
+    }
+
+    #[test]
+    fn a_failure_with_nowhere_to_write_creates_no_file_at_all() {
+        let stray = std::env::current_dir().expect("cwd").join("sidecar.log");
+        assert!(
+            !stray.exists(),
+            "{:?} already exists, so this test cannot tell a relative fallback from a \
+             leftover -- delete it and re-run rather than letting the check pass on it",
+            stray
+        );
+
+        report_backend_failure_to("Backend spawn failed: nowhere to write this", None);
+
+        let appeared = stray.exists();
+        std::fs::remove_file(&stray).ok();
+        assert!(
+            !appeared,
+            "None means do not write the log, never write it somewhere else. This pins the \
+             short-circuit at the top of append_sidecar_log, not path resolution -- that is \
+             sidecar_log_dir_from's, and its own tests cover it. Deleting the file up front \
+             instead of failing on it hid a live defect behind its own leftover"
+        );
+    }
+
+    #[test]
+    fn a_record_marks_every_line_and_ends_itself_whatever_the_marker() {
+        assert_eq!(log_record("[shell]", "one"), "[shell] one\n");
+        assert_eq!(
+            log_record("[shell]", "Failed to start backend: os error 2\nsecond line"),
+            "[shell] Failed to start backend: os error 2\n[shell] second line\n",
+            "these messages are built from io::Error strings, which carry newlines -- an \
+             unmarked continuation line is indistinguishable from the sidecar's own stdout"
+        );
+        assert_eq!(log_record("[shell]", ""), "[shell]\n");
+        assert_eq!(
+            log_record("[terminated]", "code=Some(1) signal=None"),
+            "[terminated] code=Some(1) signal=None\n",
+            "the drain loop's own records go through the same function, or the convention \
+             gets changed in one of the three places it used to be written out"
+        );
+    }
+
+    #[test]
+    fn a_record_reaches_the_file_whole_however_it_was_handed_over() {
+        let dir = scratch_log_dir("atomic");
+        report_backend_failure_to("Backend spawn failed: a\nb", Some(&dir));
+        assert!(
+            append_sidecar_log(b"[terminated] code=Some(1) signal=None", Some(&dir)),
+            "a record with no newline of its own must still be written"
+        );
+
+        let log = read_and_discard(&dir);
+        assert_eq!(
+            log,
+            "[shell] Backend spawn failed: a\n[shell] b\n[terminated] code=Some(1) signal=None\n",
+            "two tasks append to this file, so a record and the newline that ends it have to \
+             go out as one write_all -- supplying the newline separately leaves a window for \
+             the other writer's chunk to land inside a record"
+        );
+    }
+
+    #[test]
+    fn a_backend_that_was_never_started_is_not_one_that_exited() {
+        assert!(
+            matches!(backend_liveness(), BackendLiveness::Missing),
+            "nothing in this suite spawns a backend, so the slot is empty -- and an empty \
+             slot is not an exit. Collapsing the two made wait_for_ready answer a busy port \
+             with 'Check Python dependencies.', which now reaches the user's own file"
+        );
+        assert!(!is_process_alive());
+    }
+
+    #[test]
+    fn a_record_with_nowhere_to_go_reports_that_it_did_not_land() {
+        assert!(
+            !append_sidecar_log(b"anything", None),
+            "the caller has to be able to tell a written record from a lost one, or the \
+             diagnosis is missing with nothing anywhere saying so"
+        );
+        let dir = scratch_log_dir("landed");
+        assert!(append_sidecar_log(b"anything", Some(&dir)));
+        read_and_discard(&dir);
+    }
+
     #[test]
     fn respawn_backoff_follows_2_4_8_second_sequence() {
         assert_eq!(respawn_backoff(0), Duration::from_secs(2));
@@ -1514,18 +1812,103 @@ mod tests {
             .join("\n")
     }
 
-    fn extract_fn_body<'a>(source: &'a str, fn_name: &str) -> &'a str {
-        let needle_pub = format!("pub fn {}(", fn_name);
-        let needle_priv = format!("fn {}(", fn_name);
+    fn extract_span<'a>(source: &'a str, opening: &str) -> &'a str {
         let start = source
-            .find(needle_pub.as_str())
-            .or_else(|| source.find(needle_priv.as_str()))
-            .unwrap_or_else(|| panic!("could not find `fn {}(` in source", fn_name));
+            .find(opening)
+            .unwrap_or_else(|| panic!("could not find `{}` in source", opening));
         let rest = &source[start..];
         let end = rest
             .find("\n}\n")
-            .unwrap_or_else(|| panic!("could not find the end of fn {}", fn_name));
+            .unwrap_or_else(|| panic!("could not find the end of `{}`", opening));
         &rest[..end + "\n}\n".len()]
+    }
+
+    fn extract_fn_body<'a>(source: &'a str, fn_name: &str) -> &'a str {
+        let needle_pub = format!("pub fn {}(", fn_name);
+        if source.contains(needle_pub.as_str()) {
+            extract_span(source, &needle_pub)
+        } else {
+            extract_span(source, &format!("fn {}(", fn_name))
+        }
+    }
+
+    #[test]
+    fn every_backend_startup_failure_is_reported_through_one_function() {
+        let backend_source = strip_doc_comment_lines(include_str!("backend.rs"));
+        let lib_source = strip_doc_comment_lines(include_str!("lib.rs"));
+        let production = backend_source
+            .split("\n#[cfg(test)]\n")
+            .next()
+            .expect("backend.rs has a production half before its test module");
+
+        let reporter = extract_fn_body(&backend_source, "report_backend_failure");
+        let reporter_seam = extract_fn_body(&backend_source, "report_backend_failure_to");
+        let lock_diagnostics = extract_span(&backend_source, "fn lock_with_wait<T>(");
+
+        let unrouted: Vec<&str> = production
+            .lines()
+            .filter(|line| line.contains("log::error!"))
+            .filter(|line| {
+                ![reporter, reporter_seam, lock_diagnostics]
+                    .iter()
+                    .any(|allowed| allowed.contains(*line))
+            })
+            .collect();
+        assert!(
+            unrouted.is_empty(),
+            "a bare log::error! reaches the OS log directory alone, which no \
+             JUSTSAY_DATA_DIR override touches -- that is JS-135. Anything reporting a \
+             backend that is not running goes through report_backend_failure; the only \
+             exemption is lock_with_wait, whose subject is this process's own mutex. \
+             Unrouted: {:?}",
+            unrouted
+        );
+
+        let spawn_call = lib_source
+            .find("backend::spawn(")
+            .expect("lib.rs must still call backend::spawn");
+        let spawn_site = &lib_source[spawn_call..(spawn_call + 200).min(lib_source.len())];
+        assert!(
+            spawn_site.contains("report_backend_failure"),
+            "lib.rs's spawn failure is the first half of the startup story and must report \
+             through backend::report_backend_failure. Unrelated errors elsewhere in lib.rs \
+             are none of this test's business, which is why it reads this call site rather \
+             than the whole file"
+        );
+
+        assert!(
+            reporter.contains("is_shutdown_requested()"),
+            "report_backend_failure must not append to the user's diagnostic file once a \
+             quit has been requested: spawn() refuses with an Err in that window and \
+             wait_for_ready() fails with one, so an ordinary quit would otherwise seed \
+             sidecar.log -- which has no rotation -- with a failure that never happened"
+        );
+
+        let appender = extract_fn_body(&backend_source, "append_sidecar_log");
+        assert_eq!(
+            appender.matches("write_all").count(),
+            1,
+            "the record and the newline that ends it go out as one write_all. Two tasks \
+             append to this file, so a second write leaves a window for the other writer's \
+             chunk to land inside a record"
+        );
+
+        let spawn_body = extract_fn_body(&backend_source, "spawn");
+        assert_eq!(
+            spawn_body.matches("log_record(").count(),
+            2,
+            "the drain loop's [shell error] and [terminated] records go through log_record \
+             like every other one. Written out inline, as they were, a change to the marker \
+             or to multi-line handling gets made in one of three places"
+        );
+
+        let liveness = extract_fn_body(&backend_source, "backend_liveness");
+        assert!(
+            !liveness.contains("report_backend_failure"),
+            "try_wait caches a reaped exit status and answers with it on every later call, \
+             so reporting from here writes the same death once per poll into a file with no \
+             rotation. spawn_watchdog reports at the one place a live backend becomes dead"
+        );
     }
 
     #[test]

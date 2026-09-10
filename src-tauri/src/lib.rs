@@ -123,7 +123,7 @@ pub fn run() {
             );
 
             if let Err(e) = backend::spawn(app.handle().clone()) {
-                log::error!("Backend spawn failed: {}", e);
+                backend::report_backend_failure(&format!("Backend spawn failed: {}", e));
             }
 
             backend::spawn_watchdog(app.handle().clone());
