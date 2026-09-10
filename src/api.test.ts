@@ -1113,6 +1113,34 @@ describe("the history cursor on the wire", () => {
     );
   });
 
+  it("rejects a null body as malformed rather than as version skew", async () => {
+    const { api, SidecarTooOldError } = await import("./api");
+    fetchMock.mockResolvedValue(okJson(null));
+
+    const error = await api.getHistory(30).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(SidecarTooOldError);
+    expect((error as Error).message).toBe("/history returned a body that is not an object");
+    expect((error as Error).name).toBe("Error");
+  });
+
+  it("rejects a primitive body the same way, before the presence test runs", async () => {
+    const { api, SidecarTooOldError } = await import("./api");
+    fetchMock.mockResolvedValue(okJson(42));
+
+    const error = await api.getHistory(30).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    expect(error).not.toBeInstanceOf(SidecarTooOldError);
+    expect((error as Error).message).toBe("/history returned a body that is not an object");
+  });
+
   it("escapes an id rather than pasting it into the query string", async () => {
     const { api } = await import("./api");
     fetchMock.mockResolvedValue(okJson({ entries: [], total: 0, next_cursor: null }));

@@ -79,6 +79,12 @@ export function renderHistory(container: HTMLElement): () => void {
    * cannot repaint the unfiltered history over them when it answers. It is what
    * "am I showing search results?" reads, so the lane that painted and the lane
    * the tab believes painted are always the same lane.
+   *
+   * The hint is the one element the claim does not cover, because it belongs to
+   * this tab rather than to the shared list. A search that is itself superseded
+   * returns without writing its own outcome, so the `finally` clears the hint it
+   * put up -- otherwise "Searching..." stays on screen for good over rows some
+   * other lane painted.
    */
   async function runSearch(q: string) {
     const claim = list.claimRows();
@@ -113,6 +119,8 @@ export function renderHistory(container: HTMLElement): () => void {
           ? "Invalid search query"
           : msg;
       }
+    } finally {
+      if (!destroyed && !claim.isCurrent()) searchHint.textContent = "";
     }
   }
 

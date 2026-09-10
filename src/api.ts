@@ -678,7 +678,13 @@ export const api = {
    *  like a store whose first page is also its last. The presence test is `in`
    *  rather than `=== undefined` because absence of the property is precisely
    *  the condition, and it throws rather than returning a flag so that no caller
-   *  can carry the third state around. */
+   *  can carry the third state around.
+   *
+   *  A body that is `null` or not an object at all is a malformed response
+   *  rather than version skew -- `request` casts without validating, and `in`
+   *  on a non-object throws a `TypeError` the caller has no branch for. It is
+   *  rejected before the presence test so the promised contract holds: the
+   *  version-skew error means the field was absent from an object. */
   getHistory: async (limit = 50, cursor: HistoryCursor | null = null) => {
     const body = await request<Partial<HistoryPageResponse>>(
       "GET",
@@ -688,6 +694,9 @@ export const api = {
       undefined,
       REREADABLE,
     );
+    if (body === null || typeof body !== "object") {
+      throw new Error("/history returned a body that is not an object");
+    }
     if (!("next_cursor" in body)) {
       throw new SidecarTooOldError("/history returned no next_cursor field");
     }

@@ -290,6 +290,60 @@ describe("renderHistory — a reload and a search cannot both own the rows", () 
   });
 });
 
+describe("renderHistory — the search hint belongs to the lane that put it up", () => {
+  it("clears Searching... when Clear All takes the rows over before the search answers", async () => {
+    const entries = [buildEntry("1"), buildEntry("2")];
+    apiMock.getHistory.mockResolvedValue({ entries, total: 2, next_cursor: null });
+    const search = deferred<{ entries: HistoryEntry[]; total: number }>();
+    apiMock.searchHistory.mockReturnValue(search.promise);
+    confirmMock.mockResolvedValue(true);
+    apiMock.clearHistory.mockResolvedValue({ deleted: 2 });
+
+    const container = document.createElement("div");
+    renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
+    });
+
+    typeQuery(container, "hello");
+    await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
+    expect(container.querySelector("#history-search-hint")!.textContent).toBe("Searching...");
+
+    clearButton(container).click();
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("0 transcripts");
+    });
+
+    search.release({ entries: [buildEntry("9")], total: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(container.querySelector("#history-search-hint")!.textContent).toBe("");
+    expect(container.querySelector("#history-count")!.textContent).toBe("0 transcripts");
+    expect(container.querySelectorAll(".history-entry")).toHaveLength(0);
+  });
+
+  it("keeps a failing search's own message, which the lane still owns", async () => {
+    const entries = [buildEntry("1"), buildEntry("2")];
+    apiMock.getHistory.mockResolvedValue({ entries, total: 2, next_cursor: null });
+    apiMock.searchHistory.mockRejectedValue(new Error("503 store busy"));
+
+    const container = document.createElement("div");
+    renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
+    });
+
+    typeQuery(container, "hello");
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-search-hint")!.textContent).toBe("503 store busy");
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(container.querySelector("#history-search-hint")!.textContent).toBe("503 store busy");
+  });
+});
+
 describe("renderHistory — Clear All asks before deleting everything", () => {
   it("cancelling the dialog leaves every transcript in place", async () => {
     confirmMock.mockResolvedValue(false);

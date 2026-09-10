@@ -299,6 +299,59 @@ describe("createHistoryList — one request at a time decides the rows and the c
     expect(h.elements.loadMoreButton.disabled).toBe(false);
   });
 
+  it("claimRows() hides Load more, since the stored cursor no longer describes what is painted", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
+    queueResponses({ entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor });
+
+    const list = listOver(h);
+    await list.load();
+    expect(h.loadMoreVisible()).toBe(true);
+
+    list.claimRows();
+
+    expect(h.loadMoreVisible()).toBe(false);
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
+  });
+
+  it("clears the version-skew warning once a page comes back carrying a cursor", async () => {
+    const h = harness();
+    apiMock.getHistory.mockRejectedValueOnce(new SidecarTooOldError("no next_cursor"));
+    apiMock.getHistory.mockResolvedValue({
+      entries: [buildEntry("a"), buildEntry("b")],
+      total: 2,
+      next_cursor: null,
+    });
+
+    const list = listOver(h);
+    await list.load();
+    expect(h.countText()).toBe("History needs the latest backend — please update JustSay.");
+
+    await list.load();
+
+    expect(h.countText()).toBe("2 transcripts");
+
+    list.entryRemoved();
+
+    expect(h.countText()).toBe("1 transcript");
+  });
+
+  it("clearAll() paints the empty count and hides Load more through the claim it took", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
+    queueResponses({ entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor });
+    confirmMock.mockResolvedValue(true);
+    apiMock.clearHistory.mockResolvedValue(undefined);
+
+    await listOver(h).load();
+    h.elements.clearButton.click();
+    await vi.waitFor(() => expect(apiMock.clearHistory).toHaveBeenCalledTimes(1));
+
+    await vi.waitFor(() => expect(h.countText()).toBe("0 transcripts"));
+    expect(h.loadMoreVisible()).toBe(false);
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
+  });
+
   it("ignores a second Load more click while the first is still outstanding", async () => {
     const h = harness();
     const cursor: HistoryCursor = { ts: 300, id: "second-row" };

@@ -54,8 +54,11 @@ export interface HistoryList {
    * search, and hands back the only way to write to the shared count and
    * "Load more" from outside this module.
    *
-   * Claiming re-enables "Load more": the page it supersedes disabled the button
-   * and its `finally` will decline to re-enable a button it no longer owns.
+   * Claiming re-enables "Load more" and hides it. The page it supersedes
+   * disabled the button and its `finally` will decline to re-enable a button it
+   * no longer owns; and the lane taking the rows over is about to paint
+   * something the stored cursor does not describe, so a click on that button
+   * would append rows from a page nothing on screen came from.
    */
   claimRows(): HistoryRowsClaim;
   /** Drops one from the running total after a single-entry delete. */
@@ -89,11 +92,14 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
   }
 
   /**
-   * The total, or the version-skew warning once one has been seen.
+   * The total, or the version-skew warning while the backend is still omitting
+   * the cursor.
    *
-   * Sticky rather than one-shot: the count is the number that is lying when the
-   * backend omits the cursor, so deleting a row afterwards must not paint a
-   * plausible total back over the warning.
+   * Sticky against `entryRemoved`, not permanent: the count is the number that
+   * is lying when the backend omits the cursor, so deleting a row afterwards
+   * must not paint a plausible total back over the warning. A page that comes
+   * back carrying a cursor is what clears it, so restarting the backend on a
+   * version that answers correctly stops the warning without a remount.
    */
   function renderTotal(): void {
     renderCount(backendOmitsCursor ? SIDECAR_TOO_OLD_TEXT : formatEntryCount(total, noun));
@@ -116,6 +122,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
   function claimRows(): HistoryRowsClaim {
     const claim = issueClaim();
     elements.loadMoreButton.disabled = false;
+    claim.renderLoadMore(false);
     return claim;
   }
 
@@ -149,6 +156,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
       if (!claim.isCurrent()) return;
 
       total = response.total;
+      backendOmitsCursor = false;
       renderTotal();
 
       if (!append) {
@@ -204,13 +212,13 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     try {
       await api.clearHistory();
       if (isDestroyed()) return;
-      claimRows();
+      const claim = claimRows();
       cursor = null;
       total = 0;
       elements.rows.innerHTML = "";
       renderEmptyState(true);
-      renderCount(formatEntryCount(0, noun));
-      renderLoadMore(false);
+      claim.renderCount(formatEntryCount(0, noun));
+      claim.renderLoadMore(false);
       onCleared?.();
     } catch (error) {
       console.error(error);

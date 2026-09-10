@@ -611,8 +611,14 @@ def _entries_locked(
     ).fetchall()
 
 
-def _has_more_locked(conn: sqlite3.Connection, after: HistoryCursor) -> bool:
-    """Caller MUST hold ``_lock``. Whether a row exists strictly after ``after``.
+def _has_more_locked(conn: sqlite3.Connection, after_ts: int, after_id: str) -> bool:
+    """Caller MUST hold ``_lock``. Whether a row exists strictly after that position.
+
+    Takes the position as primitives rather than as a ``HistoryCursor`` so that
+    the model is built only once the answer is yes. A page that is full and last
+    would otherwise validate a cursor it never returns, and ``consolidate_into``
+    copies ids verbatim out of a merged database, so an id longer than
+    ``CURSOR_ID_MAX_LENGTH`` would turn a page that reads fine into a 500.
 
     Selects no transcript column, so on ``entries_ts_id_idx`` the whole question
     is answered inside the index without reaching a table row. Built from the
@@ -622,13 +628,16 @@ def _has_more_locked(conn: sqlite3.Connection, after: HistoryCursor) -> bool:
     return (
         conn.execute(
             f"SELECT 1 FROM entries {_CURSOR_PAGE_WHERE}{_CURSOR_PAGE_ORDER}",
-            {"before_ts": after.ts, "before_id": after.id, "row_limit": 1},
+            {"before_ts": after_ts, "before_id": after_id, "row_limit": 1},
         ).fetchone()
         is not None
     )
 
 
-_CURSOR_SEEK_PLAN_SHAPES = (("page read", "id, raw_text"), ("has-more probe", "1"))
+_CURSOR_SEEK_PLAN_SHAPES = (
+    ("page read", "id, raw_text", False),
+    ("has-more probe", "1", True),
+)
 
 
 def cursor_seek_plan_failure() -> str | None:
@@ -648,14 +657,23 @@ def cursor_seek_plan_failure() -> str | None:
     same index DDL, predicate and ordering the shipped read uses, rather than a
     second spelling of them.
 
-    Two statements ship on the cursored read path since ADR 055 -- the page
-    projection and ``_has_more_locked``'s key-only ``SELECT 1`` -- so both are
-    planned here and the message names which of the two failed. A probe covering
-    half of what ships covers nothing.
+    Two statement *shapes* ship on the cursored read path since ADR 055 -- a
+    payload projection and ``_has_more_locked``'s key-only ``SELECT 1`` -- so
+    both are planned here and the message names which of the two failed. The
+    projections are stand-ins for the shipped column lists rather than copies of
+    them: the miniature table has one payload column where the page read selects
+    all of ``ENTRY_READ_COLUMNS``.
 
     A seek alone is not the property: a library that seeks and then sorts the
     result, or that reaches the rows through a table walk, has given the flat
     cost back. All three are asserted of each shape, matching the local pin.
+
+    The has-more probe carries a fourth assertion the page read cannot: its plan
+    must say ``COVERING INDEX``. Reading no transcript column is the entire point
+    of that statement, and a spelling that reaches the table -- ``SELECT *``, say
+    -- still seeks the index and so passes every other check while pulling a
+    whole transcript body per page. The page read legitimately reaches the table
+    and is held to the first three only.
     """
     conn = sqlite3.connect(":memory:")
     try:
@@ -664,26 +682,35 @@ def cursor_seek_plan_failure() -> str | None:
             "(id TEXT PRIMARY KEY, ts INTEGER NOT NULL, raw_text TEXT NOT NULL)"
         )
         conn.executescript(_REPLACE_TS_INDEX_WITH_TS_ID_INDEX)
-        plans = {
-            shape: " ".join(
-                str(row[3])
-                for row in conn.execute(
-                    f"EXPLAIN QUERY PLAN SELECT {projection} FROM entries "
-                    f"{_CURSOR_PAGE_WHERE}{_CURSOR_PAGE_ORDER}",
-                    {"before_ts": 0, "before_id": "", "row_limit": 1},
-                ).fetchall()
+        plans = [
+            (
+                shape,
+                requires_covering,
+                " ".join(
+                    str(row[3])
+                    for row in conn.execute(
+                        f"EXPLAIN QUERY PLAN SELECT {projection} FROM entries "
+                        f"{_CURSOR_PAGE_WHERE}{_CURSOR_PAGE_ORDER}",
+                        {"before_ts": 0, "before_id": "", "row_limit": 1},
+                    ).fetchall()
+                ),
             )
-            for shape, projection in _CURSOR_SEEK_PLAN_SHAPES
-        }
+            for shape, projection, requires_covering in _CURSOR_SEEK_PLAN_SHAPES
+        ]
     finally:
         conn.close()
-    for shape, plan in plans.items():
+    for shape, requires_covering, plan in plans:
         seeks_the_index = "SEARCH" in plan and "entries_ts_id_idx" in plan
         walks_the_table = "SCAN entries" in plan
         sorts_afterwards = "TEMP B-TREE" in plan.upper()
         if not seeks_the_index or walks_the_table or sorts_afterwards:
             return (
                 f"SQLite {sqlite3.sqlite_version} does not seek entries_ts_id_idx for the "
+                f"cursored history {shape}: {plan}"
+            )
+        if requires_covering and "COVERING INDEX" not in plan.upper():
+            return (
+                f"SQLite {sqlite3.sqlite_version} reaches the entries table for the "
                 f"cursored history {shape}: {plan}"
             )
     return None
@@ -700,6 +727,12 @@ def _count_locked(conn: sqlite3.Connection) -> int:
     this out of the fixtures: a suite that closes the connection without touching
     the generation gets a different instance on the next open, and so misses
     without being told to.
+
+    The identity test is only sound because the cache tuple itself holds a strong
+    reference to the connection it was keyed on. Were the reference weak, a freed
+    ``Connection`` could be replaced at the same address and ``is`` would match a
+    different connection over a different file. ``_close_conn_locked`` clears the
+    cache so that reference is never a retention.
     """
     global _page_total_cache
     cached = _page_total_cache
@@ -719,16 +752,20 @@ def get_page(limit: int = 50, before: HistoryCursor | None = None) -> HistoryPag
 
     A page that comes back short is the last one, so the probe is skipped entirely
     rather than asked a question its own length already answered.
+
+    The cursor is built only once the probe has answered yes, so a page with no
+    page after it validates nothing -- a stored id too long for ``HistoryCursor``
+    keeps failing only where a cursor is actually returned.
     """
     clamped_limit = _clamp_limit(limit)
     with _lock:
         conn = _ensure_conn_locked()
         rows = _entries_locked(conn, clamped_limit, before)
         next_cursor: HistoryCursor | None = None
-        if len(rows) == clamped_limit:
-            last = HistoryCursor(ts=rows[-1]["ts"], id=rows[-1]["id"])
-            if _has_more_locked(conn, last):
-                next_cursor = last
+        if len(rows) == clamped_limit and _has_more_locked(
+            conn, rows[-1]["ts"], rows[-1]["id"]
+        ):
+            next_cursor = HistoryCursor(ts=rows[-1]["ts"], id=rows[-1]["id"])
         total = _count_locked(conn)
     return HistoryPage(
         entries=[_row_to_entry(r) for r in rows], total=total, next_cursor=next_cursor
@@ -753,12 +790,17 @@ def delete_entry(entry_id: str) -> bool:
 
 
 def clear_all() -> int:
+    """Deletes every entry and returns how many rows the DELETE actually removed.
+
+    The number comes from the statement itself rather than from a count taken
+    beforehand: ``_count_locked`` may answer from the memoised total (ADR 055),
+    and the API reports this as ``ClearResult.deleted``.
+    """
     with _lock:
         conn = _ensure_conn_locked()
-        count = _count_locked(conn)
         conn.execute("BEGIN")
         try:
-            conn.execute("DELETE FROM entries")
+            count = conn.execute("DELETE FROM entries").rowcount
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -891,8 +933,14 @@ def _reopen_conn_locked(directory: Path) -> None:
 
 
 def _close_conn_locked() -> None:
-    """Caller MUST hold ``_lock``."""
-    global _conn
+    """Caller MUST hold ``_lock``. Closes the connection and drops the page total.
+
+    Dropping ``_page_total_cache`` here is what stops a closed connection being
+    retained for the life of the process, and with it the only object whose
+    identity ``_count_locked`` compares against.
+    """
+    global _conn, _page_total_cache
+    _page_total_cache = None
     if _conn is not None:
         try:
             _conn.close()

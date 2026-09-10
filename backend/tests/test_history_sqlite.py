@@ -1193,9 +1193,9 @@ def test_get_page_never_releases_the_store_lock_between_its_reads(isolated_stora
         events.append("read-entries")
         return real_entries_locked(conn, limit, before)
 
-    def has_more(conn, after):
+    def has_more(conn, after_ts, after_id):
         events.append("read-has-more")
-        return real_has_more_locked(conn, after)
+        return real_has_more_locked(conn, after_ts, after_id)
 
     def count(conn):
         events.append("read-count")
@@ -1603,6 +1603,12 @@ def test_the_has_more_probe_reads_a_key_and_seeks_the_index(isolated_storage, tm
     Both halves are asserted on the shipped statement: it names no transcript
     column, and the planner answers it out of ``entries_ts_id_idx`` without
     reaching a table row or sorting.
+
+    The covering assertion is what the column loop cannot make. ``SELECT *``
+    names none of ``ENTRY_READ_COLUMNS`` literally and still seeks the index, so
+    every other check here passes while the probe reads a whole transcript body
+    per page. Only ``COVERING INDEX`` in the plan says the table was never
+    reached.
     """
     _seed(tmp_path / "target", 60, lambda index: 1_700_000_000_000 + index)
 
@@ -1617,6 +1623,7 @@ def test_the_has_more_probe_reads_a_key_and_seeks_the_index(isolated_storage, tm
     assert any("SEARCH" in step and "entries_ts_id_idx" in step for step in plan), plan
     assert not any("SCAN entries" in step for step in plan), plan
     assert not any("TEMP B-TREE" in step for step in plan), plan
+    assert any("COVERING INDEX" in step.upper() for step in plan), plan
 
 
 def test_a_short_page_asks_nothing_about_a_next_one(isolated_storage, tmp_path):
@@ -1629,6 +1636,78 @@ def test_a_short_page_asks_nothing_about_a_next_one(isolated_storage, tmp_path):
 
     assert page.next_cursor is None
     assert probes == [], probes
+
+
+def test_a_full_last_page_validates_no_cursor(isolated_storage, tmp_path):
+    """An id too long for ``HistoryCursor`` only matters where a cursor is returned.
+
+    ``consolidate_into`` copies ids verbatim out of a merged database, so a row
+    whose id exceeds ``CURSOR_ID_MAX_LENGTH`` can be sitting in the store. A page
+    that is both full and last returns no cursor, so building one to ask "is
+    there more" turns a page that reads fine into a ``ValidationError`` and a
+    500. The probe therefore takes the position as primitives.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    over_long_id = "x" * (history.CURSOR_ID_MAX_LENGTH + 1)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.execute("BEGIN")
+        conn.executemany(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES (?, ?, 'uk', 'normal', 'row', 'row', 1)",
+            [("newer", 1_700_000_000_001), (over_long_id, 1_700_000_000_000)],
+        )
+        conn.execute("COMMIT")
+        history.invalidate_derived_caches_locked()
+
+    page = history.get_page(limit=2)
+
+    assert page.next_cursor is None
+    assert [entry.id for entry in page.entries] == ["newer", over_long_id]
+
+
+def test_clear_all_reports_the_rows_it_deleted_not_a_memoised_count(
+    isolated_storage, tmp_path
+):
+    """``ClearResult.deleted`` comes from the DELETE, so the cache cannot skew it.
+
+    A row smuggled past every mutator leaves the memoised total one behind the
+    table -- the residual risk ADR 055 accepts for the number on screen. The
+    number of rows a delete removed is not that number, and ``cursor.rowcount``
+    is what knows it.
+    """
+    _seed(tmp_path / "target", 3, lambda index: 1_700_000_000_000 + index)
+    assert history.get_page(limit=1).total == 3
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.execute("BEGIN")
+        conn.execute(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('smuggled', 1, 'uk', 'normal', 'row', 'row', 1)"
+        )
+        conn.execute("COMMIT")
+
+    assert history.clear_all() == 4
+
+
+def test_closing_the_connection_drops_the_memoised_total(isolated_storage, tmp_path):
+    """The cache is the only strong reference to the connection it is keyed on.
+
+    Left in place, it keeps a closed ``sqlite3.Connection`` alive past every
+    ``bootstrap``, ``relocate`` and reopen. Clearing it where the connection is
+    closed removes the retention, and with it the question of whether a freed
+    connection could be replaced at the same address and match ``is``.
+    """
+    _seed(tmp_path / "target", 3, lambda index: 1_700_000_000_000 + index)
+    history.get_page(limit=1)
+    assert history._page_total_cache is not None
+
+    with history._lock:
+        history._close_conn_locked()
+
+    assert history._page_total_cache is None
 
 
 def test_the_total_is_counted_once_until_a_write_lands(isolated_storage, tmp_path):
@@ -1728,23 +1807,52 @@ def test_the_plan_probe_names_the_shape_that_walked_the_index(isolated_storage):
     attributed rather than merely produced: a probe that named the first
     configured shape whatever failed would report the wrong statement for half of
     what ships, and would still pass a test that broke every shape at once.
+
+    The same attribution is asserted for the covering requirement, one shape at a
+    time, against a projection that seeks the index and then reaches the table --
+    the exact mutation a seek-only probe accepts.
     """
     assert history.cursor_seek_plan_failure() is None
 
     shipped = history._CURSOR_SEEK_PLAN_SHAPES
-    projection_that_walks_the_table = "(SELECT COUNT(*) FROM entries)"
-    for broken in range(len(shipped)):
-        patched = tuple(
-            (name, projection_that_walks_the_table if position == broken else projection)
-            for position, (name, projection) in enumerate(shipped)
+
+    def broken_one_at_a_time(position_broken, projection_that_fails):
+        return tuple(
+            (
+                name,
+                projection_that_fails if position == position_broken else projection,
+                requires_covering,
+            )
+            for position, (name, projection, requires_covering) in enumerate(shipped)
         )
+
+    def assert_names_only(patched, position_broken):
         with patch.object(history, "_CURSOR_SEEK_PLAN_SHAPES", patched):
             failure = history.cursor_seek_plan_failure()
         assert failure is not None, patched
-        assert shipped[broken][0] in failure, (shipped[broken][0], failure)
-        for position, (name, _) in enumerate(shipped):
-            if position != broken:
+        assert shipped[position_broken][0] in failure, (
+            shipped[position_broken][0],
+            failure,
+        )
+        for position, (name, _, _) in enumerate(shipped):
+            if position != position_broken:
                 assert name not in failure, (name, failure)
+
+    projection_that_walks_the_table = "(SELECT COUNT(*) FROM entries)"
+    for broken in range(len(shipped)):
+        assert_names_only(
+            broken_one_at_a_time(broken, projection_that_walks_the_table), broken
+        )
+
+    projection_that_reaches_the_table = "*"
+    covering = [
+        position for position, shape in enumerate(shipped) if shape[2]
+    ]
+    assert covering, shipped
+    for broken in covering:
+        assert_names_only(
+            broken_one_at_a_time(broken, projection_that_reaches_the_table), broken
+        )
 
 
 def _bulk_seed(target, count):
