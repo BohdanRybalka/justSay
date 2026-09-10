@@ -65,13 +65,17 @@ async def list_history(
     asks for the first page, or both present, which is a complete position. A half
     a cursor is 422 because FastAPI cannot say "both or neither" in a signature.
 
-``before_ts`` is bounded in the signature rather than defended against in the
+    ``before_ts`` is bounded in the signature rather than defended against in the
     body: a value outside the signed 64-bit range SQLite can hold is 422, which the
     driver would otherwise answer with ``OverflowError`` and a 500.
 
-    ``before_id`` carries no length bound: the client only ever echoes a cursor this
-    endpoint minted, a stored id can be any length, and the id reaches SQLite as a
-    bound parameter in a comparison. ADR 053 carries the reasoning.
+    ``before_id`` carries no length bound, because a stored id can be any length and
+    a cursor this endpoint minted has to be readable back (JS-137). Nothing here
+    assumes the sender is the app's own frontend -- anything on the loopback
+    interface can send what it likes. What makes an arbitrary value harmless is that
+    it reaches SQLite as a bound parameter in a comparison and that the request line
+    is capped before the handler sees it, which is what
+    ``test_an_unbounded_before_id_is_data_not_a_control`` pins.
     """
     if (before_ts is None) != (before_id is None):
         raise HTTPException(

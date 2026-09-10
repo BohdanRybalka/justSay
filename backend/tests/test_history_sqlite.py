@@ -1633,36 +1633,32 @@ def test_a_short_page_asks_nothing_about_a_next_one(isolated_storage, tmp_path):
     assert probes == [], probes
 
 
-def test_a_full_last_page_validates_no_cursor(isolated_storage, tmp_path):
-    """A full *last* page returns no cursor, so it validates nothing at all.
+def test_a_full_last_page_holding_an_adopted_id_returns_no_cursor(
+    isolated_storage, tmp_path, insert_history_rows
+):
+    """A full *last* page ending on an adopted id still returns no cursor.
 
-    The probe takes the position as primitives precisely so that the model is
-    built only once a cursor is actually going to be returned. An adopted id of
-    any length rides along here as the row this page ends on; that it is also
-    expressible as a cursor is
+    The pairing is what this covers: full, so the length of the page says nothing
+    about whether more rows exist, and last, so the answer is that none do. The
+    adopted id is the row it ends on. That the same id is also expressible as a
+    cursor when a page *does* follow is
     ``test_a_full_page_with_more_mints_a_cursor_from_an_adopted_id``.
     """
-    target = tmp_path / "target"
-    history.bootstrap(target)
-    over_long_id = "x" * 100
-    with history._lock:
-        conn = history._ensure_conn_locked()
-        conn.execute("BEGIN")
-        conn.executemany(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES (?, ?, 'uk', 'normal', 'row', 'row', 1)",
-            [("newer", 1_700_000_000_001), (over_long_id, 1_700_000_000_000)],
-        )
-        conn.execute("COMMIT")
-        history.invalidate_derived_caches_locked()
+    history.bootstrap(tmp_path / "target")
+    adopted_id = "x" * 100
+    insert_history_rows(
+        [("newer", 1_700_000_000_001, "row"), (adopted_id, 1_700_000_000_000, "row")]
+    )
 
     page = history.get_page(limit=2)
 
     assert page.next_cursor is None
-    assert [entry.id for entry in page.entries] == ["newer", over_long_id]
+    assert [entry.id for entry in page.entries] == ["newer", adopted_id]
 
 
-def test_a_full_page_with_more_mints_a_cursor_from_an_adopted_id(isolated_storage, tmp_path):
+def test_a_full_page_with_more_mints_a_cursor_from_an_adopted_id(
+    isolated_storage, tmp_path, insert_history_rows
+):
     """A page with a page after it hands back the id it ended on, whatever its length.
 
     ``consolidate_into`` copies ids verbatim and ``relocate`` adopts a foreign
@@ -1670,23 +1666,15 @@ def test_a_full_page_with_more_mints_a_cursor_from_an_adopted_id(isolated_storag
     length bound on the cursor made such a page unanswerable rather than the cursor
     invalid; the second read here is the same cursor going back in (JS-137).
     """
-    target = tmp_path / "target"
-    history.bootstrap(target)
+    history.bootstrap(tmp_path / "target")
     adopted_id = "x" * 100
-    with history._lock:
-        conn = history._ensure_conn_locked()
-        conn.execute("BEGIN")
-        conn.executemany(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES (?, ?, 'uk', 'normal', 'row', 'row', 1)",
-            [
-                ("newest", 1_700_000_000_002),
-                (adopted_id, 1_700_000_000_001),
-                ("oldest", 1_700_000_000_000),
-            ],
-        )
-        conn.execute("COMMIT")
-        history.invalidate_derived_caches_locked()
+    insert_history_rows(
+        [
+            ("newest", 1_700_000_000_002, "row"),
+            (adopted_id, 1_700_000_000_001, "row"),
+            ("oldest", 1_700_000_000_000, "row"),
+        ]
+    )
 
     first = history.get_page(limit=2)
 

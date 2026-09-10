@@ -93,17 +93,18 @@ class HistoryCursor(BaseModel):
     deleted. ``id`` is only a tiebreaker: it makes the ordering total, which is
     what a position needs to identify one row. See ADR 053.
 
-``ts`` is bounded on the model rather than only in the router's signature,
+    ``ts`` is bounded on the model rather than only in the router's signature,
     for the reason ``_clamp_limit``'s docstring gives about ``limit``: a bound
     that lives only in a FastAPI signature is not a bound on the function. A
     ``ts`` outside the signed 64-bit range SQLite stores an INTEGER in raises
     ``OverflowError`` out of the driver, so a caller that builds a cursor by hand
     gets a ``ValidationError`` here instead.
 
-    ``id`` is deliberately not bounded: no ``ts`` the server mints can fail its
-    check, while a stored ``id`` is whatever the merged or adopted file holds, so
-    a length bound rejected the app's own cursor rather than a bad one. ADR 053
-    carries that reasoning; JS-137 is what it cost.
+    ``id`` carries no length bound, because a stored ``id`` is whatever the
+    merged or adopted file holds: ``save_entry`` mints twelve hex characters, but
+    ``consolidate_into`` copies ids verbatim and ``relocate`` adopts a foreign
+    ``history.db`` whole. A length bound therefore rejected the app's own cursor
+    rather than a bad one. ADR 053 carries that reasoning; JS-137 is what it cost.
     """
 
     ts: int = Field(ge=CURSOR_TS_MIN, le=CURSOR_TS_MAX)
@@ -619,8 +620,10 @@ def _has_more_locked(conn: sqlite3.Connection, after_ts: int, after_id: str) -> 
     """Caller MUST hold ``_lock``. Whether a row exists strictly after that position.
 
     Takes the position as primitives rather than as a ``HistoryCursor`` so that
-    the model is built only once the answer is yes: a page that is full *and
-    last* would otherwise validate a cursor it never returns.
+    the model is built only once the answer is yes. While ``id`` was length-bounded
+    that avoided a real 500 on a full last page; with the bound gone it avoids one
+    model construction per last page and nothing more, and no test detects a revert
+    to the model form.
 
     Selects no transcript column, so on ``entries_ts_id_idx`` the whole question
     is answered inside the index without reaching a table row. Built from the
@@ -791,8 +794,15 @@ def get_page(limit: int = 50, before: HistoryCursor | None = None) -> HistoryPag
 
     The cursor is built only once the probe has answered yes, so a full page with
     no page after it validates nothing. Where a cursor *is* returned it is minted
-    from the row's own key, and ``HistoryCursor`` bounds nothing that key can
-    carry, so the position of any stored row is expressible.
+    from the row's own key, and no *length* of id can make that fail any more.
+
+    A key of the wrong *type* still can, and that is JS-146 rather than this
+    function's business to paper over: SQLite permits NULL in ``id TEXT PRIMARY
+    KEY`` on a rowid table, and affinity leaves a REAL or TEXT ``ts`` in an
+    ``INTEGER NOT NULL`` column, so a hand-written or foreign ``history.db`` can
+    hold a row that is not a position in ``(ts DESC, id DESC)`` at all. Such a row
+    cannot be paged past whatever this mints, so refusing it belongs where rows
+    enter the store, not here.
     """
     clamped_limit = _clamp_limit(limit)
     with _lock:
