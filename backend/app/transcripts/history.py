@@ -45,7 +45,6 @@ HISTORY_FILENAME = "history.db"
 SCHEMA_VERSION = 3
 STATS_TTL_SECONDS = 5.0
 HISTORY_LIMIT_MAX = 200
-CURSOR_ID_MAX_LENGTH = 64
 CURSOR_TS_MIN = -(2**63)
 CURSOR_TS_MAX = 2**63 - 1
 ROW_VALUE_MIN_SQLITE_VERSION = (3, 15)
@@ -94,16 +93,21 @@ class HistoryCursor(BaseModel):
     deleted. ``id`` is only a tiebreaker: it makes the ordering total, which is
     what a position needs to identify one row. See ADR 053.
 
-    Both halves are bounded on the model rather than only in the router's
-    signature, for the reason ``_clamp_limit``'s docstring gives about ``limit``:
-    a bound that lives only in a FastAPI signature is not a bound on the
-    function. ``ts`` outside the signed 64-bit range SQLite stores an INTEGER in
-    raises ``OverflowError`` out of the driver, so any caller that builds a
-    cursor by hand gets a ``ValidationError`` here instead.
+``ts`` is bounded on the model rather than only in the router's signature,
+    for the reason ``_clamp_limit``'s docstring gives about ``limit``: a bound
+    that lives only in a FastAPI signature is not a bound on the function. A
+    ``ts`` outside the signed 64-bit range SQLite stores an INTEGER in raises
+    ``OverflowError`` out of the driver, so a caller that builds a cursor by hand
+    gets a ``ValidationError`` here instead.
+
+    ``id`` is deliberately not bounded: no ``ts`` the server mints can fail its
+    check, while a stored ``id`` is whatever the merged or adopted file holds, so
+    a length bound rejected the app's own cursor rather than a bad one. ADR 053
+    carries that reasoning; JS-137 is what it cost.
     """
 
     ts: int = Field(ge=CURSOR_TS_MIN, le=CURSOR_TS_MAX)
-    id: str = Field(max_length=CURSOR_ID_MAX_LENGTH)
+    id: str
 
 
 class HistoryPage(BaseModel):
@@ -615,13 +619,8 @@ def _has_more_locked(conn: sqlite3.Connection, after_ts: int, after_id: str) -> 
     """Caller MUST hold ``_lock``. Whether a row exists strictly after that position.
 
     Takes the position as primitives rather than as a ``HistoryCursor`` so that
-    the model is built only once the answer is yes. A page that is full *and
-    last* would otherwise validate a cursor it never returns, and
-    ``consolidate_into`` copies ids verbatim out of a merged database, so an id
-    longer than ``CURSOR_ID_MAX_LENGTH`` would turn a last page that reads fine
-    into a 500. A full page that does have a page after it still validates the
-    id it hands back and still raises there; that is JS-137, which predates this
-    probe and is not narrowed by it.
+    the model is built only once the answer is yes: a page that is full *and
+    last* would otherwise validate a cursor it never returns.
 
     Selects no transcript column, so on ``entries_ts_id_idx`` the whole question
     is answered inside the index without reaching a table row. Built from the
@@ -791,9 +790,9 @@ def get_page(limit: int = 50, before: HistoryCursor | None = None) -> HistoryPag
     rather than asked a question its own length already answered.
 
     The cursor is built only once the probe has answered yes, so a full page with
-    no page after it validates nothing. Where a cursor *is* returned the id is
-    validated and a stored id too long for ``HistoryCursor`` still raises,
-    exactly as it did before this probe existed: that remaining case is JS-137.
+    no page after it validates nothing. Where a cursor *is* returned it is minted
+    from the row's own key, and ``HistoryCursor`` bounds nothing that key can
+    carry, so the position of any stored row is expressible.
     """
     clamped_limit = _clamp_limit(limit)
     with _lock:

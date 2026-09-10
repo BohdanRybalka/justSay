@@ -250,15 +250,9 @@ async def test_history_rejects_half_a_cursor(client):
     An empty ``before_id`` is a whole cursor, not half of one: ``(ts, "")`` sorts
     below every real id at that ``ts``, so it names a well-defined position and
     answers 200, exactly as a cursor naming a row that never existed does."""
-    from app.transcripts.history import CURSOR_ID_MAX_LENGTH
-
     assert (await client.get("/history?limit=30&before_ts=1700000000000")).status_code == 422
     assert (await client.get("/history?limit=30&before_id=abc")).status_code == 422
     assert (await client.get("/history?limit=30&before_ts=abc&before_id=x")).status_code == 422
-    long_id = "a" * (CURSOR_ID_MAX_LENGTH + 1)
-    assert (
-        await client.get(f"/history?limit=30&before_ts=1700000000000&before_id={long_id}")
-    ).status_code == 422
     assert (
         await client.get("/history?limit=30&before_ts=1700000000000&before_id=nosuchrow")
     ).status_code == 200
@@ -271,7 +265,8 @@ async def test_history_rejects_half_a_cursor(client):
 async def test_history_rejects_a_before_ts_sqlite_cannot_hold(client):
     """``ts`` is a SQLite INTEGER, so a wider value raises ``OverflowError`` out of
     the driver, past ``store_busy_as_503``, and answers 500 with a traceback. The
-    bound is in the signature, so it is 422 like an over-long ``before_id``."""
+    bound is in the signature, so it is 422. ``before_id`` carries no such bound and
+    needs none -- see ``test_a_cursor_the_server_minted_is_accepted_back_however_long``."""
     from app.transcripts.history import CURSOR_TS_MAX, CURSOR_TS_MIN
 
     assert (
@@ -330,3 +325,45 @@ async def test_history_pages_over_http_without_repeating_an_entry(client):
     assert len(set(ids)) == 60
     assert second["next_cursor"] is None
     assert second["total"] == 61
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_the_server_minted_is_accepted_back_however_long(client):
+    """ADR 053's echo over HTTP, on an id this build could not have minted.
+
+    An adopted history holds ids of any length, so ``next_cursor`` can carry one and
+    the client echoes back exactly what it was handed: a length bound on
+    ``before_id`` answered the app's own cursor with 422 and ended paging one page
+    in. ``before_ts`` keeps its bound, which no minted ``ts`` can fail.
+    """
+    from app.transcripts import history
+
+    adopted_id = "x" * 100
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.execute("BEGIN")
+        conn.executemany(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES (?, ?, 'uk', 'normal', 'row', 'row', 1)",
+            [
+                ("newest", 1_700_000_000_002),
+                (adopted_id, 1_700_000_000_001),
+                ("oldest", 1_700_000_000_000),
+            ],
+        )
+        conn.execute("COMMIT")
+        history.invalidate_derived_caches_locked()
+
+    first = await client.get("/history?limit=2")
+
+    assert first.status_code == 200, first.text
+    cursor = first.json()["next_cursor"]
+    assert cursor is not None
+    assert cursor["id"] == adopted_id
+
+    second = await client.get(
+        f"/history?limit=2&before_ts={cursor['ts']}&before_id={cursor['id']}"
+    )
+
+    assert second.status_code == 200, second.text
+    assert [entry["id"] for entry in second.json()["entries"]] == ["oldest"]
