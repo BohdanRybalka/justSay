@@ -217,10 +217,7 @@ _REPAIRED_TS_SQL = (
     "THEN CAST(ts AS INTEGER) ELSE @UNKNOWN@ END"
 ).replace("@MAXTS@", str(STORED_TS_MAX)).replace("@UNKNOWN@", str(UNKNOWN_TS))
 
-_REPAIRED_ID_SQL = (
-    "CASE WHEN typeof(id) = 'text' THEN id "
-    "ELSE 'recovered-' || " + _REPAIRED_TS_SQL + " || '-' || rowid END"
-)
+_REPAIRED_ID_SQL = "CASE WHEN typeof(id) = 'text' THEN id ELSE 'recovered-' || rowid END"
 
 
 def _repaired_text_sql(column: str) -> str:
@@ -234,7 +231,29 @@ def _repaired_nullable_sql(column: str, allowed: str) -> str:
     )
 
 
-REPAIRED_COLUMN_SQL = {
+def _repaired_numeric_sql(column: str) -> str:
+    return (
+        f"CASE WHEN typeof({column}) = 'integer' THEN {column} "
+        f"WHEN typeof({column}) = 'real' THEN CAST({column} AS INTEGER) ELSE NULL END"
+    )
+
+
+_MISSING_COLUMN_SQL = {
+    "id": "'recovered-' || rowid",
+    "ts": str(UNKNOWN_TS),
+    "language": "''",
+    "style": "'normal'",
+    "raw_text": "''",
+    "cleaned_text": "''",
+    "duration_ms": "0",
+    "audio_duration_seconds": "NULL",
+    "word_count": "NULL",
+    "model_name": "NULL",
+    "tokens_used": "NULL",
+}
+
+
+_REPAIRED_COLUMN_SQL = {
     "id": _REPAIRED_ID_SQL,
     "ts": _REPAIRED_TS_SQL,
     "language": _repaired_text_sql("language"),
@@ -242,15 +261,15 @@ REPAIRED_COLUMN_SQL = {
     "raw_text": _repaired_text_sql("raw_text"),
     "cleaned_text": _repaired_text_sql("cleaned_text"),
     "duration_ms": (
-        "CASE WHEN typeof(duration_ms) = 'integer' AND duration_ms >= 0 "
-        "THEN duration_ms ELSE 0 END"
+        "CASE WHEN typeof(duration_ms) IN ('integer', 'real') AND duration_ms >= 0 "
+        "THEN CAST(duration_ms AS INTEGER) ELSE 0 END"
     ),
     "audio_duration_seconds": _repaired_nullable_sql(
         "audio_duration_seconds", "'integer', 'real'"
     ),
-    "word_count": _repaired_nullable_sql("word_count", "'integer'"),
+    "word_count": _repaired_numeric_sql("word_count"),
     "model_name": _repaired_nullable_sql("model_name", "'text'"),
-    "tokens_used": _repaired_nullable_sql("tokens_used", "'integer'"),
+    "tokens_used": _repaired_numeric_sql("tokens_used"),
 }
 
 _REPLACE_TS_INDEX_WITH_TS_ID_INDEX = """
@@ -351,45 +370,49 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 def _migrate_to_v4_locked(conn: sqlite3.Connection) -> bool:
     """Rebuild ``entries`` so every stored row is one the app can read and order.
 
-    Returns whether the rebuild landed. **It never raises**, and that is the
-    point: ``_init_schema`` runs inside ``bootstrap``, which the lifespan does
-    not guard, so an exception here is not a broken tab but a backend that does
-    not start. A store this cannot repair keeps the table it has and the caller
-    leaves ``user_version`` alone, so the next open tries again.
+    Returns whether the rebuild landed, and **never raises**: ``_init_schema``
+    runs inside ``bootstrap``, which the lifespan does not guard, so an
+    exception here is not a broken tab but a backend that does not start. A
+    store this cannot repair keeps the table it has and the caller leaves
+    ``user_version`` alone, so the next open tries again. The index and FTS work
+    after the commit is inside a handler for the same reason.
 
     Runs when ``user_version`` is below 4. ``_DDL_V1`` is
     ``CREATE TABLE IF NOT EXISTS``, so a constraint written there never reaches
     a file that already exists, and SQLite cannot add one to a table in place --
     hence the copy-drop-rename, which is SQLite's own documented procedure.
 
-    **Every column is read through ``REPAIRED_COLUMN_SQL`` rather than copied.**
-    An adopted ``entries`` was not necessarily created by this app: it can hold
-    a ``style`` outside the two, a negative ``duration_ms``, a REAL
-    ``word_count``, a BLOB ``id``. Copying those into a constrained table aborts
-    the migration; leaving them unrepaired fails a page later on. Only the
-    columns the stored table actually has are read, the way
-    ``consolidate_into`` already does it, so a file missing one degrades to
-    NULL instead of raising ``no such column``.
+    **The copy always writes all eleven columns.** An adopted ``entries`` was
+    not necessarily created by this app: it can hold a ``style`` outside the
+    two, a negative ``duration_ms``, a BLOB ``id``, or simply not have a column
+    at all. A present column is read through ``_REPAIRED_COLUMN_SQL``, a missing
+    one through ``_MISSING_COLUMN_SQL``. Selecting only the columns the source
+    happens to have looks safer and is not: a source with no ``duration_ms``
+    leaves that ``NOT NULL`` column empty, ``INSERT OR IGNORE`` then refuses
+    every row, and the drop that follows destroys the user's entire history
+    with nothing to restore it from.
+
+    **``rowid`` is carried across.** ``entry_fts`` is external-content keyed on
+    ``entries.rowid`` and ``vec_entries`` addresses rows by it, and ``vec0`` has
+    no rebuild command -- so letting SQLite renumber would mean discarding every
+    embedding and recomputing it, which in Cloud mode is the user's whole
+    transcript history re-sent to a provider and paid for, over a migration that
+    changed no text. Only the embeddings of rows whose *id* was repaired are
+    dropped, because those no longer name a row -- and only once
+    ``entry_embeddings`` exists, which on a v1 or v2 store it does not until
+    the caller runs the v3 DDL after this.
 
     **The copy is ``INSERT OR IGNORE`` and the count is compared.** Two source
     rows can share an id when the stored table has no primary key, and a
-    duplicate must not abort a migration; what it must not do either is vanish
-    without a word, so a shortfall is logged with both counts.
+    duplicate must not abort a migration; a shortfall is logged with both
+    counts. Carrying *nothing* is refused outright rather than logged: at that
+    point the drop would be a deletion, not a migration.
 
-    **The three FTS triggers are dropped first.** They are on ``entries``, so
-    ``entries_ai`` fires for every copied row -- work the rebuild below
-    discards, and a hard failure on a store whose ``entry_fts`` is missing,
-    which is a partial-migration state ``_init_schema`` exists to recover from.
-    Dropping ``entries`` would drop them anyway; ``_DDL_V2`` puts them back.
-
-    **The vector index is reset rather than remapped.** ``vec_entries`` is keyed
-    on ``entries.rowid`` and the copy renumbers every row, so a surviving index
-    answers a semantic search with the wrong transcript. There is no rebuild
-    command for a ``vec0`` table, and ``backfill_batch`` resumes from
-    ``entry_embeddings``, so clearing that table and ``embeddings_meta`` is what
-    makes the indexer re-embed -- and an empty ``embeddings_meta`` is exactly
-    what sends ``ensure_vec_table_locked`` down its recreate path, which is also
-    the only site that creates the ``entries_ad_vec`` trigger the drop removed.
+    **Four triggers are dropped first.** The three FTS ones are on ``entries``,
+    so ``entries_ai`` fires for every copied row -- work the rebuild discards,
+    and a hard failure on a store whose ``entry_fts`` is missing.
+    ``entries_ad_vec`` goes with the table either way and is put back by
+    ``vector_store.recreate_delete_trigger_locked``.
 
     **The two ``executescript`` calls are after the COMMIT and have to stay
     there.** Python's ``sqlite3`` issues an implicit COMMIT before running a
@@ -399,35 +422,40 @@ def _migrate_to_v4_locked(conn: sqlite3.Connection) -> bool:
     the pragma re-runs this step, which is idempotent: after it every row
     already satisfies the constraints.
     """
+    from app.transcripts import vector_store
+
     try:
         stored = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
     except sqlite3.Error:
         log.exception("Could not read the entries table; leaving the store at its version")
         return False
 
-    shared = [name for name in ENTRY_COLUMNS if name in stored]
-    if "id" not in shared or "ts" not in shared:
-        log.warning(
-            "entries has no %s column, so it is not a history this build can repair",
-            "id" if "id" not in shared else "ts",
-        )
+    if not {"raw_text", "cleaned_text"} & stored:
+        log.warning("entries holds no transcript column, so there is nothing here to repair")
         return False
 
-    column_list = columns_sql(shared)
-    select_list = ", ".join(REPAIRED_COLUMN_SQL[name] for name in shared)
+    column_list = columns_sql(ENTRY_COLUMNS)
+    select_list = ", ".join(
+        _REPAIRED_COLUMN_SQL[name] if name in stored else _MISSING_COLUMN_SQL[name]
+        for name in ENTRY_COLUMNS
+    )
     previous_foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
     conn.execute("PRAGMA foreign_keys = OFF")
     try:
         conn.execute("BEGIN")
         stored_rows = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
-        for trigger in ("entries_ai", "entries_ad", "entries_au"):
+        for trigger in ("entries_ai", "entries_ad", "entries_au", "entries_ad_vec"):
             conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
         conn.execute("DROP TABLE IF EXISTS entries_v4")
         conn.execute(_DDL_V4_ENTRIES)
         copied = conn.execute(
-            f"INSERT OR IGNORE INTO entries_v4 ({column_list}) "
-            f"SELECT {select_list} FROM entries"
+            f"INSERT OR IGNORE INTO entries_v4 (rowid, {column_list}) "
+            f"SELECT rowid, {select_list} FROM entries"
         ).rowcount
+        if copied == 0 < stored_rows:
+            raise sqlite3.IntegrityError(
+                f"the rebuilt table would hold none of the {stored_rows} stored rows"
+            )
         conn.execute("DROP TABLE entries")
         conn.execute("ALTER TABLE entries_v4 RENAME TO entries")
         conn.execute("COMMIT")
@@ -443,43 +471,31 @@ def _migrate_to_v4_locked(conn: sqlite3.Connection) -> bool:
 
     if copied != stored_rows:
         log.warning(
-            "History rebuild carried %d of %d rows; %d shared an id with another row",
+            "History rebuild carried %d of the %d stored rows; %d could not be written "
+            "into a table that requires a distinct id",
             copied,
             stored_rows,
             stored_rows - copied,
         )
-    orphans = conn.execute("PRAGMA foreign_key_check").fetchall()
-    if orphans:
-        log.warning("Foreign key check after the history rebuild found %d rows", len(orphans))
 
-    conn.executescript(_REPLACE_TS_INDEX_WITH_TS_ID_INDEX)
-    conn.executescript(_DDL_V2)
-    conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
-    _reset_vector_index_locked(conn)
-    return True
-
-
-def _reset_vector_index_locked(conn: sqlite3.Connection) -> None:
-    """Discard every embedding so the indexer recomputes them against new rowids.
-
-    ``vec_entries`` addresses rows by ``entries.rowid`` and the rebuild above
-    renumbers them, so what survives points at the wrong transcript -- and
-    ``vec0`` has no rebuild or integrity command to put it right.
-
-    Clearing ``embeddings_meta`` is what does the work: it is the comparison
-    ``ensure_vec_table_locked`` early-returns on, so an empty one sends the next
-    embed down the path that recreates ``vec_entries`` *and* the
-    ``entries_ad_vec`` trigger, which ``DROP TABLE entries`` took with it. The
-    recovery path already exists; this only puts the store into the state that
-    triggers it.
-    """
-    conn.execute("DROP TABLE IF EXISTS vec_entries")
-    for table in ("entry_embeddings", "embeddings_meta"):
-        exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    try:
+        conn.executescript(_REPLACE_TS_INDEX_WITH_TS_ID_INDEX)
+        conn.executescript(_DDL_V2)
+        conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
+        embeddings_exist = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entry_embeddings'"
         ).fetchone()
-        if exists:
-            conn.execute(f"DELETE FROM {table}")
+        if embeddings_exist:
+            conn.execute(
+                "DELETE FROM entry_embeddings WHERE entry_id NOT IN (SELECT id FROM entries)"
+            )
+        vector_store.recreate_delete_trigger_locked(conn)
+    except sqlite3.Error:
+        log.exception(
+            "The history table was rebuilt but its indexes were not; the next open repeats this"
+        )
+        return False
+    return True
 
 
 def _resolve_output_dir() -> Path:
@@ -516,11 +532,13 @@ def _epoch_ms_to_iso(ms: int) -> str | None:
 
     ``UNKNOWN_TS`` and anything below it is not a recording time -- it is what
     the v4 migration writes for a row whose stored value could not be recovered
-    (see ``ORDERABLE_TS_SQL``). The tabs render a dash for it. Decided by the
+    (see ``_REPAIRED_COLUMN_SQL``). The tabs render a dash for it. A value that
+    is not a number at all reaches here only from a store the migration could
+    not repair, and answers ``None`` too: a guard that raises is not a guard. Decided by the
     user on 2026-09-10: a record whose text survived keeps its place in the
     list, and its date shows as nothing rather than as a wrong date.
     """
-    if not UNKNOWN_TS < ms <= STORED_TS_MAX:
+    if not isinstance(ms, int) or not UNKNOWN_TS < ms <= STORED_TS_MAX:
         return None
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
 
@@ -674,7 +692,7 @@ def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateOut
     older source schema degrades to NULLs instead of raising.
 
     Every column is repaired on the way in rather than copied verbatim,
-    through the same ``REPAIRED_COLUMN_SQL`` the v4 migration applies. Since v4
+    through the same ``_REPAIRED_COLUMN_SQL`` the v4 migration applies. Since v4
     the target's ``entries`` refuses a value it cannot read back, and
     ``INSERT OR IGNORE`` answers a refused row by **skipping it** -- measured,
     not assumed -- so copying verbatim would drop the user's transcripts out of
@@ -711,18 +729,32 @@ def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateOut
         _init_schema(conn)
         conn.execute("ATTACH DATABASE ? AS source", (str(source_path),))
         source_columns = {row[1] for row in conn.execute("PRAGMA source.table_info(entries)")}
-        if "id" not in source_columns:
-            return ConsolidateOutcome.FAILED, "Source database has no entries table"
+        if not {"raw_text", "cleaned_text"} & source_columns:
+            return ConsolidateOutcome.FAILED, "Source database holds no transcripts"
 
-        shared = [name for name in ENTRY_COLUMNS if name in source_columns]
-        column_list = columns_sql(shared)
-        select_list = ", ".join(REPAIRED_COLUMN_SQL[name] for name in shared)
+        column_list = columns_sql(ENTRY_COLUMNS)
+        select_list = ", ".join(
+            _REPAIRED_COLUMN_SQL[name] if name in source_columns else _MISSING_COLUMN_SQL[name]
+            for name in ENTRY_COLUMNS
+        )
+        available = conn.execute("SELECT count(*) FROM source.entries").fetchone()[0]
+        already = conn.execute(
+            "SELECT count(*) FROM source.entries s "
+            "WHERE EXISTS (SELECT 1 FROM entries t WHERE t.id = s.id)"
+        ).fetchone()[0]
         conn.execute("BEGIN")
         cursor = conn.execute(
             f"INSERT OR IGNORE INTO entries ({column_list}) "
             f"SELECT {select_list} FROM source.entries"
         )
         copied = cursor.rowcount
+        if copied < available - already:
+            log.warning(
+                "Merge carried %d of the %d rows the source holds that this history did "
+                "not already have",
+                copied,
+                available - already,
+            )
         conn.execute("COMMIT")
         conn.execute("DETACH DATABASE source")
     except (OSError, sqlite3.Error) as e:
