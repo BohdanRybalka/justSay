@@ -16,10 +16,20 @@ const apiMock = {
   deleteHistoryEntry: vi.fn(),
 };
 
-vi.mock("../../api", () => ({
-  api: apiMock,
-}));
+/**
+ * Only `api` is replaced. Everything else in the module -- `SidecarTooOldError`
+ * above all -- stays the real export, so the `instanceof` branch under test is
+ * tied to the class `api.getHistory` actually throws. A stand-in class of the
+ * same name passes whatever the module does, including throwing a plain
+ * `Error`.
+ */
+vi.mock("../../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../api")>();
+  return { ...actual, api: apiMock };
+});
 
+const { SidecarTooOldError } = await import("../../api");
+const { sidecarTooOldText } = await import("../history-list");
 const { renderMetrics } = await import("./metrics");
 
 function stubBackend(total: number): HistoryEntry[] {
@@ -48,6 +58,21 @@ function clearButton(container: HTMLElement): HTMLButtonElement {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("renderMetrics — a backend without the cursor contract says so here too", () => {
+  it("names Metrics rather than History, since the shared list is told whose rows it paints", async () => {
+    apiMock.getHistory.mockRejectedValue(new SidecarTooOldError("no next_cursor"));
+    const container = document.createElement("div");
+
+    renderMetrics(container);
+
+    await vi.waitFor(() => {
+      expect(container.querySelector("#metrics-count")!.textContent).toBe(
+        sidecarTooOldText("Metrics")
+      );
+    });
+  });
 });
 
 describe("renderMetrics — paging over the history endpoint", () => {

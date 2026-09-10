@@ -14,11 +14,20 @@ const apiMock = {
   clearHistory: vi.fn(),
 };
 
-vi.mock("../api", () => ({
-  api: apiMock,
-}));
+/**
+ * Only `api` is replaced. Everything else in the module -- `SidecarTooOldError`
+ * above all -- stays the real export, so the `instanceof` branch under test is
+ * tied to the class `api.getHistory` actually throws. A stand-in class of the
+ * same name passes whatever the module does, including throwing a plain
+ * `Error`.
+ */
+vi.mock("../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api")>();
+  return { ...actual, api: apiMock };
+});
 
-const { createHistoryList, formatEntryCount } = await import("./history-list");
+const { SidecarTooOldError } = await import("../api");
+const { createHistoryList, formatEntryCount, sidecarTooOldText } = await import("./history-list");
 
 const TRANSCRIPTS = { singular: "transcript", plural: "transcripts" };
 const ENTRIES = { singular: "entry", plural: "entries" };
@@ -67,10 +76,11 @@ function harness(): Harness {
   };
 }
 
-function listOver(h: Harness, pageSize = 2) {
+function listOver(h: Harness, pageSize = 2, isDestroyed: () => boolean = () => false) {
   return createHistoryList({
     pageSize,
     noun: TRANSCRIPTS,
+    featureName: "History",
     elements: h.elements,
     createRow: (entry) => {
       const row = document.createElement("div");
@@ -78,7 +88,7 @@ function listOver(h: Harness, pageSize = 2) {
       return row;
     },
     renderEmptyState: () => {},
-    isDestroyed: () => false,
+    isDestroyed,
   });
 }
 
@@ -177,10 +187,7 @@ describe("createHistoryList — the client echoes cursors and never builds one",
     const cursor: HistoryCursor = { ts: 300, id: "second-row" };
     confirmMock.mockResolvedValue(true);
     apiMock.clearHistory.mockResolvedValue({ deleted: 5 });
-    queueResponses(
-      { entries: [buildEntry("a"), buildEntry("b")], total: 5, next_cursor: cursor },
-      { entries: [], total: 0, next_cursor: null }
-    );
+    queueResponses({ entries: [buildEntry("a"), buildEntry("b")], total: 5, next_cursor: cursor });
 
     const list = listOver(h);
     await list.load();
@@ -189,9 +196,35 @@ describe("createHistoryList — the client echoes cursors and never builds one",
     await vi.waitFor(() => expect(h.countText()).toBe("0 transcripts"));
 
     h.elements.loadMoreButton.click();
-    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
+    await flush();
 
-    expect(sentCursors()).toEqual([null, null]);
+    expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
+    expect(sentCursors()).toEqual([null]);
+  });
+
+  it("refuses an append while the stored cursor is null instead of re-asking for page one", async () => {
+    const h = harness();
+    queueResponses({ entries: [buildEntry("a")], total: 1, next_cursor: null });
+
+    await listOver(h).load();
+    h.elements.loadMoreButton.click();
+    await flush();
+
+    expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
+    expect(sentCursors()).toEqual([null]);
+  });
+
+  it("leaves the button as it found it when it refuses an append", async () => {
+    const h = harness();
+    queueResponses({ entries: [buildEntry("a")], total: 1, next_cursor: null });
+
+    await listOver(h).load();
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
+
+    h.elements.loadMoreButton.click();
+    await flush();
+
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
   });
 });
 
@@ -215,20 +248,176 @@ function flush(): Promise<void> {
 }
 
 describe("createHistoryList — one request at a time decides the rows and the cursor", () => {
-  it("treats a response with no next_cursor field as the last page", async () => {
+  it("names the version skew when the backend omits next_cursor entirely", async () => {
     const h = harness();
-    queueResponses(
-      { entries: [buildEntry("a")], total: 99 } as unknown as HistoryPageResponse,
-      { entries: [buildEntry("b")], total: 99, next_cursor: null }
-    );
+    apiMock.getHistory.mockRejectedValue(new SidecarTooOldError("no next_cursor"));
+
+    await listOver(h).load();
+
+    expect(h.countText()).toBe("History needs the latest backend — please update JustSay.");
+  });
+
+  it("keeps the version-skew warning painted when a row is deleted afterwards", async () => {
+    const h = harness();
+    apiMock.getHistory.mockResolvedValueOnce({
+      entries: [buildEntry("a"), buildEntry("b")],
+      total: 2,
+      next_cursor: null,
+    });
+    apiMock.getHistory.mockRejectedValue(new SidecarTooOldError("no next_cursor"));
+
+    const list = listOver(h);
+    await list.load();
+    await list.load();
+    expect(h.countText()).toBe(sidecarTooOldText("History"));
+
+    list.entryRemoved();
+
+    expect(h.countText()).toBe(sidecarTooOldText("History"));
+  });
+
+  it("keeps the ordinary failure text for a failure that is not version skew", async () => {
+    const h = harness();
+    apiMock.getHistory.mockRejectedValue(new Error("503 store busy"));
+
+    await listOver(h).load();
+
+    expect(h.countText()).toBe("Failed to load");
+  });
+
+  it("claimRows() disables Load more and leaves the wrapper alone, so an unrepainted list stays pageable", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
+    queueResponses({ entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor });
+
+    const list = listOver(h);
+    await list.load();
+    expect(h.loadMoreVisible()).toBe(true);
+
+    const claim = list.claimRows();
+
+    expect(h.loadMoreVisible()).toBe(true);
+    expect(h.elements.loadMoreButton.disabled).toBe(true);
+
+    h.elements.loadMoreButton.click();
+    await flush();
+    expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
+
+    claim.release();
+
+    expect(h.loadMoreVisible()).toBe(true);
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
+  });
+
+  it("claimRows() touches nothing once the tab is gone", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
+    queueResponses({ entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor });
+    let destroyed = false;
+
+    const list = listOver(h, 2, () => destroyed);
+    await list.load();
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
+
+    destroyed = true;
+    list.claimRows();
+
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
+  });
+
+  it("only the current claim hands Load more back, so a superseded append cannot re-enable it", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
+    const append = deferredPage();
+    let calls = 0;
+    apiMock.getHistory.mockImplementation(async () => {
+      calls += 1;
+      return calls === 2
+        ? append.promise
+        : { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor };
+    });
 
     const list = listOver(h);
     await list.load();
     h.elements.loadMoreButton.click();
     await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
+    expect(h.elements.loadMoreButton.disabled).toBe(true);
 
+    const claim = list.claimRows();
+
+    append.release({ entries: [buildEntry("c")], total: 4, next_cursor: null });
+    await flush();
+
+    expect(claim.isCurrent()).toBe(true);
+    expect(h.paintedIds()).toEqual(["a", "b"]);
+    expect(h.elements.loadMoreButton.disabled).toBe(true);
+
+    claim.release();
+
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
+  });
+
+  it("clears the version-skew warning once a page comes back carrying a cursor", async () => {
+    const h = harness();
+    apiMock.getHistory.mockRejectedValueOnce(new SidecarTooOldError("no next_cursor"));
+    apiMock.getHistory.mockResolvedValue({
+      entries: [buildEntry("a"), buildEntry("b")],
+      total: 2,
+      next_cursor: null,
+    });
+
+    const list = listOver(h);
+    await list.load();
+    expect(h.countText()).toBe("History needs the latest backend — please update JustSay.");
+
+    await list.load();
+
+    expect(h.countText()).toBe("2 transcripts");
+
+    list.entryRemoved();
+
+    expect(h.countText()).toBe("1 transcript");
+  });
+
+  it("keeps the version-skew warning over an emptied store, because the backend is still the old one", async () => {
+    const h = harness();
+    apiMock.getHistory.mockResolvedValueOnce({
+      entries: [buildEntry("a")],
+      total: 5,
+      next_cursor: null,
+    });
+    apiMock.getHistory.mockRejectedValue(new SidecarTooOldError("no next_cursor"));
+    confirmMock.mockResolvedValue(true);
+    apiMock.clearHistory.mockResolvedValue({ deleted: 5 });
+
+    const list = listOver(h);
+    await list.load();
+    await list.load();
+    expect(h.countText()).toBe(sidecarTooOldText("History"));
+
+    h.elements.clearButton.click();
+    await vi.waitFor(() => expect(apiMock.clearHistory).toHaveBeenCalledTimes(1));
+    await flush();
+
+    expect(h.countText()).toBe(sidecarTooOldText("History"));
     expect(h.loadMoreVisible()).toBe(false);
-    expect(sentCursors()).toEqual([null, null]);
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
+  });
+
+  it("clearAll() paints the empty count and hides Load more through the claim it took", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
+    queueResponses({ entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor });
+    confirmMock.mockResolvedValue(true);
+    apiMock.clearHistory.mockResolvedValue(undefined);
+
+    await listOver(h).load();
+    h.elements.clearButton.click();
+    await vi.waitFor(() => expect(apiMock.clearHistory).toHaveBeenCalledTimes(1));
+
+    await vi.waitFor(() => expect(h.countText()).toBe("0 transcripts"));
+    expect(h.loadMoreVisible()).toBe(false);
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
   });
 
   it("ignores a second Load more click while the first is still outstanding", async () => {
@@ -362,9 +551,8 @@ describe("createHistoryList — one request at a time decides the rows and the c
     append.release({ entries: [buildEntry("c")], total: 4, next_cursor: null });
     await flush();
 
-    h.elements.loadMoreButton.click();
-    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(3));
-    expect(sentCursors()).toEqual([null, cursor, null]);
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
+    expect(sentCursors()).toEqual([null, cursor]);
   });
 
   it("lets clearAll() supersede an append that is still in flight", async () => {

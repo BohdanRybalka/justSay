@@ -618,6 +618,18 @@ export interface HistoryPageResponse {
   next_cursor: HistoryCursor | null;
 }
 
+/** Thrown when the backend is older than the contract the frontend was built
+ *  against: a `/history` response carrying no `next_cursor` property at all, or
+ *  a `/history/search` that answers `404`/`405` because the endpoint does not
+ *  exist yet. One class for one condition, so no caller has to recognise skew
+ *  by reading the text of an error message. */
+export class SidecarTooOldError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SidecarTooOldError";
+  }
+}
+
 export interface WordCount {
   word: string;
   count: number;
@@ -659,16 +671,51 @@ export const api = {
 
   /** Pass `null` for the first page, then whatever `next_cursor` the previous
    *  response carried. A cursor is a position rather than a count, so nothing
-   *  under it shifts when an entry is saved or deleted between two pages. */
-  getHistory: (limit = 50, cursor: HistoryCursor | null = null) =>
-    request<HistoryPageResponse>(
+   *  under it shifts when an entry is saved or deleted between two pages.
+   *
+   *  This is the last place in the app where an absent `next_cursor` can be told
+   *  from a null one: `request` casts the parsed body rather than validating it,
+   *  so one line further down the two have already collapsed into `undefined`
+   *  and `null`, and a backend predating the cursor contract would silently look
+   *  like a store whose first page is also its last. The presence test is `in`
+   *  rather than `=== undefined` because absence of the property is precisely
+   *  the condition, and it throws rather than returning a flag so that no caller
+   *  can carry the third state around.
+   *
+   *  A body that is `null`, an array, or not an object at all is a malformed
+   *  response rather than version skew -- `request` casts without validating,
+   *  and `in` on a non-object throws a `TypeError` the caller has no branch
+   *  for. An array is rejected with them because `typeof [] === "object"` and
+   *  `"next_cursor" in []` is simply false, so a JSON array would otherwise be
+   *  reported as an old backend. They are rejected before the presence test so
+   *  the promised contract holds: the version-skew error means the field was
+   *  absent from an object.
+   *
+   *  The presence test alone is not the whole edge: a body carrying
+   *  `next_cursor: undefined` passes `in` and would reach the caller as a
+   *  cursor that is neither a position nor `null`, showing "Load more", slipping
+   *  past an append guard written as `cursor === null` and going out as
+   *  `before_ts=undefined`. `JSON.parse` cannot produce it; a stubbed
+   *  `api.getHistory` can, and the type says it cannot. The value is normalised
+   *  once the presence test has had its answer, so the edge keeps both jobs it
+   *  was given. */
+  getHistory: async (limit = 50, cursor: HistoryCursor | null = null) => {
+    const body = await request<Partial<HistoryPageResponse>>(
       "GET",
       cursor === null
         ? `/history?limit=${limit}`
         : `/history?limit=${limit}&before_ts=${cursor.ts}&before_id=${encodeURIComponent(cursor.id)}`,
       undefined,
       REREADABLE,
-    ),
+    );
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      throw new Error("/history returned a body that is not an object");
+    }
+    if (!("next_cursor" in body)) {
+      throw new SidecarTooOldError("/history returned no next_cursor field");
+    }
+    return { ...body, next_cursor: body.next_cursor ?? null } as HistoryPageResponse;
+  },
 
   historyStats: () => request<HistoryStats>("GET", "/history/stats", undefined, REREADABLE),
 
@@ -679,14 +726,28 @@ export const api = {
    *  search when the embedding provider is slow (ADR 010), and a slow provider
    *  does not raise, so a client-side budget fires first and throws away the
    *  local half that had already answered. A slow search would become no
-   *  search — the degradation path the backend was built with, preempted. */
-  searchHistory: (q: string, limit = 30) =>
-    request<HistoryListResponse>(
-      "GET",
-      `/history/search?q=${encodeURIComponent(q)}&limit=${limit}`,
-      undefined,
-      UNRECONCILED,
-    ),
+   *  search — the degradation path the backend was built with, preempted.
+   *
+   *  A backend predating the search endpoint answers `404` or `405` rather
+   *  than omitting a field, but it is the same version skew `getHistory`
+   *  reports, so it is reported by the same class. Branching on the class is
+   *  what lets the caller stop reading English out of an error message, which
+   *  the backend never promised to keep spelling the same way. */
+  searchHistory: async (q: string, limit = 30) => {
+    try {
+      return await request<HistoryListResponse>(
+        "GET",
+        `/history/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+        undefined,
+        UNRECONCILED,
+      );
+    } catch (error) {
+      if (error instanceof ApiRequestError && (error.status === 404 || error.status === 405)) {
+        throw new SidecarTooOldError(`/history/search answered HTTP ${error.status}`);
+      }
+      throw error;
+    }
+  },
 
   /** `POST /audio/start` calls `await recorder.start()` before it answers, so
    *  the microphone may be open whichever way this ends. That is why abandoning
