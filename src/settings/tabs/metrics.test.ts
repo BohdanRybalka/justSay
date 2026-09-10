@@ -29,6 +29,7 @@ vi.mock("../../api", async (importOriginal) => {
 });
 
 const { SidecarTooOldError } = await import("../../api");
+const { sidecarTooOldText } = await import("../history-list");
 const { renderMetrics } = await import("./metrics");
 
 function stubBackend(total: number): HistoryEntry[] {
@@ -60,7 +61,7 @@ beforeEach(() => {
 });
 
 describe("renderMetrics — a backend without the cursor contract says so here too", () => {
-  it("replaces the count with the update message, which reaches this tab through the shared list", async () => {
+  it("names Metrics rather than History, since the shared list is told whose rows it paints", async () => {
     apiMock.getHistory.mockRejectedValue(new SidecarTooOldError("no next_cursor"));
     const container = document.createElement("div");
 
@@ -68,7 +69,7 @@ describe("renderMetrics — a backend without the cursor contract says so here t
 
     await vi.waitFor(() => {
       expect(container.querySelector("#metrics-count")!.textContent).toBe(
-        "History needs the latest backend — please update JustSay."
+        sidecarTooOldText("Metrics")
       );
     });
   });

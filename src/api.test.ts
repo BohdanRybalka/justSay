@@ -1183,6 +1183,15 @@ describe("the history cursor on the wire", () => {
     expect((error as Error).message).toBe("/history returned a body that is not an object");
   });
 
+  it("normalises a present-but-undefined next_cursor to null once the presence test has passed", async () => {
+    const { api } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ entries: [], total: 0, next_cursor: undefined }));
+
+    const page = await api.getHistory(30);
+
+    expect(page.next_cursor).toBeNull();
+  });
+
   it("escapes an id rather than pasting it into the query string", async () => {
     const { api } = await import("./api");
     fetchMock.mockResolvedValue(okJson({ entries: [], total: 0, next_cursor: null }));

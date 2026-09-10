@@ -20,6 +20,8 @@ export interface HistoryListElements {
 export interface HistoryListOptions {
   pageSize: number;
   noun: HistoryListNoun;
+  /** The tab's own name, as the version-skew message says it. */
+  featureName: string;
   elements: HistoryListElements;
   createRow: (entry: HistoryEntry) => HTMLElement;
   renderEmptyState: (isEmpty: boolean) => void;
@@ -69,7 +71,16 @@ export interface HistoryList {
    * rows hides the wrapper itself.
    */
   claimRows(): HistoryRowsClaim;
-  /** Drops one from the running total after a single-entry delete. */
+  /**
+   * Drops one from the running total after a single-entry delete, and does
+   * nothing at all while the rows on screen belong to another lane.
+   *
+   * The list knows whose paint is showing, so the caller does not have to: a
+   * delete during a History search leaves the match count alone, and the same
+   * delete after a reload has taken the rows back decrements the total. Asking
+   * the caller to guard meant asking a claim whether it was superseded, which
+   * is a question a claim answers `false` to after teardown as well.
+   */
   entryRemoved(): void;
 }
 
@@ -90,13 +101,15 @@ export function formatEntryCount(total: number, noun: HistoryListNoun): string {
  * that page over `api.getHistory`. It never creates markup and never owns a row's shape.
  */
 export function createHistoryList(options: HistoryListOptions): HistoryList {
-  const { pageSize, noun, elements, createRow, renderEmptyState, isDestroyed, onCleared } = options;
+  const { pageSize, noun, featureName, elements, createRow, renderEmptyState, isDestroyed, onCleared } =
+    options;
 
   let cursor: HistoryCursor | null = null;
   let total = 0;
   let latestIssuedToken = 0;
   let backendOmitsCursor = false;
   let latestClaim: HistoryRowsClaim;
+  let rowsAreOwnPage = false;
 
   function renderCount(text: string): void {
     elements.count.textContent = text;
@@ -118,10 +131,16 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
    */
   function renderTotal(claim: HistoryRowsClaim): void {
     claim.renderCount(
-      backendOmitsCursor ? sidecarTooOldText("History") : formatEntryCount(total, noun)
+      backendOmitsCursor ? sidecarTooOldText(featureName) : formatEntryCount(total, noun)
     );
   }
 
+  /**
+   * Issues a claim, which supersedes every lane already holding one: the token
+   * is bumped and the new claim is recorded as the list's own writer. Reading
+   * this as a plain factory is the mistake it is named against -- calling it
+   * "just to get a claim" silently invalidates every request in flight.
+   */
   function issueClaim(): HistoryRowsClaim {
     const token = ++latestIssuedToken;
     const isCurrent = () => !isDestroyed() && !isStaleStatusResponse(token, latestIssuedToken);
@@ -145,6 +164,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
   function claimRows(): HistoryRowsClaim {
     const claim = issueClaim();
+    rowsAreOwnPage = false;
     if (!isDestroyed()) {
       elements.loadMoreButton.disabled = true;
     }
@@ -182,6 +202,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
       total = response.total;
       backendOmitsCursor = false;
+      rowsAreOwnPage = true;
       renderTotal(claim);
 
       if (!append) {
@@ -195,14 +216,14 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
       renderEmptyState(response.entries.length === 0 && !append);
 
       cursor = response.next_cursor;
-      renderLoadMore(cursor !== null);
+      claim.renderLoadMore(cursor !== null);
     } catch (error) {
       if (!claim.isCurrent()) return;
       if (error instanceof SidecarTooOldError) {
         backendOmitsCursor = true;
         renderTotal(claim);
       } else {
-        renderCount("Failed to load");
+        claim.renderCount("Failed to load");
       }
       console.error(error);
     } finally {
@@ -240,6 +261,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
       total = 0;
       elements.rows.innerHTML = "";
       renderEmptyState(true);
+      rowsAreOwnPage = true;
       renderTotal(claim);
       claim.renderLoadMore(false);
       claim.release();
@@ -268,6 +290,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     },
     claimRows,
     entryRemoved() {
+      if (!rowsAreOwnPage) return;
       total--;
       renderTotal(latestClaim);
     },

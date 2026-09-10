@@ -31,6 +31,7 @@ def isolated_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(history, "_output_dir", tmp_path)
     monkeypatch.setattr(history, "_conn", None)
     monkeypatch.setattr(history, "_stats_cache", None)
+    monkeypatch.setattr(history, "_page_total_cache", None)
 
     yield {"tmp_path": tmp_path}
 
@@ -1804,7 +1805,7 @@ def test_the_total_follows_the_generation_counter_not_the_table(isolated_storage
 
 
 def test_the_memoised_total_expires_so_a_second_writer_is_picked_up(
-    isolated_storage, tmp_path
+    isolated_storage, tmp_path, monkeypatch
 ):
     """A writer outside this process bumps no generation, so only the age catches it.
 
@@ -1833,11 +1834,10 @@ def test_the_memoised_total_expires_so_a_second_writer_is_picked_up(
     assert history.get_page(limit=1).total == 3
 
     stamp, generation, cached_conn, total = history._page_total_cache
-    history._page_total_cache = (
-        stamp - history.STATS_TTL_SECONDS - 1,
-        generation,
-        cached_conn,
-        total,
+    monkeypatch.setattr(
+        history,
+        "_page_total_cache",
+        (stamp - history.STATS_TTL_SECONDS - 1, generation, cached_conn, total),
     )
 
     assert history.get_page(limit=1).total == 4
@@ -1867,6 +1867,40 @@ def test_the_plan_probe_reports_every_shape_that_failed(isolated_storage):
     assert failure is not None
     for name, _, _ in shipped:
         assert name in failure, (name, failure)
+
+
+def test_the_plan_probe_reports_every_condition_one_shape_failed(isolated_storage):
+    """A shape that breaks two of the plan assertions is reported on both.
+
+    The packaged build this probe exists for is the one where the bundled
+    library is old enough to break more than one property at a time, and how
+    much of the read path it gave back is the whole value of the message. A
+    projection that reaches the table through a scanning subquery fails the
+    table-walk assertion and the covering one together, and both must be named.
+    """
+    shipped = history._CURSOR_SEEK_PLAN_SHAPES
+    covering = [position for position, shape in enumerate(shipped) if shape[2]]
+    assert covering, shipped
+    broken = covering[0]
+
+    projection_that_scans_and_reaches_the_table = (
+        "raw_text, (SELECT COUNT(raw_text) FROM entries)"
+    )
+    patched = tuple(
+        (
+            name,
+            projection_that_scans_and_reaches_the_table if position == broken else projection,
+            requires_covering,
+        )
+        for position, (name, projection, requires_covering) in enumerate(shipped)
+    )
+
+    with patch.object(history, "_CURSOR_SEEK_PLAN_SHAPES", patched):
+        failure = history.cursor_seek_plan_failure()
+
+    assert failure is not None
+    assert "walks the entries table" in failure, failure
+    assert "instead of answering from the index" in failure, failure
 
 
 def test_the_plan_probe_names_the_shape_that_walked_the_index(isolated_storage):

@@ -80,6 +80,7 @@ function listOver(h: Harness, pageSize = 2, isDestroyed: () => boolean = () => f
   return createHistoryList({
     pageSize,
     noun: TRANSCRIPTS,
+    featureName: "History",
     elements: h.elements,
     createRow: (entry) => {
       const row = document.createElement("div");

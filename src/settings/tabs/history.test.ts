@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HistoryEntry, HistoryPageResponse } from "../../api";
 import { buildEntry, pagesByCursor } from "../history-page-stub.test-helper";
 
@@ -61,8 +61,26 @@ function clearButton(container: HTMLElement): HTMLButtonElement {
   return container.querySelector<HTMLButtonElement>("#btn-clear-history")!;
 }
 
+/**
+ * The search box's own debounce, restated so the clock can be advanced by
+ * exactly it. Fake timers are what keep this file's cost off the wall clock:
+ * ordering here is decided by the `deferred()` handles rather than by elapsed
+ * time, so nothing is weakened by not waiting 300 ms fifteen times over.
+ */
+const SEARCH_DEBOUNCE_MS = 300;
+
+/** Lets every already-resolved promise settle without any real time passing. */
+async function flush(): Promise<void> {
+  await vi.advanceTimersByTimeAsync(0);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("renderHistory — paging over the history endpoint", () => {
@@ -139,6 +157,7 @@ describe("renderHistory — teardown", () => {
     const search = container.querySelector<HTMLInputElement>("#history-search")!;
     search.value = "hello";
     search.dispatchEvent(new Event("input"));
+    await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
     await vi.waitFor(() => {
       expect(apiMock.searchHistory).toHaveBeenCalledTimes(1);
     });
@@ -171,10 +190,11 @@ function deferred<T>(): { promise: Promise<T>; release: (value: T) => void } {
   return { promise, release };
 }
 
-function typeQuery(container: HTMLElement, value: string): void {
+async function typeQuery(container: HTMLElement, value: string): Promise<void> {
   const search = container.querySelector<HTMLInputElement>("#history-search")!;
   search.value = value;
   search.dispatchEvent(new Event("input"));
+  await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
 }
 
 async function deleteFirstRow(container: HTMLElement): Promise<void> {
@@ -204,9 +224,9 @@ describe("renderHistory — a reload and a search cannot both own the rows", () 
       expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
     });
 
-    typeQuery(container, "");
+    await typeQuery(container, "");
     await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
-    typeQuery(container, "hello");
+    await typeQuery(container, "hello");
     await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
 
     search.release({ entries: [buildEntry("9")], total: 1 });
@@ -215,7 +235,7 @@ describe("renderHistory — a reload and a search cannot both own the rows", () 
     });
 
     reload.release({ entries, total: 2, next_cursor: { ts: 1, id: "1" } });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
 
     expect(container.querySelector("#history-count")!.textContent).toBe("1 match");
     expect(container.querySelectorAll(".history-entry")).toHaveLength(1);
@@ -243,9 +263,9 @@ describe("renderHistory — a reload and a search cannot both own the rows", () 
       expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
     });
 
-    typeQuery(container, "hello");
+    await typeQuery(container, "hello");
     await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
-    typeQuery(container, "");
+    await typeQuery(container, "");
     await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
 
     reload.release({ entries, total: 2, next_cursor: null });
@@ -254,7 +274,7 @@ describe("renderHistory — a reload and a search cannot both own the rows", () 
     });
 
     search.release({ entries: [buildEntry("9")], total: 1 });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
 
     expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
     expect(container.querySelectorAll(".history-entry")).toHaveLength(2);
@@ -287,14 +307,14 @@ describe("renderHistory — a reload and a search cannot both own the rows", () 
     await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
     expect(loadMore.disabled).toBe(true);
 
-    typeQuery(container, "hello");
+    await typeQuery(container, "hello");
     await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
 
     expect(loadMore.disabled).toBe(true);
 
     search.release({ entries: [], total: 0 });
     append.release({ entries: [buildEntry("31")], total: 60, next_cursor: null });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
 
     expect(loadMore.disabled).toBe(false);
   });
@@ -323,13 +343,13 @@ describe("renderHistory — Load more while a search owns the rows", () => {
       expect(container.querySelector("#history-count")!.textContent).toBe("60 transcripts");
     });
 
-    typeQuery(container, "hello");
+    await typeQuery(container, "hello");
     await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
 
     const loadMore = container.querySelector<HTMLButtonElement>("#btn-load-more")!;
     expect(loadMore.disabled).toBe(true);
     loadMore.click();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
     expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
 
     search.release({ entries: [buildEntry("9")], total: 1 });
@@ -351,7 +371,7 @@ describe("renderHistory — Load more while a search owns the rows", () => {
       expect(container.querySelector("#history-count")!.textContent).toBe("60 transcripts");
     });
 
-    typeQuery(container, "hello");
+    await typeQuery(container, "hello");
     await vi.waitFor(() => {
       expect(container.querySelector("#history-search-hint")!.textContent).toBe("503 store busy");
     });
@@ -406,7 +426,7 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
       expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
     });
 
-    typeQuery(container, "hello");
+    await typeQuery(container, "hello");
     await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
     expect(container.querySelector("#history-search-hint")!.textContent).toBe("Searching...");
 
@@ -416,7 +436,7 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
     });
 
     search.release({ entries: [buildEntry("9")], total: 1 });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
 
     expect(container.querySelector("#history-search-hint")!.textContent).toBe("");
     expect(container.querySelector("#history-count")!.textContent).toBe("0 transcripts");
@@ -434,12 +454,12 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
       expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
     });
 
-    typeQuery(container, "hello");
+    await typeQuery(container, "hello");
     await vi.waitFor(() => {
       expect(container.querySelector("#history-search-hint")!.textContent).toBe("503 store busy");
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
 
     expect(container.querySelector("#history-search-hint")!.textContent).toBe("503 store busy");
   });
@@ -460,9 +480,9 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
       expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
     });
 
-    typeQuery(container, "first");
+    await typeQuery(container, "first");
     await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
-    typeQuery(container, "second");
+    await typeQuery(container, "second");
     await vi.waitFor(() => {
       expect(container.querySelector("#history-search-hint")!.textContent).toBe(
         "Invalid search query"
@@ -470,7 +490,7 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
     });
 
     superseded.release({ entries: [buildEntry("9")], total: 1 });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
 
     expect(container.querySelector("#history-search-hint")!.textContent).toBe(
       "Invalid search query"
@@ -494,13 +514,13 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
       expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
     });
 
-    typeQuery(container, "first");
+    await typeQuery(container, "first");
     await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
-    typeQuery(container, "second");
+    await typeQuery(container, "second");
     await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(2));
 
     superseded.release({ entries: [buildEntry("9")], total: 1 });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
 
     expect(container.querySelector("#history-search-hint")!.textContent).toBe("Searching...");
   });
@@ -518,7 +538,7 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
       expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
     });
 
-    typeQuery(container, "hello");
+    await typeQuery(container, "hello");
 
     await vi.waitFor(() => {
       expect(container.querySelector("#history-search-hint")!.textContent).toBe(
@@ -538,13 +558,71 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
       expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
     });
 
-    typeQuery(container, "hello");
+    await typeQuery(container, "hello");
 
     await vi.waitFor(() => {
       expect(container.querySelector("#history-search-hint")!.textContent).toBe(
         "transcript not found"
       );
     });
+  });
+});
+
+describe("renderHistory — the version-skew message names this tab", () => {
+  it("says History, where the same module tells the Metrics tab to say Metrics", async () => {
+    apiMock.getHistory.mockRejectedValue(new SidecarTooOldError("no next_cursor"));
+    const container = document.createElement("div");
+
+    renderHistory(container);
+
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe(
+        "History needs the latest backend — please update JustSay."
+      );
+    });
+  });
+});
+
+describe("renderHistory — a delete moves the total only when the rows are the history", () => {
+  it("decrements after an ordinary load", async () => {
+    apiMock.deleteHistoryEntry.mockResolvedValue({ deleted: true });
+    const container = await renderWith(2);
+
+    await deleteFirstRow(container);
+
+    expect(container.querySelector("#history-count")!.textContent).toBe("1 transcript");
+  });
+});
+
+describe("renderHistory — Clear All leaves no message describing rows that are gone", () => {
+  it("clears a search error the box still shows, along with the box and the rows", async () => {
+    apiMock.getHistory.mockResolvedValue({
+      entries: [buildEntry("1"), buildEntry("2")],
+      total: 2,
+      next_cursor: null,
+    });
+    apiMock.searchHistory.mockRejectedValue(new Error("503 store busy"));
+    confirmMock.mockResolvedValue(true);
+    apiMock.clearHistory.mockResolvedValue({ deleted: 2 });
+
+    const container = document.createElement("div");
+    renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
+    });
+
+    await typeQuery(container, "hello");
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-search-hint")!.textContent).toBe("503 store busy");
+    });
+
+    clearButton(container).click();
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("0 transcripts");
+    });
+
+    expect(container.querySelector("#history-search-hint")!.textContent).toBe("");
+    expect(container.querySelector<HTMLInputElement>("#history-search")!.value).toBe("");
   });
 });
 

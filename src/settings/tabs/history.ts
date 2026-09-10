@@ -53,6 +53,7 @@ export function renderHistory(container: HTMLElement): () => void {
   const list = createHistoryList({
     pageSize: PAGE_SIZE,
     noun: { singular: "transcript", plural: "transcripts" },
+    featureName: "History",
     elements: {
       count: countEl,
       rows: listEl,
@@ -67,6 +68,7 @@ export function renderHistory(container: HTMLElement): () => void {
     isDestroyed: () => destroyed,
     onCleared: () => {
       searchInput.value = "";
+      searchHint.textContent = "";
     },
   });
 
@@ -196,9 +198,7 @@ export function renderHistory(container: HTMLElement): () => void {
         try {
           await api.deleteHistoryEntry(entry.id);
           el.remove();
-          if (searchClaim === null || !searchClaim.isCurrent()) {
-            list.entryRemoved();
-          }
+          list.entryRemoved();
         } catch (err) {
           console.error(err);
         }

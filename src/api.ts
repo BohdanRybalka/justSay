@@ -689,7 +689,16 @@ export const api = {
    *  `"next_cursor" in []` is simply false, so a JSON array would otherwise be
    *  reported as an old backend. They are rejected before the presence test so
    *  the promised contract holds: the version-skew error means the field was
-   *  absent from an object. */
+   *  absent from an object.
+   *
+   *  The presence test alone is not the whole edge: a body carrying
+   *  `next_cursor: undefined` passes `in` and would reach the caller as a
+   *  cursor that is neither a position nor `null`, showing "Load more", slipping
+   *  past an append guard written as `cursor === null` and going out as
+   *  `before_ts=undefined`. `JSON.parse` cannot produce it; a stubbed
+   *  `api.getHistory` can, and the type says it cannot. The value is normalised
+   *  once the presence test has had its answer, so the edge keeps both jobs it
+   *  was given. */
   getHistory: async (limit = 50, cursor: HistoryCursor | null = null) => {
     const body = await request<Partial<HistoryPageResponse>>(
       "GET",
@@ -705,7 +714,7 @@ export const api = {
     if (!("next_cursor" in body)) {
       throw new SidecarTooOldError("/history returned no next_cursor field");
     }
-    return body as HistoryPageResponse;
+    return { ...body, next_cursor: body.next_cursor ?? null } as HistoryPageResponse;
   },
 
   historyStats: () => request<HistoryStats>("GET", "/history/stats", undefined, REREADABLE),

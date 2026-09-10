@@ -582,7 +582,7 @@ _CURSOR_PAGE_ORDER = "ORDER BY ts DESC, id DESC LIMIT :row_limit"
 def _entries_locked(
     conn: sqlite3.Connection, limit: int, before: HistoryCursor | None
 ) -> list[sqlite3.Row]:
-    """Caller MUST hold ``_lock``. Newest first, exactly the ``limit`` rows returned.
+    """Caller MUST hold ``_lock``. Newest first, at most ``limit`` rows returned.
 
     "Is there another page" is a separate key-only question, asked by
     ``_has_more_locked`` and only when this page comes back full, so no
@@ -671,10 +671,11 @@ def cursor_seek_plan_failure() -> str | None:
     result, or that reaches the rows through a table walk, has given the flat
     cost back. All three are asserted of each shape, matching the local pin.
 
-    Every shape is planned and every failure it produced is reported, joined
-    into one message, rather than stopping at the first. ``selftest`` promises
-    exactly that of every check it runs, and a library old enough to break one
-    shape is the build whose other shape is worth knowing about.
+    Every shape is planned and every condition it failed is reported, joined
+    into one message, rather than stopping at the first shape or at the first
+    condition within a shape. ``selftest`` promises exactly that of every check
+    it runs, and a plan that both misses the index and reaches the table is the
+    packaged build where the second half is worth knowing about.
 
     The has-more probe carries a fourth assertion the page read cannot: its plan
     must say ``COVERING INDEX``. Reading no transcript column is the entire point
@@ -709,17 +710,18 @@ def cursor_seek_plan_failure() -> str | None:
         conn.close()
     failures: list[str] = []
     for shape, requires_covering, plan in plans:
-        seeks_the_index = "SEARCH" in plan and "entries_ts_id_idx" in plan
-        walks_the_table = "SCAN entries" in plan
-        sorts_afterwards = "TEMP B-TREE" in plan.upper()
-        if not seeks_the_index or walks_the_table or sorts_afterwards:
+        reasons: list[str] = []
+        if "SEARCH" not in plan or "entries_ts_id_idx" not in plan:
+            reasons.append("does not seek entries_ts_id_idx")
+        if "SCAN entries" in plan:
+            reasons.append("walks the entries table")
+        if "TEMP B-TREE" in plan.upper():
+            reasons.append("sorts the result afterwards")
+        if requires_covering and "COVERING INDEX" not in plan.upper():
+            reasons.append("reaches the entries table instead of answering from the index")
+        if reasons:
             failures.append(
-                f"SQLite {sqlite3.sqlite_version} does not seek entries_ts_id_idx for the "
-                f"cursored history {shape}: {plan}"
-            )
-        elif requires_covering and "COVERING INDEX" not in plan.upper():
-            failures.append(
-                f"SQLite {sqlite3.sqlite_version} reaches the entries table for the "
+                f"SQLite {sqlite3.sqlite_version} {', and '.join(reasons)} for the "
                 f"cursored history {shape}: {plan}"
             )
     return "; ".join(failures) if failures else None
@@ -727,6 +729,10 @@ def cursor_seek_plan_failure() -> str | None:
 
 def _count_locked(conn: sqlite3.Connection) -> int:
     """Caller MUST hold ``_lock``. The row count, memoised until it can have changed.
+
+    Reads and *rewrites* ``_page_total_cache``: every call either serves the
+    memoised total or replaces the entry with a freshly counted one, so this
+    reads as a query and is not one.
 
     Keyed on ``(age, derived generation, connection object)`` (ADR 055), and all
     three have to hold for a hit. Every statement in the backend that changes the
