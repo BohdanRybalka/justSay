@@ -74,6 +74,29 @@ class BackfillResult(BaseModel):
     remaining: int
 
 
+def recreate_delete_trigger_locked(conn: sqlite3.Connection) -> None:
+    """Caller MUST hold ``history._lock``.
+
+    ``entries_ad_vec`` is a trigger ON ``entries``, so anything that drops that
+    table takes it with it -- the v4 rebuild does. Without it a deleted
+    transcript leaves its vector behind, and SQLite reuses rowids, so a later
+    entry inherits it. Declared here rather than at the two call sites so the
+    two cannot drift.
+
+    A no-op while ``vec_entries`` does not exist: the trigger's body names it,
+    and it is created lazily on the first successful embed.
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vec_entries'"
+    ).fetchone()
+    if not exists:
+        return
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS entries_ad_vec AFTER DELETE ON entries BEGIN "
+        "DELETE FROM vec_entries WHERE rowid = old.rowid; END"
+    )
+
+
 def ensure_vec_table_locked(conn: sqlite3.Connection, provider: str, model: str, dim: int) -> None:
     """Caller MUST hold ``history._lock``.
 
@@ -98,10 +121,7 @@ def ensure_vec_table_locked(conn: sqlite3.Connection, provider: str, model: str,
     conn.execute(
         f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_entries USING vec0(embedding float[{dim}])"
     )
-    conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS entries_ad_vec AFTER DELETE ON entries BEGIN "
-        "DELETE FROM vec_entries WHERE rowid = old.rowid; END"
-    )
+    recreate_delete_trigger_locked(conn)
     conn.execute(
         "INSERT INTO embeddings_meta(id, provider, model, dim) VALUES (1, ?, ?, ?) "
         "ON CONFLICT(id) DO UPDATE SET "
