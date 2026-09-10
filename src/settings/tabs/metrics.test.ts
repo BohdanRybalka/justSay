@@ -16,13 +16,19 @@ const apiMock = {
   deleteHistoryEntry: vi.fn(),
 };
 
-class SidecarTooOldError extends Error {}
+/**
+ * Only `api` is replaced. Everything else in the module -- `SidecarTooOldError`
+ * above all -- stays the real export, so the `instanceof` branch under test is
+ * tied to the class `api.getHistory` actually throws. A stand-in class of the
+ * same name passes whatever the module does, including throwing a plain
+ * `Error`.
+ */
+vi.mock("../../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../api")>();
+  return { ...actual, api: apiMock };
+});
 
-vi.mock("../../api", () => ({
-  api: apiMock,
-  SidecarTooOldError,
-}));
-
+const { SidecarTooOldError } = await import("../../api");
 const { renderMetrics } = await import("./metrics");
 
 function stubBackend(total: number): HistoryEntry[] {

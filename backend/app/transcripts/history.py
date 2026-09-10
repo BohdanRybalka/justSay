@@ -54,7 +54,7 @@ _lock = threading.Lock()
 _output_dir: Path | None = None
 _conn: sqlite3.Connection | None = None
 _stats_cache: tuple[float, HistoryStats] | None = None
-_page_total_cache: tuple[int, sqlite3.Connection, int] | None = None
+_page_total_cache: tuple[float, int, sqlite3.Connection, int] | None = None
 _derived_generation = 0
 
 _vec_available: bool = False
@@ -615,10 +615,13 @@ def _has_more_locked(conn: sqlite3.Connection, after_ts: int, after_id: str) -> 
     """Caller MUST hold ``_lock``. Whether a row exists strictly after that position.
 
     Takes the position as primitives rather than as a ``HistoryCursor`` so that
-    the model is built only once the answer is yes. A page that is full and last
-    would otherwise validate a cursor it never returns, and ``consolidate_into``
-    copies ids verbatim out of a merged database, so an id longer than
-    ``CURSOR_ID_MAX_LENGTH`` would turn a page that reads fine into a 500.
+    the model is built only once the answer is yes. A page that is full *and
+    last* would otherwise validate a cursor it never returns, and
+    ``consolidate_into`` copies ids verbatim out of a merged database, so an id
+    longer than ``CURSOR_ID_MAX_LENGTH`` would turn a last page that reads fine
+    into a 500. A full page that does have a page after it still validates the
+    id it hands back and still raises there; that is JS-137, which predates this
+    probe and is not narrowed by it.
 
     Selects no transcript column, so on ``entries_ts_id_idx`` the whole question
     is answered inside the index without reaching a table row. Built from the
@@ -668,6 +671,11 @@ def cursor_seek_plan_failure() -> str | None:
     result, or that reaches the rows through a table walk, has given the flat
     cost back. All three are asserted of each shape, matching the local pin.
 
+    Every shape is planned and every failure it produced is reported, joined
+    into one message, rather than stopping at the first. ``selftest`` promises
+    exactly that of every check it runs, and a library old enough to break one
+    shape is the build whose other shape is worth knowing about.
+
     The has-more probe carries a fourth assertion the page read cannot: its plan
     must say ``COVERING INDEX``. Reading no transcript column is the entire point
     of that statement, and a spelling that reaches the table -- ``SELECT *``, say
@@ -699,34 +707,44 @@ def cursor_seek_plan_failure() -> str | None:
         ]
     finally:
         conn.close()
+    failures: list[str] = []
     for shape, requires_covering, plan in plans:
         seeks_the_index = "SEARCH" in plan and "entries_ts_id_idx" in plan
         walks_the_table = "SCAN entries" in plan
         sorts_afterwards = "TEMP B-TREE" in plan.upper()
         if not seeks_the_index or walks_the_table or sorts_afterwards:
-            return (
+            failures.append(
                 f"SQLite {sqlite3.sqlite_version} does not seek entries_ts_id_idx for the "
                 f"cursored history {shape}: {plan}"
             )
-        if requires_covering and "COVERING INDEX" not in plan.upper():
-            return (
+        elif requires_covering and "COVERING INDEX" not in plan.upper():
+            failures.append(
                 f"SQLite {sqlite3.sqlite_version} reaches the entries table for the "
                 f"cursored history {shape}: {plan}"
             )
-    return None
+    return "; ".join(failures) if failures else None
 
 
 def _count_locked(conn: sqlite3.Connection) -> int:
     """Caller MUST hold ``_lock``. The row count, memoised until it can have changed.
 
-    Keyed on the pair ``(derived generation, connection object)`` (ADR 055).
-    Every statement in the backend that changes the number of rows in ``entries``
-    lives in this module and bumps the generation, and every path that swaps the
-    connection replaces the object as well, so both halves of the key are already
-    maintained by the code for its own reasons. The connection half is what keeps
-    this out of the fixtures: a suite that closes the connection without touching
-    the generation gets a different instance on the next open, and so misses
-    without being told to.
+    Keyed on ``(age, derived generation, connection object)`` (ADR 055), and all
+    three have to hold for a hit. Every statement in the backend that changes the
+    number of rows in ``entries`` lives in this module and bumps the generation,
+    and every path that swaps the connection replaces the object as well, so both
+    of those halves are already maintained by the code for its own reasons. The
+    connection half is what keeps this out of the fixtures: a suite that closes
+    the connection without touching the generation gets a different instance on
+    the next open, and so misses without being told to.
+
+    ``STATS_TTL_SECONDS`` is the third, and it is the bound ``_stats_cache``
+    already keeps for the same reason: a second process writing this
+    ``history.db`` changes the table without going through any of this module's
+    generation bumps, which is the sync-folder case ``journal_mode=DELETE``
+    exists for. With no age, that writer would never be picked up and the two
+    derived totals this module serves would disagree until a restart. A scroll
+    still pays one count every five seconds rather than one per page, which is
+    the property ADR 055 was bought for.
 
     The identity test is only sound because the cache tuple itself holds a strong
     reference to the connection it was keyed on. Were the reference weak, a freed
@@ -736,10 +754,15 @@ def _count_locked(conn: sqlite3.Connection) -> int:
     """
     global _page_total_cache
     cached = _page_total_cache
-    if cached is not None and cached[0] == _derived_generation and cached[1] is conn:
-        return cached[2]
+    if (
+        cached is not None
+        and (time.monotonic() - cached[0]) < STATS_TTL_SECONDS
+        and cached[1] == _derived_generation
+        and cached[2] is conn
+    ):
+        return cached[3]
     total = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
-    _page_total_cache = (_derived_generation, conn, total)
+    _page_total_cache = (time.monotonic(), _derived_generation, conn, total)
     return total
 
 
@@ -753,9 +776,10 @@ def get_page(limit: int = 50, before: HistoryCursor | None = None) -> HistoryPag
     A page that comes back short is the last one, so the probe is skipped entirely
     rather than asked a question its own length already answered.
 
-    The cursor is built only once the probe has answered yes, so a page with no
-    page after it validates nothing -- a stored id too long for ``HistoryCursor``
-    keeps failing only where a cursor is actually returned.
+    The cursor is built only once the probe has answered yes, so a full page with
+    no page after it validates nothing. Where a cursor *is* returned the id is
+    validated and a stored id too long for ``HistoryCursor`` still raises,
+    exactly as it did before this probe existed: that remaining case is JS-137.
     """
     clamped_limit = _clamp_limit(limit)
     with _lock:

@@ -16,10 +16,20 @@ const apiMock = {
   deleteHistoryEntry: vi.fn(),
 };
 
-vi.mock("../../api", () => ({
-  api: apiMock,
-}));
+/**
+ * Only `api` is replaced. Everything else in the module -- `SidecarTooOldError`
+ * above all -- stays the real export, so the `instanceof` branch under test is
+ * tied to the class `api.getHistory` actually throws. A stand-in class of the
+ * same name passes whatever the module does, including throwing a plain
+ * `Error`.
+ */
+vi.mock("../../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../api")>();
+  return { ...actual, api: apiMock };
+});
 
+const { SidecarTooOldError } = await import("../../api");
+const { sidecarTooOldText } = await import("../history-list");
 const { renderHistory } = await import("./history");
 
 async function renderWith(total: number): Promise<HTMLElement> {
@@ -253,7 +263,7 @@ describe("renderHistory — a reload and a search cannot both own the rows", () 
     expect(container.querySelector("#history-count")!.textContent).toBe("1 transcript");
   });
 
-  it("a search taking the rows over leaves Load more clickable rather than dead", async () => {
+  it("a search taking the rows over leaves Load more clickable once the search has answered", async () => {
     const entries = Array.from({ length: 30 }, (_, index) => buildEntry(String(index + 1)));
     const append = deferred<HistoryPageResponse>();
     let pages = 0;
@@ -280,13 +290,104 @@ describe("renderHistory — a reload and a search cannot both own the rows", () 
     typeQuery(container, "hello");
     await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
 
-    expect(loadMore.disabled).toBe(false);
+    expect(loadMore.disabled).toBe(true);
 
     search.release({ entries: [], total: 0 });
     append.release({ entries: [buildEntry("31")], total: 60, next_cursor: null });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(loadMore.disabled).toBe(false);
+  });
+});
+
+/**
+ * "Load more" while a search owns the rows, in the four states the button can be
+ * in. The search lane paints something the stored cursor does not describe, so a
+ * click while it runs must not page -- but the rows it never repaints must stay
+ * pageable once it is done.
+ */
+describe("renderHistory — Load more while a search owns the rows", () => {
+  it("refuses a click while the search is still outstanding, without discarding the search", async () => {
+    const entries = Array.from({ length: 30 }, (_, index) => buildEntry(String(index + 1)));
+    apiMock.getHistory.mockResolvedValue({
+      entries,
+      total: 60,
+      next_cursor: { ts: 30, id: "30" },
+    });
+    const search = deferred<{ entries: HistoryEntry[]; total: number }>();
+    apiMock.searchHistory.mockReturnValue(search.promise);
+
+    const container = document.createElement("div");
+    renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("60 transcripts");
+    });
+
+    typeQuery(container, "hello");
+    await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
+
+    const loadMore = container.querySelector<HTMLButtonElement>("#btn-load-more")!;
+    expect(loadMore.disabled).toBe(true);
+    loadMore.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
+
+    search.release({ entries: [buildEntry("9")], total: 1 });
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("1 match");
+    });
+    expect(container.querySelector<HTMLElement>("#history-load-more")!.style.display).toBe("none");
+  });
+
+  it("leaves the wrapper up and the button live when the search fails over rows it never repainted", async () => {
+    apiMock.getHistory.mockImplementation(
+      pagesByCursor(Array.from({ length: 60 }, (_, index) => buildEntry(String(index + 1))))
+    );
+    apiMock.searchHistory.mockRejectedValue(new Error("503 store busy"));
+
+    const container = document.createElement("div");
+    renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("60 transcripts");
+    });
+
+    typeQuery(container, "hello");
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-search-hint")!.textContent).toBe("503 store busy");
+    });
+
+    const loadMore = container.querySelector<HTMLButtonElement>("#btn-load-more")!;
+    expect(container.querySelector<HTMLElement>("#history-load-more")!.style.display).toBe("block");
+    expect(loadMore.disabled).toBe(false);
+
+    loadMore.click();
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll(".history-entry")).toHaveLength(60);
+    });
+  });
+
+  it("ends a Clear All with the wrapper hidden and the button live", async () => {
+    apiMock.getHistory.mockResolvedValue({
+      entries: [buildEntry("1")],
+      total: 60,
+      next_cursor: { ts: 30, id: "30" },
+    });
+    confirmMock.mockResolvedValue(true);
+    apiMock.clearHistory.mockResolvedValue({ deleted: 60 });
+
+    const container = document.createElement("div");
+    renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("60 transcripts");
+    });
+
+    clearButton(container).click();
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("0 transcripts");
+    });
+
+    expect(container.querySelector<HTMLElement>("#history-load-more")!.style.display).toBe("none");
+    expect(container.querySelector<HTMLButtonElement>("#btn-load-more")!.disabled).toBe(false);
   });
 });
 
@@ -341,6 +442,109 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(container.querySelector("#history-search-hint")!.textContent).toBe("503 store busy");
+  });
+
+  it("leaves a newer search's error message alone when the one it superseded settles", async () => {
+    const entries = [buildEntry("1"), buildEntry("2")];
+    apiMock.getHistory.mockResolvedValue({ entries, total: 2, next_cursor: null });
+    const superseded = deferred<{ entries: HistoryEntry[]; total: number }>();
+    let searches = 0;
+    apiMock.searchHistory.mockImplementation(() => {
+      searches += 1;
+      return searches === 1 ? superseded.promise : Promise.reject(new Error("invalid query"));
+    });
+
+    const container = document.createElement("div");
+    renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
+    });
+
+    typeQuery(container, "first");
+    await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
+    typeQuery(container, "second");
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-search-hint")!.textContent).toBe(
+        "Invalid search query"
+      );
+    });
+
+    superseded.release({ entries: [buildEntry("9")], total: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(container.querySelector("#history-search-hint")!.textContent).toBe(
+      "Invalid search query"
+    );
+  });
+
+  it("leaves a newer search's Searching... alone when the one it superseded settles first", async () => {
+    const entries = [buildEntry("1"), buildEntry("2")];
+    apiMock.getHistory.mockResolvedValue({ entries, total: 2, next_cursor: null });
+    const superseded = deferred<{ entries: HistoryEntry[]; total: number }>();
+    const inFlight = deferred<{ entries: HistoryEntry[]; total: number }>();
+    let searches = 0;
+    apiMock.searchHistory.mockImplementation(() => {
+      searches += 1;
+      return searches === 1 ? superseded.promise : inFlight.promise;
+    });
+
+    const container = document.createElement("div");
+    renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
+    });
+
+    typeQuery(container, "first");
+    await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
+    typeQuery(container, "second");
+    await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(2));
+
+    superseded.release({ entries: [buildEntry("9")], total: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(container.querySelector("#history-search-hint")!.textContent).toBe("Searching...");
+  });
+
+  it("names the version skew from the error class rather than from the words in its message", async () => {
+    const entries = [buildEntry("1"), buildEntry("2")];
+    apiMock.getHistory.mockResolvedValue({ entries, total: 2, next_cursor: null });
+    apiMock.searchHistory.mockRejectedValue(
+      new SidecarTooOldError("/history/search answered HTTP 404")
+    );
+
+    const container = document.createElement("div");
+    renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
+    });
+
+    typeQuery(container, "hello");
+
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-search-hint")!.textContent).toBe(
+        sidecarTooOldText("Search")
+      );
+    });
+  });
+
+  it("reports an ordinary failure verbatim even when it happens to say 'not found'", async () => {
+    const entries = [buildEntry("1"), buildEntry("2")];
+    apiMock.getHistory.mockResolvedValue({ entries, total: 2, next_cursor: null });
+    apiMock.searchHistory.mockRejectedValue(new Error("transcript not found"));
+
+    const container = document.createElement("div");
+    renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
+    });
+
+    typeQuery(container, "hello");
+
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-search-hint")!.textContent).toBe(
+        "transcript not found"
+      );
+    });
   });
 });
 

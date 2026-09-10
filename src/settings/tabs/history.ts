@@ -1,5 +1,5 @@
-import { api, type HistoryEntry } from "../../api";
-import { createHistoryList, type HistoryRowsClaim } from "../history-list";
+import { api, SidecarTooOldError, type HistoryEntry } from "../../api";
+import { createHistoryList, sidecarTooOldText, type HistoryRowsClaim } from "../history-list";
 import { escapeHtml } from "../html";
 
 const DATE_FORMATTER = new Intl.DateTimeFormat("uk-UA", {
@@ -85,6 +85,13 @@ export function renderHistory(container: HTMLElement): () => void {
    * returns without writing its own outcome, so the `finally` clears the hint it
    * put up -- otherwise "Searching..." stays on screen for good over rows some
    * other lane painted.
+   *
+   * What the `finally` asks is whether a newer *search* exists, not whether this
+   * lane is still current. A newer search owns the hint and has already written
+   * its own text into it, so blanking it there would erase a live error message
+   * -- the same defect, moved one element over. Only a reload or a Clear All can
+   * supersede this lane while `searchClaim` still points at it, and after one of
+   * those there is no search on screen for the hint to describe.
    */
   async function runSearch(q: string) {
     const claim = list.claimRows();
@@ -105,22 +112,19 @@ export function renderHistory(container: HTMLElement): () => void {
       searchHint.textContent = "";
     } catch (e) {
       if (!claim.isCurrent()) return;
-      const msg = (e as Error).message || "Search failed";
-      const lower = msg.toLowerCase();
-      const sidecarTooOld =
-        lower.includes("not found") ||
-        lower.includes("http 404") ||
-        lower.includes("method not allowed") ||
-        lower.includes("http 405");
-      if (sidecarTooOld) {
-        searchHint.textContent = "Search needs the latest backend — please update JustSay.";
+      if (e instanceof SidecarTooOldError) {
+        searchHint.textContent = sidecarTooOldText("Search");
       } else {
-        searchHint.textContent = lower.includes("invalid")
+        const msg = (e as Error).message || "Search failed";
+        searchHint.textContent = msg.toLowerCase().includes("invalid")
           ? "Invalid search query"
           : msg;
       }
     } finally {
-      if (!destroyed && !claim.isCurrent()) searchHint.textContent = "";
+      claim.release();
+      if (!destroyed && searchClaim === claim && !claim.isCurrent()) {
+        searchHint.textContent = "";
+      }
     }
   }
 
@@ -135,7 +139,7 @@ export function renderHistory(container: HTMLElement): () => void {
         searchHint.textContent = "";
         void list.load();
       } else {
-        runSearch(value);
+        void runSearch(value);
       }
     }, SEARCH_DEBOUNCE_MS);
   });

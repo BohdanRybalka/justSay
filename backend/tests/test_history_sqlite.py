@@ -1639,13 +1639,17 @@ def test_a_short_page_asks_nothing_about_a_next_one(isolated_storage, tmp_path):
 
 
 def test_a_full_last_page_validates_no_cursor(isolated_storage, tmp_path):
-    """An id too long for ``HistoryCursor`` only matters where a cursor is returned.
+    """An id too long for ``HistoryCursor`` no longer breaks a full *last* page.
 
     ``consolidate_into`` copies ids verbatim out of a merged database, so a row
     whose id exceeds ``CURSOR_ID_MAX_LENGTH`` can be sitting in the store. A page
     that is both full and last returns no cursor, so building one to ask "is
-    there more" turns a page that reads fine into a ``ValidationError`` and a
+    there more" turned a page that reads fine into a ``ValidationError`` and a
     500. The probe therefore takes the position as primitives.
+
+    That is the whole of what this pins. A full page that *does* have a page
+    after it returns a cursor built from that same id and still raises, which is
+    JS-137 and predates this spec.
     """
     target = tmp_path / "target"
     history.bootstrap(target)
@@ -1797,6 +1801,72 @@ def test_the_total_follows_the_generation_counter_not_the_table(isolated_storage
         history.invalidate_derived_caches_locked()
 
     assert history.get_page(limit=1).total == 4
+
+
+def test_the_memoised_total_expires_so_a_second_writer_is_picked_up(
+    isolated_storage, tmp_path
+):
+    """A writer outside this process bumps no generation, so only the age catches it.
+
+    ``journal_mode=DELETE`` exists for exactly this shape -- the same
+    ``history.db`` reachable from a second process, a sync folder being the case
+    the module docstring names. Such a writer changes the table without going
+    through any mutator in this module, so the generation and the connection
+    halves of the key both still match and the memoised total would stand
+    forever. ``STATS_TTL_SECONDS`` is what bounds that, and the cache is aged by
+    hand rather than by sleeping for it.
+    """
+    target = tmp_path / "target"
+    _seed(target, 3, lambda index: 1_700_000_000_000 + index)
+    assert history.get_page(limit=1).total == 3
+
+    other_process = sqlite3.connect(target / "history.db")
+    try:
+        other_process.execute(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('from-elsewhere', 1, 'uk', 'normal', 'row', 'row', 1)"
+        )
+        other_process.commit()
+    finally:
+        other_process.close()
+
+    assert history.get_page(limit=1).total == 3
+
+    stamp, generation, cached_conn, total = history._page_total_cache
+    history._page_total_cache = (
+        stamp - history.STATS_TTL_SECONDS - 1,
+        generation,
+        cached_conn,
+        total,
+    )
+
+    assert history.get_page(limit=1).total == 4
+
+
+def test_the_plan_probe_reports_every_shape_that_failed(isolated_storage):
+    """``selftest`` promises every check runs and a failure reports all of them.
+
+    ``cursor_seek_plan_failure`` is one of those checks and makes the same
+    promise across the shapes it plans: with both broken, both are named. A probe
+    that returned on the first one would hide the second in exactly the
+    environment -- an old bundled library -- where knowing how much of the read
+    path it broke is the point.
+    """
+    shipped = history._CURSOR_SEEK_PLAN_SHAPES
+    assert len(shipped) > 1, shipped
+
+    projection_that_walks_the_table = "(SELECT COUNT(*) FROM entries)"
+    all_broken = tuple(
+        (name, projection_that_walks_the_table, requires_covering)
+        for name, _, requires_covering in shipped
+    )
+
+    with patch.object(history, "_CURSOR_SEEK_PLAN_SHAPES", all_broken):
+        failure = history.cursor_seek_plan_failure()
+
+    assert failure is not None
+    for name, _, _ in shipped:
+        assert name in failure, (name, failure)
 
 
 def test_the_plan_probe_names_the_shape_that_walked_the_index(isolated_storage):
