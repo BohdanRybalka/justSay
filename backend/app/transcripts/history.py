@@ -54,6 +54,7 @@ _lock = threading.Lock()
 _output_dir: Path | None = None
 _conn: sqlite3.Connection | None = None
 _stats_cache: tuple[float, HistoryStats] | None = None
+_page_total_cache: tuple[int, sqlite3.Connection, int] | None = None
 _derived_generation = 0
 
 _vec_available: bool = False
@@ -575,17 +576,18 @@ def _clamp_limit(limit: int) -> int:
 
 
 _CURSOR_PAGE_WHERE = "WHERE (ts, id) < (:before_ts, :before_id) "
-_CURSOR_PAGE_ORDER = "ORDER BY ts DESC, id DESC LIMIT :limit_plus_one"
+_CURSOR_PAGE_ORDER = "ORDER BY ts DESC, id DESC LIMIT :row_limit"
 
 
 def _entries_locked(
     conn: sqlite3.Connection, limit: int, before: HistoryCursor | None
 ) -> list[sqlite3.Row]:
-    """Caller MUST hold ``_lock``. Newest first, up to ``limit + 1`` full rows.
+    """Caller MUST hold ``_lock``. Newest first, exactly the ``limit`` rows returned.
 
-    The extra row is the probe that answers "is there another page": it is read
-    and dropped rather than returned. The row-value predicate ``(ts, id) < (?, ?)``
-    is a seek into ``entries_ts_id_idx``; the portable
+    "Is there another page" is a separate key-only question, asked by
+    ``_has_more_locked`` and only when this page comes back full, so no
+    transcript body is ever read and dropped (ADR 055). The row-value predicate
+    ``(ts, id) < (?, ?)`` is a seek into ``entries_ts_id_idx``; the portable
     ``ts < ? OR (ts = ? AND id < ?)`` spelling plans as a scan from the top of the
     index on every page, which is the property this paging exists to buy. It needs
     SQLite >= ``ROW_VALUE_MIN_SQLITE_VERSION``, which lives beside this predicate
@@ -598,7 +600,7 @@ def _entries_locked(
     than answering.
     """
     where = _CURSOR_PAGE_WHERE if before is not None else ""
-    params: dict[str, object] = {"limit_plus_one": limit + 1}
+    params: dict[str, object] = {"row_limit": limit}
     if before is not None:
         params["before_ts"] = before.ts
         params["before_id"] = before.id
@@ -607,6 +609,26 @@ def _entries_locked(
         f"{where}{_CURSOR_PAGE_ORDER}",
         params,
     ).fetchall()
+
+
+def _has_more_locked(conn: sqlite3.Connection, after: HistoryCursor) -> bool:
+    """Caller MUST hold ``_lock``. Whether a row exists strictly after ``after``.
+
+    Selects no transcript column, so on ``entries_ts_id_idx`` the whole question
+    is answered inside the index without reaching a table row. Built from the
+    same ``_CURSOR_PAGE_WHERE`` and ``_CURSOR_PAGE_ORDER`` as the page read, so
+    the predicate the seek depends on keeps one spelling.
+    """
+    return (
+        conn.execute(
+            f"SELECT 1 FROM entries {_CURSOR_PAGE_WHERE}{_CURSOR_PAGE_ORDER}",
+            {"before_ts": after.ts, "before_id": after.id, "row_limit": 1},
+        ).fetchone()
+        is not None
+    )
+
+
+_CURSOR_SEEK_PLAN_SHAPES = (("page read", "id, raw_text"), ("has-more probe", "1"))
 
 
 def cursor_seek_plan_failure() -> str | None:
@@ -626,9 +648,14 @@ def cursor_seek_plan_failure() -> str | None:
     same index DDL, predicate and ordering the shipped read uses, rather than a
     second spelling of them.
 
+    Two statements ship on the cursored read path since ADR 055 -- the page
+    projection and ``_has_more_locked``'s key-only ``SELECT 1`` -- so both are
+    planned here and the message names which of the two failed. A probe covering
+    half of what ships covers nothing.
+
     A seek alone is not the property: a library that seeks and then sorts the
     result, or that reaches the rows through a table walk, has given the flat
-    cost back. All three are asserted, matching the local pin.
+    cost back. All three are asserted of each shape, matching the local pin.
     """
     conn = sqlite3.connect(":memory:")
     try:
@@ -637,30 +664,50 @@ def cursor_seek_plan_failure() -> str | None:
             "(id TEXT PRIMARY KEY, ts INTEGER NOT NULL, raw_text TEXT NOT NULL)"
         )
         conn.executescript(_REPLACE_TS_INDEX_WITH_TS_ID_INDEX)
-        plan = " ".join(
-            str(row[3])
-            for row in conn.execute(
-                "EXPLAIN QUERY PLAN SELECT id, raw_text FROM entries "
-                f"{_CURSOR_PAGE_WHERE}{_CURSOR_PAGE_ORDER}",
-                {"before_ts": 0, "before_id": "", "limit_plus_one": 1},
-            ).fetchall()
-        )
+        plans = {
+            shape: " ".join(
+                str(row[3])
+                for row in conn.execute(
+                    f"EXPLAIN QUERY PLAN SELECT {projection} FROM entries "
+                    f"{_CURSOR_PAGE_WHERE}{_CURSOR_PAGE_ORDER}",
+                    {"before_ts": 0, "before_id": "", "row_limit": 1},
+                ).fetchall()
+            )
+            for shape, projection in _CURSOR_SEEK_PLAN_SHAPES
+        }
     finally:
         conn.close()
-    seeks_the_index = "SEARCH" in plan and "entries_ts_id_idx" in plan
-    walks_the_table = "SCAN entries" in plan
-    sorts_afterwards = "TEMP B-TREE" in plan.upper()
-    if seeks_the_index and not walks_the_table and not sorts_afterwards:
-        return None
-    return (
-        f"SQLite {sqlite3.sqlite_version} does not seek entries_ts_id_idx for a "
-        f"cursored history page: {plan}"
-    )
+    for shape, plan in plans.items():
+        seeks_the_index = "SEARCH" in plan and "entries_ts_id_idx" in plan
+        walks_the_table = "SCAN entries" in plan
+        sorts_afterwards = "TEMP B-TREE" in plan.upper()
+        if not seeks_the_index or walks_the_table or sorts_afterwards:
+            return (
+                f"SQLite {sqlite3.sqlite_version} does not seek entries_ts_id_idx for the "
+                f"cursored history {shape}: {plan}"
+            )
+    return None
 
 
 def _count_locked(conn: sqlite3.Connection) -> int:
-    """Caller MUST hold ``_lock``."""
-    return conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+    """Caller MUST hold ``_lock``. The row count, memoised until it can have changed.
+
+    Keyed on the pair ``(derived generation, connection object)`` (ADR 055).
+    Every statement in the backend that changes the number of rows in ``entries``
+    lives in this module and bumps the generation, and every path that swaps the
+    connection replaces the object as well, so both halves of the key are already
+    maintained by the code for its own reasons. The connection half is what keeps
+    this out of the fixtures: a suite that closes the connection without touching
+    the generation gets a different instance on the next open, and so misses
+    without being told to.
+    """
+    global _page_total_cache
+    cached = _page_total_cache
+    if cached is not None and cached[0] == _derived_generation and cached[1] is conn:
+        return cached[2]
+    total = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+    _page_total_cache = (_derived_generation, conn, total)
+    return total
 
 
 def get_page(limit: int = 50, before: HistoryCursor | None = None) -> HistoryPage:
@@ -669,17 +716,22 @@ def get_page(limit: int = 50, before: HistoryCursor | None = None) -> HistoryPag
     One acquisition of ``_lock`` covers the page read, the "is there more" probe and
     the total on purpose. Taken separately, a write landing between them returns a
     total that counts the new row and a page that does not.
+
+    A page that comes back short is the last one, so the probe is skipped entirely
+    rather than asked a question its own length already answered.
     """
     clamped_limit = _clamp_limit(limit)
     with _lock:
         conn = _ensure_conn_locked()
         rows = _entries_locked(conn, clamped_limit, before)
+        next_cursor: HistoryCursor | None = None
+        if len(rows) == clamped_limit:
+            last = HistoryCursor(ts=rows[-1]["ts"], id=rows[-1]["id"])
+            if _has_more_locked(conn, last):
+                next_cursor = last
         total = _count_locked(conn)
-    has_more = len(rows) > clamped_limit
-    page = rows[:clamped_limit]
-    next_cursor = HistoryCursor(ts=page[-1]["ts"], id=page[-1]["id"]) if has_more else None
     return HistoryPage(
-        entries=[_row_to_entry(r) for r in page], total=total, next_cursor=next_cursor
+        entries=[_row_to_entry(r) for r in rows], total=total, next_cursor=next_cursor
     )
 
 
@@ -777,10 +829,12 @@ def compute_stats(now: datetime | None = None) -> HistoryStats:
 def invalidate_derived_caches_locked() -> None:
     """Drop every cache derived from ``entries``. Caller MUST hold ``_lock``.
 
-    Two of them exist: this module's own 5 s stats cache, and the word-frequency
-    cache in ``app.transcripts.words``, which reads ``derived_generation_locked``
-    rather than a timestamp because a whole-table tokenising scan must not be
-    repeated while nothing has changed.
+    Three of them exist: this module's own 5 s stats cache, its page-total cache,
+    and the word-frequency cache in ``app.transcripts.words``. The last two read
+    ``derived_generation_locked`` rather than a timestamp, because a whole-table
+    tokenising scan and a whole-table count must not be repeated while nothing has
+    changed, and must never survive a change. Bumping the counter is the whole
+    invalidation: neither of them is cleared by name here.
     """
     global _stats_cache, _derived_generation
     _stats_cache = None

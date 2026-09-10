@@ -14,8 +14,11 @@ const apiMock = {
   clearHistory: vi.fn(),
 };
 
+class SidecarTooOldError extends Error {}
+
 vi.mock("../api", () => ({
   api: apiMock,
+  SidecarTooOldError,
 }));
 
 const { createHistoryList, formatEntryCount } = await import("./history-list");
@@ -177,10 +180,7 @@ describe("createHistoryList — the client echoes cursors and never builds one",
     const cursor: HistoryCursor = { ts: 300, id: "second-row" };
     confirmMock.mockResolvedValue(true);
     apiMock.clearHistory.mockResolvedValue({ deleted: 5 });
-    queueResponses(
-      { entries: [buildEntry("a"), buildEntry("b")], total: 5, next_cursor: cursor },
-      { entries: [], total: 0, next_cursor: null }
-    );
+    queueResponses({ entries: [buildEntry("a"), buildEntry("b")], total: 5, next_cursor: cursor });
 
     const list = listOver(h);
     await list.load();
@@ -189,9 +189,35 @@ describe("createHistoryList — the client echoes cursors and never builds one",
     await vi.waitFor(() => expect(h.countText()).toBe("0 transcripts"));
 
     h.elements.loadMoreButton.click();
-    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
+    await flush();
 
-    expect(sentCursors()).toEqual([null, null]);
+    expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
+    expect(sentCursors()).toEqual([null]);
+  });
+
+  it("refuses an append while the stored cursor is null instead of re-asking for page one", async () => {
+    const h = harness();
+    queueResponses({ entries: [buildEntry("a")], total: 1, next_cursor: null });
+
+    await listOver(h).load();
+    h.elements.loadMoreButton.click();
+    await flush();
+
+    expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
+    expect(sentCursors()).toEqual([null]);
+  });
+
+  it("leaves the button as it found it when it refuses an append", async () => {
+    const h = harness();
+    queueResponses({ entries: [buildEntry("a")], total: 1, next_cursor: null });
+
+    await listOver(h).load();
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
+
+    h.elements.loadMoreButton.click();
+    await flush();
+
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
   });
 });
 
@@ -215,20 +241,62 @@ function flush(): Promise<void> {
 }
 
 describe("createHistoryList — one request at a time decides the rows and the cursor", () => {
-  it("treats a response with no next_cursor field as the last page", async () => {
+  it("names the version skew when the backend omits next_cursor entirely", async () => {
     const h = harness();
-    queueResponses(
-      { entries: [buildEntry("a")], total: 99 } as unknown as HistoryPageResponse,
-      { entries: [buildEntry("b")], total: 99, next_cursor: null }
-    );
+    apiMock.getHistory.mockRejectedValue(new SidecarTooOldError("no next_cursor"));
+
+    await listOver(h).load();
+
+    expect(h.countText()).toBe("History needs the latest backend — please update JustSay.");
+  });
+
+  it("keeps the version-skew warning painted when a row is deleted afterwards", async () => {
+    const h = harness();
+    apiMock.getHistory.mockRejectedValue(new SidecarTooOldError("no next_cursor"));
+
+    const list = listOver(h);
+    await list.load();
+    list.entryRemoved();
+
+    expect(h.countText()).toBe("History needs the latest backend — please update JustSay.");
+  });
+
+  it("keeps the ordinary failure text for a failure that is not version skew", async () => {
+    const h = harness();
+    apiMock.getHistory.mockRejectedValue(new Error("503 store busy"));
+
+    await listOver(h).load();
+
+    expect(h.countText()).toBe("Failed to load");
+  });
+
+  it("claimRows() re-enables Load more so a lane taking the rows over is not left with a dead button", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
+    const append = deferredPage();
+    let calls = 0;
+    apiMock.getHistory.mockImplementation(async () => {
+      calls += 1;
+      return calls === 2
+        ? append.promise
+        : { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor };
+    });
 
     const list = listOver(h);
     await list.load();
     h.elements.loadMoreButton.click();
     await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
+    expect(h.elements.loadMoreButton.disabled).toBe(true);
 
-    expect(h.loadMoreVisible()).toBe(false);
-    expect(sentCursors()).toEqual([null, null]);
+    const claim = list.claimRows();
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
+
+    append.release({ entries: [buildEntry("c")], total: 4, next_cursor: null });
+    await flush();
+
+    expect(claim.isCurrent()).toBe(true);
+    expect(h.paintedIds()).toEqual(["a", "b"]);
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
   });
 
   it("ignores a second Load more click while the first is still outstanding", async () => {
@@ -362,9 +430,8 @@ describe("createHistoryList — one request at a time decides the rows and the c
     append.release({ entries: [buildEntry("c")], total: 4, next_cursor: null });
     await flush();
 
-    h.elements.loadMoreButton.click();
-    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(3));
-    expect(sentCursors()).toEqual([null, cursor, null]);
+    expect(h.elements.loadMoreButton.disabled).toBe(false);
+    expect(sentCursors()).toEqual([null, cursor]);
   });
 
   it("lets clearAll() supersede an append that is still in flight", async () => {

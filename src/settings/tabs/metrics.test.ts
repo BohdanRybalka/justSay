@@ -16,8 +16,11 @@ const apiMock = {
   deleteHistoryEntry: vi.fn(),
 };
 
+class SidecarTooOldError extends Error {}
+
 vi.mock("../../api", () => ({
   api: apiMock,
+  SidecarTooOldError,
 }));
 
 const { renderMetrics } = await import("./metrics");
@@ -48,6 +51,21 @@ function clearButton(container: HTMLElement): HTMLButtonElement {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("renderMetrics — a backend without the cursor contract says so here too", () => {
+  it("replaces the count with the update message, which reaches this tab through the shared list", async () => {
+    apiMock.getHistory.mockRejectedValue(new SidecarTooOldError("no next_cursor"));
+    const container = document.createElement("div");
+
+    renderMetrics(container);
+
+    await vi.waitFor(() => {
+      expect(container.querySelector("#metrics-count")!.textContent).toBe(
+        "History needs the latest backend — please update JustSay."
+      );
+    });
+  });
 });
 
 describe("renderMetrics — paging over the history endpoint", () => {

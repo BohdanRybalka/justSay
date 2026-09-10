@@ -1,5 +1,5 @@
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { api, type HistoryCursor, type HistoryEntry } from "../api";
+import { api, SidecarTooOldError, type HistoryCursor, type HistoryEntry } from "../api";
 import { isStaleStatusResponse } from "../stale-response";
 
 /** The singular/plural pair a tab uses when it names its own rows. */
@@ -27,6 +27,21 @@ export interface HistoryListOptions {
   onCleared?: () => void;
 }
 
+/**
+ * A lane's permission to write to the shared count and "Load more" elements,
+ * valid only while nothing newer has taken the rows over.
+ *
+ * Taking a claim is what supersedes every other lane, so one counter decides
+ * both who paints and who the tab believes painted. Both writers are no-ops
+ * once `isCurrent()` is false, so a late answer needs no staleness test of its
+ * own beyond the one it already asks before touching rows.
+ */
+export interface HistoryRowsClaim {
+  isCurrent(): boolean;
+  renderCount(text: string): void;
+  renderLoadMore(visible: boolean): void;
+}
+
 export interface HistoryList {
   /**
    * Asks for the first page with no cursor and, once it arrives, replaces
@@ -34,12 +49,20 @@ export interface HistoryList {
    * that fails changes nothing.
    */
   load(): Promise<void>;
-  /** Overrides the count text — for a tab lane the list does not own, such as History's search. */
-  renderCount(text: string): void;
-  renderLoadMore(visible: boolean): void;
+  /**
+   * Takes the rows over for a lane the list does not own, such as History's
+   * search, and hands back the only way to write to the shared count and
+   * "Load more" from outside this module.
+   *
+   * Claiming re-enables "Load more": the page it supersedes disabled the button
+   * and its `finally` will decline to re-enable a button it no longer owns.
+   */
+  claimRows(): HistoryRowsClaim;
   /** Drops one from the running total after a single-entry delete. */
   entryRemoved(): void;
 }
+
+const SIDECAR_TOO_OLD_TEXT = "History needs the latest backend — please update JustSay.";
 
 export function formatEntryCount(total: number, noun: HistoryListNoun): string {
   return `${total} ${total === 1 ? noun.singular : noun.plural}`;
@@ -55,6 +78,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
   let cursor: HistoryCursor | null = null;
   let total = 0;
   let latestIssuedToken = 0;
+  let backendOmitsCursor = false;
 
   function renderCount(text: string): void {
     elements.count.textContent = text;
@@ -62,6 +86,37 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
   function renderLoadMore(visible: boolean): void {
     elements.loadMoreWrapper.style.display = visible ? "block" : "none";
+  }
+
+  /**
+   * The total, or the version-skew warning once one has been seen.
+   *
+   * Sticky rather than one-shot: the count is the number that is lying when the
+   * backend omits the cursor, so deleting a row afterwards must not paint a
+   * plausible total back over the warning.
+   */
+  function renderTotal(): void {
+    renderCount(backendOmitsCursor ? SIDECAR_TOO_OLD_TEXT : formatEntryCount(total, noun));
+  }
+
+  function issueClaim(): HistoryRowsClaim {
+    const token = ++latestIssuedToken;
+    const isCurrent = () => !isDestroyed() && !isStaleStatusResponse(token, latestIssuedToken);
+    return {
+      isCurrent,
+      renderCount(text: string) {
+        if (isCurrent()) renderCount(text);
+      },
+      renderLoadMore(visible: boolean) {
+        if (isCurrent()) renderLoadMore(visible);
+      },
+    };
+  }
+
+  function claimRows(): HistoryRowsClaim {
+    const claim = issueClaim();
+    elements.loadMoreButton.disabled = false;
+    return claim;
   }
 
   /**
@@ -73,24 +128,28 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
    * and the next click would re-fetch and re-append the first page -- the
    * duplicate this whole spec exists to remove.
    *
-   * Staleness is `isStaleStatusResponse`, the one mechanism this app uses for a
-   * late answer, and a second click is refused by disabling the button rather
-   * than by a flag beside it: the condition then lives on the element it
-   * governs and cannot drift out of step with a counter.
+   * Staleness is `isStaleStatusResponse` behind a claim, the one mechanism this
+   * app uses for a late answer, and a second click is refused by disabling the
+   * button rather than by a flag beside it: the condition then lives on the
+   * element it governs and cannot drift out of step with a counter.
    *
-   * `next_cursor` is normalised at the edge because `request` casts the response
-   * rather than validating it: a backend that predates the cursor contract omits
-   * the field, and `undefined !== null` would leave "Load more" visible forever.
+   * An append with no stored cursor would ask for the first page and append it
+   * under itself, so it is refused before the claim is issued and before the
+   * button is touched: a refused click supersedes nothing and leaves the button
+   * as it found it. That invariant used to be held up by every call site
+   * happening to hide the button, which the next call site added would not have
+   * known to do.
    */
   async function loadPage(append: boolean): Promise<void> {
-    const token = ++latestIssuedToken;
+    if (append && cursor === null) return;
+    const claim = issueClaim();
     elements.loadMoreButton.disabled = true;
     try {
       const response = await api.getHistory(pageSize, append ? cursor : null);
-      if (isDestroyed() || isStaleStatusResponse(token, latestIssuedToken)) return;
+      if (!claim.isCurrent()) return;
 
       total = response.total;
-      renderCount(formatEntryCount(total, noun));
+      renderTotal();
 
       if (!append) {
         elements.rows.innerHTML = "";
@@ -102,15 +161,19 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
       renderEmptyState(response.entries.length === 0 && !append);
 
-      const nextCursor = response.next_cursor ?? null;
-      cursor = nextCursor;
-      renderLoadMore(nextCursor !== null);
+      cursor = response.next_cursor;
+      renderLoadMore(cursor !== null);
     } catch (error) {
-      if (isDestroyed() || isStaleStatusResponse(token, latestIssuedToken)) return;
-      renderCount("Failed to load");
+      if (!claim.isCurrent()) return;
+      if (error instanceof SidecarTooOldError) {
+        backendOmitsCursor = true;
+        renderTotal();
+      } else {
+        renderCount("Failed to load");
+      }
       console.error(error);
     } finally {
-      if (!isDestroyed() && !isStaleStatusResponse(token, latestIssuedToken)) {
+      if (claim.isCurrent()) {
         elements.loadMoreButton.disabled = false;
       }
     }
@@ -141,8 +204,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     try {
       await api.clearHistory();
       if (isDestroyed()) return;
-      ++latestIssuedToken;
-      elements.loadMoreButton.disabled = false;
+      claimRows();
       cursor = null;
       total = 0;
       elements.rows.innerHTML = "";
@@ -172,11 +234,10 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     load() {
       return loadPage(false);
     },
-    renderCount,
-    renderLoadMore,
+    claimRows,
     entryRemoved() {
       total--;
-      renderCount(formatEntryCount(total, noun));
+      renderTotal();
     },
   };
 }

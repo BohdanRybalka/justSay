@@ -346,8 +346,9 @@ def selftest() -> tuple[bool, str]:
 
     Three assertions about the SQLite the frozen sidecar actually bundles, which
     only a packaged build can answer: the library parses row values, its planner
-    seeks ``entries_ts_id_idx`` for the cursored history read, and sqlite-vec
-    loads. **Every check runs**, and a failure reports all of them -- an old
+    seeks ``entries_ts_id_idx`` for both statements of the cursored history read --
+    the page projection and the has-more probe -- and sqlite-vec loads. **Every
+    check runs**, and a failure reports all of them -- an old
     library is exactly the build whose sqlite-vec status is worth knowing, so
     stopping at the first failure would throw that answer away. Each check
     reports rather than raises, and the loop guards them anyway: the promise in

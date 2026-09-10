@@ -1,5 +1,5 @@
 import { api, type HistoryEntry } from "../../api";
-import { createHistoryList } from "../history-list";
+import { createHistoryList, type HistoryRowsClaim } from "../history-list";
 import { escapeHtml } from "../html";
 
 const DATE_FORMATTER = new Intl.DateTimeFormat("uk-UA", {
@@ -46,9 +46,8 @@ export function renderHistory(container: HTMLElement): () => void {
   const btnLoadMore = container.querySelector<HTMLButtonElement>("#btn-load-more")!;
   const btnClear = container.querySelector<HTMLButtonElement>("#btn-clear-history")!;
 
-  let inSearchMode = false;
+  let searchClaim: HistoryRowsClaim | null = null;
   let debounceTimer: number | null = null;
-  let searchSeq = 0;
   let destroyed = false;
 
   const list = createHistoryList({
@@ -68,35 +67,38 @@ export function renderHistory(container: HTMLElement): () => void {
     isDestroyed: () => destroyed,
     onCleared: () => {
       searchInput.value = "";
-      inSearchMode = false;
     },
   });
 
-  function loadEntries(): Promise<void> {
-    inSearchMode = false;
-    ++searchSeq;
-    return list.load();
-  }
-
+  /**
+   * The search lane, holding a claim on the shared rows for as long as what is on
+   * screen is its own paint.
+   *
+   * The claim is taken before the request rather than after it, so a page load
+   * already in flight is superseded at the moment the user asks for matches and
+   * cannot repaint the unfiltered history over them when it answers. It is what
+   * "am I showing search results?" reads, so the lane that painted and the lane
+   * the tab believes painted are always the same lane.
+   */
   async function runSearch(q: string) {
-    inSearchMode = true;
-    const seq = ++searchSeq;
+    const claim = list.claimRows();
+    searchClaim = claim;
     searchHint.textContent = "Searching...";
     try {
       const resp = await api.searchHistory(q, PAGE_SIZE);
-      if (destroyed || seq !== searchSeq) return;
+      if (!claim.isCurrent()) return;
       listEl.innerHTML = "";
-      list.renderCount(`${resp.total} match${resp.total !== 1 ? "es" : ""}`);
+      claim.renderCount(`${resp.total} match${resp.total !== 1 ? "es" : ""}`);
       if (resp.entries.length === 0) {
         listEl.innerHTML = `<div style="color: var(--text-muted); padding: 32px; text-align: center;">No matches</div>`;
       }
       for (const entry of resp.entries) {
         listEl.appendChild(createEntryElement(entry));
       }
-      list.renderLoadMore(false);
+      claim.renderLoadMore(false);
       searchHint.textContent = "";
     } catch (e) {
-      if (destroyed || seq !== searchSeq) return;
+      if (!claim.isCurrent()) return;
       const msg = (e as Error).message || "Search failed";
       const lower = msg.toLowerCase();
       const sidecarTooOld =
@@ -123,7 +125,7 @@ export function renderHistory(container: HTMLElement): () => void {
       debounceTimer = null;
       if (!value) {
         searchHint.textContent = "";
-        loadEntries();
+        void list.load();
       } else {
         runSearch(value);
       }
@@ -182,7 +184,7 @@ export function renderHistory(container: HTMLElement): () => void {
         try {
           await api.deleteHistoryEntry(entry.id);
           el.remove();
-          if (!inSearchMode) {
+          if (searchClaim === null || !searchClaim.isCurrent()) {
             list.entryRemoved();
           }
         } catch (err) {
@@ -194,7 +196,7 @@ export function renderHistory(container: HTMLElement): () => void {
     return el;
   }
 
-  loadEntries();
+  void list.load();
 
   return () => {
     destroyed = true;

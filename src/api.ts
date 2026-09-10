@@ -618,6 +618,16 @@ export interface HistoryPageResponse {
   next_cursor: HistoryCursor | null;
 }
 
+/** Thrown when a `/history` response carries no `next_cursor` property at all,
+ *  which only a backend predating the cursor contract produces. Named for the
+ *  vocabulary the History tab already uses for the same class of skew. */
+export class SidecarTooOldError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SidecarTooOldError";
+  }
+}
+
 export interface WordCount {
   word: string;
   count: number;
@@ -659,16 +669,30 @@ export const api = {
 
   /** Pass `null` for the first page, then whatever `next_cursor` the previous
    *  response carried. A cursor is a position rather than a count, so nothing
-   *  under it shifts when an entry is saved or deleted between two pages. */
-  getHistory: (limit = 50, cursor: HistoryCursor | null = null) =>
-    request<HistoryPageResponse>(
+   *  under it shifts when an entry is saved or deleted between two pages.
+   *
+   *  This is the last place in the app where an absent `next_cursor` can be told
+   *  from a null one: `request` casts the parsed body rather than validating it,
+   *  so one line further down the two have already collapsed into `undefined`
+   *  and `null`, and a backend predating the cursor contract would silently look
+   *  like a store whose first page is also its last. The presence test is `in`
+   *  rather than `=== undefined` because absence of the property is precisely
+   *  the condition, and it throws rather than returning a flag so that no caller
+   *  can carry the third state around. */
+  getHistory: async (limit = 50, cursor: HistoryCursor | null = null) => {
+    const body = await request<Partial<HistoryPageResponse>>(
       "GET",
       cursor === null
         ? `/history?limit=${limit}`
         : `/history?limit=${limit}&before_ts=${cursor.ts}&before_id=${encodeURIComponent(cursor.id)}`,
       undefined,
       REREADABLE,
-    ),
+    );
+    if (!("next_cursor" in body)) {
+      throw new SidecarTooOldError("/history returned no next_cursor field");
+    }
+    return body as HistoryPageResponse;
+  },
 
   historyStats: () => request<HistoryStats>("GET", "/history/stats", undefined, REREADABLE),
 
