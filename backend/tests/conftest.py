@@ -704,3 +704,36 @@ def fake_genai_modules(client_class) -> dict[str, ModuleType]:
         "google.genai": genai_module,
         "google.genai.types": types_module,
     }
+
+
+@pytest.fixture
+def insert_history_rows():
+    """Writes ``(id, ts, text)`` rows into the open history store exactly as given.
+
+    ``save_entry`` mints its own id and stamps its own wall-clock millisecond, so
+    it cannot produce the rows a store adopted from elsewhere holds: an id no build
+    of this app would mint, or a timestamp chosen to fix an ordering under test.
+    ``_seed`` in ``test_history_sqlite.py`` covers the case where ``save_entry``'s
+    ids are fine and only the timestamps need rewriting; this covers the case where
+    the id itself is the point.
+    """
+
+    def insert(rows: list[tuple[str, int, str]]) -> None:
+        from app.transcripts import history
+
+        with history._lock:
+            conn = history._ensure_conn_locked()
+            conn.execute("BEGIN")
+            try:
+                conn.executemany(
+                    "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, "
+                    "duration_ms) VALUES (?, ?, 'uk', 'normal', ?, ?, 1)",
+                    [(row_id, ts, text, text) for row_id, ts, text in rows],
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            history.invalidate_derived_caches_locked()
+
+    return insert

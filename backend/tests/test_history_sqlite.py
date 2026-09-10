@@ -1347,7 +1347,7 @@ def test_an_exactly_full_last_page_costs_no_extra_request(isolated_storage, tmp_
 
 
 def test_a_cursor_cannot_be_built_outside_the_bounds_sqlite_can_hold(isolated_storage, tmp_path):
-    """The bounds belong to ``HistoryCursor``, not only to the router's signature.
+    """The ``ts`` bound belongs to ``HistoryCursor``, not only to the router's signature.
 
     A ``ts`` wider than a signed 64-bit integer reaches ``conn.execute`` and raises
     ``OverflowError`` out of the driver, which is the failure ``_entries_locked``'s
@@ -1355,6 +1355,10 @@ def test_a_cursor_cannot_be_built_outside_the_bounds_sqlite_can_hold(isolated_st
     FastAPI signature is not a bound on the function, which is the reasoning
     ``_clamp_limit`` already carries about ``limit``. So a non-router caller is
     refused at construction rather than at the driver.
+
+    ``id`` carries no such bound and no assertion here: every string is a position
+    the store can answer, and a length cap rejected ids the store itself holds --
+    see ``test_a_full_page_with_more_mints_a_cursor_from_an_adopted_id``.
     """
     history.bootstrap(tmp_path / "target")
     history.save_entry(text="x", duration_ms=1)
@@ -1363,20 +1367,9 @@ def test_a_cursor_cannot_be_built_outside_the_bounds_sqlite_can_hold(isolated_st
         history.HistoryCursor(ts=history.CURSOR_TS_MAX + 1, id="x")
     with pytest.raises(ValidationError):
         history.HistoryCursor(ts=history.CURSOR_TS_MIN - 1, id="x")
-    with pytest.raises(ValidationError):
-        history.HistoryCursor(ts=0, id="a" * (history.CURSOR_ID_MAX_LENGTH + 1))
 
     at_the_edge = history.HistoryCursor(ts=history.CURSOR_TS_MAX, id="x")
     assert history.get_page(limit=5, before=at_the_edge).entries != []
-
-
-def test_a_saved_id_fits_the_cursor_id_bound(isolated_storage, tmp_path):
-    """The router caps ``before_id`` so a cursor cannot carry a payload. The cap
-    is stated against what ``save_entry`` actually produces rather than against a
-    ``12`` repeated in prose."""
-    history.bootstrap(tmp_path / "target")
-
-    assert len(history.save_entry(text="x", duration_ms=1).id) < history.CURSOR_ID_MAX_LENGTH
 
 
 def test_the_page_read_asks_for_exactly_the_clamped_limit(isolated_storage, tmp_path):
@@ -1640,37 +1633,59 @@ def test_a_short_page_asks_nothing_about_a_next_one(isolated_storage, tmp_path):
     assert probes == [], probes
 
 
-def test_a_full_last_page_validates_no_cursor(isolated_storage, tmp_path):
-    """An id too long for ``HistoryCursor`` no longer breaks a full *last* page.
+def test_a_full_last_page_holding_an_adopted_id_returns_no_cursor(
+    isolated_storage, tmp_path, insert_history_rows
+):
+    """A full *last* page ending on an adopted id still returns no cursor.
 
-    ``consolidate_into`` copies ids verbatim out of a merged database, so a row
-    whose id exceeds ``CURSOR_ID_MAX_LENGTH`` can be sitting in the store. A page
-    that is both full and last returns no cursor, so building one to ask "is
-    there more" turned a page that reads fine into a ``ValidationError`` and a
-    500. The probe therefore takes the position as primitives.
-
-    That is the whole of what this pins. A full page that *does* have a page
-    after it returns a cursor built from that same id and still raises, which is
-    JS-137 and predates this spec.
+    The pairing is what this covers: full, so the length of the page says nothing
+    about whether more rows exist, and last, so the answer is that none do. The
+    adopted id is the row it ends on. That the same id is also expressible as a
+    cursor when a page *does* follow is
+    ``test_a_full_page_with_more_mints_a_cursor_from_an_adopted_id``.
     """
-    target = tmp_path / "target"
-    history.bootstrap(target)
-    over_long_id = "x" * (history.CURSOR_ID_MAX_LENGTH + 1)
-    with history._lock:
-        conn = history._ensure_conn_locked()
-        conn.execute("BEGIN")
-        conn.executemany(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES (?, ?, 'uk', 'normal', 'row', 'row', 1)",
-            [("newer", 1_700_000_000_001), (over_long_id, 1_700_000_000_000)],
-        )
-        conn.execute("COMMIT")
-        history.invalidate_derived_caches_locked()
+    history.bootstrap(tmp_path / "target")
+    adopted_id = "x" * 100
+    insert_history_rows(
+        [("newer", 1_700_000_000_001, "row"), (adopted_id, 1_700_000_000_000, "row")]
+    )
 
     page = history.get_page(limit=2)
 
     assert page.next_cursor is None
-    assert [entry.id for entry in page.entries] == ["newer", over_long_id]
+    assert [entry.id for entry in page.entries] == ["newer", adopted_id]
+
+
+def test_a_full_page_with_more_mints_a_cursor_from_an_adopted_id(
+    isolated_storage, tmp_path, insert_history_rows
+):
+    """A page with a page after it hands back the id it ended on, whatever its length.
+
+    ``consolidate_into`` copies ids verbatim and ``relocate`` adopts a foreign
+    ``history.db`` whole, so the store holds ids ``save_entry`` never minted. A
+    length bound on the cursor made such a page unanswerable rather than the cursor
+    invalid; the second read here is the same cursor going back in (JS-137).
+    """
+    history.bootstrap(tmp_path / "target")
+    adopted_id = "x" * 100
+    insert_history_rows(
+        [
+            ("newest", 1_700_000_000_002, "row"),
+            (adopted_id, 1_700_000_000_001, "row"),
+            ("oldest", 1_700_000_000_000, "row"),
+        ]
+    )
+
+    first = history.get_page(limit=2)
+
+    assert [entry.id for entry in first.entries] == ["newest", adopted_id]
+    assert first.next_cursor is not None
+    assert first.next_cursor.id == adopted_id
+
+    second = history.get_page(limit=2, before=first.next_cursor)
+
+    assert [entry.id for entry in second.entries] == ["oldest"]
+    assert second.next_cursor is None
 
 
 def test_clear_all_reports_the_rows_it_deleted_not_a_memoised_count(
