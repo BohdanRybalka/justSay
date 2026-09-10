@@ -162,7 +162,7 @@ export function renderHistory(container: HTMLElement): () => void {
     el.className = "history-entry";
     el.dataset.id = entry.id;
 
-    const date = new Date(entry.timestamp);
+    const date = entry.timestamp == null ? null : new Date(entry.timestamp);
 
     const badges: string[] = [];
     badges.push(`<span class="history-badge">${(entry.duration_ms / 1000).toFixed(2)} s process</span>`);
@@ -184,8 +184,8 @@ export function renderHistory(container: HTMLElement): () => void {
     el.innerHTML = `
       <div class="history-entry-header">
         <div class="history-stamp">
-          <span class="history-stamp-date">${DATE_FORMATTER.format(date)}</span>
-          <span class="history-stamp-time">${TIME_FORMATTER.format(date)}</span>
+          <span class="history-stamp-date">${date === null ? "—" : DATE_FORMATTER.format(date)}</span>
+          <span class="history-stamp-time">${date === null ? "" : TIME_FORMATTER.format(date)}</span>
         </div>
         <div class="history-badges">${badges.join("")}</div>
       </div>

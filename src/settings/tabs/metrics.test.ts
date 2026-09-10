@@ -223,3 +223,24 @@ describe("renderMetrics — teardown", () => {
     expect(clearButton(container).disabled).toBe(true);
   });
 });
+
+describe("renderMetrics — a record whose recording time could not be recovered", () => {
+  it("shows a dash in the time column and keeps the rest of the row", async () => {
+    const undated: HistoryEntry = { ...buildEntry("undated"), timestamp: null };
+    apiMock.getHistory.mockResolvedValue({
+      entries: [buildEntry("dated"), undated],
+      total: 2,
+      next_cursor: null,
+    });
+    const container = document.createElement("div");
+    renderMetrics(container);
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll("tbody tr")).toHaveLength(2);
+    });
+
+    const cells = container.querySelectorAll<HTMLElement>("tbody tr:nth-child(2) td");
+    expect(cells[0].textContent).toBe("—");
+    expect(cells[1].textContent).toBe("whisper");
+    expect(container.textContent).not.toContain("Invalid Date");
+  });
+});

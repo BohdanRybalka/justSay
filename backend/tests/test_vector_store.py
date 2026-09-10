@@ -49,10 +49,10 @@ def _rowid(conn: sqlite3.Connection, entry_id: str) -> int:
 
 
 
-def test_schema_version_is_v3():
+def test_schema_version_is_v4():
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_v3_tables_and_trigger_exist_vec_entries_lazy():
@@ -70,7 +70,7 @@ def test_v3_tables_and_trigger_exist_vec_entries_lazy():
     assert "vec_entries" not in names
 
 
-def test_migration_v1_to_v3(tmp_path):
+def test_migration_v1_to_current(tmp_path):
     db_path = tmp_path / "history.db"
     with history._lock:
         history._close_conn_locked()
@@ -87,7 +87,7 @@ def test_migration_v1_to_v3(tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         names = {
             r[0]
             for r in conn.execute(
@@ -98,7 +98,7 @@ def test_migration_v1_to_v3(tmp_path):
     assert "entry_embeddings" in names
 
 
-def test_migration_v2_to_v3(tmp_path):
+def test_migration_v2_to_current(tmp_path):
     db_path = tmp_path / "history.db"
     with history._lock:
         history._close_conn_locked()
@@ -117,7 +117,7 @@ def test_migration_v2_to_v3(tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         names = {
             r[0]
             for r in conn.execute(
@@ -128,7 +128,7 @@ def test_migration_v2_to_v3(tmp_path):
     assert "entry_embeddings" in names
 
 
-def test_crash_before_v3_pragma_retries(tmp_path):
+def test_crash_before_the_version_pragma_retries(tmp_path):
     """A crash that ran the v3 DDL but never wrote user_version=3 must
     self-heal idempotently on the next boot (mirrors the existing v1->v2
     crash-safety test in test_history_sqlite.py)."""
@@ -150,7 +150,7 @@ def test_crash_before_v3_pragma_retries(tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_partial_migration_recovery_v3_tables_missing(tmp_path):

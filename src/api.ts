@@ -584,7 +584,12 @@ export interface CleanupResult {
 
 export interface HistoryEntry {
   id: string;
-  timestamp: string;
+  /** ISO 8601, or `null` when the stored recording time could not be
+   *  recovered — a row merged or adopted from a foreign history file whose
+   *  date was not a number. The text and every other field are intact; the
+   *  tabs render a dash where the date goes. See `UNKNOWN_TS` in
+   *  `backend/app/transcripts/history.py`. */
+  timestamp: string | null;
   language: string;
   style: string;
   text: string;
