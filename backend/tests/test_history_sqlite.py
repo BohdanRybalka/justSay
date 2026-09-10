@@ -360,13 +360,15 @@ def test_operational_error_mapped_to_503(isolated_storage, tmp_path):
 
 
 
-def test_schema_version_is_v3(isolated_storage, tmp_path):
-    """Bumped to 3 by Phase 3 (sqlite-vec) — see the Phase 3 section below."""
+def test_schema_version_is_v4(isolated_storage, tmp_path):
+    """Bumped to 3 by Phase 3 (sqlite-vec), then to 4 by spec 146, which rebuilt
+    ``entries`` behind a constraint that refuses a row with no id or a
+    non-integer ``ts``."""
     target = tmp_path / "target"
     history.bootstrap(target)
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == history.SCHEMA_VERSION
 
 
 def test_fts_table_and_triggers_exist(isolated_storage, tmp_path):
@@ -421,8 +423,9 @@ def test_clear_all_propagates_to_fts(isolated_storage, tmp_path):
 
 
 def test_migration_v1_to_v2_populates_fts(isolated_storage, tmp_path):
-    """A pre-existing v1 DB with rows must upgrade to v2 with the FTS
-    populated from the rebuild branch of _init_schema."""
+    """A pre-existing v1 DB with rows must upgrade with the FTS populated from
+    the rebuild branch of _init_schema. Named for v2 because that is the step
+    that introduced FTS; the boot now carries it to the current version."""
     db_path = tmp_path / "history.db"
     raw = sqlite3.connect(db_path)
     try:
@@ -444,7 +447,7 @@ def test_migration_v1_to_v2_populates_fts(isolated_storage, tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == history.SCHEMA_VERSION
         hits = conn.execute(
             "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'brown'"
         ).fetchall()
@@ -536,7 +539,7 @@ def test_crash_before_user_version_pragma_retries(isolated_storage, tmp_path, mo
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == history.SCHEMA_VERSION
         hits = conn.execute(
             "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'crash'"
         ).fetchall()
@@ -563,9 +566,9 @@ def test_relocate_rebuilds_fts(isolated_storage, tmp_path):
 
 
 
-def test_v1_to_v3_migration_lands_at_v3(isolated_storage, tmp_path):
+def test_v1_to_current_migration_lands_in_one_boot(isolated_storage, tmp_path):
     """A pre-existing v1 DB (only `entries`, no FTS, no embeddings tables)
-    upgrades straight to v3 in one boot."""
+    upgrades straight to the current version in one boot."""
     db_path = tmp_path / "history.db"
     raw = sqlite3.connect(db_path)
     try:
@@ -583,7 +586,7 @@ def test_v1_to_v3_migration_lands_at_v3(isolated_storage, tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == history.SCHEMA_VERSION
         names = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
         ).fetchall()}
@@ -591,9 +594,9 @@ def test_v1_to_v3_migration_lands_at_v3(isolated_storage, tmp_path):
     assert expected.issubset(names)
 
 
-def test_v2_to_v3_migration_lands_at_v3(isolated_storage, tmp_path):
+def test_v2_to_current_migration_keeps_the_fts_index(isolated_storage, tmp_path):
     """A pre-existing v2 DB (FTS already migrated, no embeddings tables)
-    upgrades to v3 without disturbing the FTS index."""
+    upgrades to the current version and its transcripts are still searchable."""
     db_path = tmp_path / "history.db"
     raw = sqlite3.connect(db_path)
     try:
@@ -613,7 +616,7 @@ def test_v2_to_v3_migration_lands_at_v3(isolated_storage, tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == history.SCHEMA_VERSION
         names = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
         ).fetchall()}
@@ -628,7 +631,7 @@ def test_crash_before_v3_user_version_pragma_retries(isolated_storage, tmp_path)
     """If a crash leaves user_version at 2 even though the v3 DDL already
     ran (embeddings tables exist), the next boot's migrator must succeed
     idempotently — mirrors test_crash_before_user_version_pragma_retries
-    for v1->v2 above."""
+    for v1->v2 above. It now lands at 4 rather than 3."""
     from app.transcripts import vector_store
 
     db_path = tmp_path / "history.db"
@@ -650,7 +653,7 @@ def test_crash_before_v3_user_version_pragma_retries(isolated_storage, tmp_path)
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == history.SCHEMA_VERSION
         names = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
         ).fetchall()}
@@ -2100,9 +2103,11 @@ def test_reading_the_last_page_costs_the_same_at_2000_rows_and_at_8000(isolated_
 
 
 def test_an_existing_database_swaps_its_index_without_a_schema_bump(isolated_storage, tmp_path):
-    """The swap rides ``_DDL_V1``, which runs unconditionally and idempotently on
-    every open. ``SCHEMA_VERSION`` stays at 3 on purpose: the upgrade branch
-    rebuilds the whole FTS index, and an index swap needs no row touched."""
+    """The swap rides ``_REPLACE_TS_INDEX_WITH_TS_ID_INDEX``, which runs
+    unconditionally and idempotently on every open, so a database already at the
+    current ``SCHEMA_VERSION`` gets it with no version change at all: the upgrade
+    branch rebuilds the whole FTS index and the whole table, and an index swap
+    needs neither."""
     target = tmp_path / "target"
     history.bootstrap(target)
     kept = history.save_entry(text="written before the swap", duration_ms=1).id
@@ -2133,5 +2138,261 @@ def test_an_existing_database_swaps_its_index_without_a_schema_bump(isolated_sto
         user_version = conn.execute("PRAGMA user_version").fetchone()[0]
     assert "entries_ts_id_idx" in indexes_after
     assert "entries_ts_idx" not in indexes_after
-    assert user_version == 3
+    assert user_version == history.SCHEMA_VERSION
     assert [e.id for e in history.get_page().entries] == [kept]
+
+
+_UNORDERABLE_COLUMNS = (
+    "id, ts, language, style, raw_text, cleaned_text, duration_ms, "
+    "audio_duration_seconds, word_count, model_name, tokens_used"
+)
+
+_UNORDERABLE_ROWS = (
+    ("ok-newest", 1700000000003, "one good row"),
+    (None, 1700000000002, "no id at all"),
+    ("real-ts", 1700000000001.5, "a fractional millisecond"),
+    ("text-ts", "notanumber", "a date that is not a date"),
+    ("numeric-text-ts", "1700000000000", "affinity already converts this one"),
+)
+
+
+def _seed_v3_store_with_unorderable_rows(db_path, with_embedding=False):
+    """A v3 database holding every shape a foreign history.db can carry.
+
+    Written through a raw connection on purpose: ``save_entry`` cannot produce
+    any of these -- ``_iso_to_epoch_ms`` returns ``int(round(...))`` -- and the
+    routes that can are ``consolidate_into`` copying verbatim and ``relocate``
+    adopting a whole file.
+
+    **A row is inserted in the middle and deleted, so the surviving rowids have
+    a hole in them.**
+    ``entry_fts`` is external-content keyed on ``entries.rowid``, and the v4
+    rebuild renumbers every row densely from 1, so without a hole the copy lands
+    on the same rowids and an index left unrebuilt still resolves correctly --
+    a test that cannot fail rather than a rebuild that is not needed. Deleting
+    the *first* row does not make one: with the table empty again SQLite takes
+    rowid 1 for the next insert.
+    """
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.executescript(history._DDL_V1)
+        raw.executescript(history._DDL_V2)
+        raw.executescript(vector_store._DDL_V3)
+        for index, (entry_id, ts, text) in enumerate(_UNORDERABLE_ROWS):
+            if index == 2:
+                raw.execute(
+                    f"INSERT INTO entries ({_UNORDERABLE_COLUMNS}) VALUES "
+                    "('deleted-later',1,'en','normal','gone','gone',0,NULL,NULL,NULL,NULL)"
+                )
+            raw.execute(
+                f"INSERT INTO entries ({_UNORDERABLE_COLUMNS}) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (entry_id, ts, "en", "normal", text, text, 10, 1.0, 3, "m", None),
+            )
+        raw.execute("DELETE FROM entries WHERE id = 'deleted-later'")
+        if with_embedding:
+            raw.execute(
+                "INSERT INTO embeddings_meta(id, provider, model, dim) VALUES (1,'p','m',4)"
+            )
+            raw.execute(
+                "INSERT INTO entry_embeddings(entry_id, model, dim, created_ts) "
+                "VALUES ('ok-newest','m',4,1)"
+            )
+        raw.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
+        raw.execute("PRAGMA user_version = 3")
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def test_a_row_that_is_not_a_position_is_repaired_rather_than_dropped(
+    isolated_storage, tmp_path
+):
+    """Every stored shape survives the v4 migration as an orderable row.
+
+    A REAL ts keeps its whole milliseconds, a value with nothing recoverable
+    becomes UNKNOWN_TS, and a NULL id gets one. Nothing is deleted: the user's
+    transcript text is the part worth keeping and none of these shapes damages
+    it.
+    """
+    _seed_v3_store_with_unorderable_rows(tmp_path / "history.db")
+
+    history.bootstrap(tmp_path)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        rows = {
+            row["cleaned_text"]: (row["id"], row["ts"], row["ts_type"])
+            for row in conn.execute(
+                "SELECT id, ts, typeof(ts) AS ts_type, cleaned_text FROM entries"
+            )
+        }
+    assert len(rows) == len(_UNORDERABLE_ROWS), "no row may be dropped by the repair"
+    assert {t for _, _, t in rows.values()} == {"integer"}
+    assert rows["one good row"][1] == 1700000000003
+    assert rows["a fractional millisecond"][1] == 1700000000001
+    assert rows["a date that is not a date"][1] == history.UNKNOWN_TS
+    assert rows["affinity already converts this one"][1] == 1700000000000
+    assert rows["no id at all"][0].startswith("recovered-")
+
+
+def test_a_page_over_a_repaired_store_answers_instead_of_raising(
+    isolated_storage, tmp_path
+):
+    """The defect JS-146 names: every page size used to fail, one way or another.
+
+    Before the repair, limit=1 and limit=3 raised ValidationError at the cursor
+    mint and limit=2 raised TypeError inside _row_to_entry, all outside
+    store_busy_as_503 -- so the tab showed an error rather than a list.
+    """
+    _seed_v3_store_with_unorderable_rows(tmp_path / "history.db")
+    history.bootstrap(tmp_path)
+
+    seen = []
+    for limit in range(1, len(_UNORDERABLE_ROWS) + 1):
+        page = history.get_page(limit=limit)
+        assert len(page.entries) == limit
+        seen.append(page.entries[-1].id)
+    assert len(set(seen)) == len(seen), "each larger page ends on a further row"
+
+    full = history.get_page(limit=len(_UNORDERABLE_ROWS))
+    assert full.next_cursor is None
+    assert full.total == len(_UNORDERABLE_ROWS)
+
+
+def test_a_record_with_no_recoverable_date_reports_no_date_at_all(
+    isolated_storage, tmp_path
+):
+    """Decided by the user on 2026-09-10: not a wrong date, no date.
+
+    Everything else about the row is intact, so it renders in full with a dash
+    where the date goes.
+    """
+    _seed_v3_store_with_unorderable_rows(tmp_path / "history.db")
+    history.bootstrap(tmp_path)
+
+    by_text = {e.text: e for e in history.get_page(limit=10).entries}
+    unknown = by_text["a date that is not a date"]
+    assert unknown.timestamp is None
+    assert unknown.text == "a date that is not a date"
+    assert unknown.language == "en"
+    assert unknown.word_count == 3
+    assert by_text["one good row"].timestamp is not None
+
+
+def test_the_repaired_store_refuses_the_shape_coming_back(isolated_storage, tmp_path):
+    """The user's own words: the situation should not arise in the first place.
+
+    A repair alone leaves the door open, because the routes that produced these
+    rows are ordinary user actions -- moving the data folder, pointing it at a
+    backup.
+    """
+    _seed_v3_store_with_unorderable_rows(tmp_path / "history.db")
+    history.bootstrap(tmp_path)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        for label, entry_id, ts in (
+            ("a missing id", None, 1700000000000),
+            ("a date that is text", "x1", "notanumber"),
+            ("a fractional date", "x2", 1700000000000.5),
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="constraint failed"):
+                conn.execute(
+                    f"INSERT INTO entries ({_UNORDERABLE_COLUMNS}) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (entry_id, ts, "en", "normal", label, label, 1, None, None, None, None),
+                )
+
+
+def test_the_rebuild_keeps_the_search_index_and_the_embeddings(
+    isolated_storage, tmp_path
+):
+    """The rebuild moves every rowid and drops the table the embeddings point at.
+
+    entry_fts is external-content keyed on entries.rowid, so it has to be
+    rebuilt; entry_embeddings.entry_id is REFERENCES entries(id) ON DELETE
+    CASCADE and _connect turns foreign keys on, so a rebuild with them enabled
+    would cascade every embedding away.
+    """
+    _seed_v3_store_with_unorderable_rows(tmp_path / "history.db", with_embedding=True)
+
+    history.bootstrap(tmp_path)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('integrity-check')")
+        matched = [
+            row[0]
+            for row in conn.execute(
+                "SELECT e.cleaned_text FROM entry_fts f "
+                "JOIN entries e ON e.rowid = f.rowid "
+                "WHERE entry_fts MATCH 'fractional'"
+            )
+        ]
+        embeddings = conn.execute(
+            "SELECT count(*) FROM entry_embeddings"
+        ).fetchone()[0]
+    assert matched == ["a fractional millisecond"], (
+        "the hit has to resolve to the row that actually holds the word. Counting index "
+        "entries instead passes over an index whose rowids no longer address anything, "
+        "which is exactly what the rebuild renumbering every row produces"
+    )
+    assert embeddings == 1, "the embedding computed before the migration must survive"
+
+
+def test_a_store_already_at_the_current_version_is_not_rebuilt_again(
+    isolated_storage, tmp_path
+):
+    """The repair is a one-off cost, not a scan on every open."""
+    _seed_v3_store_with_unorderable_rows(tmp_path / "history.db")
+    history.bootstrap(tmp_path)
+    with history._lock:
+        first = history._ensure_conn_locked().execute(
+            "SELECT id FROM entries WHERE cleaned_text = 'no id at all'"
+        ).fetchone()[0]
+        history._close_conn_locked()
+
+    calls = []
+    original = history._migrate_to_v4_locked
+    try:
+        history._migrate_to_v4_locked = lambda conn: (
+            calls.append(1),
+            original(conn),
+        )[1]
+        history.bootstrap(tmp_path)
+    finally:
+        history._migrate_to_v4_locked = original
+
+    assert calls == [], "a v4 store must not be migrated a second time"
+    with history._lock:
+        second = history._ensure_conn_locked().execute(
+            "SELECT id FROM entries WHERE cleaned_text = 'no id at all'"
+        ).fetchone()[0]
+    assert second == first, "a second boot must not mint the recovered id again"
+
+
+def test_a_merge_repairs_a_foreign_row_instead_of_skipping_it(
+    isolated_storage, tmp_path
+):
+    """INSERT OR IGNORE answers a CHECK violation by skipping the row.
+
+    So with the v4 constraint in place and a verbatim copy, merging a foreign
+    history would drop exactly the transcripts this spec exists to keep -- and
+    say nothing.
+    """
+    source_dir = tmp_path / "source"
+    target_dir = tmp_path / "target"
+    source_dir.mkdir()
+    target_dir.mkdir()
+    _seed_v3_store_with_unorderable_rows(source_dir / "history.db")
+
+    outcome, error = history.consolidate_into(source_dir, target_dir)
+    assert outcome is history.ConsolidateOutcome.CONSOLIDATED, error
+
+    history.bootstrap(target_dir)
+    texts = {e.text for e in history.get_page(limit=50).entries}
+    assert texts == {text for _, _, text in _UNORDERABLE_ROWS}, (
+        "every source row must arrive, repaired -- a skipped row is a transcript "
+        "the user silently loses"
+    )

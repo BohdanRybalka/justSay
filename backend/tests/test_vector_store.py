@@ -52,7 +52,7 @@ def _rowid(conn: sqlite3.Connection, entry_id: str) -> int:
 def test_schema_version_is_v3():
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == history.SCHEMA_VERSION
 
 
 def test_v3_tables_and_trigger_exist_vec_entries_lazy():
@@ -87,7 +87,7 @@ def test_migration_v1_to_v3(tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == history.SCHEMA_VERSION
         names = {
             r[0]
             for r in conn.execute(
@@ -117,7 +117,7 @@ def test_migration_v2_to_v3(tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == history.SCHEMA_VERSION
         names = {
             r[0]
             for r in conn.execute(
@@ -150,7 +150,7 @@ def test_crash_before_v3_pragma_retries(tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == history.SCHEMA_VERSION
 
 
 def test_partial_migration_recovery_v3_tables_missing(tmp_path):

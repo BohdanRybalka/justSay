@@ -64,13 +64,15 @@ export function renderMetrics(container: HTMLElement): () => void {
     const tr = document.createElement("tr");
     tr.style.borderBottom = "1px solid var(--border)";
 
-    const date = new Date(entry.timestamp);
-    const timeStr = date.toLocaleDateString("uk-UA", {
-      day: "2-digit",
-      month: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    const timeStr =
+      entry.timestamp == null
+        ? "—"
+        : new Date(entry.timestamp).toLocaleDateString("uk-UA", {
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
 
     const cells: [string, string][] = [
       [timeStr, "padding: 7px 10px; color: var(--text-dim); white-space: nowrap;"],

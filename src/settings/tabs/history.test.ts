@@ -734,3 +734,30 @@ describe("renderHistory — Clear All asks before deleting everything", () => {
     expect(container.querySelectorAll(".history-entry")).toHaveLength(0);
   });
 });
+
+describe("renderHistory — a record whose recording time could not be recovered", () => {
+  it("shows a dash where the date goes and the transcript in full", async () => {
+    const dated = buildEntry("dated");
+    const undated: HistoryEntry = { ...buildEntry("undated"), timestamp: null };
+    apiMock.getHistory.mockResolvedValue({
+      entries: [dated, undated],
+      total: 2,
+      next_cursor: null,
+    });
+    const container = document.createElement("div");
+    renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll(".history-entry")).toHaveLength(2);
+    });
+
+    const rows = container.querySelectorAll<HTMLElement>(".history-entry");
+    const undatedRow = rows[1];
+    expect(undatedRow.querySelector(".history-stamp-date")!.textContent).toBe("—");
+    expect(undatedRow.querySelector(".history-stamp-time")!.textContent).toBe("");
+    expect(undatedRow.textContent).toContain("transcript undated");
+    expect(undatedRow.textContent).not.toContain("Invalid Date");
+    expect(undatedRow.textContent).not.toContain("1970");
+
+    expect(rows[0].querySelector(".history-stamp-date")!.textContent).not.toBe("—");
+  });
+});

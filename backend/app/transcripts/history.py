@@ -42,9 +42,20 @@ from app.core.app_paths import resolve_app_data_root
 log = logging.getLogger(__name__)
 
 HISTORY_FILENAME = "history.db"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 STATS_TTL_SECONDS = 5.0
 HISTORY_LIMIT_MAX = 200
+UNKNOWN_TS = 0
+"""The stored ``ts`` of a row whose recording time could not be recovered.
+
+Not a date: ``_epoch_ms_to_iso`` answers ``None`` for it and the tabs render a
+dash. It is a real integer rather than NULL because a row still has to hold a
+position in ``(ts DESC, id DESC)`` -- a NULL would need ``COALESCE`` in the
+ORDER BY, which stops ``entries_ts_id_idx`` being seekable and undoes ADR 053.
+Zero is unambiguous because nothing this app records can sit at the Unix epoch:
+``save_entry`` takes its ``ts`` from the clock.
+"""
+
 CURSOR_TS_MIN = -(2**63)
 CURSOR_TS_MAX = 2**63 - 1
 ROW_VALUE_MIN_SQLITE_VERSION = (3, 15)
@@ -74,8 +85,15 @@ class ConsolidateOutcome(str, Enum):
 
 
 class HistoryEntry(BaseModel):
+    """One stored transcript as the app reads it.
+
+    ``timestamp`` is ``None`` for a row whose recording time could not be
+    recovered -- see ``UNKNOWN_TS``. Everything else about such a row is
+    intact, so it renders in full with a dash where the date goes.
+    """
+
     id: str
-    timestamp: str
+    timestamp: str | None
     language: str
     style: str
     text: str
@@ -184,6 +202,49 @@ CREATE TABLE IF NOT EXISTS entries (
 );
 """
 
+_DDL_V4_ENTRIES = """
+CREATE TABLE entries_v4 (
+  id TEXT PRIMARY KEY NOT NULL,
+  ts INTEGER NOT NULL CHECK (typeof(ts) = 'integer'),
+  language TEXT NOT NULL,
+  style TEXT NOT NULL CHECK (style IN ('normal', 'ai_prompt')),
+  raw_text TEXT NOT NULL,
+  cleaned_text TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+  audio_duration_seconds REAL,
+  word_count INTEGER,
+  model_name TEXT,
+  tokens_used INTEGER
+)
+"""
+
+ORDERABLE_TS_SQL = (
+    "CASE WHEN typeof({ts}) = 'integer' THEN {ts} "
+    "WHEN typeof({ts}) = 'real' THEN CAST({ts} AS INTEGER) "
+    f"ELSE {UNKNOWN_TS} END"
+)
+"""The stored ``ts`` reduced to one an ordering can use, as an SQL expression.
+
+A REAL keeps its whole milliseconds; anything else -- TEXT that is not numeric,
+NULL, a BLOB -- has no recoverable value and becomes ``UNKNOWN_TS``. A *numeric*
+string never reaches the ELSE: column affinity has already converted it to an
+INTEGER on the way in, checked rather than assumed.
+
+Written once because two callers apply it and they must not drift: the v4
+migration repairs the rows already stored, and ``consolidate_into`` repairs the
+rows it copies. Without the second, ``INSERT OR IGNORE`` would meet the v4 CHECK
+and *silently skip* a violating source row -- the user's transcripts vanishing
+out of a merged file with nothing said.
+"""
+
+ORDERABLE_ID_SQL = "COALESCE({id}, 'recovered-' || lower(hex(randomblob(6))))"
+"""A stored ``id`` reduced to one that exists.
+
+``id TEXT PRIMARY KEY`` permits NULL on a rowid table, and the id is only the
+tiebreaker that makes the ordering total (ADR 053), so a minted one carries the
+same meaning as the one that is missing.
+"""
+
 _REPLACE_TS_INDEX_WITH_TS_ID_INDEX = """
 CREATE INDEX IF NOT EXISTS entries_ts_id_idx ON entries(ts DESC, id DESC);
 DROP INDEX IF EXISTS entries_ts_idx;
@@ -217,17 +278,24 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     ``_DDL_V1`` and ``_REPLACE_TS_INDEX_WITH_TS_ID_INDEX`` both run
     unconditionally and idempotently, so the ``entries_ts_idx`` ->
     ``entries_ts_id_idx`` swap reaches an existing database without a
-    ``SCHEMA_VERSION`` bump. Why it is not bumped, and what that leaves
+    ``SCHEMA_VERSION`` bump. ``_DDL_V1`` still declares the pre-v4 shape and is
+    deliberately left alone: it is what an existing file already holds, and
+    ``_migrate_to_v4_locked`` is what replaces it. Why it is not bumped, and what that leaves
     unrecorded, is ADR 053, "What it leaves unrecorded" -- stated there once,
     because the version of it that lived in both places had to be corrected in
     both places.
 
     Branches:
-      - fresh v0 / upgrade from v1 or v2 → run v2 DDL, rebuild FTS from
-        rows, run v3 DDL (embeddings_meta + entry_embeddings — both start
-        empty, no rows to replay), write user_version=3 LAST so a crash
-        before the PRAGMA leaves a retry-able prior-version state.
-      - already at v3 → re-run v2 DDL (IF NOT EXISTS makes this idempotent)
+      - fresh v0 / upgrade from v1, v2 or v3 → ``_migrate_to_v4_locked``,
+        which repairs every unorderable row, rebuilds ``entries`` behind a
+        constraint that refuses the shape, re-runs v2 DDL and rebuilds FTS;
+        then run v3 DDL (embeddings_meta + entry_embeddings — both start
+        empty, no rows to replay), and write user_version=4 LAST so a crash
+        before the PRAGMA leaves a retry-able prior-version state. **A fresh
+        database takes this path too**, on nought rows, so a new install and a
+        migrated one end up with the same ``entries`` declaration rather than
+        two that have to be kept in step by hand.
+      - already at v4 → re-run v2 DDL (IF NOT EXISTS makes this idempotent)
         and probe FTS integrity; rebuild on OperationalError so a partial
         migration that left user_version=3 but no FTS table self-heals.
         Also re-run v3 DDL (IF NOT EXISTS) so a partial migration that left
@@ -239,8 +307,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_REPLACE_TS_INDEX_WITH_TS_ID_INDEX)
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     if current < SCHEMA_VERSION:
-        conn.executescript(_DDL_V2)
-        conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
+        _migrate_to_v4_locked(conn)
         conn.executescript(vector_store._DDL_V3)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     else:
@@ -264,6 +331,66 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
         conn.executescript(vector_store._DDL_V3)
 
+
+def _migrate_to_v4_locked(conn: sqlite3.Connection) -> None:
+    """Repair every row that is not a position in ``(ts DESC, id DESC)``, then
+    make the shape unstorable.
+
+    Runs when ``user_version`` is below 4. ``_DDL_V1`` is
+    ``CREATE TABLE IF NOT EXISTS``, so a constraint written there never reaches
+    a file that already exists, and SQLite cannot add one to a table in place --
+    hence the copy-drop-rename, which is SQLite's own documented procedure.
+
+    **Foreign keys are off across the rebuild and checked after it.**
+    ``entry_embeddings.entry_id`` is ``REFERENCES entries(id) ON DELETE
+    CASCADE`` and ``_connect`` turns foreign keys on, so dropping ``entries``
+    with them enabled would cascade every embedding away.
+
+    **The three FTS triggers are dropped first.** They are on ``entries``, so
+    ``entries_au`` fires for every repaired row and ``entries_ai`` for every
+    copied one -- work that the rebuild below discards, and a hard failure on a
+    store whose ``entry_fts`` is missing, which is a partial-migration state
+    ``_init_schema`` exists to recover from. Dropping ``entries`` would drop
+    them anyway; ``_DDL_V2`` puts them back after the rename.
+
+    **Nothing here uses ``executescript``.** Python's ``sqlite3`` issues an
+    implicit COMMIT before running a script, which would end this transaction
+    before the copy.
+
+    The caller writes ``user_version`` last, so a crash between the commit and
+    the pragma re-runs this step, which is idempotent: after it, every row
+    already satisfies the CHECK.
+    """
+    previous_foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN")
+        try:
+            for trigger in ("entries_ai", "entries_ad", "entries_au"):
+                conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            conn.execute(f"UPDATE entries SET ts = {ORDERABLE_TS_SQL.format(ts='ts')}")
+            conn.execute(f"UPDATE entries SET id = {ORDERABLE_ID_SQL.format(id='id')}")
+            conn.execute("DROP TABLE IF EXISTS entries_v4")
+            conn.execute(_DDL_V4_ENTRIES)
+            column_list = columns_sql(ENTRY_COLUMNS)
+            conn.execute(
+                f"INSERT INTO entries_v4 ({column_list}) SELECT {column_list} FROM entries"
+            )
+            conn.execute("DROP TABLE entries")
+            conn.execute("ALTER TABLE entries_v4 RENAME TO entries")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            log.warning("Foreign key check after the v4 rebuild found %d rows", len(violations))
+    finally:
+        conn.execute(f"PRAGMA foreign_keys = {'ON' if previous_foreign_keys else 'OFF'}")
+
+    conn.executescript(_REPLACE_TS_INDEX_WITH_TS_ID_INDEX)
+    conn.executescript(_DDL_V2)
+    conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
 
 
 def _resolve_output_dir() -> Path:
@@ -295,7 +422,17 @@ def _iso_to_epoch_ms(ts: str) -> int:
     return int(round(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000))
 
 
-def _epoch_ms_to_iso(ms: int) -> str:
+def _epoch_ms_to_iso(ms: int) -> str | None:
+    """The stored ``ts`` as ISO 8601, or ``None`` when there is no date to show.
+
+    ``UNKNOWN_TS`` and anything below it is not a recording time -- it is what
+    the v4 migration writes for a row whose stored value could not be recovered
+    (see ``ORDERABLE_TS_SQL``). The tabs render a dash for it. Decided by the
+    user on 2026-09-10: a record whose text survived keeps its place in the
+    list, and its date shows as nothing rather than as a wrong date.
+    """
+    if ms <= UNKNOWN_TS:
+        return None
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
 
 
@@ -422,6 +559,21 @@ def columns_sql(columns: Sequence[str], alias: str = "") -> str:
     return ", ".join(f"{qualifier}{name}" for name in columns)
 
 
+def _repaired_select_expression(column: str) -> str:
+    """One column of a copy out of a foreign database, repaired where it must be.
+
+    ``id`` and ``ts`` are the ordering key and are the two columns a foreign
+    file can hold an unusable value in; every other column is copied as it
+    stands. The name is validated by ``columns_sql`` before it reaches SQL.
+    """
+    columns_sql([column])
+    if column == "ts":
+        return f"{ORDERABLE_TS_SQL.format(ts='ts')} AS ts"
+    if column == "id":
+        return f"{ORDERABLE_ID_SQL.format(id='id')} AS id"
+    return column
+
+
 def _premigration_path(target_dir: Path) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     candidate = target_dir / f"{HISTORY_FILENAME}.premigration-{stamp}"
@@ -445,7 +597,14 @@ def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateOut
     Rows are copied with ``INSERT OR IGNORE`` on the existing
     ``id TEXT PRIMARY KEY``, so a repeated run is a no-op and no row is ever
     overwritten. Only columns present in *both* databases are copied, so an
-    older source schema degrades to NULLs instead of raising. ``entry_fts``
+    older source schema degrades to NULLs instead of raising.
+
+    ``id`` and ``ts`` are repaired on the way in rather than copied verbatim.
+    Since v4 the target's ``entries`` refuses a NULL id and a non-integer
+    ``ts``, and ``INSERT OR IGNORE`` answers a refused row by **skipping it** --
+    measured, not assumed -- so copying verbatim would drop the user's
+    transcripts out of a merged file with nothing said. The same two
+    expressions the v4 migration applies are applied here. ``entry_fts``
     is filled by the ``entries_ai`` trigger and embeddings by
     ``run_background_indexer``, so no index is rebuilt here.
 
@@ -478,10 +637,11 @@ def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateOut
 
         shared = [name for name in ENTRY_COLUMNS if name in source_columns]
         column_list = columns_sql(shared)
+        select_list = ", ".join(_repaired_select_expression(name) for name in shared)
         conn.execute("BEGIN")
         cursor = conn.execute(
             f"INSERT OR IGNORE INTO entries ({column_list}) "
-            f"SELECT {column_list} FROM source.entries"
+            f"SELECT {select_list} FROM source.entries"
         )
         copied = cursor.rowcount
         conn.execute("COMMIT")
