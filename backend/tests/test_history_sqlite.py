@@ -2191,12 +2191,31 @@ def _seed_v3_store_with_unorderable_rows(db_path, with_embedding=False):
             )
         raw.execute("DELETE FROM entries WHERE id = 'deleted-later'")
         if with_embedding:
+            import sqlite_vec
+
+            raw.enable_load_extension(True)
+            sqlite_vec.load(raw)
+            raw.enable_load_extension(False)
             raw.execute(
                 "INSERT INTO embeddings_meta(id, provider, model, dim) VALUES (1,'p','m',4)"
             )
             raw.execute(
                 "INSERT INTO entry_embeddings(entry_id, model, dim, created_ts) "
                 "VALUES ('ok-newest','m',4,1)"
+            )
+            raw.execute(
+                "CREATE VIRTUAL TABLE vec_entries USING vec0(embedding float[4])"
+            )
+            raw.execute(
+                "CREATE TRIGGER entries_ad_vec AFTER DELETE ON entries BEGIN "
+                "DELETE FROM vec_entries WHERE rowid = old.rowid; END"
+            )
+            embedded_rowid = raw.execute(
+                "SELECT rowid FROM entries WHERE id = 'ok-newest'"
+            ).fetchone()[0]
+            raw.execute(
+                "INSERT INTO vec_entries(rowid, embedding) VALUES (?, ?)",
+                (embedded_rowid, sqlite_vec.serialize_float32([0.1, 0.2, 0.3, 0.4])),
             )
         raw.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
         raw.execute("PRAGMA user_version = 3")
@@ -2305,17 +2324,15 @@ def test_the_repaired_store_refuses_the_shape_coming_back(isolated_storage, tmp_
                 )
 
 
-def test_the_rebuild_keeps_the_search_index_and_the_embeddings(
+def test_the_rebuild_keeps_the_search_index_pointing_at_the_right_row(
     isolated_storage, tmp_path
 ):
-    """The rebuild moves every rowid and drops the table the embeddings point at.
+    """The rebuild renumbers every rowid, and entry_fts is keyed on exactly those.
 
-    entry_fts is external-content keyed on entries.rowid, so it has to be
-    rebuilt; entry_embeddings.entry_id is REFERENCES entries(id) ON DELETE
-    CASCADE and _connect turns foreign keys on, so a rebuild with them enabled
-    would cascade every embedding away.
+    Counting index entries would pass over an index whose rowids no longer
+    address anything, so the hit is resolved back to its row.
     """
-    _seed_v3_store_with_unorderable_rows(tmp_path / "history.db", with_embedding=True)
+    _seed_v3_store_with_unorderable_rows(tmp_path / "history.db")
 
     history.bootstrap(tmp_path)
 
@@ -2330,15 +2347,61 @@ def test_the_rebuild_keeps_the_search_index_and_the_embeddings(
                 "WHERE entry_fts MATCH 'fractional'"
             )
         ]
-        embeddings = conn.execute(
-            "SELECT count(*) FROM entry_embeddings"
-        ).fetchone()[0]
     assert matched == ["a fractional millisecond"], (
         "the hit has to resolve to the row that actually holds the word. Counting index "
         "entries instead passes over an index whose rowids no longer address anything, "
         "which is exactly what the rebuild renumbering every row produces"
     )
-    assert embeddings == 1, "the embedding computed before the migration must survive"
+
+
+def test_the_rebuild_discards_embeddings_rather_than_leaving_them_misaddressed(
+    isolated_storage, tmp_path
+):
+    """vec_entries addresses rows by entries.rowid, and vec0 has no rebuild.
+
+    Keeping it across a rebuild that renumbers every row means a semantic search
+    answers with a different transcript than the one that matched -- worse than
+    no answer, because it is confident. Recomputing an embedding is cheap and
+    happens on its own; the only thing that must be true here is that nothing
+    stale survives and that the recompute is actually armed.
+    """
+    _seed_v3_store_with_unorderable_rows(tmp_path / "history.db", with_embedding=True)
+
+    history.bootstrap(tmp_path)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        names = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master")
+        }
+        assert "vec_entries" not in names, (
+            "an index keyed on rowids that no longer exist must not survive the rebuild"
+        )
+        assert conn.execute("SELECT count(*) FROM entry_embeddings").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM embeddings_meta").fetchone()[0] == 0, (
+            "an empty embeddings_meta is what sends ensure_vec_table_locked down its "
+            "recreate path -- with the old row left in place it early-returns and the "
+            "entries_ad_vec trigger the table drop removed is never put back"
+        )
+
+        pending = conn.execute(
+            "SELECT count(*) FROM entries WHERE id NOT IN (SELECT entry_id FROM entry_embeddings)"
+        ).fetchone()[0]
+        assert pending == len(_UNORDERABLE_ROWS), (
+            "backfill_batch resumes from entry_embeddings, so every row has to look "
+            "un-embedded or nothing is ever recomputed"
+        )
+
+        vector_store.ensure_vec_table_locked(conn, "p", "m", 4)
+        recreated = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master")
+        }
+    assert {"vec_entries", "entries_ad_vec"} <= recreated, (
+        "the first embed after the migration has to put back both the index and the "
+        "delete trigger that DROP TABLE entries took with it"
+    )
 
 
 def test_a_store_already_at_the_current_version_is_not_rebuilt_again(
@@ -2395,4 +2458,330 @@ def test_a_merge_repairs_a_foreign_row_instead_of_skipping_it(
     assert texts == {text for _, _, text in _UNORDERABLE_ROWS}, (
         "every source row must arrive, repaired -- a skipped row is a transcript "
         "the user silently loses"
+    )
+
+
+_UNCONSTRAINED_ENTRIES_DDL = """
+CREATE TABLE entries (
+  id TEXT,
+  ts INTEGER,
+  language TEXT,
+  style TEXT,
+  raw_text TEXT,
+  cleaned_text TEXT,
+  duration_ms INTEGER,
+  audio_duration_seconds REAL,
+  word_count INTEGER,
+  model_name TEXT,
+  tokens_used INTEGER
+);
+"""
+
+
+def _seed_a_foreign_store(db_path, rows, ddl=_UNCONSTRAINED_ENTRIES_DDL):
+    """A history.db this app did not create: no constraints, no primary key.
+
+    `_DDL_V1` is CREATE TABLE IF NOT EXISTS, so whatever shape such a file holds
+    is the shape the migration reads from. `relocate`'s NEW_ALREADY_HAS_FILE
+    adopts one whole.
+    """
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.executescript(ddl)
+        for row in rows:
+            raw.execute(
+                f"INSERT INTO entries ({_UNORDERABLE_COLUMNS}) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                row,
+            )
+        raw.execute("PRAGMA user_version = 3")
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def test_a_foreign_store_the_constraints_reject_still_lets_the_app_start(
+    isolated_storage, tmp_path
+):
+    """The worst outcome this change could have had, and the one it must not.
+
+    `_init_schema` runs inside `bootstrap`, which the lifespan does not guard,
+    so a migration that raises is not a broken tab -- it is a backend that never
+    starts. Every one of these shapes is refused by the v4 declaration and every
+    one of them is reachable in a file this app did not write.
+    """
+    _seed_a_foreign_store(
+        tmp_path / "history.db",
+        [
+            (
+                "a",
+                1700000000003,
+                "en",
+                "meeting",
+                "an unknown style",
+                "an unknown style",
+                10,
+                1.0,
+                1,
+                "m",
+                None,
+            ),
+            (
+                "b",
+                1700000000002,
+                "en",
+                "normal",
+                "a negative duration",
+                "a negative duration",
+                -5,
+                1.0,
+                1,
+                "m",
+                None,
+            ),
+            (
+                "c",
+                1700000000001,
+                "en",
+                "normal",
+                "a fractional word count",
+                "a fractional word count",
+                10,
+                1.0,
+                3.5,
+                "m",
+                None,
+            ),
+            (
+                b"\xff\xfe",
+                1700000000000,
+                "en",
+                "normal",
+                "an id that is bytes",
+                "an id that is bytes",
+                10,
+                1.0,
+                1,
+                "m",
+                None,
+            ),
+            (
+                "e",
+                1700000000000000,
+                "en",
+                "normal",
+                "a date in microseconds",
+                "a date in microseconds",
+                10,
+                1.0,
+                1,
+                "m",
+                None,
+            ),
+            (
+                "f",
+                1699999999999,
+                None,
+                "normal",
+                "no language at all",
+                "no language at all",
+                10,
+                1.0,
+                1,
+                "m",
+                None,
+            ),
+        ],
+    )
+
+    history.bootstrap(tmp_path)
+
+    page = history.get_page(limit=20)
+    assert {e.text for e in page.entries} == {
+        "an unknown style",
+        "a negative duration",
+        "a fractional word count",
+        "an id that is bytes",
+        "a date in microseconds",
+        "no language at all",
+    }, "every row has to arrive: the transcript text is the part worth keeping"
+
+    by_text = {e.text: e for e in page.entries}
+    assert by_text["an unknown style"].style == "normal"
+    assert by_text["a negative duration"].duration_ms == 0
+    assert by_text["a fractional word count"].word_count is None
+    assert by_text["an id that is bytes"].id.startswith("recovered-")
+    assert by_text["a date in microseconds"].timestamp is None
+    assert by_text["no language at all"].language == ""
+
+    with history._lock:
+        version = history._ensure_conn_locked().execute(
+            "PRAGMA user_version"
+        ).fetchone()[0]
+    assert version == history.SCHEMA_VERSION
+
+
+def test_a_store_missing_a_column_this_build_knows_still_opens(
+    isolated_storage, tmp_path
+):
+    """SELECTing the full column list from a table this build did not create
+    raises `no such column` out of bootstrap. `consolidate_into` already solves
+    this by intersecting with the stored table's own columns."""
+    ddl = _UNCONSTRAINED_ENTRIES_DDL.replace(
+        "  model_name TEXT,\n  tokens_used INTEGER\n", "  model_name TEXT\n"
+    )
+    columns = _UNORDERABLE_COLUMNS.replace(", tokens_used", "")
+    raw = sqlite3.connect(tmp_path / "history.db")
+    try:
+        raw.executescript(ddl)
+        raw.execute(
+            f"INSERT INTO entries ({columns}) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                "a",
+                1700000000000,
+                "en",
+                "normal",
+                "no tokens column",
+                "no tokens column",
+                10,
+                1.0,
+                1,
+                "m",
+            ),
+        )
+        raw.execute("PRAGMA user_version = 3")
+        raw.commit()
+    finally:
+        raw.close()
+
+    history.bootstrap(tmp_path)
+
+    entries = history.get_page(limit=5).entries
+    assert [e.text for e in entries] == ["no tokens column"]
+    assert entries[0].tokens_used is None
+
+
+def test_two_rows_sharing_an_id_do_not_abort_the_whole_migration(
+    isolated_storage, tmp_path, caplog
+):
+    """A foreign table with no primary key can hold a duplicate id.
+
+    A duplicate must not take the other transcripts down with it, and it must
+    not vanish without a word either.
+    """
+    _seed_a_foreign_store(
+        tmp_path / "history.db",
+        [
+            ("same", 1700000000002, "en", "normal", "first", "first", 10, 1.0, 1, "m", None),
+            ("same", 1700000000001, "en", "normal", "second", "second", 10, 1.0, 1, "m", None),
+            (
+                "other",
+                1700000000000,
+                "en",
+                "normal",
+                "untouched",
+                "untouched",
+                10,
+                1.0,
+                1,
+                "m",
+                None,
+            ),
+        ],
+    )
+
+    with caplog.at_level("WARNING"):
+        history.bootstrap(tmp_path)
+
+    texts = {e.text for e in history.get_page(limit=10).entries}
+    assert "untouched" in texts
+    assert len(texts) == 2, "one of the two rows sharing an id survives"
+    assert any("shared an id" in record.message for record in caplog.records), (
+        "a transcript that could not be carried over has to be said out loud"
+    )
+
+
+def test_a_migration_that_cannot_run_leaves_the_app_working(isolated_storage, tmp_path):
+    """A store whose entries table has no id column at all.
+
+    Nothing can repair that, and the answer is still not to refuse to start.
+    """
+    raw = sqlite3.connect(tmp_path / "history.db")
+    try:
+        raw.executescript("CREATE TABLE entries (ts INTEGER, cleaned_text TEXT);")
+        raw.execute("INSERT INTO entries VALUES (1700000000000, 'orphaned')")
+        raw.execute("PRAGMA user_version = 3")
+        raw.commit()
+    finally:
+        raw.close()
+
+    history.bootstrap(tmp_path)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        stored = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
+    assert version == 3, "the version stays where it was so the next open tries again"
+    assert stored == 1, "and the row is still there to be repaired by a build that can"
+
+
+def test_a_rebuild_that_raises_mid_transaction_still_lets_the_app_start(
+    isolated_storage, tmp_path, monkeypatch
+):
+    """The column check catches what this build can see coming; this covers the rest.
+
+    Any sqlite error inside the rebuild -- a disk that fills during the copy, a
+    shape nobody predicted -- must land the same way as a store that cannot be
+    read at all: rolled back, logged, version untouched, app running.
+    """
+    _seed_v3_store_with_unorderable_rows(tmp_path / "history.db")
+    monkeypatch.setattr(history, "_DDL_V4_ENTRIES", "CREATE TABLE entries_v4 (nope")
+
+    history.bootstrap(tmp_path)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        stored = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
+        in_transaction = conn.in_transaction
+        foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    assert version == 3, "a failed rebuild must not claim the new version"
+    assert stored == len(_UNORDERABLE_ROWS), "and must not lose a row on the way out"
+    assert not in_transaction, "the rollback has to leave the shared connection clean"
+    assert foreign_keys == 1, (
+        "foreign keys are turned off for the rebuild and this connection lives for the "
+        "life of the process -- left off, entry_embeddings stops cascading on delete "
+        "for every later call, with nothing anywhere saying so"
+    )
+
+
+def test_merging_the_same_source_twice_does_not_duplicate_a_repaired_row(
+    isolated_storage, tmp_path
+):
+    """consolidate_into promises a repeated run is a no-op.
+
+    It is reachable: when the source cannot be renamed aside the function still
+    answers CONSOLIDATED, and the next startup merges the same file again. A
+    repaired id minted at random would give the same source row a different id
+    each pass, so INSERT OR IGNORE would have nothing to match and every
+    NULL-id transcript would arrive twice.
+    """
+    source_dir = tmp_path / "source"
+    target_dir = tmp_path / "target"
+    source_dir.mkdir()
+    target_dir.mkdir()
+    _seed_v3_store_with_unorderable_rows(source_dir / "history.db")
+    original = (source_dir / "history.db").read_bytes()
+
+    first, error = history.consolidate_into(source_dir, target_dir)
+    assert first is history.ConsolidateOutcome.CONSOLIDATED, error
+    (source_dir / "history.db").write_bytes(original)
+    second, error = history.consolidate_into(source_dir, target_dir)
+    assert second is history.ConsolidateOutcome.CONSOLIDATED, error
+
+    history.bootstrap(target_dir)
+    entries = history.get_page(limit=50).entries
+    assert len(entries) == len(_UNORDERABLE_ROWS), (
+        "the second pass must add nothing: "
+        + ", ".join(sorted(e.text for e in entries))
     )
