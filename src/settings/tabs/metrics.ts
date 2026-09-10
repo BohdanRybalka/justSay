@@ -44,6 +44,7 @@ export function renderMetrics(container: HTMLElement): () => void {
   const list = createHistoryList({
     pageSize: PAGE_SIZE,
     noun: { singular: "entry", plural: "entries" },
+    featureName: "Metrics",
     elements: {
       count: countEl,
       rows: tbody,

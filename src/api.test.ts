@@ -1093,6 +1093,35 @@ describe("the history cursor on the wire", () => {
     removeBridge();
   });
 
+  it.each([404, 405])(
+    "reports a /history/search that answers %i as the same version skew /history reports",
+    async (status) => {
+      const { api, SidecarTooOldError } = await import("./api");
+      fetchMock.mockResolvedValue(errJson(status, "Not Found"));
+
+      const error = await api.searchHistory("note").then(
+        () => null,
+        (thrown: unknown) => thrown,
+      );
+
+      expect(error).toBeInstanceOf(SidecarTooOldError);
+    },
+  );
+
+  it("leaves any other search failure as the ApiRequestError it was", async () => {
+    const { api, SidecarTooOldError, ApiRequestError } = await import("./api");
+    fetchMock.mockResolvedValue(errJson(503, "store busy"));
+
+    const error = await api.searchHistory("note").then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect(error).not.toBeInstanceOf(SidecarTooOldError);
+    expect((error as Error).message).toBe("store busy");
+  });
+
   it("sends no cursor parameter at all for the first page", async () => {
     const { api } = await import("./api");
     fetchMock.mockResolvedValue(okJson({ entries: [], total: 0, next_cursor: null }));
@@ -1111,6 +1140,56 @@ describe("the history cursor on the wire", () => {
     expect(fetchMock.mock.calls[0][0]).toBe(
       "http://127.0.0.1:9377/history?limit=30&before_ts=1700000000042&before_id=ff00ff00ff00",
     );
+  });
+
+  it("rejects a null body as malformed rather than as version skew", async () => {
+    const { api, SidecarTooOldError } = await import("./api");
+    fetchMock.mockResolvedValue(okJson(null));
+
+    const error = await api.getHistory(30).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(SidecarTooOldError);
+    expect((error as Error).message).toBe("/history returned a body that is not an object");
+    expect((error as Error).name).toBe("Error");
+  });
+
+  it("rejects a primitive body the same way, before the presence test runs", async () => {
+    const { api, SidecarTooOldError } = await import("./api");
+    fetchMock.mockResolvedValue(okJson(42));
+
+    const error = await api.getHistory(30).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    expect(error).not.toBeInstanceOf(SidecarTooOldError);
+    expect((error as Error).message).toBe("/history returned a body that is not an object");
+  });
+
+  it("rejects an array body as malformed, which the presence test alone would call version skew", async () => {
+    const { api, SidecarTooOldError } = await import("./api");
+    fetchMock.mockResolvedValue(okJson([]));
+
+    const error = await api.getHistory(30).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    expect(error).not.toBeInstanceOf(SidecarTooOldError);
+    expect((error as Error).message).toBe("/history returned a body that is not an object");
+  });
+
+  it("normalises a present-but-undefined next_cursor to null once the presence test has passed", async () => {
+    const { api } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ entries: [], total: 0, next_cursor: undefined }));
+
+    const page = await api.getHistory(30);
+
+    expect(page.next_cursor).toBeNull();
   });
 
   it("escapes an id rather than pasting it into the query string", async () => {

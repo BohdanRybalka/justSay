@@ -1,5 +1,5 @@
-import { api, type HistoryEntry } from "../../api";
-import { createHistoryList } from "../history-list";
+import { api, SidecarTooOldError, type HistoryEntry } from "../../api";
+import { createHistoryList, sidecarTooOldText, type HistoryRowsClaim } from "../history-list";
 import { escapeHtml } from "../html";
 
 const DATE_FORMATTER = new Intl.DateTimeFormat("uk-UA", {
@@ -46,14 +46,14 @@ export function renderHistory(container: HTMLElement): () => void {
   const btnLoadMore = container.querySelector<HTMLButtonElement>("#btn-load-more")!;
   const btnClear = container.querySelector<HTMLButtonElement>("#btn-clear-history")!;
 
-  let inSearchMode = false;
+  let searchClaim: HistoryRowsClaim | null = null;
   let debounceTimer: number | null = null;
-  let searchSeq = 0;
   let destroyed = false;
 
   const list = createHistoryList({
     pageSize: PAGE_SIZE,
     noun: { singular: "transcript", plural: "transcripts" },
+    featureName: "History",
     elements: {
       count: countEl,
       rows: listEl,
@@ -68,48 +68,75 @@ export function renderHistory(container: HTMLElement): () => void {
     isDestroyed: () => destroyed,
     onCleared: () => {
       searchInput.value = "";
-      inSearchMode = false;
+      searchHint.textContent = "";
     },
   });
 
-  function loadEntries(): Promise<void> {
-    inSearchMode = false;
-    ++searchSeq;
-    return list.load();
+  function noMatchesElement(): HTMLElement {
+    const el = document.createElement("div");
+    el.style.cssText = "color: var(--text-muted); padding: 32px; text-align: center;";
+    el.textContent = "No matches";
+    return el;
   }
 
+  /**
+   * The search lane, holding a claim on the shared rows for as long as what is on
+   * screen is its own paint.
+   *
+   * Every row it paints goes through `claim.replaceRows`, including the empty
+   * state, so the shared list is the only writer of the row container and knows
+   * whose paint is on screen. A search that claims and then fails repaints
+   * nothing, and the list's own count keeps describing the list's own rows.
+   *
+   * The claim is taken before the request rather than after it, so a page load
+   * already in flight is superseded at the moment the user asks for matches and
+   * cannot repaint the unfiltered history over them when it answers. It is what
+   * "am I showing search results?" reads, so the lane that painted and the lane
+   * the tab believes painted are always the same lane.
+   *
+   * The hint is the one element the claim does not cover, because it belongs to
+   * this tab rather than to the shared list. A search that is itself superseded
+   * returns without writing its own outcome, so the `finally` clears the hint it
+   * put up -- otherwise "Searching..." stays on screen for good over rows some
+   * other lane painted.
+   *
+   * What the `finally` asks is whether a newer *search* exists, not whether this
+   * lane is still current. A newer search owns the hint and has already written
+   * its own text into it, so blanking it there would erase a live error message
+   * -- the same defect, moved one element over. Only a reload or a Clear All can
+   * supersede this lane while `searchClaim` still points at it, and after one of
+   * those there is no search on screen for the hint to describe.
+   */
   async function runSearch(q: string) {
-    inSearchMode = true;
-    const seq = ++searchSeq;
+    const claim = list.claimRows();
+    searchClaim = claim;
     searchHint.textContent = "Searching...";
     try {
       const resp = await api.searchHistory(q, PAGE_SIZE);
-      if (destroyed || seq !== searchSeq) return;
-      listEl.innerHTML = "";
-      list.renderCount(`${resp.total} match${resp.total !== 1 ? "es" : ""}`);
-      if (resp.entries.length === 0) {
-        listEl.innerHTML = `<div style="color: var(--text-muted); padding: 32px; text-align: center;">No matches</div>`;
+      claim.replaceRows(
+        resp.entries.length === 0
+          ? [noMatchesElement()]
+          : resp.entries.map((entry) => createEntryElement(entry))
+      );
+      claim.renderCount(`${resp.total} match${resp.total !== 1 ? "es" : ""}`);
+      claim.renderLoadMore(false);
+      if (claim.isCurrent()) {
+        searchHint.textContent = "";
       }
-      for (const entry of resp.entries) {
-        listEl.appendChild(createEntryElement(entry));
-      }
-      list.renderLoadMore(false);
-      searchHint.textContent = "";
     } catch (e) {
-      if (destroyed || seq !== searchSeq) return;
-      const msg = (e as Error).message || "Search failed";
-      const lower = msg.toLowerCase();
-      const sidecarTooOld =
-        lower.includes("not found") ||
-        lower.includes("http 404") ||
-        lower.includes("method not allowed") ||
-        lower.includes("http 405");
-      if (sidecarTooOld) {
-        searchHint.textContent = "Search needs the latest backend — please update JustSay.";
+      if (!claim.isCurrent()) return;
+      if (e instanceof SidecarTooOldError) {
+        searchHint.textContent = sidecarTooOldText("Search");
       } else {
-        searchHint.textContent = lower.includes("invalid")
+        const msg = (e as Error).message || "Search failed";
+        searchHint.textContent = msg.toLowerCase().includes("invalid")
           ? "Invalid search query"
           : msg;
+      }
+    } finally {
+      claim.release();
+      if (!destroyed && searchClaim === claim && !claim.isCurrent()) {
+        searchHint.textContent = "";
       }
     }
   }
@@ -123,9 +150,9 @@ export function renderHistory(container: HTMLElement): () => void {
       debounceTimer = null;
       if (!value) {
         searchHint.textContent = "";
-        loadEntries();
+        void list.load();
       } else {
-        runSearch(value);
+        void runSearch(value);
       }
     }, SEARCH_DEBOUNCE_MS);
   });
@@ -182,9 +209,7 @@ export function renderHistory(container: HTMLElement): () => void {
         try {
           await api.deleteHistoryEntry(entry.id);
           el.remove();
-          if (!inSearchMode) {
-            list.entryRemoved();
-          }
+          list.entryRemoved();
         } catch (err) {
           console.error(err);
         }
@@ -194,7 +219,7 @@ export function renderHistory(container: HTMLElement): () => void {
     return el;
   }
 
-  loadEntries();
+  void list.load();
 
   return () => {
     destroyed = true;

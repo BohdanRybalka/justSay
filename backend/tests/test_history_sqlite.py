@@ -11,6 +11,7 @@ import contextlib
 import sqlite3
 import threading
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -31,6 +32,7 @@ def isolated_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(history, "_output_dir", tmp_path)
     monkeypatch.setattr(history, "_conn", None)
     monkeypatch.setattr(history, "_stats_cache", None)
+    monkeypatch.setattr(history, "_page_total_cache", None)
 
     yield {"tmp_path": tmp_path}
 
@@ -1164,17 +1166,20 @@ class _RecordingLock:
         return self._inner.__exit__(*exc)
 
 
-def test_get_page_never_releases_the_store_lock_between_its_two_reads(isolated_storage, tmp_path):
-    """JS-126's technical half: the page and the total must come from one state.
+def test_get_page_never_releases_the_store_lock_between_its_reads(isolated_storage, tmp_path):
+    """JS-126's technical half: the page, the probe and the total come from one state.
 
-    What has to hold is that no other thread can write between the two reads, and
-    the only thing that guarantees it is the lock staying held across both. Two
-    weaker pins were tried and both passed against a mutant that reintroduces the
-    defect: a writer thread started from inside ``get_page`` is blocked while
-    *either* read holds the lock, and counting acquisitions cannot see a
+    What has to hold is that no other thread can write between the reads, and
+    the only thing that guarantees it is the lock staying held across all of them.
+    Two weaker pins were tried and both passed against a mutant that reintroduces
+    the defect: a writer thread started from inside ``get_page`` is blocked while
+    *any* read holds the lock, and counting acquisitions cannot see a
     ``_count_locked`` moved out of the ``with`` block entirely. Recording the
-    sequence is what distinguishes them — a release between the two reads is
+    sequence is what distinguishes them — a release between two of the reads is
     exactly the defect, whether or not a second acquisition follows it.
+
+    The page size matches the store size so the page comes back full and the
+    has-more probe runs; a short page skips it and could not pin its position.
     """
     target = tmp_path / "target"
     history.bootstrap(target)
@@ -1183,11 +1188,16 @@ def test_get_page_never_releases_the_store_lock_between_its_two_reads(isolated_s
 
     events: list[str] = []
     real_entries_locked = history._entries_locked
+    real_has_more_locked = history._has_more_locked
     real_count_locked = history._count_locked
 
     def entries(conn, limit, before):
         events.append("read-entries")
         return real_entries_locked(conn, limit, before)
+
+    def has_more(conn, after_ts, after_id):
+        events.append("read-has-more")
+        return real_has_more_locked(conn, after_ts, after_id)
 
     def count(conn):
         events.append("read-count")
@@ -1196,12 +1206,13 @@ def test_get_page_never_releases_the_store_lock_between_its_two_reads(isolated_s
     with (
         patch.object(history, "_lock", _RecordingLock(history._lock, events)),
         patch.object(history, "_entries_locked", entries),
+        patch.object(history, "_has_more_locked", has_more),
         patch.object(history, "_count_locked", count),
     ):
-        page = history.get_page(limit=50)
+        page = history.get_page(limit=3)
 
-    assert events == ["acquire", "read-entries", "read-count", "release"], (
-        "the store lock was released between the page read and the total, so a write "
+    assert events == ["acquire", "read-entries", "read-has-more", "read-count", "release"], (
+        "the store lock was released between two of the page's reads, so a write "
         f"can land between them: {events}"
     )
     assert len(page.entries) == page.total == 3
@@ -1321,9 +1332,10 @@ def test_next_cursor_is_null_only_on_the_last_page(isolated_storage, tmp_path):
 def test_an_exactly_full_last_page_costs_no_extra_request(isolated_storage, tmp_path):
     """60 rows at page size 30 is two requests, not three.
 
-    This is what the ``limit + 1`` probe buys over comparing a count: asking for
-    31 rows and getting 30 is how the second page learns it is the last one, so
-    "Load more" never offers a page that turns out to be empty.
+    This is what the has-more probe buys over comparing a count: a full page asks
+    the index whether one more key exists past its last row, so the second page
+    learns it is the last one and "Load more" never offers a page that turns out
+    to be empty.
     """
     _seed(tmp_path / "target", 60, lambda index: 1_700_000_000_000 + index)
 
@@ -1367,11 +1379,9 @@ def test_a_saved_id_fits_the_cursor_id_bound(isolated_storage, tmp_path):
     assert len(history.save_entry(text="x", duration_ms=1).id) < history.CURSOR_ID_MAX_LENGTH
 
 
-def test_the_page_read_asks_for_exactly_one_row_more_than_the_clamped_limit(
-    isolated_storage, tmp_path
-):
-    """The clamp bounds the probe too: the largest read the store ever issues is
-    ``HISTORY_LIMIT_MAX + 1`` rows, not the caller's number plus one."""
+def test_the_page_read_asks_for_exactly_the_clamped_limit(isolated_storage, tmp_path):
+    """The clamp is the whole bound: the largest read the store ever issues is
+    ``HISTORY_LIMIT_MAX`` rows, and no row is read only to be dropped (ADR 055)."""
     history.bootstrap(tmp_path / "target")
     for index in range(history.HISTORY_LIMIT_MAX + 5):
         history.save_entry(text=f"entry {index}", duration_ms=1)
@@ -1387,7 +1397,7 @@ def test_the_page_read_asks_for_exactly_one_row_more_than_the_clamped_limit(
     with patch.object(history, "_entries_locked", entries):
         page = history.get_page(limit=history.HISTORY_LIMIT_MAX + 100)
 
-    assert read_sizes == [history.HISTORY_LIMIT_MAX + 1]
+    assert read_sizes == [history.HISTORY_LIMIT_MAX]
     assert len(page.entries) == history.HISTORY_LIMIT_MAX
 
 
@@ -1559,6 +1569,406 @@ def test_the_shipped_stats_aggregate_plan_is_unchanged_by_the_index_swap(
     assert not any("entries_ts_id_idx" in step for step in plan), (reads[0], plan)
 
 
+def _the_has_more_probe(action):
+    """The key-only statement that answers "is there another page", if one ran."""
+    return [
+        statement
+        for statement in _statements_from(action)
+        if _reads_entries(statement)
+        and "raw_text" not in statement
+        and "COUNT(*)" not in statement.upper()
+    ]
+
+
+def test_a_full_page_reads_exactly_the_rows_it_returns(isolated_storage, tmp_path):
+    """ADR 055's first half, pinned on the statement the store actually issued.
+
+    The trace callback substitutes the bound parameters in, so the limit the page
+    read carries is readable rather than inferred: a page of 30 asks SQLite for 30
+    rows, not for 31 of which one transcript body is thrown away.
+    """
+    _seed(tmp_path / "target", 60, lambda index: 1_700_000_000_000 + index)
+
+    reads = [
+        statement
+        for statement in _statements_from(lambda: history.get_page(limit=30))
+        if _reads_entries(statement) and "raw_text" in statement
+    ]
+
+    assert len(reads) == 1, reads
+    assert "LIMIT 30" in " ".join(reads[0].split()).upper(), reads[0]
+
+
+def test_the_has_more_probe_reads_a_key_and_seeks_the_index(isolated_storage, tmp_path):
+    """The question a full page asks about the next one costs an index key.
+
+    Both halves are asserted on the shipped statement: it names no transcript
+    column, and the planner answers it out of ``entries_ts_id_idx`` without
+    reaching a table row or sorting.
+
+    The covering assertion is what the column loop cannot make. ``SELECT *``
+    names none of ``ENTRY_READ_COLUMNS`` literally and still seeks the index, so
+    every other check here passes while the probe reads a whole transcript body
+    per page. Only ``COVERING INDEX`` in the plan says the table was never
+    reached.
+    """
+    _seed(tmp_path / "target", 60, lambda index: 1_700_000_000_000 + index)
+
+    probes = _the_has_more_probe(lambda: history.get_page(limit=30))
+
+    assert len(probes) == 1, probes
+    for column in history.ENTRY_READ_COLUMNS:
+        if column not in ("id", "ts"):
+            assert column not in probes[0], probes[0]
+
+    plan = _plan_of(probes[0])
+    assert any("SEARCH" in step and "entries_ts_id_idx" in step for step in plan), plan
+    assert not any("SCAN entries" in step for step in plan), plan
+    assert not any("TEMP B-TREE" in step for step in plan), plan
+    assert any("COVERING INDEX" in step.upper() for step in plan), plan
+
+
+def test_a_short_page_asks_nothing_about_a_next_one(isolated_storage, tmp_path):
+    """A page that comes back short is the last one by its own length, so the
+    probe is skipped entirely rather than run to learn what is already known."""
+    _seed(tmp_path / "target", 10, lambda index: 1_700_000_000_000 + index)
+
+    page = history.get_page(limit=30)
+    probes = _the_has_more_probe(lambda: history.get_page(limit=30))
+
+    assert page.next_cursor is None
+    assert probes == [], probes
+
+
+def test_a_full_last_page_validates_no_cursor(isolated_storage, tmp_path):
+    """An id too long for ``HistoryCursor`` no longer breaks a full *last* page.
+
+    ``consolidate_into`` copies ids verbatim out of a merged database, so a row
+    whose id exceeds ``CURSOR_ID_MAX_LENGTH`` can be sitting in the store. A page
+    that is both full and last returns no cursor, so building one to ask "is
+    there more" turned a page that reads fine into a ``ValidationError`` and a
+    500. The probe therefore takes the position as primitives.
+
+    That is the whole of what this pins. A full page that *does* have a page
+    after it returns a cursor built from that same id and still raises, which is
+    JS-137 and predates this spec.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    over_long_id = "x" * (history.CURSOR_ID_MAX_LENGTH + 1)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.execute("BEGIN")
+        conn.executemany(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES (?, ?, 'uk', 'normal', 'row', 'row', 1)",
+            [("newer", 1_700_000_000_001), (over_long_id, 1_700_000_000_000)],
+        )
+        conn.execute("COMMIT")
+        history.invalidate_derived_caches_locked()
+
+    page = history.get_page(limit=2)
+
+    assert page.next_cursor is None
+    assert [entry.id for entry in page.entries] == ["newer", over_long_id]
+
+
+def test_clear_all_reports_the_rows_it_deleted_not_a_memoised_count(
+    isolated_storage, tmp_path
+):
+    """``ClearResult.deleted`` comes from the DELETE, so the cache cannot skew it.
+
+    A row smuggled past every mutator leaves the memoised total one behind the
+    table -- the residual risk ADR 055 accepts for the number on screen. The
+    number of rows a delete removed is not that number, and ``cursor.rowcount``
+    is what knows it.
+    """
+    _seed(tmp_path / "target", 3, lambda index: 1_700_000_000_000 + index)
+    assert history.get_page(limit=1).total == 3
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.execute("BEGIN")
+        conn.execute(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('smuggled', 1, 'uk', 'normal', 'row', 'row', 1)"
+        )
+        conn.execute("COMMIT")
+
+    assert history.clear_all() == 4
+
+
+def test_closing_the_connection_drops_the_memoised_total(isolated_storage, tmp_path):
+    """The cache is the only strong reference to the connection it is keyed on.
+
+    Left in place, it keeps a closed ``sqlite3.Connection`` alive past every
+    ``bootstrap``, ``relocate`` and reopen. Clearing it where the connection is
+    closed removes the retention, and with it the question of whether a freed
+    connection could be replaced at the same address and match ``is``.
+    """
+    _seed(tmp_path / "target", 3, lambda index: 1_700_000_000_000 + index)
+    history.get_page(limit=1)
+    assert history._page_total_cache is not None
+
+    with history._lock:
+        history._close_conn_locked()
+
+    assert history._page_total_cache is None
+
+
+def test_the_total_is_counted_once_until_a_write_lands(
+    isolated_storage, tmp_path, monkeypatch
+):
+    """ADR 055's second half: the only term that grew with the store is now read
+    when it can have changed, not once per page.
+
+    The clock is pinned rather than raced. The memo's third key is an age against
+    ``time.monotonic``, so on real time these calls would have to finish inside
+    ``STATS_TTL_SECONDS`` and a stalled worker would fail this test for a reason
+    other than the defect it names.
+    """
+    monkeypatch.setattr(history, "time", SimpleNamespace(monotonic=lambda: 1_000.0))
+    _seed(tmp_path / "target", 10, lambda index: 1_700_000_000_000 + index)
+
+    def counts(action):
+        return [
+            statement
+            for statement in _statements_from(action)
+            if "COUNT(*)" in statement.upper() and "FROM ENTRIES" in statement.upper()
+        ]
+
+    def three_pages():
+        for _ in range(3):
+            history.get_page(limit=5)
+
+    assert len(counts(three_pages)) == 1
+
+    history.save_entry(text="one more", duration_ms=1)
+
+    assert len(counts(lambda: history.get_page(limit=5))) == 1
+
+
+def test_the_total_matches_a_fresh_count_after_every_mutator(isolated_storage, tmp_path):
+    """The cached total against an independent oracle, not against a second call
+    into the code under test: a ``SELECT COUNT(*)`` read through its own
+    connection on the same file, after each path that can change the row count.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+
+    def fresh_count():
+        conn = sqlite3.connect(target / "history.db")
+        try:
+            return conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+        finally:
+            conn.close()
+
+    def assert_agrees(step):
+        assert history.get_page(limit=1).total == fresh_count(), step
+
+    kept = history.save_entry(text="kept", duration_ms=1).id
+    history.save_entry(text="doomed", duration_ms=1)
+    assert_agrees("after save_entry")
+
+    history.delete_entry(kept)
+    assert_agrees("after delete_entry")
+
+    history.save_entry(text="another", duration_ms=1)
+    assert_agrees("after a second save_entry")
+
+    history.clear_all()
+    assert_agrees("after clear_all")
+
+    history.save_entry(text="post-clear", duration_ms=1)
+    with history._lock:
+        history._close_conn_locked()
+    history.bootstrap(target)
+    assert_agrees("after a store reopen")
+
+
+def test_the_total_follows_the_generation_counter_not_the_table(isolated_storage, tmp_path):
+    """Both halves of the invalidation contract in one test.
+
+    A row written straight through the open connection, behind every mutator that
+    would have bumped the generation, does not move the total; bumping the counter
+    by hand does. That is exactly the residual risk ADR 055 accepts, stated as a
+    test rather than as a sentence.
+    """
+    _seed(tmp_path / "target", 3, lambda index: 1_700_000_000_000 + index)
+    assert history.get_page(limit=1).total == 3
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.execute("BEGIN")
+        conn.execute(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('smuggled', 1, 'uk', 'normal', 'row', 'row', 1)"
+        )
+        conn.execute("COMMIT")
+
+    assert history.get_page(limit=1).total == 3
+
+    with history._lock:
+        history.invalidate_derived_caches_locked()
+
+    assert history.get_page(limit=1).total == 4
+
+
+def test_the_memoised_total_expires_so_a_second_writer_is_picked_up(
+    isolated_storage, tmp_path, monkeypatch
+):
+    """A writer outside this process bumps no generation, so only the age catches it.
+
+    ``journal_mode=DELETE`` exists for exactly this shape -- the same
+    ``history.db`` reachable from a second process, a sync folder being the case
+    the module docstring names. Such a writer changes the table without going
+    through any mutator in this module, so the generation and the connection
+    halves of the key both still match and the memoised total would stand
+    forever. ``STATS_TTL_SECONDS`` is what bounds that, and the cache is aged by
+    hand rather than by sleeping for it.
+    """
+    target = tmp_path / "target"
+    _seed(target, 3, lambda index: 1_700_000_000_000 + index)
+    assert history.get_page(limit=1).total == 3
+
+    other_process = sqlite3.connect(target / "history.db")
+    try:
+        other_process.execute(
+            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('from-elsewhere', 1, 'uk', 'normal', 'row', 'row', 1)"
+        )
+        other_process.commit()
+    finally:
+        other_process.close()
+
+    assert history.get_page(limit=1).total == 3
+
+    stamp, generation, cached_conn, total = history._page_total_cache
+    monkeypatch.setattr(
+        history,
+        "_page_total_cache",
+        (stamp - history.STATS_TTL_SECONDS - 1, generation, cached_conn, total),
+    )
+
+    assert history.get_page(limit=1).total == 4
+
+
+def test_the_plan_probe_reports_every_shape_that_failed(isolated_storage):
+    """``selftest`` promises every check runs and a failure reports all of them.
+
+    ``cursor_seek_plan_failure`` is one of those checks and makes the same
+    promise across the shapes it plans: with both broken, both are named. A probe
+    that returned on the first one would hide the second in exactly the
+    environment -- an old bundled library -- where knowing how much of the read
+    path it broke is the point.
+    """
+    shipped = history._CURSOR_SEEK_PLAN_SHAPES
+    assert len(shipped) > 1, shipped
+
+    projection_that_walks_the_table = "(SELECT COUNT(*) FROM entries)"
+    all_broken = tuple(
+        (name, projection_that_walks_the_table, requires_covering)
+        for name, _, requires_covering in shipped
+    )
+
+    with patch.object(history, "_CURSOR_SEEK_PLAN_SHAPES", all_broken):
+        failure = history.cursor_seek_plan_failure()
+
+    assert failure is not None
+    for name, _, _ in shipped:
+        assert name in failure, (name, failure)
+
+
+def test_the_plan_probe_reports_every_condition_one_shape_failed(isolated_storage):
+    """A shape that breaks two of the plan assertions is reported on both.
+
+    The packaged build this probe exists for is the one where the bundled
+    library is old enough to break more than one property at a time, and how
+    much of the read path it gave back is the whole value of the message. A
+    projection that reaches the table through a scanning subquery fails the
+    table-walk assertion and the covering one together, and both must be named.
+    """
+    shipped = history._CURSOR_SEEK_PLAN_SHAPES
+    covering = [position for position, shape in enumerate(shipped) if shape[2]]
+    assert covering, shipped
+    broken = covering[0]
+
+    projection_that_scans_and_reaches_the_table = (
+        "raw_text, (SELECT COUNT(raw_text) FROM entries)"
+    )
+    patched = tuple(
+        (
+            name,
+            projection_that_scans_and_reaches_the_table if position == broken else projection,
+            requires_covering,
+        )
+        for position, (name, projection, requires_covering) in enumerate(shipped)
+    )
+
+    with patch.object(history, "_CURSOR_SEEK_PLAN_SHAPES", patched):
+        failure = history.cursor_seek_plan_failure()
+
+    assert failure is not None
+    assert "walks the entries table" in failure, failure
+    assert "instead of answering from the index" in failure, failure
+
+
+def test_the_plan_probe_names_the_shape_that_walked_the_index(isolated_storage):
+    """Both shipped shapes are planned, and a failure says which one failed.
+
+    Exactly one shape at a time is given a projection whose plan walks the table
+    while every other shape keeps the one it ships with, so the message is
+    attributed rather than merely produced: a probe that named the first
+    configured shape whatever failed would report the wrong statement for half of
+    what ships, and would still pass a test that broke every shape at once.
+
+    The same attribution is asserted for the covering requirement, one shape at a
+    time, against a projection that seeks the index and then reaches the table --
+    the exact mutation a seek-only probe accepts.
+    """
+    assert history.cursor_seek_plan_failure() is None
+
+    shipped = history._CURSOR_SEEK_PLAN_SHAPES
+
+    def broken_one_at_a_time(position_broken, projection_that_fails):
+        return tuple(
+            (
+                name,
+                projection_that_fails if position == position_broken else projection,
+                requires_covering,
+            )
+            for position, (name, projection, requires_covering) in enumerate(shipped)
+        )
+
+    def assert_names_only(patched, position_broken):
+        with patch.object(history, "_CURSOR_SEEK_PLAN_SHAPES", patched):
+            failure = history.cursor_seek_plan_failure()
+        assert failure is not None, patched
+        assert shipped[position_broken][0] in failure, (
+            shipped[position_broken][0],
+            failure,
+        )
+        for position, (name, _, _) in enumerate(shipped):
+            if position != position_broken:
+                assert name not in failure, (name, failure)
+
+    projection_that_walks_the_table = "(SELECT COUNT(*) FROM entries)"
+    for broken in range(len(shipped)):
+        assert_names_only(
+            broken_one_at_a_time(broken, projection_that_walks_the_table), broken
+        )
+
+    projection_that_reaches_the_table = "*"
+    covering = [
+        position for position, shape in enumerate(shipped) if shape[2]
+    ]
+    assert covering, shipped
+    for broken in covering:
+        assert_names_only(
+            broken_one_at_a_time(broken, projection_that_reaches_the_table), broken
+        )
+
+
 def _bulk_seed(target, count):
     history.bootstrap(target)
     with history._lock:
@@ -1608,7 +2018,13 @@ def _run_read(sql):
 def _last_page_probe(store_size, tmp_path, name):
     """Steps for the whole shipped ``get_page`` of the last page, steps for the
     offset read it replaces, and the statements the shipped call issued over
-    ``entries``, on a store of ``store_size`` rows."""
+    ``entries``, on a store of ``store_size`` rows.
+
+    The derived caches are dropped between the measured call and the traced one, so
+    the traced call is a separate cold call rather than a warmed repeat of the
+    measured one: it is structurally identical to the call the step counter was
+    open across, which is what its statement list stands in for.
+    """
     _bulk_seed(tmp_path / name, store_size)
     with history._lock:
         conn = history._ensure_conn_locked()
@@ -1621,9 +2037,13 @@ def _last_page_probe(store_size, tmp_path, name):
         f"SELECT {history.columns_sql(history.ENTRY_READ_COLUMNS)} FROM entries "
         f"ORDER BY ts DESC LIMIT 30 OFFSET {store_size - 30}"
     )
+    cursor_steps = _vm_steps_of(lambda: history.get_page(limit=30, before=cursor))
+    offset_steps = _vm_steps_of(lambda: _run_read(offset_read))
+    with history._lock:
+        history.invalidate_derived_caches_locked()
     return (
-        _vm_steps_of(lambda: history.get_page(limit=30, before=cursor)),
-        _vm_steps_of(lambda: _run_read(offset_read)),
+        cursor_steps,
+        offset_steps,
         [
             statement
             for statement in _statements_from(lambda: history.get_page(limit=30, before=cursor))
@@ -1641,19 +2061,24 @@ def test_reading_the_last_page_costs_the_same_at_2000_rows_and_at_8000(isolated_
 
     What the instrument reaches is on record rather than assumed. The counter is
     open across the whole call rather than across a statement the test re-runs, and
-    that call issues exactly the two reads asserted below: the page read and the
-    whole-store total. Inside that window the page read's size dependence is
-    visible per opcode, and the total's is not: ``SELECT COUNT(*)`` compiles to a
-    single ``OP_Count`` whose b-tree walk happens inside one instruction, so a step
-    counter reads it flat at any store size. That is why the acceptance criterion
-    names the instrument and not just the outcome.
+    that call issues exactly the three reads asserted below: the page read, the
+    key-only has-more probe beside it, and the whole-store total. Inside that
+    window the page read's size dependence is visible per opcode, and the total's
+    is not: ``SELECT COUNT(*)`` compiles to a single ``OP_Count`` whose b-tree walk
+    happens inside one instruction, so a step counter reads it flat at any store
+    size. That is why the acceptance criterion names the instrument and not just
+    the outcome.
     """
     small_cursor, small_offset, small_reads = _last_page_probe(2_000, tmp_path, "small")
     large_cursor, large_offset, _ = _last_page_probe(8_000, tmp_path, "large")
 
-    assert len(small_reads) == 2, small_reads
+    assert len(small_reads) == 3, small_reads
     assert any("raw_text" in statement for statement in small_reads), small_reads
     assert any("COUNT(*)" in statement.upper() for statement in small_reads), small_reads
+    assert any(
+        "raw_text" not in statement and "COUNT(*)" not in statement.upper()
+        for statement in small_reads
+    ), small_reads
 
     assert large_cursor < small_cursor * 1.5, (small_cursor, large_cursor)
     assert large_offset > small_offset * 1.5, (small_offset, large_offset)
