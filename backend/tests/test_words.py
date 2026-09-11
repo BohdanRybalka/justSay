@@ -413,7 +413,6 @@ def _make_hit(entry_id: str, highlighted_text: str = "") -> words.HistorySearchH
         id=entry_id,
         timestamp="2024-01-01T00:00:00Z",
         language="en",
-        style="normal",
         text=entry_id,
         duration_ms=1,
         highlighted_text=highlighted_text,

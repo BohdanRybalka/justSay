@@ -50,7 +50,7 @@ def test_user_version_set(isolated_storage, tmp_path):
         version = conn.execute("PRAGMA user_version").fetchone()[0]
     finally:
         conn.close()
-    assert version == 4
+    assert version == 5
 
 
 def test_pragmas_set_in_factory(isolated_storage, tmp_path):
@@ -62,13 +62,6 @@ def test_pragmas_set_in_factory(isolated_storage, tmp_path):
         jm = conn.execute("PRAGMA journal_mode").fetchone()[0]
         assert jm.lower() == "delete"
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2
-
-
-def test_check_constraint_rejects_invalid_style(isolated_storage, tmp_path):
-    target = tmp_path / "target"
-    history.bootstrap(target)
-    with pytest.raises(sqlite3.IntegrityError):
-        history.save_entry(text="x", duration_ms=1, style="bogus")
 
 
 def test_check_constraint_rejects_negative_duration(isolated_storage, tmp_path):
@@ -169,9 +162,9 @@ def test_stats_cache_ttl_returns_cached_value(isolated_storage, tmp_path):
     with history._lock:
         conn = history._ensure_conn_locked()
         conn.execute(
-            "INSERT INTO entries(id, ts, language, style, raw_text, "
+            "INSERT INTO entries(id, ts, language, raw_text, "
             "cleaned_text, duration_ms, word_count) "
-            "VALUES ('zzz', 0, 'uk', 'normal', '', '', 0, 99)"
+            "VALUES ('zzz', 0, 'uk', '', '', 0, 99)"
         )
     s2 = history.compute_stats()
     assert s2.total_entries == s1.total_entries
@@ -360,15 +353,16 @@ def test_operational_error_mapped_to_503(isolated_storage, tmp_path):
 
 
 
-def test_schema_version_is_v4(isolated_storage, tmp_path):
+def test_schema_version_is_v5(isolated_storage, tmp_path):
     """Bumped to 3 by Phase 3 (sqlite-vec), then to 4 by spec 146, which rebuilt
     ``entries`` behind a constraint that refuses a row with no id or a
-    non-integer ``ts``."""
+    non-integer ``ts``, then to 5 by spec 152, which rebuilt it again without
+    the ``style`` column the removed Normal / AI Prompt switch wrote."""
     target = tmp_path / "target"
     history.bootstrap(target)
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
 
 
 def test_fts_table_and_triggers_exist(isolated_storage, tmp_path):
@@ -432,12 +426,12 @@ def test_migration_v1_to_v2_populates_fts(isolated_storage, tmp_path):
         raw.executescript(history._DDL_V1)
         raw.execute("PRAGMA user_version = 1")
         raw.execute(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES ('a', 0, 'uk', 'normal', 'hello brown fox', 'hello brown fox', 0)"
+            "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('a', 0, 'uk', 'hello brown fox', 'hello brown fox', 0)"
         )
         raw.execute(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES ('b', 1, 'uk', 'normal', 'lazy dog jumps', 'lazy dog jumps', 0)"
+            "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('b', 1, 'uk', 'lazy dog jumps', 'lazy dog jumps', 0)"
         )
         raw.commit()
     finally:
@@ -447,7 +441,7 @@ def test_migration_v1_to_v2_populates_fts(isolated_storage, tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         hits = conn.execute(
             "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'brown'"
         ).fetchall()
@@ -465,8 +459,8 @@ def test_partial_migration_recovery_docsize_shadow_missing(isolated_storage, tmp
         raw.executescript(history._DDL_V1)
         raw.executescript(history._DDL_V2)
         raw.execute(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES ('a', 0, 'uk', 'normal', 'shadow probe', 'shadow probe', 0)"
+            "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('a', 0, 'uk', 'shadow probe', 'shadow probe', 0)"
         )
         raw.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
         raw.execute("PRAGMA user_version = 2")
@@ -495,8 +489,8 @@ def test_partial_migration_recovery_fts_missing(isolated_storage, tmp_path):
         raw.executescript(history._DDL_V1)
         raw.execute("PRAGMA user_version = 2")
         raw.execute(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES ('a', 0, 'uk', 'normal', 'recovery text', 'recovery text', 0)"
+            "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('a', 0, 'uk', 'recovery text', 'recovery text', 0)"
         )
         raw.commit()
     finally:
@@ -527,8 +521,8 @@ def test_crash_before_user_version_pragma_retries(isolated_storage, tmp_path, mo
         raw.executescript(history._DDL_V1)
         raw.executescript(history._DDL_V2)
         raw.execute(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES ('a', 0, 'uk', 'normal', 'crash safety', 'crash safety', 0)"
+            "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('a', 0, 'uk', 'crash safety', 'crash safety', 0)"
         )
         raw.execute("PRAGMA user_version = 1")
         raw.commit()
@@ -539,7 +533,7 @@ def test_crash_before_user_version_pragma_retries(isolated_storage, tmp_path, mo
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         hits = conn.execute(
             "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'crash'"
         ).fetchall()
@@ -575,8 +569,8 @@ def test_v1_to_current_migration_lands_in_one_boot(isolated_storage, tmp_path):
         raw.executescript(history._DDL_V1)
         raw.execute("PRAGMA user_version = 1")
         raw.execute(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES ('a', 0, 'uk', 'normal', 'hello brown fox', 'hello brown fox', 0)"
+            "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('a', 0, 'uk', 'hello brown fox', 'hello brown fox', 0)"
         )
         raw.commit()
     finally:
@@ -586,7 +580,7 @@ def test_v1_to_current_migration_lands_in_one_boot(isolated_storage, tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         names = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
         ).fetchall()}
@@ -603,8 +597,8 @@ def test_v2_to_current_migration_keeps_the_fts_index(isolated_storage, tmp_path)
         raw.executescript(history._DDL_V1)
         raw.executescript(history._DDL_V2)
         raw.execute(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES ('a', 0, 'uk', 'normal', 'v2 already migrated', 'v2 already migrated', 0)"
+            "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('a', 0, 'uk', 'v2 already migrated', 'v2 already migrated', 0)"
         )
         raw.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
         raw.execute("PRAGMA user_version = 2")
@@ -616,7 +610,7 @@ def test_v2_to_current_migration_keeps_the_fts_index(isolated_storage, tmp_path)
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         names = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
         ).fetchall()}
@@ -641,8 +635,8 @@ def test_crash_before_v3_user_version_pragma_retries(isolated_storage, tmp_path)
         raw.executescript(history._DDL_V2)
         raw.executescript(vector_store._DDL_V3)
         raw.execute(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES ('a', 0, 'uk', 'normal', 'crash safety v3', 'crash safety v3', 0)"
+            "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('a', 0, 'uk', 'crash safety v3', 'crash safety v3', 0)"
         )
         raw.execute("PRAGMA user_version = 2")
         raw.commit()
@@ -653,7 +647,7 @@ def test_crash_before_v3_user_version_pragma_retries(isolated_storage, tmp_path)
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         names = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
         ).fetchall()}
@@ -1015,7 +1009,7 @@ def test_entry_read_columns_are_exactly_what_row_to_entry_reads(
     """
     target = tmp_path / "target"
     history.bootstrap(target)
-    history.save_entry("hello world", 1200, language="uk", style="normal")
+    history.save_entry("hello world", 1200, language="uk")
     entries = history.get_page().entries
 
     conn = sqlite3.connect(target / "history.db")
@@ -1076,7 +1070,6 @@ def test_a_saved_row_lands_in_the_right_columns_whatever_their_order(
         text="hello world",
         duration_ms=1200,
         language="uk",
-        style="normal",
         model_name="gemini/flash",
         tokens_used=42,
         audio_duration_seconds=3.5,
@@ -1708,8 +1701,8 @@ def test_clear_all_reports_the_rows_it_deleted_not_a_memoised_count(
         conn = history._ensure_conn_locked()
         conn.execute("BEGIN")
         conn.execute(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES ('smuggled', 1, 'uk', 'normal', 'row', 'row', 1)"
+            "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('smuggled', 1, 'uk', 'row', 'row', 1)"
         )
         conn.execute("COMMIT")
 
@@ -1819,8 +1812,8 @@ def test_the_total_follows_the_generation_counter_not_the_table(isolated_storage
         conn = history._ensure_conn_locked()
         conn.execute("BEGIN")
         conn.execute(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES ('smuggled', 1, 'uk', 'normal', 'row', 'row', 1)"
+            "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('smuggled', 1, 'uk', 'row', 'row', 1)"
         )
         conn.execute("COMMIT")
 
@@ -1852,8 +1845,8 @@ def test_the_memoised_total_expires_so_a_second_writer_is_picked_up(
     other_process = sqlite3.connect(target / "history.db")
     try:
         other_process.execute(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-            "VALUES ('from-elsewhere', 1, 'uk', 'normal', 'row', 'row', 1)"
+            "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
+            "VALUES ('from-elsewhere', 1, 'uk', 'row', 'row', 1)"
         )
         other_process.commit()
     finally:
@@ -1994,8 +1987,8 @@ def _bulk_seed(target, count):
         conn.execute("BEGIN")
         try:
             conn.executemany(
-                "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, duration_ms) "
-                "VALUES (?, ?, 'uk', 'normal', 'row', 'row', 1)",
+                "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
+                "VALUES (?, ?, 'uk', 'row', 'row', 1)",
                 [(f"{index:012d}", 1_700_000_000_000 + index) for index in range(count)],
             )
             conn.execute("COMMIT")
@@ -2138,11 +2131,16 @@ def test_an_existing_database_swaps_its_index_without_a_schema_bump(isolated_sto
         user_version = conn.execute("PRAGMA user_version").fetchone()[0]
     assert "entries_ts_id_idx" in indexes_after
     assert "entries_ts_idx" not in indexes_after
-    assert user_version == 4
+    assert user_version == 5
     assert [e.id for e in history.get_page().entries] == [kept]
 
 
 _UNORDERABLE_COLUMNS = (
+    "id, ts, language, raw_text, cleaned_text, duration_ms, "
+    "audio_duration_seconds, word_count, model_name, tokens_used"
+)
+
+_FOREIGN_COLUMNS = (
     "id, ts, language, style, raw_text, cleaned_text, duration_ms, "
     "audio_duration_seconds, word_count, model_name, tokens_used"
 )
@@ -2166,7 +2164,7 @@ def _seed_v3_store_with_unorderable_rows(db_path, with_embedding=False):
 
     **A row is inserted in the middle and deleted, so the surviving rowids have
     a hole in them.**
-    ``entry_fts`` is external-content keyed on ``entries.rowid``, and the v4
+    ``entry_fts`` is external-content keyed on ``entries.rowid``, and the
     rebuild renumbers every row densely from 1, so without a hole the copy lands
     on the same rowids and an index left unrebuilt still resolves correctly --
     a test that cannot fail rather than a rebuild that is not needed. Deleting
@@ -2182,12 +2180,12 @@ def _seed_v3_store_with_unorderable_rows(db_path, with_embedding=False):
             if index == 2:
                 raw.execute(
                     f"INSERT INTO entries ({_UNORDERABLE_COLUMNS}) VALUES "
-                    "('deleted-later',1,'en','normal','gone','gone',0,NULL,NULL,NULL,NULL)"
+                    "('deleted-later',1,'en','gone','gone',0,NULL,NULL,NULL,NULL)"
                 )
             raw.execute(
                 f"INSERT INTO entries ({_UNORDERABLE_COLUMNS}) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (entry_id, ts, "en", "normal", text, text, 10, 1.0, 3, "m", None),
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (entry_id, ts, "en", text, text, 10, 1.0, 3, "m", None),
             )
         raw.execute("DELETE FROM entries WHERE id = 'deleted-later'")
         if with_embedding:
@@ -2227,7 +2225,7 @@ def _seed_v3_store_with_unorderable_rows(db_path, with_embedding=False):
 def test_a_row_that_is_not_a_position_is_repaired_rather_than_dropped(
     isolated_storage, tmp_path
 ):
-    """Every stored shape survives the v4 migration as an orderable row.
+    """Every stored shape survives the rebuild as an orderable row.
 
     A REAL ts keeps its whole milliseconds, a value with nothing recoverable
     becomes UNKNOWN_TS, and a NULL id gets one. Nothing is deleted: the user's
@@ -2319,8 +2317,8 @@ def test_the_repaired_store_refuses_the_shape_coming_back(isolated_storage, tmp_
             with pytest.raises(sqlite3.IntegrityError, match="constraint failed"):
                 conn.execute(
                     f"INSERT INTO entries ({_UNORDERABLE_COLUMNS}) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    (entry_id, ts, "en", "normal", label, label, 1, None, None, None, None),
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (entry_id, ts, "en", label, label, 1, None, None, None, None),
                 )
 
 
@@ -2443,6 +2441,174 @@ def test_an_embedding_orphaned_by_a_repaired_id_is_dropped(isolated_storage, tmp
     )
 
 
+_DDL_V4_ENTRIES_AS_SPEC_146_SHIPPED_IT = """
+CREATE TABLE entries (
+  id TEXT PRIMARY KEY NOT NULL CHECK (typeof(id) = 'text'),
+  ts INTEGER NOT NULL CHECK (typeof(ts) = 'integer' AND ts BETWEEN 0 AND 253402300799000),
+  language TEXT NOT NULL CHECK (typeof(language) = 'text'),
+  style TEXT NOT NULL CHECK (style IN ('normal', 'ai_prompt')),
+  raw_text TEXT NOT NULL CHECK (typeof(raw_text) = 'text'),
+  cleaned_text TEXT NOT NULL CHECK (typeof(cleaned_text) = 'text'),
+  duration_ms INTEGER NOT NULL CHECK (typeof(duration_ms) = 'integer' AND duration_ms >= 0),
+  audio_duration_seconds REAL,
+  word_count INTEGER,
+  model_name TEXT,
+  tokens_used INTEGER
+);
+"""
+
+
+def _seed_a_v4_store_with_embeddings(db_path, rows):
+    """A database exactly as the build before this spec left it: a ten-plus-one
+    column ``entries`` carrying ``style``, at ``user_version = 4``, with one
+    embedding per row addressed by ``rowid``.
+
+    The DDL is written out here rather than imported, because the point of the
+    fixture is the shape this build no longer declares.
+    """
+    import sqlite_vec
+
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.executescript(_DDL_V4_ENTRIES_AS_SPEC_146_SHIPPED_IT)
+        raw.executescript(history._DDL_V2)
+        raw.enable_load_extension(True)
+        sqlite_vec.load(raw)
+        raw.enable_load_extension(False)
+        raw.executescript(vector_store._DDL_V3)
+        raw.execute("CREATE VIRTUAL TABLE vec_entries USING vec0(embedding float[4])")
+        raw.execute(
+            "INSERT INTO embeddings_meta(id, provider, model, dim) VALUES (1,'p','m',4)"
+        )
+        for index, (entry_id, style, text) in enumerate(rows):
+            raw.execute(
+                "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, "
+                "duration_ms, audio_duration_seconds, word_count, model_name, tokens_used) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (entry_id, 1700000000000 + index, "uk", style, text, text,
+                 10, 1.0, 2, "m", None),
+            )
+            rowid = raw.execute(
+                "SELECT rowid FROM entries WHERE id = ?", (entry_id,)
+            ).fetchone()[0]
+            raw.execute(
+                "INSERT INTO entry_embeddings(entry_id, model, dim, created_ts) "
+                "VALUES (?,'m',4,1)",
+                (entry_id,),
+            )
+            raw.execute(
+                "INSERT INTO vec_entries(rowid, embedding) VALUES (?, ?)",
+                (rowid, sqlite_vec.serialize_float32([0.1, 0.2, 0.3, 0.4])),
+            )
+        raw.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
+        raw.execute("PRAGMA user_version = 4")
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def test_a_bootstrapped_store_has_no_style_column(isolated_storage, tmp_path):
+    """The Normal / AI Prompt switch was removed from the UI in v0.12.0 and the
+    column it wrote is gone from the table in v0.13.0.
+
+    Its sibling `test_entry_columns_match_the_bootstrapped_schema` pins
+    `ENTRY_COLUMNS` against the same table, so a column dropped from one and
+    left in the other fails there; this one names the column itself, which is
+    the claim the spec made to the user.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    conn = sqlite3.connect(target / "history.db")
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        conn.close()
+    assert "style" not in columns
+    assert columns == set(history.ENTRY_COLUMNS)
+    assert version == 5
+
+
+def test_a_v4_store_keeps_every_row_its_rowid_and_its_embeddings(
+    isolated_storage, tmp_path
+):
+    """The cost this migration is forbidden to impose is a re-embed.
+
+    `vec_entries` addresses rows by `rowid` and `vec0` has no rebuild command,
+    so a renumbering would mean discarding every embedding and recomputing it —
+    in Cloud mode, the user's whole transcript history re-sent to a provider
+    over a migration that changed no text.
+    """
+    _seed_a_v4_store_with_embeddings(
+        tmp_path / "history.db",
+        [
+            ("first", "normal", "a faithful transcript"),
+            ("second", "ai_prompt", "a structured transcript"),
+            ("third", "normal", "another faithful transcript"),
+        ],
+    )
+    raw = sqlite3.connect(tmp_path / "history.db")
+    try:
+        before = {row[0]: row[1] for row in raw.execute("SELECT id, rowid FROM entries")}
+        embeddings_before = raw.execute(
+            "SELECT count(*) FROM entry_embeddings"
+        ).fetchone()[0]
+    finally:
+        raw.close()
+
+    history.bootstrap(tmp_path)
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        after = {row[0]: row[1] for row in conn.execute("SELECT id, rowid FROM entries")}
+        embeddings_after = conn.execute(
+            "SELECT count(*) FROM entry_embeddings"
+        ).fetchone()[0]
+        vectors = conn.execute("SELECT count(*) FROM vec_entries").fetchone()[0]
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
+
+    assert after == before, "every row keeps its id and its rowid"
+    assert embeddings_after == embeddings_before == 3
+    assert vectors == 3
+    assert version == 5
+    assert "style" not in columns
+    assert {e.text for e in history.get_page(limit=10).entries} == {
+        "a faithful transcript",
+        "a structured transcript",
+        "another faithful transcript",
+    }
+
+
+def test_a_merge_from_a_store_that_still_has_a_style_column_keeps_every_transcript(
+    isolated_storage, tmp_path
+):
+    """`consolidate_into` builds its select list from `ENTRY_COLUMNS` too, so a
+    source column this build no longer knows is simply not read — including a
+    `style` that was never one of the two the old CHECK allowed."""
+    source = tmp_path / "source"
+    source.mkdir()
+    _seed_a_foreign_store(
+        source / "history.db",
+        [
+            ("s1", 1700000000001, "uk", "meeting", "merged one", "merged one",
+             10, 1.0, 2, "m", None),
+            ("s2", 1700000000002, "uk", "ai_prompt", "merged two", "merged two",
+             10, 1.0, 2, "m", None),
+        ],
+    )
+    target = tmp_path / "target"
+    history.bootstrap(target)
+
+    outcome, error = history.consolidate_into(source, target)
+
+    assert error is None, outcome
+    assert {e.text for e in history.get_page(limit=10).entries} == {
+        "merged one",
+        "merged two",
+    }
+
+
 def test_a_store_already_at_the_current_version_is_not_rebuilt_again(
     isolated_storage, tmp_path
 ):
@@ -2456,17 +2622,17 @@ def test_a_store_already_at_the_current_version_is_not_rebuilt_again(
         history._close_conn_locked()
 
     calls = []
-    original = history._migrate_to_v4_locked
+    original = history._migrate_to_v5_locked
     try:
-        history._migrate_to_v4_locked = lambda conn: (
+        history._migrate_to_v5_locked = lambda conn: (
             calls.append(1),
             original(conn),
         )[1]
         history.bootstrap(tmp_path)
     finally:
-        history._migrate_to_v4_locked = original
+        history._migrate_to_v5_locked = original
 
-    assert calls == [], "a v4 store must not be migrated a second time"
+    assert calls == [], "a current-version store must not be migrated a second time"
     with history._lock:
         second = history._ensure_conn_locked().execute(
             "SELECT id FROM entries WHERE cleaned_text = 'no id at all'"
@@ -2479,7 +2645,7 @@ def test_a_merge_repairs_a_foreign_row_instead_of_skipping_it(
 ):
     """INSERT OR IGNORE answers a CHECK violation by skipping the row.
 
-    So with the v4 constraint in place and a verbatim copy, merging a foreign
+    So with the rebuilt table's constraints in place and a verbatim copy, merging a foreign
     history would drop exactly the transcripts this spec exists to keep -- and
     say nothing.
     """
@@ -2529,7 +2695,7 @@ def _seed_a_foreign_store(db_path, rows, ddl=_UNCONSTRAINED_ENTRIES_DDL):
         raw.executescript(ddl)
         for row in rows:
             raw.execute(
-                f"INSERT INTO entries ({_UNORDERABLE_COLUMNS}) "
+                f"INSERT INTO entries ({_FOREIGN_COLUMNS}) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 row,
             )
@@ -2546,7 +2712,7 @@ def test_a_foreign_store_the_constraints_reject_still_lets_the_app_start(
 
     `_init_schema` runs inside `bootstrap`, which the lifespan does not guard,
     so a migration that raises is not a broken tab -- it is a backend that never
-    starts. Every one of these shapes is refused by the v4 declaration and every
+    starts. Every one of these shapes is refused by the current declaration and every
     one of them is reachable in a file this app did not write.
     """
     _seed_a_foreign_store(
@@ -2646,7 +2812,7 @@ def test_a_foreign_store_the_constraints_reject_still_lets_the_app_start(
     }, "every row has to arrive: the transcript text is the part worth keeping"
 
     by_text = {e.text: e for e in page.entries}
-    assert by_text["an unknown style"].style == "normal"
+    assert by_text["an unknown style"].language == "en"
     assert by_text["a negative duration"].duration_ms == 0
     assert by_text["a fractional word count"].word_count == 3
     assert by_text["an id that is bytes"].id.startswith("recovered-")
@@ -2657,7 +2823,7 @@ def test_a_foreign_store_the_constraints_reject_still_lets_the_app_start(
         version = history._ensure_conn_locked().execute(
             "PRAGMA user_version"
         ).fetchone()[0]
-    assert version == 4
+    assert version == 5
 
 
 def test_a_store_missing_a_column_this_build_knows_still_opens(
@@ -2669,7 +2835,7 @@ def test_a_store_missing_a_column_this_build_knows_still_opens(
     ddl = _UNCONSTRAINED_ENTRIES_DDL.replace(
         "  model_name TEXT,\n  tokens_used INTEGER\n", "  model_name TEXT\n"
     )
-    columns = _UNORDERABLE_COLUMNS.replace(", tokens_used", "")
+    columns = _FOREIGN_COLUMNS.replace(", tokens_used", "")
     raw = sqlite3.connect(tmp_path / "history.db")
     try:
         raw.executescript(ddl)
@@ -2777,7 +2943,7 @@ def test_a_rebuild_that_raises_mid_transaction_still_lets_the_app_start(
     read at all: rolled back, logged, version untouched, app running.
     """
     _seed_v3_store_with_unorderable_rows(tmp_path / "history.db")
-    monkeypatch.setattr(history, "_DDL_V4_ENTRIES", "CREATE TABLE entries_v4 (nope")
+    monkeypatch.setattr(history, "_DDL_V5_ENTRIES", "CREATE TABLE entries_v5 (nope")
 
     history.bootstrap(tmp_path)
 
@@ -2860,7 +3026,7 @@ def test_a_source_missing_a_required_column_does_not_erase_the_history(
     from. The transcripts are the whole point of the file.
     """
     ddl = _UNCONSTRAINED_ENTRIES_DDL.replace("  duration_ms INTEGER,\n", "")
-    columns = _UNORDERABLE_COLUMNS.replace("duration_ms, ", "")
+    columns = _FOREIGN_COLUMNS.replace("duration_ms, ", "")
     raw = sqlite3.connect(tmp_path / "history.db")
     try:
         raw.executescript(ddl)

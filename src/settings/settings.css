@@ -479,11 +479,6 @@ select {
   white-space: nowrap;
 }
 
-.history-badge.history-badge-ai {
-  background: rgba(108, 99, 255, 0.18);
-  color: var(--accent);
-}
-
 .history-text {
   font-size: 15px;
   color: var(--text);

@@ -845,8 +845,8 @@ def insert_history_rows():
             conn.execute("BEGIN")
             try:
                 conn.executemany(
-                    "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, "
-                    "duration_ms) VALUES (?, ?, 'uk', 'normal', ?, ?, 1)",
+                    "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, "
+                    "duration_ms) VALUES (?, ?, 'uk', ?, ?, 1)",
                     [(row_id, ts, text, text) for row_id, ts, text in rows],
                 )
                 conn.execute("COMMIT")

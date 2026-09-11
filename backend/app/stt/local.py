@@ -124,7 +124,7 @@ class LocalSTTProvider(STTProvider):
     async def transcribe(
         self, audio_path: Path, language: str = "uk", **kwargs
     ) -> TranscriptionResult:
-        """Transcribe locally. ``style`` kwarg is accepted for interface parity but ignored.
+        """Transcribe locally.
 
         ``audio_duration`` (kwarg, seconds) — when provided, drives a
         latency-vs-accuracy decision: short clips get ``beam_size=1`` and

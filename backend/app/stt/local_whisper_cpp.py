@@ -465,7 +465,7 @@ class WhisperCppServerSTTProvider(STTProvider):
     ) -> TranscriptionResult:
         """Transcribe via the already-running whisper-server's `POST /inference`.
 
-        `style`/`audio_duration` kwargs are accepted for interface parity
+        The `audio_duration` kwarg is accepted for interface parity
         but ignored -- this spec's own scope explicitly does not replicate
         `LocalSTTProvider`'s duration-driven beam_size/VAD tuning (plan 018,
         Cuts deferred: proving the base accelerated path works is the job;

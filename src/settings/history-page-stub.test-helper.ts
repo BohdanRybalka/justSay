@@ -6,7 +6,6 @@ export function buildEntry(id: string): HistoryEntry {
     id,
     timestamp: "2026-08-01T10:00:00Z",
     language: "uk",
-    style: "normal",
     text: `transcript ${id}`,
     duration_ms: 1200,
     model_name: "whisper",

@@ -173,9 +173,6 @@ export function renderHistory(container: HTMLElement): () => void {
       badges.push(`<span class="history-badge">${entry.word_count} words</span>`);
     }
     badges.push(`<span class="history-badge">${escapeHtml(entry.language)}</span>`);
-    if (entry.style === "ai_prompt") {
-      badges.push(`<span class="history-badge history-badge-ai">AI Prompt</span>`);
-    }
 
     const textHtml = entry.highlighted_text
       ? entry.highlighted_text

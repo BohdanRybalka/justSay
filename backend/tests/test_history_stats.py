@@ -13,11 +13,11 @@ def _insert_entry(words: int, lang: str, model: str, when: datetime) -> None:
     with history._lock:
         conn = history._ensure_conn_locked()
         conn.execute(
-            "INSERT INTO entries(id, ts, language, style, raw_text, cleaned_text, "
+            "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, "
             "duration_ms, audio_duration_seconds, word_count, model_name, tokens_used) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                f"id-{words}-{lang}-{model}", ts_ms, lang, "normal",
+                f"id-{words}-{lang}-{model}", ts_ms, lang,
                 "x " * words, "x " * words, 1000,
                 5.0, words, model, None,
             ),

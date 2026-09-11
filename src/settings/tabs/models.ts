@@ -31,16 +31,16 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
       </div>
       <div class="setting-row" id="stt-engine-row" style="${settings.stt_mode === "cloud" ? "" : "display:none;"}">
         <span class="label">Cloud engine
-          <span class="info-tip" title="Auto: short clips (≤ 30 s) go to Groq Whisper for speed; long audio and AI Prompt go to Gemini Native Audio. Pin Groq or Gemini to force one provider — pinned-Groq automatically falls back to Gemini for AI Prompt and unsupported formats (.webm).">&#9432;</span>
+          <span class="info-tip" title="Auto: short clips (≤ 30 s) go to Groq Whisper for speed; long audio goes to Gemini Native Audio. Pin Groq or Gemini to force one provider — pinned-Groq automatically falls back to Gemini for unsupported formats (.webm).">&#9432;</span>
         </span>
         <select id="stt-engine">
           <option value="auto" ${settings.stt_engine === "auto" ? "selected" : ""}>Auto (recommended)</option>
           <option value="groq" ${settings.stt_engine === "groq" ? "selected" : ""}>Groq Whisper (fast, short)</option>
-          <option value="gemini" ${settings.stt_engine === "gemini" ? "selected" : ""}>Gemini (long / structured)</option>
+          <option value="gemini" ${settings.stt_engine === "gemini" ? "selected" : ""}>Gemini (long / any format)</option>
         </select>
       </div>
       <div class="setting-hint">
-        Cloud short (&le; 30 s) → Groq Whisper · Cloud long / AI Prompt → Gemini · Local → faster-whisper (NVIDIA/CPU) or whisper.cpp+Vulkan (Windows AMD/Intel)
+        Cloud short (&le; 30 s) → Groq Whisper · Cloud long → Gemini · Local → faster-whisper (NVIDIA/CPU) or whisper.cpp+Vulkan (Windows AMD/Intel)
       </div>
       <div id="stt-panel"></div>
     </div>

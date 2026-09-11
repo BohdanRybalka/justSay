@@ -1,7 +1,7 @@
 """Cloud STT provider — Gemini 2.5 Flash Native Audio.
 
-Used for long audio (>cloud_routing_threshold) and for structured output
-(style="ai_prompt"), which Groq Whisper can't do.
+Used for long audio (>cloud_routing_threshold) and for the audio formats
+Groq Whisper can't accept.
 """
 
 import asyncio
@@ -21,8 +21,6 @@ class GeminiSTTProvider(STTProvider):
     """Gemini 2.5 Flash Native Audio — cloud STT provider.
 
     Uses the google-genai SDK to send audio to Gemini and receive transcription.
-    Accepts a ``style`` kwarg to switch between faithful transcription and
-    structured-output prompts.
 
     Requires: pip install justsay-backend[cloud]
     """
@@ -61,15 +59,14 @@ class GeminiSTTProvider(STTProvider):
         client = self._get_client()
         audio_bytes = audio_path.read_bytes()
 
-        style = kwargs.get("style", "normal")
         glossary = self._settings.initial_prompt.strip() or None
-        prompt = self._build_prompt(language, style, glossary)
+        prompt = self._build_prompt(language, glossary)
         mime_type = mime_for_extension(audio_path.name)
         log.info(
             "Gemini STT: POST generate_content model=%s file=%s mime=%s "
-            "size=%.1fKB lang=%s style=%s glossary=%s",
+            "size=%.1fKB lang=%s glossary=%s",
             self._settings.gemini_model, audio_path.name, mime_type,
-            len(audio_bytes) / 1024, language, style,
+            len(audio_bytes) / 1024, language,
             f"{len(glossary)}chars" if glossary else "none",
         )
 
@@ -94,45 +91,22 @@ class GeminiSTTProvider(STTProvider):
         )
 
     @staticmethod
-    def _build_prompt(language: str, style: str, glossary: str | None = None) -> str:
+    def _build_prompt(language: str, glossary: str | None = None) -> str:
         if language == "auto":
             lang_clause = "Automatically detect the spoken language from the audio."
-            lang_ref = "the detected language"
         else:
             lang_name = LANGUAGE_NAMES.get(language, language)
             lang_clause = f"The primary language is {lang_name}."
-            lang_ref = lang_name
 
-        if style == "ai_prompt":
-            base = (
-                f"Transcribe this audio and structure the output as a professional document. "
-                f"{lang_clause} "
-                f"The speaker may use words from other languages — "
-                f"write them in their original form.\n\n"
-                "Instructions:\n"
-                "1. Transcribe faithfully, removing speech disfluencies (hesitation, filler words, "
-                "repeated words).\n"
-                f"2. Fix grammar, spelling, punctuation appropriate for {lang_ref}.\n"
-                "3. Analyse the speaker's intent and structure appropriately:\n"
-                "   - Task or request -> action items with context\n"
-                "   - Idea or concept -> key points\n"
-                "   - Problem description -> problem statement + expected behaviour\n"
-                "   - List of items -> bulleted list\n"
-                "4. Add headings and lists where they improve clarity.\n"
-                "5. Preserve proper nouns, brand names and technical terms exactly.\n"
-                "6. Do not add information not present in the audio.\n\n"
-                "Output ONLY the structured text."
-            )
-        else:
-            base = (
-                f"Transcribe this audio faithfully. "
-                f"{lang_clause} "
-                f"The speaker may use words from other languages — "
-                f"write them in their original form. "
-                f"Include natural punctuation (periods, commas, question marks) "
-                f"based on speech intonation. "
-                f"Output ONLY the transcription text, nothing else."
-            )
+        base = (
+            f"Transcribe this audio faithfully. "
+            f"{lang_clause} "
+            f"The speaker may use words from other languages — "
+            f"write them in their original form. "
+            f"Include natural punctuation (periods, commas, question marks) "
+            f"based on speech intonation. "
+            f"Output ONLY the transcription text, nothing else."
+        )
 
         if glossary:
             safe = glossary.replace("</glossary>", "").replace("<glossary>", "")
