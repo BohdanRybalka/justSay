@@ -18,8 +18,8 @@ from pydantic import ValidationError
 from app.audio.analysis import SilenceAnalysis, analyze_silence, rms_dbfs
 from app.audio.base import write_wav, write_wav_streaming
 from app.audio.config import AudioSettings
-from app.audio.recorder import MicrophoneRecorder
-from app.audio.session import SessionMismatchError
+from app.audio.recorder import MicrophoneRecorder, NotRecordingError
+from app.audio.session import SESSION_MISMATCH_DETAIL, SessionMismatchError
 from app.audio.system_source import SystemAudioUnavailableError
 
 
@@ -84,7 +84,7 @@ async def test_a_failing_stream_constructor_leaves_the_recorder_stopped(audio_se
     assert recorder.is_recording is False
     assert recorder.duration_seconds == 0.0
 
-    with pytest.raises(RuntimeError, match="Not recording"):
+    with pytest.raises(NotRecordingError, match="Not recording"):
         await recorder.stop()
 
 
@@ -140,7 +140,7 @@ async def test_stop_returns_wav_file(audio_settings, mock_stream):
 async def test_stop_without_start_raises(audio_settings):
     recorder = MicrophoneRecorder(audio_settings)
 
-    with pytest.raises(RuntimeError, match="Not recording"):
+    with pytest.raises(NotRecordingError, match="Not recording"):
         await recorder.stop()
 
 
@@ -153,7 +153,7 @@ async def test_double_stop_raises(audio_settings, mock_stream):
     _simulate_audio_callback(recorder, num_blocks=3)
     await recorder.stop()
 
-    with pytest.raises(RuntimeError, match="Not recording"):
+    with pytest.raises(NotRecordingError, match="Not recording"):
         await recorder.stop()
 
 
@@ -1329,3 +1329,58 @@ def test_the_ownership_guard_cannot_be_separated_from_the_state_it_guards():
         "must sit inside a `with self._lock` block, or the ownership guard and the state "
         f"it guards are two decisions rather than one: {unprotected}"
     )
+
+
+@pytest.mark.anyio
+async def test_a_stop_that_raced_a_stop_is_an_answer_rather_than_a_crash(client):
+    """409, not the 500 the bare `RuntimeError` produced (spec 150).
+
+    `/audio/stop` guards on `is_recording` before it calls the recorder, so
+    this state is only reachable when a second stop lands between the guard
+    and the lock. The recorder answered it with a bare `RuntimeError` while
+    `discard()` answered the identical state with a 409, and the client that
+    branches on a decisive refusal saw a crash instead.
+    """
+    from app.audio.dependencies import get_recorder
+    from app.main import app as fastapi_app
+
+    class _LostTheRace:
+        is_recording = True
+        duration_seconds = 1.5
+        level_db = -20.0
+        session_id = None
+
+        async def stop(self, session_id: str | None = None):
+            raise NotRecordingError("Not recording")
+
+    fastapi_app.dependency_overrides[get_recorder] = _LostTheRace
+    try:
+        resp = await client.post("/audio/stop")
+    finally:
+        fastapi_app.dependency_overrides.pop(get_recorder, None)
+
+    assert resp.status_code == 409
+    assert resp.json() == {"detail": "Not recording", "code": "not_recording"}
+
+
+@pytest.mark.anyio
+async def test_a_strangers_discard_answers_403_with_the_refusal_code(client, wired_recorder):
+    """The 403 keeps its status and gains the machine-readable name of the
+    refusal, which is what replaces substring-matching its prose."""
+    await client.post("/audio/start", json={"session_id": OWNER_SESSION_ID})
+
+    resp = await client.post("/audio/discard", json={"session_id": OTHER_SESSION_ID})
+
+    assert resp.status_code == 403
+    assert resp.json() == {
+        "detail": SESSION_MISMATCH_DETAIL,
+        "code": "session_mismatch",
+    }
+
+
+@pytest.mark.anyio
+async def test_a_discard_of_nothing_answers_409_with_the_refusal_code(client, wired_recorder):
+    resp = await client.post("/audio/discard", json={"session_id": OWNER_SESSION_ID})
+
+    assert resp.status_code == 409
+    assert resp.json() == {"detail": "Not recording", "code": "not_recording"}

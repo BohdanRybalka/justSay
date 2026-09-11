@@ -87,5 +87,4 @@ ignore_names = [
     "total_audio_seconds", "word", "highlighted_text",
     "row_factory", "LimitFlags",
     "log_file_path", "_reset_library_cache",
-    "NotReadyError",
 ]

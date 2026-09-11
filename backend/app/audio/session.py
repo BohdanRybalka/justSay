@@ -8,13 +8,18 @@ answer it. The client mints the id, sends it with the request that starts the
 capture, and every later request naming it is either the owner or a stranger.
 See docs/adr/050-the-client-names-the-recording-before-it-asks-for-one.md.
 
-Pydantic only, never fastapi: docs/style-guide.md §3.2 puts the mapping to an
-HTTP status in the router and the raise in the layer below, and
+Pydantic only, never fastapi: docs/style-guide.md §3.2 keeps the web
+framework out of every module but the router, and
 ``backend/tests/test_import_layers.py`` fails this module if it grows a web
-framework import.
+framework import. The status a mismatch answers with travels on the exception
+class instead, per docs/adr/059-a-refusal-is-a-class-not-a-string.md.
 """
 
+from typing import ClassVar
+
 from pydantic import BaseModel, Field
+
+from app.core.errors import JustSayError
 
 SESSION_ID_PATTERN = "^[0-9a-f]{32}$"
 
@@ -43,12 +48,20 @@ class SessionRef(BaseModel):
     session_id: str = Field(pattern=SESSION_ID_PATTERN, description=_SESSION_ID_DESCRIPTION)
 
 
-class SessionMismatchError(Exception):
+class SessionMismatchError(JustSayError):
     """A request named a session that does not own the recorder.
 
     Raised inside the recorder's lock, in the same critical section that
-    would have to change for the answer to change, and mapped to ``403`` by
-    the router. 403 rather than 409 because the two are the widget's only
-    discriminator between "nothing is running" and "something is running and
-    it is not yours", and the routers already spend 409 on three other states.
+    would have to change for the answer to change, and answering ``403``
+    through its own ``status_code``. 403 rather than 409 because the two are
+    the widget's only discriminator between "nothing is running" and
+    "something is running and it is not yours", and the routers already spend
+    409 on three other states. ``src/session.ts:41`` reads that number, so it
+    is frozen.
+
+    A direct subclass of ``JustSayError`` rather than of ``NotReadyError``:
+    409 is what that base means, and this refusal is deliberately not one.
     """
+
+    status_code: ClassVar[int] = 403
+    code: ClassVar[str] = "session_mismatch"

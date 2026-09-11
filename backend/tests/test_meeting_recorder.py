@@ -48,6 +48,7 @@ from app.audio.meeting_spool import MeetingSpool
 from app.audio.system_source import (
     SystemAudioSource,
     SystemAudioUnavailableError,
+    SystemAudioUnsupportedError,
     create_system_audio_source,
 )
 from app.main import app
@@ -463,7 +464,7 @@ async def test_both_sources_are_audible_in_the_written_wav(
 async def test_stop_without_start_raises(audio_settings):
     recorder = MeetingRecorder(audio_settings)
 
-    with pytest.raises(RuntimeError, match="Not recording"):
+    with pytest.raises(MeetingCaptureAbortedError, match="Not recording"):
         await recorder.stop()
 
 
@@ -896,20 +897,27 @@ class _FakeRecorder:
 
 @pytest.mark.anyio
 async def test_meeting_start_returns_501_where_no_system_source_exists(client):
-    """AC: the endpoint answers 501 naming the platform limitation."""
+    """AC: a platform with no capture path at all still answers 501.
 
-    class _Unavailable(_FakeRecorder):
+    501 rather than the 503 its base now answers, because this is permanent:
+    telling the client to retry something that can never succeed on this
+    operating system is worse than the status it would replace
+    (docs/adr/060-a-platform-without-audio-is-not-a-broken-device.md).
+    """
+
+    class _Unsupported(_FakeRecorder):
         async def start(self):
-            raise SystemAudioUnavailableError(
+            raise SystemAudioUnsupportedError(
                 "System audio capture is not available on this platform"
             )
 
-    app.dependency_overrides[get_meeting_recorder] = lambda: _Unavailable()
+    app.dependency_overrides[get_meeting_recorder] = lambda: _Unsupported()
 
     resp = await client.post("/audio/meeting/start")
 
     assert resp.status_code == 501
     assert "platform" in resp.json()["detail"]
+    assert resp.json()["code"] == "system_audio_unsupported"
 
 
 @pytest.mark.anyio
@@ -1176,8 +1184,14 @@ async def test_start_surfaces_the_real_device_failure(audio_settings, fake_micro
 
 
 @pytest.mark.anyio
-async def test_meeting_start_501_carries_the_device_reason(client):
-    """The 501 body is what the user actually reads (JS-78)."""
+async def test_meeting_start_503_carries_the_device_reason(client):
+    """The body is what the user actually reads (JS-78), and 503 is what a
+    machine-level open failure means (spec 150, style guide §3.3's BLOCKER).
+
+    This machine has a capture path and could not open it, which the next
+    attempt may manage; the 501 it answered until now told a Windows user
+    that meeting recording requires Windows.
+    """
 
     class _Broken:
         is_recording = False
@@ -1193,9 +1207,10 @@ async def test_meeting_start_501_carries_the_device_reason(client):
 
     resp = await client.post("/audio/meeting/start")
 
-    assert resp.status_code == 501
+    assert resp.status_code == 503
     assert "default render endpoint" in resp.json()["detail"]
     assert "requires Windows or macOS" not in resp.json()["detail"]
+    assert resp.json()["code"] == "resource_unavailable"
 
 
 @pytest.mark.asyncio
@@ -2455,7 +2470,7 @@ async def test_cleanup_retires_both_executors_and_refuses_a_later_start(
     _wait_for_devices(recorder)
     _wait_for_writes(recorder)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(MeetingCaptureAbortedError):
         await recorder.start()
 
     assert recorder._devices_in_flight == 0

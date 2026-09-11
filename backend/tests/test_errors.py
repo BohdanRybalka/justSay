@@ -1,6 +1,6 @@
 """The hierarchy's shape, pinned where prose cannot hold it.
 
-Five properties live here: the base is `Exception` and not `RuntimeError`,
+Six properties live here: the base is `Exception` and not `RuntimeError`,
 the three subclasses are members of it, the base itself cannot be raised, no
 subclass answers the base's 500 sentinel, and no two subclasses share a `code`.
 The last two are what a step-2 migrator relies on when adding a fourth class —
@@ -20,6 +20,13 @@ each one reddens across this file and `tests/test_error_handler.py` together:
   AST one and the `sys.modules` subprocess one
 - the `type(self) is JustSayError` guard dropped from `__init__` -- two tests,
   one here and one in `tests/test_error_handler.py`
+
+The sixth property is the repo-wide one, and it is the only thing holding a
+hierarchy whose classes are declared in the package that raises them rather
+than in `app/core/errors.py` (ADR 060). It walks every subclass reachable
+after `app.main` is imported, so a package-local class is covered by exactly
+the two rules the module-scoped tests above apply to the three base ones.
+Mutation run: `SessionMismatchError.code` set to `"not_ready"` -- one test.
 """
 
 import ast
@@ -140,3 +147,45 @@ def test_importing_the_module_does_not_pull_a_web_framework_into_the_process() -
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def _every_subclass() -> list[type[JustSayError]]:
+    """Every subclass in the process, however deep and wherever declared.
+
+    `app.main` is imported first because a class in a module nothing has
+    imported does not exist yet: the composition root is what makes the walk
+    repo-wide rather than errors-module-wide, and `tests/conftest.py` already
+    imports it for every other test in the suite.
+    """
+    import app.main  # noqa: F401
+
+    found: list[type[JustSayError]] = []
+    pending = [JustSayError]
+    while pending:
+        for subclass in pending.pop().__subclasses__():
+            if subclass not in found:
+                found.append(subclass)
+                pending.append(subclass)
+    return found
+
+
+def test_no_refusal_anywhere_in_the_app_answers_the_500_sentinel() -> None:
+    """A `JustSayError` that answers 500 is indistinguishable from the crash
+    the hierarchy exists to separate it from."""
+    offenders = sorted(
+        f"{c.__module__}.{c.__name__}" for c in _every_subclass() if c.status_code == 500
+    )
+    assert offenders == []
+
+
+def test_every_refusal_that_declares_a_code_declares_a_distinct_one() -> None:
+    """Inheriting a code says "the same kind of refusal", which is legitimate;
+    two classes independently declaring one value is a collision the frontend
+    would have no way to tell apart.
+    """
+    declared = [c for c in _every_subclass() if "code" in c.__dict__]
+    codes = [c.code for c in declared]
+    duplicates = sorted({code for code in codes if codes.count(code) > 1})
+    assert duplicates == []
+    assert JustSayError.code not in codes
+    assert len(declared) >= 3
