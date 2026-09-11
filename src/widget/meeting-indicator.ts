@@ -22,9 +22,16 @@ export const MEETING_STATE_CLASS = "meeting";
 
 export const MEETING_DURATION_ID = "widget-meeting-duration";
 
+/** Added next to `MEETING_STATE_CLASS` while the capture is still running but
+ *  something has gone wrong with it. A second class rather than a different
+ *  state, because the marker must not disappear or become something else: the
+ *  call is still being recorded and the obligation still holds. */
+export const MEETING_DEGRADED_CLASS = "meeting-degraded";
+
 export interface MeetingIndicatorState {
   active: boolean;
   elapsedSeconds: number;
+  incident: string | null;
 }
 
 export function renderMeetingIndicator(root: HTMLElement, state: MeetingIndicatorState): void {
@@ -32,6 +39,7 @@ export function renderMeetingIndicator(root: HTMLElement, state: MeetingIndicato
 
   if (state.active) {
     root.classList.add(MEETING_STATE_CLASS);
+    root.classList.toggle(MEETING_DEGRADED_CLASS, state.incident !== null);
     if (!readout) {
       console.error(
         `The meeting recording indicator has no #${MEETING_DURATION_ID} to write to, so the ` +
@@ -43,5 +51,6 @@ export function renderMeetingIndicator(root: HTMLElement, state: MeetingIndicato
     return;
   }
   root.classList.remove(MEETING_STATE_CLASS);
+  root.classList.remove(MEETING_DEGRADED_CLASS);
   if (readout) readout.textContent = "";
 }

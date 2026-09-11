@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import {
+  MEETING_DEGRADED_CLASS,
   MEETING_DURATION_ID,
   MEETING_STATE_CLASS,
   renderMeetingIndicator,
@@ -21,16 +22,40 @@ describe("the meeting recording indicator (ADR 040 obligation 2)", () => {
   it("marks the widget root and shows a duration while a meeting is recording", () => {
     const { root, meeting } = widget();
 
-    renderMeetingIndicator(root, { active: true, elapsedSeconds: 5 });
+    renderMeetingIndicator(root, { active: true, elapsedSeconds: 5, incident: null });
 
     expect(root.classList.contains(MEETING_STATE_CLASS)).toBe(true);
     expect(meeting.textContent).not.toBe("");
   });
 
+  it("marks the root degraded, without dropping the recording state, on an incident", () => {
+    const { root, meeting } = widget();
+
+    renderMeetingIndicator(root, {
+      active: true,
+      elapsedSeconds: 5,
+      incident: "system_audio_ended",
+    });
+
+    expect(root.classList.contains(MEETING_STATE_CLASS)).toBe(true);
+    expect(root.classList.contains(MEETING_DEGRADED_CLASS)).toBe(true);
+    expect(meeting.textContent).not.toBe("");
+  });
+
+  it("takes the degraded mark off again when the call ends", () => {
+    const { root } = widget();
+
+    renderMeetingIndicator(root, { active: true, elapsedSeconds: 5, incident: "storage_low" });
+    renderMeetingIndicator(root, { active: false, elapsedSeconds: 0, incident: null });
+
+    expect(root.classList.contains(MEETING_STATE_CLASS)).toBe(false);
+    expect(root.classList.contains(MEETING_DEGRADED_CLASS)).toBe(false);
+  });
+
   it("carries neither the state nor a duration when nothing is recording", () => {
     const { root, meeting } = widget();
 
-    renderMeetingIndicator(root, { active: false, elapsedSeconds: 0 });
+    renderMeetingIndicator(root, { active: false, elapsedSeconds: 0, incident: null });
 
     expect(root.classList.contains(MEETING_STATE_CLASS)).toBe(false);
     expect(meeting.textContent).toBe("");
@@ -39,10 +64,10 @@ describe("the meeting recording indicator (ADR 040 obligation 2)", () => {
   it("disappears when the recording stops, after having been shown", () => {
     const { root, meeting } = widget();
 
-    renderMeetingIndicator(root, { active: true, elapsedSeconds: 61 });
+    renderMeetingIndicator(root, { active: true, elapsedSeconds: 61, incident: null });
     expect(root.classList.contains(MEETING_STATE_CLASS)).toBe(true);
 
-    renderMeetingIndicator(root, { active: false, elapsedSeconds: 61 });
+    renderMeetingIndicator(root, { active: false, elapsedSeconds: 61, incident: null });
 
     expect(root.classList.contains(MEETING_STATE_CLASS)).toBe(false);
     expect(meeting.textContent).toBe("");
@@ -51,8 +76,8 @@ describe("the meeting recording indicator (ADR 040 obligation 2)", () => {
   it("leaves the dictation state class alone in both directions", () => {
     const { root } = widget();
 
-    renderMeetingIndicator(root, { active: true, elapsedSeconds: 1 });
-    renderMeetingIndicator(root, { active: false, elapsedSeconds: 1 });
+    renderMeetingIndicator(root, { active: true, elapsedSeconds: 1, incident: null });
+    renderMeetingIndicator(root, { active: false, elapsedSeconds: 1, incident: null });
 
     expect(root.classList.contains("idle")).toBe(true);
   });
@@ -60,9 +85,9 @@ describe("the meeting recording indicator (ADR 040 obligation 2)", () => {
   it("advances the readout as the recording runs", () => {
     const { root, meeting } = widget();
 
-    renderMeetingIndicator(root, { active: true, elapsedSeconds: 1 });
+    renderMeetingIndicator(root, { active: true, elapsedSeconds: 1, incident: null });
     const first = meeting.textContent;
-    renderMeetingIndicator(root, { active: true, elapsedSeconds: 75 });
+    renderMeetingIndicator(root, { active: true, elapsedSeconds: 75, incident: null });
 
     expect(meeting.textContent).not.toBe(first);
     expect(meeting.textContent).toBe("1:15");
@@ -70,7 +95,7 @@ describe("the meeting recording indicator (ADR 040 obligation 2)", () => {
 
   it("survives the widget clearing dictation's counter, which is the defect", () => {
     const { root, dictation, meeting } = widget();
-    renderMeetingIndicator(root, { active: true, elapsedSeconds: 75 });
+    renderMeetingIndicator(root, { active: true, elapsedSeconds: 75, incident: null });
 
     dictation.textContent = "";
 
@@ -81,10 +106,10 @@ describe("the meeting recording indicator (ADR 040 obligation 2)", () => {
     const { root, dictation } = widget();
     dictation.textContent = "0:07";
 
-    renderMeetingIndicator(root, { active: true, elapsedSeconds: 30 });
+    renderMeetingIndicator(root, { active: true, elapsedSeconds: 30, incident: null });
     expect(dictation.textContent).toBe("0:07");
 
-    renderMeetingIndicator(root, { active: false, elapsedSeconds: 30 });
+    renderMeetingIndicator(root, { active: false, elapsedSeconds: 30, incident: null });
     expect(dictation.textContent).toBe("0:07");
   });
 
@@ -95,7 +120,7 @@ describe("the meeting recording indicator (ADR 040 obligation 2)", () => {
     console.error = (...args: unknown[]) => reported.push(args);
 
     try {
-      expect(() => renderMeetingIndicator(root, { active: true, elapsedSeconds: 1 })).not.toThrow();
+      expect(() => renderMeetingIndicator(root, { active: true, elapsedSeconds: 1, incident: null })).not.toThrow();
     } finally {
       console.error = original;
     }

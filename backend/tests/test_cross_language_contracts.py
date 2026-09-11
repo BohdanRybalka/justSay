@@ -1,4 +1,4 @@
-"""Seven values exist in two or three languages at once; the copies must agree.
+"""Eight values exist in two or three languages at once; the copies must agree.
 
 Each value has exactly one nominated declaration per language, and this module
 reads every declaration as **text** so it needs no TypeScript compiler, no Rust
@@ -15,9 +15,10 @@ because ``backend/build/`` is gitignored and holds a stale copy of
 ``app/core/config.py``: an unbounded walk would fail on any machine that has run
 ``pip install -e`` and pass in CI.
 
-The seven are the backend port, the masked-key sentinel, the upload allowlist
+The eight are the backend port, the masked-key sentinel, the upload allowlist
 and its cap, the Tauri event names, the session-id alphabet, the Tauri command
-names, and the two application data directory names.
+names, the two application data directory names, and the capture-incident
+tokens a meeting recording can report.
 
 ADR 045 records why these values are pinned rather than generated. Its
 amendment nominates Rust as the canonical declaration for the Tauri command
@@ -38,6 +39,7 @@ CONSTANTS_PY = REPO_ROOT / "backend" / "app" / "core" / "constants.py"
 AUDIO_FORMATS_PY = REPO_ROOT / "backend" / "app" / "core" / "audio_formats.py"
 APP_PATHS_PY = REPO_ROOT / "backend" / "app" / "core" / "app_paths.py"
 SESSION_PY = REPO_ROOT / "backend" / "app" / "audio" / "session.py"
+MEETING_RECORDER_PY = REPO_ROOT / "backend" / "app" / "audio" / "meeting_recorder.py"
 CONTRACTS_TS = REPO_ROOT / "src" / "contracts.ts"
 LIB_RS = REPO_ROOT / "src-tauri" / "src" / "lib.rs"
 BACKEND_RS = REPO_ROOT / "src-tauri" / "src" / "backend.rs"
@@ -542,6 +544,52 @@ def test_the_session_id_alphabet_agrees_across_languages() -> None:
         f"{SESSION_PY.name} validates session ids against {python_pattern!r} but "
         f"{CONTRACTS_TS.name} mints them against {typescript_pattern!r}"
     )
+
+
+def test_every_capture_incident_token_is_spelled_the_same_in_both_languages() -> None:
+    """The widget picks the sentence it shows a user off these tokens.
+
+    The backend names what went wrong with a meeting capture and the widget
+    decides what that means to a user, so a token only one side knows degrades
+    the marker with no explanation -- or, the other way round, leaves a
+    sentence nothing can ever trigger. Neither is visible to `tsc` or to
+    `mypy`.
+
+    Mutation-checked: renaming `STORAGE_LOW`'s value in `meeting_recorder.py`
+    and leaving `src/contracts.ts` alone fails this test printing both sets.
+    """
+    python_tokens = set(
+        re.findall(
+            r'^    [A-Z_]+ = "([a-z_]+)"$',
+            _class_body(MEETING_RECORDER_PY, "CaptureIncident"),
+            re.MULTILINE,
+        )
+    )
+    declaration = _extract(
+        CONTRACTS_TS, r"export const CAPTURE_INCIDENTS = \[([^\]]*)\] as const;"
+    )[0]
+    typescript_tokens = set(re.findall(r'"([a-z_]+)"', declaration))
+    assert python_tokens == typescript_tokens, (
+        f"{MEETING_RECORDER_PY.name} can report {sorted(python_tokens)} but "
+        f"{CONTRACTS_TS.name} carries {sorted(typescript_tokens)}"
+    )
+    assert len(python_tokens) >= 5, (
+        "the extractor matched fewer tokens than CaptureIncident declares, so "
+        "it is no longer reading the enum it exists to pin"
+    )
+
+
+def _class_body(path: Path, name: str) -> str:
+    """The indented body of one class, so a scan cannot stray into its siblings.
+
+    `meeting_recorder.py` holds two `str, Enum` classes and a token pin that
+    read the whole file collected `MeetingState`'s members as well.
+    """
+    text = _read(path)
+    start = text.index(f"class {name}(")
+    body = text[start:]
+    end = re.search(r"^(?:class |def )", body[1:], re.MULTILINE)
+    return body if end is None else body[: end.start() + 1]
 
 
 def _rust_source_files() -> list[Path]:

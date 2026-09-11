@@ -38,7 +38,12 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from app.audio.config import AudioSettings
-from app.audio.system_source import BlockSink, SystemAudioSource, SystemAudioUnavailableError
+from app.audio.system_source import (
+    BlockSink,
+    FailureSink,
+    SystemAudioSource,
+    SystemAudioUnavailableError,
+)
 from app.audio.timeline import interleaved_buffer_to_mono
 
 log = logging.getLogger(__name__)
@@ -180,6 +185,7 @@ class MacOSTapSource(SystemAudioSource):
             maxlen=_STDERR_TAIL_LINES
         )
         self._on_block: BlockSink | None = None
+        self._on_failure: FailureSink | None = None
         self._native_sample_rate = settings.sample_rate
         self._channels = 1
 
@@ -191,7 +197,7 @@ class MacOSTapSource(SystemAudioSource):
     def endpoint_name(self) -> str:
         return ENDPOINT_NAME
 
-    def start(self, on_block: BlockSink) -> None:
+    def start(self, on_block: BlockSink, on_failure: FailureSink | None = None) -> None:
         self._stopping.clear()
         process = self._spawn()
         stderr_reader = _start_reader(
@@ -215,6 +221,7 @@ class MacOSTapSource(SystemAudioSource):
 
         with self._lock:
             self._on_block = on_block
+            self._on_failure = on_failure
         self._process = process
         self._stderr_reader = stderr_reader
         self._reader = _start_reader(
@@ -272,6 +279,12 @@ class MacOSTapSource(SystemAudioSource):
                 code,
                 self._stderr_text(),
             )
+            with self._lock:
+                on_failure = self._on_failure
+            if on_failure is not None:
+                on_failure(
+                    f"the macOS system-audio helper exited with code {code}"
+                )
 
     def _drain_stderr(self, stream: object) -> None:
         """Read the helper's stderr from the moment it is spawned.
@@ -345,6 +358,7 @@ class MacOSTapSource(SystemAudioSource):
         self._stopping.set()
         with self._lock:
             self._on_block = None
+            self._on_failure = None
         process = self._process
         self._process = None
         readers = [t for t in (self._reader, self._stderr_reader) if t is not None]

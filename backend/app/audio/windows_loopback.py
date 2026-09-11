@@ -20,7 +20,12 @@ import pyaudiowpatch as pyaudio
 
 from app.audio.config import AudioSettings
 from app.audio.endpoint_selection import resolve_loopback_device
-from app.audio.system_source import BlockSink, SystemAudioSource, SystemAudioUnavailableError
+from app.audio.system_source import (
+    BlockSink,
+    FailureSink,
+    SystemAudioSource,
+    SystemAudioUnavailableError,
+)
 from app.audio.timeline import interleaved_buffer_to_mono
 from app.audio.windows_endpoints import render_endpoint_names
 
@@ -72,6 +77,7 @@ class WindowsLoopbackSource(SystemAudioSource):
         self._endpoint_name = str(device.get("name", "Unknown endpoint"))
         self._stream: object | None = None
         self._on_block: BlockSink | None = None
+        self._on_failure: FailureSink | None = None
         self._status_reported = False
         self._lock = threading.Lock()
         log.info(
@@ -98,11 +104,21 @@ class WindowsLoopbackSource(SystemAudioSource):
         mix. They are indistinguishable in the samples themselves and this
         flag is the only thing that separates them — discarding it cost a
         full diagnosis pass during spec 066.
+
+        The same flag is the only evidence Windows has that loopback capture
+        has degraded, so it is reported to the recorder as well as logged:
+        a meeting whose far side stopped arriving is news the user gets while
+        the call is still running rather than when they play the file back.
         """
         with self._lock:
             already = self._status_reported
             self._status_reported = True
+            on_failure = self._on_failure
         if not already:
+            if on_failure is not None:
+                on_failure(
+                    f"the WASAPI loopback stream reported PortAudio status {int(status)}"
+                )
             log.warning(
                 "WASAPI loopback stream reported PortAudio status %d "
                 "(paInputUnderflow=%d) — any silence in this recording may be "
@@ -121,9 +137,10 @@ class WindowsLoopbackSource(SystemAudioSource):
             sink(arrival, interleaved_buffer_to_mono(in_data, self._channels, "<f4"))
         return (None, pyaudio.paContinue)
 
-    def start(self, on_block: BlockSink) -> None:
+    def start(self, on_block: BlockSink, on_failure: FailureSink | None = None) -> None:
         with self._lock:
             self._on_block = on_block
+            self._on_failure = on_failure
         self._stream = self._audio.open(
             format=pyaudio.paFloat32,
             channels=self._channels,
@@ -138,6 +155,7 @@ class WindowsLoopbackSource(SystemAudioSource):
     def stop(self) -> None:
         with self._lock:
             self._on_block = None
+            self._on_failure = None
         stream = self._stream
         self._stream = None
         if stream is not None:

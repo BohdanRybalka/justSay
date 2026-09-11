@@ -28,11 +28,13 @@ import asyncio
 import functools
 import itertools
 import logging
+import queue
 import threading
 import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import ExitStack
 from enum import Enum
 from pathlib import Path
 from typing import NamedTuple, TypeVar
@@ -41,14 +43,20 @@ import numpy as np
 import sounddevice as sd
 
 from app.audio.analysis import rms_dbfs, to_mono
-from app.audio.base import AudioRecorder, write_wav
+from app.audio.base import AudioRecorder, write_wav_streaming
 from app.audio.config import AudioSettings
+from app.audio.meeting_spool import (
+    MeetingSpool,
+    assembly_reserve_bytes,
+    close_memmap,
+    free_bytes,
+)
 from app.audio.system_source import (
     SystemAudioSource,
     SystemAudioUnavailableError,
     create_system_audio_source,
 )
-from app.audio.timeline import CapturedBlock, mix_and_normalize, place_on_timeline
+from app.audio.timeline import normalize_in_place, place_on_timeline
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +96,45 @@ class MeetingState(str, Enum):
     STARTING = "starting"
     RECORDING = "recording"
     STOPPING = "stopping"
+
+
+class CaptureIncident(str, Enum):
+    """Something ended or degraded a capture, named so the widget can say it.
+
+    Exactly the tokens the code can produce, and no others: each one has a
+    site that observes the event, and `src/contracts.ts` carries the same set
+    pinned by `backend/tests/test_cross_language_contracts.py`. The first
+    incident of a capture wins — a later one does not overwrite it — because
+    what the user needs is the reason their recording went wrong, and the
+    first thing to go wrong is usually the cause of the rest.
+
+    A meeting with an incident is still a meeting: capture keeps running,
+    the file is still written, and the token says what is missing from it.
+    """
+
+    MICROPHONE_STALLED = "microphone_stalled"
+    SYSTEM_AUDIO_ENDED = "system_audio_ended"
+    STORAGE_FAILED = "storage_failed"
+    STORAGE_LOW = "storage_low"
+    STORAGE_BACKLOG = "storage_backlog"
+
+
+def microphone_has_stalled(last_arrival: float | None, now: float, tolerance: float) -> bool:
+    """Whether the microphone has gone quiet for longer than `tolerance`.
+
+    Derived from the last arrival rather than watched by a background task,
+    so nothing new touches a device handle off the owner thread — ADR 048's
+    invariant is untouched. `last_arrival` is `None` only when no capture is
+    running, which is not a stall.
+    """
+    return last_arrival is not None and now - last_arrival > tolerance
+
+
+MICROPHONE_SOURCE = "microphone"
+
+SYSTEM_SOURCE = "system"
+
+_SPILL_SENTINEL = object()
 
 
 class MeetingCaptureAbortedError(RuntimeError):
@@ -131,20 +178,25 @@ MEETING_BUSY_DETAIL = (
 
 
 class _CapturedMeeting(NamedTuple):
-    """Everything the WAV needs, taken out of the recorder in one lock hold."""
+    """Everything the WAV needs, taken out of the recorder in one lock hold.
 
-    microphone_blocks: list[CapturedBlock]
-    system_blocks: list[CapturedBlock]
+    The two spools are files on disk rather than lists of blocks, so what
+    crosses to the writer thread is a pair of handles whatever the length of
+    the meeting. Discarding them is the writer's obligation from here on.
+    """
+
+    microphone_spool: MeetingSpool
+    system_spool: MeetingSpool
     system_rate: int
     recording_start: float
     recording_stop: float
-    truncated: bool
+    incident: CaptureIncident | None
 
 
 class MeetingRecording(NamedTuple):
     """A written meeting file and the facts describing that same capture.
 
-    The duration and the truncation flag travel with the path because they
+    The duration and the incident travel with the path because they
     are properties of the capture, not of the recorder: the recorder stops
     being busy the moment the harvest returns, so a second meeting can start
     and finish while this file is still being written, and anything stored on
@@ -153,11 +205,11 @@ class MeetingRecording(NamedTuple):
 
     path: Path
     duration_seconds: float
-    truncated: bool
+    incident: CaptureIncident | None
 
 
 class MeetingStatusSnapshot(NamedTuple):
-    """The five reported facts as they stood in one lock hold.
+    """The six reported facts as they stood in one lock hold.
 
     Exists because reading the five properties one after another does not
     describe one moment: each takes its own lock hold, and the owner thread
@@ -173,6 +225,7 @@ class MeetingStatusSnapshot(NamedTuple):
     level_db: float
     system_endpoint: str | None
     system_level_db: float
+    capture_incident: CaptureIncident | None
 
 
 def _release_devices(
@@ -221,12 +274,17 @@ class MeetingRecorder(AudioRecorder):
         self._writer = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="meeting-writer"
         )
+        self._spill = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="meeting-spill"
+        )
         self._tokens = itertools.count(1)
         self._session_token: int | None = None
-        self._microphone_blocks: list[CapturedBlock] = []
-        self._system_blocks: list[CapturedBlock] = []
-        self._raw_bytes = 0
-        self._truncated = False
+        self._spill_queue: queue.Queue | None = None
+        self._spill_drain: Future[None] | None = None
+        self._microphone_spool: MeetingSpool | None = None
+        self._system_spool: MeetingSpool | None = None
+        self._last_microphone_arrival: float | None = None
+        self._incident: CaptureIncident | None = None
         self._stream: sd.InputStream | None = None
         self._system_source: SystemAudioSource | None = None
         self._state = MeetingState.IDLE
@@ -298,35 +356,144 @@ class MeetingRecorder(AudioRecorder):
             with self._lock:
                 self._devices_in_flight -= 1
 
-    def _store(
-        self, token: int, blocks: list[CapturedBlock], arrival: float, mono: np.ndarray
-    ) -> bool:
-        """Append under the lock unless the raw-store cap is already reached.
+    def _store(self, token: int, source: str, arrival: float, mono: np.ndarray) -> bool:
+        """Hand the block to the spill thread and return, doing no I/O here.
 
-        Returns whether the block was kept. Both stores share one budget, and
-        once it is exhausted capture keeps running but stops accumulating, so
-        `stop()` still returns a valid WAV of everything up to that point.
+        Returns whether the block was queued. The device callbacks reach this
+        on a thread PortAudio calls with a deadline, so what happens here is a
+        bounded `put_nowait` and nothing else: a write to a file a slow disk
+        has stalled would be answered with substituted zeros and an underflow
+        flag, which is the failure this queue exists to avoid.
+
+        A full queue is an incident rather than an exception — the block is
+        lost and the user is told — because raising at the device would take
+        the stream down instead of the seconds it could not keep up with.
 
         A block is kept only for the session that registered the callback,
         and only while that session is capturing.
+
+        The put happens under the same lock hold as the state check, and not
+        after it: `_finish_spill` drops the queue under that lock before it
+        enqueues the sentinel, so a callback that passed the check cannot be
+        preempted and then land a block behind the sentinel, into a queue no
+        worker is draining any more. `put_nowait` never blocks, so the hold
+        stays as short as the check it joins, and the incident is recorded
+        after the lock is released because `_note_incident` takes it too.
         """
+        full = False
         with self._lock:
             if self._session_token != token:
                 return False
             if self._state not in (MeetingState.STARTING, MeetingState.RECORDING):
                 return False
-            if self._raw_bytes >= self._settings.meeting_max_raw_bytes:
-                if not self._truncated:
-                    self._truncated = True
-                    log.warning(
-                        "Meeting recording hit the %d-byte raw buffer cap — "
-                        "further audio is dropped",
-                        self._settings.meeting_max_raw_bytes,
-                    )
+            work = self._spill_queue
+            if work is None:
                 return False
-            blocks.append(CapturedBlock(arrival=arrival, samples=mono))
-            self._raw_bytes += mono.nbytes
-            return True
+            try:
+                work.put_nowait((source, arrival, mono))
+            except queue.Full:
+                full = True
+        if full:
+            self._note_incident(
+                CaptureIncident.STORAGE_BACKLOG,
+                "the spill thread could not keep up, so some audio was dropped",
+            )
+            return False
+        return True
+
+    def _note_incident(self, incident: CaptureIncident, detail: str) -> bool:
+        """Record the first incident of this capture and log it once.
+
+        Returns whether this call was the one that recorded it, so a site
+        reached repeatedly — a status read deriving a stall, a callback
+        raising the same flag every block — logs one line per capture rather
+        than one per call.
+        """
+        with self._lock:
+            first = self._incident is None
+            if first:
+                self._incident = incident
+        if not first:
+            return False
+        if incident is CaptureIncident.STORAGE_FAILED:
+            log.error("Meeting capture incident %s: %s", incident.value, detail)
+        else:
+            log.warning("Meeting capture incident %s: %s", incident.value, detail)
+        return True
+
+    def _drain_spill(
+        self, work: queue.Queue, spools: dict[str, MeetingSpool], started_at: float
+    ) -> None:
+        """Write every queued block to its spool until the sentinel arrives.
+
+        Stops accumulating — rather than stopping — on a storage failure or a
+        free-space floor, because the audio already on disk is a recording the
+        user can still have and the callbacks must keep finding a drained
+        queue whatever happened to the disk.
+
+        The free-space check runs every `meeting_free_space_check_blocks`
+        appends rather than every append: `disk_usage` is a syscall, and at
+        the default that is one every 10.9 s of 48 kHz audio.
+        """
+        appended = 0
+        accumulating = True
+        while True:
+            item = work.get()
+            if item is _SPILL_SENTINEL:
+                return
+            if not accumulating:
+                continue
+            source, arrival, mono = item
+            try:
+                if appended % self._settings.meeting_free_space_check_blocks == 0:
+                    elapsed = time.monotonic() - started_at
+                    reserve = assembly_reserve_bytes(elapsed, self._settings.sample_rate)
+                    if free_bytes(self._settings.temp_dir) < reserve:
+                        accumulating = False
+                        self._note_incident(
+                            CaptureIncident.STORAGE_LOW,
+                            f"assembling this recording needs {reserve} free bytes and "
+                            f"the disk holding the recording has fewer, so capture "
+                            f"stopped accumulating",
+                        )
+                        continue
+                spools[source].append(arrival, mono)
+            except OSError as e:
+                accumulating = False
+                self._note_incident(CaptureIncident.STORAGE_FAILED, str(e))
+                continue
+            appended += 1
+
+    def _finish_spill(self) -> None:
+        """Drain everything already queued, then let the spill worker return.
+
+        Called on the owner thread once the state forbids further puts, so
+        the sentinel is the last item the queue can receive and every block
+        ahead of it is written before the spools are read.
+        """
+        with self._lock:
+            work = self._spill_queue
+            drain = self._spill_drain
+            self._spill_queue = None
+            self._spill_drain = None
+        if work is not None:
+            work.put(_SPILL_SENTINEL)
+        if drain is not None:
+            try:
+                drain.result()
+            except Exception:
+                log.warning("The meeting spill thread ended badly", exc_info=True)
+
+    def _system_failed(self, token: int, reason: str) -> None:
+        """The system source says it has stopped delivering audio.
+
+        The meeting keeps recording the microphone: half a call is what the
+        user has, and taking the capture down would replace it with nothing.
+        """
+        with self._lock:
+            if self._session_token != token:
+                return
+        self._note_incident(CaptureIncident.SYSTEM_AUDIO_ENDED, reason)
 
     def _microphone_callback(
         self,
@@ -343,30 +510,40 @@ class MeetingRecorder(AudioRecorder):
         the second one. Without that check a callback preempted mid-way
         republishes an ended meeting's level after `_end_capture` cleared it.
 
-        The level is published whether or not the block was kept. Both stores
-        share one raw-byte budget, and past it `_store` answers `False` for
-        the rest of the meeting while capture keeps running — gating the meter
-        on that answer froze both readings at their last pre-cap value on any
-        call long enough to exhaust the budget, which is the opposite of what
-        `system_level_db` exists for. The re-check repeats `_store`'s own
-        session token rather than its return value, so a block belonging to a
-        session that has already ended still publishes nothing.
+        The level is published whether or not the block was kept. `_store`
+        answers `False` for a block a full queue or a stopped session refused,
+        and gating the meter on that answer froze both readings at their last
+        accepted value, which is the opposite of what `system_level_db` exists
+        for. The re-check repeats `_store`'s own session token rather than its
+        return value, so a block belonging to a session that has already ended
+        still publishes nothing.
+
+        `status` is read rather than ignored: a non-zero `sd.CallbackFlags`
+        is PortAudio saying it substituted zeros for audio it could not
+        deliver, and a microphone that has stopped producing looks exactly
+        like a quiet room without it.
         """
         arrival = time.monotonic()
         mono = to_mono(indata)
-        self._store(token, self._microphone_blocks, arrival, mono)
+        if status:
+            self._note_incident(
+                CaptureIncident.MICROPHONE_STALLED,
+                f"PortAudio reported {status} on the meeting microphone stream",
+            )
+        self._store(token, MICROPHONE_SOURCE, arrival, mono)
         with self._lock:
             if self._session_token == token:
                 self._current_level = rms_dbfs(mono)
+                self._last_microphone_arrival = arrival
 
     def _system_callback(self, token: int, arrival: float, mono: np.ndarray) -> None:
         """The far side's half of `_microphone_callback`, with the same re-check.
 
         The level write is a second lock hold here too, so a stop landing in
         the gap must not be followed by the ended meeting's far-side level,
-        and it is reached past the raw-byte cap for the same reason.
+        and it is reached past a refused store for the same reason.
         """
-        self._store(token, self._system_blocks, arrival, mono)
+        self._store(token, SYSTEM_SOURCE, arrival, mono)
         with self._lock:
             if self._session_token == token:
                 self._system_level = rms_dbfs(mono)
@@ -407,13 +584,17 @@ class MeetingRecorder(AudioRecorder):
         held no handle went on answering `is_recording: true` with a ticking
         duration and a named endpoint.
 
-        `_truncated` is deliberately not here. It belongs to the capture
+        `_incident` is deliberately not here. It belongs to the capture
         being harvested and travels inside the `_CapturedMeeting`; the next
         start clears it.
+
+        The two spools are taken out rather than discarded: whoever ends the
+        capture owns the files from here on, which is the writer for a
+        harvest and the caller itself for an abandoned start.
         """
-        self._microphone_blocks = []
-        self._system_blocks = []
-        self._raw_bytes = 0
+        self._microphone_spool = None
+        self._system_spool = None
+        self._last_microphone_arrival = None
         self._session_token = None
         self._start_time = None
         self._endpoint_name = None
@@ -446,10 +627,7 @@ class MeetingRecorder(AudioRecorder):
             if self._state is not MeetingState.IDLE:
                 raise MeetingCaptureAbortedError(MEETING_BUSY_DETAIL)
             self._session_token = token
-            self._microphone_blocks = []
-            self._system_blocks = []
-            self._raw_bytes = 0
-            self._truncated = False
+            self._incident = None
             self._current_level = float("-inf")
             self._system_level = float("-inf")
             self._endpoint_name = None
@@ -457,6 +635,7 @@ class MeetingRecorder(AudioRecorder):
 
         source: SystemAudioSource | None = None
         stream: sd.InputStream | None = None
+        spools: dict[str, MeetingSpool] = {}
         try:
             source = create_system_audio_source(self._settings)
             if source is None:
@@ -465,10 +644,28 @@ class MeetingRecorder(AudioRecorder):
                     "meeting recording requires Windows or macOS"
                 )
             self._settings.temp_dir.mkdir(parents=True, exist_ok=True)
+            meeting_id = uuid.uuid4().hex[:12]
+            spools = {
+                name: MeetingSpool(self._settings.temp_dir, meeting_id, name)
+                for name in (MICROPHONE_SOURCE, SYSTEM_SOURCE)
+            }
+            started_at = time.monotonic()
+            work: queue.Queue = queue.Queue(
+                maxsize=self._settings.meeting_spill_queue_blocks
+            )
+            drain = self._spill.submit(self._drain_spill, work, spools, started_at)
             with self._lock:
-                self._start_time = time.monotonic()
+                self._start_time = started_at
                 self._endpoint_name = source.endpoint_name
-            source.start(functools.partial(self._system_callback, token))
+                self._last_microphone_arrival = started_at
+                self._microphone_spool = spools[MICROPHONE_SOURCE]
+                self._system_spool = spools[SYSTEM_SOURCE]
+                self._spill_queue = work
+                self._spill_drain = drain
+            source.start(
+                functools.partial(self._system_callback, token),
+                functools.partial(self._system_failed, token),
+            )
             stream = sd.InputStream(
                 samplerate=self._settings.sample_rate,
                 channels=self._settings.channels,
@@ -481,6 +678,9 @@ class MeetingRecorder(AudioRecorder):
             _release_devices(stream, source)
             with self._lock:
                 self._forget_capture()
+            self._finish_spill()
+            for spool in spools.values():
+                spool.discard()
             self._transition(MeetingState.IDLE)
             raise
 
@@ -493,9 +693,9 @@ class MeetingRecorder(AudioRecorder):
         """End the capture on the owner thread and await the file it writes.
 
         Answers with a `MeetingRecording` rather than the bare path the
-        dictation recorder returns: the duration and the truncation flag
-        belong to the capture that produced the file and cannot be read off
-        the recorder afterwards, which by then may be serving a later meeting.
+        dictation recorder returns: the duration and the incident belong to
+        the capture that produced the file and cannot be read off the
+        recorder afterwards, which by then may be serving a later meeting.
 
         Both awaits are detachable and neither of them owns the work behind
         it: once `_end_capture` has returned, the write is already submitted,
@@ -503,8 +703,8 @@ class MeetingRecorder(AudioRecorder):
         recording, and the file's path reaches the log without it.
 
         A cancellation that lands on the first await is different: the harvest
-        may not have run yet, and when it does it can still find both block
-        lists empty and produce no file at all.
+        may not have run yet, and when it does it can still find both spools
+        empty and produce no file at all.
         """
         try:
             writing = await self._run_on_devices(self._end_capture)
@@ -545,9 +745,14 @@ class MeetingRecorder(AudioRecorder):
         cancellation's reach: the `_CapturedMeeting` never crosses back to
         the loop.
 
-        The truncation flag is harvested in the same lock hold as the blocks
-        and travels inside the `_CapturedMeeting`, because it describes this
+        The incident is harvested in the same lock hold as the spools and
+        travels inside the `_CapturedMeeting`, because it describes this
         capture while the live copy belongs to whichever meeting starts next.
+
+        The spill thread is drained before the harvest reads the spools, and
+        only after the transition to `STOPPING` has made `_store` refuse every
+        further block, so the sentinel is the last thing the queue can carry
+        and nothing captured is left unwritten.
 
         Both level meters are cleared with the rest of the capture's identity,
         by the same `_forget_capture` the abandoned-start path calls, so a
@@ -561,22 +766,25 @@ class MeetingRecorder(AudioRecorder):
 
         stream: sd.InputStream | None = None
         source: SystemAudioSource | None = None
+        self._finish_spill()
         try:
             with self._lock:
                 stream = self._stream
                 source = self._system_source
                 self._stream = None
                 self._system_source = None
+                microphone_spool = self._microphone_spool
+                system_spool = self._system_spool
                 system_rate = self._settings.sample_rate
                 if source is not None:
                     system_rate = source.native_sample_rate
                 captured = _CapturedMeeting(
-                    microphone_blocks=self._microphone_blocks,
-                    system_blocks=self._system_blocks,
+                    microphone_spool=microphone_spool,
+                    system_spool=system_spool,
                     system_rate=system_rate,
                     recording_start=self._start_time,
                     recording_stop=time.monotonic(),
-                    truncated=self._truncated,
+                    incident=self._incident,
                 )
         finally:
             with self._lock:
@@ -584,7 +792,11 @@ class MeetingRecorder(AudioRecorder):
             _release_devices(stream, source)
             self._transition(MeetingState.IDLE)
 
-        if not captured.microphone_blocks and not captured.system_blocks:
+        captured.microphone_spool.close()
+        captured.system_spool.close()
+        if not captured.microphone_spool.frames and not captured.system_spool.frames:
+            captured.microphone_spool.discard()
+            captured.system_spool.discard()
             raise MeetingCaptureEmptyError("No audio data captured")
         return self._writer.submit(self._write_captured_meeting, captured)
 
@@ -596,18 +808,12 @@ class MeetingRecorder(AudioRecorder):
         to be made by the party that owns the write rather than by the one
         that asked for it, which may already be gone.
 
-        The duration and the truncation flag come back with the path so the
-        answer describes this capture whatever the recorder is doing by the
-        time the write lands.
+        The duration and the incident come back with the path so the answer
+        describes this capture whatever the recorder is doing by the time the
+        write lands.
         """
         try:
-            output_path = self._assemble_and_write(
-                captured.microphone_blocks,
-                captured.system_blocks,
-                captured.system_rate,
-                captured.recording_start,
-                captured.recording_stop,
-            )
+            output_path = self._assemble_and_write(captured)
         except Exception as e:
             log.error("Writing the meeting recording failed", exc_info=True)
             raise MeetingWriteFailedError(str(e) or type(e).__name__) from e
@@ -615,7 +821,7 @@ class MeetingRecorder(AudioRecorder):
         return MeetingRecording(
             path=output_path,
             duration_seconds=captured.recording_stop - captured.recording_start,
-            truncated=captured.truncated,
+            incident=captured.incident,
         )
 
     def _abandon_capture(self, token: int) -> None:
@@ -642,64 +848,93 @@ class MeetingRecorder(AudioRecorder):
         with self._lock:
             stream = self._stream
             source = self._system_source
+            spools = [self._microphone_spool, self._system_spool]
             self._stream = None
             self._system_source = None
             self._forget_capture()
+        self._finish_spill()
+        for spool in spools:
+            if spool is not None:
+                spool.discard()
         _release_devices(stream, source)
         self._transition(MeetingState.IDLE)
 
-    def _assemble_and_write(
-        self,
-        microphone_blocks: list[CapturedBlock],
-        system_blocks: list[CapturedBlock],
-        system_rate: int,
-        recording_start: float,
-        recording_stop: float,
-    ) -> Path:
-        """Two resamples, a mix and a synchronous wave write, off the event loop.
+    def _assemble_and_write(self, captured: _CapturedMeeting) -> Path:
+        """Stream both spools into one mix file and read the WAV out of it.
 
-        A 45-minute call is tens of millions of samples and ~86 MB to disk.
-        Run inline this blocked every other endpoint for the whole write --
-        including `/health` and the meeting status the widget polls twice a
-        second, which is the moment the user is waiting on their transcript.
+        Off the event loop, because run inline this blocked every other
+        endpoint for the whole write -- including `/health` and the meeting
+        status the widget polls, which is the moment the user is waiting on
+        their transcript.
+
+        The spools and the mix file go in the `finally` — they are transient
+        by construction, and a write that failed must not leave the raw
+        capture behind next to no recording. Every mapping `_mix_into` opens
+        is closed by that call's own `ExitStack` before it returns or
+        propagates, because an open mapping cannot be unlinked on Windows and
+        a raising call's frame -- and so its memmaps -- stays alive in the
+        traceback for as long as the exception does.
         """
-        return self._write_wav(
-            self._assemble(
-                microphone_blocks,
-                system_blocks,
-                system_rate,
-                recording_start,
-                recording_stop,
-            )
-        )
+        output_path = self._settings.temp_dir / f"meeting_{uuid.uuid4().hex[:12]}.wav"
+        mix_path = self._settings.temp_dir / f"meeting_mix_{uuid.uuid4().hex[:12]}.f32"
+        try:
+            return self._mix_into(captured, mix_path, output_path)
+        finally:
+            try:
+                mix_path.unlink(missing_ok=True)
+            except OSError:
+                log.warning("The meeting mix file %s could not be removed", mix_path)
+            captured.microphone_spool.discard()
+            captured.system_spool.discard()
 
-    def _assemble(
-        self,
-        microphone_blocks: list[CapturedBlock],
-        system_blocks: list[CapturedBlock],
-        system_rate: int,
-        recording_start: float,
-        recording_stop: float,
-    ) -> np.ndarray:
+    def _mix_into(
+        self, captured: _CapturedMeeting, mix_path: Path, output_path: Path
+    ) -> Path:
+        """Sum both spools into one mix file and read the WAV out of it.
+
+        The mix is a `np.memmap` over a temporary file rather than an array:
+        a meeting has no length limit, and the recording only has to fit on
+        the disk it was already being captured to. A fresh memmap is
+        zero-filled, which is the silence a source that produced nothing
+        contributes, so both sources are simply summed into it.
+
+        All three mappings — the mix and one over each spool — are registered
+        with an `ExitStack` as they are opened, so a write that fails part-way
+        leaves none of them open. Nothing reads any of them after the stack
+        unwinds; the caller's `finally` only removes the files they mapped.
+        """
         target_rate = self._settings.sample_rate
-        common = {
-            "target_rate": target_rate,
-            "recording_start": recording_start,
-            "recording_stop": recording_stop,
-            "gap_tolerance_blocks": self._settings.meeting_gap_tolerance_blocks,
-            "rate_tolerance": self._settings.meeting_rate_tolerance,
-        }
-        microphone = place_on_timeline(
-            microphone_blocks, nominal_rate=target_rate, **common
-        )
-        system = place_on_timeline(system_blocks, nominal_rate=system_rate, **common)
-        return mix_and_normalize(microphone, system)
+        chunk_frames = self._settings.meeting_assembly_chunk_frames
+        span = captured.recording_stop - captured.recording_start
+        total_samples = max(int(round(span * target_rate)), 0)
 
-    def _write_wav(self, audio_data: np.ndarray) -> Path:
-        filename = f"meeting_{uuid.uuid4().hex[:12]}.wav"
-        output_path = self._settings.temp_dir / filename
-
-        return write_wav(output_path, audio_data, self._settings.sample_rate, channels=1)
+        with ExitStack() as mappings:
+            mix = np.memmap(
+                mix_path, dtype=np.float32, mode="w+", shape=(max(total_samples, 1),)
+            )
+            mappings.callback(close_memmap, mix)
+            timeline = mix[:total_samples]
+            common = {
+                "target_rate": target_rate,
+                "recording_start": captured.recording_start,
+                "gap_tolerance_blocks": self._settings.meeting_gap_tolerance_blocks,
+                "rate_tolerance": self._settings.meeting_rate_tolerance,
+                "chunk_frames": chunk_frames,
+                "out": timeline,
+            }
+            for spool, nominal_rate in (
+                (captured.microphone_spool, target_rate),
+                (captured.system_spool, captured.system_rate),
+            ):
+                samples = spool.samples()
+                mappings.callback(close_memmap, samples)
+                place_on_timeline(
+                    spool.index(), samples, nominal_rate=nominal_rate, **common
+                )
+            normalize_in_place(timeline, chunk_frames)
+            return write_wav_streaming(
+                output_path, timeline, target_rate, 1, chunk_frames
+            )
 
     @property
     def is_recording(self) -> bool:
@@ -769,11 +1004,28 @@ class MeetingRecorder(AudioRecorder):
         The writes are already atomic — the harvest publishes and clears the
         clock, the endpoint name and both meters together — and this is the
         matching read, so what the caller reports describes one moment of
-        the recorder rather than up to five.
+        the recorder rather than up to six.
+
+        A stalled microphone is derived here rather than watched by a
+        background task: the last arrival is written by the callback that
+        already takes this lock, so the staleness is a comparison against the
+        clock and nothing new touches a device handle.
+
+        The incident is reported only while a capture is running, because
+        `_incident` deliberately outlives the harvest that reads it and a
+        status answering with a finished meeting's incident would degrade the
+        widget for a call that had already ended.
         """
+        stalled = False
         with self._lock:
             start_time = self._start_time
-            return MeetingStatusSnapshot(
+            if start_time is not None and microphone_has_stalled(
+                self._last_microphone_arrival,
+                time.monotonic(),
+                self._settings.meeting_stall_tolerance_seconds,
+            ):
+                stalled = True
+            snapshot = MeetingStatusSnapshot(
                 is_recording=start_time is not None,
                 duration_seconds=(
                     0.0 if start_time is None else time.monotonic() - start_time
@@ -781,7 +1033,17 @@ class MeetingRecorder(AudioRecorder):
                 level_db=self._current_level,
                 system_endpoint=self._endpoint_name,
                 system_level_db=self._system_level,
+                capture_incident=None if start_time is None else self._incident,
             )
+        if not stalled:
+            return snapshot
+        self._note_incident(
+            CaptureIncident.MICROPHONE_STALLED,
+            f"no microphone block has arrived for more than "
+            f"{self._settings.meeting_stall_tolerance_seconds} s",
+        )
+        with self._lock:
+            return snapshot._replace(capture_incident=self._incident)
 
     def cleanup(self) -> None:
         """Send the owner thread one last command, then retire it.
@@ -812,3 +1074,4 @@ class MeetingRecorder(AudioRecorder):
         """
         self._discard_capture()
         self._writer.shutdown(wait=False)
+        self._spill.shutdown(wait=False)

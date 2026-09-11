@@ -23,7 +23,10 @@ class AudioSettings(BaseSettings):
     silence_vad_min_speech_frames: int = Field(default=5, ge=0)
 
     meeting_block_frames: int = Field(default=1024, gt=0)
-    meeting_max_raw_bytes: int = Field(default=700_000_000, gt=0)
+    meeting_spill_queue_blocks: int = Field(default=256, gt=0)
+    meeting_assembly_chunk_frames: int = Field(default=1 << 20, gt=0)
+    meeting_free_space_check_blocks: int = Field(default=512, gt=0)
+    meeting_stall_tolerance_seconds: float = Field(default=3.0, gt=0.0)
     meeting_gap_tolerance_blocks: float = Field(default=1.5, gt=1.0)
     meeting_rate_tolerance: float = Field(default=0.05, gt=0.0, lt=1.0)
 

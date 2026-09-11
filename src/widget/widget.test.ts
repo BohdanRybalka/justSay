@@ -15,8 +15,9 @@ const apiMock = {
     is_recording: false,
     duration_seconds: 0,
     level_db: -60,
-    system_endpoint: null,
+    system_endpoint: null as string | null,
     system_level_db: -60,
+    capture_incident: null as string | null,
   })),
   startMeetingRecording: vi.fn(),
   stopMeetingRecording: vi.fn(),
@@ -126,6 +127,7 @@ beforeEach(() => {
     level_db: -60,
     system_endpoint: null,
     system_level_db: -60,
+    capture_incident: null,
   });
   invokeMock.mockResolvedValue(undefined);
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -245,14 +247,20 @@ describe("a Tauri bridge that stops answering", () => {
     await loadWidget();
     await vi.waitFor(() => expect(listeners.get(EVENT_MEETING_TOGGLE)).toBeTypeOf("function"));
     const pressTray = listeners.get(EVENT_MEETING_TOGGLE)!;
+    apiMock.getMeetingStatus.mockRejectedValue(new TypeError("Failed to fetch"));
     apiMock.startMeetingRecording.mockResolvedValue({
       is_recording: true,
       duration_seconds: 0,
       level_db: -60,
       system_endpoint: null,
       system_level_db: -60,
+      capture_incident: null,
     });
-    apiMock.stopMeetingRecording.mockResolvedValue({ path: "meeting.wav" });
+    apiMock.stopMeetingRecording.mockResolvedValue({
+      filename: "meeting.wav",
+      duration_seconds: 3,
+      capture_incident: null,
+    });
     invokeMock.mockImplementation(() => new Promise(() => {}));
 
     void pressTray({});
@@ -265,6 +273,76 @@ describe("a Tauri bridge that stops answering", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(apiMock.stopMeetingRecording).toHaveBeenCalledOnce();
+  });
+});
+
+describe("a meeting that goes wrong while nobody is looking", () => {
+  async function startAMeeting() {
+    await loadWidget();
+    await vi.waitFor(() => expect(listeners.get(EVENT_MEETING_TOGGLE)).toBeTypeOf("function"));
+    apiMock.startMeetingRecording.mockResolvedValue({
+      is_recording: true,
+      duration_seconds: 0,
+      level_db: -60,
+      system_endpoint: "Headset [Loopback]",
+      system_level_db: -60,
+      capture_incident: null,
+    });
+    await listeners.get(EVENT_MEETING_TOGGLE)!({});
+    await vi.advanceTimersByTimeAsync(0);
+    apiMock.getMeetingStatus.mockClear();
+    return document.getElementById("widget")!;
+  }
+
+  it("asks the backend how the capture is doing, without adding a second timer", async () => {
+    await startAMeeting();
+
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(apiMock.getMeetingStatus).toHaveBeenCalledOnce();
+  });
+
+  it("degrades the marker and names the reason when the capture reports an incident", async () => {
+    const root = await startAMeeting();
+    apiMock.getMeetingStatus.mockResolvedValue({
+      is_recording: true,
+      duration_seconds: 5,
+      level_db: -60,
+      system_endpoint: "Headset [Loopback]",
+      system_level_db: -60,
+      capture_incident: "system_audio_ended",
+    });
+
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(root.classList.contains("meeting")).toBe(true);
+    expect(root.classList.contains("meeting-degraded")).toBe(true);
+  });
+
+  it("takes the marker down when the backend says the capture has ended", async () => {
+    const root = await startAMeeting();
+    apiMock.getMeetingStatus.mockResolvedValue({
+      is_recording: false,
+      duration_seconds: 0,
+      level_db: -60,
+      system_endpoint: null,
+      system_level_db: -60,
+      capture_incident: null,
+    });
+
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(root.classList.contains("meeting")).toBe(false);
+  });
+
+  it("leaves the marker up when the status call itself fails", async () => {
+    const root = await startAMeeting();
+    apiMock.getMeetingStatus.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await vi.advanceTimersByTimeAsync(4_000);
+
+    expect(root.classList.contains("meeting")).toBe(true);
+    expect(root.classList.contains("meeting-degraded")).toBe(false);
   });
 });
 

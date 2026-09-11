@@ -479,20 +479,23 @@ export interface DiscardResponse {
 
 /** The meeting endpoints' own response shape. Deliberately separate from
  *  `RecordingStatus`: the dictation contract must not move, and a meeting
- *  recording has to report which output it captures (`system_endpoint`) and
- *  whether sound is arriving from it (`system_level_db`). */
+ *  recording has to report which output it captures (`system_endpoint`),
+ *  whether sound is arriving from it (`system_level_db`) and whether anything
+ *  has gone wrong with the capture (`capture_incident`, one of
+ *  `CAPTURE_INCIDENTS` or `null`). */
 export interface MeetingStatus {
   is_recording: boolean;
   duration_seconds: number;
   level_db: number;
   system_endpoint: string | null;
   system_level_db: number;
+  capture_incident: string | null;
 }
 
 export interface MeetingStopResponse {
   filename: string;
   duration_seconds: number;
-  truncated: boolean;
+  capture_incident: string | null;
 }
 
 export interface DictateResponse {
@@ -812,11 +815,10 @@ export const api = {
   startMeetingRecording: () =>
     request<MeetingStatus>("POST", "/audio/meeting/start", undefined, UNRECONCILED),
 
-  /** Ends the capture and writes the whole WAV before it answers —
-   *  `_assemble_and_write` puts a 45-minute call at "~86 MB to disk" and
-   *  `meeting_max_raw_bytes` allows roughly eight times that. Abandoning it
-   *  costs the filename of a recording that was made, with nothing able to
-   *  recover it. */
+  /** Ends the capture and streams the whole WAV out of the spill files before
+   *  it answers, at roughly 115 MB per hour of call and with no length limit
+   *  at all. Abandoning it costs the filename of a recording that was made,
+   *  with nothing able to recover it. */
   stopMeetingRecording: () =>
     request<MeetingStopResponse>("POST", "/audio/meeting/stop", undefined, UNRECONCILED),
 

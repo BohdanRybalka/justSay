@@ -10,7 +10,11 @@ function actions(overrides: Partial<MeetingToggleActions> = {}) {
   const spies = {
     isRecording: vi.fn(() => false),
     startRecording: vi.fn(async () => ({})),
-    stopRecording: vi.fn(async () => ({})),
+    stopRecording: vi.fn(async () => ({
+      filename: "meeting.wav",
+      duration_seconds: 12,
+      capture_incident: null as string | null,
+    })),
     showIndicator: vi.fn(),
     hideIndicator: vi.fn(),
     setTrayRecording: vi.fn(async () => {}),
@@ -44,6 +48,32 @@ describe("the meeting recording toggle", () => {
   });
 
 
+
+  it("reports the incident a successful stop carries, having taken the marker down", async () => {
+    const deps = actions({
+      isRecording: vi.fn(() => true),
+      stopRecording: vi.fn(async () => ({
+        filename: "meeting.wav",
+        duration_seconds: 3600,
+        capture_incident: "storage_low" as string | null,
+      })),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.hideIndicator).toHaveBeenCalledOnce();
+    expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
+    expect(deps.reportError).toHaveBeenCalledOnce();
+    expect(deps.reportError.mock.calls[0][0]).toMatch(/not all of it/);
+  });
+
+  it("says nothing extra when a successful stop carries no incident", async () => {
+    const deps = actions({ isRecording: vi.fn(() => true) });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.reportError).not.toHaveBeenCalled();
+  });
 
   it("clears the indicator when starting fails, because nothing is recording", async () => {
     const deps = actions({

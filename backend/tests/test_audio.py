@@ -5,6 +5,7 @@ import logging
 import sys
 import threading
 import time
+import wave
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,6 +16,7 @@ import soundfile as sf
 from pydantic import ValidationError
 
 from app.audio.analysis import SilenceAnalysis, analyze_silence, rms_dbfs
+from app.audio.base import write_wav, write_wav_streaming
 from app.audio.config import AudioSettings
 from app.audio.recorder import MicrophoneRecorder
 from app.audio.session import SessionMismatchError
@@ -338,6 +340,35 @@ async def test_microphone_wav_bytes_unchanged(audio_settings, mock_stream):
 
     digest = hashlib.sha256(audio_path.read_bytes()).hexdigest()
     assert digest == _INSTANT_PROMPT_WAV_SHA256
+
+
+@pytest.mark.parametrize("chunk_frames", [1, 7, 1024, 100_000])
+def test_a_streamed_wav_is_byte_identical_to_a_single_shot_one(tmp_path, chunk_frames):
+    """Spec 153: the meeting path writes its WAV out of a memmap in chunks.
+
+    `write_wav` delegates to `write_wav_streaming`, so the dictation bytes
+    depend on the chunking being irrelevant to the result. The int16
+    conversion is elementwise and the clip is per sample, so it is -- and a
+    chunk size of 1 is the harshest way to say so.
+    """
+    rng = np.random.default_rng(153)
+    audio = rng.uniform(-1.5, 1.5, 40_000).astype(np.float32)
+
+    whole = write_wav(tmp_path / "whole.wav", audio, 16000, 1)
+    streamed = write_wav_streaming(tmp_path / "streamed.wav", audio, 16000, 1, chunk_frames)
+
+    assert whole.read_bytes() == streamed.read_bytes()
+
+
+def test_a_streamed_wav_of_nothing_is_still_a_valid_empty_wav(tmp_path):
+    """A meeting whose wall-clock span rounds to zero frames still answers."""
+    path = write_wav_streaming(
+        tmp_path / "empty.wav", np.zeros(0, dtype=np.float32), 16000, 1, 1024
+    )
+
+    with wave.open(str(path), "rb") as wf:
+        assert wf.getnframes() == 0
+        assert wf.getframerate() == 16000
 
 
 @pytest.mark.anyio

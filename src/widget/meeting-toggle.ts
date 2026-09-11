@@ -44,9 +44,15 @@
  * The sentence a user reads is written here and the backend detail is appended
  * to it as its cause, which is why the 507 detail carries the write error alone
  * and not a second sentence of its own.
+ *
+ * A stop that *succeeded* can still carry a `capture_incident` — the call was
+ * recorded and a file exists, but something went wrong along the way. That is
+ * the one outcome nothing read before spec 153: the indicator comes down as it
+ * always did, and the reason is reported alongside it rather than swallowed.
  */
 
-import { ApiRequestError } from "../api";
+import { ApiRequestError, type MeetingStopResponse } from "../api";
+import { describeMeetingIncident } from "./meeting-health";
 
 export const DISCLOSURE_REQUIRED_MESSAGE =
   "Read the meeting-recording disclosure before recording a call.";
@@ -83,6 +89,10 @@ function writeFailedMessage(error: unknown): string {
   return `The call ended but its recording could not be saved: ${describeFailure(error)}`;
 }
 
+function stoppedWithIncidentMessage(incident: string): string {
+  return `The call was recorded, but not all of it — ${describeMeetingIncident(incident)}.`;
+}
+
 function alreadyRecordingMessage(error: unknown): string {
   return `A call is already being recorded: ${describeFailure(error)}`;
 }
@@ -102,7 +112,7 @@ function captureOverMessage(error: ApiRequestError): string {
 export interface MeetingToggleActions {
   isRecording(): boolean;
   startRecording(): Promise<unknown>;
-  stopRecording(): Promise<unknown>;
+  stopRecording(): Promise<MeetingStopResponse>;
   showIndicator(): void;
   hideIndicator(): void;
   setTrayRecording(active: boolean): Promise<void>;
@@ -112,8 +122,9 @@ export interface MeetingToggleActions {
 
 export async function runMeetingToggle(actions: MeetingToggleActions): Promise<void> {
   if (actions.isRecording()) {
+    let stopped: MeetingStopResponse;
     try {
-      await actions.stopRecording();
+      stopped = await actions.stopRecording();
     } catch (e) {
       if (e instanceof ApiRequestError && CAPTURE_OVER_STATUSES.includes(e.status)) {
         actions.hideIndicator();
@@ -126,6 +137,9 @@ export async function runMeetingToggle(actions: MeetingToggleActions): Promise<v
     }
     actions.hideIndicator();
     await actions.setTrayRecording(false);
+    if (stopped.capture_incident) {
+      actions.reportError(stoppedWithIncidentMessage(stopped.capture_incident));
+    }
     return;
   }
 
