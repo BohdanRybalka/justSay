@@ -403,6 +403,16 @@ fn startup_log_dir() -> Option<PathBuf> {
     sidecar_log_dir(data_dir_name)
 }
 
+/// The size `sidecar.log` is allowed to reach before the live file is rotated
+/// away, and the size the one kept generation is bounded by — so the file the
+/// user is told to open costs at most twice this on disk.
+///
+/// The number is `tauri_plugin_log`'s own `max_file_size` in `lib.rs`: the two
+/// logs are opened for the same reason by the same reader, and a shell that
+/// keeps one of them to a megabyte and the other to a different figure would be
+/// stating a preference it does not have.
+const SIDECAR_LOG_MAX_BYTES: u64 = 1_000_000;
+
 /// Append one record to `sidecar.log` under the directory the caller resolved
 /// — see `sidecar_log_dir_from` and
 /// `docs/adr/012-dev-mode-data-directory-isolation.md`, so that a
@@ -437,10 +447,13 @@ fn append_sidecar_log(line: &[u8], log_dir: Option<&Path>) -> bool {
     if !record.ends_with(b"\n") {
         record.push(b'\n');
     }
+    let path = log_dir.join("sidecar.log");
+    let _rotation = sidecar_log_rotation_lock().lock();
+    rotate_sidecar_log_if_full(&path, record.len() as u64);
     match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(log_dir.join("sidecar.log"))
+        .open(&path)
     {
         Ok(mut file) => {
             use std::io::Write;
@@ -448,6 +461,42 @@ fn append_sidecar_log(line: &[u8], log_dir: Option<&Path>) -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// Held across the size check, the rename and the append, so the two producers
+/// cannot both find the file full and rotate the other's records away between
+/// them.
+///
+/// It does not replace the single `write_all` in `append_sidecar_log`: the lock
+/// orders this process's own writers, and the record still has to reach the
+/// file whole for anything appending to the same path from outside it.
+fn sidecar_log_rotation_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Move the live `sidecar.log` aside when the incoming record would carry it
+/// past `SIDECAR_LOG_MAX_BYTES`, replacing whatever `sidecar.log.1` held.
+///
+/// What a reader loses is the oldest cycles and never the newest: a crash loop
+/// repeats its failure for as long as the app is open, so the records worth
+/// keeping are the ones written last. Two generations rather than one, so that
+/// a rotation landing just before someone opens the file still leaves the
+/// preceding megabyte beside it.
+///
+/// A rename that fails leaves the file to grow rather than dropping the record:
+/// `std::fs::rename` replaces an existing destination on Windows and macOS
+/// alike, so what is left is the failures where nothing could be written
+/// anyway.
+fn rotate_sidecar_log_if_full(path: &Path, incoming: u64) -> bool {
+    let current = match std::fs::metadata(path) {
+        Ok(metadata) => metadata.len(),
+        Err(_) => return false,
+    };
+    if current + incoming <= SIDECAR_LOG_MAX_BYTES {
+        return false;
+    }
+    std::fs::rename(path, path.with_file_name("sidecar.log.1")).is_ok()
 }
 
 /// Report a reason the backend is not running to both the app log and
@@ -1732,6 +1781,86 @@ mod tests {
         read_and_discard(&dir);
     }
 
+    fn fill_sidecar_log(dir: &Path, records: usize) {
+        let filler = vec![b'x'; 50_000];
+        for _ in 0..records {
+            assert!(
+                append_sidecar_log(&filler, Some(dir)),
+                "the filler records have to land for the size assertions to mean anything"
+            );
+        }
+    }
+
+    #[test]
+    fn a_crash_loop_cannot_grow_the_log_past_two_generations() {
+        let dir = scratch_log_dir("rotation-bound");
+
+        fill_sidecar_log(&dir, 60);
+
+        let current = std::fs::metadata(dir.join("sidecar.log"))
+            .expect("sidecar.log")
+            .len();
+        let previous = std::fs::metadata(dir.join("sidecar.log.1"))
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            current <= SIDECAR_LOG_MAX_BYTES,
+            "a backend that starts, answers /health and dies loops for as long as the \
+             app is open, so the live file has to stay bounded: {} bytes",
+            current
+        );
+        assert!(
+            previous <= SIDECAR_LOG_MAX_BYTES,
+            "the kept generation is bounded by the same cap: {} bytes",
+            previous
+        );
+        assert!(
+            current + previous < 3_000_000,
+            "3 MB of records must not survive as 3 MB on disk: {} + {} bytes",
+            current,
+            previous
+        );
+    }
+
+    #[test]
+    fn rotation_drops_the_oldest_cycles_and_keeps_the_newest() {
+        let dir = scratch_log_dir("rotation-order");
+
+        append_sidecar_log(b"[shell] the crash that started it", Some(&dir));
+        fill_sidecar_log(&dir, 45);
+        append_sidecar_log(b"[shell] the crash that just happened", Some(&dir));
+
+        let current = std::fs::read_to_string(dir.join("sidecar.log")).expect("sidecar.log");
+        let previous = std::fs::read_to_string(dir.join("sidecar.log.1")).unwrap_or_default();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            current.contains("the crash that just happened"),
+            "the reader opens this file after a crash loop to find the recent failures"
+        );
+        assert!(
+            !current.contains("the crash that started it")
+                && !previous.contains("the crash that started it"),
+            "rotation gives up the oldest cycles, never the newest"
+        );
+    }
+
+    #[test]
+    fn only_one_generation_is_kept_beside_the_live_file() {
+        let dir = scratch_log_dir("rotation-count");
+
+        fill_sidecar_log(&dir, 45);
+        let extra = dir.join("sidecar.log.2").exists();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            !extra,
+            "two files is the whole bound; a third generation would put the growth back"
+        );
+    }
+
     #[test]
     fn respawn_backoff_follows_2_4_8_second_sequence() {
         assert_eq!(respawn_backoff(0), Duration::from_secs(2));
@@ -1881,7 +2010,7 @@ mod tests {
             "report_backend_failure must not append to the user's diagnostic file once a \
              quit has been requested: spawn() refuses with an Err in that window and \
              wait_for_ready() fails with one, so an ordinary quit would otherwise seed \
-             sidecar.log -- which has no rotation -- with a failure that never happened"
+             sidecar.log with a failure that never happened"
         );
 
         let appender = extract_fn_body(&backend_source, "append_sidecar_log");
@@ -1906,8 +2035,9 @@ mod tests {
         assert!(
             !liveness.contains("report_backend_failure"),
             "try_wait caches a reaped exit status and answers with it on every later call, \
-             so reporting from here writes the same death once per poll into a file with no \
-             rotation. spawn_watchdog reports at the one place a live backend becomes dead"
+             so reporting from here writes the same death once per poll, rotating the \
+             records of why it died out of the file. spawn_watchdog reports at the one \
+             place a live backend becomes dead"
         );
     }
 
