@@ -11,6 +11,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from app.core import tasks
+from app.core.errors import ResourceUnavailableError
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
 from app.stt.config import STTSettings
@@ -46,12 +47,17 @@ def peek_active_load() -> asyncio.Task | None:
     return _active_load[1] if _active_load is not None else None
 
 
-class LocalReadinessTimeoutError(Exception):
+class LocalReadinessTimeoutError(ResourceUnavailableError):
     """Raised by await_local_ready() when the bounded wait genuinely times
     out -- i.e. ensure_local_ready() itself did not return within the
     budget, as opposed to returning promptly via one of its own early-return
     guards (see await_local_ready()'s docstring for why that distinction
-    matters)."""
+    matters).
+
+    A local engine that has not finished coming up is the base class's case
+    word for word: outside this process, nobody can fix it from Settings, and
+    the next attempt may well succeed. It therefore inherits both the 503 and
+    the `resource_unavailable` code rather than declaring its own."""
 
 
 class LocalSttStatus(BaseModel):

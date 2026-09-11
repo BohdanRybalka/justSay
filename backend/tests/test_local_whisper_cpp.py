@@ -15,6 +15,7 @@ from ctypes import wintypes
 import pytest
 
 import app.stt.local_whisper_cpp as local_whisper_cpp_module
+from app.core.errors import ResourceUnavailableError
 from app.stt.config import STTSettings
 from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
 
@@ -240,7 +241,7 @@ def test_get_model_raises_and_latches_error_when_binary_missing(monkeypatch):
     monkeypatch.setattr(local_whisper_cpp_module, "resolve_binary_path", lambda: None)
     provider = WhisperCppServerSTTProvider(STTSettings())
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ResourceUnavailableError):
         provider._get_model()
 
     assert provider.is_loaded is False
@@ -307,7 +308,7 @@ def test_get_model_latches_error_on_health_poll_timeout(monkeypatch, tmp_path):
     monkeypatch.setattr(local_whisper_cpp_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
     monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
 
-    with pytest.raises(RuntimeError, match="did not become healthy"):
+    with pytest.raises(ResourceUnavailableError, match="did not become healthy"):
         provider._get_model()
 
     assert provider.is_loaded is False
@@ -330,7 +331,7 @@ def test_get_model_terminates_orphaned_process_after_health_poll_timeout_then_re
     monkeypatch.setattr(local_whisper_cpp_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
     monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
 
-    with pytest.raises(RuntimeError, match="did not become healthy"):
+    with pytest.raises(ResourceUnavailableError, match="did not become healthy"):
         provider._get_model()
 
     assert len(popen_calls) == 1
@@ -731,8 +732,8 @@ def test_get_model_except_branch_reraises_original_error_not_timeout_expired(
     AND the orphan-cleanup's kill fallback itself can't confirm the process
     died within its own 3s budget, `_get_model()`'s except-branch must still
     reach `self._process = None` and the caller must see the original
-    health-poll-timeout `RuntimeError`, not a `TimeoutExpired` that replaced
-    it."""
+    health-poll-timeout `ResourceUnavailableError`, not a `TimeoutExpired`
+    that replaced it."""
     provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
 
     _install_fake_httpx(monkeypatch, get_impl=lambda url: _FakeResponse(503))
@@ -747,10 +748,10 @@ def test_get_model_except_branch_reraises_original_error_not_timeout_expired(
     monkeypatch.setattr(local_whisper_cpp_module, "_GRACE_POLL_MAX_ATTEMPTS", 2)
     monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
 
-    with pytest.raises(RuntimeError, match="did not become healthy") as exc_info:
+    with pytest.raises(ResourceUnavailableError, match="did not become healthy") as exc_info:
         provider._get_model()
 
-    assert exc_info.type is RuntimeError
+    assert exc_info.type is ResourceUnavailableError
     assert process.kill_calls == 1
     assert provider._process is None
     assert provider.is_loaded is False
@@ -1263,3 +1264,56 @@ async def test_verbose_json_missing_or_stubbed_field_fails_open(
 
     assert result.no_speech_prob is None
     assert result.text == "привіт"
+
+
+def test_health_poll_reports_an_early_child_exit_as_a_resource_refusal(monkeypatch, tmp_path):
+    """A `whisper-server` that dies before answering `/health` is a 503, not a 500.
+
+    The subprocess is a helper binary outside this process, and the documented
+    remedy is `POST /stt/local/prewarm`, which is a retry — so it is a
+    `ResourceUnavailableError` rather than an unclassified crash.
+    """
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+
+    dead = _FakeProcess()
+    dead.returncode = 3
+    monkeypatch.setattr(local_whisper_cpp_module.subprocess, "Popen", lambda argv, **k: dead)
+
+    _install_fake_httpx(monkeypatch, get_impl=lambda url: _FakeResponse(200))
+    monkeypatch.setattr(local_whisper_cpp_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
+
+    with pytest.raises(ResourceUnavailableError, match="exited early") as exc_info:
+        provider._get_model()
+
+    assert exc_info.type is ResourceUnavailableError
+    assert exc_info.value.status_code == 503
+    assert "code 3" in str(exc_info.value)
+
+
+def test_early_exit_latches_the_status_text_the_settings_indicator_shows(monkeypatch, tmp_path):
+    """`last_load_error` is served as `GET /stt/local/status`'s `last_error`.
+
+    The provider latches `f"{type(e).__name__}: {e}"`, so classifying the
+    early-exit raise changed that text from `RuntimeError: ...` to
+    `ResourceUnavailableError: ...` — visible in the Local STT indicator's
+    title, its aria-label and an error toast. The exact string is pinned so
+    the next move of it is a failing test rather than a surprise in Settings.
+    """
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+
+    dead = _FakeProcess()
+    dead.returncode = 3
+    monkeypatch.setattr(local_whisper_cpp_module.subprocess, "Popen", lambda argv, **k: dead)
+
+    _install_fake_httpx(monkeypatch, get_impl=lambda url: _FakeResponse(200))
+    monkeypatch.setattr(local_whisper_cpp_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
+
+    with pytest.raises(ResourceUnavailableError):
+        provider._get_model()
+
+    assert (
+        provider.last_load_error
+        == "ResourceUnavailableError: whisper-server exited early (code 3)"
+    )
