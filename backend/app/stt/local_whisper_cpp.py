@@ -30,6 +30,7 @@ from pathlib import Path
 
 import httpx
 
+from app.core.errors import ResourceUnavailableError
 from app.stt.base import (
     STTProvider,
     TranscriptionResult,
@@ -314,7 +315,7 @@ class WhisperCppServerSTTProvider(STTProvider):
             try:
                 binary_path = resolve_binary_path()
                 if binary_path is None:
-                    raise RuntimeError(binary_not_found_message())
+                    raise ResourceUnavailableError(binary_not_found_message())
                 model_path = resolve_model_path(self._settings.whisper_model_size)
                 if not model_path.is_file():
                     self._download_model(model_path)
@@ -448,7 +449,7 @@ class WhisperCppServerSTTProvider(STTProvider):
         with httpx.Client(timeout=_HEALTH_REQUEST_TIMEOUT) as client:
             for _ in range(_HEALTH_POLL_MAX_ATTEMPTS):
                 if self._process.poll() is not None:
-                    raise RuntimeError(
+                    raise ResourceUnavailableError(
                         f"whisper-server exited early (code {self._process.returncode})"
                     )
                 try:
@@ -458,7 +459,9 @@ class WhisperCppServerSTTProvider(STTProvider):
                 except httpx.HTTPError:
                     pass
                 time.sleep(_HEALTH_POLL_INTERVAL)
-        raise RuntimeError("whisper-server did not become healthy within the poll budget")
+        raise ResourceUnavailableError(
+            "whisper-server did not become healthy within the poll budget"
+        )
 
     async def transcribe(
         self, audio_path: Path, language: str = "uk", **kwargs

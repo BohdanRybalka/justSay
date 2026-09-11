@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.core.errors import ResourceUnavailableError
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
 from app.stt import local_setup
@@ -1441,8 +1442,12 @@ async def test_await_local_ready_raises_typed_timeout_on_stuck_load(monkeypatch)
 
     settings = STTSettings(mode=ProviderMode.LOCAL)
 
-    with pytest.raises(local_setup.LocalReadinessTimeoutError):
+    with pytest.raises(local_setup.LocalReadinessTimeoutError) as exc_info:
         await local_setup.await_local_ready(settings, timeout=0.05)
+
+    assert isinstance(exc_info.value, ResourceUnavailableError)
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.code == "resource_unavailable"
 
 
 @pytest.mark.asyncio

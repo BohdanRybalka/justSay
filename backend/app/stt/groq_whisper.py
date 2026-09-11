@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 
 from app.core.constants import GROQ_TIMEOUT_SECONDS
+from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.stt.base import (
     STTProvider,
     TranscriptionResult,
@@ -41,7 +42,7 @@ class GroqWhisperSTTProvider(STTProvider):
     def _get_client(self):
         if self._client is None:
             if not self._settings.groq_api_key:
-                raise RuntimeError(
+                raise ConfigurationError(
                     "Groq API key is missing. Go to Settings → Keys and add your key."
                 )
             from groq import Groq
@@ -118,7 +119,7 @@ class GroqWhisperSTTProvider(STTProvider):
         except Exception as e:
             msg = str(e)
             if "429" in msg or "rate_limit" in msg.lower():
-                raise RuntimeError(
+                raise ResourceUnavailableError(
                     "Groq rate limit exceeded. Try again later or switch STT to Gemini."
                 ) from e
             raise
