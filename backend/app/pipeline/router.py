@@ -12,6 +12,7 @@ from app.audio.recorder import MicrophoneRecorder
 from app.audio.session import SessionMismatchError, SessionRef
 from app.core.config import settings
 from app.core.constants import MAX_UPLOAD_SIZE
+from app.core.errors import JustSayError
 from app.pipeline.service import process_audio
 from app.pipeline.upload_validation import read_upload_with_limit, validate_audio_upload
 
@@ -85,6 +86,8 @@ async def dictate(
             background_tasks=background_tasks,
         )
         return DictateResponse(**result.__dict__)
+    except JustSayError:
+        raise
     except Exception as e:
         log.exception("Pipeline failure")
         raise HTTPException(
@@ -121,6 +124,8 @@ async def process_file(
         )
         return DictateResponse(**result.__dict__)
     except HTTPException:
+        raise
+    except JustSayError:
         raise
     except Exception as e:
         log.exception("Pipeline failure")

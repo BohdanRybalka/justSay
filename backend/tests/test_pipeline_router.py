@@ -21,6 +21,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.audio.dependencies import get_recorder
 from app.audio.session import SessionMismatchError
+from app.core.errors import ConfigurationError, NotReadyError, ResourceUnavailableError
 from app.main import app
 from app.pipeline.router import DictateResponse
 from app.pipeline.service import ProcessingResult
@@ -262,6 +263,60 @@ async def test_a_refused_dictate_transcribes_nothing(client, tmp_path):
 
     assert resp.status_code == 403
     mock_process_audio.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("refusal", "expected_status", "expected_code"),
+    [
+        (ConfigurationError, 400, "configuration_error"),
+        (ResourceUnavailableError, 503, "resource_unavailable"),
+        (NotReadyError, 409, "not_ready"),
+    ],
+)
+async def test_dictate_lets_a_refusal_answer_with_its_own_status(
+    client, tmp_path, monkeypatch, refusal, expected_status, expected_code
+):
+    """A classified refusal reaches the wire as itself, not as a 500.
+
+    Without the ``except JustSayError: raise`` above ``dictate``'s
+    ``except Exception``, every one of these arrives as a 500 whose ``detail``
+    reads ``Pipeline failed: <ClassName>: <message>`` — the class-name leak this
+    spec exists to remove, and the reason a provider-level migration in another
+    package would change nothing a user sees at this endpoint.
+    """
+    recording = tmp_path / "rec.wav"
+    recording.write_bytes(_wav_bytes())
+    recorder = _stopping_recorder(recording)
+    app.dependency_overrides[get_recorder] = lambda: recorder
+    monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: None)
+
+    with patch(
+        "app.pipeline.router.process_audio",
+        AsyncMock(side_effect=refusal("the provider said no")),
+    ):
+        resp = await client.post("/pipeline/dictate")
+
+    assert resp.status_code == expected_status
+    assert resp.json() == {"detail": "the provider said no", "code": expected_code}
+
+
+@pytest.mark.anyio
+async def test_process_file_lets_a_refusal_answer_with_its_own_status(client, monkeypatch):
+    """The uploaded-file path carries the same wrapper and needs the same guard."""
+    monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: None)
+
+    with patch(
+        "app.pipeline.router.process_audio",
+        AsyncMock(side_effect=ResourceUnavailableError("the local engine is not up")),
+    ):
+        resp = await client.post(
+            "/pipeline/process-file",
+            files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
+        )
+
+    assert resp.status_code == 503
+    assert resp.json() == {"detail": "the local engine is not up", "code": "resource_unavailable"}
 
 
 def test_the_dictate_response_carries_every_processing_result_field() -> None:
