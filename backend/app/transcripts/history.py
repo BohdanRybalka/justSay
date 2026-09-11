@@ -42,7 +42,7 @@ from app.core.app_paths import resolve_app_data_root
 log = logging.getLogger(__name__)
 
 HISTORY_FILENAME = "history.db"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 STATS_TTL_SECONDS = 5.0
 HISTORY_LIMIT_MAX = 200
 UNKNOWN_TS = 0
@@ -87,7 +87,6 @@ class HistoryEntry(BaseModel):
     id: str
     timestamp: str | None
     language: str
-    style: str
     text: str
     duration_ms: int
     model_name: str | None = None
@@ -183,7 +182,6 @@ CREATE TABLE IF NOT EXISTS entries (
   id TEXT PRIMARY KEY,
   ts INTEGER NOT NULL,
   language TEXT NOT NULL,
-  style TEXT NOT NULL CHECK (style IN ('normal', 'ai_prompt')),
   raw_text TEXT NOT NULL,
   cleaned_text TEXT NOT NULL,
   duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
@@ -194,12 +192,11 @@ CREATE TABLE IF NOT EXISTS entries (
 );
 """
 
-_DDL_V4_ENTRIES = """
-CREATE TABLE entries_v4 (
+_DDL_V5_ENTRIES = """
+CREATE TABLE entries_v5 (
   id TEXT PRIMARY KEY NOT NULL CHECK (typeof(id) = 'text'),
   ts INTEGER NOT NULL CHECK (typeof(ts) = 'integer' AND ts BETWEEN 0 AND @MAXTS@),
   language TEXT NOT NULL CHECK (typeof(language) = 'text'),
-  style TEXT NOT NULL CHECK (style IN ('normal', 'ai_prompt')),
   raw_text TEXT NOT NULL CHECK (typeof(raw_text) = 'text'),
   cleaned_text TEXT NOT NULL CHECK (typeof(cleaned_text) = 'text'),
   duration_ms INTEGER NOT NULL CHECK (typeof(duration_ms) = 'integer' AND duration_ms >= 0),
@@ -242,7 +239,6 @@ _MISSING_COLUMN_SQL = {
     "id": "'recovered-' || rowid",
     "ts": str(UNKNOWN_TS),
     "language": "''",
-    "style": "'normal'",
     "raw_text": "''",
     "cleaned_text": "''",
     "duration_ms": "0",
@@ -257,7 +253,6 @@ _REPAIRED_COLUMN_SQL = {
     "id": _REPAIRED_ID_SQL,
     "ts": _REPAIRED_TS_SQL,
     "language": _repaired_text_sql("language"),
-    "style": "CASE WHEN style IN ('normal', 'ai_prompt') THEN style ELSE 'normal' END",
     "raw_text": _repaired_text_sql("raw_text"),
     "cleaned_text": _repaired_text_sql("cleaned_text"),
     "duration_ms": (
@@ -305,20 +300,20 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     ``_DDL_V1`` and ``_REPLACE_TS_INDEX_WITH_TS_ID_INDEX`` both run
     unconditionally and idempotently, so the ``entries_ts_idx`` ->
     ``entries_ts_id_idx`` swap reaches an existing database without a
-    ``SCHEMA_VERSION`` bump. ``_DDL_V1`` still declares the pre-v4 shape and is
+    ``SCHEMA_VERSION`` bump. ``_DDL_V1`` still declares the pre-v5 shape and is
     deliberately left alone: it is what an existing file already holds, and
-    ``_migrate_to_v4_locked`` is what replaces it. Why it is not bumped, and what that leaves
+    ``_migrate_to_v5_locked`` is what replaces it. Why it is not bumped, and what that leaves
     unrecorded, is ADR 053, "What it leaves unrecorded" -- stated there once,
     because the version of it that lived in both places had to be corrected in
     both places.
 
     Branches:
-      - fresh v0 / upgrade from v1, v2 or v3 → ``_migrate_to_v4_locked``,
+      - fresh v0 / upgrade from v1, v2, v3 or v4 → ``_migrate_to_v5_locked``,
         which repairs every unreadable row, rebuilds ``entries`` behind
         constraints that refuse the shape, re-runs v2 DDL, rebuilds FTS and
         resets the vector index; then run v3 DDL (embeddings_meta +
         entry_embeddings — both start empty, no rows to replay), and write
-        user_version=4 LAST so a crash before the PRAGMA leaves a retry-able
+        user_version=5 LAST so a crash before the PRAGMA leaves a retry-able
         prior-version state. **A fresh database takes this path too**, on
         nought rows, so a new install and a migrated one end up with the same
         ``entries`` declaration rather than two that have to be kept in step by
@@ -329,18 +324,18 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         ``CREATE INDEX ... ON entries(ts DESC, id DESC)`` raises ``no such
         column: id`` on such a table, and running it first meant the migration
         never got to decide anything.
-      - already at v4 → re-run v2 DDL (IF NOT EXISTS makes this idempotent)
+      - already at v5 → re-run v2 DDL (IF NOT EXISTS makes this idempotent)
         and probe FTS integrity; rebuild on OperationalError so a partial
-        migration that left user_version=4 but no FTS table self-heals.
+        migration that left user_version=5 but no FTS table self-heals.
         Also re-run v3 DDL (IF NOT EXISTS) so a partial migration that left
-        user_version=4 but the embeddings tables missing self-heals too.
+        user_version=5 but the embeddings tables missing self-heals too.
     """
     from app.transcripts import vector_store
 
     conn.executescript(_DDL_V1)
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     if current < SCHEMA_VERSION:
-        if not _migrate_to_v4_locked(conn):
+        if not _migrate_to_v5_locked(conn):
             return
         conn.executescript(vector_store._DDL_V3)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -367,7 +362,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         conn.executescript(vector_store._DDL_V3)
 
 
-def _migrate_to_v4_locked(conn: sqlite3.Connection) -> bool:
+def _migrate_to_v5_locked(conn: sqlite3.Connection) -> bool:
     """Rebuild ``entries`` so every stored row is one the app can read and order.
 
     Returns whether the rebuild landed, and **never raises**: ``_init_schema``
@@ -377,16 +372,18 @@ def _migrate_to_v4_locked(conn: sqlite3.Connection) -> bool:
     ``user_version`` alone, so the next open tries again. The index and FTS work
     after the commit is inside a handler for the same reason.
 
-    Runs when ``user_version`` is below 4. ``_DDL_V1`` is
+    Runs when ``user_version`` is below 5. ``_DDL_V1`` is
     ``CREATE TABLE IF NOT EXISTS``, so a constraint written there never reaches
     a file that already exists, and SQLite cannot add one to a table in place --
     hence the copy-drop-rename, which is SQLite's own documented procedure.
 
-    **The copy always writes all eleven columns.** An adopted ``entries`` was
-    not necessarily created by this app: it can hold a ``style`` outside the
-    two, a negative ``duration_ms``, a BLOB ``id``, or simply not have a column
-    at all. A present column is read through ``_REPAIRED_COLUMN_SQL``, a missing
-    one through ``_MISSING_COLUMN_SQL``. Selecting only the columns the source
+    **The copy always writes all ten columns.** An adopted ``entries`` was
+    not necessarily created by this app: it can hold a negative ``duration_ms``,
+    a BLOB ``id``, or simply not have a column at all. A column this build no
+    longer knows -- a v4 store's ``style`` -- is not read: the select list is
+    built from ``ENTRY_COLUMNS``, not from the source. A present column is read
+    through ``_REPAIRED_COLUMN_SQL``, a missing one through
+    ``_MISSING_COLUMN_SQL``. Selecting only the columns the source
     happens to have looks safer and is not: a source with no ``duration_ms``
     leaves that ``NOT NULL`` column empty, ``INSERT OR IGNORE`` then refuses
     every row, and the drop that follows destroys the user's entire history
@@ -446,10 +443,10 @@ def _migrate_to_v4_locked(conn: sqlite3.Connection) -> bool:
         stored_rows = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
         for trigger in ("entries_ai", "entries_ad", "entries_au", "entries_ad_vec"):
             conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-        conn.execute("DROP TABLE IF EXISTS entries_v4")
-        conn.execute(_DDL_V4_ENTRIES)
+        conn.execute("DROP TABLE IF EXISTS entries_v5")
+        conn.execute(_DDL_V5_ENTRIES)
         copied = conn.execute(
-            f"INSERT OR IGNORE INTO entries_v4 (rowid, {column_list}) "
+            f"INSERT OR IGNORE INTO entries_v5 (rowid, {column_list}) "
             f"SELECT rowid, {select_list} FROM entries"
         ).rowcount
         if copied == 0 < stored_rows:
@@ -457,7 +454,7 @@ def _migrate_to_v4_locked(conn: sqlite3.Connection) -> bool:
                 f"the rebuilt table would hold none of the {stored_rows} stored rows"
             )
         conn.execute("DROP TABLE entries")
-        conn.execute("ALTER TABLE entries_v4 RENAME TO entries")
+        conn.execute("ALTER TABLE entries_v5 RENAME TO entries")
         conn.execute("COMMIT")
     except sqlite3.Error:
         log.exception("Rebuilding the history table failed; leaving the store at its version")
@@ -531,7 +528,7 @@ def _epoch_ms_to_iso(ms: int) -> str | None:
     """The stored ``ts`` as ISO 8601, or ``None`` when there is no date to show.
 
     ``UNKNOWN_TS`` and anything below it is not a recording time -- it is what
-    the v4 migration writes for a row whose stored value could not be recovered
+    the migration writes for a row whose stored value could not be recovered
     (see ``_REPAIRED_COLUMN_SQL``). The tabs render a dash for it. A value that
     is not a number at all reaches here only from a store the migration could
     not repair, and answers ``None`` too: a guard that raises is not a guard. Decided by the
@@ -634,7 +631,6 @@ ENTRY_COLUMNS = (
     "id",
     "ts",
     "language",
-    "style",
     "raw_text",
     "cleaned_text",
     "duration_ms",
@@ -692,7 +688,7 @@ def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateOut
     older source schema degrades to NULLs instead of raising.
 
     Every column is repaired on the way in rather than copied verbatim,
-    through the same ``_REPAIRED_COLUMN_SQL`` the v4 migration applies. Since v4
+    through the same ``_REPAIRED_COLUMN_SQL`` the rebuild applies. Since v4
     the target's ``entries`` refuses a value it cannot read back, and
     ``INSERT OR IGNORE`` answers a refused row by **skipping it** -- measured,
     not assumed -- so copying verbatim would drop the user's transcripts out of
@@ -788,7 +784,6 @@ def save_entry(
     text: str,
     duration_ms: int,
     language: str = "uk",
-    style: str = "normal",
     model_name: str | None = None,
     tokens_used: int | None = None,
     audio_duration_seconds: float | None = None,
@@ -800,7 +795,6 @@ def save_entry(
         id=uuid.uuid4().hex[:12],
         timestamp=timestamp,
         language=language,
-        style=style,
         text=text,
         duration_ms=duration_ms,
         model_name=model_name,
@@ -821,7 +815,6 @@ def save_entry(
                     "id": entry.id,
                     "ts": ts_ms,
                     "language": entry.language,
-                    "style": entry.style,
                     "raw_text": entry.text,
                     "cleaned_text": entry.text,
                     "duration_ms": entry.duration_ms,
@@ -1211,7 +1204,6 @@ def _row_to_entry(row: sqlite3.Row) -> HistoryEntry:
         id=row["id"],
         timestamp=_epoch_ms_to_iso(row["ts"]),
         language=row["language"],
-        style=row["style"],
         text=row["raw_text"],
         duration_ms=row["duration_ms"],
         audio_duration_seconds=row["audio_duration_seconds"],

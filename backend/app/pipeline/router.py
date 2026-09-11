@@ -49,7 +49,6 @@ async def dictate(
     background_tasks: BackgroundTasks,
     ref: SessionRef | None = None,
     language: str = "uk",
-    style: str = "normal",
     copy_to_clipboard: bool = True,
     recorder: MicrophoneRecorder = Depends(get_recorder),
 ):
@@ -73,15 +72,14 @@ async def dictate(
         raise HTTPException(status_code=403, detail=str(e)) from e
     captured_duration = recorder.last_duration_seconds
     log.info(
-        "Dictate: stopped recording. path=%s duration=%.2fs language=%s style=%s",
-        audio_path.name, captured_duration, language, style,
+        "Dictate: stopped recording. path=%s duration=%.2fs language=%s",
+        audio_path.name, captured_duration, language,
     )
 
     try:
         result = await process_audio(
             audio_path,
             language=language,
-            style=style,
             copy_to_clipboard=copy_to_clipboard,
             audio_duration=captured_duration if captured_duration > 0.0 else None,
             background_tasks=background_tasks,
@@ -102,7 +100,6 @@ async def process_file(
     file: UploadFile,
     background_tasks: BackgroundTasks,
     language: str = "auto",
-    style: str = "normal",
     copy_to_clipboard: bool = True,
 ):
     """Process an uploaded audio file through the full pipeline."""
@@ -119,7 +116,6 @@ async def process_file(
         result = await process_audio(
             temp_path,
             language=language,
-            style=style,
             copy_to_clipboard=copy_to_clipboard,
             background_tasks=background_tasks,
         )

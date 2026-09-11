@@ -1,7 +1,7 @@
 """Audio processing pipeline: Audio -> smart-routed STT -> Clipboard.
 
-Gemini's ai_prompt style handles transcription and structuring in a single call;
-short normal-style audio goes through Groq Whisper for minimum latency.
+Long audio and the formats Groq can't accept go to Gemini;
+short audio goes through Groq Whisper for minimum latency.
 """
 
 import asyncio
@@ -38,12 +38,11 @@ class ProcessingResult:
 async def process_audio(
     audio_path: Path,
     language: str = "uk",
-    style: str = "normal",
     copy_to_clipboard: bool = True,
     audio_duration: float | None = None,
     background_tasks: BackgroundTasks | None = None,
 ) -> ProcessingResult:
-    """Full pipeline: route STT by duration+style -> transcribe -> clipboard.
+    """Full pipeline: route STT by duration+format -> transcribe -> clipboard.
 
     ``background_tasks``, when provided, schedules embedding generation via
     ``BackgroundTasks.add_task`` — FastAPI guarantees these run AFTER the
@@ -89,15 +88,13 @@ async def process_audio(
     stt, fallback_reason = get_routed_provider(
         settings.stt,
         audio_duration=duration,
-        style=style,
         file_extension=file_ext,
     )
 
     log.info(
-        "Pipeline route: %s, duration=%.2fs, style=%s, ext=%s, fallback=%s",
+        "Pipeline route: %s, duration=%.2fs, ext=%s, fallback=%s",
         stt.model_name,
         duration if duration is not None else -1.0,
-        style,
         file_ext,
         fallback_reason or "no",
     )
@@ -111,7 +108,6 @@ async def process_audio(
         result = await stt.transcribe(
             audio_path,
             language=language,
-            style=style,
             audio_duration=duration,
         )
     except Exception:
@@ -166,7 +162,6 @@ async def process_audio(
             text=text,
             duration_ms=duration_ms,
             language=effective_language,
-            style=style,
             model_name=stt.model_name,
             tokens_used=result.tokens_used,
             audio_duration_seconds=duration,

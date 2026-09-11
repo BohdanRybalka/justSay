@@ -1,7 +1,7 @@
 """Cloud STT provider — Groq Whisper (whisper-large-v3-turbo).
 
-Used for short audio clips (<= cloud_routing_threshold seconds) in normal style.
-Long audio and ai_prompt style go to Gemini.
+Used for short audio clips (<= cloud_routing_threshold seconds).
+Long audio goes to Gemini.
 """
 
 import asyncio
@@ -52,8 +52,7 @@ class GroqWhisperSTTProvider(STTProvider):
     async def transcribe(
         self, audio_path: Path, language: str = "uk", **kwargs
     ) -> TranscriptionResult:
-        """Send audio file to Groq Whisper API. ``style`` kwarg is ignored
-        (Groq can't structure)."""
+        """Send audio file to Groq Whisper API."""
         client = self._get_client()
         size_kb = audio_path.stat().st_size / 1024
         prompt = self._settings.initial_prompt.strip() or None

@@ -591,7 +591,6 @@ export interface HistoryEntry {
    *  `backend/app/transcripts/history.py`. */
   timestamp: string | null;
   language: string;
-  style: string;
   text: string;
   duration_ms: number;
   model_name: string | null;

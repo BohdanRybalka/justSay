@@ -48,12 +48,12 @@ async def test_transcribe_returns_stripped_text(tmp_path):
 
 @pytest.mark.asyncio
 async def test_transcribe_ignores_unknown_kwargs(tmp_path):
-    """style=ai_prompt must not crash Groq — it just ignores it."""
+    """An unrecognised kwarg must not crash Groq — it just ignores it."""
     provider = GroqWhisperSTTProvider(_settings())
     provider._client = MagicMock()
 
     with patch.object(GroqWhisperSTTProvider, "_call_groq", return_value=("ok", None, None)):
-        result = await provider.transcribe(_wav(tmp_path), language="uk", style="ai_prompt")
+        result = await provider.transcribe(_wav(tmp_path), language="uk", unknown_kwarg="x")
 
     assert result.text == "ok"
 

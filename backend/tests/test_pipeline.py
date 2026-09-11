@@ -117,7 +117,7 @@ async def test_pipeline_returns_stt_text_verbatim(
     stt = _make_stt_mock("Привіт світ")
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(sample_wav, language="uk", style="normal")
+        result = await process_audio(sample_wav, language="uk")
 
     assert result.text == "Привіт світ"
     assert result.copied_to_clipboard is True
@@ -125,7 +125,6 @@ async def test_pipeline_returns_stt_text_verbatim(
     saved_kwargs = save_mock.call_args.kwargs
     assert saved_kwargs["text"] == "Привіт світ"
     assert saved_kwargs["language"] == "uk"
-    assert saved_kwargs["style"] == "normal"
     assert saved_kwargs["model_name"] == "mock/provider"
     assert saved_kwargs["tokens_used"] is None
     assert saved_kwargs["word_count"] == 2
@@ -142,7 +141,7 @@ async def test_pipeline_does_not_copy_empty_text(
     stt = _make_stt_mock("")
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(sample_wav, language="uk", style="normal")
+        result = await process_audio(sample_wav, language="uk")
 
     assert result.copied_to_clipboard is False
     copy_mock.assert_not_called()
@@ -164,7 +163,7 @@ async def test_pipeline_copies_speech_that_opens_like_a_refusal(
     stt = _make_stt_mock(spoken)
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(sample_wav, language="en", style="normal")
+        result = await process_audio(sample_wav, language="en")
 
     assert result.text == spoken
     assert result.copied_to_clipboard is True
@@ -186,44 +185,13 @@ async def test_pipeline_clipboard_failure_is_graceful(
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
         caplog.at_level(logging.DEBUG, logger="app.pipeline.service"),
     ):
-        result = await process_audio(sample_wav, language="uk", style="normal")
+        result = await process_audio(sample_wav, language="uk")
 
     assert result.text == "text"
     assert result.copied_to_clipboard is False
     assert save_mock.call_count == 1
     assert save_mock.call_args.kwargs["text"] == "text"
     assert [r for r in caplog.records if r.name == "app.pipeline.service" and r.exc_info]
-
-
-@pytest.mark.asyncio
-async def test_pipeline_passes_style_to_provider(
-    sample_wav, cloud_mode, _isolate_side_effects
-):
-    stt = _make_stt_mock("structured output")
-
-    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)) as routed:
-        await process_audio(sample_wav, language="uk", style="ai_prompt")
-
-    routed.assert_called_once()
-    _, kwargs = routed.call_args
-    assert kwargs["style"] == "ai_prompt"
-
-    stt.transcribe.assert_awaited_once()
-    call_kwargs = stt.transcribe.await_args.kwargs
-    assert call_kwargs.get("style") == "ai_prompt"
-
-
-@pytest.mark.asyncio
-async def test_pipeline_records_ai_prompt_style_in_history(
-    sample_wav, cloud_mode, _isolate_side_effects
-):
-    _, save_mock = _isolate_side_effects
-    stt = _make_stt_mock("ok")
-
-    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        await process_audio(sample_wav, language="uk", style="ai_prompt")
-
-    assert save_mock.call_args.kwargs["style"] == "ai_prompt"
 
 
 @pytest.mark.asyncio
@@ -235,7 +203,7 @@ async def test_pipeline_forwards_tokens_used_to_history(
     stt = _make_stt_mock("hello", tokens=1500)
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        await process_audio(sample_wav, language="uk", style="normal")
+        await process_audio(sample_wav, language="uk")
 
     assert save_mock.call_args.kwargs["tokens_used"] == 1500
 
@@ -250,7 +218,7 @@ async def test_pipeline_respects_explicit_audio_duration(
     with patch("app.pipeline.service.detect_duration") as detect, patch(
         "app.pipeline.service.get_routed_provider", return_value=(stt, None)
     ) as routed:
-        await process_audio(sample_wav, audio_duration=12.5, style="normal")
+        await process_audio(sample_wav, audio_duration=12.5)
 
     detect.assert_not_called()
     assert routed.call_args.kwargs["audio_duration"] == 12.5
@@ -262,7 +230,7 @@ async def test_pipeline_passes_file_extension_to_routing(
 ):
     stt = _make_stt_mock("ok")
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)) as routed:
-        await process_audio(sample_wav, style="normal")
+        await process_audio(sample_wav)
     assert routed.call_args.kwargs["file_extension"] == ".wav"
 
 
@@ -279,7 +247,7 @@ async def test_pipeline_propagates_stt_failure(
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         with pytest.raises(RuntimeError, match="groq down"):
-            await process_audio(sample_wav, style="normal")
+            await process_audio(sample_wav)
 
     save_mock.assert_not_called()
 
@@ -313,7 +281,7 @@ async def test_pipeline_concurrent_invocations_save_independently(
         return mocks.pop(0), None
 
     async def one(idx: int):
-        return await process_audio(paths[idx], style="normal")
+        return await process_audio(paths[idx])
 
     with patch("app.pipeline.service.get_routed_provider", side_effect=_route):
         results = await asyncio.gather(*[one(i) for i in range(5)])
@@ -346,7 +314,7 @@ async def test_pipeline_schedules_embedding_via_background_tasks_not_awaited(
         patch.object(bt, "add_task") as add_task_mock,
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
     ):
-        result = await process_audio(sample_wav, style="normal", background_tasks=bt)
+        result = await process_audio(sample_wav, background_tasks=bt)
 
     assert result.text == "hello world"
     assert add_task_mock.call_count == 2
@@ -372,7 +340,7 @@ async def test_pipeline_omits_background_task_when_none_provided(
     stt = _make_stt_mock("hello world")
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(sample_wav, style="normal")
+        result = await process_audio(sample_wav)
 
     assert result.text == "hello world"
 
@@ -409,7 +377,7 @@ async def test_pipeline_survives_embedding_provider_outage(
 
     bt = BackgroundTasks()
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(sample_wav, style="normal", background_tasks=bt)
+        result = await process_audio(sample_wav, background_tasks=bt)
 
     assert result.text == "hello world"
     assert result.copied_to_clipboard is True
@@ -438,7 +406,7 @@ async def test_pipeline_silence_guard_skips_stt_call(
     stt = _make_stt_mock("Дякую за перегляд")
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(silent_wav, language="uk", style="normal")
+        result = await process_audio(silent_wav, language="uk")
 
     stt.transcribe.assert_not_called()
     assert result.text == ""
@@ -462,7 +430,7 @@ async def test_pipeline_silence_guard_skips_clipboard_history_and_embeddings(
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
     ):
         result = await process_audio(
-            silent_wav, language="uk", style="normal", background_tasks=bt
+            silent_wav, language="uk", background_tasks=bt
         )
 
     assert result.text == ""
@@ -482,7 +450,7 @@ async def test_pipeline_silence_guard_does_not_raise(
     stt = _make_stt_mock("Дякую за перегляд")
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(silent_wav, style="normal")
+        result = await process_audio(silent_wav)
 
     assert result.discarded_reason == "silence"
 
@@ -500,7 +468,7 @@ async def test_pipeline_silence_guard_logs_warning_with_measurements(
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
         with caplog.at_level(logging.WARNING, logger="app.pipeline.service"):
-            await process_audio(silent_wav, style="normal")
+            await process_audio(silent_wav)
 
     full_log = "\n".join(r.getMessage() for r in caplog.records)
     assert "peak=" in full_log
@@ -518,7 +486,7 @@ async def test_pipeline_non_silent_audio_is_not_discarded(
     stt = _make_stt_mock("hello world")
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(sample_wav, style="normal")
+        result = await process_audio(sample_wav)
 
     assert result.discarded_reason is None
     stt.transcribe.assert_awaited_once()
@@ -557,7 +525,7 @@ async def test_pipeline_silence_guard_does_not_block_event_loop(
     async def _run():
         try:
             with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-                return await process_audio(silent_wav, style="normal")
+                return await process_audio(silent_wav)
         finally:
             done.set()
 
@@ -611,7 +579,7 @@ async def test_process_audio_skips_readiness_barrier_for_cloud_provider(
     monkeypatch.setattr("app.stt.local_setup.await_local_ready", _boom)
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(sample_wav, style="normal")
+        result = await process_audio(sample_wav)
 
     assert result.text == "hello"
 
@@ -643,8 +611,8 @@ async def test_process_audio_awaits_shared_readiness_barrier_no_second_get_model
     )
 
     await asyncio.gather(
-        process_audio(sample_wav, style="normal"),
-        process_audio(sample_wav, style="normal"),
+        process_audio(sample_wav),
+        process_audio(sample_wav),
     )
 
     assert call_count["n"] == 1
@@ -678,7 +646,7 @@ async def test_process_audio_raises_clear_error_when_readiness_wait_times_out(
     monkeypatch.setattr(LocalSTTProvider, "transcribe", _boom)
 
     with pytest.raises(LocalReadinessTimeoutError, match="not become ready"):
-        await process_audio(sample_wav, style="normal")
+        await process_audio(sample_wav)
 
 
 @pytest.mark.asyncio
@@ -709,7 +677,7 @@ async def test_process_audio_proceeds_to_transcribe_when_barrier_returns_not_rea
         AsyncMock(return_value=TranscriptionResult(text="lazy-loaded anyway", tokens_used=None)),
     )
 
-    result = await process_audio(sample_wav, style="normal")
+    result = await process_audio(sample_wav)
 
     assert result.text == "lazy-loaded anyway"
     assert save_mock.call_count == 1
@@ -731,7 +699,7 @@ async def test_pipeline_auto_language_substitutes_detected_language(
     stt.is_local = False
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        await process_audio(sample_wav, language="auto", style="normal")
+        await process_audio(sample_wav, language="auto")
 
     assert save_mock.call_args.kwargs["language"] == "uk"
 
@@ -751,7 +719,7 @@ async def test_pipeline_explicit_language_never_overridden_by_detection(
     stt.is_local = False
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        await process_audio(sample_wav, language="uk", style="normal")
+        await process_audio(sample_wav, language="uk")
 
     assert save_mock.call_args.kwargs["language"] == "uk"
 
@@ -766,7 +734,7 @@ async def test_pipeline_auto_language_falls_back_to_auto_sentinel_when_provider_
     stt = _make_stt_mock("ok")
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        await process_audio(sample_wav, language="auto", style="normal")
+        await process_audio(sample_wav, language="auto")
 
     assert save_mock.call_args.kwargs["language"] == "auto"
 
@@ -819,7 +787,7 @@ async def test_vad_silent_verdict_is_discarded(
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
     ):
         result = await process_audio(
-            sample_wav, language="uk", style="normal", background_tasks=bt
+            sample_wav, language="uk", background_tasks=bt
         )
 
     assert result.discarded_reason == "silence"
@@ -857,7 +825,7 @@ async def test_vad_speech_verdict_skips_energy_pass_entirely(
         patch("app.pipeline.service.analyze_vad", return_value=_vad_analysis(False)),
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
     ):
-        result = await process_audio(sample_wav, language="uk", style="normal")
+        result = await process_audio(sample_wav, language="uk")
 
     assert result.discarded_reason is None
     assert result.text == "тихе мовлення"
@@ -888,7 +856,7 @@ async def test_energy_pass_is_skipped_whenever_the_vad_has_a_verdict(
         patch("app.pipeline.service.analyze_vad", return_value=_vad_analysis(vad_is_silent)),
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
     ):
-        result = await process_audio(sample_wav, language="uk", style="normal")
+        result = await process_audio(sample_wav, language="uk")
 
     assert energy_mock.call_count == 0
     assert result.discarded_reason == ("silence" if vad_is_silent else None)
@@ -913,7 +881,7 @@ async def test_energy_pass_runs_exactly_once_when_the_vad_abstains(
         patch("app.pipeline.service.analyze_vad", return_value=None),
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
     ):
-        result = await process_audio(sample_wav, language="uk", style="normal")
+        result = await process_audio(sample_wav, language="uk")
 
     assert energy_mock.call_count == 1
     assert result.text == "привіт"
@@ -934,7 +902,7 @@ async def test_vad_absent_falls_back_to_energy_verdict_bit_identically(
         patch("app.pipeline.service.analyze_vad", return_value=None),
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
     ):
-        discarded = await process_audio(sample_wav, language="uk", style="normal")
+        discarded = await process_audio(sample_wav, language="uk")
 
     assert discarded.discarded_reason == "silence"
     assert stt.transcribe.await_count == 0
@@ -945,7 +913,7 @@ async def test_vad_absent_falls_back_to_energy_verdict_bit_identically(
         patch("app.pipeline.service.analyze_vad", return_value=None),
         patch("app.pipeline.service.get_routed_provider", return_value=(stt2, None)),
     ):
-        kept = await process_audio(sample_wav, language="uk", style="normal")
+        kept = await process_audio(sample_wav, language="uk")
 
     assert kept.discarded_reason is None
     assert kept.text == "привіт"
@@ -967,7 +935,7 @@ async def test_vad_speech_verdict_transcribes_normally(
         patch("app.pipeline.service.analyze_vad", return_value=_vad_analysis(False)),
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
     ):
-        result = await process_audio(sample_wav, language="uk", style="normal")
+        result = await process_audio(sample_wav, language="uk")
 
     assert result.discarded_reason is None
     assert result.text == "привіт світ"
@@ -991,7 +959,7 @@ async def test_vad_discard_logs_deciding_layer_and_measurements(
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
         caplog.at_level(logging.WARNING, logger="app.pipeline.service"),
     ):
-        await process_audio(sample_wav, language="uk", style="normal")
+        await process_audio(sample_wav, language="uk")
 
     full_log = "\n".join(r.getMessage() for r in caplog.records)
     assert "layer=vad" in full_log
@@ -1015,7 +983,7 @@ async def test_energy_discard_names_its_layer_in_the_log(
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
         caplog.at_level(logging.WARNING, logger="app.pipeline.service"),
     ):
-        await process_audio(sample_wav, language="uk", style="normal")
+        await process_audio(sample_wav, language="uk")
 
     full_log = "\n".join(r.getMessage() for r in caplog.records)
     assert "layer=energy" in full_log
@@ -1037,7 +1005,7 @@ async def test_vad_disabled_never_calls_analyze_vad(
         patch("app.pipeline.service.analyze_vad") as vad_mock,
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
     ):
-        result = await process_audio(sample_wav, language="uk", style="normal")
+        result = await process_audio(sample_wav, language="uk")
 
     assert vad_mock.call_count == 0
     assert result.text == "привіт"
@@ -1069,7 +1037,7 @@ async def test_vad_disabled_still_discards_on_the_energy_verdict(
         patch("app.pipeline.service.analyze_vad") as vad_mock,
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
     ):
-        result = await process_audio(sample_wav, language="uk", style="normal")
+        result = await process_audio(sample_wav, language="uk")
 
     assert vad_mock.call_count == 0
     assert energy_mock.call_count == 1, (
@@ -1107,7 +1075,7 @@ async def test_vad_runs_off_the_event_loop(sample_wav, cloud_mode, _isolate_side
             patch("app.pipeline.service.analyze_vad", _slow_vad),
             patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
         ):
-            await process_audio(sample_wav, language="uk", style="normal")
+            await process_audio(sample_wav, language="uk")
     finally:
         task.cancel()
 
@@ -1142,7 +1110,7 @@ async def test_high_no_speech_prob_discards_after_model(
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
     ):
         result = await process_audio(
-            sample_wav, language="uk", style="normal", background_tasks=bt
+            sample_wav, language="uk", background_tasks=bt
         )
 
     assert result.discarded_reason == "silence"
@@ -1163,7 +1131,7 @@ async def test_no_speech_prob_exactly_at_threshold_is_kept(
     stt = _stt_mock_with_no_speech("реальні слова", 0.6)
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(sample_wav, language="uk", style="normal")
+        result = await process_audio(sample_wav, language="uk")
 
     assert result.discarded_reason is None
     assert result.text == "реальні слова"
@@ -1177,7 +1145,7 @@ async def test_no_speech_prob_none_is_kept(sample_wav, cloud_mode, _isolate_side
     stt = _stt_mock_with_no_speech("реальні слова", None)
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(sample_wav, language="uk", style="normal")
+        result = await process_audio(sample_wav, language="uk")
 
     assert result.discarded_reason is None
     assert result.text == "реальні слова"
@@ -1194,7 +1162,7 @@ async def test_mixed_segments_min_keeps_transcription(
     stt = _stt_mock_with_no_speech("справжні слова плюс галюцинація", 0.1)
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(sample_wav, language="uk", style="normal")
+        result = await process_audio(sample_wav, language="uk")
 
     assert result.discarded_reason is None
     assert result.text == "справжні слова плюс галюцинація"
@@ -1216,7 +1184,7 @@ async def test_no_speech_discard_logs_layer_and_never_the_text(
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
         caplog.at_level(logging.WARNING, logger="app.pipeline.service"),
     ):
-        await process_audio(sample_wav, language="uk", style="normal")
+        await process_audio(sample_wav, language="uk")
 
     full_log = "\n".join(r.getMessage() for r in caplog.records)
     assert "layer=provider-metadata" in full_log
@@ -1234,7 +1202,7 @@ async def test_no_speech_threshold_is_settings_driven(
     monkeypatch.setattr(settings.stt, "no_speech_prob_threshold", 0.9)
 
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)):
-        result = await process_audio(sample_wav, language="uk", style="normal")
+        result = await process_audio(sample_wav, language="uk")
 
     assert result.discarded_reason is None
     assert result.text == "гранична впевненість"
@@ -1258,7 +1226,7 @@ async def test_history_save_failure_records_its_cause(
         patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
         caplog.at_level(logging.DEBUG, logger="app.pipeline.service"),
     ):
-        result = await process_audio(sample_wav, language="uk", style="normal")
+        result = await process_audio(sample_wav, language="uk")
 
     assert result.text == "the transcript"
     failures = [

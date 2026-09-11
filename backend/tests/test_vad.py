@@ -586,7 +586,7 @@ async def test_averted_energy_false_positive_is_not_discarded_end_to_end(tmp_pat
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)), \
             patch("app.pipeline.service.pyperclip.copy"), \
             patch("app.pipeline.service.save_entry"):
-        result = await process_audio(path, language="uk", style="normal")
+        result = await process_audio(path, language="uk")
 
     assert result.discarded_reason is None, (
         "AC 12 VIOLATED — the pipeline discarded the window the VAD rescued"
@@ -884,11 +884,11 @@ async def _median_gate_ms(path: Path, duration: float, runs: int = 5) -> float:
     with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)), \
             patch("app.pipeline.service.pyperclip.copy"), \
             patch("app.pipeline.service.save_entry"):
-        await process_audio(path, language="uk", style="normal", audio_duration=duration)
+        await process_audio(path, language="uk", audio_duration=duration)
         for _ in range(runs):
             started = time.perf_counter()
             await process_audio(
-                path, language="uk", style="normal", audio_duration=duration
+                path, language="uk", audio_duration=duration
             )
             samples.append((time.perf_counter() - started) * 1000)
     return statistics.median(samples)

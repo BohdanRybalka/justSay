@@ -152,9 +152,6 @@ class STTProvider(ABC):
                   as its own native auto-detect sentinel, so no translation
                   is needed.
             **kwargs: Provider-specific extensions. Currently recognised:
-                - ``style`` ("normal" | "ai_prompt"): Gemini uses it to select
-                  between a faithful transcription prompt and a structuring prompt.
-                  Groq / local providers ignore it.
                 - ``audio_duration`` (float, seconds): when known, the local
                   provider uses it to pick a latency-vs-accuracy beam_size
                   (1 for short clips, 5 for long). Cloud providers ignore it.

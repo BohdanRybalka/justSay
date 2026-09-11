@@ -2,7 +2,7 @@
 
 This file is the **routing and cache** layer on top of the provider classes.
 Pipeline code calls :func:`get_routed_provider` with the audio metadata
-(mode, duration, style) and gets back the correct provider to use.
+(mode, duration, format) and gets back the correct provider to use.
 Other endpoints (status) call :func:`get_provider`
 which returns the mode-level provider without engine/duration heuristics.
 
@@ -16,9 +16,8 @@ LOCAL                    Platform-selected via
                          :class:`~app.stt.local_whisper_cpp.WhisperCppServerSTTProvider`
                          on macOS arm64 and on Windows AMD/Intel, else
                          :class:`~app.stt.local.LocalSTTProvider`
-CLOUD + style=ai_prompt  :class:`~app.stt.cloud.GeminiSTTProvider`
 CLOUD + long audio       :class:`~app.stt.cloud.GeminiSTTProvider`
-CLOUD + short + normal   :class:`~app.stt.groq_whisper.GroqWhisperSTTProvider`
+CLOUD + short audio      :class:`~app.stt.groq_whisper.GroqWhisperSTTProvider`
 CLOUD + unknown length   :class:`~app.stt.cloud.GeminiSTTProvider` (safe default)
 ======================  ========================================================
 """
@@ -86,7 +85,7 @@ def get_provider(mode: ProviderMode, stt_settings: STTSettings) -> STTProvider:
     """Mode-level provider lookup, no routing heuristics.
 
     For `/stt/local/load` and the status endpoints —
-    callers that don't have audio duration / style context. Cloud mode always
+    callers that don't have audio duration context. Cloud mode always
     returns Gemini (engine pin and duration routing live in
     :func:`get_routed_provider`).
     """
@@ -98,22 +97,20 @@ def get_provider(mode: ProviderMode, stt_settings: STTSettings) -> STTProvider:
 def get_routed_provider(
     stt_settings: STTSettings,
     audio_duration: float | None = None,
-    style: str = "normal",
     file_extension: str | None = None,
 ) -> tuple[STTProvider, str | None]:
-    """Select a provider based on engine pin + mode + audio duration + style + format.
+    """Select a provider based on engine pin + mode + audio duration + format.
 
     Args:
         stt_settings: Current STT configuration.
         audio_duration: Known duration in seconds, or ``None`` when unknown.
-        style: ``"normal"`` (plain transcription) or ``"ai_prompt"`` (structured).
         file_extension: e.g. ``".wav"``, ``".webm"``. When a format isn't supported
             by the routed provider, we fall back to the other cloud provider.
 
     Returns:
         ``(provider, fallback_reason)`` — the cached/created :class:`STTProvider`
         plus an optional reason string when the *requested* engine had to be
-        overridden (used by the UI to show "fell back to Gemini for ai_prompt").
+        overridden (used by the UI to show "fell back to Gemini for this format").
     """
     if stt_settings.mode == ProviderMode.LOCAL:
         return _get_local(stt_settings), None
@@ -125,14 +122,9 @@ def get_routed_provider(
         return _get_gemini(stt_settings), None
 
     if engine == "groq":
-        if style == "ai_prompt":
-            return _get_gemini(stt_settings), "ai_prompt requires Gemini structuring"
         if ext is not None and ext not in GROQ_SUPPORTED_FORMATS:
             return _get_gemini(stt_settings), f"Groq doesn't support {ext}"
         return _get_groq(stt_settings), None
-
-    if style == "ai_prompt":
-        return _get_gemini(stt_settings), None
 
     duration_short = (
         audio_duration is not None and audio_duration <= stt_settings.cloud_routing_threshold
