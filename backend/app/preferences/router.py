@@ -50,6 +50,17 @@ async def get_settings():
 
 @router.put("", response_model=SettingsUpdateResponse)
 async def put_settings(updates: dict):
+    """Apply a partial settings update.
+
+    ``update_user_settings`` refuses a directory or model size the user typed
+    with a ``ConfigurationError``, which answers 400 through the app-wide
+    handler and never reaches this function. What is left for ``except
+    ValueError`` is pydantic's ``ValidationError`` — a ``ValueError`` subclass
+    — raised by ``UserSettings.model_validate`` for a field constraint such as
+    the 500-character ``initial_prompt`` ceiling. ``except RuntimeError``
+    covers the one failure that is not a refusal: a history relocate that
+    broke mid-move.
+    """
     allowed_fields = set(UserSettings.model_fields.keys())
     filtered = {
         k: v for k, v in updates.items()

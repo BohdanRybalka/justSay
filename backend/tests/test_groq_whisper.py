@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.stt.config import STTSettings
 from app.stt.groq_whisper import GroqWhisperSTTProvider
 
@@ -29,7 +30,7 @@ def test_model_name_uses_configured_model():
 
 def test_missing_api_key_raises():
     provider = GroqWhisperSTTProvider(_settings(groq_api_key=""))
-    with pytest.raises(RuntimeError, match="missing"):
+    with pytest.raises(ConfigurationError, match="missing"):
         provider._get_client()
 
 
@@ -58,15 +59,19 @@ async def test_transcribe_ignores_unknown_kwargs(tmp_path):
     assert result.text == "ok"
 
 
-def test_rate_limit_raises_clearer_runtime_error(tmp_path):
-    """_call_groq must translate HTTP 429 into a RuntimeError with helpful text."""
+def test_rate_limit_raises_a_resource_unavailable_error(tmp_path):
+    """_call_groq must translate HTTP 429 into a 503 refusal with helpful text.
+
+    The provider answered, with nothing usable and a hint to try again later,
+    which is `ResourceUnavailableError` rather than a crash.
+    """
     provider = GroqWhisperSTTProvider(_settings())
     client = MagicMock()
     client.audio.transcriptions.create.side_effect = Exception(
         "HTTP 429: rate_limit_exceeded"
     )
 
-    with pytest.raises(RuntimeError, match="Groq rate limit"):
+    with pytest.raises(ResourceUnavailableError, match="Groq rate limit"):
         provider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None)
 
 

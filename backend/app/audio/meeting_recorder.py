@@ -37,7 +37,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from enum import Enum
 from pathlib import Path
-from typing import NamedTuple, TypeVar
+from typing import ClassVar, NamedTuple, TypeVar
 
 import numpy as np
 import sounddevice as sd
@@ -53,10 +53,11 @@ from app.audio.meeting_spool import (
 )
 from app.audio.system_source import (
     SystemAudioSource,
-    SystemAudioUnavailableError,
+    SystemAudioUnsupportedError,
     create_system_audio_source,
 )
 from app.audio.timeline import normalize_in_place, place_on_timeline
+from app.core.errors import NotReadyError, ResourceUnavailableError
 
 log = logging.getLogger(__name__)
 
@@ -137,38 +138,52 @@ SYSTEM_SOURCE = "system"
 _SPILL_SENTINEL = object()
 
 
-class MeetingCaptureAbortedError(RuntimeError):
+class MeetingCaptureAbortedError(NotReadyError):
     """No meeting file can be produced, and it is the caller's situation.
 
     Covers a start that found the recorder already spoken for and a stop with
-    nothing recording. The router maps it to 409; subclassing `RuntimeError`
-    keeps every caller that only distinguishes "it failed" working unchanged.
+    nothing recording -- JustSay's own state machine refusing, which is what
+    `NotReadyError` means, so the 409 is inherited rather than declared.
+
+    It is deliberately no longer a `RuntimeError`: `_submit_on_devices`
+    converts the executor's own `RuntimeError` into this class, and the two
+    have to stay tellable apart now that one is a refusal and the other is
+    not.
     """
+
+    code: ClassVar[str] = "meeting_capture_aborted"
 
 
 class MeetingCaptureEmptyError(MeetingCaptureAbortedError):
     """A meeting ran, both capture paths delivered nothing, and there is no file.
 
     Separate from its base class because the two outcomes are different
-    outcomes rather than different wordings: the router answers 410 for this
-    one and 409 for a stop that found nothing recording, and the widget picks
-    its message from the status rather than from the prose.
+    outcomes rather than different wordings: this one answers 410 and a stop
+    that found nothing recording answers 409, and the widget picks its message
+    from the status rather than from the prose.
     """
 
+    status_code: ClassVar[int] = 410
+    code: ClassVar[str] = "meeting_capture_empty"
 
-class MeetingWriteFailedError(RuntimeError):
+
+class MeetingWriteFailedError(ResourceUnavailableError):
     """The capture ended, both devices were released, and no file was written.
 
     Deliberately outside the `MeetingCaptureAbortedError` hierarchy: those two
     say a meeting never ran or captured nothing, and this one says a meeting
     ran and its audio was lost on the way to disk — a full disk, a `temp_dir`
-    that vanished, a resample that failed. The router answers 507 for it, and
-    that status is the whole point of the class: by the time the write is
-    submitted `_end_capture` has already released both handles and returned
-    the recorder to `IDLE`, so the widget must take its indicator down. A bare
-    500 is indistinguishable from an unreachable backend, which may still be
-    recording, and left the indicator lit after the meeting had ended.
+    that vanished, a resample that failed. It answers 507 rather than its
+    base's 503, and that status is the whole point of the class: by the time
+    the write is submitted `_end_capture` has already released both handles
+    and returned the recorder to `IDLE`, so the widget must take its
+    indicator down. A bare 500 is indistinguishable from an unreachable
+    backend, which may still be recording, and left the indicator lit after
+    the meeting had ended.
     """
+
+    status_code: ClassVar[int] = 507
+    code: ClassVar[str] = "meeting_write_failed"
 
 
 MEETING_BUSY_DETAIL = (
@@ -567,7 +582,7 @@ class MeetingRecorder(AudioRecorder):
         except BaseException:
             try:
                 self._submit_on_devices(self._abandon_capture, token)
-            except RuntimeError:
+            except MeetingCaptureAbortedError:
                 log.warning(
                     "The meeting recorder was retired before the abandoned start "
                     "could be torn down"
@@ -639,7 +654,7 @@ class MeetingRecorder(AudioRecorder):
         try:
             source = create_system_audio_source(self._settings)
             if source is None:
-                raise SystemAudioUnavailableError(
+                raise SystemAudioUnsupportedError(
                     "System audio capture is not available on this platform — "
                     "meeting recording requires Windows or macOS"
                 )

@@ -1,3 +1,16 @@
+"""The HTTP surface of dictation and meeting recording.
+
+The `HTTPException` raises left here are this layer's own guards -- consent,
+"already recording", "not recording" -- decided from state the router can read
+before it calls anything. Every refusal the recorders themselves produce
+carries its own status on its exception class and reaches the client through
+`app/core/error_handler.py`, so the statuses those calls can answer with are
+documented where they are raised: `SessionMismatchError` (403),
+`NotRecordingError` (409), `MeetingCaptureAbortedError` (409),
+`MeetingCaptureEmptyError` (410), `MeetingWriteFailedError` (507),
+`SystemAudioUnavailableError` (503) and `SystemAudioUnsupportedError` (501).
+"""
+
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -10,16 +23,9 @@ from app.audio.dependencies import (
     get_meeting_recorder,
     get_recorder,
 )
-from app.audio.meeting_recorder import (
-    MEETING_BUSY_DETAIL,
-    MeetingCaptureAbortedError,
-    MeetingCaptureEmptyError,
-    MeetingRecorder,
-    MeetingWriteFailedError,
-)
-from app.audio.recorder import MicrophoneRecorder, NotRecordingError
-from app.audio.session import SessionMismatchError, SessionRef
-from app.audio.system_source import SystemAudioUnavailableError
+from app.audio.meeting_recorder import MEETING_BUSY_DETAIL, MeetingRecorder
+from app.audio.recorder import MicrophoneRecorder
+from app.audio.session import SessionRef
 from app.core.utils import sse_event
 from app.preferences.user_settings import get_user_settings
 
@@ -161,10 +167,7 @@ async def stop_recording(
     if not recorder.is_recording:
         raise HTTPException(status_code=409, detail="Not recording")
     duration = recorder.duration_seconds
-    try:
-        audio_path = await recorder.stop(ref.session_id if ref else None)
-    except SessionMismatchError as e:
-        raise HTTPException(status_code=403, detail=str(e)) from e
+    audio_path = await recorder.stop(ref.session_id if ref else None)
     return StopResponse(
         filename=audio_path.name,
         duration_seconds=duration,
@@ -189,12 +192,7 @@ async def discard_recording(
     start had run; 403 and 409 mean it did not, so something else already
     happened to it.
     """
-    try:
-        dropped_seconds = await recorder.discard(ref.session_id)
-    except SessionMismatchError as e:
-        raise HTTPException(status_code=403, detail=str(e)) from e
-    except NotRecordingError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
+    dropped_seconds = await recorder.discard(ref.session_id)
     return DiscardResponse(duration_seconds=dropped_seconds)
 
 
@@ -227,12 +225,7 @@ async def start_meeting_recording(
         raise HTTPException(status_code=409, detail="A dictation recording is in progress")
     if recorder.is_busy:
         raise HTTPException(status_code=409, detail=MEETING_BUSY_DETAIL)
-    try:
-        await recorder.start()
-    except SystemAudioUnavailableError as e:
-        raise HTTPException(status_code=501, detail=str(e)) from e
-    except MeetingCaptureAbortedError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
+    await recorder.start()
     return _meeting_status(recorder)
 
 
@@ -265,14 +258,7 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
     """
     if not recorder.is_busy:
         raise HTTPException(status_code=409, detail="Not recording")
-    try:
-        recording = await recorder.stop()
-    except MeetingWriteFailedError as e:
-        raise HTTPException(status_code=507, detail=str(e)) from e
-    except MeetingCaptureEmptyError as e:
-        raise HTTPException(status_code=410, detail=str(e)) from e
-    except MeetingCaptureAbortedError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
+    recording = await recorder.stop()
     return MeetingStopResponse(
         filename=recording.path.name,
         duration_seconds=recording.duration_seconds,

@@ -5,6 +5,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.core.errors import JustSayError
 from app.core.types import ProviderMode
 from app.preferences.user_settings import update_user_settings
 from app.stt import clear_cache, get_provider
@@ -52,6 +53,8 @@ async def stt_local_load():
         provider = get_provider(settings.stt.mode, settings.stt)
         await asyncio.to_thread(provider._get_model)
         return {"loaded": True, "model": provider.model_name}
+    except JustSayError:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
