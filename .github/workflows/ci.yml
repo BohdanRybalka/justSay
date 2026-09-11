@@ -99,10 +99,29 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
-          cache-dependency-path: backend/pyproject.toml
+          cache-dependency-path: backend/uv.lock
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      # Names the cause up front: this exits 1 when backend/pyproject.toml has
+      # changed since backend/uv.lock was generated. The install step below
+      # would fail on the same staleness anyway (`uv export --locked` exits 2),
+      # but as an opaque export error rather than "re-run `uv lock`".
+      - name: Check the dependency lock is fresh
+        working-directory: backend
+        run: uv lock --check
+
+      # Installs the one recorded resolution instead of resolving pyproject's
+      # ranges afresh on every run (ADR 056). `uv export` only reads the lock,
+      # so it needs no environment of its own; `--no-deps` on the editable
+      # install is what stops pip re-resolving what the lock already pinned.
       - name: Install backend deps
-        run: pip install -e "backend[dev]"
+        working-directory: backend
+        run: |
+          uv export --locked --format requirements.txt --extra dev --no-emit-project --no-hashes -o requirements-locked.txt
+          pip install -r requirements-locked.txt
+          pip install -e . --no-deps
 
       - name: Run ruff (lint)
         run: npm run lint:ruff
@@ -127,7 +146,10 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
-          cache-dependency-path: backend/pyproject.toml
+          cache-dependency-path: backend/uv.lock
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
 
       # PortAudio is a runtime dependency of `sounddevice`, imported at module
       # load in backend/app/audio/recorder.py and reached at pytest collection
@@ -141,7 +163,11 @@ jobs:
       # or fall back to a sys.modules stub that accepts any keyword, so CI
       # verified neither Gemini acceptance criterion while reporting green.
       - name: Install backend deps
-        run: pip install -e "backend[dev,audio,cloud]"
+        working-directory: backend
+        run: |
+          uv export --locked --format requirements.txt --extra dev --extra audio --extra cloud --no-emit-project --no-hashes -o requirements-locked.txt
+          pip install -r requirements-locked.txt
+          pip install -e . --no-deps
 
       - name: Run backend tests (pytest, not slow)
         run: npm run test -- -m "not slow"

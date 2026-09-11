@@ -260,11 +260,15 @@ def test_only_the_macos_config_ships_the_audio_tap_helper():
     assert "resources/justsay-audiotap" not in _bundle_resources(TAURI_WINDOWS_CONF)
 
 
-def test_the_sidecar_pip_install_line_is_unchanged():
+def test_the_sidecar_installs_only_the_cloud_and_audio_extras():
     """The chosen engine is a bundled binary, not a Python package. Adding an
     extra here would pull a multi-GB dependency into the shipped sidecar for
-    nothing."""
-    assert 'pip install -e ".[cloud,audio]"' in _release_workflow_text()
+    nothing. Since spec 141 the extras are named on the `uv export` line that
+    feeds `pip install -r`, not on a `pip install -e ".[...]"` line."""
+    text = _release_workflow_text()
+
+    assert re.findall(r"--extra (\w+)", text) == ["cloud", "audio"]
+    assert "pip install -e . --no-deps" in text
 
 
 def test_pyproject_scopes_package_discovery_without_disabling_it():

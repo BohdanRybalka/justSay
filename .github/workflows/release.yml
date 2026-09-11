@@ -79,8 +79,10 @@ jobs:
       # it carries pip) goes on PATH, so every later step's python/pip/pyinstaller
       # resolves to it and PyInstaller freezes THAT interpreter. arm64 is
       # preserved (uv installs the arm64 build on macos-14). Windows is untouched.
-      - name: Install uv (macOS)
-        if: runner.os == 'macOS'
+      # Unconditional since spec 141: both OSes now install the backend from
+      # backend/uv.lock via `uv export`, so Windows needs the binary too. The
+      # macOS-only interpreter provisioning below keeps its own `if`.
+      - name: Install uv
         uses: astral-sh/setup-uv@v6
 
       - name: Install Python via uv (macOS)
@@ -98,11 +100,19 @@ jobs:
         run: |
           python -c "import sqlite3, sys; c = sqlite3.connect(':memory:'); assert hasattr(c, 'enable_load_extension'), 'CPython built WITHOUT loadable sqlite extensions: ' + sys.executable; print('OK loadable-extensions:', sys.executable)"
 
+      # The sidecar is frozen from the one resolution recorded in
+      # backend/uv.lock (ADR 056), not from whatever pyproject's ranges resolve
+      # to on release day. `uv export` only reads the lock, so it needs no
+      # environment of its own and the VIRTUAL_ENV warning it may print on
+      # macOS is cosmetic; `--no-deps` on the editable install is what stops
+      # pip re-resolving what the lock already pinned.
       - name: Install Python deps + PyInstaller
         working-directory: backend
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[cloud,audio]"
+          uv export --locked --format requirements.txt --extra cloud --extra audio --no-emit-project --no-hashes -o requirements-locked.txt
+          pip install -r requirements-locked.txt
+          pip install -e . --no-deps
           pip install pyinstaller
 
       # TEN VAD neural silence gate (spec 033 / ADR 019). Windows-only: it is
