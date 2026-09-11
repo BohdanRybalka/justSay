@@ -350,6 +350,10 @@ def test_operational_error_mapped_to_503(isolated_storage, tmp_path):
             resp = client.get("/history/stats")
             assert resp.status_code == 503
             assert resp.headers.get("Retry-After") == "1"
+            assert resp.json() == {
+                "detail": "Transcript store busy",
+                "code": "resource_unavailable",
+            }
 
 
 
@@ -769,6 +773,7 @@ def test_search_lock_error_returns_503(isolated_storage, tmp_path):
             resp = client.get("/history/search?q=anything")
             assert resp.status_code == 503
             assert resp.headers.get("Retry-After") == "1"
+            assert resp.json()["code"] == "resource_unavailable"
 
 
 

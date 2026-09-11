@@ -103,7 +103,7 @@ _WEB_FRAMEWORK_FREE_PACKAGES = {
     "pipeline": {"router.py", "service.py", "upload_validation.py"},
     "preferences": {"router.py"},
     "stt": {"router.py"},
-    "transcripts": {"history_router.py", "words_router.py", "store_errors.py"},
+    "transcripts": {"history_router.py", "words_router.py"},
 }
 
 _WEB_FRAMEWORK_FREE_APP_ROOT_EXCEPT = {"main.py"}
