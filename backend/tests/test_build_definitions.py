@@ -260,15 +260,22 @@ def test_only_the_macos_config_ships_the_audio_tap_helper():
     assert "resources/justsay-audiotap" not in _bundle_resources(TAURI_WINDOWS_CONF)
 
 
-def test_the_sidecar_installs_only_the_cloud_and_audio_extras():
+def test_the_sidecar_installs_only_the_cloud_audio_and_build_extras():
     """The chosen engine is a bundled binary, not a Python package. Adding an
     extra here would pull a multi-GB dependency into the shipped sidecar for
     nothing. Since spec 141 the extras are named on the `uv export` line that
-    feeds `pip install -r`, not on a `pip install -e ".[...]"` line."""
-    text = _release_workflow_text()
+    feeds `pip install -r`, not on a `pip install -e ".[...]"` line, so this
+    reads that one step and rejects every shape that widens the set: a second
+    `--extra`, the `--extra=name` form, `--all-extras`, and `--group`.
+    """
+    step = _step_named("Install Python deps + PyInstaller")
 
-    assert re.findall(r"--extra (\w+)", text) == ["cloud", "audio"]
-    assert "pip install -e . --no-deps" in text
+    assert re.findall(r"--extra[= ]([\w-]+)", step) == ["cloud", "audio", "build"]
+    assert "--all-extras" not in step
+    assert "--group" not in step
+    assert "--no-dev" in step
+    assert "pip install -r requirements-locked.txt --no-deps" in step
+    assert "pip install -e . --no-deps" in step
 
 
 def test_pyproject_scopes_package_discovery_without_disabling_it():
@@ -335,7 +342,7 @@ def test_pyproject_declares_no_apple_specific_extra():
     section = text.split("[project.optional-dependencies]", 1)[1].split("\n[", 1)[0]
     declared = set(re.findall(r"^([a-z][a-z-]*) = \[", section, re.MULTILINE))
 
-    assert declared == {"dev", "cloud", "local", "local-llm", "audio"}, (
+    assert declared == {"dev", "cloud", "local", "local-llm", "audio", "build"}, (
         f"pyproject extras changed: {sorted(declared)}. An Apple-specific extra "
         "would mean the macOS engine is a Python package again, which spec 068 "
         "and ADR 036 removed."

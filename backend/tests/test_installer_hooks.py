@@ -3,7 +3,8 @@ and its process kill list must stay in sync with the sidecar image name the
 Rust shell actually uses.
 
 Reads only committed repo files, so it runs on `ubuntu-latest` in CI
-(`.github/workflows/ci.yml:114`) the same as on Windows — see ADR 031 and
+(the `backend-test` job's "Run backend tests (pytest, not slow)" step in
+`.github/workflows/ci.yml`) the same as on Windows — see ADR 031 and
 specs/048-updating-over-running-backend/plan.md.
 """
 

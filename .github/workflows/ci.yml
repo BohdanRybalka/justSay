@@ -101,13 +101,19 @@ jobs:
           cache: "pip"
           cache-dependency-path: backend/uv.lock
 
+      # Pinned rather than floating: this binary is what judges the lock's
+      # freshness, so it is bumped deliberately together with the lock it
+      # writes (same version as the dev machine's uv).
       - name: Install uv
         uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.10"
 
       # Names the cause up front: this exits 1 when backend/pyproject.toml has
       # changed since backend/uv.lock was generated. The install step below
-      # would fail on the same staleness anyway (`uv export --locked` exits 2),
-      # but as an opaque export error rather than "re-run `uv lock`".
+      # would fail on the same staleness anyway (`uv export --locked` exits 2)
+      # and prints the same "run `uv lock`" text, so what this buys is a named
+      # step in the job log instead of a red install step.
       - name: Check the dependency lock is fresh
         working-directory: backend
         run: uv lock --check
@@ -119,8 +125,8 @@ jobs:
       - name: Install backend deps
         working-directory: backend
         run: |
-          uv export --locked --format requirements.txt --extra dev --no-emit-project --no-hashes -o requirements-locked.txt
-          pip install -r requirements-locked.txt
+          uv export --locked --format requirements.txt --extra dev --no-dev --no-emit-project --no-hashes -o requirements-locked.txt
+          pip install -r requirements-locked.txt --no-deps
           pip install -e . --no-deps
 
       - name: Run ruff (lint)
@@ -148,8 +154,13 @@ jobs:
           cache: "pip"
           cache-dependency-path: backend/uv.lock
 
+      # Pinned rather than floating: this binary is what judges the lock's
+      # freshness, so it is bumped deliberately together with the lock it
+      # writes (same version as the dev machine's uv).
       - name: Install uv
         uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.10"
 
       # PortAudio is a runtime dependency of `sounddevice`, imported at module
       # load in backend/app/audio/recorder.py and reached at pytest collection
@@ -158,16 +169,16 @@ jobs:
       - name: Install PortAudio
         run: sudo apt-get update && sudo apt-get install -y libportaudio2
 
-      # The cloud extra is here for the gates, not for the app: without
-      # google-genai installed, the Gemini timeout tests either skip outright
-      # or fall back to a sys.modules stub that accepts any keyword, so CI
-      # verified neither Gemini acceptance criterion while reporting green.
+      # The cloud extra the script names is here for the gates, not for the
+      # app: without google-genai installed, the Gemini timeout tests either
+      # skip outright or fall back to a sys.modules stub that accepts any
+      # keyword, so CI verified neither Gemini acceptance criterion while
+      # reporting green.
+      # Byte-identical to the `backend:install` npm script, so it routes
+      # through it rather than keeping a second copy of the same definition
+      # (ADR 017). The script does its own `cd backend`; Node is set up above.
       - name: Install backend deps
-        working-directory: backend
-        run: |
-          uv export --locked --format requirements.txt --extra dev --extra audio --extra cloud --no-emit-project --no-hashes -o requirements-locked.txt
-          pip install -r requirements-locked.txt
-          pip install -e . --no-deps
+        run: npm run backend:install
 
       - name: Run backend tests (pytest, not slow)
         run: npm run test -- -m "not slow"

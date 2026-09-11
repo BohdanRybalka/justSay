@@ -11,7 +11,7 @@
     "tauri:dev:frozen": "npm run sidecar:build && cross-env JUSTSAY_USE_FROZEN_SIDECAR=1 tauri dev",
     "sidecar:build": "cd backend && pyinstaller build_sidecar.spec --noconfirm --distpath ../src-tauri/resources",
     "backend": "cd backend && python -m uvicorn app.main:app --host 127.0.0.1 --port 9377 --reload",
-    "backend:install": "cd backend && uv export --locked --format requirements.txt --extra dev --extra audio --extra cloud --no-emit-project --no-hashes -o requirements-locked.txt && pip install -r requirements-locked.txt && pip install -e . --no-deps",
+    "backend:install": "cd backend && uv export --locked --format requirements.txt --extra dev --extra audio --extra cloud --extra build --no-dev --no-emit-project --no-hashes -o requirements-locked.txt && pip install -r requirements-locked.txt --no-deps && pip install -e . --no-deps",
     "setup": "npm install && npm run backend:install",
     "test": "cd backend && python -m pytest tests/ -v",
     "test:frontend": "vitest run",
