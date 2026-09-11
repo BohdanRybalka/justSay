@@ -14,6 +14,7 @@ carrying ``.values: list[float]``.
 import asyncio
 
 from app.core.constants import GEMINI_EMBEDDING_TIMEOUT_SECONDS
+from app.core.errors import ConfigurationError
 
 
 class CloudEmbeddingProvider:
@@ -36,7 +37,7 @@ class CloudEmbeddingProvider:
     def _get_client(self):
         if self._client is None:
             if not self._api_key:
-                raise RuntimeError(
+                raise ConfigurationError(
                     "Gemini API key is missing. Go to Settings → Keys and add your key."
                 )
             from google import genai

@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.core.constants import GEMINI_EMBEDDING_TIMEOUT_SECONDS, GEMINI_TIMEOUT_SECONDS
+from app.core.errors import ConfigurationError
 from app.core.types import ProviderMode
 from app.embeddings import LOCAL_MISSING_MODEL_REASON, clear_cache, resolve_embedding_provider
 from app.embeddings.cloud import CloudEmbeddingProvider
@@ -356,8 +357,15 @@ def test_cloud_embedding_model_name():
 
 
 def test_cloud_embedding_requires_api_key():
+    """A missing key is something the user fixes in Settings, so it is a refusal.
+
+    The class is what every caller of `embed()` sees: `words.py` and
+    `vector_store.embed_entry_background` both catch `Exception` and degrade
+    silently, so the migration changes no behaviour here — it makes the reason
+    readable to anything that ever stops swallowing it.
+    """
     provider = CloudEmbeddingProvider(gemini_api_key="", model="text-embedding-004")
-    with pytest.raises(RuntimeError, match="missing"):
+    with pytest.raises(ConfigurationError, match="missing"):
         provider._get_client()
 
 
