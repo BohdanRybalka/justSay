@@ -309,3 +309,25 @@ async def test_put_settings_accepts_valid_whisper_model_size(client):
     resp = await client.put("/settings", json={"whisper_model_size": "large-v3-turbo"})
     assert resp.status_code == 200
     assert user_settings.get_user_settings().whisper_model_size == "large-v3-turbo"
+
+
+@pytest.mark.anyio
+async def test_put_settings_refuses_a_relative_output_dir_with_a_classified_body(client):
+    """A rejected setting is a `ConfigurationError`, so the handler writes the
+    body rather than the router's `except ValueError` branch."""
+    resp = await client.put("/settings", json={"output_dir": "relative/dir"})
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert set(body) == {"detail", "code"}
+    assert body["code"] == "configuration_error"
+    assert "absolute" in body["detail"]
+
+
+@pytest.mark.anyio
+async def test_put_settings_still_refuses_an_over_long_initial_prompt(client):
+    """Pydantic's `ValidationError` is a `ValueError`, so `put_settings` keeps
+    its `except ValueError` branch and this stays a 400 after the migration."""
+    resp = await client.put("/settings", json={"initial_prompt": "x" * 501})
+
+    assert resp.status_code == 400

@@ -16,6 +16,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from app.core.app_paths import resolve_app_data_root, resolve_temp_dir
+from app.core.errors import ConfigurationError
 from app.transcripts import history
 
 
@@ -124,8 +125,8 @@ def update_user_settings(updates: dict) -> UpdateResult:
 def _validate_whisper_model_size(value: object) -> None:
     """Reject a whisper_model_size that could escape its model cache path.
 
-    Raises ValueError (which ``put_settings`` maps to 400) on any value that
-    is not a plain model-size token: it must consist only of ``[A-Za-z0-9._-]``
+    Raises ``ConfigurationError``, which answers 400 on its own, for any value
+    that is not a plain model-size token: it must consist only of ``[A-Za-z0-9._-]``
     (full-string match -- a trailing newline is rejected) and must not contain
     ``..``.
     """
@@ -134,7 +135,7 @@ def _validate_whisper_model_size(value: object) -> None:
         or not _WHISPER_MODEL_SIZE_RE.fullmatch(value)
         or ".." in value
     ):
-        raise ValueError(
+        raise ConfigurationError(
             "whisper_model_size must contain only letters, digits, '.', '_', "
             "or '-', and must not contain '..'"
         )
@@ -164,9 +165,9 @@ def _is_inside_scratch(candidate: Path) -> bool:
 
 
 def _reject_scratch_directory(candidate: Path) -> None:
-    """Raise if ``candidate`` is the scratch directory or lives inside it."""
+    """Refuse ``candidate`` if it is the scratch directory or lives inside it."""
     if _is_inside_scratch(candidate):
-        raise ValueError(
+        raise ConfigurationError(
             f"output_dir cannot be inside the temporary audio directory "
             f"({resolve_temp_dir()}); files there are deleted by Clear Temp Files"
         )
@@ -213,14 +214,14 @@ def repair_scratch_output_dir() -> Path:
 
 
 def _validate_output_dir(value: object) -> Path:
-    """Validate a candidate output_dir. Raises ValueError on rejection."""
+    """Validate a candidate output_dir. Raises ``ConfigurationError`` on rejection."""
     if not isinstance(value, str) or not value.strip():
-        raise ValueError("output_dir must be a non-empty string")
+        raise ConfigurationError("output_dir must be a non-empty string")
 
     candidate = Path(value).expanduser()
 
     if not candidate.is_absolute():
-        raise ValueError("output_dir must be an absolute path")
+        raise ConfigurationError("output_dir must be an absolute path")
 
     candidate = candidate.resolve(strict=False)
 
@@ -230,26 +231,26 @@ def _validate_output_dir(value: object) -> Path:
         except (ValueError, OSError):
             continue
         if inside:
-            raise ValueError(f"output_dir is inside a system directory: {forbidden}")
+            raise ConfigurationError(f"output_dir is inside a system directory: {forbidden}")
 
     _reject_scratch_directory(candidate)
 
     if candidate.exists():
         if not candidate.is_dir():
-            raise ValueError("output_dir exists but is not a directory")
+            raise ConfigurationError("output_dir exists but is not a directory")
     elif not candidate.parent.exists():
-        raise ValueError("output_dir parent directory does not exist")
+        raise ConfigurationError("output_dir parent directory does not exist")
     else:
         try:
             candidate.mkdir(parents=False, exist_ok=True)
         except OSError as e:
-            raise ValueError(f"Could not create output_dir: {e}") from e
+            raise ConfigurationError(f"Could not create output_dir: {e}") from e
 
     probe = candidate / f".justsay-write-probe-{uuid.uuid4().hex[:8]}"
     try:
         probe.write_bytes(b"x")
     except OSError as e:
-        raise ValueError(f"output_dir is not writable: {e}") from e
+        raise ConfigurationError(f"output_dir is not writable: {e}") from e
     finally:
         try:
             probe.unlink(missing_ok=True)

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from app.core.config import AppSettings
+from app.core.errors import ConfigurationError
 from app.preferences import user_settings
 from app.transcripts import history
 
@@ -40,30 +41,30 @@ def isolated(tmp_path, monkeypatch):
 
 
 def test_validate_output_dir_rejects_relative():
-    with pytest.raises(ValueError, match="absolute"):
+    with pytest.raises(ConfigurationError, match="absolute"):
         user_settings._validate_output_dir("relative/dir")
 
 
 def test_validate_output_dir_rejects_empty():
-    with pytest.raises(ValueError, match="non-empty"):
+    with pytest.raises(ConfigurationError, match="non-empty"):
         user_settings._validate_output_dir("   ")
 
 
 def test_validate_output_dir_rejects_non_string():
-    with pytest.raises(ValueError, match="non-empty"):
+    with pytest.raises(ConfigurationError, match="non-empty"):
         user_settings._validate_output_dir(42)
 
 
 def test_validate_output_dir_rejects_when_path_is_file(tmp_path):
     f = tmp_path / "a.txt"
     f.write_text("x")
-    with pytest.raises(ValueError, match="not a directory"):
+    with pytest.raises(ConfigurationError, match="not a directory"):
         user_settings._validate_output_dir(str(f))
 
 
 def test_validate_output_dir_rejects_nonexistent_parent(tmp_path):
     target = tmp_path / "no" / "such" / "parent" / "dir"
-    with pytest.raises(ValueError, match="parent directory"):
+    with pytest.raises(ConfigurationError, match="parent directory"):
         user_settings._validate_output_dir(str(target))
 
 
@@ -75,7 +76,7 @@ def test_validate_output_dir_rejects_when_not_writable(tmp_path, monkeypatch):
         raise OSError("Permission denied")
 
     monkeypatch.setattr(Path, "write_bytes", deny_write)
-    with pytest.raises(ValueError, match="not writable"):
+    with pytest.raises(ConfigurationError, match="not writable"):
         user_settings._validate_output_dir(str(target))
 
 
@@ -86,7 +87,7 @@ def test_validate_output_dir_accepts_valid_dir(tmp_path):
 
 def test_validate_output_dir_rejects_forbidden_parent():
     forbidden = "C:/Windows/System32/justsay" if sys.platform == "win32" else "/etc/justsay"
-    with pytest.raises(ValueError, match="system directory"):
+    with pytest.raises(ConfigurationError, match="system directory"):
         user_settings._validate_output_dir(forbidden)
 
 
@@ -339,7 +340,7 @@ def test_validate_output_dir_rejects_the_scratch_directory(isolated):
     scratch = isolated["settings_dir"] / "tmp"
     scratch.mkdir(parents=True, exist_ok=True)
 
-    with pytest.raises(ValueError, match="temporary audio directory"):
+    with pytest.raises(ConfigurationError, match="temporary audio directory"):
         user_settings._validate_output_dir(str(scratch))
 
 
@@ -347,7 +348,7 @@ def test_validate_output_dir_rejects_a_directory_inside_scratch(isolated):
     nested = isolated["settings_dir"] / "tmp" / "history"
     nested.mkdir(parents=True, exist_ok=True)
 
-    with pytest.raises(ValueError, match="temporary audio directory"):
+    with pytest.raises(ConfigurationError, match="temporary audio directory"):
         user_settings._validate_output_dir(str(nested))
 
 

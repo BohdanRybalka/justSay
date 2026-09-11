@@ -1,4 +1,4 @@
-"""Translation of SQLite lock contention into an HTTP answer.
+"""Translation of SQLite lock contention into a refusal the caller can read.
 
 Both routers in this package read the same SQLite file through the same
 connection and lock, so "database is locked" means one thing wherever it
@@ -7,13 +7,17 @@ written out at six call sites with four different detail strings — "History
 store busy", "Stats store busy", "Words store busy" and an unreachable default
 — which read as three different stores to a client and to a reader. There is
 one store.
+
+The refusal is a ``ResourceUnavailableError``, which already answers 503 and
+carries the ``Retry-After`` header to the handler, so this module needs no web
+framework of its own.
 """
 
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from fastapi import HTTPException
+from app.core.errors import ResourceUnavailableError
 
 _BUSY_MARKER = "locked"
 _BUSY_DETAIL = "Transcript store busy"
@@ -37,9 +41,9 @@ def store_busy_as_503() -> Iterator[None]:
         yield
     except sqlite3.OperationalError as e:
         if is_store_busy(e):
-            raise HTTPException(
-                status_code=503,
-                detail=_BUSY_DETAIL,
+            raise ResourceUnavailableError(
+                _BUSY_DETAIL,
+                diagnostic=str(e),
                 headers={"Retry-After": _RETRY_AFTER_SECONDS},
             ) from e
         raise
