@@ -1565,3 +1565,33 @@ async def test_timeout_then_retry_joins_in_flight_load_instead_of_starting_a_sec
         "a second _get_model() call was started while the first was still in flight"
     )
     assert result is True
+
+
+@pytest.mark.asyncio
+async def test_prewarm_latch_keeps_the_class_name_prefix_for_a_migrated_refusal(monkeypatch):
+    """The Settings indicator's text for a classified failure, pinned exactly.
+
+    ``_prewarm_error`` is served verbatim as ``GET /stt/local/status``'s
+    ``last_error`` and rendered into the Local STT indicator's title, its
+    aria-label and an error toast. Classifying the local-engine raises moved
+    this string's prefix from ``RuntimeError:`` to ``ResourceUnavailableError:``,
+    which is a user-visible change, so the exact text is asserted here rather
+    than left to be discovered from a screenshot. Step 3 deletes the prefix;
+    this test is what makes that deletion visible instead of silent.
+    """
+    _stub_whisper_cpp_server_kind(monkeypatch)
+
+    def _fail(p):
+        raise ResourceUnavailableError("whisper-server exited early (code 3)")
+
+    provider = _FakePrewarmProvider(get_model=_fail)
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+
+    await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+
+    assert (
+        local_setup._prewarm_error
+        == "ResourceUnavailableError: whisper-server exited early (code 3)"
+    )

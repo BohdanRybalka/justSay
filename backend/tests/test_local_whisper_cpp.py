@@ -1289,3 +1289,31 @@ def test_health_poll_reports_an_early_child_exit_as_a_resource_refusal(monkeypat
     assert exc_info.type is ResourceUnavailableError
     assert exc_info.value.status_code == 503
     assert "code 3" in str(exc_info.value)
+
+
+def test_early_exit_latches_the_status_text_the_settings_indicator_shows(monkeypatch, tmp_path):
+    """`last_load_error` is served as `GET /stt/local/status`'s `last_error`.
+
+    The provider latches `f"{type(e).__name__}: {e}"`, so classifying the
+    early-exit raise changed that text from `RuntimeError: ...` to
+    `ResourceUnavailableError: ...` — visible in the Local STT indicator's
+    title, its aria-label and an error toast. The exact string is pinned so
+    the next move of it is a failing test rather than a surprise in Settings.
+    """
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+
+    dead = _FakeProcess()
+    dead.returncode = 3
+    monkeypatch.setattr(local_whisper_cpp_module.subprocess, "Popen", lambda argv, **k: dead)
+
+    _install_fake_httpx(monkeypatch, get_impl=lambda url: _FakeResponse(200))
+    monkeypatch.setattr(local_whisper_cpp_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
+
+    with pytest.raises(ResourceUnavailableError):
+        provider._get_model()
+
+    assert (
+        provider.last_load_error
+        == "ResourceUnavailableError: whisper-server exited early (code 3)"
+    )
