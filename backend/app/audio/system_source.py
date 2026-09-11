@@ -13,10 +13,12 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 
 from app.audio.config import AudioSettings
+from app.core.errors import ResourceUnavailableError
 
 log = logging.getLogger(__name__)
 
@@ -25,8 +27,28 @@ BlockSink = Callable[[float, np.ndarray], None]
 FailureSink = Callable[[str], None]
 
 
-class SystemAudioUnavailableError(RuntimeError):
-    """No system-audio capture exists on this platform, or no device was found."""
+class SystemAudioUnavailableError(ResourceUnavailableError):
+    """This machine could not open the capture path its platform has.
+
+    A missing loopback device, a denied macOS recording permission, a helper
+    binary that would not spawn, a COM call that failed: every raise of this
+    class is an open-time failure of one machine, so 503 is the honest answer
+    and the next attempt may succeed. The platform having no capture path at
+    all is a different fact and has its own subclass.
+    """
+
+
+class SystemAudioUnsupportedError(SystemAudioUnavailableError):
+    """This operating system has no system-audio capture path at all.
+
+    Permanent for as long as the app runs on this OS, which is why it keeps
+    the 501 its base gave up: `ResourceUnavailableError` promises that
+    retrying later may work, and here it never will. See
+    docs/adr/060-a-platform-without-audio-is-not-a-broken-device.md.
+    """
+
+    status_code: ClassVar[int] = 501
+    code: ClassVar[str] = "system_audio_unsupported"
 
 
 class SystemAudioSource(ABC):
