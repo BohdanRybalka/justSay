@@ -571,13 +571,24 @@ async def test_pipeline_silence_guard_does_not_block_event_loop(
 
 
 @pytest.fixture
-def local_mode():
+def local_mode(monkeypatch):
     """Mirrors `cloud_mode` above but for Local -- restores the real STT
     provider cache afterwards since these tests route through the real
     LocalSTTProvider class (pinned by conftest.py's autouse
-    `_force_faster_whisper_for_local` fixture), not a mocked provider."""
+    `_force_faster_whisper_for_local` fixture), not a mocked provider.
+
+    `_check_package_installed` is stubbed to True because these tests are
+    about the readiness barrier, not about installation: without the stub,
+    `ensure_local_ready()` takes its install branch on any machine where the
+    optional engine is absent and runs a real `pip install .[local]`
+    subprocess (spec 149). Same stub, same reason, as
+    `tests/test_background_tasks.py`'s real-`ensure_local_ready` test.
+    """
     from app.stt import clear_cache as clear_stt_cache
 
+    monkeypatch.setattr(
+        "app.stt.local_setup._check_package_installed", lambda: True
+    )
     original_stt = settings.stt.mode
     settings.stt.mode = ProviderMode.LOCAL
     clear_stt_cache()

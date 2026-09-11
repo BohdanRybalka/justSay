@@ -476,7 +476,11 @@ def test_load_lock_serialises_concurrent_get_model(monkeypatch):
             call_count["n"] += 1
             time.sleep(0.05)
 
-    monkeypatch.setattr("faster_whisper.WhisperModel", _FakeWhisperModel)
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=_FakeWhisperModel),
+    )
 
     threads = [threading.Thread(target=provider._get_model) for _ in range(2)]
     for t in threads:
