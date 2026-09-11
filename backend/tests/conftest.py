@@ -12,6 +12,7 @@ os.environ["JUSTSAY_TRUSTED_HOSTS"] = (
 )
 
 import logging
+import re
 import shutil
 import warnings
 from collections.abc import Callable
@@ -28,6 +29,57 @@ from app.main import app
 from app.preferences import user_settings
 from app.stt import clear_cache as clear_stt_cache
 from app.transcripts import history
+
+_INSTALLER_TOOLS = frozenset(
+    {"pip", "uv", "uvx", "pipx", "poetry", "conda", "easy_install"}
+)
+_INSTALL_VERBS = frozenset({"install", "add", "sync"})
+_VERSIONED_PIP = re.compile(r"pip\d+(?:\.\d+)*")
+
+
+def _normalise_token(token: object) -> str:
+    r"""Reduce one argv entry to the bare lowercase program name it names:
+    ``C:\Py312\Scripts\Pip3.12.EXE`` and ``/usr/bin/pip`` both become the
+    name the installer sets below are written against."""
+    text = str(token).lower().replace("\\", "/")
+    name = text.rsplit("/", 1)[-1]
+    if name.endswith(".exe"):
+        name = name[: -len(".exe")]
+    return name
+
+
+def _is_installer_tool(name: str) -> bool:
+    return name in _INSTALLER_TOOLS or _VERSIONED_PIP.fullmatch(name) is not None
+
+
+def is_package_installer_command(argv: object) -> bool:
+    """True when ``argv`` would install packages into the running environment.
+
+    Recognises a tool invoked directly (``pip install x``, ``uv sync``), one
+    invoked through the interpreter (``python -m pip install x``), and
+    ``python -m ensurepip``. A tool name with no install verb after it, and an
+    argv naming no tool at all, are both False -- the suite spawns real
+    subprocesses for import probes, the GPU probe and whisper-server, and none
+    of those may be blocked.
+    """
+    if isinstance(argv, (str, bytes)):
+        tokens = [_normalise_token(part) for part in str(argv).split()]
+    elif isinstance(argv, (list, tuple)):
+        tokens = [_normalise_token(part) for part in argv]
+    else:
+        return False
+
+    for index, token in enumerate(tokens):
+        if token == "-m":
+            module = tokens[index + 1] if index + 1 < len(tokens) else ""
+            if module == "ensurepip":
+                return True
+            if _is_installer_tool(module):
+                return any(rest in _INSTALL_VERBS for rest in tokens[index + 2 :])
+            return False
+        if _is_installer_tool(token):
+            return any(rest in _INSTALL_VERBS for rest in tokens[index + 1 :])
+    return False
 
 
 @pytest.fixture
@@ -674,6 +726,56 @@ def _no_background_indexer_by_default(monkeypatch, request):
 
     if not request.node.get_closest_marker("background_indexer"):
         monkeypatch.setattr(vector_store, "run_background_indexer", _noop)
+
+
+
+
+@pytest.fixture(autouse=True)
+def _no_real_package_installs(monkeypatch, request):
+    """Fail any test that tries to spawn a package installer, naming the test.
+
+    Spec 149: `test_process_audio_awaits_shared_readiness_barrier_no_second_get_model`
+    reached `local_setup._run_pip_install` and ran a real `pip install .[local]`
+    against whatever environment was executing the suite -- on the CI runner
+    that install is what made a later test's `import faster_whisper` succeed, so
+    the suite's green depended on a unit test mutating the machine. Function
+    scope is what lets the message name the offending test.
+
+    `subprocess.Popen` covers `subprocess.run`, `check_call` and `check_output`,
+    which all resolve the module global. The asyncio helpers are patched
+    separately rather than assumed to follow: on Windows the event loop spawns
+    through `asyncio.windows_utils.Popen`, which a patched `subprocess.Popen`
+    does not touch.
+    """
+
+    def _reject(argv: object) -> None:
+        if is_package_installer_command(argv):
+            raise RuntimeError(
+                f"{request.node.nodeid} tried to run a package installer: {argv!r}"
+            )
+
+    real_popen = subprocess.Popen
+
+    class _GuardedPopen(real_popen):
+        def __init__(self, args, *rest, **kwargs):
+            _reject(args)
+            super().__init__(args, *rest, **kwargs)
+
+    real_exec = asyncio.create_subprocess_exec
+    real_shell = asyncio.create_subprocess_shell
+
+    async def _guarded_exec(program, *args, **kwargs):
+        _reject([program, *args])
+        return await real_exec(program, *args, **kwargs)
+
+    async def _guarded_shell(cmd, **kwargs):
+        _reject(cmd)
+        return await real_shell(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _GuardedPopen)
+    for module in (asyncio, asyncio.subprocess):
+        monkeypatch.setattr(module, "create_subprocess_exec", _guarded_exec)
+        monkeypatch.setattr(module, "create_subprocess_shell", _guarded_shell)
 
 
 def fake_genai_modules(client_class) -> dict[str, ModuleType]:
