@@ -1,11 +1,13 @@
 """The hierarchy's shape, pinned where prose cannot hold it.
 
-Four properties live here: the base is `Exception` and not `RuntimeError`, the
-three subclasses are members of it, no subclass answers the base's 500
-sentinel, and no two subclasses share a `code`. The last two are what a step-2
-migrator relies on when adding a fourth class — a forgotten `status_code`
-override and a copy-pasted `code` both turn red here rather than in a response
-nobody inspects.
+Five properties live here: the base is `Exception` and not `RuntimeError`,
+the three subclasses are members of it, the base itself cannot be raised, no
+subclass answers the base's 500 sentinel, and no two subclasses share a `code`.
+The last two are what a step-2 migrator relies on when adding a fourth class —
+a forgotten `status_code` override and a copy-pasted `code` both turn red here
+rather than in a response nobody inspects. The third closes the shortcut those
+two leave open: a bare `JustSayError` would otherwise answer the sentinel and
+look like a refusal at 500.
 
 Mutations actually run against `app/core/errors.py`, with the number of tests
 each one reddens across this file and `tests/test_error_handler.py` together:
@@ -16,6 +18,8 @@ each one reddens across this file and `tests/test_error_handler.py` together:
 - `ResourceUnavailableError.code` set to `"configuration_error"` -- four tests
 - `from fastapi import HTTPException` planted in the module -- two tests, the
   AST one and the `sys.modules` subprocess one
+- the `type(self) is JustSayError` guard dropped from `__init__` -- two tests,
+  one here and one in `tests/test_error_handler.py`
 """
 
 import ast
@@ -74,6 +78,17 @@ def test_no_subclass_resolves_to_the_base_s_500_sentinel() -> None:
     assert JustSayError.status_code == 500
     offenders = [c.__name__ for c in _declared_subclasses() if c.status_code == 500]
     assert offenders == []
+
+
+def test_the_base_cannot_be_raised_as_a_refusal_of_its_own() -> None:
+    """Membership is what the base is for; answering a request is not."""
+    with pytest.raises(TypeError, match="membership test"):
+        JustSayError("Something went wrong internally.")
+
+
+def test_every_named_subclass_stays_constructible() -> None:
+    for subclass in _declared_subclasses():
+        assert isinstance(subclass("A refusal."), JustSayError)
 
 
 def test_every_subclass_declares_a_unique_code() -> None:

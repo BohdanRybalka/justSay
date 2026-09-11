@@ -18,7 +18,9 @@ having a handler map its type to a status, so adding a refusal with an unusual
 status is a class declaration and nothing else. The base's `status_code` of 500
 is a sentinel, not a default: a `JustSayError` that answers 500 contradicts
 what membership means, and `tests/test_errors.py` fails any subclass that
-resolves to it.
+resolves to it. The base itself cannot be instantiated at all, so the
+contradiction has no way to reach the wire — the sentinel is only ever the
+inherited value a subclass must override.
 
 Choosing between the three: `ConfigurationError` when the user can fix it in
 Settings; `ResourceUnavailableError` when the thing that is wrong lives outside
@@ -43,6 +45,12 @@ class JustSayError(Exception):
     of the log needs — a provider's reply, a `ctypes` return code, a device id
     — and never leaves the process. `headers` exists so a refusal that already
     answers with `Retry-After` can keep doing so.
+
+    The class is the membership test and never a refusal in its own right:
+    instantiating it raises `TypeError`, because the only body it could produce
+    is a 500 `internal_error` shaped exactly like a refusal the user is meant
+    to read. `except JustSayError` is unaffected — catching is what the base is
+    for, raising is not.
     """
 
     status_code: ClassVar[int] = 500
@@ -55,6 +63,11 @@ class JustSayError(Exception):
         diagnostic: str | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> None:
+        if type(self) is JustSayError:
+            raise TypeError(
+                "JustSayError is the membership test, not a refusal: "
+                "raise one of its subclasses instead."
+            )
         super().__init__(message)
         self.message = message
         self.diagnostic = diagnostic

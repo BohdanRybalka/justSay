@@ -15,6 +15,8 @@ tests in this file each one reddens:
 - `headers=` dropped from the `JSONResponse` -- one
 - the handler registered on `Exception` instead of `JustSayError` -- all seven,
   because it then swallows the `RuntimeError` too
+- the base's `type(self) is JustSayError` guard dropped in `app/core/errors.py`
+  -- one, the bare-base test below, which then gets a 500 refusal body back
 """
 
 import logging
@@ -99,6 +101,20 @@ def test_a_subclass_of_a_subclass_is_caught_by_the_one_registration() -> None:
         "detail": "The microphone is in use.",
         "code": "resource_unavailable",
     }
+
+
+def test_the_bare_base_never_answers_with_a_refusal_shaped_500() -> None:
+    """A 500 carrying `detail` and `code` would read as a refusal it is not."""
+    app = FastAPI()
+    register_error_handlers(app)
+
+    @app.get("/boom")
+    async def boom() -> None:
+        raise JustSayError("Something went wrong internally.")
+
+    with TestClient(app) as client:
+        with pytest.raises(TypeError, match="membership test"):
+            client.get("/boom")
 
 
 def test_a_plain_runtime_error_is_left_alone() -> None:
