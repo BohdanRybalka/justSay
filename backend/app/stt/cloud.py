@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.core.audio_formats import mime_for_extension
 from app.core.constants import GEMINI_TIMEOUT_SECONDS
+from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.stt.base import STTProvider, TranscriptionResult, clean_transcript_text
 from app.stt.config import STTSettings
 from app.stt.languages import LANGUAGE_NAMES
@@ -36,7 +37,7 @@ class GeminiSTTProvider(STTProvider):
     def _get_client(self):
         if self._client is None:
             if not self._settings.gemini_api_key:
-                raise RuntimeError(
+                raise ConfigurationError(
                     "Gemini API key is missing. Go to Settings → Keys and add your key."
                 )
             from google import genai
@@ -140,14 +141,16 @@ class GeminiSTTProvider(STTProvider):
 
         block_reason = getattr(getattr(response, "prompt_feedback", None), "block_reason", None)
         if block_reason is not None:
-            raise RuntimeError(f"Gemini returned no transcription (blocked: {block_reason})")
+            raise ResourceUnavailableError(
+                f"Gemini returned no transcription (blocked: {block_reason})"
+            )
         candidates = getattr(response, "candidates", None) or []
         finish_reason = getattr(candidates[0], "finish_reason", None) if candidates else None
         if finish_reason is not None:
-            raise RuntimeError(
+            raise ResourceUnavailableError(
                 f"Gemini returned no transcription (finish_reason: {finish_reason})"
             )
-        raise RuntimeError("Gemini returned no transcription")
+        raise ResourceUnavailableError("Gemini returned no transcription")
 
     @staticmethod
     def _call_gemini(

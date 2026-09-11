@@ -13,6 +13,7 @@ import pytest
 import soundfile as sf
 
 from app.core.constants import GEMINI_TIMEOUT_SECONDS
+from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.core.types import ProviderMode
 from app.stt import clear_cache, get_provider
 from app.stt.base import (
@@ -107,7 +108,7 @@ def test_cloud_stt_model_name():
 def test_cloud_stt_requires_api_key():
     settings = STTSettings(mode=ProviderMode.CLOUD, gemini_api_key="")
     provider = GeminiSTTProvider(settings)
-    with pytest.raises(RuntimeError, match="missing"):
+    with pytest.raises(ConfigurationError, match="missing"):
         provider._get_client()
 
 
@@ -279,9 +280,11 @@ def test_gemini_raises_rather_than_reporting_a_blocked_response_as_success(
     Returning "" here produced the same shape a deleted transcript did:
     ``process_audio`` copies nothing, saves a zero-word history row and reports
     ``discarded_reason=None``, which ``computeDoneStatus`` renders as nothing at
-    all. The raise reaches the user as a 500 naming the reason instead.
+    all. The raise reaches the user as a 503 naming the reason instead: a
+    provider that answered with nothing usable is outside this process, so it
+    is a `ResourceUnavailableError` rather than a crash.
     """
-    with pytest.raises(RuntimeError, match=expected_fragment):
+    with pytest.raises(ResourceUnavailableError, match=expected_fragment):
         GeminiSTTProvider._transcript_from_response(response)
 
 
@@ -1075,3 +1078,56 @@ def test_a_gemini_request_that_is_never_answered_raises_a_timeout():
         "Windows an unreachable port raises ConnectTimeout, which is also a "
         "TimeoutException and would make a looser assertion vacuous"
     )
+
+
+async def test_local_load_answers_503_for_a_refusal_instead_of_the_class_name_500(
+    client, monkeypatch
+):
+    """A classified refusal out of `_get_model` reaches the handler, not the wrapper.
+
+    Before spec 150 step 2 the router's `except Exception` turned every local
+    load failure into `500` with `detail` = `"<ClassName>: <message>"`. A
+    `JustSayError` now re-raises past it, so the missing binary and the dead
+    `whisper-server` answer `503` with the bare sentence and a stable `code`.
+    """
+    from app.stt import router as stt_router
+
+    class _RefusingProvider:
+        model_name = "whisper-cpp/large-v3-turbo"
+
+        def _get_model(self) -> None:
+            raise ResourceUnavailableError("whisper-server exited early (code 1)")
+
+    monkeypatch.setattr(stt_router.settings.stt, "mode", ProviderMode.LOCAL)
+    monkeypatch.setattr(stt_router, "get_provider", lambda *a, **k: _RefusingProvider())
+
+    resp = await client.post("/stt/local/load")
+
+    assert resp.status_code == 503
+    assert resp.json() == {
+        "detail": "whisper-server exited early (code 1)",
+        "code": "resource_unavailable",
+    }
+
+
+async def test_local_load_still_answers_500_for_an_unclassified_failure(client, monkeypatch):
+    """The `except JustSayError: raise` insert must not widen past the hierarchy.
+
+    Step 3 deletes the class-name wrapper outright; until then an exception
+    that is not a refusal keeps producing exactly the 500 it produces today.
+    """
+    from app.stt import router as stt_router
+
+    class _CrashingProvider:
+        model_name = "whisper-cpp/large-v3-turbo"
+
+        def _get_model(self) -> None:
+            raise RuntimeError("invariant broke")
+
+    monkeypatch.setattr(stt_router.settings.stt, "mode", ProviderMode.LOCAL)
+    monkeypatch.setattr(stt_router, "get_provider", lambda *a, **k: _CrashingProvider())
+
+    resp = await client.post("/stt/local/load")
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "RuntimeError: invariant broke"

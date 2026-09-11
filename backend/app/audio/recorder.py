@@ -6,6 +6,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import sounddevice as sd
@@ -14,20 +15,27 @@ from app.audio.analysis import rms_dbfs
 from app.audio.base import AudioRecorder, write_wav
 from app.audio.config import AudioSettings
 from app.audio.session import SESSION_MISMATCH_DETAIL, SessionMismatchError
+from app.core.errors import NotReadyError
 
 log = logging.getLogger(__name__)
 
 
-class NotRecordingError(Exception):
+class NotRecordingError(NotReadyError):
     """A request to end a capture arrived when no capture was running.
 
-    Named rather than raised as a bare ``RuntimeError`` so that the router can
-    map exactly this state to its 409 instead of wrapping a whole coroutine
-    body in ``except RuntimeError``. That shape is the one [JS-107] was: any
-    unrelated ``RuntimeError`` raised later inside the handler's call would be
-    answered as "not recording", and the client reads that 409 as *proof* that
-    its abandoned request was already processed.
+    Named rather than raised as a bare ``RuntimeError`` so that exactly this
+    state answers 409, instead of a whole coroutine body being wrapped in
+    ``except RuntimeError``. That shape is the one [JS-107] was: any unrelated
+    ``RuntimeError`` raised later inside the handler's call would be answered
+    as "not recording", and the client reads that 409 as *proof* that its
+    abandoned request was already processed.
+
+    Both ways a capture can end -- ``stop()`` and ``discard()`` -- raise it,
+    so the one state has one class and one status rather than the bare
+    ``RuntimeError``/409 split it carried until spec 150.
     """
+
+    code: ClassVar[str] = "not_recording"
 
 
 
@@ -103,7 +111,7 @@ class MicrophoneRecorder(AudioRecorder):
         """
         with self._lock:
             if not self._recording or self._stream is None:
-                raise RuntimeError("Not recording")
+                raise NotRecordingError("Not recording")
             if session_id is not None and session_id != self._session_id:
                 raise SessionMismatchError(SESSION_MISMATCH_DETAIL)
             self._final_duration = time.monotonic() - self._start_time
