@@ -365,18 +365,29 @@ class MeetingRecorder(AudioRecorder):
 
         A block is kept only for the session that registered the callback,
         and only while that session is capturing.
+
+        The put happens under the same lock hold as the state check, and not
+        after it: `_finish_spill` drops the queue under that lock before it
+        enqueues the sentinel, so a callback that passed the check cannot be
+        preempted and then land a block behind the sentinel, into a queue no
+        worker is draining any more. `put_nowait` never blocks, so the hold
+        stays as short as the check it joins, and the incident is recorded
+        after the lock is released because `_note_incident` takes it too.
         """
+        full = False
         with self._lock:
             if self._session_token != token:
                 return False
             if self._state not in (MeetingState.STARTING, MeetingState.RECORDING):
                 return False
             work = self._spill_queue
-        if work is None:
-            return False
-        try:
-            work.put_nowait((source, arrival, mono))
-        except queue.Full:
+            if work is None:
+                return False
+            try:
+                work.put_nowait((source, arrival, mono))
+            except queue.Full:
+                full = True
+        if full:
             self._note_incident(
                 CaptureIncident.STORAGE_BACKLOG,
                 "the spill thread could not keep up, so some audio was dropped",

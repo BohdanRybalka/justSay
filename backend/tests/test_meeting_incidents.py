@@ -26,6 +26,7 @@ import sounddevice as sd
 from app.audio.config import AudioSettings
 from app.audio.dependencies import get_meeting_recorder
 from app.audio.meeting_recorder import (
+    MICROPHONE_SOURCE,
     CaptureIncident,
     MeetingRecorder,
     microphone_has_stalled,
@@ -643,3 +644,60 @@ async def test_the_spill_thread_is_retired_with_the_rest_of_the_recorder(
             return
         await asyncio.sleep(0.02)
     raise AssertionError("a meeting-spill thread is still running after cleanup()")
+
+
+@pytest.mark.asyncio
+async def test_a_block_that_passed_the_state_check_cannot_land_behind_the_sentinel(
+    settings, source, microphone_stream
+):
+    """A callback preempted on its way to the queue still reaches the spool.
+
+    `_store` used to release the lock before putting, so a block whose state
+    check passed while the meeting was still recording could be suspended,
+    let `_finish_spill` enqueue the sentinel and the drain worker return, and
+    only then put -- into a queue nobody reads any more. The block was lost
+    with no incident and no log line, which is the silent loss this spec
+    exists to close.
+
+    The preemption is made deterministic by delaying `put_nowait` itself
+    rather than by hoping for a scheduler: the storing thread reaches the put
+    and stalls there, and the owner thread finishes the spill meanwhile. With
+    the put inside the same lock hold as the check, the owner thread waits for
+    it instead of racing past it.
+    """
+    recorder = MeetingRecorder(settings)
+    try:
+        await recorder.start()
+        work = recorder._spill_queue
+        reached_the_put = threading.Event()
+        queue_a_block = work.put_nowait
+
+        def stall_on_the_way_to_the_queue(item):
+            reached_the_put.set()
+            time.sleep(0.3)
+            queue_a_block(item)
+
+        work.put_nowait = stall_on_the_way_to_the_queue
+        block = np.full(BLOCK_FRAMES, 0.4, dtype=np.float32)
+        storing = threading.Thread(
+            target=recorder._store,
+            args=(
+                recorder._session_token,
+                MICROPHONE_SOURCE,
+                recorder._start_time,
+                block,
+            ),
+            name="preempted-callback",
+        )
+        storing.start()
+        assert reached_the_put.wait(timeout=5.0), "the block never reached the queue"
+        recorder._finish_spill()
+        storing.join(timeout=5.0)
+
+        assert recorder._microphone_spool.frames == BLOCK_FRAMES, (
+            f"{BLOCK_FRAMES - recorder._microphone_spool.frames} frames were "
+            f"dropped between the state check and the queue, and the capture "
+            f"reports {recorder._incident}"
+        )
+    finally:
+        recorder.cleanup()

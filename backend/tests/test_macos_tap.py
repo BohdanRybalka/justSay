@@ -520,6 +520,43 @@ def test_a_nonzero_exit_is_logged_with_what_the_helper_wrote(
     assert any("exited with code 3" in message for message in messages), messages
 
 
+def test_a_helper_that_exits_tells_the_recorder_the_far_side_is_gone(tap_settings):
+    """AC: the helper's non-zero exit is what becomes `system_audio_ended`.
+
+    The exit report already logged; the recorder now hears it too, and this
+    drives that call site rather than the abstract sink, because the argument
+    and the lock read in `_read_blocks` are the half of the acceptance
+    criterion no other test reaches.
+    """
+    process = _FakeTapProcess(tap_stdout(blocks=1), returncode=3)
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+    reported: list[str] = []
+
+    with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
+        source.start(lambda arrival, mono: None, reported.append)
+        source._reader.join(timeout=5.0)
+        source.stop()
+
+    assert reported == ["the macOS system-audio helper exited with code 3"], (
+        f"a helper that died mid-meeting told the recorder {reported}, so the "
+        f"meeting keeps its indicator clean while system audio is gone"
+    )
+
+
+def test_a_helper_that_exits_cleanly_reports_no_failure(tap_settings):
+    """A helper reaching the end of its stream is not a failed capture."""
+    process = _FakeTapProcess(tap_stdout(blocks=1), returncode=0)
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+    reported: list[str] = []
+
+    with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
+        source.start(lambda arrival, mono: None, reported.append)
+        source._reader.join(timeout=5.0)
+        source.stop()
+
+    assert reported == []
+
+
 class _PipedTapProcess:
     """A helper process whose stdout and stderr are real OS pipes.
 

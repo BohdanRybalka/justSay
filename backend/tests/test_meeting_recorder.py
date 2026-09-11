@@ -589,6 +589,7 @@ def fake_pyaudiowpatch(monkeypatch):
     module = types.ModuleType("pyaudiowpatch")
     module.paFloat32 = 1
     module.paContinue = 0
+    module.paInputUnderflow = 2
 
     class _Stream:
         def __init__(self):
@@ -706,6 +707,54 @@ def test_windows_source_delivers_nothing_after_stop(fake_pyaudiowpatch, render_e
 
     assert received == []
     assert fake_pyaudiowpatch.PyAudio.instances[-1].terminated is True
+
+
+def test_a_loopback_status_flag_reaches_the_recorder_once_per_capture(
+    fake_pyaudiowpatch, render_endpoints
+):
+    """AC: a non-zero PortAudio status is what tells a meeting the far side ended.
+
+    Driven through `_stream_callback` with the flag PortAudio would really
+    set, because the argument and the lock read in `_report_stream_status` are
+    the literal code that turns a degraded WASAPI loopback into
+    `system_audio_ended`, and nothing else in the suite reaches them: the
+    recorder's own incident tests drive a hand-rolled fake source instead.
+
+    Twice, because the report is deduplicated per capture: a stream that
+    raises the flag on every block must not hand the user a new sentence each
+    time.
+    """
+    from app.audio.windows_loopback import WindowsLoopbackSource
+
+    source = WindowsLoopbackSource(AudioSettings())
+    reported: list[str] = []
+    silence = np.zeros(4, dtype=np.float32).tobytes()
+
+    source.start(lambda arrival, mono: None, reported.append)
+    source._stream_callback(silence, 2, None, fake_pyaudiowpatch.paInputUnderflow)
+    source._stream_callback(silence, 2, None, fake_pyaudiowpatch.paInputUnderflow)
+    source.stop()
+
+    assert reported == ["the WASAPI loopback stream reported PortAudio status 2"], (
+        f"a degraded loopback stream told the recorder {reported}, so the "
+        f"meeting reports no incident while its far side is gone"
+    )
+
+
+def test_a_loopback_stream_with_no_status_flag_reports_no_failure(
+    fake_pyaudiowpatch, render_endpoints
+):
+    """The silence WASAPI delivers while nothing renders is not a failure."""
+    from app.audio.windows_loopback import WindowsLoopbackSource
+
+    source = WindowsLoopbackSource(AudioSettings())
+    reported: list[str] = []
+
+    source.start(lambda arrival, mono: None, reported.append)
+    source._stream_callback(np.zeros(4, dtype=np.float32).tobytes(), 2, None, 0)
+    source.stop()
+
+    assert reported == []
 
 
 def test_windows_source_captures_the_communications_endpoint(
