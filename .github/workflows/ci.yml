@@ -1,6 +1,6 @@
 # PR-gating CI (spec 030 / 039, ADR 017 / 025).
 #
-# Four per-check jobs run in parallel — each check routes through an npm
+# Five per-check jobs run in parallel — each check routes through an npm
 # script so CI and a local run share one definition (ADR 017's
 # single-definition rule):
 #
@@ -12,6 +12,9 @@
 #   frontend-test — Node only: vitest.
 #   backend-lint  — Node entry point + Python[dev]: ruff + vulture.
 #   backend-test  — Node entry point + Python[dev,audio,cloud]: pytest.
+#   shell-test    — Node entry point + Rust, on a windows-latest + macos-14
+#                   matrix: cargo test. Added by spec 151; see its own comment
+#                   block at the job for why both legs are required.
 #
 # backend-lint installs only backend[dev] and skips PortAudio: neither ruff nor
 # vulture imports the app. Both backend jobs drop `npm ci` — their npm scripts
@@ -19,11 +22,13 @@
 # npm + pip caching is on for every job that installs deps, to offset the extra
 # per-job setup the split re-pays.
 #
-# Deliberately a subset of the local Stage 2 gate: no Rust toolchain, no
-# PyInstaller sidecar, no Vulkan SDK, and pytest runs `-m "not slow"` so the
-# hardware-less runner skips the timing-sensitive pins. See
-# docs/adr/025-pr-ci-gate-scope-and-exclusions.md for why this subset (no Rust,
-# no coverage gate) and docs/adr/017-static-analysis-in-pr-ci.md for why these
+# Still deliberately a subset of the local Stage 2 gate: no PyInstaller
+# sidecar, no Vulkan SDK, and pytest runs `-m "not slow"` so the hardware-less
+# runner skips the timing-sensitive pins. ADR 025 excluded Rust from this gate
+# and named the trigger for adding it; spec 151 adds it on the user's decision
+# of 2026-09-11 that every layer's tests run on every pull request. See
+# docs/adr/025-pr-ci-gate-scope-and-exclusions.md for the rest of the subset
+# (no coverage gate) and docs/adr/017-static-analysis-in-pr-ci.md for why these
 # checks live in a PR workflow rather than a pre-commit hook or subagent step.
 
 name: CI
@@ -196,3 +201,69 @@ jobs:
       # rather than a specific seed, and reproduced in seconds without one.
       - name: Run backend tests in a randomised order
         run: cd backend && python -m pytest tests/ -m "not slow" -p randomly
+
+  # The Rust shell (spec 151). It starts the engine, owns the tray and the
+  # global shortcut, so a break here is a dead app rather than a degraded one —
+  # yet until now `cargo` appeared in no PR workflow and the suite ran for the
+  # first time on a tag push.
+  #
+  # A matrix rather than one runner: of the 30 tests in the `app_lib` binary, 7
+  # are `#[cfg(windows)]` (the Job Object kill-on-close pair, the pid-assign
+  # non-fatality, the three timing budgets and the force-kill path from ADR
+  # 023/024), so Windows runs 30 and macOS runs 23. Both legs are required —
+  # CLAUDE.md forbids making either platform non-fatal. Toolchain setup and the
+  # cache key shape are copied from release.yml deliberately, so the two
+  # workflows do not drift into two ways of building the same crate.
+  #
+  # macOS needs no system dependency beyond what the runner image ships:
+  # release.yml installs none for its own Rust build either.
+  shell-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+          - platform: macos-14 # arm64 Apple Silicon runner
+            target: aarch64-apple-darwin
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      # `tauri-build` resolves every bundle resource path at compile time and
+      # fails the build script with "resource path ... doesn't exist" when one
+      # is missing. All of them are produced by a release build (the PyInstaller
+      # sidecar, the whisper.cpp binaries, the macOS audio tap) and all are
+      # gitignored, so a clean checkout carries none. Empty placeholders satisfy
+      # the path check; this job compiles and runs tests, it bundles nothing.
+      - name: Create placeholder bundle resources
+        shell: bash
+        run: |
+          mkdir -p src-tauri/resources/justsay-backend
+          mkdir -p src-tauri/resources/whisper-cpp-vulkan
+          mkdir -p src-tauri/resources/whisper-cpp-metal
+          touch src-tauri/resources/justsay-audiotap
+
+      # Routed through the npm script so CI and a local run share one definition
+      # (ADR 017); no `npm ci` — the script is a bare `cd src-tauri && cargo
+      # test` and needs no node_modules binary.
+      - name: Run shell tests (cargo test)
+        run: npm run test:rust
