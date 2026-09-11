@@ -27,6 +27,7 @@ import {
   startErrorLabel,
   type DictationErrorLabel,
 } from "./error-label";
+import { decideMeetingHealth } from "./meeting-health";
 import { MEETING_STATE_CLASS, renderMeetingIndicator } from "./meeting-indicator";
 import { type MeetingToggleActions, runMeetingToggle } from "./meeting-toggle";
 import { createRecordingIntentQueue } from "./recording-intent";
@@ -336,30 +337,75 @@ let meetingActive = false;
 let meetingStartedAt = 0;
 let meetingTimer: ReturnType<typeof setInterval> | null = null;
 let meetingBusy = false;
+let meetingIncident: string | null = null;
+let meetingTicks = 0;
 
 const MEETING_TICK_MS = 500;
+
+/** The backend is asked how the capture is doing on every fourth clock tick,
+ *  so the poll runs every 2 s and no second timer appears. A capture that dies
+ *  mid-meeting used to leave a ticking indicator over nothing for the rest of
+ *  the call, because `syncMeetingIndicator` is awaited once at load and
+ *  nothing repeated it. */
+const MEETING_POLL_EVERY_TICKS = 4;
 
 function renderMeetingIndicatorFromState() {
   renderMeetingIndicator(widget, {
     active: meetingActive,
     elapsedSeconds: (Date.now() - meetingStartedAt) / 1000,
+    incident: meetingIncident,
   });
+}
+
+function onMeetingTick() {
+  renderMeetingIndicatorFromState();
+  meetingTicks += 1;
+  if (meetingTicks % MEETING_POLL_EVERY_TICKS === 0) void pollMeetingHealth();
 }
 
 function beginMeetingIndicator(startedAt = Date.now()) {
   meetingActive = true;
   meetingStartedAt = startedAt;
+  meetingIncident = null;
+  meetingTicks = 0;
   renderMeetingIndicatorFromState();
-  meetingTimer = setInterval(renderMeetingIndicatorFromState, MEETING_TICK_MS);
+  meetingTimer = setInterval(onMeetingTick, MEETING_TICK_MS);
 }
 
 function endMeetingIndicator() {
   meetingActive = false;
+  meetingIncident = null;
   if (meetingTimer) {
     clearInterval(meetingTimer);
     meetingTimer = null;
   }
   renderMeetingIndicatorFromState();
+}
+
+/** Act on one poll of the meeting status. A failed poll is ignored on purpose:
+ *  an unreachable backend is not evidence the capture ended, and taking the
+ *  marker down on it would break ADR 040 obligation 2 while a recording may
+ *  still be running. */
+async function pollMeetingHealth() {
+  let status;
+  try {
+    status = await api.getMeetingStatus();
+  } catch (e) {
+    console.warn("Could not read the meeting recording status:", e);
+    return;
+  }
+  const action = decideMeetingHealth(status, meetingActive);
+  if (action.kind === "keep") return;
+  if (action.kind === "end") {
+    endMeetingIndicator();
+    await invokeShell("set_meeting_recording", { active: false });
+    meetingToggleActions.reportError(action.message);
+    return;
+  }
+  if (meetingIncident === action.incident) return;
+  meetingIncident = action.incident;
+  renderMeetingIndicatorFromState();
+  meetingToggleActions.reportError(action.message);
 }
 
 /** The budget on a shell command, covering the bridge import and the `invoke()`

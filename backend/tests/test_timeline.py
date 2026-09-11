@@ -7,24 +7,113 @@ docs/adr/038-two-capture-clocks-reconciled-by-measured-rate.md.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import numpy as np
 import pytest
 
 from app.audio.analysis import to_mono
 from app.audio.config import AudioSettings
+from app.audio.meeting_spool import INDEX_DTYPE
 from app.audio.timeline import (
-    CapturedBlock,
     Segment,
-    mix_and_normalize,
+    normalize_in_place,
     place_on_timeline,
-    resample_to,
-    segment_blocks,
+    resample_chunks,
     segment_effective_rate,
+    segment_spool,
 )
 
 TARGET_RATE = 16000
 GAP_TOLERANCE = 1.5
 RATE_TOLERANCE = AudioSettings().meeting_rate_tolerance
+CHUNK_FRAMES = AudioSettings().meeting_assembly_chunk_frames
+
+
+class CapturedBlock(NamedTuple):
+    """One block as a device delivered it, before it reaches a spool.
+
+    The production path spills blocks to disk and assembles from the file, so
+    nothing in `app` carries a block list any more. These tests still describe
+    their inputs as blocks because that is what a device produces, and
+    `_spool_of` is the one place that turns them into the index-and-samples
+    pair `place_on_timeline` reads.
+    """
+
+    arrival: float
+    samples: np.ndarray
+
+
+def _spool_of(blocks: list[CapturedBlock]) -> tuple[np.ndarray, np.ndarray]:
+    """The `(index, samples)` pair a `MeetingSpool` would hold for `blocks`."""
+    index = np.array(
+        [(block.arrival, len(block.samples)) for block in blocks], dtype=INDEX_DTYPE
+    )
+    if not blocks:
+        return index, np.zeros(0, dtype=np.float32)
+    return index, np.concatenate([block.samples for block in blocks]).astype(np.float32)
+
+
+def segment_blocks(
+    blocks: list[CapturedBlock], nominal_rate: int, gap_tolerance_blocks: float
+) -> list[Segment]:
+    index, _ = _spool_of(blocks)
+    return segment_spool(index, nominal_rate, gap_tolerance_blocks)
+
+
+def place_blocks_on_timeline(
+    blocks: list[CapturedBlock],
+    *,
+    nominal_rate: int,
+    target_rate: int,
+    recording_start: float,
+    recording_stop: float,
+    gap_tolerance_blocks: float,
+    rate_tolerance: float,
+) -> np.ndarray:
+    """Assemble one source the way `MeetingRecorder._mix_into` does.
+
+    The production caller allocates the timeline once and sums both sources
+    into it; this allocates one for a single source so a test can read the
+    result back.
+    """
+    index, samples = _spool_of(blocks)
+    total = max(int(round((recording_stop - recording_start) * target_rate)), 0)
+    out = np.zeros(total, dtype=np.float32)
+    place_on_timeline(
+        index,
+        samples,
+        nominal_rate=nominal_rate,
+        target_rate=target_rate,
+        recording_start=recording_start,
+        gap_tolerance_blocks=gap_tolerance_blocks,
+        rate_tolerance=rate_tolerance,
+        chunk_frames=CHUNK_FRAMES,
+        out=out,
+    )
+    return out
+
+
+def resample_to(samples: np.ndarray, source_rate: float, target_rate: int) -> np.ndarray:
+    chunks = list(resample_chunks(samples, source_rate, target_rate, CHUNK_FRAMES))
+    if not chunks:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(chunks)
+
+
+def mix_and_normalize(microphone: np.ndarray, system: np.ndarray) -> np.ndarray:
+    """Both sources summed into one buffer and scaled, as assembly does it."""
+    mixed = np.zeros(max(len(microphone), len(system)), dtype=np.float32)
+    mixed[: len(microphone)] += microphone
+    mixed[: len(system)] += system
+    normalize_in_place(mixed, CHUNK_FRAMES)
+    return mixed
+
+
+def _one_block_segment(end_arrival: float, frames: int) -> Segment:
+    return Segment(
+        start_arrival=0.0, end_arrival=end_arrival, start_frame=0, stop_frame=frames
+    )
 
 
 def _blocks_at(rate: float, *, block_frames: int, duration: float, start: float = 0.0,
@@ -73,7 +162,7 @@ def test_drift_is_corrected_and_naive_concatenation_is_not():
         "test below proves nothing"
     )
 
-    corrected = place_on_timeline(
+    corrected = place_blocks_on_timeline(
         blocks,
         nominal_rate=TARGET_RATE,
         target_rate=TARGET_RATE,
@@ -107,11 +196,7 @@ def test_effective_rate_falls_back_to_nominal_when_measurement_is_absurd(elapsed
     and a non-positive elapsed measures nothing at all. All three fall back
     to nominal.
     """
-    segment = Segment(
-        start_arrival=0.0,
-        end_arrival=elapsed,
-        samples=np.zeros(TARGET_RATE, dtype=np.float32),
-    )
+    segment = _one_block_segment(elapsed, TARGET_RATE)
 
     assert segment_effective_rate(segment, TARGET_RATE, RATE_TOLERANCE) == pytest.approx(
         TARGET_RATE
@@ -120,11 +205,7 @@ def test_effective_rate_falls_back_to_nominal_when_measurement_is_absurd(elapsed
 
 def test_effective_rate_inside_the_window_is_used_as_measured():
     """The window must not swallow the real correction it exists to bound."""
-    segment = Segment(
-        start_arrival=0.0,
-        end_arrival=1.0,
-        samples=np.zeros(16020, dtype=np.float32),
-    )
+    segment = _one_block_segment(1.0, 16020)
 
     assert segment_effective_rate(segment, TARGET_RATE, RATE_TOLERANCE) == pytest.approx(16020.0)
 
@@ -144,7 +225,7 @@ def test_a_20_second_capture_gap_becomes_silence_not_removed_time():
     )
     stop = after[-1].arrival + block_duration
 
-    timeline = place_on_timeline(
+    timeline = place_blocks_on_timeline(
         before + after,
         nominal_rate=TARGET_RATE,
         target_rate=TARGET_RATE,
@@ -173,7 +254,7 @@ def test_a_20_second_capture_gap_becomes_silence_not_removed_time():
 
 def test_a_source_that_delivered_nothing_contributes_a_full_length_silence():
     """A starved loopback endpoint must not shorten the recording."""
-    timeline = place_on_timeline(
+    timeline = place_blocks_on_timeline(
         [],
         nominal_rate=48000,
         target_rate=TARGET_RATE,
@@ -205,7 +286,7 @@ def test_1khz_tone_through_48khz_stereo_survives_as_1khz_mono():
         for i in range(total // block_frames)
     ]
 
-    timeline = place_on_timeline(
+    timeline = place_blocks_on_timeline(
         blocks,
         nominal_rate=source_rate,
         target_rate=TARGET_RATE,
@@ -307,6 +388,68 @@ def test_segmentation_of_an_empty_stream_is_empty():
     assert segment_blocks([], TARGET_RATE, GAP_TOLERANCE) == []
 
 
+def test_a_spool_index_splits_at_exactly_the_gaps_its_arrivals_carry():
+    """The spool index is the only record assembly has of when audio arrived.
+
+    A block list and the index written from it describe the same arrivals, so
+    the gap rule reading the index must find the boundaries those arrivals
+    imply -- this drives an uninterrupted run and a real stall through one
+    spool and names the frame ranges it expects.
+    """
+    block_frames = 1024
+    block_duration = block_frames / TARGET_RATE
+    arrivals = [0.0, block_duration, 2 * block_duration, 10.0, 10.0 + block_duration]
+    blocks = [
+        CapturedBlock(arrival=arrival, samples=np.zeros(block_frames, dtype=np.float32))
+        for arrival in arrivals
+    ]
+    index, _ = _spool_of(blocks)
+
+    segments = segment_spool(index, TARGET_RATE, GAP_TOLERANCE)
+
+    assert [(s.start_frame, s.stop_frame) for s in segments] == [
+        (0, 3 * block_frames),
+        (3 * block_frames, 5 * block_frames),
+    ]
+    assert [s.start_arrival for s in segments] == [0.0, 10.0]
+
+
+def test_resampling_in_chunks_matches_resampling_the_whole_segment_at_once():
+    """The seam between two chunks must not be a discontinuity.
+
+    `soxr.ResampleStream` carries its filter state across the boundary; naive
+    per-chunk `soxr.resample` calls would not, and the difference is an
+    audible click at every chunk boundary.
+    """
+    source_rate = 48000
+    tone = np.sin(2 * np.pi * 440 * np.arange(source_rate) / source_rate).astype(np.float32)
+
+    small = np.concatenate(list(resample_chunks(tone, source_rate, TARGET_RATE, 4096)))
+    whole = np.concatenate(list(resample_chunks(tone, source_rate, TARGET_RATE, len(tone))))
+
+    assert len(small) == len(whole)
+    assert np.max(np.abs(small - whole)) < 1e-6
+
+
+def test_normalising_in_chunks_finds_the_same_peak_as_one_pass():
+    """A peak that falls in the last chunk must still scale the first."""
+    timeline = np.full(5000, 0.5, dtype=np.float32)
+    timeline[4999] = 4.0
+
+    normalize_in_place(timeline, 1024)
+
+    assert timeline[4999] == pytest.approx(1.0)
+    assert timeline[0] == pytest.approx(0.125)
+
+
+def test_a_timeline_that_does_not_clip_is_left_exactly_as_it_was():
+    timeline = np.full(5000, 0.5, dtype=np.float32)
+
+    normalize_in_place(timeline, 1024)
+
+    assert np.all(timeline == np.float32(0.5))
+
+
 def test_to_mono_averages_channels_rather_than_taking_the_first():
     stereo = np.array([[1.0, 0.0], [0.5, 0.5]], dtype=np.float32)
 
@@ -329,7 +472,7 @@ def test_blocks_arriving_before_the_recording_start_are_clipped_not_wrapped():
         for i in range(40)
     ]
 
-    timeline = place_on_timeline(
+    timeline = place_blocks_on_timeline(
         blocks,
         nominal_rate=TARGET_RATE,
         target_rate=TARGET_RATE,
@@ -403,7 +546,7 @@ def test_a_marker_lands_where_its_own_arrival_says_inside_a_drifted_segment():
         "uncorrected path produces, so this test no longer separates them"
     )
 
-    timeline = place_on_timeline(
+    timeline = place_blocks_on_timeline(
         blocks,
         nominal_rate=TARGET_RATE,
         target_rate=TARGET_RATE,
@@ -434,7 +577,7 @@ def test_two_capture_clocks_keep_a_common_marker_aligned_with_each_other():
         blocks, _ = _marker_stream(
             real_rate, block_frames=block_frames, duration=duration, marker_at=marker_at
         )
-        timeline = place_on_timeline(
+        timeline = place_blocks_on_timeline(
             blocks,
             nominal_rate=nominal_rate,
             target_rate=TARGET_RATE,
@@ -480,7 +623,7 @@ def test_burst_jitter_measures_outside_the_window_and_falls_back_to_nominal(arri
     assert len(segments) == 1
 
     elapsed = segments[0].end_arrival - segments[0].start_arrival
-    ratio = (len(segments[0].samples) / elapsed) / nominal_rate
+    ratio = (segments[0].frames / elapsed) / nominal_rate
 
     assert abs(ratio - 1.0) > RATE_TOLERANCE, (
         f"a burst measuring {ratio:.6f}x nominal is now inside the "
@@ -512,7 +655,7 @@ def test_a_one_block_segment_measures_exactly_nominal_by_construction():
 
     assert len(segments) == 1
     elapsed = segments[0].end_arrival - segments[0].start_arrival
-    assert (len(segments[0].samples) / elapsed) / nominal_rate == pytest.approx(1.0, abs=1e-12)
+    assert (segments[0].frames / elapsed) / nominal_rate == pytest.approx(1.0, abs=1e-12)
     assert segment_effective_rate(segments[0], nominal_rate, RATE_TOLERANCE) == pytest.approx(
         nominal_rate
     )
@@ -564,7 +707,7 @@ def test_a_rejected_segment_is_truncated_at_its_neighbour_rather_than_summed_int
         "one segment would make this test pass without the truncation"
     )
 
-    timeline = place_on_timeline(
+    timeline = place_blocks_on_timeline(
         blocks,
         nominal_rate=nominal_rate,
         target_rate=TARGET_RATE,

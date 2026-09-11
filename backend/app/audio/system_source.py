@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 
 BlockSink = Callable[[float, np.ndarray], None]
 
+FailureSink = Callable[[str], None]
+
 
 class SystemAudioUnavailableError(RuntimeError):
     """No system-audio capture exists on this platform, or no device was found."""
@@ -31,8 +33,17 @@ class SystemAudioSource(ABC):
     """Contract: start delivering timestamped mono blocks → stop."""
 
     @abstractmethod
-    def start(self, on_block: BlockSink) -> None:
-        """Begin capturing, calling `on_block(arrival_monotonic, mono_block)`."""
+    def start(self, on_block: BlockSink, on_failure: FailureSink | None = None) -> None:
+        """Begin capturing, calling `on_block(arrival_monotonic, mono_block)`.
+
+        `on_failure(reason)` is called once if the source stops delivering for
+        a reason it can actually observe -- a helper that exited, a PortAudio
+        status flag. It is optional because both implementations are useful
+        without it, and it is a report rather than a raise: the meeting keeps
+        recording the microphone, and the caller decides what to tell the
+        user. A render endpoint that goes quiet with no flag set is
+        indistinguishable from a machine playing silence and reaches nobody.
+        """
 
     @abstractmethod
     def stop(self) -> None:

@@ -54,6 +54,21 @@ export const EVENT_SETTINGS_HIDDEN = "settings-hidden";
  *  recording rather than one. */
 export const SESSION_ID_PATTERN = /^[0-9a-f]{32}$/;
 
+/** Every reason a meeting capture can report going wrong, spelled the same way
+ *  as `CaptureIncident` in `backend/app/audio/meeting_recorder.py` and pinned
+ *  against it by `backend/tests/test_cross_language_contracts.py`. The widget
+ *  picks the sentence it shows off these tokens, so one the backend can send
+ *  and this list does not carry would degrade the marker with no explanation. */
+export const CAPTURE_INCIDENTS = [
+  "microphone_stalled",
+  "system_audio_ended",
+  "storage_failed",
+  "storage_low",
+  "storage_backlog",
+] as const;
+
+export type CaptureIncident = (typeof CAPTURE_INCIDENTS)[number];
+
 /** Payload of `EVENT_SHORTCUT_REQUESTED` — Settings asks the widget, which
  *  owns the global-shortcut registration, to take a new accelerator. */
 export interface ShortcutRequested {

@@ -62,13 +62,14 @@ class MeetingStopResponse(BaseModel):
     """Deliberately separate from StopResponse.
 
     The Instant Prompt response model must stay untouched by this feature, and
-    the meeting path reports one thing dictation does not: whether the raw
-    buffer cap was hit and audio was dropped.
+    the meeting path reports one thing dictation does not: whether anything
+    went wrong during the capture, named by a `CaptureIncident` token, or
+    `null` when nothing did.
     """
 
     filename: str
     duration_seconds: float
-    truncated: bool
+    capture_incident: str | None
 
 
 class MeetingStatus(BaseModel):
@@ -83,6 +84,7 @@ class MeetingStatus(BaseModel):
     level_db: float
     system_endpoint: str | None
     system_level_db: float
+    capture_incident: str | None
 
 
 _CONSENT_REQUIRED_DETAIL = (
@@ -118,6 +120,9 @@ def _meeting_status(recorder: MeetingRecorder) -> MeetingStatus:
         level_db=snapshot.level_db,
         system_endpoint=snapshot.system_endpoint,
         system_level_db=snapshot.system_level_db,
+        capture_incident=(
+            None if snapshot.capture_incident is None else snapshot.capture_incident.value
+        ),
     )
 
 
@@ -252,11 +257,11 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
     raise: the recorder is idle by then, but a 500 is indistinguishable from
     an unreachable backend, so the widget kept the indicator lit.
 
-    `duration_seconds` and `truncated` arrive with the file, inside the
-    `MeetingRecording` the write produces, rather than being read off the
+    `duration_seconds` and `capture_incident` arrive with the file, inside
+    the `MeetingRecording` the write produces, rather than being read off the
     recorder: the harvest clears the live clock, so reading it here answers
     `0.0`, and a meeting started while this file is still being written owns
-    the recorder's live truncation flag by then.
+    the recorder's live incident by then.
     """
     if not recorder.is_busy:
         raise HTTPException(status_code=409, detail="Not recording")
@@ -271,7 +276,9 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
     return MeetingStopResponse(
         filename=recording.path.name,
         duration_seconds=recording.duration_seconds,
-        truncated=recording.truncated,
+        capture_incident=(
+            None if recording.incident is None else recording.incident.value
+        ),
     )
 
 

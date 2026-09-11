@@ -281,6 +281,15 @@ html, body {
   border-color: rgba(255, 94, 94, 0.35);
 }
 
+.widget.meeting.meeting-degraded {
+  border-color: rgba(255, 186, 84, 0.75);
+  box-shadow: 0 0 0 1px rgba(255, 186, 84, 0.35);
+}
+
+.widget.meeting.meeting-degraded .widget-meeting-duration {
+  color: rgba(255, 186, 84, 0.95);
+}
+
 .widget-route {
   position: absolute;
   bottom: -22px;
