@@ -36,6 +36,7 @@ _WHISPER_SERVER_ARGV = [
         ["uv", "pip", "install", "x"],
         ["uv", "add", "x"],
         ["uv", "sync"],
+        ["pip", "--quiet", "install", "x"],
         [sys.executable, "-m", "ensurepip"],
     ],
 )
@@ -48,6 +49,8 @@ def test_installer_commands_are_recognised(argv):
     [
         [sys.executable, "-c", "import app"],
         ["nvidia-smi", "--query-gpu=name", "--format=csv"],
+        ["uv", "run", "pytest", "-k", "install"],
+        ["uv", "run", "python", "-c", "import app"],
         _WHISPER_SERVER_ARGV,
     ],
 )

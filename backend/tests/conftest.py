@@ -52,6 +52,23 @@ def _is_installer_tool(name: str) -> bool:
     return name in _INSTALLER_TOOLS or _VERSIONED_PIP.fullmatch(name) is not None
 
 
+def _starts_with_install_verb(rest: list[str]) -> bool:
+    """True when the first thing said after the tool name is an install verb.
+
+    ``uv pip install x`` reaches the verb past a second tool name and
+    ``pip --quiet install x`` past an option, so both are stepped over. What is
+    not stepped over is an unrelated subcommand: ``uv run pytest -k install``
+    names a verb further along and installs nothing.
+    """
+    for token in rest:
+        if token in _INSTALL_VERBS:
+            return True
+        if token.startswith("-") or _is_installer_tool(token):
+            continue
+        return False
+    return False
+
+
 def is_package_installer_command(argv: object) -> bool:
     """True when ``argv`` would install packages into the running environment.
 
@@ -75,10 +92,10 @@ def is_package_installer_command(argv: object) -> bool:
             if module == "ensurepip":
                 return True
             if _is_installer_tool(module):
-                return any(rest in _INSTALL_VERBS for rest in tokens[index + 2 :])
+                return _starts_with_install_verb(tokens[index + 2 :])
             return False
         if _is_installer_tool(token):
-            return any(rest in _INSTALL_VERBS for rest in tokens[index + 1 :])
+            return _starts_with_install_verb(tokens[index + 1 :])
     return False
 
 
