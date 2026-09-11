@@ -97,7 +97,7 @@ _WEB_FRAMEWORK_ROOTS = frozenset({"fastapi", "starlette"})
 
 _WEB_FRAMEWORK_FREE_PACKAGES = {
     "audio": {"router.py", "dependencies.py"},
-    "core": {"router.py", "auth_middleware.py"},
+    "core": {"router.py", "auth_middleware.py", "error_handler.py"},
     "embeddings": set(),
     "llm": set(),
     "pipeline": {"router.py", "service.py", "upload_validation.py"},

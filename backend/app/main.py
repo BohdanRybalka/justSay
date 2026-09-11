@@ -10,6 +10,7 @@ from app import __version__
 from app.core import tasks
 from app.core.auth_middleware import LaunchTokenMiddleware
 from app.core.config import settings
+from app.core.error_handler import register_error_handlers
 from app.core.logging_config import setup_logging
 
 setup_logging()
@@ -94,6 +95,8 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+
+register_error_handlers(app)
 
 app.add_middleware(LaunchTokenMiddleware)
 
