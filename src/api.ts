@@ -703,7 +703,17 @@ export const api = {
    *  `before_ts=undefined`. `JSON.parse` cannot produce it; a stubbed
    *  `api.getHistory` can, and the type says it cannot. The value is normalised
    *  once the presence test has had its answer, so the edge keeps both jobs it
-   *  was given. */
+   *  was given.
+   *
+   *  The other two fields are checked here for the same reason and nowhere
+   *  else: a 200 carrying a cursor but neither `entries` nor `total` is
+   *  accepted by the presence test alone, and the caller paints the count and
+   *  empties the row container before iterating the entries throws -- so the
+   *  failure lands over a list the request had already destroyed. Rejecting the
+   *  shape here is what keeps the caller's promise that a failed request
+   *  changes nothing on screen. It is a presence check on this one response,
+   *  not a general response validator: every other endpoint still casts, and
+   *  giving them one is a separate task with a separate budget. */
   getHistory: async (limit = 50, cursor: HistoryCursor | null = null) => {
     const body = await request<Partial<HistoryPageResponse>>(
       "GET",
@@ -718,6 +728,12 @@ export const api = {
     }
     if (!("next_cursor" in body)) {
       throw new SidecarTooOldError("/history returned no next_cursor field");
+    }
+    if (!Array.isArray(body.entries)) {
+      throw new Error("/history returned entries that are not an array");
+    }
+    if (typeof body.total !== "number") {
+      throw new Error("/history returned a total that is not a number");
     }
     return { ...body, next_cursor: body.next_cursor ?? null } as HistoryPageResponse;
   },

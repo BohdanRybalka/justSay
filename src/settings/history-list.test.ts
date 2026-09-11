@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HistoryCursor, HistoryPageResponse } from "../api";
 import { buildEntry } from "./history-page-stub.test-helper";
 
@@ -27,6 +27,7 @@ vi.mock("../api", async (importOriginal) => {
 });
 
 const { SidecarTooOldError } = await import("../api");
+const { api: unmockedApi } = await vi.importActual<typeof import("../api")>("../api");
 const { createHistoryList, formatEntryCount, sidecarTooOldText } = await import("./history-list");
 
 const TRANSCRIPTS = { singular: "transcript", plural: "transcripts" };
@@ -109,6 +110,10 @@ function sentCursors(): (HistoryCursor | null)[] {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("createHistoryList — the client echoes cursors and never builds one", () => {
@@ -274,6 +279,29 @@ describe("createHistoryList — one request at a time decides the rows and the c
     list.entryRemoved();
 
     expect(h.countText()).toBe(sidecarTooOldText("History"));
+  });
+
+  it("leaves the painted rows alone when a 200 carries a cursor but no page", async () => {
+    const h = harness();
+    queueResponses({ entries: [buildEntry("a"), buildEntry("b")], total: 2, next_cursor: null });
+    const list = listOver(h);
+    await list.load();
+    expect(h.paintedIds()).toEqual(["a", "b"]);
+    expect(h.countText()).toBe("2 transcripts");
+
+    vi.stubGlobal("fetch", async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ next_cursor: null }),
+    }));
+    apiMock.getHistory.mockImplementation((limit: number, cursor: HistoryCursor | null) =>
+      unmockedApi.getHistory(limit, cursor)
+    );
+
+    await list.load();
+
+    expect(h.paintedIds()).toEqual(["a", "b"]);
+    expect(h.countText()).toBe("Failed to load");
   });
 
   it("keeps the ordinary failure text for a failure that is not version skew", async () => {

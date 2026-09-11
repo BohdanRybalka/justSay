@@ -1202,4 +1202,32 @@ describe("the history cursor on the wire", () => {
       "http://127.0.0.1:9377/history?limit=30&before_ts=1&before_id=a%26limit%3D999",
     );
   });
+
+  it.each([
+    [{ total: 2, next_cursor: null }, "/history returned entries that are not an array"],
+    [
+      { entries: "two", total: 2, next_cursor: null },
+      "/history returned entries that are not an array",
+    ],
+    [{ entries: [], next_cursor: null }, "/history returned a total that is not a number"],
+    [
+      { entries: [], total: "2", next_cursor: null },
+      "/history returned a total that is not a number",
+    ],
+  ])(
+    "rejects a 200 whose next_cursor is present but whose page is not a page",
+    async (body, message) => {
+      const { api, SidecarTooOldError } = await import("./api");
+      fetchMock.mockResolvedValue(okJson(body));
+
+      const error = await api.getHistory(30).then(
+        () => null,
+        (thrown: unknown) => thrown,
+      );
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(SidecarTooOldError);
+      expect((error as Error).message).toBe(message);
+    },
+  );
 });
