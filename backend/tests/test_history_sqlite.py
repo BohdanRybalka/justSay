@@ -2683,7 +2683,9 @@ CREATE TABLE entries (
 """
 
 
-def _seed_a_foreign_store(db_path, rows, ddl=_UNCONSTRAINED_ENTRIES_DDL):
+def _seed_a_foreign_store(
+    db_path, rows, ddl=_UNCONSTRAINED_ENTRIES_DDL, user_version=3
+):
     """A history.db this app did not create: no constraints, no primary key.
 
     `_DDL_V1` is CREATE TABLE IF NOT EXISTS, so whatever shape such a file holds
@@ -2699,14 +2701,15 @@ def _seed_a_foreign_store(db_path, rows, ddl=_UNCONSTRAINED_ENTRIES_DDL):
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 row,
             )
-        raw.execute("PRAGMA user_version = 3")
+        raw.execute(f"PRAGMA user_version = {user_version}")
         raw.commit()
     finally:
         raw.close()
 
 
+@pytest.mark.parametrize("source_version", [3, 4])
 def test_a_foreign_store_the_constraints_reject_still_lets_the_app_start(
-    isolated_storage, tmp_path
+    isolated_storage, tmp_path, source_version
 ):
     """The worst outcome this change could have had, and the one it must not.
 
@@ -2714,6 +2717,10 @@ def test_a_foreign_store_the_constraints_reject_still_lets_the_app_start(
     so a migration that raises is not a broken tab -- it is a backend that never
     starts. Every one of these shapes is refused by the current declaration and every
     one of them is reachable in a file this app did not write.
+
+    Both source versions matter. A v3 store always entered the rebuild; a v4 one
+    sat past the migration branch until `SCHEMA_VERSION` became 5 and now
+    re-enters it carrying rows no declaration this build writes would accept.
     """
     _seed_a_foreign_store(
         tmp_path / "history.db",
@@ -2797,6 +2804,7 @@ def test_a_foreign_store_the_constraints_reject_still_lets_the_app_start(
                 None,
             ),
         ],
+        user_version=source_version,
     )
 
     history.bootstrap(tmp_path)
