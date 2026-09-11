@@ -90,10 +90,15 @@ class ConfigurationError(JustSayError):
 class ResourceUnavailableError(JustSayError):
     """Something outside the app's control is absent, busy or not answering.
 
-    A held SQLite lock, a missing capture device, a platform without the
-    capability at all, an index that has not been built, a helper binary that
-    is not on disk, a provider that replied with nothing usable. Nobody can fix
-    it from Settings right now; retrying later may work.
+    A held SQLite lock, a missing capture device, an index that has not been
+    built, a helper binary that is not on disk, a provider that replied with
+    nothing usable. Nobody can fix it from Settings right now; retrying later
+    may work.
+
+    A platform that lacks the capability *at all* is deliberately not one of
+    these, and was listed here until ADR 060 decided otherwise: retrying later
+    never works on an operating system with no capture path, so it answers 501
+    through its own subclass rather than borrowing this one's promise.
     """
 
     status_code: ClassVar[int] = 503
