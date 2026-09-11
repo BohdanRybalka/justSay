@@ -707,13 +707,19 @@ export const api = {
    *
    *  The other two fields are checked here for the same reason and nowhere
    *  else: a 200 carrying a cursor but neither `entries` nor `total` is
-   *  accepted by the presence test alone, and the caller paints the count and
-   *  empties the row container before iterating the entries throws -- so the
-   *  failure lands over a list the request had already destroyed. Rejecting the
-   *  shape here is what keeps the caller's promise that a failed request
-   *  changes nothing on screen. It is a presence check on this one response,
-   *  not a general response validator: every other endpoint still casts, and
-   *  giving them one is a separate task with a separate budget. */
+   *  accepted by the presence test alone, and `undefined transcripts` over an
+   *  empty list is a worse answer than a named failure. It is a presence check
+   *  on the two top-level fields of this one response, not a general response
+   *  validator and not a check on an entry's own shape: every other endpoint
+   *  still casts, and giving them one is a separate task with a separate
+   *  budget.
+   *
+   *  It is deliberately not what keeps the caller's promise that a failed
+   *  request changes nothing on screen -- `loadPage` holds that itself, by
+   *  building every row before it writes the count or empties the container, so
+   *  an entry malformed in a way no check here anticipated fails over an intact
+   *  list. A validator here would have to know every field each tab's row
+   *  reads to make the same promise. */
   getHistory: async (limit = 50, cursor: HistoryCursor | null = null) => {
     const body = await request<Partial<HistoryPageResponse>>(
       "GET",
