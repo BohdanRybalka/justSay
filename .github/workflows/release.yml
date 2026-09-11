@@ -68,6 +68,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Unconditional since spec 141: both OSes now install the backend from
+      # backend/uv.lock via `uv export`, so Windows needs the binary too. The
+      # version is pinned rather than floating because this binary is what
+      # judges the lock's freshness — bump it deliberately, together with the
+      # lock it writes (same version as the dev machine's uv).
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.10"
+
       # macOS: actions/setup-python's macOS CPython (>= 3.11.0-rc.2) is built
       # WITHOUT --enable-loadable-sqlite-extensions by design (actions/setup-
       # python#540 — won't-fix, no toggle exists), so sqlite3.Connection has no
@@ -78,11 +88,8 @@ jobs:
       # interpreter that pip + PyInstaller run against. The venv (built --seed so
       # it carries pip) goes on PATH, so every later step's python/pip/pyinstaller
       # resolves to it and PyInstaller freezes THAT interpreter. arm64 is
-      # preserved (uv installs the arm64 build on macos-14). Windows is untouched.
-      - name: Install uv (macOS)
-        if: runner.os == 'macOS'
-        uses: astral-sh/setup-uv@v6
-
+      # preserved (uv installs the arm64 build on macos-14). Windows keeps the
+      # actions/setup-python interpreter above, so this step stays macOS-gated.
       - name: Install Python via uv (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -98,12 +105,23 @@ jobs:
         run: |
           python -c "import sqlite3, sys; c = sqlite3.connect(':memory:'); assert hasattr(c, 'enable_load_extension'), 'CPython built WITHOUT loadable sqlite extensions: ' + sys.executable; print('OK loadable-extensions:', sys.executable)"
 
+      # The sidecar is frozen from the one resolution recorded in
+      # backend/uv.lock (ADR 056), not from whatever pyproject's ranges resolve
+      # to on release day — PyInstaller itself included, which is why it comes
+      # from the `build` extra rather than a bare `pip install pyinstaller`.
+      # `uv export` only reads the lock, so it needs no environment of its own;
+      # `--no-deps` on both pip lines is what stops pip re-resolving or adding
+      # anything the lock did not name. `shell: bash` is load-bearing: under
+      # pwsh (the Windows default) a failing `uv export` mid-script would leave
+      # the step green with nothing installed, while macOS stopped correctly.
       - name: Install Python deps + PyInstaller
+        shell: bash
         working-directory: backend
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[cloud,audio]"
-          pip install pyinstaller
+          uv export --locked --format requirements.txt --extra cloud --extra audio --extra build --no-dev --no-emit-project --no-hashes -o requirements-locked.txt
+          pip install -r requirements-locked.txt --no-deps
+          pip install -e . --no-deps
 
       # TEN VAD neural silence gate (spec 033 / ADR 019). Windows-only: it is
       # the only platform this project ships the prebuilt library for (no

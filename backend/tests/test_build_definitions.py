@@ -21,6 +21,7 @@ TAURI_WINDOWS_CONF = REPO_ROOT / "src-tauri" / "tauri.windows.conf.json"
 TAURI_MACOS_CONF = REPO_ROOT / "src-tauri" / "tauri.macos.conf.json"
 TAURI_SHARED_CONF = REPO_ROOT / "src-tauri" / "tauri.conf.json"
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 PACKAGE_JSON = REPO_ROOT / "package.json"
 PYPROJECT = REPO_ROOT / "backend" / "pyproject.toml"
 VULKAN_BUILD_SCRIPT = REPO_ROOT / "backend" / "scripts" / "build_whisper_cpp_vulkan.ps1"
@@ -260,11 +261,69 @@ def test_only_the_macos_config_ships_the_audio_tap_helper():
     assert "resources/justsay-audiotap" not in _bundle_resources(TAURI_WINDOWS_CONF)
 
 
-def test_the_sidecar_pip_install_line_is_unchanged():
+def test_the_sidecar_installs_only_the_cloud_audio_and_build_extras():
     """The chosen engine is a bundled binary, not a Python package. Adding an
     extra here would pull a multi-GB dependency into the shipped sidecar for
-    nothing."""
-    assert 'pip install -e ".[cloud,audio]"' in _release_workflow_text()
+    nothing. Since spec 141 the extras are named on the `uv export` line that
+    feeds `pip install -r`, not on a `pip install -e ".[...]"` line, so this
+    reads that one step and rejects every shape that widens the set: a second
+    `--extra`, the `--extra=name` form, `--all-extras`, and `--group`.
+    """
+    step = _step_named("Install Python deps + PyInstaller")
+
+    assert "--locked" in step
+    assert re.findall(r"--extra[= ]([\w-]+)", step) == ["cloud", "audio", "build"]
+    assert "--all-extras" not in step
+    assert "--group" not in step
+    assert "--no-dev" in step
+    assert "pip install -r requirements-locked.txt --no-deps" in step
+    assert "pip install -e . --no-deps" in step
+
+
+def _dependency_definition_texts() -> dict[str, str]:
+    return {
+        path.name: path.read_text(encoding="utf-8")
+        for path in (CI_WORKFLOW, RELEASE_WORKFLOW, PACKAGE_JSON)
+    }
+
+
+def test_every_uv_export_refuses_to_resolve_around_a_stale_lock():
+    """`--locked` is the single token the whole lock mechanism rests on: without
+    it `uv export` silently re-resolves and rewrites `backend/uv.lock` on the
+    runner instead of failing, and every install path would then be back to
+    resolving ranges afresh with nothing saying so (ADR 056).
+
+    Comment lines are excluded because these workflows explain themselves in
+    prose that names the command; a commented mention runs nothing."""
+    unlocked = sorted(
+        f"{name}: {line.strip()}"
+        for name, text in _dependency_definition_texts().items()
+        for line in text.splitlines()
+        if "uv export" in line
+        and not line.lstrip().startswith("#")
+        and "--locked" not in line
+    )
+
+    assert unlocked == [], (
+        f"these `uv export` invocations would resolve around a stale lock: {unlocked}"
+    )
+
+
+def test_every_install_path_pins_the_same_uv_version():
+    """The binary that judges the lock's freshness is itself pinned, and the pin
+    is written at three sites. A bump that misses one leaves CI green and fails
+    the tag build, which is the one place nothing here can check beforehand."""
+    text = CI_WORKFLOW.read_text(encoding="utf-8") + RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    tails = text.split("astral-sh/setup-uv@")[1:]
+    pinned = [re.search(r'version: "([^"]+)"', tail[:200]) for tail in tails]
+    versions = [match.group(1) for match in pinned if match is not None]
+
+    assert len(versions) == 3, (
+        f"expected three pinned setup-uv sites, found {len(versions)} of "
+        f"{len(pinned)}: {versions}. An unpinned site puts the lock's freshness in the "
+        f"hands of whatever uv ships that day"
+    )
+    assert len(set(versions)) == 1, f"setup-uv versions disagree across install paths: {versions}"
 
 
 def test_pyproject_scopes_package_discovery_without_disabling_it():
@@ -331,7 +390,7 @@ def test_pyproject_declares_no_apple_specific_extra():
     section = text.split("[project.optional-dependencies]", 1)[1].split("\n[", 1)[0]
     declared = set(re.findall(r"^([a-z][a-z-]*) = \[", section, re.MULTILINE))
 
-    assert declared == {"dev", "cloud", "local", "local-llm", "audio"}, (
+    assert declared == {"dev", "cloud", "local", "local-llm", "audio", "build"}, (
         f"pyproject extras changed: {sorted(declared)}. An Apple-specific extra "
         "would mean the macOS engine is a Python package again, which spec 068 "
         "and ADR 036 removed."

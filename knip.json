@@ -2,6 +2,6 @@
   "$schema": "https://unpkg.com/knip@5/schema.json",
   "entry": ["src/widget/widget.ts"],
   "project": ["src/**/*.ts"],
-  "ignoreBinaries": ["python", "pip", "pyinstaller"],
+  "ignoreBinaries": ["python", "pip", "pyinstaller", "uv"],
   "ignoreExportsUsedInFile": true
 }
