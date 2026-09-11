@@ -29,6 +29,7 @@ from app.audio.meeting_recorder import (
     MICROPHONE_SOURCE,
     CaptureIncident,
     MeetingRecorder,
+    MeetingWriteFailedError,
     microphone_has_stalled,
 )
 from app.audio.meeting_spool import MeetingSpool
@@ -93,11 +94,21 @@ def microphone_stream():
 
 
 def _feed(recorder: MeetingRecorder, count: int, frames: int = BLOCK_FRAMES, fill=0.3):
-    """Deliver `count` microphone blocks as the live session's own callback."""
+    """Deliver `count` microphone blocks as the live session's own callback.
+
+    Waits while the spill queue is full, the way a real device does by
+    arriving in real time: a loop that puts as fast as Python can run
+    outruns the drain thread on a long feed and reports `storage_backlog`,
+    which would be this helper's own speed rather than anything the test
+    under it drove.
+    """
     token = recorder._session_token
     started = recorder._start_time
     block = np.full((frames, 1), fill, dtype=np.float32)
     for index in range(count):
+        work = recorder._spill_queue
+        while work is not None and work.full():
+            time.sleep(0.001)
         recorder._microphone_callback(token, block, frames, None, NO_CALLBACK_FLAGS)
         recorder._last_microphone_arrival = started + index * frames / 16000
 
@@ -623,10 +634,59 @@ def test_the_spill_thread_is_named_so_a_stack_dump_says_which_thread_it_is(setti
 
 
 @pytest.mark.asyncio
+async def test_a_write_that_fails_leaves_no_spill_or_mix_file_behind(
+    settings, source, microphone_stream
+):
+    """The recording a disk-full write could not produce costs no disk either.
+
+    The failure is raised from `write_wav_streaming`, which is the last thing
+    assembly does and the only point at which all three mappings -- the mix
+    and one over each spool -- are open at once. On Windows a file cannot be
+    unlinked while a mapping over it is open, and a raising call keeps its
+    frame alive in the traceback, so before `_mix_into` closed its mappings
+    explicitly the `finally` that removes them swallowed `WinError 32` and
+    left hundreds of megabytes of `.pcm` and `.f32` in the scratch directory
+    -- during the disk-full incident, which is the worst possible moment for
+    it. On POSIX the unlink succeeds either way, so this pins the behaviour
+    everywhere and the regression on Windows.
+    """
+    recorder = MeetingRecorder(settings)
+    try:
+        await recorder.start()
+        _feed(recorder, 8)
+        for index in range(8):
+            source.deliver(recorder._start_time + index * BLOCK_FRAMES / SYSTEM_RATE)
+        recorder._start_time = recorder._start_time - 1.0
+
+        def refuse_to_write(*args, **kwargs):
+            raise OSError("[Errno 28] No space left on device")
+
+        with patch(
+            "app.audio.meeting_recorder.write_wav_streaming", refuse_to_write
+        ), pytest.raises(MeetingWriteFailedError):
+            await recorder.stop()
+        await asyncio.to_thread(recorder._writer.shutdown, True)
+
+        left_behind = sorted(path.name for path in settings.temp_dir.iterdir())
+        assert left_behind == [], (
+            f"a failed write left {left_behind} in the scratch directory"
+        )
+    finally:
+        recorder.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_the_spill_thread_is_retired_with_the_rest_of_the_recorder(
     settings, source, microphone_stream
 ):
-    """`cleanup()` is terminal, and a live spill thread would outlive it."""
+    """`cleanup()` is terminal, and a live spill thread would outlive it.
+
+    Asks this recorder's own executor which threads it started rather than
+    scanning the process for the `meeting-spill` name: every recorder names
+    its worker identically, and the suite builds recorders that are never
+    cleaned up, so a name scan asserts the hygiene of every test that ran
+    before this one instead of what `cleanup()` did here.
+    """
     recorder = MeetingRecorder(settings)
     await recorder.start()
     _feed(recorder, 2)
@@ -634,16 +694,16 @@ async def test_the_spill_thread_is_retired_with_the_rest_of_the_recorder(
     recorder._start_time = started - 2.0
     await recorder.stop()
     await asyncio.to_thread(recorder._writer.shutdown, True)
+    spill_threads = set(recorder._spill._threads)
+    assert spill_threads, "the capture never started a spill thread to retire"
 
     recorder.cleanup()
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
-        if not any(
-            thread.name.startswith("meeting-spill") for thread in threading.enumerate()
-        ):
+        if not any(thread.is_alive() for thread in spill_threads):
             return
         await asyncio.sleep(0.02)
-    raise AssertionError("a meeting-spill thread is still running after cleanup()")
+    raise AssertionError("this recorder's meeting-spill thread outlived cleanup()")
 
 
 @pytest.mark.asyncio

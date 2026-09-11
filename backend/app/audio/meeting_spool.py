@@ -41,6 +41,27 @@ def assembly_reserve_bytes(seconds: float, sample_rate: int) -> int:
     return int(per_second * max(seconds, 0.0)) + ASSEMBLY_RESERVE_MARGIN_BYTES
 
 
+def close_memmap(array: np.ndarray) -> None:
+    """Release the OS-level mapping behind `array`, if it has one.
+
+    Windows refuses to unlink a file while a mapping over it is open, and a
+    memmap created inside a call that raises stays reachable from the
+    exception's traceback long after that call's frame would otherwise have
+    gone. Waiting for the reference to drop therefore removes the file on the
+    success path and leaves it behind on the failure path -- the one path
+    where a large temporary matters, because it is the disk running out that
+    produces it. Closing the mapping explicitly is what makes both paths the
+    same.
+
+    Takes an `ndarray` rather than a `memmap` because a spool with no frames
+    answers with a plain array, and a caller that has to ask which it got
+    would forget.
+    """
+    mapping = getattr(array, "_mmap", None)
+    if mapping is not None:
+        mapping.close()
+
+
 def free_bytes(directory: Path) -> int:
     """Bytes free on the volume holding `directory`."""
     return shutil.disk_usage(directory).free

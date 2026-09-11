@@ -34,6 +34,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import ExitStack
 from enum import Enum
 from pathlib import Path
 from typing import NamedTuple, TypeVar
@@ -44,7 +45,12 @@ import sounddevice as sd
 from app.audio.analysis import rms_dbfs, to_mono
 from app.audio.base import AudioRecorder, write_wav_streaming
 from app.audio.config import AudioSettings
-from app.audio.meeting_spool import MeetingSpool, assembly_reserve_bytes, free_bytes
+from app.audio.meeting_spool import (
+    MeetingSpool,
+    assembly_reserve_bytes,
+    close_memmap,
+    free_bytes,
+)
 from app.audio.system_source import (
     SystemAudioSource,
     SystemAudioUnavailableError,
@@ -863,10 +869,11 @@ class MeetingRecorder(AudioRecorder):
 
         The spools and the mix file go in the `finally` — they are transient
         by construction, and a write that failed must not leave the raw
-        capture behind next to no recording. The mixing is a call rather than
-        a block so that every memmap it opens is a local of that call: an
-        open mapping cannot be unlinked on Windows, so the references have to
-        be gone before this `finally` runs.
+        capture behind next to no recording. Every mapping `_mix_into` opens
+        is closed by that call's own `ExitStack` before it returns or
+        propagates, because an open mapping cannot be unlinked on Windows and
+        a raising call's frame -- and so its memmaps -- stays alive in the
+        traceback for as long as the exception does.
         """
         output_path = self._settings.temp_dir / f"meeting_{uuid.uuid4().hex[:12]}.wav"
         mix_path = self._settings.temp_dir / f"meeting_mix_{uuid.uuid4().hex[:12]}.f32"
@@ -890,38 +897,44 @@ class MeetingRecorder(AudioRecorder):
         the disk it was already being captured to. A fresh memmap is
         zero-filled, which is the silence a source that produced nothing
         contributes, so both sources are simply summed into it.
+
+        All three mappings — the mix and one over each spool — are registered
+        with an `ExitStack` as they are opened, so a write that fails part-way
+        leaves none of them open. Nothing reads any of them after the stack
+        unwinds; the caller's `finally` only removes the files they mapped.
         """
         target_rate = self._settings.sample_rate
         chunk_frames = self._settings.meeting_assembly_chunk_frames
         span = captured.recording_stop - captured.recording_start
         total_samples = max(int(round(span * target_rate)), 0)
 
-        mix = np.memmap(
-            mix_path, dtype=np.float32, mode="w+", shape=(max(total_samples, 1),)
-        )
-        timeline = mix[:total_samples]
-        common = {
-            "target_rate": target_rate,
-            "recording_start": captured.recording_start,
-            "gap_tolerance_blocks": self._settings.meeting_gap_tolerance_blocks,
-            "rate_tolerance": self._settings.meeting_rate_tolerance,
-            "chunk_frames": chunk_frames,
-            "out": timeline,
-        }
-        place_on_timeline(
-            captured.microphone_spool.index(),
-            captured.microphone_spool.samples(),
-            nominal_rate=target_rate,
-            **common,
-        )
-        place_on_timeline(
-            captured.system_spool.index(),
-            captured.system_spool.samples(),
-            nominal_rate=captured.system_rate,
-            **common,
-        )
-        normalize_in_place(timeline, chunk_frames)
-        return write_wav_streaming(output_path, timeline, target_rate, 1, chunk_frames)
+        with ExitStack() as mappings:
+            mix = np.memmap(
+                mix_path, dtype=np.float32, mode="w+", shape=(max(total_samples, 1),)
+            )
+            mappings.callback(close_memmap, mix)
+            timeline = mix[:total_samples]
+            common = {
+                "target_rate": target_rate,
+                "recording_start": captured.recording_start,
+                "gap_tolerance_blocks": self._settings.meeting_gap_tolerance_blocks,
+                "rate_tolerance": self._settings.meeting_rate_tolerance,
+                "chunk_frames": chunk_frames,
+                "out": timeline,
+            }
+            for spool, nominal_rate in (
+                (captured.microphone_spool, target_rate),
+                (captured.system_spool, captured.system_rate),
+            ):
+                samples = spool.samples()
+                mappings.callback(close_memmap, samples)
+                place_on_timeline(
+                    spool.index(), samples, nominal_rate=nominal_rate, **common
+                )
+            normalize_in_place(timeline, chunk_frames)
+            return write_wav_streaming(
+                output_path, timeline, target_rate, 1, chunk_frames
+            )
 
     @property
     def is_recording(self) -> bool:
