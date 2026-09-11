@@ -703,7 +703,23 @@ export const api = {
    *  `before_ts=undefined`. `JSON.parse` cannot produce it; a stubbed
    *  `api.getHistory` can, and the type says it cannot. The value is normalised
    *  once the presence test has had its answer, so the edge keeps both jobs it
-   *  was given. */
+   *  was given.
+   *
+   *  The other two fields are checked here for the same reason and nowhere
+   *  else: a 200 carrying a cursor but neither `entries` nor `total` is
+   *  accepted by the presence test alone, and `undefined transcripts` over an
+   *  empty list is a worse answer than a named failure. It is a presence check
+   *  on the two top-level fields of this one response, not a general response
+   *  validator and not a check on an entry's own shape: every other endpoint
+   *  still casts, and giving them one is a separate task with a separate
+   *  budget.
+   *
+   *  It is deliberately not what keeps the caller's promise that a failed
+   *  request changes nothing on screen -- `loadPage` holds that itself, by
+   *  building every row before it writes the count or empties the container, so
+   *  an entry malformed in a way no check here anticipated fails over an intact
+   *  list. A validator here would have to know every field each tab's row
+   *  reads to make the same promise. */
   getHistory: async (limit = 50, cursor: HistoryCursor | null = null) => {
     const body = await request<Partial<HistoryPageResponse>>(
       "GET",
@@ -718,6 +734,12 @@ export const api = {
     }
     if (!("next_cursor" in body)) {
       throw new SidecarTooOldError("/history returned no next_cursor field");
+    }
+    if (!Array.isArray(body.entries)) {
+      throw new Error("/history returned entries that are not an array");
+    }
+    if (typeof body.total !== "number") {
+      throw new Error("/history returned a total that is not a number");
     }
     return { ...body, next_cursor: body.next_cursor ?? null } as HistoryPageResponse;
   },

@@ -208,6 +208,13 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
    * as it found it. That invariant used to be held up by every call site
    * happening to hide the button, which the next call site added would not have
    * known to do.
+   *
+   * "Nothing painted is destroyed" covers a row this list cannot build, not
+   * only a request that fails: every row is built before the count is written
+   * and before the container is emptied, so a `createRow` that throws on a
+   * malformed entry lands in the same `catch` with the previous page still on
+   * screen. Validating the arriving shape instead would have to enumerate every
+   * field each tab's row reads, in a module that renders neither.
    */
   async function loadPage(append: boolean): Promise<void> {
     if (append && cursor === null) return;
@@ -215,6 +222,8 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     try {
       const response = await api.getHistory(pageSize, append ? cursor : null);
       if (!claim.isCurrent()) return;
+
+      const builtRows = response.entries.map((entry) => createRow(entry));
 
       total = response.total;
       backendOmitsCursor = false;
@@ -225,8 +234,8 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
         elements.rows.innerHTML = "";
       }
 
-      for (const entry of response.entries) {
-        elements.rows.appendChild(createRow(entry));
+      for (const row of builtRows) {
+        elements.rows.appendChild(row);
       }
 
       renderEmptyState(response.entries.length === 0 && !append);

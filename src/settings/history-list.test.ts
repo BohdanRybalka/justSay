@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryCursor, HistoryPageResponse } from "../api";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { HistoryCursor, HistoryEntry, HistoryPageResponse } from "../api";
 import { buildEntry } from "./history-page-stub.test-helper";
 
 const confirmMock = vi.fn();
@@ -27,6 +27,7 @@ vi.mock("../api", async (importOriginal) => {
 });
 
 const { SidecarTooOldError } = await import("../api");
+const { api: unmockedApi } = await vi.importActual<typeof import("../api")>("../api");
 const { createHistoryList, formatEntryCount, sidecarTooOldText } = await import("./history-list");
 
 const TRANSCRIPTS = { singular: "transcript", plural: "transcripts" };
@@ -76,20 +77,39 @@ function harness(): Harness {
   };
 }
 
-function listOver(h: Harness, pageSize = 2, isDestroyed: () => boolean = () => false) {
+function listOver(
+  h: Harness,
+  pageSize = 2,
+  isDestroyed: () => boolean = () => false,
+  createRow: (entry: HistoryEntry) => HTMLElement = defaultCreateRow
+) {
   return createHistoryList({
     pageSize,
     noun: TRANSCRIPTS,
     featureName: "History",
     elements: h.elements,
-    createRow: (entry) => {
-      const row = document.createElement("div");
-      row.textContent = entry.id;
-      return row;
-    },
+    createRow,
     renderEmptyState: () => {},
     isDestroyed,
   });
+}
+
+function defaultCreateRow(entry: HistoryEntry): HTMLElement {
+  const row = document.createElement("div");
+  row.textContent = entry.id;
+  return row;
+}
+
+/**
+ * What both tabs' real row builders do with an entry missing a field they read:
+ * History's reaches `escapeHtml(entry.language)` and Words' reads the same
+ * entry shape, so the row throws rather than coming back half-built.
+ */
+function createRowRequiringLanguage(entry: HistoryEntry): HTMLElement {
+  if (typeof entry.language !== "string") {
+    throw new TypeError("entry.language is not a string");
+  }
+  return defaultCreateRow(entry);
 }
 
 /**
@@ -109,6 +129,10 @@ function sentCursors(): (HistoryCursor | null)[] {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("createHistoryList — the client echoes cursors and never builds one", () => {
@@ -274,6 +298,65 @@ describe("createHistoryList — one request at a time decides the rows and the c
     list.entryRemoved();
 
     expect(h.countText()).toBe(sidecarTooOldText("History"));
+  });
+
+  it("leaves the painted rows alone when a 200 carries a cursor but no page", async () => {
+    const h = harness();
+    queueResponses({ entries: [buildEntry("a"), buildEntry("b")], total: 2, next_cursor: null });
+    const list = listOver(h);
+    await list.load();
+    expect(h.paintedIds()).toEqual(["a", "b"]);
+    expect(h.countText()).toBe("2 transcripts");
+
+    vi.stubGlobal("fetch", async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ next_cursor: null }),
+    }));
+    apiMock.getHistory.mockImplementation((limit: number, cursor: HistoryCursor | null) =>
+      unmockedApi.getHistory(limit, cursor)
+    );
+
+    await list.load();
+
+    expect(h.paintedIds()).toEqual(["a", "b"]);
+    expect(h.countText()).toBe("Failed to load");
+  });
+
+  it("leaves the painted rows alone when a well-formed page carries a malformed entry", async () => {
+    const h = harness();
+    queueResponses(
+      { entries: [buildEntry("a"), buildEntry("b")], total: 2, next_cursor: null },
+      { entries: [{ id: "c" } as unknown as HistoryEntry], total: 1, next_cursor: null }
+    );
+    const list = listOver(h, 2, () => false, createRowRequiringLanguage);
+    await list.load();
+    expect(h.paintedIds()).toEqual(["a", "b"]);
+
+    await list.load();
+
+    expect(h.paintedIds()).toEqual(["a", "b"]);
+    expect(h.countText()).toBe("Failed to load");
+  });
+
+  it("leaves the appended rows alone when a second page carries a malformed entry", async () => {
+    const h = harness();
+    queueResponses(
+      { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: { ts: 1, id: "b" } },
+      {
+        entries: [buildEntry("c"), { id: "d" } as unknown as HistoryEntry],
+        total: 4,
+        next_cursor: null,
+      }
+    );
+    const list = listOver(h, 2, () => false, createRowRequiringLanguage);
+    await list.load();
+    expect(h.paintedIds()).toEqual(["a", "b"]);
+
+    h.elements.loadMoreButton.click();
+    await vi.waitFor(() => expect(h.countText()).toBe("Failed to load"));
+
+    expect(h.paintedIds()).toEqual(["a", "b"]);
   });
 
   it("keeps the ordinary failure text for a failure that is not version skew", async () => {
