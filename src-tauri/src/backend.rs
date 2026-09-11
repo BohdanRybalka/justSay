@@ -447,6 +447,7 @@ fn append_sidecar_log(line: &[u8], log_dir: Option<&Path>) -> bool {
     if !record.ends_with(b"\n") {
         record.push(b'\n');
     }
+    let record = clamp_sidecar_log_record(record);
     let path = log_dir.join("sidecar.log");
     let _rotation = sidecar_log_rotation_lock().lock();
     rotate_sidecar_log_if_full(&path, record.len() as u64);
@@ -461,6 +462,30 @@ fn append_sidecar_log(line: &[u8], log_dir: Option<&Path>) -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// Cut a record larger than `SIDECAR_LOG_MAX_BYTES` down to the cap.
+///
+/// Rotation moves a full file aside but cannot shrink the record that follows
+/// it: a single 2 MB line lands whole in the freshly emptied `sidecar.log` and
+/// becomes a 2 MB `sidecar.log.1` at the next rotation — twice what this file
+/// is allowed to cost, from one record. A traceback captured from the sidecar
+/// reaches that size when a payload is echoed into it.
+///
+/// The tail is what the cut gives up, because the head of a record is where
+/// the failure is named. The cut lands on a UTF-8 boundary, so the last line a
+/// reader sees ends in a character rather than in half of one.
+fn clamp_sidecar_log_record(mut record: Vec<u8>) -> Vec<u8> {
+    if record.len() as u64 <= SIDECAR_LOG_MAX_BYTES {
+        return record;
+    }
+    let mut cut = SIDECAR_LOG_MAX_BYTES as usize - 1;
+    while cut > 0 && record[cut] & 0b1100_0000 == 0b1000_0000 {
+        cut -= 1;
+    }
+    record.truncate(cut);
+    record.push(b'\n');
+    record
 }
 
 /// Held across the size check, the rename and the append, so the two producers
@@ -1820,6 +1845,38 @@ mod tests {
             current + previous < 3_000_000,
             "3 MB of records must not survive as 3 MB on disk: {} + {} bytes",
             current,
+            previous
+        );
+    }
+
+    #[test]
+    fn one_record_bigger_than_the_cap_cannot_break_the_bound() {
+        let dir = scratch_log_dir("rotation-oversized");
+
+        append_sidecar_log(b"[shell] the crash that started it", Some(&dir));
+        let oversized = vec![b'x'; 2 * SIDECAR_LOG_MAX_BYTES as usize];
+        assert!(
+            append_sidecar_log(&oversized, Some(&dir)),
+            "the oversized record has to land for the size assertions to mean anything"
+        );
+        append_sidecar_log(b"[shell] the crash that just happened", Some(&dir));
+
+        let current = std::fs::metadata(dir.join("sidecar.log"))
+            .expect("sidecar.log")
+            .len();
+        let previous = std::fs::metadata(dir.join("sidecar.log.1"))
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            current <= SIDECAR_LOG_MAX_BYTES,
+            "one record cannot be allowed past the cap the live file is held to: {} bytes",
+            current
+        );
+        assert!(
+            previous <= SIDECAR_LOG_MAX_BYTES,
+            "a record rotated away carries its size with it: {} bytes",
             previous
         );
     }
