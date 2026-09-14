@@ -321,11 +321,16 @@ def test_api_ts_is_the_whole_client_surface():
     Required here and not in the sibling gate: narrow scope fails *silently* in
     this direction. A second file requesting a dead path is simply never read,
     where in the mirror direction it would only produce a false alarm.
+
+    Two suffixes are test code by this repository's own convention and are
+    excluded: ``*.test.ts``, which ``vitest.config.ts`` collects as the suite,
+    and ``*.test-helper.ts``, which only a ``*.test.ts`` imports and which
+    therefore reaches no bundle a user runs.
     """
     sources = {
         path.relative_to(REPO_ROOT).as_posix(): path.read_text(encoding="utf-8")
         for path in sorted(SRC_DIR.rglob("*.ts"))
-        if not path.name.endswith(".test.ts")
+        if not path.name.endswith((".test.ts", ".test-helper.ts"))
     }
 
     assert sources, f"no non-test TypeScript source was found under {SRC_DIR}"
