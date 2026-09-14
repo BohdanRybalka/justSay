@@ -17,6 +17,7 @@ from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.core.types import ProviderMode
 from app.stt import clear_cache, get_provider
 from app.stt.base import (
+    LOAD_FAILED_WITHOUT_A_MESSAGE,
     TranscriptionResult,
     clean_transcript_text,
     normalize_detected_language,
@@ -420,6 +421,69 @@ def test_local_stt_last_load_error_starts_none():
     settings = STTSettings(mode=ProviderMode.LOCAL)
     provider = LocalSTTProvider(settings)
     assert provider.last_load_error is None
+
+
+def _local_provider_whose_model_load_raises(monkeypatch, exc):
+    """A `LocalSTTProvider` whose faster-whisper construction raises `exc`.
+
+    `_get_model` imports `faster_whisper` inside the `try`, so replacing the
+    module is what drives the `except` branch that writes `_last_load_error`.
+    """
+    def _explode(*_args, **_kwargs):
+        raise exc
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=_explode))
+    return LocalSTTProvider(STTSettings(mode=ProviderMode.LOCAL, whisper_device="cpu"))
+
+
+def test_faster_whisper_load_failure_latches_the_reason_without_the_class_name(monkeypatch):
+    """`last_load_error` is served as `GET /stt/local/status`'s `last_error`.
+
+    The Settings Local STT indicator renders it into a title, an aria-label and
+    an error toast, so it carries the failure's own sentence and no class name.
+    """
+    provider = _local_provider_whose_model_load_raises(
+        monkeypatch, ResourceUnavailableError("CUDA driver is too old")
+    )
+
+    with pytest.raises(ResourceUnavailableError):
+        provider._get_model()
+
+    assert provider.last_load_error == "CUDA driver is too old"
+
+
+def test_faster_whisper_load_failure_without_a_message_still_latches_something(monkeypatch):
+    """An empty latch is worse than a leaked class name, not merely quieter.
+
+    `src/status-indicator.ts` reads a falsy `error` as not-an-error, so an
+    empty string draws a failed load as a healthy indicator while the Settings
+    models tab still raises a toast with no text in it.
+    """
+    provider = _local_provider_whose_model_load_raises(monkeypatch, RuntimeError(""))
+
+    with pytest.raises(RuntimeError):
+        provider._get_model()
+
+    assert provider.last_load_error == LOAD_FAILED_WITHOUT_A_MESSAGE
+    assert provider.last_load_error
+
+
+def test_faster_whisper_load_failure_leaves_through_the_original_exception(monkeypatch):
+    """The `except` block must end in a bare `raise` of the object it caught.
+
+    `stt/router.py` and `pipeline/router.py` both let a refusal past by
+    matching `JustSayError`. An exception raised inside this `except` block —
+    a `NameError` from reading a binding the latch edit dropped, say —
+    replaces the original before `raise` is reached, and a classified 503
+    refusal is answered as an unclassified 500 crash instead.
+    """
+    raised = ResourceUnavailableError("CUDA driver is too old")
+    provider = _local_provider_whose_model_load_raises(monkeypatch, raised)
+
+    with pytest.raises(ResourceUnavailableError) as excinfo:
+        provider._get_model()
+
+    assert excinfo.value is raised
 
 
 def test_cleanup_returns_promptly_without_deadlock_when_load_lock_held(monkeypatch):
@@ -1113,8 +1177,10 @@ async def test_local_load_answers_503_for_a_refusal_instead_of_the_class_name_50
 async def test_local_load_still_answers_500_for_an_unclassified_failure(client, monkeypatch):
     """The `except JustSayError: raise` insert must not widen past the hierarchy.
 
-    Step 3 deletes the class-name wrapper outright; until then an exception
-    that is not a refusal keeps producing exactly the 500 it produces today.
+    An exception that is not a refusal is a crash, and a crash answers a fixed
+    sentence: neither the class name nor the exception's own text reaches the
+    body, because both describe an internal fault to a reader who can act on
+    neither. The class and its traceback go to the backend log instead.
     """
     from app.stt import router as stt_router
 
@@ -1130,4 +1196,6 @@ async def test_local_load_still_answers_500_for_an_unclassified_failure(client, 
     resp = await client.post("/stt/local/load")
 
     assert resp.status_code == 500
-    assert resp.json()["detail"] == "RuntimeError: invariant broke"
+    assert resp.json()["detail"] == stt_router._LOCAL_LOAD_CRASHED_DETAIL
+    assert "RuntimeError" not in resp.text
+    assert "invariant broke" not in resp.text

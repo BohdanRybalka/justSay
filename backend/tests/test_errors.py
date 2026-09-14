@@ -98,6 +98,19 @@ def test_every_named_subclass_stays_constructible() -> None:
         assert isinstance(subclass("A refusal."), JustSayError)
 
 
+def test_configuration_error_keeps_the_code_the_widget_branches_on() -> None:
+    """The other half of this literal lives in `src/api.ts`.
+
+    `CONFIGURATION_ERROR_CODE` there is what `src/widget/error-label.ts` tests
+    to choose the "Add key in Settings" label, and nothing mechanically
+    compares the two strings across the language boundary. Renaming this one
+    turns this test red; renaming the TypeScript one alone leaves both suites
+    green and silently retires that label, which is why a reader who breaks
+    this is told here where the other half is.
+    """
+    assert ConfigurationError.code == "configuration_error"
+
+
 def test_every_subclass_declares_a_unique_code() -> None:
     codes = [c.code for c in _declared_subclasses()]
     assert len(codes) == len(set(codes))

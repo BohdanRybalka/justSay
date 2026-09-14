@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ApiAuthError, ApiRequestError } from "../api";
+import { ApiAuthError, ApiRequestError, CONFIGURATION_ERROR_CODE } from "../api";
 import { dictationErrorLabel, startErrorLabel } from "./error-label";
 
 describe("dictationErrorLabel", () => {
@@ -14,10 +14,32 @@ describe("dictationErrorLabel", () => {
   });
 
   it("a genuinely missing cloud key still routes the user to Settings", () => {
-    const { label, toast } = dictationErrorLabel(new Error("Missing GEMINI_API_KEY"));
+    const { label, toast } = dictationErrorLabel(
+      new ApiRequestError("any text at all", 400, CONFIGURATION_ERROR_CODE),
+    );
 
     expect(label).toBe("Add key in Settings");
     expect(toast).toBe("No API key set — add one in Settings.");
+  });
+
+  it("chooses that label by the refusal's code and by nothing the body says", () => {
+    const { label } = dictationErrorLabel(
+      new ApiRequestError("nothing about keys here", 400, "configuration_error"),
+    );
+
+    expect(label).toBe("Add key in Settings");
+  });
+
+  it("a crash whose text says a key is missing is still a crash", () => {
+    const { label } = dictationErrorLabel(
+      new ApiRequestError(
+        "Gemini API key is missing. Go to Settings → Keys and add your key.",
+        500,
+        null,
+      ),
+    );
+
+    expect(label).toBe("Failed");
   });
 
   it("any other failure falls through to the generic label", () => {
@@ -47,8 +69,8 @@ describe("dictationErrorLabel", () => {
     expect(dictationErrorLabel(new ApiRequestError("Not recording", 409)).label).toBe("Failed");
   });
 
-  it("a non-Error rejection is stringified rather than crashing the handler", () => {
-    expect(dictationErrorLabel("missing something").label).toBe("Add key in Settings");
+  it("a rejection that is not one of the known refusals falls through without crashing", () => {
+    expect(dictationErrorLabel("missing something").label).toBe("Failed");
     expect(dictationErrorLabel(undefined).label).toBe("Failed");
   });
 

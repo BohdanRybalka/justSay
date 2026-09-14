@@ -14,6 +14,7 @@ from app.core import tasks
 from app.core.errors import ResourceUnavailableError
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
+from app.stt.base import latched_load_error
 from app.stt.config import STTSettings
 from app.stt.local_factory import (
     LocalProviderKind,
@@ -235,7 +236,7 @@ async def _run_get_model(provider) -> None:
     try:
         await asyncio.to_thread(provider._get_model)
     except Exception as e:
-        _prewarm_error = f"{type(e).__name__}: {e}"
+        _prewarm_error = latched_load_error(e)
     else:
         _prewarm_error = None
     finally:

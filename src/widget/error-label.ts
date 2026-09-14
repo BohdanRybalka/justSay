@@ -1,4 +1,4 @@
-import { ApiAuthError, ApiRequestError } from "../api";
+import { ApiAuthError, ApiRequestError, CONFIGURATION_ERROR_CODE } from "../api";
 
 export interface DictationErrorLabel {
   /** Compact widget text — the pill is ~240 px wide, so keep it short. */
@@ -19,11 +19,9 @@ const AUTH_FAILED: DictationErrorLabel = {
  * Decides what the widget shows after a failed `POST /audio/start`.
  *
  * Separate from `dictationErrorLabel` because a start is not a dictation and
- * that function's other two branches actively misdescribe one. A `409 Already
- * recording` is not "Dictation failed — try again", and the substring heuristic
- * reads the word "missing" out of a microphone fault and sends the user to the
- * cloud-key screen — the exact spec 042 defect, reintroduced at a different
- * endpoint by routing the start through the dictation labels.
+ * that function's other branches actively misdescribe one. A `409 Already
+ * recording` is not "Dictation failed — try again", and a start has no
+ * remedial key to add, so the labels that endpoint needs are its own.
  *
  * The 401 gets its own wording because "try again" is advice that fails
  * identically every time it is taken. Every other failure keeps the start's own
@@ -66,11 +64,14 @@ export const DICTATION_NEVER_PROCESSED: DictationErrorLabel = {
 /**
  * Decides what the widget shows after a failed dictation.
  *
- * The `ApiAuthError` branch runs BEFORE the substring heuristic on purpose: the
- * backend's 401 body is `"Missing or invalid API token"`, which contains
- * "missing" and therefore used to render "Add key in Settings" — sending the
- * user to add a cloud API key when the actual failure was the app not
- * authenticating to its own local backend (spec 042).
+ * Every branch reads a status or a `code` and none reads the message, which is
+ * what keeps two defects closed structurally rather than by ordering. The
+ * backend's 401 body is `"Missing or invalid API token"` and the 403's names a
+ * missing owning session; both used to match a substring test for the word
+ * "missing" and render "Add key in Settings", sending the user to add a cloud
+ * API key for a failure that was the app not authenticating to its own local
+ * backend (spec 042) or another window holding the microphone (spec 119).
+ * Neither body is consulted now, so neither can select a label again.
  */
 export function dictationErrorLabel(error: unknown): DictationErrorLabel {
   if (error instanceof ApiAuthError) {
@@ -81,8 +82,7 @@ export function dictationErrorLabel(error: unknown): DictationErrorLabel {
     return NOT_YOURS;
   }
 
-  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  if (msg.includes("missing")) {
+  if (error instanceof ApiRequestError && error.code === CONFIGURATION_ERROR_CODE) {
     return {
       label: "Add key in Settings",
       toast: "No API key set — add one in Settings.",

@@ -16,6 +16,7 @@ import pytest
 
 import app.stt.local_whisper_cpp as local_whisper_cpp_module
 from app.core.errors import ResourceUnavailableError
+from app.stt.base import LOAD_FAILED_WITHOUT_A_MESSAGE
 from app.stt.config import STTSettings
 from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
 
@@ -1294,11 +1295,15 @@ def test_health_poll_reports_an_early_child_exit_as_a_resource_refusal(monkeypat
 def test_early_exit_latches_the_status_text_the_settings_indicator_shows(monkeypatch, tmp_path):
     """`last_load_error` is served as `GET /stt/local/status`'s `last_error`.
 
-    The provider latches `f"{type(e).__name__}: {e}"`, so classifying the
-    early-exit raise changed that text from `RuntimeError: ...` to
-    `ResourceUnavailableError: ...` — visible in the Local STT indicator's
-    title, its aria-label and an error toast. The exact string is pinned so
-    the next move of it is a failing test rather than a surprise in Settings.
+    The provider latches the failure's own sentence and nothing else — no
+    class name — and that text is visible in the Local STT indicator's title,
+    its aria-label and an error toast. The exact string is pinned so the next
+    move of it is a failing test rather than a surprise in Settings.
+
+    The re-raise is pinned by identity as well: the `except` block that writes
+    this latch must leave through a bare `raise`, because the routers above it
+    match the refusal hierarchy by class. An exception raised inside that block
+    replaces the original and turns a classified 503 into an unclassified 500.
     """
     provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
 
@@ -1310,10 +1315,51 @@ def test_early_exit_latches_the_status_text_the_settings_indicator_shows(monkeyp
     monkeypatch.setattr(local_whisper_cpp_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
     monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
 
-    with pytest.raises(ResourceUnavailableError):
+    with pytest.raises(ResourceUnavailableError) as excinfo:
         provider._get_model()
 
-    assert (
-        provider.last_load_error
-        == "ResourceUnavailableError: whisper-server exited early (code 3)"
+    assert provider.last_load_error == "whisper-server exited early (code 3)"
+    assert str(excinfo.value) == "whisper-server exited early (code 3)"
+
+
+def test_load_failure_without_a_message_still_latches_something(monkeypatch, tmp_path):
+    """A failure whose `str()` is empty still leaves a readable `last_error`.
+
+    `src/status-indicator.ts` reads a falsy `error` as not-an-error, so an
+    empty latch draws a failed load as a healthy Local STT indicator while the
+    Settings models tab still raises a toast carrying no text at all.
+    """
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    monkeypatch.setattr(
+        local_whisper_cpp_module,
+        "resolve_binary_path",
+        lambda: (_ for _ in ()).throw(RuntimeError("")),
     )
+
+    with pytest.raises(RuntimeError):
+        provider._get_model()
+
+    assert provider.last_load_error == LOAD_FAILED_WITHOUT_A_MESSAGE
+    assert provider.last_load_error
+
+
+def test_load_failure_leaves_through_the_original_exception(monkeypatch, tmp_path):
+    """The `except` block must end in a bare `raise` of the object it caught.
+
+    `stt/router.py`'s `except JustSayError: raise` matches a refusal by class.
+    An exception raised inside this `except` block — a `NameError` from reading
+    a binding the latch edit dropped, say — replaces the original before
+    `raise` is reached, and a classified 503 refusal answers as a 500 crash.
+    """
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    raised = ResourceUnavailableError("the binary is not where it should be")
+    monkeypatch.setattr(
+        local_whisper_cpp_module,
+        "resolve_binary_path",
+        lambda: (_ for _ in ()).throw(raised),
+    )
+
+    with pytest.raises(ResourceUnavailableError) as excinfo:
+        provider._get_model()
+
+    assert excinfo.value is raised
