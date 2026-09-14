@@ -21,6 +21,7 @@ import asyncio
 import html
 import logging
 import re
+import sqlite3
 from collections import Counter
 from typing import Literal
 
@@ -257,7 +258,7 @@ def _substring_page_locked(
     ).fetchall()
 
 
-def _substring_lane(tokens: list[str], exclude_ids: set[str], wanted: int) -> list:
+def _substring_lane(tokens: list[str], exclude_ids: set[str], wanted: int) -> list[sqlite3.Row]:
     """The mid-word substring lane, walked in bounded pages.
 
     ``history._lock`` is taken once per page and released before the next one,
