@@ -12,17 +12,21 @@ Every device is stubbed, exactly as in `test_meeting_recorder.py`.
 from __future__ import annotations
 
 import asyncio
+import gc
+import inspect
 import logging
 import threading
 import time
-import tracemalloc
 import wave
+import weakref
+from types import ModuleType
 from unittest.mock import patch
 
 import numpy as np
 import pytest
 import sounddevice as sd
 
+from app.audio.analysis import to_mono
 from app.audio.config import AudioSettings
 from app.audio.dependencies import get_meeting_recorder
 from app.audio.meeting_recorder import (
@@ -111,6 +115,58 @@ def _feed(recorder: MeetingRecorder, count: int, frames: int = BLOCK_FRAMES, fil
             time.sleep(0.001)
         recorder._microphone_callback(token, block, frames, None, NO_CALLBACK_FLAGS)
         recorder._last_microphone_arrival = started + index * frames / 16000
+
+
+def _feed_tracked(recorder: MeetingRecorder, blocks: int) -> list:
+    """Feed `blocks` microphone blocks, keeping a weak reference to each mono array.
+
+    The wrapper calls the real `to_mono` and adds nothing to the object graph
+    the recorder can see, so a block stays alive after the feed only if the
+    recorder itself still points at it.
+    """
+    tracked: list = []
+
+    def tracking_to_mono(block):
+        mono = to_mono(block)
+        tracked.append(weakref.ref(mono))
+        return mono
+
+    with patch("app.audio.meeting_recorder.to_mono", tracking_to_mono):
+        _feed(recorder, blocks)
+    return tracked
+
+
+def _audio_bytes_reachable_from(root: object) -> int:
+    """Bytes of every array and byte string the object graph under `root` holds.
+
+    Counted by walking references rather than by sampling an allocator, so the
+    answer is the same whatever else the machine is doing. Classes and modules
+    end a branch because they lead to the whole interpreter; a function is
+    followed into its closure cells and its bound receiver, which is where a
+    retained copy hides, but not into its globals, for the same reason.
+    """
+    seen: set[int] = set()
+    pending = [root]
+    total = 0
+    while pending:
+        obj = pending.pop()
+        if obj is None or id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        if isinstance(obj, (type, ModuleType)):
+            continue
+        if inspect.isroutine(obj):
+            pending.extend(getattr(obj, "__closure__", None) or ())
+            pending.append(getattr(obj, "__self__", None))
+            continue
+        if isinstance(obj, np.ndarray):
+            total += obj.nbytes
+            continue
+        if isinstance(obj, (bytes, bytearray)):
+            total += len(obj)
+            continue
+        pending.extend(gc.get_referents(obj))
+    return total
 
 
 def _wav_frames(path) -> int:
@@ -210,38 +266,56 @@ async def test_a_meeting_longer_than_the_old_ceiling_writes_a_wav_of_its_full_sp
 async def test_what_capture_retains_does_not_grow_with_the_length_of_the_meeting(
     settings, source, microphone_stream
 ):
-    """AC: four times the blocks does not cost four times the retained memory.
+    """AC: four times the blocks costs four times the file and no extra memory.
 
-    Measured with `tracemalloc` around capture only. The old store held every
-    block for the length of the call, so this ratio was the block count's;
-    what remains resident now is the queue and the index, and neither is
-    proportional to the meeting.
+    Every number here is counted rather than sampled: live weak references,
+    an integer frame counter, a file size, and a walk of the recorder's own
+    object graph. None of them moves with what else the machine is running,
+    which is what the `tracemalloc` window this replaced could not say.
     """
-    async def retained(blocks: int) -> int:
+
+    async def captured(blocks: int) -> tuple[int, int, int, int]:
         recorder = MeetingRecorder(settings)
         try:
             await recorder.start()
-            tracemalloc.start()
-            before = tracemalloc.get_traced_memory()[0]
-            _feed(recorder, blocks)
+            tracked = _feed_tracked(recorder, blocks)
             recorder._finish_spill()
-            after = tracemalloc.get_traced_memory()[0]
-            tracemalloc.stop()
-            return after - before
+            spool = recorder._microphone_spool
+            frames = spool.frames
+            spool.close()
+            size = spool.samples_path.stat().st_size
+            assert recorder._incident is None, (
+                f"the capture reported {recorder._incident}, so its counts describe "
+                f"a capture that lost blocks rather than the property under test"
+            )
+            assert len(tracked) == blocks, (
+                f"{len(tracked)} mono blocks were built for {blocks} fed blocks -- "
+                f"the instrument missed the capture and would pass on anything"
+            )
+            gc.collect()
+            alive = sum(1 for reference in tracked if reference() is not None)
+            return alive, _audio_bytes_reachable_from(recorder), frames, size
         finally:
             recorder.cleanup()
 
-    baseline = await retained(200)
-    longer = await retained(800)
-    accumulating = 800 * BLOCK_FRAMES * 4
+    short_alive, short_held, short_frames, short_size = await captured(200)
+    long_alive, long_held, long_frames, long_size = await captured(800)
 
-    assert longer <= max(baseline, 64 * 1024) * 1.2, (
-        f"capturing four times as long retained {longer} bytes against the "
-        f"baseline's {baseline} -- the capture is accumulating in memory again"
+    assert (short_alive, long_alive) == (0, 0), (
+        f"{short_alive} of 200 and {long_alive} of 800 captured blocks are still "
+        f"referenced after the spill finished -- capture accumulates in memory again"
     )
-    assert longer < accumulating / 4, (
-        f"{longer} retained bytes is within a quarter of the {accumulating} an "
-        f"accumulating store would hold, so this threshold proves nothing"
+    assert (short_held, long_held) == (0, 0), (
+        f"the recorder still reaches {short_held} bytes of audio after 200 blocks "
+        f"and {long_held} after 800 -- a copy of the capture is being retained"
+    )
+    assert (short_frames, long_frames) == (200 * BLOCK_FRAMES, 800 * BLOCK_FRAMES)
+    assert (short_size, long_size) == (
+        200 * BLOCK_FRAMES * 4,
+        800 * BLOCK_FRAMES * 4,
+    ), (
+        f"{short_size} and {long_size} bytes reached disk for 200 and 800 blocks -- "
+        f"the spill file is not what the meeting's length is paid into"
     )
 
 
