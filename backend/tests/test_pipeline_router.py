@@ -23,6 +23,7 @@ from app.audio.dependencies import get_recorder
 from app.audio.session import SessionMismatchError
 from app.core.errors import ConfigurationError, NotReadyError, ResourceUnavailableError
 from app.main import app
+from app.pipeline import router as pipeline_router
 from app.pipeline.router import DictateResponse
 from app.pipeline.service import ProcessingResult
 
@@ -262,7 +263,48 @@ async def test_a_refused_dictate_transcribes_nothing(client, tmp_path):
         resp = await client.post("/pipeline/dictate", json={"session_id": _DICTATE_SESSION_ID})
 
     assert resp.status_code == 403
+    assert resp.json() == {"detail": "not yours", "code": "session_mismatch"}
     mock_process_audio.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_dictate_answers_a_fixed_sentence_for_an_unclassified_crash(client, tmp_path):
+    """A crash must not answer in the shape of a refusal.
+
+    `src/widget/widget.ts` hands this body to `dictationErrorLabel`, and a
+    `KeyError`'s own text is a fact about the backend's internals rather than
+    anything the person dictating can act on. The class and its traceback go
+    to the backend log at the same site.
+    """
+    recorder = _stopping_recorder(tmp_path / "rec.wav")
+    app.dependency_overrides[get_recorder] = lambda: recorder
+
+    with patch("app.pipeline.router.process_audio", AsyncMock(side_effect=KeyError("provider"))):
+        resp = await client.post("/pipeline/dictate")
+
+    assert resp.status_code == 500
+    assert resp.json() == {"detail": pipeline_router._PIPELINE_CRASHED_DETAIL}
+    assert "KeyError" not in resp.text
+    assert "provider" not in resp.text
+
+
+@pytest.mark.anyio
+async def test_process_file_answers_a_fixed_sentence_for_an_unclassified_crash(client):
+    """The same body at the endpoint that renders `detail` verbatim.
+
+    `src/settings/tabs/transcribe.ts` puts this string on screen unchanged, so
+    it is the one place a leaked class name was read by a person directly.
+    """
+    with patch("app.pipeline.router.process_audio", AsyncMock(side_effect=KeyError("provider"))):
+        resp = await client.post(
+            "/pipeline/process-file",
+            files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
+        )
+
+    assert resp.status_code == 500
+    assert resp.json() == {"detail": pipeline_router._PIPELINE_CRASHED_DETAIL}
+    assert "KeyError" not in resp.text
+    assert "provider" not in resp.text
 
 
 @pytest.mark.anyio

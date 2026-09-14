@@ -780,7 +780,50 @@ describe("an error body that parses but is not an object", () => {
 
     expect(error).toBeInstanceOf(ApiRequestError);
     expect((error as InstanceType<typeof ApiRequestError>).status).toBe(500);
+    expect((error as InstanceType<typeof ApiRequestError>).code).toBeNull();
     expect((error as Error).message).toBe("HTTP 500");
+  });
+});
+
+describe("the refusal code a non-2xx body carries", () => {
+  beforeEach(() => {
+    invokeMock.mockResolvedValue("secret-token");
+  });
+
+  it("is read from the body, because it is what a caller branches on", async () => {
+    const { api, ApiRequestError } = await import("./api");
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 400,
+      statusText: "Bad Request",
+      json: async () => ({ detail: "Add your Gemini API key.", code: "configuration_error" }),
+    } as unknown as Response);
+
+    const error = await api.getSettings().then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect((error as InstanceType<typeof ApiRequestError>).code).toBe("configuration_error");
+  });
+
+  it("is null when the body carries none, which is what a crash looks like", async () => {
+    const { api, ApiRequestError } = await import("./api");
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: "Internal Server Error",
+      json: async () => ({ detail: "The transcription pipeline failed unexpectedly." }),
+    } as unknown as Response);
+
+    const error = await api.getSettings().then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect((error as InstanceType<typeof ApiRequestError>).code).toBeNull();
   });
 });
 

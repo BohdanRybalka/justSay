@@ -34,6 +34,7 @@ from app.core.errors import ResourceUnavailableError
 from app.stt.base import (
     STTProvider,
     TranscriptionResult,
+    latched_load_error,
     min_no_speech_prob,
     normalize_detected_language,
 )
@@ -330,7 +331,7 @@ class WhisperCppServerSTTProvider(STTProvider):
                     self._settings.whisper_model_size, _PORT,
                 )
             except Exception as e:
-                msg = f"{type(e).__name__}: {e}"
+                msg = latched_load_error(e)
                 self._last_load_error = msg
                 self._server_ready = False
                 log.exception("whisper-server load failed: %s", msg)

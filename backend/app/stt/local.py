@@ -26,6 +26,7 @@ from app.stt.base import (
     STTProvider,
     TranscriptionResult,
     coerce_no_speech_prob,
+    latched_load_error,
     normalize_detected_language,
 )
 from app.stt.config import STTSettings
@@ -92,7 +93,7 @@ class LocalSTTProvider(STTProvider):
                     self._last_load_error = None
                     log.info("Whisper loaded successfully")
                 except Exception as e:
-                    msg = f"{type(e).__name__}: {e}"
+                    msg = latched_load_error(e)
                     self._last_load_error = msg
                     log.exception("Whisper load failed: %s", msg)
                     raise

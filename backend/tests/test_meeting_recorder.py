@@ -3117,10 +3117,12 @@ def test_a_failed_write_carries_the_cause_and_not_a_second_sentence(audio_settin
         with patch.object(recorder, "_assemble_and_write", side_effect=OSError()):
             with pytest.raises(MeetingWriteFailedError) as unnamed:
                 recorder._write_captured_meeting(captured)
-        assert str(unnamed.value) == "OSError", (
-            "the user is told the recording could not be saved and given "
-            "nothing after the colon"
+        assert str(unnamed.value) == "the write failed without saying why", (
+            "the user is told the recording could not be saved and given a "
+            "reason after the colon rather than a Python class name"
         )
+        assert "Error" not in str(unnamed.value)
+        assert unnamed.value.status_code == 507
     finally:
         recorder.cleanup()
 

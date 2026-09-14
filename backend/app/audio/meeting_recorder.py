@@ -831,7 +831,7 @@ class MeetingRecorder(AudioRecorder):
             output_path = self._assemble_and_write(captured)
         except Exception as e:
             log.error("Writing the meeting recording failed", exc_info=True)
-            raise MeetingWriteFailedError(str(e) or type(e).__name__) from e
+            raise MeetingWriteFailedError(str(e) or "the write failed without saying why") from e
         log.info("Meeting recording written to %s", output_path)
         return MeetingRecording(
             path=output_path,

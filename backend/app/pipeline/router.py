@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from app.audio.dependencies import get_recorder
 from app.audio.recorder import MicrophoneRecorder
-from app.audio.session import SessionMismatchError, SessionRef
+from app.audio.session import SessionRef
 from app.core.config import settings
 from app.core.constants import MAX_UPLOAD_SIZE
 from app.core.errors import JustSayError
@@ -18,6 +18,10 @@ from app.pipeline.upload_validation import read_upload_with_limit, validate_audi
 
 log = logging.getLogger(__name__)
 router = APIRouter()
+
+_PIPELINE_CRASHED_DETAIL = (
+    "The transcription pipeline failed unexpectedly. Check the backend log."
+)
 
 
 def _discard_scratch_file(path: Path) -> None:
@@ -67,10 +71,7 @@ async def dictate(
     if not recorder.is_recording:
         raise HTTPException(status_code=409, detail="Not recording. Call POST /audio/start first")
 
-    try:
-        audio_path = await recorder.stop(ref.session_id if ref else None)
-    except SessionMismatchError as e:
-        raise HTTPException(status_code=403, detail=str(e)) from e
+    audio_path = await recorder.stop(ref.session_id if ref else None)
     captured_duration = recorder.last_duration_seconds
     log.info(
         "Dictate: stopped recording. path=%s duration=%.2fs language=%s",
@@ -88,11 +89,11 @@ async def dictate(
         return DictateResponse(**result.__dict__)
     except JustSayError:
         raise
-    except Exception as e:
+    except Exception:
         log.exception("Pipeline failure")
         raise HTTPException(
             status_code=500,
-            detail=f"Pipeline failed: {type(e).__name__}: {e}",
+            detail=_PIPELINE_CRASHED_DETAIL,
         )
     finally:
         _discard_scratch_file(audio_path)
@@ -127,11 +128,11 @@ async def process_file(
         raise
     except JustSayError:
         raise
-    except Exception as e:
+    except Exception:
         log.exception("Pipeline failure")
         raise HTTPException(
             status_code=500,
-            detail=f"Pipeline failed: {type(e).__name__}: {e}",
+            detail=_PIPELINE_CRASHED_DETAIL,
         )
     finally:
         _discard_scratch_file(temp_path)

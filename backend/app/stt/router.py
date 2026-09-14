@@ -17,6 +17,8 @@ from app.stt.local_setup import (
     check_status as check_local_status,
 )
 
+_LOCAL_LOAD_CRASHED_DETAIL = "Loading the local engine failed unexpectedly. Check the backend log."
+
 router = APIRouter()
 
 
@@ -55,8 +57,8 @@ async def stt_local_load():
         return {"loaded": True, "model": provider.model_name}
     except JustSayError:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+    except Exception:
+        raise HTTPException(status_code=500, detail=_LOCAL_LOAD_CRASHED_DETAIL)
 
 
 @router.post("/local/unload")

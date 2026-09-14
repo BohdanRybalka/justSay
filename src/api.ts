@@ -272,17 +272,40 @@ function getToken(): Promise<string | null> {
   })());
 }
 
+/** The body every refusal answers with, mirroring `ErrorBody` in
+ *  `backend/app/core/error_handler.py` field for field.
+ *
+ *  `code` is the refusal's stable machine-readable name, declared as a literal
+ *  on the raising class. It is what a caller branches on, because the class
+ *  name it replaced could change without any client knowing, and the sentence
+ *  in `detail` is written for a person rather than for a test. */
+export interface ErrorBody {
+  detail: string;
+  code: string;
+}
+
+/** `ConfigurationError`'s code. Its other half is the literal on
+ *  `backend/app/core/errors.py`'s `ConfigurationError`, pinned there by
+ *  `backend/tests/test_errors.py`; nothing compares the two mechanically, so
+ *  renaming one alone retires the label the widget chooses by it. */
+export const CONFIGURATION_ERROR_CODE = "configuration_error";
+
 /** Thrown on any non-401 failure, carrying the status so a caller can branch
  *  on it. The meeting-recording flow needs `403` specifically: it means the
  *  consent disclosure has not been acknowledged, which is a UI step rather
- *  than an error to report. */
+ *  than an error to report.
+ *
+ *  `code` is `null` whenever the body carried none — a crash, a non-JSON
+ *  answer, or any 4xx the backend raises outside its refusal hierarchy. */
 export class ApiRequestError extends Error {
   readonly status: number;
+  readonly code: string | null;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code: string | null = null) {
     super(message);
     this.name = "ApiRequestError";
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -299,7 +322,7 @@ export class ApiRequestError extends Error {
  *  `TypeError` that left this function through neither of its two paths — the
  *  caller saw a type error where it was branching on a status. */
 async function responseError(resp: Response): Promise<Error> {
-  let err: { detail?: string } | null;
+  let err: Partial<ErrorBody> | null;
   try {
     err = await resp.json();
   } catch (e) {
@@ -310,7 +333,7 @@ async function responseError(resp: Response): Promise<Error> {
   if (resp.status === 401) {
     return new ApiAuthError(detail, bridgeDiagnosis);
   }
-  return new ApiRequestError(detail, resp.status);
+  return new ApiRequestError(detail, resp.status, err?.code ?? null);
 }
 
 /** An abort is identified by its `name`, not by its class.

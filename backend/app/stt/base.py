@@ -14,6 +14,27 @@ class TranscriptionResult:
     no_speech_prob: float | None = field(default=None)
 
 
+LOAD_FAILED_WITHOUT_A_MESSAGE = "The local engine failed to load and gave no reason."
+
+
+def latched_load_error(exc: BaseException) -> str:
+    """The sentence `GET /stt/local/status`'s `last_error` shows for a failed load.
+
+    An exception's `str()` can be empty, and an empty latch is worse than a
+    leaked class name rather than merely quieter. `src/status-indicator.ts`
+    treats a falsy `error` as not-an-error, so a failed load would be drawn as
+    a healthy indicator, while the Settings models tab would still raise a
+    toast carrying no text. `app/stt/local_setup.py`'s status read is
+    `get_local_load_error(stt_settings) or _prewarm_error`, so an empty
+    provider latch also falls through to an unrelated source.
+
+    The class name never belongs in this field: it is read by a person
+    deciding what to do next, and the class and its traceback are already in
+    the backend log at the same site.
+    """
+    return str(exc) or LOAD_FAILED_WITHOUT_A_MESSAGE
+
+
 def normalize_detected_language(raw: str | None) -> str | None:
     """Normalize a provider-reported language into a lowercase ISO-639-1
     code, or ``None`` when unrecognised or empty.

@@ -11,6 +11,7 @@ from app.core.errors import ResourceUnavailableError
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
 from app.stt import local_setup
+from app.stt.base import LOAD_FAILED_WITHOUT_A_MESSAGE
 from app.stt.config import STTSettings
 from app.stt.local_factory import get_local_provider_class as _real_get_local_provider_class
 from app.stt.local_factory import get_local_provider_kind as _real_get_local_provider_kind
@@ -711,7 +712,7 @@ async def test_ensure_local_ready_replaces_a_stale_error_when_the_load_itself_fa
     await local_setup.ensure_local_ready(settings)
 
     assert provider.is_loaded is False
-    assert local_setup._prewarm_error == "RuntimeError: model load exploded"
+    assert local_setup._prewarm_error == "model load exploded"
 
 
 @pytest.mark.asyncio
@@ -1568,16 +1569,15 @@ async def test_timeout_then_retry_joins_in_flight_load_instead_of_starting_a_sec
 
 
 @pytest.mark.asyncio
-async def test_prewarm_latch_keeps_the_class_name_prefix_for_a_migrated_refusal(monkeypatch):
+async def test_prewarm_latch_shows_the_reason_without_the_class_name(monkeypatch):
     """The Settings indicator's text for a classified failure, pinned exactly.
 
     ``_prewarm_error`` is served verbatim as ``GET /stt/local/status``'s
     ``last_error`` and rendered into the Local STT indicator's title, its
-    aria-label and an error toast. Classifying the local-engine raises moved
-    this string's prefix from ``RuntimeError:`` to ``ResourceUnavailableError:``,
-    which is a user-visible change, so the exact text is asserted here rather
-    than left to be discovered from a screenshot. Step 3 deletes the prefix;
-    this test is what makes that deletion visible instead of silent.
+    aria-label and an error toast. It is the provider's own sentence and
+    nothing else: a person reading that indicator is deciding what to do next,
+    and a Python class name tells them nothing they can act on while the class
+    and its traceback are already in the backend log.
     """
     _stub_whisper_cpp_server_kind(monkeypatch)
 
@@ -1591,7 +1591,30 @@ async def test_prewarm_latch_keeps_the_class_name_prefix_for_a_migrated_refusal(
 
     await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
 
-    assert (
-        local_setup._prewarm_error
-        == "ResourceUnavailableError: whisper-server exited early (code 3)"
-    )
+    assert local_setup._prewarm_error == "whisper-server exited early (code 3)"
+
+
+@pytest.mark.asyncio
+async def test_prewarm_latch_is_never_empty_when_the_load_failed(monkeypatch):
+    """A failure whose `str()` is empty still leaves a readable `last_error`.
+
+    An empty latch is worse than a leaked class name. `src/status-indicator.ts`
+    reads a falsy `error` as not-an-error, so a failed prewarm would be drawn
+    as a healthy Local STT indicator, and `local_setup.check_status`'s own read
+    is `get_local_load_error(...) or _prewarm_error`, so an empty latch also
+    falls through to an unrelated source.
+    """
+    _stub_whisper_cpp_server_kind(monkeypatch)
+
+    def _fail(p):
+        raise RuntimeError("")
+
+    provider = _FakePrewarmProvider(get_model=_fail)
+    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+
+    await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+
+    assert local_setup._prewarm_error == LOAD_FAILED_WITHOUT_A_MESSAGE
+    assert local_setup._prewarm_error
