@@ -17,8 +17,11 @@
 #                   block at the job for why both legs are required.
 #
 # backend-lint installs only backend[dev] and skips PortAudio: neither ruff nor
-# vulture imports the app. Both backend jobs drop `npm ci` — their npm scripts
-# are all `cd backend && python -m …` with no node_modules binary dependency.
+# vulture imports the app, and it drops `npm ci` — its npm scripts are all
+# `cd backend && python -m …` with no node_modules binary dependency.
+# backend-test does run `npm ci`: tests/test_client_route_targets.py parses
+# src/api.ts with the TypeScript compiler from node_modules, and it fails rather
+# than skips when that package is absent.
 # npm + pip caching is on for every job that installs deps, to offset the extra
 # per-job setup the split re-pays.
 #
@@ -151,6 +154,9 @@ jobs:
         with:
           node-version: "24"
           cache: "npm"
+
+      - name: Install npm deps
+        run: npm ci
 
       - name: Install Python
         uses: actions/setup-python@v5
