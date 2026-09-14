@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 
 TOP_LIMIT_MAX = 500
 SEARCH_LIMIT_MAX = 100
+SEARCH_SCAN_CHUNK_ROWS = 200
 RRF_K = 60
 
 STOPWORDS_ALL: frozenset[str] = STOPWORDS_UK | STOPWORDS_EN
@@ -215,16 +216,124 @@ def _hit_from_row(row, tokens: list[str]) -> HistorySearchHit:
     )
 
 
+def _escape_like(t: str) -> str:
+    """Neutralise ``LIKE``'s own wildcards so a query matches them literally.
+
+    Paired with ``ESCAPE '\\'`` at every call site; the backslash must be doubled
+    first or the two later replacements would themselves be escaped twice.
+    """
+    return t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _substring_page_locked(
+    conn,
+    like_sql: str,
+    like_params: dict[str, str],
+    before: tuple[int, str] | None,
+    chunk: int,
+):
+    """Caller MUST hold ``history._lock``. One page of the substring walk.
+
+    Reuses ``history._CURSOR_PAGE_WHERE`` and ``history._CURSOR_PAGE_ORDER``
+    verbatim rather than respelling the seek, for the reason
+    ``history._has_more_locked`` already gives: the row-value predicate is the
+    only spelling that plans as a seek into ``entries_ts_id_idx`` instead of a
+    scan from the top of it on every page.
+
+    The projection is three small columns on purpose. ``matched`` keeps the
+    ``LIKE`` evaluation inside SQLite's C implementation, and ``id``/``ts`` carry
+    the cursor for the next page even when the last row of the page does not
+    match -- which a page filtered down to matching rows could not do.
+    """
+    where = history._CURSOR_PAGE_WHERE if before is not None else ""
+    params: dict[str, object] = {**like_params, "row_limit": chunk}
+    if before is not None:
+        params["before_ts"] = before[0]
+        params["before_id"] = before[1]
+    return conn.execute(
+        f"SELECT id, ts, ({like_sql}) AS matched FROM entries "
+        f"{where}{history._CURSOR_PAGE_ORDER}",
+        params,
+    ).fetchall()
+
+
+def _substring_lane(tokens: list[str], exclude_ids: set[str], wanted: int) -> list:
+    """The mid-word substring lane, walked in bounded pages.
+
+    ``history._lock`` is taken once per page and released before the next one,
+    so the hold is a function of ``SEARCH_SCAN_CHUNK_ROWS`` and never of the size
+    of the user's history: a dictation finishing during a search waits for a page
+    rather than for the table (ADR 061).
+
+    ``wanted <= 0`` returns before any lock is taken. That is the case where the
+    FTS lane has already filled the caller's limit, and without the guard the lane
+    would spend an acquisition and a statement to learn it has nothing to collect.
+
+    Collection order is the walk order, ``ts DESC, id DESC``, and the final
+    ``id IN (...)`` fetch is re-ordered back into it in Python because ``IN`` does
+    not preserve it. At most ``SEARCH_LIMIT_MAX`` ids reach that fetch.
+
+    The walk is not one snapshot of ``entries``: a row written or deleted between
+    two pages can be missed, which is the exposure ``history.get_page`` already
+    carries since ADR 055. Duplicates cannot happen, because ``exclude_ids``
+    de-duplicates against the FTS lane and each row is seen by one page only.
+    """
+    if wanted <= 0:
+        return []
+
+    like_sql = " AND ".join(
+        f"cleaned_text LIKE :like_{i} ESCAPE '\\'" for i in range(len(tokens))
+    )
+    like_params = {f"like_{i}": f"%{_escape_like(t)}%" for i, t in enumerate(tokens)}
+
+    collected: list[str] = []
+    before: tuple[int, str] | None = None
+    while True:
+        with history._lock:
+            conn = history._ensure_conn_locked()
+            page = _substring_page_locked(
+                conn, like_sql, like_params, before, SEARCH_SCAN_CHUNK_ROWS
+            )
+        for row in page:
+            if row["matched"] and row["id"] not in exclude_ids:
+                collected.append(row["id"])
+                if len(collected) >= wanted:
+                    break
+        if len(collected) >= wanted or len(page) < SEARCH_SCAN_CHUNK_ROWS:
+            break
+        before = (page[-1]["ts"], page[-1]["id"])
+
+    if not collected:
+        return []
+
+    placeholders = ",".join("?" * len(collected))
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        rows = conn.execute(
+            f"SELECT {history.columns_sql(history.ENTRY_COLUMNS)} "
+            f"FROM entries WHERE id IN ({placeholders})",
+            collected,
+        ).fetchall()
+    by_id = {r["id"]: r for r in rows}
+    return [by_id[i] for i in collected if i in by_id]
+
+
 def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
     """Two-lane search: FTS5 BM25 prefix-match (primary) + LIKE substring
     fallback (secondary).
 
     The FTS5 lane uses the sanitized prefix query (``прав*``-style) on
-    ``entry_fts`` and orders by BM25 ascending (best first). The LIKE
-    fallback runs only when the FTS5 lane returns fewer rows than
-    ``clamped_limit``, catches mid-word substrings the prefix path misses
-    (e.g. ``"кадабр"`` inside ``"абракадабра"``), and is de-duplicated at
-    SQL level via ``id NOT IN (...)``.
+    ``entry_fts``, orders by BM25 ascending (best first), and holds
+    ``history._lock`` for its single statement only.
+
+    The substring lane catches mid-word substrings the prefix path misses
+    (e.g. ``"кадабр"`` inside ``"абракадабра"``). SQLite can answer no
+    leading-wildcard ``LIKE`` from an index, so it is a walk of ``entries``; it
+    runs after the FTS lane's acquisition has been released, in pages of at most
+    ``SEARCH_SCAN_CHUNK_ROWS`` rows with one acquisition per page, and it
+    de-duplicates against the FTS rows in Python rather than with an
+    ``id NOT IN (...)`` clause. The two lanes therefore no longer read one
+    snapshot -- see ``_substring_lane`` and ADR 061 for what that costs and buys.
 
     Match highlights are computed by ``_build_highlight`` on the raw
     ``cleaned_text`` joined in from ``entries`` — FTS5's own ``highlight()``
@@ -252,35 +361,14 @@ def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
             (fts_expr, clamped_limit),
         ).fetchall()
 
-        rows = fts_rows
-
-        residual = clamped_limit - len(rows)
-        if residual > 0:
-            like_clauses = " AND ".join(["cleaned_text LIKE ? ESCAPE '\\'"] * len(tokens))
-            def _escape_like(t: str) -> str:
-                return t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            like_params: list = [f"%{_escape_like(t)}%" for t in tokens]
-
-            existing_ids = [r["id"] for r in rows]
-            if existing_ids:
-                placeholders = ",".join("?" * len(existing_ids))
-                not_in_clause = f" AND id NOT IN ({placeholders})"
-                params = (*like_params, *existing_ids, residual)
-            else:
-                not_in_clause = ""
-                params = (*like_params, residual)
-
-            like_rows = conn.execute(
-                f"SELECT {history.columns_sql(history.ENTRY_COLUMNS)} "
-                f"FROM entries WHERE {like_clauses}{not_in_clause} "
-                "ORDER BY ts DESC LIMIT ?",
-                params,
-            ).fetchall()
-
-            rows.extend(like_rows)
+    rows = list(fts_rows)
+    rows.extend(
+        _substring_lane(
+            tokens, {r["id"] for r in fts_rows}, clamped_limit - len(rows)
+        )
+    )
 
     return [_hit_from_row(r, tokens) for r in rows[:clamped_limit]]
-
 
 
 async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearchHit]:

@@ -323,9 +323,12 @@ def test_search_history_combined_cap_enforced():
 
 
 def test_search_history_empty_fts5_then_like_only_no_sql_error():
-    """Iter-2 RED-3: ``id NOT IN ()`` would be a SQL syntax error if the
-    LIKE-fallback lane ran without any FTS5 results. The guard must skip
-    the NOT IN clause when ``fts_rows`` is empty."""
+    """Iter-2 RED-3, kept after spec 125 removed the SQL guard it named.
+
+    The substring lane no longer emits ``id NOT IN (...)`` at all -- it
+    de-duplicates in Python against the FTS ids -- so the syntax error this was
+    written for cannot recur. What it still pins is the lane running to a result
+    when the FTS lane returned nothing at all."""
     history.save_entry(text="абракадабра", duration_ms=1)
     hits = words.search_history("кадабр", limit=5)
     assert len(hits) == 1
@@ -664,3 +667,237 @@ def test_search_does_not_hold_the_store_lock_while_highlighting(monkeypatch):
     assert "<mark>прав</mark>ив" in hits[0].highlighted_text
     assert lock_was_free == [True]
 
+
+class _CountingLock:
+    """Delegates to a real lock, counts acquisitions, and can run a one-shot
+    callback immediately after a chosen release.
+
+    ``__enter__``/``__exit__`` are the whole surface: every use of
+    ``history._lock`` in ``backend/app/`` is a ``with`` statement, so delegating
+    ``acquire``/``release`` as well would guard nothing. The callback fires after
+    the inner lock is already released, so what it runs may take the lock itself;
+    it is cleared before it runs, so a re-entry cannot fire it twice.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.acquisitions = 0
+        self.releases = 0
+        self.fire_on_release = None
+        self.callback = None
+
+    def __enter__(self):
+        self.acquisitions += 1
+        return self._inner.__enter__()
+
+    def __exit__(self, *exc):
+        result = self._inner.__exit__(*exc)
+        self.releases += 1
+        if self.releases == self.fire_on_release:
+            self.fire_on_release = None
+            self.callback()
+        return result
+
+
+def _insert_entry(entry_id: str, ts: int, text: str) -> None:
+    """Seed one row with a chosen ``(ts, id)``, which ``save_entry`` cannot do.
+
+    The ``entries_ai`` trigger keeps ``entry_fts`` in step, so both search lanes
+    see the row.
+    """
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.execute(
+            "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
+            "VALUES (:id, :ts, 'uk', :text, :text, 0)",
+            {"id": entry_id, "ts": ts, "text": text},
+        )
+
+
+def test_the_scan_chunk_never_exceeds_the_largest_page_the_store_already_reads():
+    """The chunk size is a relationship, not a free-chosen number.
+
+    ``get_page`` already holds the lock across ``HISTORY_LIMIT_MAX`` rows of
+    ``ENTRY_READ_COLUMNS``, so a chunk of that many rows of ``(id, ts, matched)``
+    is strictly less work per acquisition than a read the store already performs.
+    The second assertion is what keeps the substring lane's final
+    ``id IN (...)`` fetch inside the same budget as one page.
+    """
+    assert words.SEARCH_SCAN_CHUNK_ROWS <= history.HISTORY_LIMIT_MAX
+    assert words.SEARCH_LIMIT_MAX <= words.SEARCH_SCAN_CHUNK_ROWS
+
+
+def test_search_releases_the_store_lock_between_chunks(monkeypatch):
+    """The defect this spec closes: one acquisition for the whole substring scan.
+
+    With the chunk set to two rows and seven seeded, a walk that gives the lock
+    back between pages takes at least four acquisitions; the single-statement
+    lane takes one however large the history is.
+    """
+    for i in range(7):
+        history.save_entry(text=f"абракадабра {i}", duration_ms=1)
+    monkeypatch.setattr(words, "SEARCH_SCAN_CHUNK_ROWS", 2)
+
+    lock = _CountingLock(history._lock)
+    monkeypatch.setattr(history, "_lock", lock)
+
+    hits = words.search_history("кадабр", limit=7)
+
+    assert len(hits) == 7
+    assert lock.acquisitions >= 4
+
+
+def test_a_save_issued_between_two_chunks_lands_before_the_search_finishes(monkeypatch):
+    """A dictation finishing during a search waits for a page, not for the table.
+
+    The write is issued from the second release of the store lock -- the first
+    boundary between two chunks of the substring walk -- and the assertions are a
+    count and an order, never elapsed time. On a tree that holds the lock for the
+    whole scan the second release never happens, so the entry is never written.
+    """
+    for i in range(7):
+        history.save_entry(text=f"абракадабра {i}", duration_ms=1)
+    monkeypatch.setattr(words, "SEARCH_SCAN_CHUNK_ROWS", 2)
+
+    lock = _CountingLock(history._lock)
+    monkeypatch.setattr(history, "_lock", lock)
+    written: list = []
+
+    def save_from_the_gap():
+        written.append(history.save_entry(text="written mid scan", duration_ms=1))
+        written.append(lock.acquisitions)
+
+    lock.callback = save_from_the_gap
+    lock.fire_on_release = 2
+
+    hits = words.search_history("кадабр", limit=7)
+    acquisitions_when_the_search_finished = lock.acquisitions
+
+    assert len(written) == 2, "no chunk boundary ever released the lock"
+    entry, acquisitions_once_the_write_was_done = written
+    assert entry.id in {e.id for e in history.get_page(limit=50).entries}
+    assert acquisitions_when_the_search_finished > acquisitions_once_the_write_was_done
+    assert len(hits) == 7
+
+
+def test_no_page_of_the_substring_walk_reads_more_than_one_chunk(monkeypatch):
+    """The bound is per statement, not per search."""
+    for i in range(7):
+        history.save_entry(text=f"абракадабра {i}", duration_ms=1)
+    monkeypatch.setattr(words, "SEARCH_SCAN_CHUNK_ROWS", 2)
+
+    real_page = words._substring_page_locked
+    page_sizes: list[int] = []
+
+    def recording_page(conn, like_sql, like_params, before, chunk):
+        rows = real_page(conn, like_sql, like_params, before, chunk)
+        page_sizes.append(len(rows))
+        return rows
+
+    monkeypatch.setattr(words, "_substring_page_locked", recording_page)
+
+    assert len(words.search_history("кадабр", limit=7)) == 7
+    assert len(page_sizes) > 1
+    assert max(page_sizes) <= 2
+
+
+def test_a_filled_fts_lane_leaves_the_substring_lane_out_of_the_store(monkeypatch):
+    """``residual == 0``: the lane must cost zero acquisitions, not one wasted one.
+
+    The rows are seeded before the counting wrapper is installed, so the writes
+    are not counted -- the single acquisition left is the FTS lane's.
+    """
+    for i in range(5):
+        history.save_entry(text=f"правда{i} буде", duration_ms=1)
+
+    lock = _CountingLock(history._lock)
+    monkeypatch.setattr(history, "_lock", lock)
+
+    hits = words.search_history("прав", limit=3)
+
+    assert len(hits) == 3
+    assert lock.acquisitions == 1
+
+
+def test_an_underscore_in_a_query_matches_an_underscore_and_not_any_character():
+    """``LIKE``'s own wildcards are escaped, so a query means what it says.
+
+    ``_`` is the only wildcard that survives tokenisation -- ``_TOKEN_RE`` keeps
+    ``\\w``, which includes it, and drops ``%`` and the backslash -- so it is the
+    one that can be pinned end to end; ``_escape_like`` covers the other two
+    directly. Both rows are mid-word matches the FTS prefix lane cannot answer.
+    """
+    _insert_entry("u1", 300, "абракадабра_ще")
+    _insert_entry("u2", 200, "абракадабраZще")
+
+    hits = words.search_history("кадабра_ще", limit=5)
+
+    assert [h.id for h in hits] == ["u1"]
+
+
+def test_escape_like_neutralises_every_wildcard():
+    assert words._escape_like("100%") == "100\\%"
+    assert words._escape_like("a_b") == "a\\_b"
+    assert words._escape_like("c:\\d") == "c:\\\\d"
+
+
+def test_a_substring_match_past_the_first_chunk_is_still_found(monkeypatch):
+    """The walk does not stop at the first page it fails to match in."""
+    _insert_entry("old", 100, "абракадабра")
+    for i in range(6):
+        _insert_entry(f"new{i}", 200 + i, f"нічого цікавого {i}")
+    monkeypatch.setattr(words, "SEARCH_SCAN_CHUNK_ROWS", 2)
+
+    hits = words.search_history("кадабр", limit=5)
+
+    assert [h.id for h in hits] == ["old"]
+
+
+def test_the_substring_lane_orders_its_hits_by_ts_then_id(monkeypatch):
+    """``ts`` alone is not a total order -- ``save_entry`` mints milliseconds and
+    two dictations can share one. The walk's cursor is ``(ts, id)``, so the lane's
+    own hits come back in that order even across a chunk boundary."""
+    for ts, ids in ((300, ("a1", "a2")), (200, ("b1", "b2")), (100, ("c1", "c2"))):
+        for entry_id in ids:
+            _insert_entry(entry_id, ts, "абракадабра")
+    monkeypatch.setattr(words, "SEARCH_SCAN_CHUNK_ROWS", 2)
+
+    hits = words.search_history("кадабр", limit=6)
+
+    assert [h.id for h in hits] == ["a2", "a1", "b2", "b1", "c2", "c1"]
+
+
+def test_a_row_both_lanes_match_appears_once_across_chunks(monkeypatch):
+    """De-duplication moved from ``id NOT IN (...)`` to a Python set, and the row
+    the FTS lane already returned now lies past the first chunk of the walk."""
+    _insert_entry("both", 100, "правда буде завжди прав")
+    for i in range(4):
+        _insert_entry(f"filler{i}", 200 + i, "нічого цікавого")
+    monkeypatch.setattr(words, "SEARCH_SCAN_CHUNK_ROWS", 2)
+
+    hits = words.search_history("прав", limit=5)
+
+    assert [h.id for h in hits] == ["both"]
+
+
+def test_the_chunked_walk_stops_at_the_callers_limit(monkeypatch):
+    """Six matching rows, a chunk of two and a limit of three: the walk reads two
+    pages and stops, rather than reading the rest of the table and slicing."""
+    for ts in range(6):
+        _insert_entry(f"e{ts}", 100 + ts, "абракадабра")
+    monkeypatch.setattr(words, "SEARCH_SCAN_CHUNK_ROWS", 2)
+
+    real_page = words._substring_page_locked
+    pages_read = []
+
+    def recording_page(conn, like_sql, like_params, before, chunk):
+        rows = real_page(conn, like_sql, like_params, before, chunk)
+        pages_read.append(len(rows))
+        return rows
+
+    monkeypatch.setattr(words, "_substring_page_locked", recording_page)
+
+    hits = words.search_history("кадабр", limit=3)
+
+    assert [h.id for h in hits] == ["e5", "e4", "e3"]
+    assert pages_read == [2, 2]
