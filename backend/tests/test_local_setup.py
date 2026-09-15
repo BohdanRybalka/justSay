@@ -24,14 +24,25 @@ from app.stt.local_setup import (
 )
 
 
-def _patches(installed: bool, gpu: tuple[bool, str | None, str]):
-    """Standard patch set: stub package detection + GPU detection.
+def _patches(
+    installed: bool,
+    gpu: tuple[bool, str | None, str],
+    *,
+    macos_arm64: bool = False,
+):
+    """Standard patch set: stub package detection + GPU detection + platform.
 
     `gpu` is `(available, name, vendor)` — the `_detect_gpu()` 3-tuple.
+
+    `macos_arm64` is stubbed too because `check_status()` branches on it
+    before it reaches anything else this set stubs, so on a real Apple
+    Silicon host an unstubbed call returns the Metal branch and every
+    device/compute-type assertion below reads `metal`.
     """
     return [
         patch.object(local_setup, "_check_package_installed", return_value=installed),
         patch.object(local_setup, "_detect_gpu", return_value=gpu),
+        patch.object(local_setup, "is_macos_arm64", return_value=macos_arm64),
     ]
 
 
@@ -203,6 +214,7 @@ def test_detect_gpu_returns_false_when_probe_reports_none(monkeypatch):
     probe finds nothing, availability/name/vendor are all "empty"."""
     from app.core.gpu_probe import GpuProbeResult, GpuVendor
 
+    monkeypatch.setattr(local_setup, "is_macos_arm64", lambda: False)
     monkeypatch.setattr(
         "app.core.gpu_probe.probe_gpu",
         lambda: GpuProbeResult(vendor=GpuVendor.NONE),
@@ -216,6 +228,7 @@ def test_detect_gpu_returns_false_when_probe_reports_none(monkeypatch):
 def test_detect_gpu_returns_name_when_cuda_available(monkeypatch):
     from app.core.gpu_probe import GpuProbeResult, GpuVendor
 
+    monkeypatch.setattr(local_setup, "is_macos_arm64", lambda: False)
     monkeypatch.setattr(
         "app.core.gpu_probe.probe_gpu",
         lambda: GpuProbeResult(vendor=GpuVendor.NVIDIA, name="RTX 4090"),
@@ -232,6 +245,7 @@ def test_detect_gpu_reports_amd_name_and_vendor_but_not_available(monkeypatch):
     faster-whisper (CTranslate2) has no AMD backend (spec 014)."""
     from app.core.gpu_probe import GpuProbeResult, GpuVendor
 
+    monkeypatch.setattr(local_setup, "is_macos_arm64", lambda: False)
     monkeypatch.setattr(
         "app.core.gpu_probe.probe_gpu",
         lambda: GpuProbeResult(vendor=GpuVendor.AMD, name="AMD Radeon RX 5700 XT"),
@@ -403,13 +417,12 @@ def test_detect_gpu_reports_apple_silicon_on_macos_arm64(monkeypatch):
     assert vendor == "apple"
 
 
-def test_check_status_macos_arm64_reports_metal_device_and_float16(monkeypatch):
+def test_check_status_macos_arm64_reports_metal_device_and_float16():
     """On macOS arm64 `check_status` must return device='metal',
     compute_type='float16'."""
     settings = STTSettings(whisper_model_size="large-v3-turbo")
-    monkeypatch.setattr("app.stt.local_setup.is_macos_arm64", lambda: True)
 
-    with _apply(_patches(True, (True, "Apple Silicon (Metal)", "apple"))):
+    with _apply(_patches(True, (True, "Apple Silicon (Metal)", "apple"), macos_arm64=True)):
         status = check_status(settings)
 
     assert status.device == "metal"
@@ -430,7 +443,6 @@ def test_check_status_macos_arm64_never_constructs_a_gpu_vendor_from_apple(monke
     from app.core import gpu_probe
 
     settings = STTSettings(whisper_model_size="large-v3-turbo")
-    monkeypatch.setattr("app.stt.local_setup.is_macos_arm64", lambda: True)
 
     real_gpu_vendor = gpu_probe.GpuVendor
 
@@ -442,7 +454,7 @@ def test_check_status_macos_arm64_never_constructs_a_gpu_vendor_from_apple(monke
 
     monkeypatch.setattr(gpu_probe, "GpuVendor", _exploding_gpu_vendor)
     try:
-        with _apply(_patches(True, (True, "Apple Silicon (Metal)", "apple"))):
+        with _apply(_patches(True, (True, "Apple Silicon (Metal)", "apple"), macos_arm64=True)):
             status = check_status(settings)
     finally:
         monkeypatch.setattr(gpu_probe, "GpuVendor", real_gpu_vendor)

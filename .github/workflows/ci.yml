@@ -1,4 +1,4 @@
-# PR-gating CI (spec 030 / 039, ADR 017 / 025).
+# PR-gating CI (spec 030 / 039, ADR 017 / 025 / 064).
 #
 # Five per-check jobs run in parallel — each check routes through an npm
 # script so CI and a local run share one definition (ADR 017's
@@ -11,17 +11,26 @@
 #                   accepts for ruff vs. vulture.
 #   frontend-test — Node only: vitest.
 #   backend-lint  — Node entry point + Python[dev]: ruff + vulture.
-#   backend-test  — Node entry point + Python[dev,audio,cloud]: pytest.
+#   backend-test  — Node entry point + Python[dev,audio,cloud]: pytest, on a
+#                   windows-latest + macos-14 matrix. Spec 156 moved it off
+#                   ubuntu-latest: the app ships on those two platforms and on
+#                   no other, and the Linux-only gate was hiding a live macOS
+#                   hole in the output-directory guard. See
+#                   docs/adr/064-a-gate-runs-on-the-platforms-that-ship.md.
 #   shell-test    — Node entry point + Rust, on a windows-latest + macos-14
 #                   matrix: cargo test. Added by spec 151; see its own comment
 #                   block at the job for why both legs are required.
 #
-# backend-lint installs only backend[dev] and skips PortAudio: neither ruff nor
-# vulture imports the app, and it drops `npm ci` — its npm scripts are all
-# `cd backend && python -m …` with no node_modules binary dependency.
+# backend-lint installs only backend[dev] and drops `npm ci` — its npm scripts
+# are all `cd backend && python -m ...` with no node_modules binary dependency,
+# and neither ruff nor vulture imports the app. It stays on one ubuntu-latest
+# runner: spec 156 measured it green on all three platforms (19s / 23s / 53s)
+# and neither tool can produce a platform-dependent answer.
 # backend-test does run `npm ci`: tests/test_client_route_targets.py parses
 # src/api.ts with the TypeScript compiler from node_modules, and it fails rather
-# than skips when that package is absent.
+# than skips when that package is absent. It installs no system PortAudio: that
+# step was Linux-only, and both shipped platforms collected all 1414 pytest
+# items without it.
 # npm + pip caching is on for every job that installs deps, to offset the extra
 # per-job setup the split re-pays.
 #
@@ -143,8 +152,18 @@ jobs:
       - name: Run dead-code check (vulture)
         run: npm run lint:dead-code:py
 
+  # Spec 156: the engine's gate runs on the two platforms the app ships on and
+  # on no other. fail-fast is off so a macOS failure still reports the Windows
+  # result and vice versa — CLAUDE.md forbids landing one platform and
+  # deferring the other, so both legs are required.
+  # See docs/adr/064-a-gate-runs-on-the-platforms-that-ship.md.
   backend-test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, macos-14] # macos-14 is the arm64 Apple Silicon runner
+
+    runs-on: ${{ matrix.platform }}
 
     steps:
       - uses: actions/checkout@v4
@@ -158,7 +177,10 @@ jobs:
       - name: Install npm deps
         run: npm ci
 
+      # macOS takes its interpreter from uv instead (two steps below), so this
+      # one is Windows-only.
       - name: Install Python
+        if: runner.os != 'macOS'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -173,12 +195,31 @@ jobs:
         with:
           version: "0.8.10"
 
-      # PortAudio is a runtime dependency of `sounddevice`, imported at module
-      # load in backend/app/audio/recorder.py and reached at pytest collection
-      # via app.main. Installed proactively so collection resolves regardless of
-      # whether the sounddevice Linux wheel bundles PortAudio; harmless if it does.
-      - name: Install PortAudio
-        run: sudo apt-get update && sudo apt-get install -y libportaudio2
+      # actions/setup-python's macOS CPython (>= 3.11.0-rc.2) is built WITHOUT
+      # --enable-loadable-sqlite-extensions by design (actions/setup-python#540
+      # — won't-fix, no toggle exists), so sqlite3.Connection has no
+      # enable_load_extension and sqlite-vec cannot load: 25 of the 36 failures
+      # spec 156 measured on the first macOS run were that one cause. uv's
+      # python-build-standalone sets PY_SQLITE_ENABLE_LOAD_EXTENSION=1.
+      # release.yml already carries this block for the same reason; it is
+      # duplicated rather than shared because a workflow cannot import steps.
+      - name: Install Python via uv (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          uv python install 3.12
+          uv venv --python 3.12 --seed "$GITHUB_WORKSPACE/.venv"
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/.venv" >> "$GITHUB_ENV"
+
+      # Fails in ~1s with a named cause instead of 25 AttributeErrors deep in
+      # the suite when the interpreter on PATH lacks loadable-extension
+      # support. Prints sys.executable so a wrong-Python-on-PATH pickup is
+      # obvious. The block scalar is load-bearing: written inline, the
+      # `:memory:` colon makes the file unparseable and GitHub answers with a
+      # workflow-file issue and no job log at all.
+      - name: Assert loadable sqlite extensions are available
+        run: |
+          python -c "import sqlite3, sys; c = sqlite3.connect(':memory:'); assert hasattr(c, 'enable_load_extension'), 'CPython built WITHOUT loadable sqlite extensions: ' + sys.executable; print('OK loadable-extensions:', sys.executable)"
 
       # The cloud extra the script names is here for the gates, not for the
       # app: without google-genai installed, the Gemini timeout tests either
@@ -205,7 +246,12 @@ jobs:
       # failed without recording its seed for exactly that reason -- though the
       # order dependency it caught (JS-110) needed a specific pair of tests
       # rather than a specific seed, and reproduced in seconds without one.
+      # One leg, not both: both legs execute the same 1363 tests (the 11
+      # Windows-gated ones are skipped on macOS, and each is already insulated
+      # by an autouse reset fixture), while on Windows this step alone was
+      # measured at 332s of the job's 654s.
       - name: Run backend tests in a randomised order
+        if: matrix.platform == 'macos-14'
         run: cd backend && python -m pytest tests/ -m "not slow" -p randomly
 
   # The Rust shell (spec 151). It starts the engine, owns the tray and the

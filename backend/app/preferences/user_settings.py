@@ -261,23 +261,45 @@ def _validate_output_dir(value: object) -> Path:
 
 
 def _forbidden_parents() -> list[Path]:
+    """System roots an output_dir may not sit inside, in resolved form.
+
+    Resolved because ``_validate_output_dir`` resolves the candidate before
+    comparing, and the two sides must live in the same space. On macOS
+    ``/etc`` is a symlink to ``/private/etc``, so an unresolved entry matches
+    nothing the user can actually type and the guard silently stops firing.
+    See docs/adr/065-a-system-directory-is-what-a-path-resolves-to.md.
+    """
     if sys.platform == "win32":
-        return [
+        roots = [
             Path("C:/Windows"),
             Path("C:/Program Files"),
             Path("C:/Program Files (x86)"),
             Path("C:/ProgramData/Microsoft"),
         ]
-    return [
-        Path("/etc"),
-        Path("/usr"),
-        Path("/sys"),
-        Path("/proc"),
-        Path("/bin"),
-        Path("/sbin"),
-        Path("/boot"),
-        Path("/dev"),
-    ]
+    elif sys.platform == "darwin":
+        roots = [
+            Path("/System"),
+            Path("/Library"),
+            Path("/Applications"),
+            Path("/usr"),
+            Path("/bin"),
+            Path("/sbin"),
+            Path("/dev"),
+            Path("/private/etc"),
+            Path("/private/var"),
+        ]
+    else:
+        roots = [
+            Path("/etc"),
+            Path("/usr"),
+            Path("/sys"),
+            Path("/proc"),
+            Path("/bin"),
+            Path("/sbin"),
+            Path("/boot"),
+            Path("/dev"),
+        ]
+    return [root.resolve(strict=False) for root in roots]
 
 
 _FORBIDDEN_PARENTS = _forbidden_parents()
