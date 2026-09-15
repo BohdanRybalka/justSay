@@ -5,7 +5,7 @@ import sqlite3
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from app.transcripts import words as words_service
+from app.transcripts import search
 from app.transcripts.history import (
     CURSOR_TS_MAX,
     CURSOR_TS_MIN,
@@ -19,13 +19,12 @@ from app.transcripts.history import (
     get_page,
 )
 from app.transcripts.store_errors import store_busy_as_503
-from app.transcripts.words import HistorySearchHit
 
 router = APIRouter(prefix="/history", tags=["History"])
 
 
 class HistorySearchResponse(BaseModel):
-    entries: list[HistorySearchHit]
+    entries: list[search.HistorySearchHit]
     total: int
 
 
@@ -100,11 +99,11 @@ async def history_search(
         description="Search query (empty or sanitized-to-empty → empty list)",
         max_length=500,
     ),
-    limit: int = Query(20, ge=1, le=words_service.SEARCH_LIMIT_MAX),
+    limit: int = Query(20, ge=1, le=search.SEARCH_LIMIT_MAX),
 ):
     """Hybrid search across transcripts: always runs the FTS5/BM25+LIKE
     lane and the semantic (vector-distance) lane concurrently and fuses
-    them with Reciprocal Rank Fusion (see ``words.search_history_hybrid``
+    them with Reciprocal Rank Fusion (see ``search.search_history_hybrid``
     and ADR 010) — there is no more ``mode`` toggle.
 
     Empty / whitespace / fully-sanitized-out ``q`` returns 200 with an
@@ -117,7 +116,7 @@ async def history_search(
     """
     try:
         with store_busy_as_503():
-            entries = await words_service.search_history_hybrid(q, limit=limit)
+            entries = await search.search_history_hybrid(q, limit=limit)
     except sqlite3.OperationalError as e:
         if _is_fts_syntax_error(e):
             raise HTTPException(status_code=400, detail="Invalid search query") from e

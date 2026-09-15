@@ -12,7 +12,7 @@ import pytest
 from app.core.config import AppSettings
 from app.core.errors import ConfigurationError
 from app.preferences import user_settings
-from app.transcripts import history
+from app.transcripts import history, relocation
 
 
 @pytest.fixture(autouse=True)
@@ -136,9 +136,9 @@ def test_update_output_dir_triggers_history_relocate(tmp_path, monkeypatch):
 
     def fake_relocate(target: Path):
         calls.append(target)
-        return history.RelocateOutcome.MOVED, None
+        return relocation.RelocateOutcome.MOVED, None
 
-    monkeypatch.setattr(history, "relocate", fake_relocate)
+    monkeypatch.setattr(relocation, "relocate", fake_relocate)
 
     user_settings.update_user_settings({"output_dir": str(new_dir)})
     assert len(calls) == 1
