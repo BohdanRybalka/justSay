@@ -44,7 +44,6 @@ class UserSettings(BaseModel):
     output_dir: str = Field(default_factory=lambda: str(_settings_dir()))
 
     stt_mode: Literal["cloud", "local"] = "cloud"
-    llm_mode: Literal["cloud", "local"] = "cloud"
 
     stt_engine: Literal["auto", "groq", "gemini"] = "auto"
 
@@ -54,7 +53,6 @@ class UserSettings(BaseModel):
     whisper_device: str = "auto"
 
     ollama_host: str = "http://localhost:11434"
-    ollama_model: str = "qwen3:1.7b"
 
     cloud_routing_threshold: float = Field(default=30.0, gt=0)
 
@@ -354,7 +352,6 @@ def sync_to_runtime(us: UserSettings) -> bool:
     from app.core.types import ProviderMode
 
     stt_mode = ProviderMode(us.stt_mode)
-    llm_mode = ProviderMode(us.llm_mode)
 
     changed_stt = (
         settings.stt.mode != stt_mode
@@ -365,12 +362,7 @@ def sync_to_runtime(us: UserSettings) -> bool:
         or (us.gemini_api_key and settings.stt.gemini_api_key != us.gemini_api_key)
         or (us.groq_api_key and settings.stt.groq_api_key != us.groq_api_key)
     )
-    changed_llm = (
-        settings.llm.mode != llm_mode
-        or settings.llm.ollama_model != us.ollama_model
-        or settings.llm.ollama_host != us.ollama_host
-        or (us.groq_api_key and settings.llm.groq_api_key != us.groq_api_key)
-    )
+    changed_embeddings = settings.embeddings.ollama_host != us.ollama_host
 
     settings.stt.mode = stt_mode
     settings.stt.whisper_model_size = us.whisper_model_size
@@ -382,18 +374,15 @@ def sync_to_runtime(us: UserSettings) -> bool:
         settings.stt.gemini_api_key = us.gemini_api_key
     if us.groq_api_key:
         settings.stt.groq_api_key = us.groq_api_key
-        settings.llm.groq_api_key = us.groq_api_key
 
-    settings.llm.mode = llm_mode
-    settings.llm.ollama_model = us.ollama_model
-    settings.llm.ollama_host = us.ollama_host
+    settings.embeddings.ollama_host = us.ollama_host
 
     if changed_stt:
         from app.stt import clear_cache as clear_stt_cache
         clear_stt_cache()
         from app.embeddings import clear_cache as clear_embeddings_cache
         clear_embeddings_cache()
-    if changed_llm:
+    if changed_embeddings:
         from app.embeddings import clear_cache as clear_embeddings_cache
         clear_embeddings_cache()
 

@@ -10,13 +10,12 @@ import logging
 import httpx
 
 from app.embeddings.ollama_models import CONNECT_TIMEOUT, READ_TIMEOUT, list_models
-from app.llm.config import LLMSettings
 
 log = logging.getLogger(__name__)
 
 
-async def is_model_available(llm: LLMSettings, model: str) -> bool:
-    """True if Ollama at ``llm.ollama_host`` reports ``model`` as pulled.
+async def is_model_available(ollama_host: str, model: str) -> bool:
+    """True if Ollama at ``ollama_host`` reports ``model`` as pulled.
 
     Any connectivity failure (Ollama not running, unreachable host) is
     treated as "not available" — the caller's job is to disable the
@@ -26,7 +25,7 @@ async def is_model_available(llm: LLMSettings, model: str) -> bool:
         connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=READ_TIMEOUT
     )
     try:
-        async with httpx.AsyncClient(base_url=llm.ollama_host, timeout=timeout) as client:
+        async with httpx.AsyncClient(base_url=ollama_host, timeout=timeout) as client:
             _, downloaded, _ = await list_models(client, model)
             return downloaded
     except Exception:

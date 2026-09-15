@@ -12,7 +12,7 @@ Three modules deliberately break that rule:
 
 - `config.py` is the composition root. It assembles `AppSettings` out of every
   package's own `*Settings` class, so it necessarily imports `app.audio`,
-  `app.stt`, `app.llm` and `app.embeddings`. It sits *above* every package
+  `app.stt` and `app.embeddings`. It sits *above* every package
   rather than beneath them, and lives here only because that is where callers
   already look for `settings`. See ADR 044.
 - `router.py` serves the operational endpoints (`/health`, `/shutdown`).

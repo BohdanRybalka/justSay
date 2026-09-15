@@ -48,12 +48,10 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     shortcut: "Ctrl+Alt+KeyV",
     output_dir: "C:/fake",
     stt_mode: "cloud",
-    llm_mode: "cloud",
     stt_engine: "auto",
     whisper_model_size: "large-v3-turbo",
     whisper_device: "auto",
     ollama_host: "http://localhost:11434",
-    ollama_model: "qwen3:1.7b",
     cloud_routing_threshold: 30,
     initial_prompt: "",
     gemini_api_key: "",
@@ -82,7 +80,7 @@ beforeEach(() => {
 
 describe("saveSettings — cloud-status refetch failure retains, does not null (Stage 3 fix)", () => {
   it("a failed refetch after saving Gemini leaves the untouched env-sourced Groq row rendering as env, not unset", async () => {
-    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" });
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.getSettings.mockResolvedValue(buildSettings({ gemini_api_key: "", groq_api_key: "" }));
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: true });
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
@@ -127,7 +125,7 @@ describe("saveSettings — cloud-status refetch failure retains, does not null (
 
 describe("loadSettings — a later re-call's cloud-status refetch failure also retains, not nulls (Stage 3 fix)", () => {
   it("a second loadSettings() call (e.g. after models.ts's STT-engine change) with a failing refetch keeps the prior cloud status", async () => {
-    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" });
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.getSettings.mockResolvedValue(buildSettings({ gemini_api_key: "", groq_api_key: "" }));
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: true });
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
@@ -154,7 +152,7 @@ describe("loadSettings — a later re-call's cloud-status refetch failure also r
 
 describe("a shortcut the widget stored while this window was open", () => {
   it("survives a tab switch instead of the General tab redrawing the one loaded at open", async () => {
-    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" });
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.getSettings.mockResolvedValue(buildSettings({ shortcut: "Ctrl+Alt+KeyV" }));
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
@@ -183,7 +181,7 @@ const backendStatusEl = () => document.getElementById("backend-status")!;
 /** Boots settings.ts with /health healthy and /settings rejecting, and waits
  *  for init()'s failure path to have painted. */
 async function bootWithFailedSettingsLoad(error: unknown) {
-  apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" });
+  apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
   apiMock.getSettings.mockRejectedValue(error);
   apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
 
@@ -239,7 +237,7 @@ describe("backend badge — health 200 + settings 401", () => {
 
   it("stays green on an open backend that needs no token — no 401 is ever observed", async () => {
     expect("__TAURI_INTERNALS__" in window).toBe(false);
-    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" });
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.getSettings.mockResolvedValue(buildSettings());
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: true, groq_key_set: true });
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
@@ -311,7 +309,7 @@ describe("backend badge — health 200, then the first settings request 401s", (
     sawAuthFailureMock.mockImplementation(() => authFailed);
     lastBridgeDiagnosisMock.mockReturnValue({ kind: "invoke-timeout" });
 
-    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" });
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
     apiMock.getSettings.mockImplementation(() => {
       authFailed = true;
@@ -384,7 +382,6 @@ describe("backend unreachable from the first poll", () => {
       status: "ok",
       version: "0.0.0",
       stt_mode: "cloud",
-      llm_mode: "cloud",
     });
     apiMock.getSettings.mockResolvedValue(buildSettings());
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: true, groq_key_set: true });
@@ -420,7 +417,6 @@ describe("backend unreachable from the first poll", () => {
       status: "ok",
       version: "0.0.0",
       stt_mode: "cloud",
-      llm_mode: "cloud",
     });
     let release!: (settings: UserSettings) => void;
     apiMock.getSettings.mockReturnValue(
@@ -455,7 +451,6 @@ describe("backend unreachable from the first poll", () => {
       status: "ok",
       version: "0.0.0",
       stt_mode: "cloud",
-      llm_mode: "cloud",
     });
     apiMock.getSettings.mockReturnValue(new Promise(() => {}));
     apiMock.cloudKeyStatus.mockReturnValue(new Promise(() => {}));
@@ -485,7 +480,6 @@ describe("backend unreachable from the first poll", () => {
       status: "ok",
       version: "0.0.0",
       stt_mode: "cloud",
-      llm_mode: "cloud",
     });
     apiMock.getSettings.mockRejectedValue(new TimedOutError(15_000, "/settings"));
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
@@ -536,7 +530,7 @@ describe("a 401 observed after settings have loaded", () => {
     sawAuthFailureMock.mockImplementation(() => authFailed);
     lastBridgeDiagnosisMock.mockReturnValue({ kind: "invoke-failed", detail: "boom" });
 
-    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" });
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
     apiMock.getSettings.mockResolvedValue(buildSettings());
@@ -581,7 +575,7 @@ describe("a 401 observed after settings have loaded", () => {
 describe("a settings load that has not settled", () => {
   it("keeps saying it is waiting while the badge goes on tracking /health", async () => {
     vi.useFakeTimers();
-    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" });
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
     apiMock.getSettings.mockImplementation(() => new Promise<UserSettings>(() => {}));
 
@@ -618,7 +612,7 @@ describe("a settings load that fails after the backend has gone away", () => {
         new Promise((resolve, reject) => {
           pending.push((ok) =>
             ok
-              ? resolve({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" })
+              ? resolve({ status: "ok", version: "0.0.0", stt_mode: "cloud" })
               : reject(new TypeError("Failed to fetch")),
           );
         }),
@@ -659,7 +653,7 @@ describe("the Settings window's own health poll", () => {
         new Promise((resolve, reject) => {
           pending.push((ok) =>
             ok
-              ? resolve({ status: "ok", version: "0.0.0", stt_mode: "cloud", llm_mode: "cloud" })
+              ? resolve({ status: "ok", version: "0.0.0", stt_mode: "cloud" })
               : reject(new TypeError("Failed to fetch")),
           );
         }),
@@ -721,7 +715,6 @@ describe("the Settings window being dismissed", () => {
       status: "ok",
       version: "0.0.0",
       stt_mode: "cloud",
-      llm_mode: "cloud",
     });
     apiMock.getSettings.mockResolvedValue(buildSettings());
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
@@ -755,7 +748,6 @@ describe("the Settings window being dismissed", () => {
       status: "ok",
       version: "0.0.0",
       stt_mode: "cloud",
-      llm_mode: "cloud",
     });
     apiMock.getSettings.mockResolvedValue(buildSettings());
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });

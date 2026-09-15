@@ -95,7 +95,7 @@ async def cloud_key_status():
     """
     return CloudKeyStatus(
         gemini_key_set=bool(runtime_settings.stt.gemini_api_key),
-        groq_key_set=bool(runtime_settings.stt.groq_api_key or runtime_settings.llm.groq_api_key),
+        groq_key_set=bool(runtime_settings.stt.groq_api_key),
     )
 
 

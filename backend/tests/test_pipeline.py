@@ -93,12 +93,9 @@ def _isolate_side_effects():
 @pytest.fixture
 def cloud_mode():
     original_stt = settings.stt.mode
-    original_llm = settings.llm.mode
     settings.stt.mode = ProviderMode.CLOUD
-    settings.llm.mode = ProviderMode.CLOUD
     yield
     settings.stt.mode = original_stt
-    settings.llm.mode = original_llm
 
 
 def _make_stt_mock(text: str = "hello world", tokens: int | None = None):

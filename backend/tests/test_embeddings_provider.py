@@ -1,9 +1,9 @@
-"""Embedding provider selection — privacy eligibility matrix (spec 003).
+"""Embedding provider selection — privacy eligibility (specs 003, 169).
 
-Single most important AC of this spec: eligibility must be derived STRICTLY
-from (stt.mode, llm.mode) with no cloud bypass hiding inside the local
-branch. Mocks the factory's internal constructors directly so a direct
-cloud-SDK bypass cannot pass.
+Single most important AC: eligibility must be derived STRICTLY from
+``stt.mode`` with no cloud bypass hiding inside the local branch. Mocks the
+factory's internal constructors directly so a direct cloud-SDK bypass cannot
+pass.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ from app.embeddings import LOCAL_MISSING_MODEL_REASON, clear_cache, resolve_embe
 from app.embeddings.cloud import CloudEmbeddingProvider
 from app.embeddings.config import EmbeddingSettings
 from app.embeddings.local import LocalEmbeddingProvider
-from app.llm.config import LLMSettings
 from app.stt.config import STTSettings
 
 
@@ -35,31 +34,23 @@ def _clear_embeddings_cache():
     clear_cache()
 
 
-def _settings(stt_mode: ProviderMode, llm_mode: ProviderMode):
+def _settings(stt_mode: ProviderMode):
     stt = STTSettings(mode=stt_mode, gemini_api_key="key")
-    llm = LLMSettings(mode=llm_mode)
     emb = EmbeddingSettings()
-    return stt, llm, emb
-
-
-MATRIX = [
-    (ProviderMode.CLOUD, ProviderMode.CLOUD),
-    (ProviderMode.CLOUD, ProviderMode.LOCAL),
-    (ProviderMode.LOCAL, ProviderMode.CLOUD),
-    (ProviderMode.LOCAL, ProviderMode.LOCAL),
-]
+    return stt, emb
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stt_mode,llm_mode", MATRIX)
-async def test_eligibility_matrix(stt_mode, llm_mode):
-    """resolve_embedding_provider returns a CloudEmbeddingProvider ONLY for
-    (cloud, cloud); a LocalEmbeddingProvider ONLY for (local, local) with
-    Ollama reporting nomic-embed-text installed; None for every other pair,
-    including both mixed pairings.
+@pytest.mark.parametrize("stt_mode", list(ProviderMode))
+async def test_eligibility_matrix(stt_mode):
+    """resolve_embedding_provider returns a CloudEmbeddingProvider for CLOUD and
+    a LocalEmbeddingProvider for LOCAL with Ollama reporting nomic-embed-text
+    installed. Those are the only two outcomes: with one switch there is no
+    third state, so the parametrisation covers every value of ProviderMode and
+    each one must yield a provider.
     """
     clear_cache()
-    stt, llm, emb = _settings(stt_mode, llm_mode)
+    stt, emb = _settings(stt_mode)
 
     fake_cloud = MagicMock(name="CloudEmbeddingProvider-instance")
     fake_local = MagicMock(name="LocalEmbeddingProvider-instance")
@@ -69,39 +60,33 @@ async def test_eligibility_matrix(stt_mode, llm_mode):
         patch("app.embeddings.local.LocalEmbeddingProvider", return_value=fake_local) as local_ctor,
         patch("app.embeddings.local.is_model_available", new=AsyncMock(return_value=True)) as avail,
     ):
-        provider, reason = await resolve_embedding_provider(stt, llm, emb)
+        provider, reason = await resolve_embedding_provider(stt, emb)
 
-    if (stt_mode, llm_mode) == (ProviderMode.CLOUD, ProviderMode.CLOUD):
+    assert reason is None
+    if stt_mode is ProviderMode.CLOUD:
         assert provider is fake_cloud
         cloud_ctor.assert_called_once()
         local_ctor.assert_not_called()
         avail.assert_not_called()
-        assert reason is None
-    elif (stt_mode, llm_mode) == (ProviderMode.LOCAL, ProviderMode.LOCAL):
+    else:
         assert provider is fake_local
         avail.assert_called_once()
         local_ctor.assert_called_once()
         cloud_ctor.assert_not_called()
-        assert reason is None
-    else:
-        assert provider is None
-        cloud_ctor.assert_not_called()
-        local_ctor.assert_not_called()
-        assert reason is not None
 
 
 @pytest.mark.asyncio
 async def test_local_mode_disabled_when_model_not_pulled():
-    """(local, local) with Ollama NOT reporting nomic-embed-text -> None +
-    a specific actionable reason, and LocalEmbeddingProvider is never
-    constructed (no half-built client left hanging around)."""
-    stt, llm, emb = _settings(ProviderMode.LOCAL, ProviderMode.LOCAL)
+    """LOCAL with Ollama NOT reporting nomic-embed-text -> None + a specific
+    actionable reason, and LocalEmbeddingProvider is never constructed (no
+    half-built client left hanging around)."""
+    stt, emb = _settings(ProviderMode.LOCAL)
 
     with (
         patch("app.embeddings.local.LocalEmbeddingProvider") as local_ctor,
         patch("app.embeddings.local.is_model_available", new=AsyncMock(return_value=False)),
     ):
-        provider, reason = await resolve_embedding_provider(stt, llm, emb)
+        provider, reason = await resolve_embedding_provider(stt, emb)
 
     assert provider is None
     local_ctor.assert_not_called()
@@ -110,56 +95,81 @@ async def test_local_mode_disabled_when_model_not_pulled():
 
 
 @pytest.mark.asyncio
-async def test_mixed_mode_never_falls_back_to_cloud():
-    """(cloud stt, local llm) and (local stt, cloud llm) must both disable
-    the feature outright — no 'pick a side' fallback to cloud, which would
-    be the actual privacy leak this AC exists to prevent."""
-    for stt_mode, llm_mode in [
-        (ProviderMode.CLOUD, ProviderMode.LOCAL),
-        (ProviderMode.LOCAL, ProviderMode.CLOUD),
-    ]:
+async def test_local_mode_never_constructs_the_cloud_provider(tmp_path, monkeypatch):
+    """The zero-leak AC, driven from a real settings file rather than a
+    hand-built STTSettings: a file written before this change still carries
+    ``llm_mode: "cloud"``, which used to be half the eligibility key. Loading it
+    and syncing it to the runtime must leave a Local-mode install on the local
+    branch, with CloudEmbeddingProvider never constructed — and it is the
+    constructor that is patched, so no lazily-built Gemini client can exist
+    either.
+    """
+    import json
+
+    from app.core.config import settings as runtime_settings
+    from app.preferences import user_settings
+
+    settings_dir = tmp_path / ".justsay"
+    settings_dir.mkdir()
+    (settings_dir / "settings.json").write_text(
+        json.dumps({"stt_mode": "local", "llm_mode": "cloud", "gemini_api_key": "AIza-stored"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("JUSTSAY_DATA_DIR", str(settings_dir))
+    monkeypatch.setattr(user_settings, "_settings", None)
+    monkeypatch.setattr("app.stt.clear_cache", lambda: None)
+
+    saved_mode = runtime_settings.stt.mode
+    try:
+        user_settings.sync_to_runtime(user_settings.get_user_settings())
+        assert runtime_settings.stt.mode is ProviderMode.LOCAL
+
         clear_cache()
-        stt, llm, emb = _settings(stt_mode, llm_mode)
         with (
             patch("app.embeddings.cloud.CloudEmbeddingProvider") as cloud_ctor,
+            patch("app.embeddings.local.is_model_available", new=AsyncMock(return_value=True)),
             patch("app.embeddings.local.LocalEmbeddingProvider") as local_ctor,
         ):
-            provider, reason = await resolve_embedding_provider(stt, llm, emb)
-        assert provider is None
-        cloud_ctor.assert_not_called()
-        local_ctor.assert_not_called()
-        assert reason is not None
-        assert "Cloud/Local mode" in reason
+            provider, reason = await resolve_embedding_provider(
+                runtime_settings.stt, runtime_settings.embeddings
+            )
+    finally:
+        runtime_settings.stt.mode = saved_mode
+
+    cloud_ctor.assert_not_called()
+    local_ctor.assert_called_once()
+    assert provider is local_ctor.return_value
+    assert reason is None
 
 
 @pytest.mark.asyncio
-async def test_factory_caches_provider_by_mode_pair():
-    stt, llm, emb = _settings(ProviderMode.CLOUD, ProviderMode.CLOUD)
+async def test_factory_caches_provider_by_mode():
+    stt, emb = _settings(ProviderMode.CLOUD)
     with patch("app.embeddings.cloud.CloudEmbeddingProvider", return_value=MagicMock()):
-        p1, _ = await resolve_embedding_provider(stt, llm, emb)
-        p2, _ = await resolve_embedding_provider(stt, llm, emb)
+        p1, _ = await resolve_embedding_provider(stt, emb)
+        p2, _ = await resolve_embedding_provider(stt, emb)
     assert p1 is p2
 
 
 @pytest.mark.asyncio
 async def test_clear_cache_forces_reresolve():
-    stt, llm, emb = _settings(ProviderMode.CLOUD, ProviderMode.CLOUD)
+    stt, emb = _settings(ProviderMode.CLOUD)
     with patch(
         "app.embeddings.cloud.CloudEmbeddingProvider", side_effect=lambda **_: MagicMock()
     ) as ctor:
-        await resolve_embedding_provider(stt, llm, emb)
+        await resolve_embedding_provider(stt, emb)
         clear_cache()
-        await resolve_embedding_provider(stt, llm, emb)
+        await resolve_embedding_provider(stt, emb)
     assert ctor.call_count == 2
 
 
 @pytest.mark.asyncio
 async def test_stale_unavailable_cache_reprobes_and_flips_available():
-    """A cached (LOCAL, LOCAL) negative result caused by a missing model
+    """A cached LOCAL negative result caused by a missing model
     must not be served verbatim forever — it must re-probe Ollama on every
     call until the model appears, then cache the resulting provider
     normally, without an intervening clear_cache()."""
-    stt, llm, emb = _settings(ProviderMode.LOCAL, ProviderMode.LOCAL)
+    stt, emb = _settings(ProviderMode.LOCAL)
     fake_local = MagicMock(name="LocalEmbeddingProvider-instance")
 
     with (
@@ -169,8 +179,8 @@ async def test_stale_unavailable_cache_reprobes_and_flips_available():
             new=AsyncMock(side_effect=[False, True]),
         ) as avail,
     ):
-        provider1, reason1 = await resolve_embedding_provider(stt, llm, emb)
-        provider2, reason2 = await resolve_embedding_provider(stt, llm, emb)
+        provider1, reason1 = await resolve_embedding_provider(stt, emb)
+        provider2, reason2 = await resolve_embedding_provider(stt, emb)
 
     assert (provider1, reason1) == (None, LOCAL_MISSING_MODEL_REASON)
     assert provider2 is fake_local
@@ -180,13 +190,13 @@ async def test_stale_unavailable_cache_reprobes_and_flips_available():
 
 @pytest.mark.asyncio
 async def test_available_cache_reprobes_and_flips_to_unavailable():
-    """A cached positive (LOCAL, LOCAL) result must not be served verbatim
+    """A cached positive LOCAL result must not be served verbatim
     forever either — it re-probes on every call same as the negative branch,
     and flips to LOCAL_MISSING_MODEL_REASON (cleaning up the now-stale
     provider) when the model disappears (e.g. `ollama rm nomic-embed-text`).
     This supersedes the old "does not reprobe" assertion on purpose — that
     was exactly the gap this item closes, not a regression."""
-    stt, llm, emb = _settings(ProviderMode.LOCAL, ProviderMode.LOCAL)
+    stt, emb = _settings(ProviderMode.LOCAL)
     fake_local = MagicMock(name="LocalEmbeddingProvider-instance")
 
     with (
@@ -195,11 +205,11 @@ async def test_available_cache_reprobes_and_flips_to_unavailable():
             "app.embeddings.local.is_model_available", new=AsyncMock(return_value=True)
         ) as avail,
     ):
-        provider1, reason1 = await resolve_embedding_provider(stt, llm, emb)
+        provider1, reason1 = await resolve_embedding_provider(stt, emb)
         assert avail.call_count == 1
 
         avail.return_value = False
-        provider2, reason2 = await resolve_embedding_provider(stt, llm, emb)
+        provider2, reason2 = await resolve_embedding_provider(stt, emb)
 
     assert provider1 is fake_local
     assert reason1 is None
@@ -214,7 +224,7 @@ async def test_available_cache_reuses_instance_while_still_available():
     """While the model stays available across consecutive calls, the same
     LocalEmbeddingProvider instance is reused (not reconstructed) — but
     each call still re-probes is_model_available()."""
-    stt, llm, emb = _settings(ProviderMode.LOCAL, ProviderMode.LOCAL)
+    stt, emb = _settings(ProviderMode.LOCAL)
     fake_local = MagicMock(name="LocalEmbeddingProvider-instance")
 
     with (
@@ -225,8 +235,8 @@ async def test_available_cache_reuses_instance_while_still_available():
             "app.embeddings.local.is_model_available", new=AsyncMock(return_value=True)
         ) as avail,
     ):
-        provider1, _ = await resolve_embedding_provider(stt, llm, emb)
-        provider2, _ = await resolve_embedding_provider(stt, llm, emb)
+        provider1, _ = await resolve_embedding_provider(stt, emb)
+        provider2, _ = await resolve_embedding_provider(stt, emb)
 
     assert provider1 is provider2 is fake_local
     local_ctor.assert_called_once()
@@ -236,7 +246,7 @@ async def test_available_cache_reuses_instance_while_still_available():
 
 @pytest.mark.asyncio
 async def test_concurrent_local_calls_serialize_and_stay_consistent():
-    """Two concurrent (LOCAL, LOCAL) calls must never interleave their
+    """Two concurrent LOCAL calls must never interleave their
     probe/decide/cleanup-or-reuse/cache-write sequence. A hand-written
     async probe (not a plain AsyncMock) tracks how many calls are
     mid-probe at once via a shared counter incremented on entry and
@@ -248,7 +258,7 @@ async def test_concurrent_local_calls_serialize_and_stay_consistent():
     first call resolves to a fresh provider and the second — observing
     that committed result — flips it to unavailable and cleans it up
     exactly once."""
-    stt, llm, emb = _settings(ProviderMode.LOCAL, ProviderMode.LOCAL)
+    stt, emb = _settings(ProviderMode.LOCAL)
     fake_local = MagicMock(name="LocalEmbeddingProvider-instance")
 
     in_flight = 0
@@ -275,8 +285,8 @@ async def test_concurrent_local_calls_serialize_and_stay_consistent():
         ),
     ):
         result1, result2 = await asyncio.gather(
-            resolve_embedding_provider(stt, llm, emb),
-            resolve_embedding_provider(stt, llm, emb),
+            resolve_embedding_provider(stt, emb),
+            resolve_embedding_provider(stt, emb),
         )
 
     assert max_in_flight == 1
@@ -286,13 +296,13 @@ async def test_concurrent_local_calls_serialize_and_stay_consistent():
 
 @pytest.mark.asyncio
 async def test_concurrent_local_calls_each_reprobe_no_coalescing():
-    """Serializing (LOCAL, LOCAL) resolutions behind `_local_reprobe_lock`
+    """Serializing LOCAL resolutions behind `_local_reprobe_lock`
     must not accidentally coalesce concurrent callers into a single probe:
     3 concurrent calls still make 3 independent `is_model_available()`
     round-trips (Spec 006/008's no-coalescing design, unchanged), while
     still reusing the same LocalEmbeddingProvider instance across all of
     them, now proven under real concurrency rather than just sequentially."""
-    stt, llm, emb = _settings(ProviderMode.LOCAL, ProviderMode.LOCAL)
+    stt, emb = _settings(ProviderMode.LOCAL)
     fake_local = MagicMock(name="LocalEmbeddingProvider-instance")
 
     with (
@@ -302,9 +312,9 @@ async def test_concurrent_local_calls_each_reprobe_no_coalescing():
         ) as avail,
     ):
         results = await asyncio.gather(
-            resolve_embedding_provider(stt, llm, emb),
-            resolve_embedding_provider(stt, llm, emb),
-            resolve_embedding_provider(stt, llm, emb),
+            resolve_embedding_provider(stt, emb),
+            resolve_embedding_provider(stt, emb),
+            resolve_embedding_provider(stt, emb),
         )
 
     assert avail.call_count == 3
@@ -581,17 +591,17 @@ async def test_a_stale_local_provider_that_refuses_to_release_is_recorded(caplog
     same lost unload as above, on the path that runs without anyone asking."""
     import app.embeddings as embeddings_module
 
-    stt, llm, emb = _settings(ProviderMode.LOCAL, ProviderMode.LOCAL)
+    stt, emb = _settings(ProviderMode.LOCAL)
     stale = MagicMock()
     stale.cleanup.side_effect = OSError("Ollama is not reachable")
     embeddings_module._cached_provider = stale
-    embeddings_module._cached_key = (ProviderMode.LOCAL, ProviderMode.LOCAL)
+    embeddings_module._cached_key = ProviderMode.LOCAL
 
     with (
         patch("app.embeddings.local.is_model_available", new=AsyncMock(return_value=False)),
         caplog.at_level(logging.DEBUG, logger="app.embeddings"),
     ):
-        provider, reason = await resolve_embedding_provider(stt, llm, emb)
+        provider, reason = await resolve_embedding_provider(stt, emb)
 
     assert provider is None
     assert reason == LOCAL_MISSING_MODEL_REASON

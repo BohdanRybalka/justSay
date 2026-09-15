@@ -1,17 +1,19 @@
-"""Embedding provider selection — mirrors the shape of ``app.stt`` / ``app.llm``.
+"""Embedding provider selection — mirrors the shape of ``app.stt``.
 
-Eligibility is DERIVED from the two existing Cloud/Local toggles
-(``stt.mode``, ``llm.mode``), never a third user-set toggle:
+Eligibility is DERIVED from the one Cloud/Local toggle the user can operate,
+``stt.mode``, never a toggle of its own:
 
-  - Cloud embeddings only when ``stt.mode == CLOUD and llm.mode == CLOUD``
-    (reuses the Gemini key already present for cloud STT).
-  - Local embeddings only when ``stt.mode == LOCAL and llm.mode == LOCAL``
-    AND Ollama reports ``nomic-embed-text`` pulled.
-  - Every other combination (including any mixed cloud/local pairing)
-    disables the feature outright — the safe default when ambiguous.
+  - Cloud embeddings when ``stt.mode == CLOUD`` (reuses the Gemini key
+    already present for cloud STT).
+  - Local embeddings when ``stt.mode == LOCAL`` AND Ollama reports
+    ``nomic-embed-text`` pulled; otherwise the feature is disabled with
+    ``LOCAL_MISSING_MODEL_REASON``.
 
-See ``docs/adr/001-sqlite-vec-embedding-provider-selection.md`` for the
-full reasoning.
+There is no third state: with a single switch there is no mixed pairing to
+report. ``docs/adr/071-semantic-search-keys-on-the-dictation-mode.md`` records
+why, superseding the two-toggle formulation in
+``docs/adr/001-sqlite-vec-embedding-provider-selection.md``, which holds for
+everything else about this package.
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ from typing import Protocol
 
 from app.core.types import ProviderMode
 from app.embeddings.config import EmbeddingSettings
-from app.llm.config import LLMSettings
 from app.stt.config import STTSettings
 
 log = logging.getLogger(__name__)
@@ -50,10 +51,6 @@ class EmbeddingProvider(Protocol):
         """
 
 
-MIXED_MODE_REASON = (
-    "Semantic search needs matching Cloud/Local mode on both Speech-to-Text "
-    "and AI Processing"
-)
 LOCAL_MISSING_MODEL_REASON = (
     "Local embeddings need Ollama with nomic-embed-text pulled — run "
     "`ollama pull nomic-embed-text`"
@@ -63,54 +60,52 @@ _cache_lock = threading.Lock()
 _local_reprobe_lock = asyncio.Lock()
 _cached_provider: EmbeddingProvider | None = None
 _cached_reason: str | None = None
-_cached_key: tuple[ProviderMode, ProviderMode] | None = None
+_cached_key: ProviderMode | None = None
 
 
 async def resolve_embedding_provider(
-    stt: STTSettings, llm: LLMSettings, emb: EmbeddingSettings
+    stt: STTSettings, emb: EmbeddingSettings
 ) -> tuple[EmbeddingProvider | None, str | None]:
-    """Factory with caching, keyed on ``(stt.mode, llm.mode)`` — same
-    cached-mode pattern as ``app.stt.get_provider``. Deliberately ``async``
-    (unlike the STT factory) because the Local-mode branch must probe
-    Ollama's tag list over HTTP to check for ``nomic-embed-text`` before
-    deciding eligibility.
+    """Factory with caching, keyed on ``stt.mode`` — same cached-mode pattern
+    as ``app.stt.get_provider``. Deliberately ``async`` (unlike the STT
+    factory) because the Local-mode branch must probe Ollama's tag list over
+    HTTP to check for ``nomic-embed-text`` before deciding eligibility.
 
-    A ``(LOCAL, LOCAL)`` cache entry is re-probed against Ollama's tag list
-    on *every* call, in both directions: a cached negative result caused by
-    a missing local model (``LOCAL_MISSING_MODEL_REASON``) re-checks in
-    case the model has since appeared, and a cached positive result
-    (a working ``LocalEmbeddingProvider``) re-checks in case the model has
-    since disappeared (e.g. ``ollama rm nomic-embed-text``) — the stale
-    provider's ``cleanup()`` is called before it's dropped from cache. While
-    the model remains available across consecutive calls, the same
+    A ``LOCAL`` cache entry is re-probed against Ollama's tag list on *every*
+    call, in both directions: a cached negative result caused by a missing
+    local model (``LOCAL_MISSING_MODEL_REASON``) re-checks in case the model
+    has since appeared, and a cached positive result (a working
+    ``LocalEmbeddingProvider``) re-checks in case the model has since
+    disappeared (e.g. ``ollama rm nomic-embed-text``) — the stale provider's
+    ``cleanup()`` is called before it's dropped from cache. While the model
+    remains available across consecutive calls, the same
     ``LocalEmbeddingProvider`` instance is reused rather than reconstructed.
-    Cloud and mixed-mode results are cached as before — neither key ever
-    enters this re-probe branch.
+    A ``CLOUD`` result is cached as before — that key never enters this
+    re-probe branch.
 
-    Concurrent ``(LOCAL, LOCAL)`` callers queue behind ``_local_reprobe_lock``
-    and run their entire probe/decide/cleanup-or-reuse/cache-write sequence
-    strictly one at a time, so a later call always observes the prior call's
+    Concurrent ``LOCAL`` callers queue behind ``_local_reprobe_lock`` and run
+    their entire probe/decide/cleanup-or-reuse/cache-write sequence strictly
+    one at a time, so a later call always observes the prior call's
     fully-committed result before making its own cleanup-or-reuse decision.
     This does not change the no-coalescing design above: each queued call
     still independently re-probes Ollama (N concurrent callers still make N
     sequential HTTP round-trips, just serialized rather than racing).
-    Cloud/mixed-mode resolution is unaffected and keeps using only
-    ``_cache_lock``.
+    Cloud resolution is unaffected and keeps using only ``_cache_lock``.
     """
     global _cached_provider, _cached_reason, _cached_key
 
-    key = (stt.mode, llm.mode)
+    key = stt.mode
 
-    if key == (ProviderMode.LOCAL, ProviderMode.LOCAL):
+    if key == ProviderMode.LOCAL:
         from app.embeddings.local import LocalEmbeddingProvider, is_model_available
 
         async with _local_reprobe_lock:
             with _cache_lock:
                 stale_local_provider = _cached_provider if _cached_key == key else None
 
-            if await is_model_available(llm, emb.local_model):
+            if await is_model_available(emb.ollama_host, emb.local_model):
                 provider: EmbeddingProvider | None = stale_local_provider or LocalEmbeddingProvider(
-                    ollama_host=llm.ollama_host, model=emb.local_model
+                    ollama_host=emb.ollama_host, model=emb.local_model
                 )
                 reason: str | None = None
             else:
@@ -134,14 +129,10 @@ async def resolve_embedding_provider(
         if _cached_key == key:
             return _cached_provider, _cached_reason
 
-    if stt.mode == ProviderMode.CLOUD and llm.mode == ProviderMode.CLOUD:
-        from app.embeddings.cloud import CloudEmbeddingProvider
+    from app.embeddings.cloud import CloudEmbeddingProvider
 
-        provider = CloudEmbeddingProvider(gemini_api_key=stt.gemini_api_key, model=emb.cloud_model)
-        reason = None
-    else:
-        provider = None
-        reason = MIXED_MODE_REASON
+    provider = CloudEmbeddingProvider(gemini_api_key=stt.gemini_api_key, model=emb.cloud_model)
+    reason = None
 
     with _cache_lock:
         _cached_provider = provider
@@ -151,10 +142,11 @@ async def resolve_embedding_provider(
 
 
 def clear_cache() -> None:
-    """Invalidate the cached provider. Call on stt/llm mode or key change.
+    """Invalidate the cached provider. Call on dictation-mode, key or
+    Ollama-host change.
 
     Hooked into ``user_settings.sync_to_runtime``'s existing
-    ``changed_stt``/``changed_llm`` invalidation, and into ``main.py``'s
+    ``changed_stt``/``changed_embeddings`` invalidation, and into ``main.py``'s
     ``lifespan`` shutdown block alongside the STT-cache release.
 
     Calls the cached provider's ``cleanup()`` before dropping the reference,

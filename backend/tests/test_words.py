@@ -484,6 +484,51 @@ async def test_the_only_embed_call_is_the_resolved_providers_own():
     assert fake_provider.embed.await_args.args == ("anything",)
 
 
+@pytest.mark.asyncio
+async def test_local_dictation_mode_gets_rows_rather_than_a_refusal():
+    """Spec 169 AC: a Local-mode install used to be refused with the mixed-mode
+    reason on every semantic search, because the other half of the eligibility
+    key was frozen at ``cloud`` and unreachable from the UI. Eligibility now
+    keys on the dictation mode alone, so the same install reaches the local
+    provider and gets rows back.
+
+    ``resolve_embedding_provider`` is NOT mocked here -- that would mock away
+    the rule under test. Only Ollama is stood in for: the tag probe reports the
+    model pulled and the provider returns a fixed vector.
+    """
+    from app.core.config import settings as runtime_settings
+    from app.core.types import ProviderMode
+    from app.embeddings import clear_cache as clear_embeddings_cache
+
+    entry = history.save_entry(text="local mode entry", duration_ms=1)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        vector_store.ensure_vec_table_locked(conn, "local", "ollama/nomic-embed-text", 3)
+        rowid = conn.execute("SELECT rowid FROM entries WHERE id = ?", (entry.id,)).fetchone()[0]
+        vector_store.insert_embedding(
+            conn, entry.id, rowid, [1.0, 0.0, 0.0], "local", "ollama/nomic-embed-text"
+        )
+
+    fake_local = Mock()
+    fake_local.model_name = "ollama/nomic-embed-text"
+    fake_local.embed = AsyncMock(return_value=[1.0, 0.0, 0.0])
+
+    saved_mode = runtime_settings.stt.mode
+    runtime_settings.stt.mode = ProviderMode.LOCAL
+    clear_embeddings_cache()
+    try:
+        with (
+            patch("app.embeddings.local.is_model_available", new=AsyncMock(return_value=True)),
+            patch("app.embeddings.local.LocalEmbeddingProvider", return_value=fake_local),
+        ):
+            hits = await words.search_history_semantic("anything", limit=10)
+    finally:
+        runtime_settings.stt.mode = saved_mode
+        clear_embeddings_cache()
+
+    assert [h.id for h in hits] == [entry.id]
+
+
 def test_the_semantic_refusal_is_inside_the_error_hierarchy():
     """Replaces a prose claim in docs/style-guide.md §3.1: the class is a
     ``ResourceUnavailableError``, so it answers 503 rather than becoming a 500 the

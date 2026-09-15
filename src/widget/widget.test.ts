@@ -6,7 +6,7 @@ import { EVENT_MEETING_TOGGLE } from "../contracts";
 import { CONNECTION_POLL_MS } from "./settings-retry";
 
 const apiMock = {
-  health: vi.fn(async () => ({ status: "ok", version: "0", stt_mode: "cloud", llm_mode: "cloud" })),
+  health: vi.fn(async () => ({ status: "ok", version: "0", stt_mode: "cloud" })),
   getSettings: vi.fn(async () => {
     throw new Error("settings not needed here");
   }),
@@ -118,7 +118,6 @@ beforeEach(() => {
     status: "ok",
     version: "0",
     stt_mode: "cloud",
-    llm_mode: "cloud",
   });
   apiMock.getSettings.mockRejectedValue(new Error("settings not needed here"));
   apiMock.getMeetingStatus.mockResolvedValue({
@@ -156,7 +155,7 @@ describe("the widget's own timers", () => {
         new Promise((resolve, reject) => {
           pending.push((ok) =>
             ok
-              ? resolve({ status: "ok", version: "0", stt_mode: "cloud", llm_mode: "cloud" })
+              ? resolve({ status: "ok", version: "0", stt_mode: "cloud" })
               : reject(new TypeError("Failed to fetch")),
           );
         }),
