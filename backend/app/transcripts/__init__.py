@@ -1,6 +1,6 @@
 """Stored transcripts — the SQLite entry store, its search lanes and word stats.
 
-These twelve modules form a closed sub-graph. `history` owns the connection,
+These eleven modules form a closed sub-graph. `history` owns the connection,
 the lock and the reads and writes over `entries`; `schema` holds that table's
 DDL, column lists and migrations; `relocation` moves the file when the output
 directory changes; `search` owns the keyword and semantic lanes; `vector_store`

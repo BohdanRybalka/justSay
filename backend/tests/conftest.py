@@ -859,3 +859,27 @@ def insert_history_rows():
             history.invalidate_derived_caches_locked()
 
     return insert
+
+
+@pytest.fixture
+def isolated_transcript_storage(tmp_path, monkeypatch):
+    """Bootstraps the transcript store into ``tmp_path`` and closes it afterwards.
+
+    Deliberately **not** autouse. It lived as an autouse fixture in
+    ``test_words.py`` until that file was split into ``test_words.py`` and
+    ``test_search.py``; making it autouse here would apply a store bootstrap to
+    every test in the suite, which is a behaviour change rather than a move. The
+    two modules that need it opt in with a module-level
+    ``pytestmark = pytest.mark.usefixtures(...)``.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(history, "_output_dir", tmp_path)
+    monkeypatch.setattr(history, "_conn", None)
+    monkeypatch.setattr(history, "_stats_cache", None)
+
+    history.bootstrap(tmp_path)
+    yield
+    with history._lock:
+        history._close_conn_locked()

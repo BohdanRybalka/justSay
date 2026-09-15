@@ -29,8 +29,10 @@ Seven properties are pinned here:
    removing it, and puts the package surface this rule deletes straight back.
 6. Importing a pure DSP module does not load the capture stack.
 7. An underscore-prefixed attribute is private to its own package (ADR 072).
-   A sibling module may name it; a module in another package may not, in
-   either spelling -- `alias._name` or `from app.x.y import _name`. The
+   A sibling module may name it; a module in another package may not, in any
+   spelling -- `alias._name`, `app.x.y._name` after a plain `import app.x.y`,
+   or `from app.x.y import _name`. An underscore-named *module* imported by a
+   sibling of its own package is the arrangement working, not a reach-in. The
    allowlist for it ships empty, and `app/` is the whole scope: a test
    legitimately reaches internals and is deliberately not walked.
 
@@ -67,6 +69,10 @@ with the number of tests each one reddens:
   `from ..transcripts import history` -- one test each
 - `from app.transcripts.history import _lock` planted in the same module --
   one test, which is what proves the `ImportFrom` arm of the walk exists
+- `history._lock` read from `app/pipeline/service.py` through the dotted
+  spelling a plain `import app.transcripts.history` binds, written out as
+  `app.transcripts.history._lock` -- one test, which is what proves the
+  attribute arm resolves a chain rather than a single `Name`
 - a fictional entry added to the empty package-private allowlist -- one test
 - the walk's attribute arm short-circuited to find nothing -- one test, the
   non-vacuity pin, and the gate deliberately stays green, which is why that
@@ -74,6 +80,12 @@ with the number of tests each one reddens:
 - `history._lock` read from `app/transcripts/store_errors.py`, a sibling in
   the same package -- **zero** tests, the negative control proving the rule is
   not over-broad
+- a package-private module `app/transcripts/_helpers.py` added alongside an
+  `app/transcripts/_zz_consumer.py` spelling `from app.transcripts import
+  _helpers` -- **zero** tests, the second negative control: a sibling naming a
+  package-private module of its own package is what the rule permits, and the
+  `ImportFrom` arm used to record the package rather than the module and fire
+  on it
 
 Each list below is an allowlist, not a description: adding an entry is a
 deliberate act a reviewer can see in the diff.
@@ -82,6 +94,7 @@ deliberate act a reviewer can see in the diff.
 from __future__ import annotations
 
 import ast
+import functools
 from collections import defaultdict
 from pathlib import Path
 
@@ -143,6 +156,7 @@ _FEATURE_PACKAGES = {
 }
 
 
+@functools.cache
 def _modules() -> dict[str, Path]:
     found = {}
     for path in sorted(_APP_DIR.rglob("*.py")):
@@ -530,6 +544,38 @@ def _module_aliases(tree: ast.Module, package: str, modules: dict[str, Path]) ->
     return aliases
 
 
+def _dotted_name(node: ast.expr) -> str | None:
+    """The dotted source spelling of an attribute chain, or None if it is not one.
+
+    `app.transcripts.history` arrives as three nested `Attribute` nodes over a
+    `Name`, so a check that only accepts `isinstance(node.value, ast.Name)` sees
+    `alias._x` and misses `app.transcripts.history._x` -- which is what a plain
+    `import app.transcripts.history` actually binds.
+    """
+    parts: list[str] = []
+    current: ast.expr = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return None
+    parts.append(current.id)
+    return ".".join(reversed(parts))
+
+
+def _resolved_module(dotted: str, aliases: dict[str, str], modules: dict[str, Path]) -> str | None:
+    head, _, rest = dotted.partition(".")
+    if head in aliases:
+        candidate = f"{aliases[head]}.{rest}" if rest else aliases[head]
+        if candidate in modules:
+            return candidate
+    return dotted if dotted in modules else None
+
+
+def _is_package_private(name: str) -> bool:
+    return name.startswith("_") and not name.startswith("__")
+
+
 def _underscore_reach_ins(
     module: str, path: Path, modules: dict[str, Path]
 ) -> list[tuple[str, str, str]]:
@@ -541,6 +587,14 @@ def _underscore_reach_ins(
     `relocate` writes `history._output_dir` -- and a direct `from app.x.y import
     _name`. Covering only the first would leave the rule one import line away
     from irrelevance, exactly as matching the literal `fastapi` did for rule 3.
+    The attribute arm resolves a whole dotted chain, so the alias spelling
+    `history._lock` and the plain-import spelling `app.transcripts.history._lock`
+    are both seen.
+
+    When `from app.x import _y` names a *module* rather than an attribute, the
+    target recorded is that module, not the package it was imported from.
+    Recording the package would make a sibling importing a package-private
+    module of its own package read as a cross-package reach-in.
 
     `ast.walk` reaches a function-body import as well as a module-top one, which
     is what makes `app/transcripts/schema.py`'s deferred `vector_store` import
@@ -551,20 +605,26 @@ def _underscore_reach_ins(
     aliases = _module_aliases(tree, package, modules)
     found: list[tuple[str, str, str]] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            target = aliases.get(node.value.id)
-            if target is not None and node.attr.startswith("_") and not node.attr.startswith("__"):
+        if isinstance(node, ast.Attribute) and _is_package_private(node.attr):
+            dotted = _dotted_name(node.value)
+            target = (
+                _resolved_module(dotted, aliases, modules) if dotted is not None else None
+            )
+            if target is not None:
                 found.append((module, target, node.attr))
         elif isinstance(node, ast.ImportFrom):
             for base in _import_from_names(node, package):
                 if base not in modules:
                     continue
                 for alias in node.names:
-                    if alias.name.startswith("_") and not alias.name.startswith("__"):
-                        found.append((module, base, alias.name))
+                    if not _is_package_private(alias.name):
+                        continue
+                    full = f"{base}.{alias.name}"
+                    found.append((module, full if full in modules else base, alias.name))
     return found
 
 
+@functools.cache
 def _all_underscore_reach_ins() -> set[tuple[str, str, str]]:
     modules = _modules()
     found: set[tuple[str, str, str]] = set()

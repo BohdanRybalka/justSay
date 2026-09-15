@@ -18,14 +18,13 @@ from app.transcripts.history import (
     delete_entry,
     get_page,
 )
-from app.transcripts.search import HistorySearchHit
 from app.transcripts.store_errors import store_busy_as_503
 
 router = APIRouter(prefix="/history", tags=["History"])
 
 
 class HistorySearchResponse(BaseModel):
-    entries: list[HistorySearchHit]
+    entries: list[search.HistorySearchHit]
     total: int
 
 
