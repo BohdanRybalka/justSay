@@ -44,8 +44,15 @@ def _resolve_macro_text(name: str, bodies: dict[str, str], seen: set[str] | None
 
 def _sidecar_image_name() -> str:
     text = BACKEND_RS.read_text(encoding="utf-8")
-    match = re.search(r'if cfg!\(windows\)\s*\{\s*"([^"]+\.exe)"', text)
-    assert match, "could not find the Windows sidecar image name literal in backend.rs"
+    match = re.search(
+        r'#\[cfg\(windows\)\]\s*const SIDECAR_EXECUTABLE_NAME: &str = "([^"]+\.exe)";',
+        text,
+    )
+    assert match, (
+        "could not find the Windows SIDECAR_EXECUTABLE_NAME literal in backend.rs — "
+        "the installer hook kills the sidecar by image name, so this test reads that "
+        "name out of the Rust source rather than restating it"
+    )
     return match.group(1)
 
 

@@ -656,6 +656,18 @@ fn find_backend_dir() -> Result<PathBuf, String> {
     Err("Backend directory not found. Expected 'backend/app/main.py'.".to_string())
 }
 
+/// The file name the PyInstaller sidecar is built and shipped under, pinned
+/// once so a rename cannot desynchronise the orphan reapers from the binary
+/// they are meant to find. This is the executable's own name only — the
+/// resource directory the bundler creates around it is `justsay-backend` on
+/// both platforms and stays a literal at its own join site, since substituting
+/// this constant there would make Windows look for the sidecar inside
+/// `justsay-backend.exe/`.
+#[cfg(windows)]
+const SIDECAR_EXECUTABLE_NAME: &str = "justsay-backend.exe";
+#[cfg(not(windows))]
+const SIDECAR_EXECUTABLE_NAME: &str = "justsay-backend";
+
 /// Resolve the production sidecar path inside the installed resource dir.
 /// Returns `None` if no frozen sidecar is present (developer setup).
 ///
@@ -666,12 +678,9 @@ fn find_backend_dir() -> Result<PathBuf, String> {
 /// scope, so they agree by construction.
 fn resolve_sidecar(app: &AppHandle) -> Option<PathBuf> {
     let resource_dir = app.path().resource_dir().ok()?;
-    let name = if cfg!(windows) {
-        "justsay-backend.exe"
-    } else {
-        "justsay-backend"
-    };
-    let candidate = resource_dir.join("justsay-backend").join(name);
+    let candidate = resource_dir
+        .join("justsay-backend")
+        .join(SIDECAR_EXECUTABLE_NAME);
     if candidate.exists() {
         Some(candidate)
     } else {
@@ -679,28 +688,32 @@ fn resolve_sidecar(app: &AppHandle) -> Option<PathBuf> {
     }
 }
 
+/// Retry budget for re-testing `PORT` after an orphan was reaped.
+const PORT_REAP_POLL_MAX_ATTEMPTS: u32 = 20;
+const PORT_REAP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Check if the port is available before spawning.
 ///
-/// On Windows, the previous `tauri dev` / installed-app session may have
-/// orphaned its sidecar — `tauri-plugin-shell` does not create a Job
-/// Object, so a parent crash or a failed in-process `CommandChild::kill()`
-/// can leave `justsay-backend.exe` running and squatting on `PORT`. If we
-/// detect an orphan that's clearly ours, reap it and retry instead of
-/// punishing the user with a startup error.
+/// The previous `tauri dev` / installed-app session may have orphaned its
+/// sidecar — `tauri-plugin-shell` does not create a Job Object, and macOS has
+/// no equivalent to fall back on — so a parent crash or a failed in-process
+/// `CommandChild::kill()` can leave the sidecar running and squatting on
+/// `PORT`. If we detect an orphan that's clearly ours, reap it and retry
+/// instead of punishing the user with a startup error. Deliberately carries no
+/// `#[cfg]` of its own: which platforms can reap is `reap_orphan_sidecar()`'s
+/// question alone, so a platform added there needs no second edit here. See
+/// `docs/adr/069-an-orphaned-backend-is-cleared-at-the-next-launch.md`.
 fn check_port_available() -> Result<(), String> {
     if try_bind_port() {
         return Ok(());
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        if reap_orphan_sidecar() {
-            for _ in 0..20 {
-                std::thread::sleep(Duration::from_millis(100));
-                if try_bind_port() {
-                    log::info!("Reaped orphan sidecar; port {} freed", PORT);
-                    return Ok(());
-                }
+    if reap_orphan_sidecar() {
+        for _ in 0..PORT_REAP_POLL_MAX_ATTEMPTS {
+            std::thread::sleep(PORT_REAP_POLL_INTERVAL);
+            if try_bind_port() {
+                log::info!("Reaped orphan sidecar; port {} freed", PORT);
+                return Ok(());
             }
         }
     }
@@ -715,15 +728,16 @@ fn try_bind_port() -> bool {
     std::net::TcpListener::bind(format!("127.0.0.1:{}", PORT)).is_ok()
 }
 
-/// On Windows: if `justsay-backend.exe` (our PyInstaller sidecar) is
-/// running, kill it with `taskkill /F /T`. Returns true when at least one
-/// such process was found and asked to terminate. Conservative — only
-/// matches by the exact image name we ship, never anything else.
+/// On Windows: if our PyInstaller sidecar is running, kill it with
+/// `taskkill /F /T`. Returns true when at least one such process was found
+/// and asked to terminate. Conservative — only matches by the exact image
+/// name we ship, never anything else.
 #[cfg(target_os = "windows")]
 fn reap_orphan_sidecar() -> bool {
     use std::os::windows::process::CommandExt;
+    let image_filter = format!("IMAGENAME eq {}", SIDECAR_EXECUTABLE_NAME);
     let listing = Command::new("tasklist")
-        .args(["/FI", "IMAGENAME eq justsay-backend.exe", "/NH"])
+        .args(["/FI", &image_filter, "/NH"])
         .creation_flags(CREATE_NO_WINDOW)
         .output();
     let stdout = match listing {
@@ -731,15 +745,77 @@ fn reap_orphan_sidecar() -> bool {
         Err(_) => return false,
     };
     let listed = String::from_utf8_lossy(&stdout);
-    if !listed.to_lowercase().contains("justsay-backend.exe") {
+    if !listed
+        .to_lowercase()
+        .contains(&SIDECAR_EXECUTABLE_NAME.to_lowercase())
+    {
         return false;
     }
-    log::warn!("Found orphan justsay-backend.exe — reaping before spawn");
+    log::warn!(
+        "Found orphan {} — reaping before spawn",
+        SIDECAR_EXECUTABLE_NAME
+    );
     let _ = Command::new("taskkill")
-        .args(["/F", "/T", "/IM", "justsay-backend.exe"])
+        .args(["/F", "/T", "/IM", SIDECAR_EXECUTABLE_NAME])
         .creation_flags(CREATE_NO_WINDOW)
         .status();
     true
+}
+
+/// On macOS: the same next-launch reap Windows has had since ADR 023. There is
+/// no Job Object here, so a force-quit of the shell leaves the sidecar holding
+/// `PORT` and the next launch fails until the user ends it by hand — see
+/// `docs/adr/069-an-orphaned-backend-is-cleared-at-the-next-launch.md`.
+#[cfg(target_os = "macos")]
+fn reap_orphan_sidecar() -> bool {
+    reap_processes_named(SIDECAR_EXECUTABLE_NAME)
+}
+
+/// Kill every process whose executable name is exactly `executable_name`,
+/// reporting whether any was found. Split out of `reap_orphan_sidecar()` so a
+/// test can drive it against a name of its own choosing and never touch a real
+/// backend.
+///
+/// `pgrep -x` matches the executable name the kernel records rather than
+/// `argv[0]`, so it finds the sidecar however it was invoked. `SIGKILL` rather
+/// than `SIGTERM` is deliberate: a graceful stop would run the backend's
+/// `lifespan` teardown, which resets `prewarm_crash_guard.json` — the counter
+/// `GracefulStop::ForceKillOnly` exists to protect. Both tools are addressed by
+/// absolute path because a macOS GUI process inherits launchd's minimal `PATH`.
+#[cfg(target_os = "macos")]
+fn reap_processes_named(executable_name: &str) -> bool {
+    let listing = Command::new("/usr/bin/pgrep")
+        .args(["-x", executable_name])
+        .output();
+    let pids: Vec<String> = match listing {
+        Ok(output) => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Err(_) => return false,
+    };
+    if pids.is_empty() {
+        return false;
+    }
+    log::warn!(
+        "Found orphan {} (PIDs {:?}) — reaping before spawn",
+        executable_name,
+        pids
+    );
+    let mut args = vec!["-KILL".to_string()];
+    args.extend(pids);
+    let _ = Command::new("/bin/kill").args(&args).status();
+    true
+}
+
+/// Neither shipped platform: report nothing rather than fail to compile, so a
+/// stray `cargo check` on a third target still builds. Nothing in CI compiles
+/// this arm.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn reap_orphan_sidecar() -> bool {
+    false
 }
 
 /// Process-lifetime Windows Job Object carrying `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`,
@@ -1098,19 +1174,28 @@ const SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS: u32 = 50;
 #[cfg(windows)]
 const SIDECAR_SHUTDOWN_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 
+#[cfg(not(target_os = "windows"))]
+const SIGTERM_POLL_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(not(target_os = "windows"))]
+const SIGTERM_POLL_MAX_ATTEMPTS: u32 = 30;
+
 /// Poll interval and attempt budget for `lock_with_wait(..., LockWait::UntilFree)`.
 /// Cross-platform (no `#[cfg(windows)]`): the guard contract they express —
 /// "the quit path waits for `BACKEND_PROCESS` instead of silently skipping
 /// it" — applies on every platform, not just Windows. Sized against the
-/// longest bounded hold any other thread can still take on this lock: the
-/// Windows `Sidecar` branch's own `GracefulStop::ShutdownEndpoint` window,
-/// `SIDECAR_SHUTDOWN_REQUEST_TIMEOUT` (1s) + `SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS`
-/// * `GRACEFUL_POLL_INTERVAL` (50 * 100ms = 5s) = 6s — not the 3s macOS
-/// `SIGTERM` poll or the 3s `CtrlBreakEvent` poll, both of which are shorter.
+/// longest bounded graceful-stop window another thread can still hold this
+/// lock for: on Windows `SIDECAR_SHUTDOWN_REQUEST_TIMEOUT` plus
+/// `SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS * GRACEFUL_POLL_INTERVAL`, on every
+/// other platform `SIGTERM_POLL_MAX_ATTEMPTS * SIGTERM_POLL_INTERVAL`.
 /// `lock_with_wait` sleeps one interval fewer than it has attempts (the last
 /// attempt logs instead of sleeping), so the realised wait is
-/// `(SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS - 1) * SHUTDOWN_LOCK_WAIT_POLL_INTERVAL`
-/// = 69 * 100ms = 6.9s, strictly above the 6s it must outlast. See
+/// `(SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS - 1) * SHUTDOWN_LOCK_WAIT_POLL_INTERVAL`.
+/// The arithmetic is deliberately not spelled out here — a prose number
+/// standing beside a constant is how a wrong one survives. Both sides are
+/// computed from the constants themselves by
+/// `guard_wait_strictly_outlasts_the_longest_graceful_stop` and
+/// `guard_wait_strictly_outlasts_the_sigterm_poll_window`, one per platform,
+/// which compare polling windows and nothing else. See
 /// `docs/adr/032-production-quit-runs-backend-teardown.md`.
 const SHUTDOWN_LOCK_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS: u32 = 70;
@@ -1176,27 +1261,26 @@ fn lock_with_wait<T>(mutex: &Mutex<T>, wait: LockWait) -> Option<std::sync::Mute
     None
 }
 
-/// Which Windows mechanism `terminate_gracefully()` should attempt before
-/// falling back to a forced kill. Non-Windows builds never construct or
-/// read this — the `#[cfg(not(target_os = "windows"))]` arm of
-/// `terminate_gracefully()` always sends `SIGTERM` regardless — so the type
-/// carries `allow(dead_code)` there rather than being `#[cfg(windows)]`
-/// itself: both call sites in `kill_current_process()` construct a variant
-/// unconditionally, on every platform.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+/// Which graceful stop `terminate_gracefully()` should attempt before falling
+/// back to a forced kill. Read on every platform, not just Windows: the
+/// variant is matched once, outside every `#[cfg]`, so `ForceKillOnly` skips
+/// the graceful step on macOS exactly as it does on Windows. The other two
+/// variants differ by platform only in the mechanism they use — a console
+/// event or a `/shutdown` call on Windows, `SIGTERM` elsewhere — never in
+/// whether a graceful step runs at all.
 enum GracefulStop {
-    /// `Dev` call site only — the child was spawned with
+    /// `Dev` call site only — on Windows the child was spawned with
     /// `CREATE_NEW_PROCESS_GROUP`, so `CTRL_BREAK_EVENT` can safely target
-    /// it alone.
+    /// it alone; elsewhere this is `SIGTERM`.
     CtrlBreakEvent,
-    /// Production `Sidecar` call site — the shell plugin's `Command`
-    /// builder exposes no way to set `CREATE_NEW_PROCESS_GROUP`, so a
-    /// console event is unsafe. Calls the sidecar's own `POST /shutdown`
-    /// route instead.
+    /// Production `Sidecar` call site — on Windows the shell plugin's
+    /// `Command` builder exposes no way to set `CREATE_NEW_PROCESS_GROUP`, so
+    /// a console event is unsafe and the sidecar's own `POST /shutdown` route
+    /// is called instead; elsewhere this is `SIGTERM`.
     ShutdownEndpoint,
     /// The watchdog's pre-respawn `kill_current_process()` call only — never
     /// `RunEvent::Exit`. Skips the graceful request and the liveness poll
-    /// entirely and force-kills at once. Not a latency tweak: a backend hung
+    /// entirely, on every platform, and force-kills at once. Not a latency tweak: a backend hung
     /// inside `asyncio.to_thread(provider._get_model)` still answers
     /// `POST /shutdown` (its event loop is free), so a graceful watchdog kill
     /// would run `lifespan`'s teardown, which cancels
@@ -1245,89 +1329,123 @@ fn request_sidecar_shutdown() -> bool {
         .unwrap_or(false)
 }
 
+/// Send `CTRL_BREAK_EVENT` to a dev child spawned with
+/// `CREATE_NEW_PROCESS_GROUP` (the only shape this can safely target alone)
+/// and poll `is_alive` for `CTRL_BREAK_POLL_MAX_ATTEMPTS` intervals. Returns
+/// whether the child exited inside that window; never force-kills, so
+/// `terminate_gracefully()` stays the one place that does.
+#[cfg(target_os = "windows")]
+fn stop_dev_child_via_ctrl_break(pid: u32, is_alive: &mut impl FnMut() -> bool) -> bool {
+    let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } != 0;
+    if !sent {
+        log::warn!("GenerateConsoleCtrlEvent failed for PID {}; force-killing", pid);
+        return false;
+    }
+    for _ in 0..CTRL_BREAK_POLL_MAX_ATTEMPTS {
+        if !is_alive() {
+            log::info!("PID {} exited gracefully after CTRL_BREAK_EVENT", pid);
+            return true;
+        }
+        std::thread::sleep(GRACEFUL_POLL_INTERVAL);
+    }
+    log::warn!("PID {} still alive 3s after CTRL_BREAK_EVENT; force-killing", pid);
+    false
+}
+
+/// Ask the production sidecar to stop through its own `POST /shutdown` route,
+/// then poll `is_alive` for `SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS` intervals.
+/// Returns whether the child exited inside that window; a failed request (no
+/// token configured, connection refused, non-2xx, timeout) is logged and
+/// reported as `false`, the same outcome this call site had before the
+/// endpoint existed. Never force-kills.
+#[cfg(target_os = "windows")]
+fn stop_sidecar_via_shutdown_endpoint(pid: u32, is_alive: &mut impl FnMut() -> bool) -> bool {
+    if !request_sidecar_shutdown() {
+        log::warn!("/shutdown request failed for PID {}; force-killing", pid);
+        return false;
+    }
+    for _ in 0..SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS {
+        if !is_alive() {
+            log::info!("PID {} exited gracefully after /shutdown", pid);
+            return true;
+        }
+        std::thread::sleep(GRACEFUL_POLL_INTERVAL);
+    }
+    log::warn!("PID {} still alive 5s after /shutdown; force-killing", pid);
+    false
+}
+
+/// Send `SIGTERM` and poll `is_alive` for `SIGTERM_POLL_MAX_ATTEMPTS`
+/// intervals. Returns whether the process exited inside that window; never
+/// force-kills. `/bin/kill` by absolute path: a macOS GUI process inherits
+/// launchd's minimal `PATH`, where a bare `kill` is not guaranteed to resolve.
+#[cfg(not(target_os = "windows"))]
+fn stop_via_sigterm(pid: u32, is_alive: &mut impl FnMut() -> bool) -> bool {
+    let _ = Command::new("/bin/kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
+    for _ in 0..SIGTERM_POLL_MAX_ATTEMPTS {
+        if !is_alive() {
+            log::info!("PID {} exited gracefully after SIGTERM", pid);
+            return true;
+        }
+        std::thread::sleep(SIGTERM_POLL_INTERVAL);
+    }
+    log::warn!(
+        "PID {} still alive after the SIGTERM grace period; force-killing",
+        pid
+    );
+    false
+}
+
 /// Attempt a graceful stop before falling back to a forced kill.
 ///
-/// Non-Windows: sends `SIGTERM` via the `kill` command, then polls
-/// `is_alive` every 100ms for up to 3s; if the process is still alive after
-/// that window, calls `force_kill`.
-///
-/// Windows has no POSIX `SIGTERM`. `GracefulStop::CtrlBreakEvent` (the
-/// `Dev` call site only — the child must have been spawned with
-/// `CREATE_NEW_PROCESS_GROUP` for this to target only itself) sends
-/// `CTRL_BREAK_EVENT` and polls the same way as the non-Windows branch, for
-/// `CTRL_BREAK_POLL_MAX_ATTEMPTS`, before falling back to a forced kill.
-/// `GracefulStop::ShutdownEndpoint` (the production `Sidecar` call site)
-/// calls `request_sidecar_shutdown()` instead: on success it polls
-/// `is_alive` every `GRACEFUL_POLL_INTERVAL` for
-/// `SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS`, returning early once the child is
-/// gone; on failure (no token configured, connection refused, non-2xx,
-/// timeout) it logs the reason and falls straight through to `force_kill`
-/// — the same outcome this call site had before this endpoint existed.
-/// `GracefulStop::ForceKillOnly` (the watchdog's pre-respawn call site only)
-/// calls `force_kill` immediately — `is_alive` is never invoked and no
-/// request is sent. See
+/// `graceful_stop` is matched once, outside every `#[cfg]`, so the caller's
+/// choice means the same thing on every platform and the compiler checks that
+/// all three variants are handled on both. `GracefulStop::ForceKillOnly` (the
+/// watchdog's pre-respawn call site only) runs no graceful step anywhere:
+/// `is_alive` is never invoked, no signal or request is sent, and `force_kill`
+/// runs at once. The other two variants delegate to the platform's own
+/// mechanism — `stop_dev_child_via_ctrl_break` or
+/// `stop_sidecar_via_shutdown_endpoint` on Windows, `stop_via_sigterm`
+/// elsewhere — each of which reports whether the process exited inside its
+/// polling window. Only a `false` reaches `force_kill`, which is called here
+/// and nowhere else. See
 /// `docs/adr/032-production-quit-runs-backend-teardown.md`.
-#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 fn terminate_gracefully(
     pid: u32,
     mut is_alive: impl FnMut() -> bool,
     force_kill: impl FnOnce(),
-    windows_stop: GracefulStop,
+    graceful_stop: GracefulStop,
 ) {
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
-        for _ in 0..30 {
-            if !is_alive() {
-                log::info!("PID {} exited gracefully after SIGTERM", pid);
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
+    let stopped_gracefully = match graceful_stop {
+        GracefulStop::CtrlBreakEvent => {
+            #[cfg(target_os = "windows")]
+            let stopped = stop_dev_child_via_ctrl_break(pid, &mut is_alive);
+            #[cfg(not(target_os = "windows"))]
+            let stopped = stop_via_sigterm(pid, &mut is_alive);
+            stopped
         }
-        log::warn!("PID {} still alive 3s after SIGTERM grace period; force-killing", pid);
-    }
-    #[cfg(target_os = "windows")]
-    {
-        match windows_stop {
-            GracefulStop::CtrlBreakEvent => {
-                let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } != 0;
-                if sent {
-                    for _ in 0..CTRL_BREAK_POLL_MAX_ATTEMPTS {
-                        if !is_alive() {
-                            log::info!("PID {} exited gracefully after CTRL_BREAK_EVENT", pid);
-                            return;
-                        }
-                        std::thread::sleep(GRACEFUL_POLL_INTERVAL);
-                    }
-                    log::warn!("PID {} still alive 3s after CTRL_BREAK_EVENT; force-killing", pid);
-                } else {
-                    log::warn!("GenerateConsoleCtrlEvent failed for PID {}; force-killing", pid);
-                }
-            }
-            GracefulStop::ShutdownEndpoint => {
-                if request_sidecar_shutdown() {
-                    for _ in 0..SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS {
-                        if !is_alive() {
-                            log::info!("PID {} exited gracefully after /shutdown", pid);
-                            return;
-                        }
-                        std::thread::sleep(GRACEFUL_POLL_INTERVAL);
-                    }
-                    log::warn!("PID {} still alive 5s after /shutdown; force-killing", pid);
-                } else {
-                    log::warn!("/shutdown request failed for PID {}; force-killing", pid);
-                }
-            }
-            GracefulStop::ForceKillOnly => {
-                log::info!(
-                    "PID {} — watchdog pre-respawn kill; skipping the graceful stop to protect \
-                     the prewarm crash guard",
-                    pid
-                );
-            }
+        GracefulStop::ShutdownEndpoint => {
+            #[cfg(target_os = "windows")]
+            let stopped = stop_sidecar_via_shutdown_endpoint(pid, &mut is_alive);
+            #[cfg(not(target_os = "windows"))]
+            let stopped = stop_via_sigterm(pid, &mut is_alive);
+            stopped
         }
+        GracefulStop::ForceKillOnly => {
+            log::info!(
+                "PID {} — pre-respawn kill; skipping the graceful stop on every platform to \
+                 protect the prewarm crash guard",
+                pid
+            );
+            false
+        }
+    };
+
+    if !stopped_gracefully {
+        force_kill();
     }
-    force_kill();
 }
 
 /// Kill the backend process on shutdown, waiting up to
@@ -1373,7 +1491,8 @@ pub fn shutdown_without_waiting() {
 /// `wait` controls how long to retry a contended `BACKEND_PROCESS` before
 /// giving up (see `LockWait`). `sidecar_stop` selects which
 /// `GracefulStop` the `Sidecar` branch attempts; the `Dev` branch always uses
-/// `GracefulStop::CtrlBreakEvent` regardless of this argument.
+/// `GracefulStop::CtrlBreakEvent` regardless of this argument, which resolves
+/// to `SIGTERM` off Windows.
 ///
 /// **`BACKEND_PROCESS` stays locked for the whole `terminate_gracefully()`
 /// call below, deliberately.** `guard.take()` empties the `Option` on its
@@ -1987,6 +2106,25 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn guard_wait_strictly_outlasts_the_sigterm_poll_window() {
+        let realised_guard_wait =
+            (SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS - 1) * SHUTDOWN_LOCK_WAIT_POLL_INTERVAL;
+        let sigterm_poll_window = SIGTERM_POLL_MAX_ATTEMPTS * SIGTERM_POLL_INTERVAL;
+        assert!(
+            realised_guard_wait > sigterm_poll_window,
+            "the realised guard wait ({:?}, {} attempts since the last one logs instead of \
+             sleeping) must strictly outlast the SIGTERM polling window a holder of \
+             BACKEND_PROCESS can still run ({:?}), or a waiter could give up while the holder \
+             is still mid-teardown. This compares polling windows and nothing else — not the \
+             /bin/kill spawn, not the is_alive closure, not the wait() that follows the guard",
+            realised_guard_wait,
+            SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS - 1,
+            sigterm_poll_window,
+        );
+    }
+
     fn strip_doc_comment_lines(source: &str) -> String {
         source
             .lines()
@@ -2226,9 +2364,8 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
-    fn graceful_stop_force_kill_only_runs_no_graceful_step() {
+    fn force_kill_only_skips_the_graceful_stop_on_every_platform() {
         let is_alive_calls = std::sync::atomic::AtomicU32::new(0);
         let force_kill_ran = AtomicBool::new(false);
 
@@ -2291,7 +2428,7 @@ mod tests {
 
     /// Bounded poll (~5s) for the child to exit; force-kills and returns false
     /// on timeout so a bug can never leave the child running or hang the suite.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     fn wait_for_exit(child: &mut Child) -> bool {
         for _ in 0..50 {
             match child.try_wait() {
@@ -2368,5 +2505,133 @@ mod tests {
         unsafe {
             CloseHandle(job as HANDLE);
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn scratch_process_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join("justsay-reaper-tests")
+            .join(format!("{}-{}", label, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("scratch process directory");
+        dir
+    }
+
+    /// Spawn a long-lived process carrying `name` as the executable name the
+    /// kernel records, which is what `pgrep -x` matches. `fs::copy` preserves
+    /// the executable bit on Unix, so a renamed copy of `/bin/sleep` is the
+    /// only way to give a process a chosen name. Both failure messages name
+    /// the copy step so an environmental break in a future runner image is
+    /// distinguishable from a defect in the reaper.
+    #[cfg(target_os = "macos")]
+    fn spawn_named_sleeper(dir: &Path, name: &str) -> Child {
+        let binary = dir.join(name);
+        std::fs::copy("/bin/sleep", &binary).unwrap_or_else(|e| {
+            panic!(
+                "test setup step failed, not the reaper: could not copy /bin/sleep to {:?}: {}",
+                binary, e
+            )
+        });
+        Command::new(&binary)
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "test setup step failed, not the reaper: could not spawn the copied \
+                     sleeper at {:?}: {}",
+                    binary, e
+                )
+            })
+    }
+
+    /// Bounded poll (~5s) for `name` to appear in `pgrep -x`, returning that
+    /// listing or an empty string. `Command::spawn` can return before the
+    /// child's `exec` has replaced its image, so the kernel-recorded
+    /// executable name is not guaranteed to be the chosen one the instant the
+    /// spawn call returns.
+    #[cfg(target_os = "macos")]
+    fn wait_until_pgrep_lists(name: &str) -> String {
+        for _ in 0..50 {
+            if let Ok(output) = Command::new("/usr/bin/pgrep").args(["-x", name]).output() {
+                let listed = String::from_utf8_lossy(&output.stdout).to_string();
+                if !listed.trim().is_empty() {
+                    return listed;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        String::new()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn short_unique_name(prefix: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        format!("{}-{}", prefix, &id[..6])
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_leftover_backend_is_reaped_before_the_next_spawn() {
+        let dir = scratch_process_dir("orphan");
+        let name = short_unique_name("jstest");
+        let mut child = spawn_named_sleeper(&dir, &name);
+        let listed_before = wait_until_pgrep_lists(&name);
+
+        let reaped = reap_processes_named(&name);
+        let exited = wait_for_exit(&mut child);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            !listed_before.trim().is_empty(),
+            "test setup step failed, not the reaper: the spawned sleeper never appeared under \
+             {} in pgrep -x",
+            name
+        );
+        assert!(
+            reaped,
+            "a live process under a sidecar-shaped name is exactly the orphan that blocks the \
+             next launch, so the reaper must report finding it"
+        );
+        assert!(
+            exited,
+            "the orphan must actually be gone, not merely reported — the port stays bound \
+             until it is"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_shipped_sidecar_name_is_matchable_by_the_reaper() {
+        let dir = scratch_process_dir("shipped-name");
+        let mut child = spawn_named_sleeper(&dir, SIDECAR_EXECUTABLE_NAME);
+        let spawned_pid = child.id().to_string();
+
+        let listed = wait_until_pgrep_lists(SIDECAR_EXECUTABLE_NAME);
+
+        let _ = child.kill();
+        let _ = child.wait();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            listed.lines().any(|line| line.trim() == spawned_pid),
+            "the shipped executable name must survive the kernel's name truncation, or the \
+             reaper would never match the real sidecar; pgrep -x listed {:?} and the process \
+             this test spawned was {}",
+            listed,
+            spawned_pid
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_reaper_reports_nothing_when_no_orphan_is_running() {
+        let absent = short_unique_name("jsnone");
+
+        assert!(
+            !reap_processes_named(&absent),
+            "no process carries {}, so the reaper must report nothing and issue no kill",
+            absent
+        );
     }
 }

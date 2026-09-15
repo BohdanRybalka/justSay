@@ -407,8 +407,7 @@ def snapshot_runtime_settings() -> dict[tuple[str, str], object]:
 
     `sync_to_runtime` is the one function that mutates process-global state
     `monkeypatch` cannot intercept, which is why a test driving it has to
-    restore the values itself -- a constraint
-    `docs/OPTIMISATION-STATUS.md` already records. Keyed by
+    restore the values itself. Keyed by
     `(child_settings_name, field_name)` so a failing restore names the field.
     """
     return {
