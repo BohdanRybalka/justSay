@@ -88,7 +88,7 @@ def clear_cache() -> None:
     """Force the next `probe_gpu()` call to re-run the full detection chain.
 
     Mirrors the `clear_cache()` convention already used by
-    `app.llm`/`app.embeddings`/`app.stt` for their own provider caches.
+    `app.embeddings`/`app.stt` for their own provider caches.
     """
     global _cached_result
     with _cache_lock:

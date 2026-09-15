@@ -83,11 +83,9 @@ def _reset_runtime_keys():
     """Ensure runtime key fields are blank before each test to prevent cross-test pollution."""
     runtime_settings.stt.gemini_api_key = ""
     runtime_settings.stt.groq_api_key = ""
-    runtime_settings.llm.groq_api_key = ""
     yield
     runtime_settings.stt.gemini_api_key = ""
     runtime_settings.stt.groq_api_key = ""
-    runtime_settings.llm.groq_api_key = ""
 
 
 @pytest.mark.anyio
@@ -125,6 +123,26 @@ async def test_cloud_status_groq_only(client):
     assert resp.json() == {"gemini_key_set": False, "groq_key_set": True}
 
 
+@pytest.mark.anyio
+async def test_cloud_status_groq_tracks_the_key_the_transcription_path_reads(client):
+    """`groq_key_set` used to be true when a second, separate Groq field was
+    set, while `GroqWhisperSTTProvider` — the only code that has ever built a Groq
+    client — reads `settings.stt.groq_api_key` and refuses without it. The
+    status and the transcription path must now answer from the same field: the
+    provider builds a client exactly when the endpoint reports the key set.
+    """
+    from app.core.errors import ConfigurationError
+    from app.stt.groq_whisper import GroqWhisperSTTProvider
+
+    empty = await client.get("/settings/cloud-status")
+    assert empty.json()["groq_key_set"] is False
+    with pytest.raises(ConfigurationError):
+        GroqWhisperSTTProvider(runtime_settings.stt)._get_client()
+
+    runtime_settings.stt.groq_api_key = "gsk-x"
+
+    filled = await client.get("/settings/cloud-status")
+    assert filled.json()["groq_key_set"] is True
 
 
 def _counting_spy(counter: dict):

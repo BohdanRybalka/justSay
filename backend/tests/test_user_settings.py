@@ -156,10 +156,7 @@ def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
     runtime_settings.stt.whisper_device = "auto"
     runtime_settings.stt.gemini_api_key = ""
     runtime_settings.stt.groq_api_key = ""
-    runtime_settings.llm.mode = ProviderMode.CLOUD
-    runtime_settings.llm.ollama_host = "http://localhost:11434"
-    runtime_settings.llm.ollama_model = "qwen3:1.7b"
-    runtime_settings.llm.groq_api_key = ""
+    runtime_settings.embeddings.ollama_host = "http://localhost:11434"
 
     cleared: list[str] = []
     monkeypatch.setattr(
@@ -169,20 +166,20 @@ def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
         "app.embeddings.clear_cache", lambda: cleared.append("emb")
     )
 
-    us = user_settings.UserSettings(stt_mode="cloud", llm_mode="cloud")
+    us = user_settings.UserSettings(stt_mode="cloud")
     assert user_settings.sync_to_runtime(us) is False
     assert cleared == []
 
-    us2 = user_settings.UserSettings(stt_mode="local", llm_mode="cloud")
+    us2 = user_settings.UserSettings(stt_mode="local")
     assert user_settings.sync_to_runtime(us2) is True
     assert cleared == ["stt", "emb"]
 
 
-def test_sync_to_runtime_llm_mode_change_invalidates_embeddings_cache(monkeypatch):
-    """Changing llm.mode alone must invalidate the embeddings provider cache —
-    llm.mode is one half of the (stt.mode, llm.mode) key that gates embedding
-    eligibility, so a stale Cloud embedding provider must not survive a switch
-    to Local. STT is untouched, so the STT cache must NOT be cleared."""
+def test_sync_to_runtime_ollama_host_change_invalidates_embeddings_cache(monkeypatch):
+    """Changing the Ollama host alone must invalidate the embeddings provider
+    cache — a different host is a different Ollama, so a provider pinned to the
+    old one must not survive. STT is untouched, so the STT cache must NOT be
+    cleared."""
     from app.core.config import settings as runtime_settings
     from app.core.types import ProviderMode
 
@@ -193,18 +190,16 @@ def test_sync_to_runtime_llm_mode_change_invalidates_embeddings_cache(monkeypatc
     runtime_settings.stt.initial_prompt = ""
     runtime_settings.stt.gemini_api_key = ""
     runtime_settings.stt.groq_api_key = ""
-    runtime_settings.llm.mode = ProviderMode.CLOUD
-    runtime_settings.llm.ollama_host = "http://localhost:11434"
-    runtime_settings.llm.ollama_model = "qwen3:1.7b"
-    runtime_settings.llm.groq_api_key = ""
+    runtime_settings.embeddings.ollama_host = "http://localhost:11434"
 
     cleared: list[str] = []
     monkeypatch.setattr("app.stt.clear_cache", lambda: cleared.append("stt"))
     monkeypatch.setattr("app.embeddings.clear_cache", lambda: cleared.append("emb"))
 
-    us = user_settings.UserSettings(stt_mode="cloud", llm_mode="local")
+    us = user_settings.UserSettings(stt_mode="cloud", ollama_host="http://10.0.0.5:11434")
     assert user_settings.sync_to_runtime(us) is False
     assert cleared == ["emb"]
+    assert runtime_settings.embeddings.ollama_host == "http://10.0.0.5:11434"
 
 
 def test_sync_to_runtime_propagates_initial_prompt_and_invalidates_cache(monkeypatch):
@@ -221,10 +216,7 @@ def test_sync_to_runtime_propagates_initial_prompt_and_invalidates_cache(monkeyp
     runtime_settings.stt.initial_prompt = ""
     runtime_settings.stt.gemini_api_key = ""
     runtime_settings.stt.groq_api_key = ""
-    runtime_settings.llm.mode = ProviderMode.CLOUD
-    runtime_settings.llm.ollama_host = "http://localhost:11434"
-    runtime_settings.llm.ollama_model = "qwen3:1.7b"
-    runtime_settings.llm.groq_api_key = ""
+    runtime_settings.embeddings.ollama_host = "http://localhost:11434"
 
     cleared: list[str] = []
     monkeypatch.setattr("app.stt.clear_cache", lambda: cleared.append("stt"))
@@ -279,7 +271,6 @@ def test_a_settings_file_written_before_meeting_recording_still_loads(isolated):
                 "language": "en",
                 "shortcut": "Ctrl+Alt+KeyQ",
                 "stt_mode": "local",
-                "ollama_model": "qwen3:1.7b",
             }
         ),
         encoding="utf-8",
@@ -292,6 +283,54 @@ def test_a_settings_file_written_before_meeting_recording_still_loads(isolated):
     assert loaded.language == "en"
     assert loaded.shortcut == "Ctrl+Alt+KeyQ"
     assert loaded.stt_mode == "local"
+
+
+def test_a_settings_file_written_before_the_llm_field_was_removed_still_loads(
+    isolated, caplog
+):
+    """Spec 169 migration AC: a real pre-change file carries `llm_mode` and
+    `ollama_model`, which no longer exist on the model. It must load silently —
+    not through the salvage path, which would reset every other field to its
+    default — keep every field the user can still act on, and drop the two dead
+    keys from disk at the next save."""
+    settings_path = isolated["settings_dir"] / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "language": "en",
+                "shortcut": "Ctrl+Alt+KeyQ",
+                "stt_mode": "local",
+                "llm_mode": "cloud",
+                "ollama_host": "http://10.0.0.5:11434",
+                "ollama_model": "qwen3:1.7b",
+                "gemini_api_key": "AIza-stored",
+                "groq_api_key": "gsk-stored",
+            }
+        ),
+        encoding="utf-8",
+    )
+    user_settings._settings = None
+
+    with caplog.at_level(logging.WARNING, logger=user_settings.log.name):
+        loaded = user_settings.get_user_settings()
+
+    assert "Ignoring invalid stored settings" not in caplog.text
+    assert loaded.language == "en"
+    assert loaded.shortcut == "Ctrl+Alt+KeyQ"
+    assert loaded.stt_mode == "local"
+    assert loaded.ollama_host == "http://10.0.0.5:11434"
+    assert loaded.gemini_api_key == "AIza-stored"
+    assert loaded.groq_api_key == "gsk-stored"
+    assert not hasattr(loaded, "llm_mode")
+    assert not hasattr(loaded, "ollama_model")
+
+    user_settings.update_user_settings({"language": "uk"})
+
+    on_disk = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "llm_mode" not in on_disk
+    assert "ollama_model" not in on_disk
+    assert on_disk["ollama_host"] == "http://10.0.0.5:11434"
+    assert on_disk["stt_mode"] == "local"
 
 
 def test_the_meeting_acknowledgement_round_trips_to_disk(isolated):
@@ -316,12 +355,11 @@ def test_the_meeting_acknowledgement_defaults_to_not_given():
 
 
 def test_sync_to_runtime_propagates_keys(monkeypatch):
-    """sync_to_runtime pushes non-empty keys into runtime STT and LLM configs."""
+    """sync_to_runtime pushes non-empty keys into the runtime STT config."""
     from app.core.config import settings as runtime_settings
 
     runtime_settings.stt.gemini_api_key = ""
     runtime_settings.stt.groq_api_key = ""
-    runtime_settings.llm.groq_api_key = ""
 
     cleared: list[str] = []
     monkeypatch.setattr("app.stt.clear_cache", lambda: cleared.append("stt"))
@@ -332,7 +370,6 @@ def test_sync_to_runtime_propagates_keys(monkeypatch):
 
     assert runtime_settings.stt.gemini_api_key == "AIza-new"
     assert runtime_settings.stt.groq_api_key == "gsk-new"
-    assert runtime_settings.llm.groq_api_key == "gsk-new"
     assert "stt" in cleared
     assert "emb" in cleared
 
@@ -342,7 +379,7 @@ def test_sync_to_runtime_preserves_env_key_when_user_key_empty(monkeypatch):
     from app.core.config import settings as runtime_settings
 
     runtime_settings.stt.gemini_api_key = "env-key"
-    runtime_settings.llm.groq_api_key = "env-groq"
+    runtime_settings.stt.groq_api_key = "env-groq"
 
     monkeypatch.setattr("app.stt.clear_cache", lambda: None)
     monkeypatch.setattr("app.embeddings.clear_cache", lambda: None)
@@ -351,7 +388,7 @@ def test_sync_to_runtime_preserves_env_key_when_user_key_empty(monkeypatch):
     user_settings.sync_to_runtime(us)
 
     assert runtime_settings.stt.gemini_api_key == "env-key"
-    assert runtime_settings.llm.groq_api_key == "env-groq"
+    assert runtime_settings.stt.groq_api_key == "env-groq"
 
 
 def _seed_history(directory: Path, count: int) -> None:

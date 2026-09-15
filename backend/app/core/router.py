@@ -17,7 +17,6 @@ async def health():
         status="ok",
         version=__version__,
         stt_mode=settings.stt.mode,
-        llm_mode=settings.llm.mode,
     )
 
 

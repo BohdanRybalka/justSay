@@ -32,10 +32,7 @@ _SENTINELS: dict[tuple[str, str], object] = {
     ("stt", "initial_prompt"): "sentinel glossary",
     ("stt", "gemini_api_key"): "sentinel-gemini-key",
     ("stt", "groq_api_key"): "sentinel-groq-key",
-    ("llm", "mode"): "local",
-    ("llm", "ollama_model"): "sentinel-model",
-    ("llm", "ollama_host"): "http://sentinel:1",
-    ("llm", "groq_api_key"): "sentinel-groq-key",
+    ("embeddings", "ollama_host"): "http://sentinel:1",
 }
 
 

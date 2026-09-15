@@ -483,7 +483,6 @@ export interface HealthResponse {
   status: string;
   version: string;
   stt_mode: "cloud" | "local";
-  llm_mode: "cloud" | "local";
 }
 
 export interface RecordingStatus {
@@ -539,12 +538,10 @@ export interface UserSettings {
   shortcut: string;
   output_dir: string;
   stt_mode: "cloud" | "local";
-  llm_mode: "cloud" | "local";
   stt_engine: "auto" | "groq" | "gemini";
   whisper_model_size: string;
   whisper_device: string;
   ollama_host: string;
-  ollama_model: string;
   /** Audio duration (seconds) at or below which the pipeline picks Groq Whisper
    *  in CLOUD mode; longer clips route to Gemini. */
   cloud_routing_threshold: number;

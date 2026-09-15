@@ -99,7 +99,6 @@ _WEB_FRAMEWORK_FREE_PACKAGES = {
     "audio": {"router.py", "dependencies.py"},
     "core": {"router.py", "auth_middleware.py", "error_handler.py"},
     "embeddings": set(),
-    "llm": set(),
     "pipeline": {"router.py", "service.py", "upload_validation.py"},
     "preferences": {"router.py"},
     "stt": {"router.py"},
@@ -113,7 +112,6 @@ _IMPORT_FREE_PACKAGE_INITS = {"audio"}
 _KNOWN_PACKAGE_CYCLES = {
     ("app.core", "app.audio"),
     ("app.core", "app.embeddings"),
-    ("app.core", "app.llm"),
     ("app.core", "app.stt"),
     ("app.preferences", "app.stt"),
 }
@@ -121,7 +119,6 @@ _KNOWN_PACKAGE_CYCLES = {
 _FEATURE_PACKAGES = {
     "audio",
     "embeddings",
-    "llm",
     "pipeline",
     "preferences",
     "stt",

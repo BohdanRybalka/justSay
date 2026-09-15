@@ -15,10 +15,10 @@ async def test_health(client):
     resp = await client.get("/health")
     assert resp.status_code == 200
     data = resp.json()
+    assert set(data) == {"status", "version", "stt_mode"}
     assert data["status"] == "ok"
     assert data["version"]
     assert data["stt_mode"] in ("cloud", "local")
-    assert data["llm_mode"] in ("cloud", "local")
 
 
 @pytest.mark.asyncio

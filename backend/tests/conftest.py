@@ -392,12 +392,7 @@ RUNTIME_SETTINGS_FIELDS_WRITTEN_BY_SYNC: dict[str, tuple[str, ...]] = {
         "gemini_api_key",
         "groq_api_key",
     ),
-    "llm": (
-        "mode",
-        "ollama_model",
-        "ollama_host",
-        "groq_api_key",
-    ),
+    "embeddings": ("ollama_host",),
 }
 
 

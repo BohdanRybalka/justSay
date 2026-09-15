@@ -1,9 +1,9 @@
 """Settings defaults — the persisted model and the runtime models must agree.
 
 ``UserSettings`` is what the user's ``settings.json`` holds; ``STTSettings``
-and ``LLMSettings`` are what the pipeline reads at run time. Nine fields are
-declared in both, three of them with a validation constraint declared in both,
-and ``sync_to_runtime`` spells every name a third time. Nothing at import time
+and ``EmbeddingSettings`` are what the pipeline reads at run time. Eight fields
+are declared in both, three of them with a validation constraint declared in
+both, and ``sync_to_runtime`` spells every name a third time. Nothing at import time
 compares the copies, so editing two of the three places leaves the field
 silently keeping its runtime default while the UI shows the new one.
 
@@ -19,13 +19,13 @@ from __future__ import annotations
 import pytest
 
 from app.core.types import ProviderMode
-from app.llm.config import LLMSettings
+from app.embeddings.config import EmbeddingSettings
 from app.preferences import user_settings
 from app.preferences.user_settings import UserSettings
 from app.stt.config import STTSettings
 
 _STT = "stt"
-_LLM = "llm"
+_EMBEDDINGS = "embeddings"
 
 _SHARED_FIELDS = [
     ("stt_engine", _STT, "engine"),
@@ -35,11 +35,10 @@ _SHARED_FIELDS = [
     ("cloud_routing_threshold", _STT, "cloud_routing_threshold"),
     ("gemini_api_key", _STT, "gemini_api_key"),
     ("groq_api_key", _STT, "groq_api_key"),
-    ("ollama_host", _LLM, "ollama_host"),
-    ("ollama_model", _LLM, "ollama_model"),
+    ("ollama_host", _EMBEDDINGS, "ollama_host"),
 ]
 
-_RUNTIME_MODELS = {_STT: STTSettings, _LLM: LLMSettings}
+_RUNTIME_MODELS = {_STT: STTSettings, _EMBEDDINGS: EmbeddingSettings}
 
 _NON_DEFAULT_VALUES = {
     "stt_engine": "groq",
@@ -50,7 +49,6 @@ _NON_DEFAULT_VALUES = {
     "gemini_api_key": "AIza-sync-probe",
     "groq_api_key": "gsk-sync-probe",
     "ollama_host": "http://ollama.internal",
-    "ollama_model": "llama3:8b",
 }
 
 
@@ -67,11 +65,13 @@ def restored_runtime_settings():
     """
     from app.core.config import settings as runtime_settings
 
-    holders = {_STT: runtime_settings.stt, _LLM: runtime_settings.llm}
+    holders = {_STT: runtime_settings.stt, _EMBEDDINGS: runtime_settings.embeddings}
     saved = {
-        (package, name): getattr(holders[package], name)
-        for package in holders
-        for name in ("mode", *(runtime for _, pkg, runtime in _SHARED_FIELDS if pkg == package))
+        (_STT, "mode"): runtime_settings.stt.mode,
+        **{
+            (package, runtime_name): getattr(holders[package], runtime_name)
+            for _, package, runtime_name in _SHARED_FIELDS
+        },
     }
 
     yield runtime_settings
@@ -114,7 +114,6 @@ def test_every_shared_field_reaches_the_runtime_object(monkeypatch, restored_run
     monkeypatch.setattr("app.embeddings.clear_cache", lambda: None)
 
     runtime_settings.stt.mode = ProviderMode.CLOUD
-    runtime_settings.llm.mode = ProviderMode.CLOUD
 
     stored = UserSettings(**_NON_DEFAULT_VALUES)
     user_settings.sync_to_runtime(stored)
@@ -136,6 +135,8 @@ def test_the_shared_field_list_is_the_whole_overlap():
     stored_names = set(UserSettings.model_fields)
     listed = {stored for stored, _, _ in _SHARED_FIELDS}
 
-    overlap = stored_names & (set(STTSettings.model_fields) | set(LLMSettings.model_fields))
+    overlap = stored_names & (
+        set(STTSettings.model_fields) | set(EmbeddingSettings.model_fields)
+    )
 
     assert overlap - listed == set()
