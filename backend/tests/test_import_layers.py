@@ -3,7 +3,7 @@
 `docs/style-guide.md` §1a states where a backend module goes, and ADR 044
 records why. Prose rots; this file fails.
 
-Seven properties are pinned here:
+Eight properties are pinned here:
 
 1. `app.core` is a leaf. Only `config.py` (the composition root) and
    `router.py` (operational endpoints) may import a feature package. Letting a
@@ -37,6 +37,12 @@ Seven properties are pinned here:
    sibling of its own package is the arrangement working, not a reach-in. The
    allowlist for it ships empty, and `app/` is the whole scope: a test
    legitimately reaches internals and is deliberately not walked.
+8. A system-audio capture source reaches neither `soxr` nor the module that
+   imports it. Both capture callbacks run on the audio thread and neither has
+   any resampling to do; the deinterleave they share lives in `analysis.py`
+   beside the `to_mono` it calls. The sources are found by subclass rather
+   than by a typed list, so the next platform's is covered the day it is
+   written.
 
 Every assertion below was mutation-checked when written. The list below is a
 ledger of mutations that were actually run, against the module actually named,
@@ -104,6 +110,15 @@ with the number of tests each one reddens:
   cross-product resolved bases with aliases where the alias walk zips them, so
   the same line named `app.core._zz_missing`, a reach-in nobody writes, and
   never mentioned the module actually reached
+- `from app.audio import timeline` planted in `app/audio/windows_loopback.py`
+  -- **one** test. That spelling used to arrive at the allowlists as
+  `app.audio` and walk past every rule written at module granularity, this one
+  included; the resolver now returns the submodule alongside the package
+- `import soxr` planted in `app/audio/macos_tap.py` -- **one** test
+- `import soxr` planted in `app/audio/system_source.py`, a sibling both capture
+  sources import, so no capture module spells it anywhere -- **one** test, and
+  only the runtime probe sees it. The static walk reports nothing, which is the
+  blind spot the probe is there for
 
 Each list below is an allowlist, not a description: adding an entry is a
 deliberate act a reviewer can see in the diff.
@@ -142,6 +157,8 @@ _SIDECAR_ABSENT_LIBRARIES = {
 _MUST_NOT_IMPORT_APP_MODULE = {
     "audio/analysis.py": {"app.audio.timeline"},
 }
+
+_RESAMPLING_STACK = frozenset({"soxr", "app.audio.timeline"})
 
 _WEB_FRAMEWORK_ROOTS = frozenset({"fastapi", "starlette"})
 
@@ -205,14 +222,32 @@ def _import_from_names(node: ast.ImportFrom, package: str) -> list[str]:
     A relative import names the same module as its absolute spelling, so both
     must reach the allowlists below as the same string; otherwise one
     `from ..audio import analysis` walks past every gate in this file.
+
+    `from app.audio import timeline` names that module as surely as
+    `from app.audio.timeline import x` does, and only the second spelling used
+    to arrive as `app.audio.timeline` -- the first arrived as `app.audio` and
+    walked past every rule written at module granularity. Both the package and
+    the submodule are returned now, so the package-level rules keep matching on
+    the base while the module-level ones stop being a spelling choice.
     """
     if not node.level:
-        return [node.module] if node.module else []
-    parts = package.split(".") if package else []
-    parts = parts[: max(len(parts) - node.level + 1, 0)]
-    if node.module:
-        return [".".join(parts + node.module.split("."))]
-    return [".".join(parts + [alias.name]) for alias in node.names]
+        bases = [node.module] if node.module else []
+    else:
+        parts = package.split(".") if package else []
+        parts = parts[: max(len(parts) - node.level + 1, 0)]
+        if not node.module:
+            return [".".join(parts + [alias.name]) for alias in node.names]
+        bases = [".".join(parts + node.module.split("."))]
+
+    names = list(bases)
+    known = _modules()
+    names.extend(
+        f"{base}.{alias.name}"
+        for base in bases
+        for alias in node.names
+        if f"{base}.{alias.name}" in known
+    )
+    return names
 
 
 def _imported_names(path: Path) -> list[str]:
@@ -293,6 +328,63 @@ def test_the_base_dsp_module_is_imported_from_rather_than_importing():
     assert not offenders, (
         f"{offenders}. The dependency runs the other way: move the shared "
         "function down into this module instead."
+    )
+
+
+def _capture_source_modules() -> list[str]:
+    """Every module implementing the system-audio capture contract, found by
+    subclass rather than by a hand-kept list.
+
+    `CLAUDE.md` names per-platform loopback capture as work still to come, so a
+    list typed out here would exempt the third platform's source by forgetting
+    it -- the same failure this file's package walk exists to remove one level
+    up.
+    """
+    found = []
+    for path in sorted((_APP_DIR / "audio").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and any(
+                isinstance(base, ast.Name) and base.id == "SystemAudioSource"
+                for base in node.bases
+            ):
+                found.append(path.relative_to(_APP_DIR).as_posix())
+                break
+    return found
+
+
+def test_a_capture_source_never_reaches_the_resampling_stack():
+    """Both capture callbacks run on the audio thread, and the only thing either
+    ever took from `timeline.py` was a deinterleave that touches `soxr` nowhere
+    — so importing that module pulled the resampling stack in to do nothing
+    with it. The deinterleave lives in `analysis.py` beside the `to_mono` it
+    calls, which is the placement fix 084 already chose for `to_mono` itself.
+
+    The static half cannot see a transitive acquisition -- `soxr` appearing in
+    any of the four sibling modules these two import would put the stack back
+    with no offender named -- so the probe below asks the process instead.
+    Only `app.audio.macos_tap` can answer it on every runner: importing
+    `windows_loopback` needs the Windows-only `pyaudiowpatch` wheel.
+    """
+    modules = _capture_source_modules()
+    assert modules, (
+        "no SystemAudioSource implementation was found under app/audio/ -- the "
+        "walk is broken, which would make this test pass by finding nothing."
+    )
+
+    offenders = []
+    for relative in modules:
+        for imported in _imported_names(_APP_DIR / relative):
+            if imported in _RESAMPLING_STACK:
+                offenders.append(f"{relative} imports {imported}")
+
+    assert not offenders, (
+        f"{offenders}. A capture callback has no resampling to do; shared code "
+        "it needs moves down into `app.audio.analysis` instead."
+    )
+
+    assert_import_loads_no_module(
+        "app.audio.macos_tap", ("soxr", "app.audio.timeline")
     )
 
 
