@@ -14,8 +14,7 @@ import pytest
 
 from app.core.config import settings
 from app.core.types import ProviderMode
-from app.transcripts import history, vector_store
-from app.transcripts import words as words_module
+from app.transcripts import history, relocation, schema, search, vector_store
 
 
 @pytest.fixture(autouse=True)
@@ -77,7 +76,7 @@ def test_migration_v1_to_current(tmp_path):
     db_path.unlink(missing_ok=True)
     raw = sqlite3.connect(db_path)
     try:
-        raw.executescript(history._DDL_V1)
+        raw.executescript(schema._DDL_V1)
         raw.execute("PRAGMA user_version = 1")
         raw.commit()
     finally:
@@ -105,8 +104,8 @@ def test_migration_v2_to_current(tmp_path):
     db_path.unlink(missing_ok=True)
     raw = sqlite3.connect(db_path)
     try:
-        raw.executescript(history._DDL_V1)
-        raw.executescript(history._DDL_V2)
+        raw.executescript(schema._DDL_V1)
+        raw.executescript(schema._DDL_V2)
         raw.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
         raw.execute("PRAGMA user_version = 2")
         raw.commit()
@@ -138,8 +137,8 @@ def test_crash_before_the_version_pragma_retries(tmp_path):
     db_path.unlink(missing_ok=True)
     raw = sqlite3.connect(db_path)
     try:
-        raw.executescript(history._DDL_V1)
-        raw.executescript(history._DDL_V2)
+        raw.executescript(schema._DDL_V1)
+        raw.executescript(schema._DDL_V2)
         raw.executescript(vector_store._DDL_V3)
         raw.execute("PRAGMA user_version = 2")
         raw.commit()
@@ -163,8 +162,8 @@ def test_partial_migration_recovery_v3_tables_missing(tmp_path):
     db_path.unlink(missing_ok=True)
     raw = sqlite3.connect(db_path)
     try:
-        raw.executescript(history._DDL_V1)
-        raw.executescript(history._DDL_V2)
+        raw.executescript(schema._DDL_V1)
+        raw.executescript(schema._DDL_V2)
         raw.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
         raw.execute("PRAGMA user_version = 3")
         raw.commit()
@@ -244,7 +243,7 @@ def test_ensure_vec_table_wipes_on_model_switch():
     assert count_after == 0
     assert tuple(meta) == ("local", "nomic-embed-text", 5)
 
-    fts_hits = words_module.search_history("alpha", limit=5)
+    fts_hits = search.search_history("alpha", limit=5)
     assert len(fts_hits) == 1
 
 
@@ -292,7 +291,7 @@ async def test_provider_switch_via_embed_background_wipes_old_embeddings():
     assert count_after == 1
     assert tuple(meta_after) == ("local", "ollama/nomic-embed-text", 5)
 
-    fts_hits = words_module.search_history("alpha", limit=5)
+    fts_hits = search.search_history("alpha", limit=5)
     assert len(fts_hits) == 1
 
 
@@ -365,8 +364,8 @@ def test_relocate_preserves_embeddings_and_semantic_search(tmp_path):
         )
 
     new_dir = tmp_path / "new"
-    res, _ = history.relocate(new_dir)
-    assert res == history.RelocateOutcome.MOVED
+    res, _ = relocation.relocate(new_dir)
+    assert res == relocation.RelocateOutcome.MOVED
 
     with history._lock:
         conn = history._ensure_conn_locked()

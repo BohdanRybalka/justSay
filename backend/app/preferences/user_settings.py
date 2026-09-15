@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.core.app_paths import resolve_app_data_root, resolve_temp_dir
 from app.core.errors import ConfigurationError
-from app.transcripts import history
+from app.transcripts import relocation
 
 
 def _settings_dir() -> Path:
@@ -99,10 +99,10 @@ def update_user_settings(updates: dict) -> UpdateResult:
             new_dir = _validate_output_dir(updates["output_dir"])
 
             if new_dir != Path(current.output_dir):
-                result, reason = history.relocate(new_dir)
-                if result == history.RelocateOutcome.FAILED:
+                result, reason = relocation.relocate(new_dir)
+                if result == relocation.RelocateOutcome.FAILED:
                     raise RuntimeError(reason or "History relocate failed")
-                if result == history.RelocateOutcome.NEW_ALREADY_HAS_FILE:
+                if result == relocation.RelocateOutcome.NEW_ALREADY_HAS_FILE:
                     warning = (
                         "Existing history file at the new location was preserved; "
                         "previous history was not migrated."
@@ -193,8 +193,8 @@ def repair_scratch_output_dir() -> Path:
         return current
 
     safe = resolve_app_data_root()
-    result, reason = history.consolidate_into(current, safe)
-    if result == history.ConsolidateOutcome.FAILED:
+    result, reason = relocation.consolidate_into(current, safe)
+    if result == relocation.ConsolidateOutcome.FAILED:
         log.error(
             "History sits inside the scratch directory (%s) and could not be moved out: %s. "
             "Continuing from the old location; Clear Temp Files will not touch it.",

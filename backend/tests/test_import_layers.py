@@ -3,7 +3,7 @@
 `docs/style-guide.md` §1a states where a backend module goes, and ADR 044
 records why. Prose rots; this file fails.
 
-Six properties are pinned here:
+Seven properties are pinned here:
 
 1. `app.core` is a leaf. Only `config.py` (the composition root) and
    `router.py` (operational endpoints) may import a feature package. Letting a
@@ -28,6 +28,11 @@ Six properties are pinned here:
    nothing else: a lazy `__getattr__` re-export defers the cost rather than
    removing it, and puts the package surface this rule deletes straight back.
 6. Importing a pure DSP module does not load the capture stack.
+7. An underscore-prefixed attribute is private to its own package (ADR 072).
+   A sibling module may name it; a module in another package may not, in
+   either spelling -- `alias._name` or `from app.x.y import _name`. The
+   allowlist for it ships empty, and `app/` is the whole scope: a test
+   legitimately reaches internals and is deliberately not walked.
 
 Every assertion below was mutation-checked when written. The list below is a
 ledger of mutations that were actually run, against the module actually named,
@@ -57,6 +62,18 @@ with the number of tests each one reddens:
   both grows the package surface and puts the capture stack back on
   `timeline`'s import path -- and a `__getattr__` re-export of the same, one
   test
+- `history._lock` read from `app/pipeline/service.py` through
+  `from app.transcripts import history`, and through the relative spelling
+  `from ..transcripts import history` -- one test each
+- `from app.transcripts.history import _lock` planted in the same module --
+  one test, which is what proves the `ImportFrom` arm of the walk exists
+- a fictional entry added to the empty package-private allowlist -- one test
+- the walk's attribute arm short-circuited to find nothing -- one test, the
+  non-vacuity pin, and the gate deliberately stays green, which is why that
+  pin is a separate test
+- `history._lock` read from `app/transcripts/store_errors.py`, a sibling in
+  the same package -- **zero** tests, the negative control proving the rule is
+  not over-broad
 
 Each list below is an allowlist, not a description: adding an entry is a
 deliberate act a reviewer can see in the diff.
@@ -473,4 +490,163 @@ def test_the_known_cycle_list_does_not_outlive_the_cycles():
     assert not stale, (
         f"These cycles no longer exist and should be removed from "
         f"_KNOWN_PACKAGE_CYCLES: {sorted(stale)}"
+    )
+
+
+_PACKAGE_PRIVATE_REACH_IN_ALLOWED: dict[tuple[str, str], set[str]] = {}
+
+_LIVE_PACKAGE_PRIVATE_REACH_INS = {
+    ("app.transcripts.words", "app.transcripts.history", "_lock"),
+    ("app.transcripts.schema", "app.transcripts.vector_store", "_DDL_V3"),
+    ("app.transcripts.relocation", "app.transcripts.history", "_conn"),
+}
+
+
+def _module_aliases(tree: ast.Module, package: str, modules: dict[str, Path]) -> dict[str, str]:
+    """Every local name bound to an `app` module, mapped to that module.
+
+    `_import_from_names` does the relative-spelling work, so `from ..transcripts
+    import history` reaches the gate as the same string `from app.transcripts
+    import history` does.
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in modules:
+                    aliases[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom):
+            resolved = _import_from_names(node, package)
+            if node.level and not node.module:
+                for alias, full in zip(node.names, resolved):
+                    if full in modules:
+                        aliases[alias.asname or alias.name] = full
+                continue
+            for base in resolved:
+                for alias in node.names:
+                    full = f"{base}.{alias.name}"
+                    if full in modules:
+                        aliases[alias.asname or alias.name] = full
+    return aliases
+
+
+def _underscore_reach_ins(
+    module: str, path: Path, modules: dict[str, Path]
+) -> list[tuple[str, str, str]]:
+    """Every underscore-prefixed name this module takes from another, as
+    `(module, target module, attribute)`.
+
+    Two spellings are walked and both are needed. An attribute access through a
+    name bound to an `app` module -- reads and assignments alike, since
+    `relocate` writes `history._output_dir` -- and a direct `from app.x.y import
+    _name`. Covering only the first would leave the rule one import line away
+    from irrelevance, exactly as matching the literal `fastapi` did for rule 3.
+
+    `ast.walk` reaches a function-body import as well as a module-top one, which
+    is what makes `app/transcripts/schema.py`'s deferred `vector_store` import
+    visible here. Dunders are skipped: `__name__` is not anyone's private state.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    package = _containing_package(path)
+    aliases = _module_aliases(tree, package, modules)
+    found: list[tuple[str, str, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            target = aliases.get(node.value.id)
+            if target is not None and node.attr.startswith("_") and not node.attr.startswith("__"):
+                found.append((module, target, node.attr))
+        elif isinstance(node, ast.ImportFrom):
+            for base in _import_from_names(node, package):
+                if base not in modules:
+                    continue
+                for alias in node.names:
+                    if alias.name.startswith("_") and not alias.name.startswith("__"):
+                        found.append((module, base, alias.name))
+    return found
+
+
+def _all_underscore_reach_ins() -> set[tuple[str, str, str]]:
+    modules = _modules()
+    found: set[tuple[str, str, str]] = set()
+    for module, path in modules.items():
+        found.update(_underscore_reach_ins(module, path, modules))
+    return found
+
+
+def _immediate_package(module: str) -> str:
+    return module.rsplit(".", 1)[0] if "." in module else module
+
+
+def test_an_underscore_attribute_is_private_to_its_own_package():
+    """ADR 072: the underscore is the only lexical marker Python has for
+    package-private, so a sibling in the same package may name it and nothing
+    outside may. `app.transcripts.words` reading `history._lock` is the
+    arrangement working; `app.pipeline.service` reading it would be a
+    cross-package consumer of internals, which means either the name should be
+    public or the module is in the wrong package.
+
+    Scope is `app/` only. `backend/tests/**` is deliberately not covered: a test
+    legitimately reaches internals to set up state, which
+    `tests/test_preferences_router.py` does on purpose."""
+    offenders = sorted(
+        f"{module} -> {target}.{attribute}"
+        for module, target, attribute in _all_underscore_reach_ins()
+        if _immediate_package(module) != _immediate_package(target)
+        and attribute
+        not in _PACKAGE_PRIVATE_REACH_IN_ALLOWED.get((module, target), frozenset())
+    )
+
+    assert not offenders, (
+        f"These modules name another package's private attribute: {offenders}. "
+        "Either the name is part of that module's contract and should lose its "
+        "underscore, or the consumer belongs in that package (ADR 072). Adding "
+        "a pair to _PACKAGE_PRIVATE_REACH_IN_ALLOWED is a decision, not a "
+        "formality -- it ships empty."
+    )
+
+
+def test_no_package_private_exemption_outlives_the_reach_in_it_covers():
+    """The mirror ADR 072 requires, in the shape of
+    `test_no_web_framework_exemption_outlives_the_import_it_covers`. An entry
+    whose module has been deleted, or whose named reach-in is no longer written,
+    hands a free pass to whatever next takes that path."""
+    modules = _modules()
+    live = _all_underscore_reach_ins()
+    stale = []
+    for (module, target), attributes in sorted(_PACKAGE_PRIVATE_REACH_IN_ALLOWED.items()):
+        if module not in modules:
+            stale.append(f"{module}: no such module")
+            continue
+        if target not in modules:
+            stale.append(f"{target}: no such module")
+            continue
+        for attribute in sorted(attributes):
+            if (module, target, attribute) not in live:
+                stale.append(f"{module} -> {target}.{attribute}: no longer written")
+
+    assert not stale, (
+        f"These exemptions no longer cover anything: {stale}. Remove each from "
+        "_PACKAGE_PRIVATE_REACH_IN_ALLOWED -- an exemption that outlives its "
+        "reach-in silently exempts the next module to take that path."
+    )
+
+
+def test_the_package_private_walk_finds_the_reach_ins_that_are_there():
+    """Both tests above pass vacuously on a walk that returns nothing: the gate
+    has no offender to report and the mirror has an empty allowlist to check.
+    Pin that the walk sees what it is meant to, in the shape of
+    `tests/test_naming_rules.py`'s own non-vacuity check.
+
+    Membership, not a count. A count would redden on the next legitimate
+    intra-package reach-in, which is the failure direction that gets a gate
+    deleted rather than fixed. The three pinned here cover one read of a
+    sibling's lock, one attribute reached through a function-body import, and
+    one *assignment* into another module's global."""
+    missing = sorted(_LIVE_PACKAGE_PRIVATE_REACH_INS - _all_underscore_reach_ins())
+
+    assert not missing, (
+        f"The walk no longer finds these reach-ins: {missing}. Either the code "
+        "moved -- repoint this set at reach-ins that are actually written -- or "
+        "the walk stopped seeing a spelling it used to see, which makes the two "
+        "tests above pass while checking nothing."
     )

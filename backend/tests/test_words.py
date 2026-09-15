@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from app.core.errors import ResourceUnavailableError
-from app.transcripts import history, vector_store, words
+from app.transcripts import history, search, vector_store, words
 from app.transcripts.stopwords_en import STOPWORDS_EN
 from app.transcripts.stopwords_uk import STOPWORDS_UK
 
@@ -169,7 +169,7 @@ async def test_words_top_limit_validated_by_fastapi(client):
 
 
 def test_sanitize_lowercases_and_appends_star():
-    expr, tokens = words._sanitize_fts_query("Я прав")
+    expr, tokens = search._sanitize_fts_query("Я прав")
     assert expr == "я* прав*"
     assert tokens == ["я", "прав"]
 
@@ -177,7 +177,7 @@ def test_sanitize_lowercases_and_appends_star():
 def test_sanitize_lowercases_fts5_operator_keywords():
     """``NOT*``/``AND*``/``OR*`` raise FTS5 syntax errors when uppercase.
     The sanitizer must lowercase them so they become literal prefix terms."""
-    expr, tokens = words._sanitize_fts_query("NOT AND OR meeting")
+    expr, tokens = search._sanitize_fts_query("NOT AND OR meeting")
     assert expr == "not* and* or* meeting*"
     history.save_entry(text="meeting brief", duration_ms=1)
     with history._lock:
@@ -191,33 +191,33 @@ def test_sanitize_strips_fts5_specials_and_dash_slash():
     """`-` is FTS5 NOT, `/` is part of `NEAR/n`. Both must be stripped.
     The trailing ``*`` per token is the prefix syntax we deliberately
     add, so we only check that NO ``*`` appears inside a token."""
-    expr, _tokens = words._sanitize_fts_query('"(bad:chars)*')
+    expr, _tokens = search._sanitize_fts_query('"(bad:chars)*')
     assert expr == "bad* chars*"
     for bad in '"():':
         assert bad not in expr
 
-    expr, tokens = words._sanitize_fts_query("-правив")
+    expr, tokens = search._sanitize_fts_query("-правив")
     assert expr == "правив*"
     assert tokens == ["правив"]
 
-    expr, _tokens = words._sanitize_fts_query("NEAR/3 word")
+    expr, _tokens = search._sanitize_fts_query("NEAR/3 word")
     assert "/" not in expr
     assert "near*" in expr and "3*" in expr and "word*" in expr
 
 
 def test_sanitize_whitespace_and_empty():
-    assert words._sanitize_fts_query("") == ("", [])
-    assert words._sanitize_fts_query("   ") == ("", [])
-    assert words._sanitize_fts_query("\t\n") == ("", [])
+    assert search._sanitize_fts_query("") == ("", [])
+    assert search._sanitize_fts_query("   ") == ("", [])
+    assert search._sanitize_fts_query("\t\n") == ("", [])
 
 
 def test_build_highlight_basic_match():
-    out = words._build_highlight("правив у файлі", ["прав"])
+    out = search._build_highlight("правив у файлі", ["прав"])
     assert "<mark>прав</mark>ив у файлі" in out
 
 
 def test_build_highlight_case_insensitive_cyrillic():
-    out = words._build_highlight("Прав і прав", ["прав"])
+    out = search._build_highlight("Прав і прав", ["прав"])
     assert "<mark>Прав</mark>" in out
     assert "<mark>прав</mark>" in out
 
@@ -226,7 +226,7 @@ def test_build_highlight_escapes_xss_content():
     """Regression for entry-gate iter 1 RED-1 (FTS5 highlight() did not
     escape). Our Python helper MUST escape the raw text and only insert
     literal ``<mark>`` markup. No raw ``<script>`` may leak."""
-    out = words._build_highlight("<script>alert(1)</script>", ["alert"])
+    out = search._build_highlight("<script>alert(1)</script>", ["alert"])
     assert "<script>" not in out
     assert "&lt;script&gt;" in out
     assert "<mark>alert</mark>" in out
@@ -236,7 +236,7 @@ def test_build_highlight_does_not_match_inside_entity():
     """Regression for entry-gate iter 1 RED-4: matching 'amp' inside the
     escaped '&amp;' would corrupt the entity. Our offsets are found on the
     raw text BEFORE escaping, so 'amp' never matches inside an entity."""
-    out = words._build_highlight("AT&T", ["amp"])
+    out = search._build_highlight("AT&T", ["amp"])
     assert out == "AT&amp;T"
     assert "<mark>" not in out
 
@@ -245,7 +245,7 @@ def test_build_highlight_overlapping_tokens_produce_valid_html():
     """Regression for entry-gate iter 1 RED-3: iterative re.sub built
     broken nested tags. Single-pass span-merge must produce well-formed
     HTML."""
-    out = words._build_highlight("mark spot", ["mark", "ar"])
+    out = search._build_highlight("mark spot", ["mark", "ar"])
 
     class Validator(HTMLParser):
         def __init__(self):
@@ -269,38 +269,38 @@ def test_build_highlight_overlapping_tokens_produce_valid_html():
 
 def test_build_highlight_empty_text_guard():
     """Iter-2 RED-4: NULL/empty cleaned_text must not crash."""
-    assert words._build_highlight("", ["x"]) == ""
-    assert words._build_highlight(None, ["x"]) == ""
+    assert search._build_highlight("", ["x"]) == ""
+    assert search._build_highlight(None, ["x"]) == ""
 
 
 def test_build_highlight_token_longer_than_text():
-    assert words._build_highlight("ab", ["abcdef"]) == "ab"
+    assert search._build_highlight("ab", ["abcdef"]) == "ab"
 
 
 def test_build_highlight_empty_tokens_returns_escaped_text():
     """No tokens → no marks, but content is still HTML-escaped."""
-    assert words._build_highlight("AT&T", []) == "AT&amp;T"
-    assert words._build_highlight("anything", []) == "anything"
+    assert search._build_highlight("AT&T", []) == "AT&amp;T"
+    assert search._build_highlight("anything", []) == "anything"
 
 
 def test_search_history_prefix_match_returns_highlight():
     history.save_entry(text="правив у файлі", duration_ms=1, language="uk")
-    hits = words.search_history("прав", limit=5)
+    hits = search.search_history("прав", limit=5)
     assert len(hits) == 1
-    assert isinstance(hits[0], words.HistorySearchHit)
+    assert isinstance(hits[0], search.HistorySearchHit)
     assert "<mark>прав</mark>ив" in hits[0].highlighted_text
 
 
 def test_search_history_no_results_no_crash():
     history.save_entry(text="anything", duration_ms=1)
-    assert words.search_history("nonexistent_token_xyz", limit=5) == []
+    assert search.search_history("nonexistent_token_xyz", limit=5) == []
 
 
 def test_search_history_like_fallback_catches_substring():
     """FTS5 prefix matching cannot find ``кадабр`` inside ``абракадабра``.
     The LIKE-fallback lane catches it."""
     history.save_entry(text="абракадабра", duration_ms=1)
-    hits = words.search_history("кадабр", limit=5)
+    hits = search.search_history("кадабр", limit=5)
     assert len(hits) == 1
     assert "абракадабра" in hits[0].text
     assert "<mark>кадабр</mark>" in hits[0].highlighted_text
@@ -310,7 +310,7 @@ def test_search_history_dedup_when_both_lanes_match():
     """Row that matches both FTS5 (prefix) and LIKE (substring) appears
     exactly once."""
     history.save_entry(text="правда буде завжди прав", duration_ms=1)
-    hits = words.search_history("прав", limit=5)
+    hits = search.search_history("прав", limit=5)
     assert len(hits) == 1
 
 
@@ -319,7 +319,7 @@ def test_search_history_combined_cap_enforced():
     the final list length must respect ``limit``."""
     for i in range(5):
         history.save_entry(text=f"правда{i} буде", duration_ms=1)
-    hits = words.search_history("прав", limit=3)
+    hits = search.search_history("прав", limit=3)
     assert len(hits) == 3
 
 
@@ -331,7 +331,7 @@ def test_search_history_empty_fts5_then_like_only_no_sql_error():
     written for cannot recur. What it still pins is the lane running to a result
     when the FTS lane returned nothing at all."""
     history.save_entry(text="абракадабра", duration_ms=1)
-    hits = words.search_history("кадабр", limit=5)
+    hits = search.search_history("кадабр", limit=5)
     assert len(hits) == 1
 
 
@@ -339,8 +339,8 @@ def test_search_history_does_not_log_query(caplog):
     """Privacy: only ``len(q)`` may appear in logs — never ``q`` and never
     ``len(sanitized_q)``."""
     history.save_entry(text="something", duration_ms=1)
-    with caplog.at_level(logging.DEBUG, logger="app.transcripts.words"):
-        words.search_history("secretpassword12345", limit=5)
+    with caplog.at_level(logging.DEBUG, logger="app.transcripts.search"):
+        search.search_history("secretpassword12345", limit=5)
     joined = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "secretpassword" not in joined
     assert "12345" not in joined
@@ -405,7 +405,7 @@ async def test_search_history_semantic_ranks_by_distance_with_plain_highlight():
         "app.embeddings.resolve_embedding_provider",
         new=AsyncMock(return_value=(fake_provider, None)),
     ):
-        hits = await words.search_history_semantic("anything", limit=10)
+        hits = await search.search_history_semantic("anything", limit=10)
 
     assert [h.id for h in hits] == [near.id, mid.id, far.id]
     assert all("<mark>" not in h.highlighted_text for h in hits)
@@ -438,7 +438,7 @@ async def test_an_embed_failure_keeps_the_class_name_out_of_the_message():
         new=AsyncMock(return_value=(fake_provider, None)),
     ):
         with pytest.raises(vector_store.SemanticSearchUnavailableError) as excinfo:
-            await words.search_history_semantic("anything", limit=10)
+            await search.search_history_semantic("anything", limit=10)
 
     assert excinfo.value.message == "Semantic search embedding failed"
     assert "ZeroDivisionError" not in excinfo.value.message
@@ -458,7 +458,7 @@ async def test_a_refused_provider_spends_no_vector_query():
         patch("app.transcripts.vector_store.query_similar", query_similar),
     ):
         with pytest.raises(vector_store.SemanticSearchUnavailableError) as excinfo:
-            await words.search_history_semantic("anything", limit=10)
+            await search.search_history_semantic("anything", limit=10)
 
     assert excinfo.value.message == "Semantic search is disabled"
     assert query_similar.call_count == 0
@@ -478,7 +478,7 @@ async def test_the_only_embed_call_is_the_resolved_providers_own():
         "app.embeddings.resolve_embedding_provider",
         new=AsyncMock(return_value=(fake_provider, None)),
     ):
-        await words.search_history_semantic("anything", limit=10)
+        await search.search_history_semantic("anything", limit=10)
 
     assert fake_provider.embed.await_count == 1
     assert fake_provider.embed.await_args.args == ("anything",)
@@ -521,7 +521,7 @@ async def test_local_dictation_mode_gets_rows_rather_than_a_refusal():
             patch("app.embeddings.local.is_model_available", new=AsyncMock(return_value=True)),
             patch("app.embeddings.local.LocalEmbeddingProvider", return_value=fake_local),
         ):
-            hits = await words.search_history_semantic("anything", limit=10)
+            hits = await search.search_history_semantic("anything", limit=10)
     finally:
         runtime_settings.stt.mode = saved_mode
         clear_embeddings_cache()
@@ -539,8 +539,8 @@ def test_the_semantic_refusal_is_inside_the_error_hierarchy():
 
 
 
-def _make_hit(entry_id: str, highlighted_text: str = "") -> words.HistorySearchHit:
-    return words.HistorySearchHit(
+def _make_hit(entry_id: str, highlighted_text: str = "") -> search.HistorySearchHit:
+    return search.HistorySearchHit(
         id=entry_id,
         timestamp="2024-01-01T00:00:00Z",
         language="en",
@@ -563,14 +563,14 @@ def test_rrf_fuse_tie_scoring_is_symmetric_and_deterministic():
     fts_hits = [a, filler_fts, b]
     semantic_hits = [b, filler_semantic, a]
 
-    fused = words._rrf_fuse(fts_hits, semantic_hits, limit=10)
+    fused = search._rrf_fuse(fts_hits, semantic_hits, limit=10)
 
-    expected_score = 1.0 / (words.RRF_K + 1) + 1.0 / (words.RRF_K + 3)
+    expected_score = 1.0 / (search.RRF_K + 1) + 1.0 / (search.RRF_K + 3)
     scores: dict[str, float] = {}
     for rank, hit in enumerate(fts_hits, start=1):
-        scores[hit.id] = scores.get(hit.id, 0.0) + 1.0 / (words.RRF_K + rank)
+        scores[hit.id] = scores.get(hit.id, 0.0) + 1.0 / (search.RRF_K + rank)
     for rank, hit in enumerate(semantic_hits, start=1):
-        scores[hit.id] = scores.get(hit.id, 0.0) + 1.0 / (words.RRF_K + rank)
+        scores[hit.id] = scores.get(hit.id, 0.0) + 1.0 / (search.RRF_K + rank)
 
     assert scores["A"] == pytest.approx(expected_score)
     assert scores["B"] == pytest.approx(expected_score)
@@ -590,11 +590,11 @@ def test_rrf_fuse_dedup_combined_score_and_highlight_precedence():
     semantic_hit = _make_hit("shared", highlighted_text="alpha text")
     solo_fts_hit = _make_hit("solo")
 
-    fused = words._rrf_fuse([fts_hit], [semantic_hit], limit=10)
+    fused = search._rrf_fuse([fts_hit], [semantic_hit], limit=10)
     assert [h.id for h in fused] == ["shared"]
     assert fused[0].highlighted_text == "<mark>alpha</mark> text"
 
-    fused_vs_solo = words._rrf_fuse([fts_hit, solo_fts_hit], [semantic_hit], limit=10)
+    fused_vs_solo = search._rrf_fuse([fts_hit, solo_fts_hit], [semantic_hit], limit=10)
     assert [h.id for h in fused_vs_solo] == ["shared", "solo"]
 
 
@@ -619,11 +619,11 @@ async def test_search_history_hybrid_runs_lanes_concurrently():
         return []
 
     with (
-        patch("app.transcripts.words.search_history", side_effect=slow_search_history),
-        patch("app.transcripts.words._semantic_lane", side_effect=slow_semantic_lane),
+        patch("app.transcripts.search.search_history", side_effect=slow_search_history),
+        patch("app.transcripts.search._semantic_lane", side_effect=slow_semantic_lane),
     ):
         start = time.monotonic()
-        await words.search_history_hybrid("anything", limit=10)
+        await search.search_history_hybrid("anything", limit=10)
         elapsed = time.monotonic() - start
 
     assert elapsed >= semantic_delay - 0.05
@@ -643,7 +643,7 @@ async def test_search_history_hybrid_empty_query_returns_empty_without_calling_e
     patching both to raise if invoked."""
     with (
         patch(
-            "app.transcripts.words.search_history",
+            "app.transcripts.search.search_history",
             side_effect=AssertionError("search_history must not be called for an empty query"),
         ),
         patch(
@@ -655,8 +655,8 @@ async def test_search_history_hybrid_empty_query_returns_empty_without_calling_e
             ),
         ),
     ):
-        assert await words.search_history_hybrid("", limit=10) == []
-        assert await words.search_history_hybrid("   ", limit=10) == []
+        assert await search.search_history_hybrid("", limit=10) == []
+        assert await search.search_history_hybrid("   ", limit=10) == []
 
 
 def _seed_history(count: int) -> None:
@@ -777,7 +777,7 @@ def test_search_does_not_hold_the_store_lock_while_highlighting(monkeypatch):
     """
     history.save_entry(text="правив у файлі", duration_ms=1, language="uk")
 
-    real_build_highlight = words._build_highlight
+    real_build_highlight = search._build_highlight
     lock_was_free: list[bool] = []
 
     def probing_build_highlight(text, tokens):
@@ -787,9 +787,9 @@ def test_search_does_not_hold_the_store_lock_while_highlighting(monkeypatch):
             history._lock.release()
         return real_build_highlight(text, tokens)
 
-    monkeypatch.setattr(words, "_build_highlight", probing_build_highlight)
+    monkeypatch.setattr(search, "_build_highlight", probing_build_highlight)
 
-    hits = words.search_history("прав", limit=5)
+    hits = search.search_history("прав", limit=5)
 
     assert len(hits) == 1
     assert "<mark>прав</mark>ив" in hits[0].highlighted_text
@@ -851,8 +851,8 @@ def test_the_scan_chunk_never_exceeds_the_largest_page_the_store_already_reads()
     The second assertion is what keeps the substring lane's final
     ``id IN (...)`` fetch inside the same budget as one page.
     """
-    assert words.SEARCH_SCAN_CHUNK_ROWS <= history.HISTORY_LIMIT_MAX
-    assert words.SEARCH_LIMIT_MAX <= words.SEARCH_SCAN_CHUNK_ROWS
+    assert search.SEARCH_SCAN_CHUNK_ROWS <= history.HISTORY_LIMIT_MAX
+    assert search.SEARCH_LIMIT_MAX <= search.SEARCH_SCAN_CHUNK_ROWS
 
 
 def test_search_releases_the_store_lock_between_chunks(monkeypatch):
@@ -864,12 +864,12 @@ def test_search_releases_the_store_lock_between_chunks(monkeypatch):
     """
     for i in range(7):
         history.save_entry(text=f"абракадабра {i}", duration_ms=1)
-    monkeypatch.setattr(words, "SEARCH_SCAN_CHUNK_ROWS", 2)
+    monkeypatch.setattr(search, "SEARCH_SCAN_CHUNK_ROWS", 2)
 
     lock = _CountingLock(history._lock)
     monkeypatch.setattr(history, "_lock", lock)
 
-    hits = words.search_history("кадабр", limit=7)
+    hits = search.search_history("кадабр", limit=7)
 
     assert len(hits) == 7
     assert lock.acquisitions >= 4
@@ -885,7 +885,7 @@ def test_a_save_issued_between_two_chunks_lands_before_the_search_finishes(monke
     """
     for i in range(7):
         history.save_entry(text=f"абракадабра {i}", duration_ms=1)
-    monkeypatch.setattr(words, "SEARCH_SCAN_CHUNK_ROWS", 2)
+    monkeypatch.setattr(search, "SEARCH_SCAN_CHUNK_ROWS", 2)
 
     lock = _CountingLock(history._lock)
     monkeypatch.setattr(history, "_lock", lock)
@@ -898,7 +898,7 @@ def test_a_save_issued_between_two_chunks_lands_before_the_search_finishes(monke
     lock.callback = save_from_the_gap
     lock.fire_on_release = 2
 
-    hits = words.search_history("кадабр", limit=7)
+    hits = search.search_history("кадабр", limit=7)
     acquisitions_when_the_search_finished = lock.acquisitions
 
     assert len(written) == 2, "no chunk boundary ever released the lock"
@@ -912,9 +912,9 @@ def test_no_page_of_the_substring_walk_reads_more_than_one_chunk(monkeypatch):
     """The bound is per statement, not per search."""
     for i in range(7):
         history.save_entry(text=f"абракадабра {i}", duration_ms=1)
-    monkeypatch.setattr(words, "SEARCH_SCAN_CHUNK_ROWS", 2)
+    monkeypatch.setattr(search, "SEARCH_SCAN_CHUNK_ROWS", 2)
 
-    real_page = words._substring_page_locked
+    real_page = search._substring_page_locked
     page_sizes: list[int] = []
 
     def recording_page(conn, like_sql, like_params, before, chunk):
@@ -922,9 +922,9 @@ def test_no_page_of_the_substring_walk_reads_more_than_one_chunk(monkeypatch):
         page_sizes.append(len(rows))
         return rows
 
-    monkeypatch.setattr(words, "_substring_page_locked", recording_page)
+    monkeypatch.setattr(search, "_substring_page_locked", recording_page)
 
-    assert len(words.search_history("кадабр", limit=7)) == 7
+    assert len(search.search_history("кадабр", limit=7)) == 7
     assert len(page_sizes) > 1
     assert max(page_sizes) <= 2
 
@@ -941,7 +941,7 @@ def test_a_filled_fts_lane_leaves_the_substring_lane_out_of_the_store(monkeypatc
     lock = _CountingLock(history._lock)
     monkeypatch.setattr(history, "_lock", lock)
 
-    hits = words.search_history("прав", limit=3)
+    hits = search.search_history("прав", limit=3)
 
     assert len(hits) == 3
     assert lock.acquisitions == 1
@@ -958,15 +958,15 @@ def test_an_underscore_in_a_query_matches_an_underscore_and_not_any_character():
     _insert_entry("u1", 300, "абракадабра_ще")
     _insert_entry("u2", 200, "абракадабраZще")
 
-    hits = words.search_history("кадабра_ще", limit=5)
+    hits = search.search_history("кадабра_ще", limit=5)
 
     assert [h.id for h in hits] == ["u1"]
 
 
 def test_escape_like_neutralises_every_wildcard():
-    assert words._escape_like("100%") == "100\\%"
-    assert words._escape_like("a_b") == "a\\_b"
-    assert words._escape_like("c:\\d") == "c:\\\\d"
+    assert search._escape_like("100%") == "100\\%"
+    assert search._escape_like("a_b") == "a\\_b"
+    assert search._escape_like("c:\\d") == "c:\\\\d"
 
 
 def test_a_substring_match_past_the_first_chunk_is_still_found(monkeypatch):
@@ -974,9 +974,9 @@ def test_a_substring_match_past_the_first_chunk_is_still_found(monkeypatch):
     _insert_entry("old", 100, "абракадабра")
     for i in range(6):
         _insert_entry(f"new{i}", 200 + i, f"нічого цікавого {i}")
-    monkeypatch.setattr(words, "SEARCH_SCAN_CHUNK_ROWS", 2)
+    monkeypatch.setattr(search, "SEARCH_SCAN_CHUNK_ROWS", 2)
 
-    hits = words.search_history("кадабр", limit=5)
+    hits = search.search_history("кадабр", limit=5)
 
     assert [h.id for h in hits] == ["old"]
 
@@ -988,9 +988,9 @@ def test_the_substring_lane_orders_its_hits_by_ts_then_id(monkeypatch):
     for ts, ids in ((300, ("a1", "a2")), (200, ("b1", "b2")), (100, ("c1", "c2"))):
         for entry_id in ids:
             _insert_entry(entry_id, ts, "абракадабра")
-    monkeypatch.setattr(words, "SEARCH_SCAN_CHUNK_ROWS", 2)
+    monkeypatch.setattr(search, "SEARCH_SCAN_CHUNK_ROWS", 2)
 
-    hits = words.search_history("кадабр", limit=6)
+    hits = search.search_history("кадабр", limit=6)
 
     assert [h.id for h in hits] == ["a2", "a1", "b2", "b1", "c2", "c1"]
 
@@ -1001,9 +1001,9 @@ def test_a_row_both_lanes_match_appears_once_across_chunks(monkeypatch):
     _insert_entry("both", 100, "правда буде завжди прав")
     for i in range(4):
         _insert_entry(f"filler{i}", 200 + i, "нічого цікавого")
-    monkeypatch.setattr(words, "SEARCH_SCAN_CHUNK_ROWS", 2)
+    monkeypatch.setattr(search, "SEARCH_SCAN_CHUNK_ROWS", 2)
 
-    hits = words.search_history("прав", limit=5)
+    hits = search.search_history("прав", limit=5)
 
     assert [h.id for h in hits] == ["both"]
 
@@ -1013,9 +1013,9 @@ def test_the_chunked_walk_stops_at_the_callers_limit(monkeypatch):
     pages and stops, rather than reading the rest of the table and slicing."""
     for ts in range(6):
         _insert_entry(f"e{ts}", 100 + ts, "абракадабра")
-    monkeypatch.setattr(words, "SEARCH_SCAN_CHUNK_ROWS", 2)
+    monkeypatch.setattr(search, "SEARCH_SCAN_CHUNK_ROWS", 2)
 
-    real_page = words._substring_page_locked
+    real_page = search._substring_page_locked
     pages_read = []
 
     def recording_page(conn, like_sql, like_params, before, chunk):
@@ -1023,9 +1023,9 @@ def test_the_chunked_walk_stops_at_the_callers_limit(monkeypatch):
         pages_read.append(len(rows))
         return rows
 
-    monkeypatch.setattr(words, "_substring_page_locked", recording_page)
+    monkeypatch.setattr(search, "_substring_page_locked", recording_page)
 
-    hits = words.search_history("кадабр", limit=3)
+    hits = search.search_history("кадабр", limit=3)
 
     assert [h.id for h in hits] == ["e5", "e4", "e3"]
     assert pages_read == [2, 2]

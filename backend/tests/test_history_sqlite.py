@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from app.transcripts import history, vector_store
+from app.transcripts import history, relocation, schema, vector_store
 
 
 @pytest.fixture(autouse=True)
@@ -147,7 +147,7 @@ def test_stats_cache_invalidated_on_relocate(isolated_storage, tmp_path):
     assert s1.total_entries == 1
 
     new_dir = tmp_path / "new"
-    history.relocate(new_dir)
+    relocation.relocate(new_dir)
     s2 = history.compute_stats()
     assert s2.total_entries == 1
 
@@ -251,8 +251,8 @@ def test_relocate_moved_branch(isolated_storage, tmp_path):
     history.save_entry(text="x", duration_ms=1)
 
     new_dir = tmp_path / "new"
-    res, reason = history.relocate(new_dir)
-    assert res == history.RelocateOutcome.MOVED
+    res, reason = relocation.relocate(new_dir)
+    assert res == relocation.RelocateOutcome.MOVED
     assert reason is None
     assert (new_dir / "history.db").exists()
     assert not (target / "history.db").exists()
@@ -266,8 +266,8 @@ def test_relocate_no_old_file_branch(isolated_storage, tmp_path):
     (target / "history.db").unlink(missing_ok=True)
 
     new_dir = tmp_path / "new"
-    res, _ = history.relocate(new_dir)
-    assert res == history.RelocateOutcome.NO_OLD_FILE
+    res, _ = relocation.relocate(new_dir)
+    assert res == relocation.RelocateOutcome.NO_OLD_FILE
 
 
 def test_relocate_new_already_has_file_branch(isolated_storage, tmp_path):
@@ -281,8 +281,8 @@ def test_relocate_new_already_has_file_branch(isolated_storage, tmp_path):
     history.save_entry(text="new", duration_ms=1)
     history.bootstrap(target)
 
-    res, _ = history.relocate(new_dir)
-    assert res == history.RelocateOutcome.NEW_ALREADY_HAS_FILE
+    res, _ = relocation.relocate(new_dir)
+    assert res == relocation.RelocateOutcome.NEW_ALREADY_HAS_FILE
     assert (new_dir / "history.db").exists()
 
 
@@ -296,10 +296,10 @@ def test_relocate_failed_on_copy_oserror(isolated_storage, tmp_path, monkeypatch
     def boom(*_a, **_kw):
         raise OSError("simulated copy failure")
 
-    monkeypatch.setattr(history.shutil, "copy2", boom)
+    monkeypatch.setattr(relocation.shutil, "copy2", boom)
 
-    res, reason = history.relocate(new_dir)
-    assert res == history.RelocateOutcome.FAILED
+    res, reason = relocation.relocate(new_dir)
+    assert res == relocation.RelocateOutcome.FAILED
     assert reason and "simulated copy failure" in reason
     assert (target / "history.db").exists()
 
@@ -427,7 +427,7 @@ def test_migration_v1_to_v2_populates_fts(isolated_storage, tmp_path):
     db_path = tmp_path / "history.db"
     raw = sqlite3.connect(db_path)
     try:
-        raw.executescript(history._DDL_V1)
+        raw.executescript(schema._DDL_V1)
         raw.execute("PRAGMA user_version = 1")
         raw.execute(
             "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
@@ -460,8 +460,8 @@ def test_partial_migration_recovery_docsize_shadow_missing(isolated_storage, tmp
     db_path = tmp_path / "history.db"
     raw = sqlite3.connect(db_path)
     try:
-        raw.executescript(history._DDL_V1)
-        raw.executescript(history._DDL_V2)
+        raw.executescript(schema._DDL_V1)
+        raw.executescript(schema._DDL_V2)
         raw.execute(
             "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
             "VALUES ('a', 0, 'uk', 'shadow probe', 'shadow probe', 0)"
@@ -490,7 +490,7 @@ def test_partial_migration_recovery_fts_missing(isolated_storage, tmp_path):
     db_path = tmp_path / "history.db"
     raw = sqlite3.connect(db_path)
     try:
-        raw.executescript(history._DDL_V1)
+        raw.executescript(schema._DDL_V1)
         raw.execute("PRAGMA user_version = 2")
         raw.execute(
             "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
@@ -522,8 +522,8 @@ def test_crash_before_user_version_pragma_retries(isolated_storage, tmp_path, mo
     db_path = tmp_path / "history.db"
     raw = sqlite3.connect(db_path)
     try:
-        raw.executescript(history._DDL_V1)
-        raw.executescript(history._DDL_V2)
+        raw.executescript(schema._DDL_V1)
+        raw.executescript(schema._DDL_V2)
         raw.execute(
             "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
             "VALUES ('a', 0, 'uk', 'crash safety', 'crash safety', 0)"
@@ -552,8 +552,8 @@ def test_relocate_rebuilds_fts(isolated_storage, tmp_path):
     history.save_entry(text="relocate searchable text", duration_ms=1)
 
     new_dir = tmp_path / "new"
-    res, _ = history.relocate(new_dir)
-    assert res == history.RelocateOutcome.MOVED
+    res, _ = relocation.relocate(new_dir)
+    assert res == relocation.RelocateOutcome.MOVED
 
     with history._lock:
         conn = history._ensure_conn_locked()
@@ -570,7 +570,7 @@ def test_v1_to_current_migration_lands_in_one_boot(isolated_storage, tmp_path):
     db_path = tmp_path / "history.db"
     raw = sqlite3.connect(db_path)
     try:
-        raw.executescript(history._DDL_V1)
+        raw.executescript(schema._DDL_V1)
         raw.execute("PRAGMA user_version = 1")
         raw.execute(
             "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
@@ -598,8 +598,8 @@ def test_v2_to_current_migration_keeps_the_fts_index(isolated_storage, tmp_path)
     db_path = tmp_path / "history.db"
     raw = sqlite3.connect(db_path)
     try:
-        raw.executescript(history._DDL_V1)
-        raw.executescript(history._DDL_V2)
+        raw.executescript(schema._DDL_V1)
+        raw.executescript(schema._DDL_V2)
         raw.execute(
             "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
             "VALUES ('a', 0, 'uk', 'v2 already migrated', 'v2 already migrated', 0)"
@@ -635,8 +635,8 @@ def test_crash_before_v3_user_version_pragma_retries(isolated_storage, tmp_path)
     db_path = tmp_path / "history.db"
     raw = sqlite3.connect(db_path)
     try:
-        raw.executescript(history._DDL_V1)
-        raw.executescript(history._DDL_V2)
+        raw.executescript(schema._DDL_V1)
+        raw.executescript(schema._DDL_V2)
         raw.executescript(vector_store._DDL_V3)
         raw.execute(
             "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
@@ -666,8 +666,8 @@ def test_partial_v3_migration_recovery_tables_missing(isolated_storage, tmp_path
     db_path = tmp_path / "history.db"
     raw = sqlite3.connect(db_path)
     try:
-        raw.executescript(history._DDL_V1)
-        raw.executescript(history._DDL_V2)
+        raw.executescript(schema._DDL_V1)
+        raw.executescript(schema._DDL_V2)
         raw.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
         raw.execute("PRAGMA user_version = 3")
         raw.commit()
@@ -767,7 +767,7 @@ def test_search_lock_error_returns_503(isolated_storage, tmp_path):
     with TestClient(app) as client:
         history.save_entry(text="anything", duration_ms=1)
         with patch(
-            "app.transcripts.words.search_history",
+            "app.transcripts.search.search_history",
             side_effect=sqlite3.OperationalError("database is locked"),
         ):
             resp = client.get("/history/search?q=anything")
@@ -922,7 +922,7 @@ def test_concurrent_save_and_search_serialised(isolated_storage, tmp_path):
     documents that guarantee. Not a race-condition test: partial reads
     are physically impossible under a single Python mutex around a single
     connection."""
-    from app.transcripts import words as words_service
+    from app.transcripts import search
 
     target = tmp_path / "target"
     history.bootstrap(target)
@@ -940,7 +940,7 @@ def test_concurrent_save_and_search_serialised(isolated_storage, tmp_path):
     def searcher():
         try:
             for _ in range(20):
-                results = words_service.search_history("searchable", limit=50)
+                results = search.search_history("searchable", limit=50)
                 seen.append(len(results))
         except Exception as e:
             errors.append(e)
@@ -961,7 +961,7 @@ def test_get_page_clamps_its_own_limit(isolated_storage, tmp_path):
     """The router's `Query(..., le=HISTORY_LIMIT_MAX)` bounds the endpoint, not
     the function. `LIMIT -1` is SQLite for "every row", so an unclamped service
     call still materialises the whole table into `HistoryEntry` objects under
-    the lock. `words.top_words` and `words.search_history` both clamp in the
+    the lock. `words.top_words` and `search.search_history` both clamp in the
     service as well as at their routers.
 
     The clamp also bounds the "is there more" probe: the largest read the store
@@ -995,7 +995,7 @@ def test_entry_columns_match_the_bootstrapped_schema(isolated_storage, tmp_path)
         )
     finally:
         conn.close()
-    assert history.ENTRY_COLUMNS == schema_columns
+    assert schema.ENTRY_COLUMNS == schema_columns
 
 
 def test_entry_read_columns_are_exactly_what_row_to_entry_reads(
@@ -1025,15 +1025,15 @@ def test_entry_read_columns_are_exactly_what_row_to_entry_reads(
     finally:
         conn.close()
 
-    assert set(history.ENTRY_READ_COLUMNS) == schema_columns - {"cleaned_text"}
+    assert set(schema.ENTRY_READ_COLUMNS) == schema_columns - {"cleaned_text"}
     assert len(entries) == 1
     assert entries[0].text == "hello world"
 
 
 def test_columns_sql_qualifies_every_name_with_the_alias():
     """The FTS lane joins `entries` as `e`, so every name must carry the alias."""
-    assert history.columns_sql(("id", "ts")) == "id, ts"
-    assert history.columns_sql(("id", "ts"), alias="e") == "e.id, e.ts"
+    assert schema.columns_sql(("id", "ts")) == "id, ts"
+    assert schema.columns_sql(("id", "ts"), alias="e") == "e.id, e.ts"
 
 
 def test_columns_sql_refuses_a_name_that_is_not_an_entries_column():
@@ -1044,7 +1044,7 @@ def test_columns_sql_refuses_a_name_that_is_not_an_entries_column():
     The check makes that a property of the function.
     """
     with pytest.raises(ValueError, match="entries table"):
-        history.columns_sql(("id", "raw_text; DROP TABLE entries"))
+        schema.columns_sql(("id", "raw_text; DROP TABLE entries"))
 
 
 def test_columns_sql_refuses_an_alias_that_is_not_an_identifier():
@@ -1052,7 +1052,7 @@ def test_columns_sql_refuses_an_alias_that_is_not_an_identifier():
     docstring's promise that an `entries` column is the only thing this can
     emit was false for anything reaching the second argument."""
     with pytest.raises(ValueError, match="table alias"):
-        history.columns_sql(("id",), alias="x FROM sqlite_master; -- ")
+        schema.columns_sql(("id",), alias="x FROM sqlite_master; -- ")
 
 
 def test_a_saved_row_lands_in_the_right_columns_whatever_their_order(
@@ -1069,7 +1069,7 @@ def test_a_saved_row_lands_in_the_right_columns_whatever_their_order(
     """
     target = tmp_path / "target"
     history.bootstrap(target)
-    monkeypatch.setattr(history, "ENTRY_COLUMNS", tuple(reversed(history.ENTRY_COLUMNS)))
+    monkeypatch.setattr(schema, "ENTRY_COLUMNS", tuple(reversed(schema.ENTRY_COLUMNS)))
 
     history.save_entry(
         text="hello world",
@@ -1107,11 +1107,11 @@ def test_a_failed_relocate_does_not_cache_a_lazily_resolved_directory(
     monkeypatch.setattr(history, "_output_dir", None)
     monkeypatch.setattr(history, "_conn", None)
     history.save_entry(text="x", duration_ms=1)
-    monkeypatch.setattr(history, "_verify_db_row_count", lambda *_a, **_kw: False)
+    monkeypatch.setattr(relocation, "_verify_db_row_count", lambda *_a, **_kw: False)
 
-    outcome, reason = history.relocate(tmp_path / "new")
+    outcome, reason = relocation.relocate(tmp_path / "new")
 
-    assert outcome == history.RelocateOutcome.FAILED
+    assert outcome == relocation.RelocateOutcome.FAILED
     assert reason and "Verification failed" in reason
     assert history._output_dir is None
 
@@ -1131,15 +1131,15 @@ def test_a_relocate_that_raises_mid_copy_leaves_a_working_store_behind(
     history.save_entry(text="before the move", duration_ms=1)
     old_dir = history._resolve_output_dir()
     monkeypatch.setattr(
-        history.shutil, "copy2", MagicMock(side_effect=OSError("disk full"))
+        relocation.shutil, "copy2", MagicMock(side_effect=OSError("disk full"))
     )
 
     history.compute_stats()
     generation_before = history._derived_generation
 
-    outcome, reason = history.relocate(tmp_path / "new")
+    outcome, reason = relocation.relocate(tmp_path / "new")
 
-    assert outcome == history.RelocateOutcome.FAILED
+    assert outcome == relocation.RelocateOutcome.FAILED
     assert reason and "disk full" in reason
     assert history._resolve_output_dir() == old_dir
     assert history._stats_cache is None
@@ -1502,20 +1502,20 @@ def test_the_shipped_first_page_read_needs_no_sort(isolated_storage, tmp_path):
 
 def test_the_shipped_word_search_read_keeps_its_ordering_index(isolated_storage, tmp_path):
     """``entries_ts_idx`` is gone and ``entries_ts_id_idx`` leads with the same
-    column, so ``words.search_history``'s ``LIKE`` lane still gets its ``ts DESC``
+    column, so ``search.search_history``'s ``LIKE`` lane still gets its ``ts DESC``
     order from an index instead of a sort. It was never a seek -- a leading-wildcard
     ``LIKE`` is unindexable -- so what is pinned is the absence of ``TEMP B-TREE``.
     """
-    from app.transcripts import words
+    from app.transcripts import search
 
     _seed(tmp_path / "target", 40, lambda index: 1_700_000_000_000 + index)
 
     reads = [
         s
-        for s in _statements_from(lambda: words.search_history("ntry", limit=5))
+        for s in _statements_from(lambda: search.search_history("ntry", limit=5))
         if _reads_entries(s) and "LIKE" in s.upper()
     ]
-    assert reads, "words.search_history issued no LIKE read over entries"
+    assert reads, "search.search_history issued no LIKE read over entries"
 
     for statement in reads:
         plan = _plan_of(statement)
@@ -1611,7 +1611,7 @@ def test_the_has_more_probe_reads_a_key_and_seeks_the_index(isolated_storage, tm
     probes = _the_has_more_probe(lambda: history.get_page(limit=30))
 
     assert len(probes) == 1, probes
-    for column in history.ENTRY_READ_COLUMNS:
+    for column in schema.ENTRY_READ_COLUMNS:
         if column not in ("id", "ts"):
             assert column not in probes[0], probes[0]
 
@@ -2050,7 +2050,7 @@ def _last_page_probe(store_size, tmp_path, name):
         ).fetchone()
     cursor = history.HistoryCursor(ts=ts, id=entry_id)
     offset_read = (
-        f"SELECT {history.columns_sql(history.ENTRY_READ_COLUMNS)} FROM entries "
+        f"SELECT {schema.columns_sql(schema.ENTRY_READ_COLUMNS)} FROM entries "
         f"ORDER BY ts DESC LIMIT 30 OFFSET {store_size - 30}"
     )
     cursor_steps = _vm_steps_of(lambda: history.get_page(limit=30, before=cursor))
@@ -2178,8 +2178,8 @@ def _seed_v3_store_with_unorderable_rows(db_path, with_embedding=False):
     """
     raw = sqlite3.connect(db_path)
     try:
-        raw.executescript(history._DDL_V1)
-        raw.executescript(history._DDL_V2)
+        raw.executescript(schema._DDL_V1)
+        raw.executescript(schema._DDL_V2)
         raw.executescript(vector_store._DDL_V3)
         for index, (entry_id, ts, text) in enumerate(_UNORDERABLE_ROWS):
             if index == 2:
@@ -2253,7 +2253,7 @@ def test_a_row_that_is_not_a_position_is_repaired_rather_than_dropped(
     assert {t for _, _, t in rows.values()} == {"integer"}
     assert rows["one good row"][1] == 1700000000003
     assert rows["a fractional millisecond"][1] == 1700000000001
-    assert rows["a date that is not a date"][1] == history.UNKNOWN_TS
+    assert rows["a date that is not a date"][1] == schema.UNKNOWN_TS
     assert rows["affinity already converts this one"][1] == 1700000000000
     assert rows["no id at all"][0].startswith("recovered-")
 
@@ -2476,7 +2476,7 @@ def _seed_a_v4_store_with_embeddings(db_path, rows):
     raw = sqlite3.connect(db_path)
     try:
         raw.executescript(_DDL_V4_ENTRIES_AS_SPEC_146_SHIPPED_IT)
-        raw.executescript(history._DDL_V2)
+        raw.executescript(schema._DDL_V2)
         raw.enable_load_extension(True)
         sqlite_vec.load(raw)
         raw.enable_load_extension(False)
@@ -2530,7 +2530,7 @@ def test_a_bootstrapped_store_has_no_style_column(isolated_storage, tmp_path):
     finally:
         conn.close()
     assert "style" not in columns
-    assert columns == set(history.ENTRY_COLUMNS)
+    assert columns == set(schema.ENTRY_COLUMNS)
     assert version == 5
 
 
@@ -2605,7 +2605,7 @@ def test_a_merge_from_a_store_that_still_has_a_style_column_keeps_every_transcri
     target = tmp_path / "target"
     history.bootstrap(target)
 
-    outcome, error = history.consolidate_into(source, target)
+    outcome, error = relocation.consolidate_into(source, target)
 
     assert error is None, outcome
     assert {e.text for e in history.get_page(limit=10).entries} == {
@@ -2627,15 +2627,15 @@ def test_a_store_already_at_the_current_version_is_not_rebuilt_again(
         history._close_conn_locked()
 
     calls = []
-    original = history._migrate_to_v5_locked
+    original = schema._migrate_to_v5_locked
     try:
-        history._migrate_to_v5_locked = lambda conn: (
+        schema._migrate_to_v5_locked = lambda conn: (
             calls.append(1),
             original(conn),
         )[1]
         history.bootstrap(tmp_path)
     finally:
-        history._migrate_to_v5_locked = original
+        schema._migrate_to_v5_locked = original
 
     assert calls == [], "a current-version store must not be migrated a second time"
     with history._lock:
@@ -2660,8 +2660,8 @@ def test_a_merge_repairs_a_foreign_row_instead_of_skipping_it(
     target_dir.mkdir()
     _seed_v3_store_with_unorderable_rows(source_dir / "history.db")
 
-    outcome, error = history.consolidate_into(source_dir, target_dir)
-    assert outcome is history.ConsolidateOutcome.CONSOLIDATED, error
+    outcome, error = relocation.consolidate_into(source_dir, target_dir)
+    assert outcome is relocation.ConsolidateOutcome.CONSOLIDATED, error
 
     history.bootstrap(target_dir)
     texts = {e.text for e in history.get_page(limit=50).entries}
@@ -2956,7 +2956,7 @@ def test_a_rebuild_that_raises_mid_transaction_still_lets_the_app_start(
     read at all: rolled back, logged, version untouched, app running.
     """
     _seed_v3_store_with_unorderable_rows(tmp_path / "history.db")
-    monkeypatch.setattr(history, "_DDL_V5_ENTRIES", "CREATE TABLE entries_v5 (nope")
+    monkeypatch.setattr(schema, "_DDL_V5_ENTRIES", "CREATE TABLE entries_v5 (nope")
 
     history.bootstrap(tmp_path)
 
@@ -3004,11 +3004,11 @@ def test_merging_the_same_source_twice_does_not_duplicate_a_repaired_row(
     _seed_v3_store_with_unorderable_rows(source_dir / "history.db")
     original = (source_dir / "history.db").read_bytes()
 
-    first, error = history.consolidate_into(source_dir, target_dir)
-    assert first is history.ConsolidateOutcome.CONSOLIDATED, error
+    first, error = relocation.consolidate_into(source_dir, target_dir)
+    assert first is relocation.ConsolidateOutcome.CONSOLIDATED, error
     (source_dir / "history.db").write_bytes(original)
-    second, error = history.consolidate_into(source_dir, target_dir)
-    assert second is history.ConsolidateOutcome.CONSOLIDATED, error
+    second, error = relocation.consolidate_into(source_dir, target_dir)
+    assert second is relocation.ConsolidateOutcome.CONSOLIDATED, error
 
     history.bootstrap(target_dir)
     entries = history.get_page(limit=50).entries
@@ -3085,7 +3085,7 @@ def test_a_copy_that_would_carry_nothing_refuses_to_drop_the_old_table(
     deletion and must not proceed.
     """
     _seed_v3_store_with_unorderable_rows(tmp_path / "history.db")
-    monkeypatch.setitem(history._REPAIRED_COLUMN_SQL, "cleaned_text", "NULL")
+    monkeypatch.setitem(schema._REPAIRED_COLUMN_SQL, "cleaned_text", "NULL")
 
     history.bootstrap(tmp_path)
 
@@ -3109,7 +3109,7 @@ def test_a_failure_after_the_commit_also_leaves_the_app_working(
     transaction would -- and this half is reached on every upgrade.
     """
     _seed_v3_store_with_unorderable_rows(tmp_path / "history.db")
-    monkeypatch.setattr(history, "_DDL_V2", "CREATE TABLE broken (")
+    monkeypatch.setattr(schema, "_DDL_V2", "CREATE TABLE broken (")
 
     history.bootstrap(tmp_path)
 
@@ -3176,8 +3176,8 @@ def test_a_merge_that_could_not_carry_every_row_says_so(
     )
 
     with caplog.at_level("WARNING"):
-        outcome, error = history.consolidate_into(source_dir, target_dir)
-    assert outcome is history.ConsolidateOutcome.CONSOLIDATED, error
+        outcome, error = relocation.consolidate_into(source_dir, target_dir)
+    assert outcome is relocation.ConsolidateOutcome.CONSOLIDATED, error
     assert any("Merge carried" in record.message for record in caplog.records), (
         "a source row that could not be written has to be said out loud"
     )
