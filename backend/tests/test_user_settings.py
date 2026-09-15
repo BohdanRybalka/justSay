@@ -86,9 +86,45 @@ def test_validate_output_dir_accepts_valid_dir(tmp_path):
 
 
 def test_validate_output_dir_rejects_forbidden_parent():
-    forbidden = "C:/Windows/System32/justsay" if sys.platform == "win32" else "/etc/justsay"
+    """Names a directory that is genuinely a system root on the running host.
+
+    `/etc/justsay` is the right probe on Linux and the wrong one on macOS,
+    where `/etc` is a symlink and the interesting case is its own test below.
+    """
+    if sys.platform == "win32":
+        forbidden = "C:/Windows/System32/justsay"
+    elif sys.platform == "darwin":
+        forbidden = "/Library/justsay"
+    else:
+        forbidden = "/etc/justsay"
     with pytest.raises(ConfigurationError, match="system directory"):
         user_settings._validate_output_dir(forbidden)
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="/etc is a symlink to /private/etc on macOS only",
+)
+def test_validate_output_dir_rejects_etc_through_the_macos_symlink():
+    """The candidate is resolved before comparison, so an unresolved `/etc`
+    entry in `_FORBIDDEN_PARENTS` matches nothing and the guard silently stops
+    firing -- only the OS permission bit refused the write, with an Errno 13
+    the user cannot act on. See spec 156 and ADR 065."""
+    with pytest.raises(ConfigurationError, match="system directory") as excinfo:
+        user_settings._validate_output_dir("/etc/justsay")
+
+    assert "/private/etc" in str(excinfo.value)
+
+
+def test_forbidden_parents_are_stored_resolved():
+    """`_validate_output_dir` resolves the candidate, so an entry that is not
+    its own resolved form can never match one. This pins that relationship for
+    every future entry instead of leaving it to whoever adds the next root."""
+    for entry in user_settings._FORBIDDEN_PARENTS:
+        assert entry == entry.resolve(strict=False), (
+            f"{entry} is not its own resolved form; the candidate it should refuse "
+            "resolves to a different path and the guard never fires"
+        )
 
 
 
