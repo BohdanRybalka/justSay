@@ -29,6 +29,8 @@ Seven properties are pinned here:
    removing it, and puts the package surface this rule deletes straight back.
 6. Importing a pure DSP module does not load the capture stack.
 7. An underscore-prefixed attribute is private to its own package (ADR 072).
+   The package is the directory the module sits in, so a package's `__init__`
+   belongs to that package and not to its parent.
    A sibling module may name it; a module in another package may not, in any
    spelling -- `alias._name`, `app.x.y._name` after a plain `import app.x.y`,
    or `from app.x.y import _name`. An underscore-named *module* imported by a
@@ -86,6 +88,22 @@ with the number of tests each one reddens:
   package-private module of its own package is what the rule permits, and the
   `ImportFrom` arm used to record the package rather than the module and fire
   on it
+- a package's own `__init__` naming a sibling's private -- `from app.transcripts
+  import history` plus `history._lock` appended to
+  `app/transcripts/__init__.py` -- **zero** tests, the third negative control.
+  A package's `__init__` *is* that package, so trimming the last segment off
+  its dotted name would place it in the parent and report the sibling as a
+  cross-package reach-in
+- `_zz_secret` added to `app/core/__init__.py` and named from a new
+  `app/_zz_root.py` directly under `app/` -- **one** test. Under the same
+  trimming both sides came out as the string `app` and the reach-in was
+  dropped, so this is the mutation that pins the blind spot rather than the
+  false alarm
+- `from .. import core, _zz_missing` planted in `app/transcripts/` -- **one**
+  test, and the offender it names is `app._zz_missing`. The arm used to
+  cross-product resolved bases with aliases where the alias walk zips them, so
+  the same line named `app.core._zz_missing`, a reach-in nobody writes, and
+  never mentioned the module actually reached
 
 Each list below is an allowlist, not a description: adding an entry is a
 deliberate act a reviewer can see in the diff.
@@ -96,7 +114,9 @@ from __future__ import annotations
 import ast
 import functools
 from collections import defaultdict
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 
 from tests.conftest import assert_import_loads_no_module
 
@@ -157,14 +177,21 @@ _FEATURE_PACKAGES = {
 
 
 @functools.cache
-def _modules() -> dict[str, Path]:
+def _modules() -> Mapping[str, Path]:
+    """Every module under `app/`, mapped to its file.
+
+    Cached, so the view handed back is read-only: five call sites share one
+    object for the session and a mutation in any of them would silently change
+    the tree every later test sees, which surfaces as order dependence rather
+    than as a wrong line.
+    """
     found = {}
     for path in sorted(_APP_DIR.rglob("*.py")):
         parts = list(path.relative_to(_APP_DIR.parent).with_suffix("").parts)
         if parts[-1] == "__init__":
             parts = parts[:-1]
         found[".".join(parts)] = path
-    return found
+    return MappingProxyType(found)
 
 
 def _containing_package(path: Path) -> str:
@@ -516,7 +543,7 @@ _LIVE_PACKAGE_PRIVATE_REACH_INS = {
 }
 
 
-def _module_aliases(tree: ast.Module, package: str, modules: dict[str, Path]) -> dict[str, str]:
+def _module_aliases(tree: ast.Module, package: str, modules: Mapping[str, Path]) -> dict[str, str]:
     """Every local name bound to an `app` module, mapped to that module.
 
     `_import_from_names` does the relative-spelling work, so `from ..transcripts
@@ -577,7 +604,7 @@ def _is_package_private(name: str) -> bool:
 
 
 def _underscore_reach_ins(
-    module: str, path: Path, modules: dict[str, Path]
+    module: str, path: Path, modules: Mapping[str, Path]
 ) -> list[tuple[str, str, str]]:
     """Every underscore-prefixed name this module takes from another, as
     `(module, target module, attribute)`.
@@ -613,28 +640,47 @@ def _underscore_reach_ins(
             if target is not None:
                 found.append((module, target, node.attr))
         elif isinstance(node, ast.ImportFrom):
-            for base in _import_from_names(node, package):
+            resolved = _import_from_names(node, package)
+            if node.level and not node.module:
+                candidates = list(zip(node.names, resolved))
+            else:
+                candidates = [
+                    (alias, f"{base}.{alias.name}") for base in resolved for alias in node.names
+                ]
+            for alias, full in candidates:
+                if not _is_package_private(alias.name):
+                    continue
+                base = full.rsplit(".", 1)[0]
                 if base not in modules:
                     continue
-                for alias in node.names:
-                    if not _is_package_private(alias.name):
-                        continue
-                    full = f"{base}.{alias.name}"
-                    found.append((module, full if full in modules else base, alias.name))
+                found.append((module, full if full in modules else base, alias.name))
     return found
 
 
 @functools.cache
-def _all_underscore_reach_ins() -> set[tuple[str, str, str]]:
+def _all_underscore_reach_ins() -> frozenset[tuple[str, str, str]]:
     modules = _modules()
     found: set[tuple[str, str, str]] = set()
     for module, path in modules.items():
         found.update(_underscore_reach_ins(module, path, modules))
-    return found
+    return frozenset(found)
 
 
-def _immediate_package(module: str) -> str:
-    return module.rsplit(".", 1)[0] if "." in module else module
+@functools.cache
+def _module_packages() -> Mapping[str, str]:
+    """Each module mapped to the package it lives in, taken from its path.
+
+    Trimming the last dotted segment off a module name is not the same thing
+    and gets two shapes wrong. A package's `__init__` *is* that package, so
+    `app.transcripts` would come out as living in `app` and a sibling it names
+    would read as a cross-package reach-in; and a module directly under `app/`
+    would share the string `app` with every package `__init__`, which makes a
+    real reach-in through one of them invisible. The directory the file sits in
+    answers both.
+    """
+    return MappingProxyType(
+        {module: _containing_package(path) for module, path in _modules().items()}
+    )
 
 
 def test_an_underscore_attribute_is_private_to_its_own_package():
@@ -651,7 +697,7 @@ def test_an_underscore_attribute_is_private_to_its_own_package():
     offenders = sorted(
         f"{module} -> {target}.{attribute}"
         for module, target, attribute in _all_underscore_reach_ins()
-        if _immediate_package(module) != _immediate_package(target)
+        if _module_packages()[module] != _module_packages()[target]
         and attribute
         not in _PACKAGE_PRIVATE_REACH_IN_ALLOWED.get((module, target), frozenset())
     )

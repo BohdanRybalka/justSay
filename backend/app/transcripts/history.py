@@ -1,8 +1,11 @@
 """Transcript history — SQLite store at ``<output_dir>/history.db``.
 
-This module owns the connection, the lock and the reads and writes over the
-``entries`` table. The table's DDL, column lists and migrations live in
-``schema.py``; moving the file lives in ``relocation.py``. The directory is
+This module owns the connection, the lock and the CRUD, paging and statistics
+over the ``entries`` table. It does not own every read of that table: ``search``,
+``words`` and ``vector_store`` query ``entries`` through ``_ensure_conn_locked``
+under the same lock, which is the arrangement ADR 072 records. The table's DDL,
+column lists and migrations live in ``schema.py``; moving the file lives in
+``relocation.py``. The directory is
 user-configurable via ``UserSettings.output_dir``. ``history.py`` deliberately
 does not import ``user_settings`` — the path is pushed in via ``bootstrap``
 (lifespan) or mutated by ``relocation.relocate`` (settings change). One-way
@@ -95,8 +98,8 @@ class HistoryCursor(BaseModel):
 
     ``id`` carries no length bound, because a stored ``id`` is whatever the
     merged or adopted file holds: ``save_entry`` mints twelve hex characters, but
-    ``consolidate_into`` copies ids verbatim and ``relocate`` adopts a foreign
-    ``history.db`` whole. A length bound therefore rejected the app's own cursor
+    ``relocation.consolidate_into`` copies ids verbatim and ``relocation.relocate``
+    adopts a foreign ``history.db`` whole. A length bound therefore rejected the app's own cursor
     rather than a bad one. ADR 053 carries that reasoning; JS-137 is what it cost.
     """
 
@@ -162,7 +165,7 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 
 
 def _resolve_output_dir() -> Path:
-    """`_output_dir` if `bootstrap()`/`relocate()` has already set one, else a
+    """`_output_dir` if `bootstrap()`/`relocation.relocate()` has already set one, else a
     lazy fallback resolved fresh on every call -- never cached at import time
     (ADR 014, AC 8a)."""
     return _output_dir if _output_dir is not None else resolve_app_data_root()
@@ -656,7 +659,7 @@ def _reopen_conn_locked(directory: Path) -> None:
 
     Caller MUST hold ``_lock``. Closes the current connection (a no-op when
     there is none), connects, applies the schema and invalidates the derived
-    caches. ``_output_dir`` is deliberately left alone: on ``relocate``'s
+    caches. ``_output_dir`` is deliberately left alone: on ``relocation.relocate``'s
     rollback the store is going back to a directory it may never have had
     recorded, and writing it there would cache a lazily-resolved fallback for
     the life of the process, against ``_resolve_output_dir``'s contract

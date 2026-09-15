@@ -482,7 +482,7 @@ async def test_search_history_hybrid_runs_lanes_concurrently():
 async def test_search_history_hybrid_empty_query_returns_empty_without_calling_either_lane():
     """Restores the coverage the deleted router-level
     `test_search_semantic_empty_query_returns_empty_without_calling_provider`
-    used to provide (spec 003) -- now at the hybrid/lane level. `words.py`'s
+    used to provide (spec 003) -- now at the hybrid/lane level. `search.py`'s
     `if not q or not q.strip(): return []` short-circuit (present in both
     `search_history_hybrid` and `search_history_semantic`) must fire before
     either lane runs, so an empty or whitespace-only query must never reach

@@ -6,8 +6,10 @@ DDL, column lists and migrations; `relocation` moves the file when the output
 directory changes; `search` owns the keyword and semantic lanes; `vector_store`
 adds the embeddings over the same connection and lock; `words` owns the word
 statistics; `store_errors` maps a locked store onto HTTP; the two `stopwords_*`
-modules are data; and the two routers expose the rest. Their only dependency
-outside this package is `app.embeddings`, which supplies the query vector.
+modules are data; and the two routers expose the rest. Outside this package
+they reach `app.embeddings` for the query vector, and `app.core` for the data
+root (`app_paths`), the settings object (`config`) and the error hierarchy
+(`errors`) — nothing else.
 
 They lived in `app.core` until spec 076. That placement made `core` both a leaf
 layer and a consumer of the feature packages at once, so `core -> embeddings`
