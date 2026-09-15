@@ -359,13 +359,22 @@ def _snapshot_real_roots_backstop(_real_app_data_roots):
     """Session-scoped: records both real roots' state before the first test
     and asserts nothing changed after the last one. Attribution to a
     specific test is poor by design -- this is the net under AC 5a/5b's net,
-    catching a leak through a mechanism nobody enumerated."""
+    catching a leak through a mechanism nobody enumerated.
+
+    It observes the filesystem rather than this process, so anything else
+    writing to a real root during the session reads the same as a leak. That
+    is not hypothetical: two pytest sessions on one machine both initialise
+    logging into the shared dev root, and the resulting failure has twice
+    been read as a defect in the suite. The message says so.
+    """
     before = _snapshot_real_roots(_real_app_data_roots)
     yield
     after = _snapshot_real_roots(_real_app_data_roots)
     assert after == before, (
-        "A real app-data root changed during the test session -- the suite "
-        "wrote somewhere real.\n"
+        "A real app-data root changed during the test session. Either the "
+        "suite wrote somewhere real, or another process on this machine did "
+        "-- a second pytest session, a running backend, the packaged app. "
+        "Re-run this suite alone before treating it as a leak.\n"
         f"before-only: {sorted(str(p) for p in before.keys() - after.keys())}\n"
         f"after-only (NEW): {sorted(str(p) for p in after.keys() - before.keys())}\n"
         f"changed: {sorted(str(p) for p in before.keys() & after.keys() if before[p] != after[p])}"
