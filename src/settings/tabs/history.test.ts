@@ -28,7 +28,7 @@ vi.mock("../../api", async (importOriginal) => {
   return { ...actual, api: apiMock };
 });
 
-const { SidecarTooOldError } = await import("../../api");
+const { SidecarTooOldError, MalformedResponseError } = await import("../../api");
 const { sidecarTooOldText } = await import("../history-list");
 const { renderHistory } = await import("./history");
 
@@ -597,6 +597,32 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
         sidecarTooOldText("Search")
       );
     });
+  });
+
+  it("keeps the endpoint out of the hint when the search reply itself was malformed", async () => {
+    const entries = [buildEntry("1"), buildEntry("2")];
+    apiMock.getHistory.mockResolvedValue({ entries, total: 2, next_cursor: null });
+    apiMock.searchHistory.mockRejectedValue(
+      new MalformedResponseError("/history/search returned a total that is not a number")
+    );
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const container = document.createElement("div");
+    renderHistory(container);
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
+    });
+
+    await typeQuery(container, "hello");
+
+    await vi.waitFor(() => {
+      expect(container.querySelector("#history-search-hint")!.textContent).toBe("Search failed");
+    });
+    expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
+    expect(container.textContent).not.toContain("undefined");
+    expect(container.textContent).not.toContain("/history");
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
   });
 
   it("reports an ordinary failure verbatim even when it happens to say 'not found'", async () => {
