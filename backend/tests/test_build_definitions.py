@@ -8,12 +8,14 @@ reads only committed repo files, so it runs on `ubuntu-latest` in CI
 is no Windows or macOS CI job, and `release.yml` only fires on a tag push.
 """
 
+import importlib.util
 import json
 import re
 from pathlib import Path
 
 import pytest
 
+from app.audio import vad as vad_module
 from app.stt.local_whisper_cpp_cmd import VENDOR_DIR_NAMES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -31,6 +33,9 @@ PLATFORM_CONFS = {
     "win32": TAURI_WINDOWS_CONF,
     "darwin": TAURI_MACOS_CONF,
 }
+
+FETCH_TEN_VAD_SCRIPT = REPO_ROOT / "backend" / "scripts" / "fetch_ten_vad.py"
+BUILD_SIDECAR_SPEC = REPO_ROOT / "backend" / "build_sidecar.spec"
 
 AUDIO_TAP_SCRIPT = REPO_ROOT / "backend" / "scripts" / "build_macos_audio_tap.sh"
 AUDIO_TAP_PACKAGE = REPO_ROOT / "macos" / "JustSayAudioTap" / "Package.swift"
@@ -435,3 +440,122 @@ def test_the_hang_guard_plugin_is_declared_and_active(pytestconfig):
         "the timeout plugin is not loaded in this run, so the hang guards in "
         "tests/test_macos_tap.py cannot fail a regression -- they hang on it"
     )
+
+
+def _fetch_ten_vad_module():
+    """`backend/scripts/` is not an importable package, so the pinned mapping is
+    loaded from its path rather than imported."""
+    spec = importlib.util.spec_from_file_location(
+        "fetch_ten_vad_under_test", FETCH_TEN_VAD_SCRIPT
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("platform", ["win32", "darwin"])
+def test_the_ten_vad_filename_agrees_across_all_four_definitions(platform, monkeypatch):
+    """The fetch script writes it, the resolver looks for it, the PyInstaller
+    spec bundles it and release.yml asserts it is in the frozen tree — four
+    copies of one string, in four languages, none of which imports another.
+
+    Spec 068 is what a drifted pair of these costs: the macOS release shipped
+    no local STT engine at all and the suite reported green. Prose telling the
+    next editor to keep them in sync is exactly what failed then, so the
+    relationship is pinned symbolically here instead.
+    """
+    _, expected_name, _ = _fetch_ten_vad_module().PLATFORM_ARTIFACTS[platform]
+
+    monkeypatch.setattr("sys.platform", platform)
+    assert vad_module._platform_lib_name() == expected_name
+
+    assert f'"{expected_name}"' in BUILD_SIDECAR_SPEC.read_text(encoding="utf-8")
+    assert expected_name in _step_named("Verify TEN VAD bundled in frozen sidecar")
+
+
+def test_every_pinned_ten_vad_digest_is_a_full_sha256():
+    """A truncated or re-wrapped paste still looks like a digest, and the fetch
+    would then fail on the real bytes with a mismatch that reads like a
+    compromised upstream rather than a typo."""
+    module = _fetch_ten_vad_module()
+    digests = {name: entry[2] for name, entry in module.PLATFORM_ARTIFACTS.items()}
+    digests["LICENSE"] = module.LICENSE_ARTIFACT[2]
+
+    for name, digest in digests.items():
+        assert re.fullmatch(r"[0-9a-f]{64}", digest), f"{name}: {digest!r}"
+
+
+@pytest.mark.parametrize(
+    "step_fragment",
+    [
+        "Fetch TEN VAD library",
+        "Verify TEN VAD bundled in frozen sidecar",
+        "Verify the frozen sidecar's neural silence gate loads and decides",
+    ],
+)
+def test_no_ten_vad_release_step_is_gated_on_one_runner(step_fragment):
+    """ADR 070 reversed ADR 019's Windows-only scope. A `runner.os` gate
+    re-added to any of these three restores the defect silently: the macOS
+    sidecar still builds, still ships and still transcribes — just with the
+    energy guard alone, which is what a user notices and no job reports."""
+    block = _step_named(step_fragment)
+
+    assert "runner.os ==" not in block
+
+
+def test_the_bundled_ten_vad_verification_names_both_platforms_and_fails_hard():
+    block = _step_named("Verify TEN VAD bundled in frozen sidecar")
+
+    assert "_internal/ten_vad/ten_vad.dll" in block
+    assert "_internal/ten_vad/libten_vad.dylib" in block
+    assert "exit 1" in block
+
+
+def test_the_frozen_sidecar_selftest_runs_the_ten_vad_flag():
+    """Presence in the bundle is not loadability, and every VAD failure path
+    fails open — so without this step a macOS sidecar whose dylib PyInstaller
+    broke would ship green."""
+    block = _step_named("Verify the frozen sidecar's neural silence gate loads and decides")
+
+    assert "--selftest-ten-vad" in block
+    assert _failure_swallowing_constructs(block) == []
+
+
+def test_ci_fetches_the_ten_vad_library_before_running_the_backend_suite():
+    """test_vad.py's [DLL] tier skips itself when the library is absent, so a
+    fetch step ordered after pytest would leave the neural verdicts unasserted
+    on both legs while the job stayed green."""
+    text = CI_WORKFLOW.read_text(encoding="utf-8")
+
+    fetch_at = text.index("- name: Fetch TEN VAD library")
+    pytest_at = text.index("- name: Run backend tests (pytest, not slow)")
+
+    assert fetch_at < pytest_at
+    assert "backend/scripts/fetch_ten_vad.py" in text[fetch_at:pytest_at]
+
+
+def test_a_platform_with_no_pinned_artifact_fails_instead_of_fetching_nothing(
+    tmp_path, monkeypatch
+):
+    """The dangerous shape of a per-platform mapping is the silent one: a
+    lookup that yields nothing, a loop that runs zero times, and a fetch step
+    that exits 0 having downloaded no library — after which every later stage
+    degrades to the energy guard and reports success. Both workflows run this
+    script ungated, so the mapping's own miss is the only thing standing
+    between an unpinned runner and a green VAD-less release.
+    """
+    module = _fetch_ten_vad_module()
+    assert "linux" not in module.PLATFORM_ARTIFACTS
+
+    def _must_not_download(*args, **kwargs):
+        raise AssertionError("an unpinned platform must not reach the network")
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", _must_not_download)
+    vendor_dir = tmp_path / "ten-vad"
+    monkeypatch.setattr(module, "VENDOR_DIR", vendor_dir)
+
+    with pytest.raises(SystemExit) as exit_info:
+        module.main(["--platform", "linux"])
+
+    assert exit_info.value.code != 0
+    assert not vendor_dir.exists()

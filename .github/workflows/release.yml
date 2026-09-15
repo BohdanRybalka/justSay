@@ -123,15 +123,16 @@ jobs:
           pip install -r requirements-locked.txt --no-deps
           pip install -e . --no-deps
 
-      # TEN VAD neural silence gate (spec 033 / ADR 019). Windows-only: it is
-      # the only platform this project ships the prebuilt library for (no
-      # macOS hardware exists here to verify a framework bundle against).
+      # TEN VAD neural silence gate (spec 033 / ADR 019, extended to macOS by
+      # spec 170 / ADR 070). Ungated: fetch_ten_vad.py pins one artifact per
+      # shipped platform and defaults to the runner's own sys.platform, so
+      # each leg fetches its own library and a platform with no pinned
+      # artifact fails the step loudly instead of fetching nothing.
       # MUST run BEFORE the PyInstaller step — build_sidecar.spec bundles the
-      # DLL only when backend/vendor/ten-vad/ already exists, and tolerates
+      # library only when backend/vendor/ten-vad/ already exists, and tolerates
       # its absence so from-source builds still work. That tolerance is
-      # exactly why the post-build assertion below is not optional.
-      - name: Fetch TEN VAD library (Windows)
-        if: runner.os == 'Windows'
+      # exactly why the two post-build assertions below are not optional.
+      - name: Fetch TEN VAD library
         run: python backend/scripts/fetch_ten_vad.py
 
       - name: Build PyInstaller sidecar
@@ -139,19 +140,42 @@ jobs:
         run: pyinstaller --clean --noconfirm build_sidecar.spec
 
       # Mirrors the sqlite-vec precedent: assert the shipped artifact
-      # actually contains the DLL, so a regression in the fetch step (or a
+      # actually contains the library, so a regression in the fetch step (or a
       # silently changed upstream layout) fails the release loudly instead
-      # of shipping a Windows build whose neural VAD is quietly inert.
-      - name: Verify TEN VAD bundled in frozen sidecar (Windows)
-        if: runner.os == 'Windows'
+      # of shipping a build whose neural VAD is quietly inert. One ungated
+      # step selecting the filename in-script, like the --selftest-sqlite-vec
+      # step below, rather than two gated copies: a single step cannot be
+      # half-forgotten the way a per-platform pair can.
+      - name: Verify TEN VAD bundled in frozen sidecar
         shell: bash
         run: |
-          DLL="backend/dist/justsay-backend/_internal/ten_vad/ten_vad.dll"
-          if [ ! -f "$DLL" ]; then
-            echo "ERROR: $DLL missing — the Windows sidecar would ship without the neural VAD."
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            LIB="backend/dist/justsay-backend/_internal/ten_vad/ten_vad.dll"
+          else
+            LIB="backend/dist/justsay-backend/_internal/ten_vad/libten_vad.dylib"
+          fi
+          if [ ! -f "$LIB" ]; then
+            echo "ERROR: $LIB missing — this sidecar would ship without the neural VAD."
             exit 1
           fi
-          echo "OK: $DLL present ($(wc -c < "$DLL") bytes)"
+          echo "OK: $LIB present ($(wc -c < "$LIB") bytes)"
+
+      # Presence is not loadability, and every VAD failure path fails open to
+      # the energy guard — so a library that is bundled but does not load is
+      # invisible at runtime and reproduces the exact bug spec 170 closes. On
+      # macOS PyInstaller rewrites Mach-O load commands and ad-hoc re-signs
+      # what it touches, so the shipped copy is not the fetched copy and this
+      # runner is the first place that can be observed. Runs the real shipped
+      # artifact, not the CI runner's own Python.
+      - name: Verify the frozen sidecar's neural silence gate loads and decides
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN="backend/dist/justsay-backend/justsay-backend.exe"
+          else
+            BIN="backend/dist/justsay-backend/justsay-backend"
+          fi
+          "$BIN" --selftest-ten-vad
 
       # Mirrors the v0.8.0 local-3.10 smoke matrix against the CI-built
       # 3.12 artifact: bind-test port 9377, launch the frozen sidecar,

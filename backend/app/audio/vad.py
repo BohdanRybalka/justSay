@@ -26,6 +26,7 @@ import ctypes
 import logging
 import os
 import sys
+import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,9 +71,10 @@ def resolve_ten_vad_lib() -> Path | None:
     var pointing at a deleted file falls through to the next source instead
     of hard-failing the dictation.
 
-    ``None`` is a normal, expected outcome — every non-Windows platform and
-    every checkout that hasn't run `backend/scripts/fetch_ten_vad.py`. The
-    caller degrades to the energy guard alone.
+    ``None`` is a normal, expected outcome — every platform with no pinned
+    artifact in `backend/scripts/fetch_ten_vad.py` (spec 170 pins Windows and
+    macOS; Linux is deliberately unpinned), and every checkout that hasn't run
+    that script. The caller degrades to the energy guard alone.
     """
     lib_name = _platform_lib_name()
 
@@ -364,3 +366,52 @@ def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None
         max_probability=float(max_probability),
         is_silent=bool(speech_hops < required_hops),
     )
+
+
+def selftest() -> tuple[bool, str]:
+    """``--selftest-ten-vad`` backend. Never raises.
+
+    Presence is not loadability. `build_sidecar.spec` bundles whatever
+    `fetch_ten_vad.py` left in backend/vendor/ten-vad, and on macOS
+    PyInstaller rewrites Mach-O load commands and ad-hoc re-signs what it
+    touches — so the shipped copy of the library is not byte-identical to the
+    fetched one, and a broken shipped copy is INVISIBLE at runtime because
+    every failure path here fails open to the energy guard. This walks the
+    three rungs that separate "the file is in the bundle" from "the neural
+    gate actually decides", and names which one gave way: it resolves the
+    library, loads it through ctypes, and runs a synthetic one-second 16 kHz
+    probe clip through `analyze_vad`, whose abstention (``None``) is the very
+    degradation the caller can never see. Modelled on
+    `app.transcripts.vector_store.selftest`, and run by `release.yml` against
+    the frozen sidecar on both platform legs.
+    """
+    library_path = resolve_ten_vad_lib()
+    if library_path is None:
+        return False, (
+            f"{_platform_lib_name()} not found via {_ENV_OVERRIDE}, the frozen "
+            "bundle, or backend/vendor/ten-vad — the neural gate is inert"
+        )
+
+    try:
+        if _get_library() is None:
+            return False, f"the library at {library_path} did not load"
+
+        import soundfile as sf
+
+        tone = 0.3 * np.sin(
+            2.0 * np.pi * 220.0 * np.arange(_VAD_SAMPLE_RATE, dtype=np.float32)
+            / _VAD_SAMPLE_RATE
+        )
+        with tempfile.TemporaryDirectory() as probe_dir:
+            probe_path = Path(probe_dir) / "ten_vad_selftest.wav"
+            sf.write(str(probe_path), tone.astype(np.float32), _VAD_SAMPLE_RATE)
+            result = analyze_vad(probe_path, AudioSettings())
+    except Exception as e:
+        return False, f"the selftest raised against {library_path}: {e}"
+
+    if result is None:
+        return False, (
+            f"the library at {library_path} loaded but abstained on a synthetic "
+            "one-second probe clip"
+        )
+    return True, "ok"

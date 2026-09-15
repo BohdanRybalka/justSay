@@ -82,21 +82,21 @@ if sys.platform == "win32":
 # by backend/scripts/fetch_ten_vad.py. A from-source or CI build that never
 # ran the fetch script must still build successfully and degrade to the
 # energy guard alone (app.audio.vad.resolve_ten_vad_lib() -> None), rather
-# than failing the build. release.yml's Windows leg runs the fetch step
-# first and then asserts the DLL landed, so a silently VAD-less Windows
-# release is impossible despite this tolerance.
+# than failing the build. Both release.yml legs run the fetch step first,
+# then assert the library landed in the frozen bundle and run
+# `--selftest-ten-vad` against it, so a silently VAD-less release is
+# impossible on either platform despite this tolerance.
 # Anchored to SPECPATH (this .spec file's own directory), never the CWD:
 # `pyinstaller backend/build_sidecar.spec` from the repo root must bundle the
 # DLL identically to a `cd backend` build, instead of silently producing a
 # VAD-less sidecar whose only signal is a print() buried in the build log.
 #
 # The library filename mirrors app.audio.vad._platform_lib_name() rather than
-# hardcoding the Windows name. Today only the Windows DLL is ever fetched
-# (plan 033 Cuts: "macOS/Linux TEN VAD shipping" is deferred until macOS
-# hardware exists), so the non-Windows branches resolve to nothing and the
-# build degrades exactly as it does now -- but whoever implements that Cut
-# changes the resolver and the fetch script, and this spec then follows along
-# instead of silently producing a VAD-less sidecar.
+# hardcoding one platform's name. Spec 170 / ADR 070 pinned the macOS artifact
+# alongside the Windows one, so both the win32 and the darwin branch now
+# resolve to a real fetched file; the Linux branch resolves to nothing,
+# because fetch_ten_vad.py deliberately pins no Linux artifact for a target
+# this project does not ship, and such a build degrades to the energy guard.
 _ten_vad_dir = Path(SPECPATH) / "vendor" / "ten-vad"
 if sys.platform == "win32":
     _ten_vad_lib_name = "ten_vad.dll"
