@@ -660,6 +660,51 @@ export class SidecarTooOldError extends Error {
   }
 }
 
+/** Thrown when a 200 carries a body the endpoint's own contract does not
+ *  describe. It names the endpoint so a log says which reply was wrong, which
+ *  is why a caller painting a widget branches on the class and writes its own
+ *  sentence rather than relaying this message. */
+export class MalformedResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MalformedResponseError";
+  }
+}
+
+/** `request` casts the parsed body rather than validating it, so a body that is
+ *  `null`, an array, or not an object at all reaches a caller typed as though it
+ *  were a response. It is rejected before any property test, because `in` on a
+ *  non-object throws a `TypeError` no caller has a branch for. An array is
+ *  rejected with them because `typeof [] === "object"` and a property test on it
+ *  is simply false, so a JSON array would otherwise be read as a body missing a
+ *  field rather than as a body of the wrong kind. */
+function checkedObjectBody(endpoint: string, body: unknown): Record<string, unknown> {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    throw new MalformedResponseError(`${endpoint} returned a body that is not an object`);
+  }
+  return body as Record<string, unknown>;
+}
+
+/** The two fields `/history` and `/history/search` both promise. A 200 carrying
+ *  neither `entries` nor `total` paints `undefined transcripts` over an empty
+ *  list, which is a worse answer than a named failure.
+ *
+ *  It is a presence check on two top-level fields, not a general response
+ *  validator and not a check on an entry's own shape: every other endpoint still
+ *  casts, and giving them one is a separate task with a separate budget. */
+function checkedHistoryFields<T extends HistoryListResponse>(
+  endpoint: string,
+  body: Record<string, unknown>,
+): T {
+  if (!Array.isArray(body.entries)) {
+    throw new MalformedResponseError(`${endpoint} returned entries that are not an array`);
+  }
+  if (typeof body.total !== "number") {
+    throw new MalformedResponseError(`${endpoint} returned a total that is not a number`);
+  }
+  return body as T;
+}
+
 export interface WordCount {
   word: string;
   count: number;
@@ -712,14 +757,9 @@ export const api = {
    *  the condition, and it throws rather than returning a flag so that no caller
    *  can carry the third state around.
    *
-   *  A body that is `null`, an array, or not an object at all is a malformed
-   *  response rather than version skew -- `request` casts without validating,
-   *  and `in` on a non-object throws a `TypeError` the caller has no branch
-   *  for. An array is rejected with them because `typeof [] === "object"` and
-   *  `"next_cursor" in []` is simply false, so a JSON array would otherwise be
-   *  reported as an old backend. They are rejected before the presence test so
-   *  the promised contract holds: the version-skew error means the field was
-   *  absent from an object.
+   *  `checkedObjectBody` runs before the presence test so the promised contract
+   *  holds: the version-skew error means the field was absent from an object,
+   *  rather than that the body was never an object at all.
    *
    *  The presence test alone is not the whole edge: a body carrying
    *  `next_cursor: undefined` passes `in` and would reach the caller as a
@@ -730,14 +770,9 @@ export const api = {
    *  once the presence test has had its answer, so the edge keeps both jobs it
    *  was given.
    *
-   *  The other two fields are checked here for the same reason and nowhere
-   *  else: a 200 carrying a cursor but neither `entries` nor `total` is
-   *  accepted by the presence test alone, and `undefined transcripts` over an
-   *  empty list is a worse answer than a named failure. It is a presence check
-   *  on the two top-level fields of this one response, not a general response
-   *  validator and not a check on an entry's own shape: every other endpoint
-   *  still casts, and giving them one is a separate task with a separate
-   *  budget.
+   *  `checkedHistoryFields` runs after the presence test rather than before it,
+   *  so a backend answering `{}` is reported as skew: an absent `next_cursor`
+   *  is the more specific diagnosis of the two.
    *
    *  It is deliberately not what keeps the caller's promise that a failed
    *  request changes nothing on screen -- `loadPage` holds that itself, by
@@ -746,27 +781,22 @@ export const api = {
    *  list. A validator here would have to know every field each tab's row
    *  reads to make the same promise. */
   getHistory: async (limit = 50, cursor: HistoryCursor | null = null) => {
-    const body = await request<Partial<HistoryPageResponse>>(
-      "GET",
-      cursor === null
-        ? `/history?limit=${limit}`
-        : `/history?limit=${limit}&before_ts=${cursor.ts}&before_id=${encodeURIComponent(cursor.id)}`,
-      undefined,
-      REREADABLE,
+    const body = checkedObjectBody(
+      "/history",
+      await request<unknown>(
+        "GET",
+        cursor === null
+          ? `/history?limit=${limit}`
+          : `/history?limit=${limit}&before_ts=${cursor.ts}&before_id=${encodeURIComponent(cursor.id)}`,
+        undefined,
+        REREADABLE,
+      ),
     );
-    if (body === null || typeof body !== "object" || Array.isArray(body)) {
-      throw new Error("/history returned a body that is not an object");
-    }
     if (!("next_cursor" in body)) {
       throw new SidecarTooOldError("/history returned no next_cursor field");
     }
-    if (!Array.isArray(body.entries)) {
-      throw new Error("/history returned entries that are not an array");
-    }
-    if (typeof body.total !== "number") {
-      throw new Error("/history returned a total that is not a number");
-    }
-    return { ...body, next_cursor: body.next_cursor ?? null } as HistoryPageResponse;
+    const page = checkedHistoryFields<HistoryPageResponse>("/history", body);
+    return { ...page, next_cursor: page.next_cursor ?? null };
   },
 
   historyStats: () => request<HistoryStats>("GET", "/history/stats", undefined, REREADABLE),
@@ -784,10 +814,16 @@ export const api = {
    *  than omitting a field, but it is the same version skew `getHistory`
    *  reports, so it is reported by the same class. Branching on the class is
    *  what lets the caller stop reading English out of an error message, which
-   *  the backend never promised to keep spelling the same way. */
+   *  the backend never promised to keep spelling the same way.
+   *
+   *  The body is assigned into a `let` declared outside the `try` so that a
+   *  failed check never travels through the version-skew catch: a malformed 200
+   *  is neither a `404` nor a `405`, but reporting it as skew would be the kind
+   *  of mistake a catch this wide invites. */
   searchHistory: async (q: string, limit = 30) => {
+    let body: unknown;
     try {
-      return await request<HistoryListResponse>(
+      body = await request<unknown>(
         "GET",
         `/history/search?q=${encodeURIComponent(q)}&limit=${limit}`,
         undefined,
@@ -799,6 +835,10 @@ export const api = {
       }
       throw error;
     }
+    return checkedHistoryFields<HistoryListResponse>(
+      "/history/search",
+      checkedObjectBody("/history/search", body),
+    );
   },
 
   /** `POST /audio/start` calls `await recorder.start()` before it answers, so

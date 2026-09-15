@@ -1,4 +1,4 @@
-import { api, SidecarTooOldError, type HistoryEntry } from "../../api";
+import { api, MalformedResponseError, SidecarTooOldError, type HistoryEntry } from "../../api";
 import { createHistoryList, sidecarTooOldText, type HistoryRowsClaim } from "../history-list";
 import { escapeHtml } from "../html";
 
@@ -106,6 +106,11 @@ export function renderHistory(container: HTMLElement): () => void {
    * -- the same defect, moved one element over. Only a reload or a Clear All can
    * supersede this lane while `searchClaim` still points at it, and after one of
    * those there is no search on screen for the hint to describe.
+   *
+   * A `MalformedResponseError` is the client's own diagnosis of the reply, and
+   * its message names the endpoint, so the hint says `Search failed` and the
+   * diagnosis goes to the console instead: a path is for the log, not for the
+   * user. Every other failure still relays what the backend sent.
    */
   async function runSearch(q: string) {
     const claim = list.claimRows();
@@ -127,6 +132,9 @@ export function renderHistory(container: HTMLElement): () => void {
       if (!claim.isCurrent()) return;
       if (e instanceof SidecarTooOldError) {
         searchHint.textContent = sidecarTooOldText("Search");
+      } else if (e instanceof MalformedResponseError) {
+        searchHint.textContent = "Search failed";
+        console.error(e);
       } else {
         const msg = (e as Error).message || "Search failed";
         searchHint.textContent = msg.toLowerCase().includes("invalid")

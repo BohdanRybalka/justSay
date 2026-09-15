@@ -1186,7 +1186,7 @@ describe("the history cursor on the wire", () => {
   });
 
   it("rejects a null body as malformed rather than as version skew", async () => {
-    const { api, SidecarTooOldError } = await import("./api");
+    const { api, SidecarTooOldError, MalformedResponseError } = await import("./api");
     fetchMock.mockResolvedValue(okJson(null));
 
     const error = await api.getHistory(30).then(
@@ -1197,7 +1197,7 @@ describe("the history cursor on the wire", () => {
     expect(error).toBeInstanceOf(Error);
     expect(error).not.toBeInstanceOf(SidecarTooOldError);
     expect((error as Error).message).toBe("/history returned a body that is not an object");
-    expect((error as Error).name).toBe("Error");
+    expect(error).toBeInstanceOf(MalformedResponseError);
   });
 
   it("rejects a primitive body the same way, before the presence test runs", async () => {
@@ -1273,4 +1273,53 @@ describe("the history cursor on the wire", () => {
       expect((error as Error).message).toBe(message);
     },
   );
+});
+
+describe("what a search reply has to look like before a count is painted from it", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    fetchMock.mockReset();
+    invokeMock.mockReset();
+    removeBridge();
+  });
+
+  it.each([
+    [null, "/history/search returned a body that is not an object"],
+    [[], "/history/search returned a body that is not an object"],
+    [{ total: 2 }, "/history/search returned entries that are not an array"],
+    [{ entries: [], total: "2" }, "/history/search returned a total that is not a number"],
+  ])("rejects a 200 whose body is not a list of matches", async (body, message) => {
+    const { api, MalformedResponseError, SidecarTooOldError } = await import("./api");
+    fetchMock.mockResolvedValue(okJson(body));
+
+    const error = await api.searchHistory("note").then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    expect(error).toBeInstanceOf(MalformedResponseError);
+    expect(error).not.toBeInstanceOf(SidecarTooOldError);
+    expect((error as Error).message).toBe(message);
+  });
+
+  it("returns a well-formed reply unchanged, so the check costs a valid search nothing", async () => {
+    const { api } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ entries: [], total: 7 }));
+
+    await expect(api.searchHistory("note")).resolves.toEqual({ entries: [], total: 7 });
+  });
+
+  it("names a malformed search reply from its own class, not from the skew the catch watches for", async () => {
+    const { api, MalformedResponseError, SidecarTooOldError } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ entries: [], total: "2" }));
+
+    const error = await api.searchHistory("note").then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    expect((error as Error).name).toBe("MalformedResponseError");
+    expect(error).not.toBeInstanceOf(SidecarTooOldError);
+    expect(error).toBeInstanceOf(MalformedResponseError);
+  });
 });
