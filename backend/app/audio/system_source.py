@@ -54,20 +54,20 @@ class SystemAudioUnsupportedError(SystemAudioUnavailableError):
 class SystemAudioSource(ABC):
     """Contract: start delivering timestamped mono blocks → stop.
 
-    When the device is acquired is part of this contract rather than an
-    implementation detail. ``endpoint_name`` and ``native_sample_rate`` answer
-    correctly as soon as the object exists, before ``start()``, and each
-    implementation reaches that differently: ``WindowsLoopbackSource.__init__``
-    opens PortAudio and resolves the loopback endpoint, while
-    ``MacOSTapSource.__init__`` only assigns fields and spawns its helper in
-    ``start()`` — its endpoint has one name on every Mac. ``MeetingRecorder``
-    depends on it, publishing ``source.endpoint_name`` in the same lock hold
-    that starts the recording and before ``start()`` returns, because PortAudio
-    begins delivering blocks inside ``open()``.
+    ``endpoint_name`` answers before ``start()``, and both implementations
+    promise that by different means: ``WindowsLoopbackSource.__init__`` opens
+    PortAudio and resolves the loopback endpoint there, while ``MacOSTapSource``
+    returns a constant — its tap has one name on every Mac — and does not spawn
+    its helper until ``start()``. ``MeetingRecorder`` depends on the promise: it
+    publishes ``source.endpoint_name`` under the lock that marks the meeting
+    live and calls ``start()`` after releasing that lock, because PortAudio
+    begins delivering blocks inside ``open()`` and a name published afterwards
+    leaves a window answering "not recording" for audio already being kept.
 
-    A subclass that deferred acquisition to ``start()`` would also move where an
-    unopenable device raises, and 501 against 503 is decided by that raise — see
-    docs/adr/060-a-platform-without-audio-is-not-a-broken-device.md.
+    ``native_sample_rate`` carries no such promise. On macOS it reads back the
+    configured rate until ``start()`` parses the tap header, so it is answerable
+    only once capture is running, which is why ``MeetingRecorder`` reads it at
+    stop time rather than at start.
     """
 
     @abstractmethod

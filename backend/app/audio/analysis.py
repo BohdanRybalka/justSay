@@ -57,39 +57,47 @@ def to_mono(block: np.ndarray) -> np.ndarray:
     meeting timeline assembly and from both silence detectors. It lives in this
     numpy-only module rather than beside the timeline code so that the
     detectors can reach it without acquiring ``soxr``.
+
+    What comes back is always writable. Neither ``np.asarray`` nor
+    ``np.ascontiguousarray`` copies an array that already has the dtype and
+    layout asked for, so a read-only input — anything built by
+    ``np.frombuffer`` over a capture buffer — used to come straight back out
+    read-only when it was already 1-D float32, while the same buffer with two
+    channels came back writable because the averaging allocated. Whether a
+    caller could write to a block decided itself on the channel count.
     """
     array = np.asarray(block, dtype=np.float32)
     if array.ndim > 1:
         array = array.mean(axis=1)
-    return np.ascontiguousarray(array, dtype=np.float32)
+    mono = np.ascontiguousarray(array, dtype=np.float32)
+    return mono if mono.flags.writeable else mono.copy()
 
 
 def interleaved_buffer_to_mono(buffer: bytes, channels: int, dtype: str) -> np.ndarray:
     """Read a raw interleaved capture buffer and downmix it to mono float32.
 
     Both system-audio sources arrive at this same shape from different places —
-    a PortAudio callback on Windows, a pipe read from the macOS helper — and
-    differ only in dtype spelling. Keeping the deinterleave in one function is
-    what stops the two platforms drifting into different channel handling,
-    which would be inaudible in tests and obvious in a recording.
+    a PortAudio callback on Windows, a pipe read from the macOS helper. Keeping
+    the deinterleave in one function is what stops the two platforms drifting
+    into different channel handling, which would be inaudible in tests and
+    obvious in a recording. ``dtype`` is passed rather than assumed for the
+    same reason: both callers spell it ``<f4`` today and each pins float32 at
+    its own end, so it is the seam a source delivering anything else would
+    arrive through, not a live difference between the two.
 
     It sits beside ``to_mono`` for the reason ``to_mono`` sits here: both
     callers are realtime capture callbacks, and the module they used to reach
     for this imports ``soxr`` at module scope, so the deinterleave pulled the
     resampling stack onto the audio thread for nothing.
 
-    What comes back is always writable. ``np.frombuffer`` hands back a
-    read-only view of the caller's bytes, and a multi-channel block leaves that
-    view behind in the averaging while a single-channel one is returned
-    untouched — so without the copy below, whether a consumer may write to the
-    block would depend on how many channels the endpoint happened to have. A
-    mono endpoint is the rarer one, which is the shape that hides.
+    ``np.frombuffer`` hands back a read-only view of the caller's bytes;
+    ``to_mono`` is what guarantees the block that comes out of here can be
+    written to, whatever the channel count.
     """
     interleaved = np.frombuffer(buffer, dtype=dtype)
     if channels > 1:
         interleaved = interleaved.reshape(-1, channels)
-    mono = to_mono(interleaved)
-    return mono if mono.flags.writeable else mono.copy()
+    return to_mono(interleaved)
 
 
 def to_dbfs(amplitude: float) -> float:

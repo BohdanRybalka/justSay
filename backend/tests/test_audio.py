@@ -475,6 +475,7 @@ def test_interleaved_buffer_averages_the_channels_it_is_told_about():
     assert mono.dtype == np.float32
     assert mono.shape == (3,)
     assert mono == pytest.approx([0.0, 0.5, 0.25])
+    assert mono.flags["WRITEABLE"]
 
 
 def test_interleaved_buffer_of_one_channel_is_passed_through_contiguous():
