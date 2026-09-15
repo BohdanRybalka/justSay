@@ -351,7 +351,7 @@ def test_operational_error_mapped_to_503(isolated_storage, tmp_path):
             assert resp.status_code == 503
             assert resp.headers.get("Retry-After") == "1"
             assert resp.json() == {
-                "detail": "Transcript store busy",
+                "detail": "History busy",
                 "code": "resource_unavailable",
             }
 

@@ -52,7 +52,23 @@ class SystemAudioUnsupportedError(SystemAudioUnavailableError):
 
 
 class SystemAudioSource(ABC):
-    """Contract: start delivering timestamped mono blocks → stop."""
+    """Contract: start delivering timestamped mono blocks → stop.
+
+    When the device is acquired is part of this contract rather than an
+    implementation detail. ``endpoint_name`` and ``native_sample_rate`` answer
+    correctly as soon as the object exists, before ``start()``, and each
+    implementation reaches that differently: ``WindowsLoopbackSource.__init__``
+    opens PortAudio and resolves the loopback endpoint, while
+    ``MacOSTapSource.__init__`` only assigns fields and spawns its helper in
+    ``start()`` — its endpoint has one name on every Mac. ``MeetingRecorder``
+    depends on it, publishing ``source.endpoint_name`` in the same lock hold
+    that starts the recording and before ``start()`` returns, because PortAudio
+    begins delivering blocks inside ``open()``.
+
+    A subclass that deferred acquisition to ``start()`` would also move where an
+    unopenable device raises, and 501 against 503 is decided by that raise — see
+    docs/adr/060-a-platform-without-audio-is-not-a-broken-device.md.
+    """
 
     @abstractmethod
     def start(self, on_block: BlockSink, on_failure: FailureSink | None = None) -> None:

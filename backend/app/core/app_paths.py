@@ -6,6 +6,17 @@
 dependency documented in ``history.py``'s own module docstring) -- so it
 lives here, one level below both, instead of being owned by either. See
 ``docs/adr/012-dev-mode-data-directory-isolation.md`` for the full rationale.
+
+One path deliberately does not come from here: the whisper.cpp model cache.
+``app.stt.local_whisper_cpp_cmd.resolve_model_path`` spells ``~/.justsay/models``
+outright and never passes it through the dev split below, so a from-source run
+shares its multi-gigabyte downloads with the installed app instead of fetching
+them a second time. That is ADR 012's own carve-out, and it is pinned by
+``_SHARED_MODEL_CACHE_ALLOWLIST`` and
+``test_model_cache_stays_shared_between_dev_and_production`` in
+``backend/tests/test_cross_language_contracts.py`` — named here because the
+allowlist was the only place that said so, and this module is where a reader
+looks first.
 """
 
 import os

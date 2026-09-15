@@ -143,6 +143,15 @@ _MUST_NOT_IMPORT_APP_MODULE = {
     "audio/analysis.py": {"app.audio.timeline"},
 }
 
+_REALTIME_CAPTURE_MODULES = frozenset(
+    {
+        "audio/windows_loopback.py",
+        "audio/macos_tap.py",
+    }
+)
+
+_RESAMPLING_STACK = frozenset({"soxr", "app.audio.timeline"})
+
 _WEB_FRAMEWORK_ROOTS = frozenset({"fastapi", "starlette"})
 
 _WEB_FRAMEWORK_FREE_PACKAGES = {
@@ -293,6 +302,24 @@ def test_the_base_dsp_module_is_imported_from_rather_than_importing():
     assert not offenders, (
         f"{offenders}. The dependency runs the other way: move the shared "
         "function down into this module instead."
+    )
+
+
+def test_a_realtime_capture_module_never_reaches_the_resampling_stack():
+    """Both capture callbacks run on the audio thread, and the only thing either
+    ever took from `timeline.py` was a deinterleave that touches `soxr` nowhere
+    — so importing that module pulled the resampling stack in to do nothing
+    with it. The deinterleave lives in `analysis.py` beside the `to_mono` it
+    calls, which is the placement fix 084 already chose for `to_mono` itself."""
+    offenders = []
+    for relative in sorted(_REALTIME_CAPTURE_MODULES):
+        for imported in _imported_names(_APP_DIR / relative):
+            if imported in _RESAMPLING_STACK:
+                offenders.append(f"{relative} imports {imported}")
+
+    assert not offenders, (
+        f"{offenders}. A capture callback has no resampling to do; shared code "
+        "it needs moves down into `app.audio.analysis` instead."
     )
 
 

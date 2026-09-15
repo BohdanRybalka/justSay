@@ -15,7 +15,12 @@ import pytest
 import soundfile as sf
 from pydantic import ValidationError
 
-from app.audio.analysis import SilenceAnalysis, analyze_silence, rms_dbfs
+from app.audio.analysis import (
+    SilenceAnalysis,
+    analyze_silence,
+    interleaved_buffer_to_mono,
+    rms_dbfs,
+)
 from app.audio.base import write_wav, write_wav_streaming
 from app.audio.config import AudioSettings
 from app.audio.recorder import MicrophoneRecorder, NotRecordingError
@@ -458,6 +463,30 @@ def test_rms_dbfs_matches_manual_formula():
 def test_rms_dbfs_zero_signal_floors_instead_of_raising():
     zero = np.zeros(512, dtype=np.float32)
     assert rms_dbfs(zero) == pytest.approx(-200.0)
+
+
+def test_interleaved_buffer_averages_the_channels_it_is_told_about():
+    """Both system-audio sources hand this raw bytes and a channel count, and
+    the count is the only thing that says where one frame ends."""
+    stereo = np.array([[-1.0, 1.0], [0.25, 0.75], [0.0, 0.5]], dtype=np.float32)
+
+    mono = interleaved_buffer_to_mono(stereo.tobytes(), 2, "<f4")
+
+    assert mono.dtype == np.float32
+    assert mono.shape == (3,)
+    assert mono == pytest.approx([0.0, 0.5, 0.25])
+
+
+def test_interleaved_buffer_of_one_channel_is_passed_through_contiguous():
+    """A mono endpoint skips the reshape, and what comes back is still a fresh
+    contiguous array rather than a read-only view onto the caller's bytes."""
+    samples = np.array([0.1, -0.2, 0.3], dtype=np.float32)
+
+    mono = interleaved_buffer_to_mono(samples.tobytes(), 1, "<f4")
+
+    assert mono == pytest.approx([0.1, -0.2, 0.3])
+    assert mono.flags["C_CONTIGUOUS"]
+    assert mono.flags["WRITEABLE"]
 
 
 @pytest.mark.asyncio
