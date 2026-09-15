@@ -135,7 +135,8 @@ def test_resolve_falls_through_when_env_override_does_not_exist(tmp_path, monkey
 
 def test_resolve_returns_none_when_nothing_found(tmp_path, monkeypatch):
     """AC-2: no override, not frozen, no vendor dir -> None (the normal
-    outcome on every non-Windows platform and every un-fetched checkout)."""
+    outcome on any platform fetch_ten_vad.py pins no artifact for, and on
+    every un-fetched checkout)."""
     monkeypatch.delenv("JUSTSAY_TEN_VAD_LIB", raising=False)
     monkeypatch.setattr(vad_module, "__file__", str(tmp_path / "app" / "audio" / "vad.py"))
     monkeypatch.setattr(vad_module.sys, "frozen", False, raising=False)
@@ -144,7 +145,7 @@ def test_resolve_returns_none_when_nothing_found(tmp_path, monkeypatch):
 
 
 def test_resolve_uses_frozen_bundle_path(tmp_path, monkeypatch):
-    """AC-2: inside the PyInstaller sidecar the DLL lives at
+    """AC-2: inside the PyInstaller sidecar the library lives at
     sys._MEIPASS/ten_vad/<lib>, which is where build_sidecar.spec puts it."""
     monkeypatch.delenv("JUSTSAY_TEN_VAD_LIB", raising=False)
     bundled = tmp_path / "ten_vad" / vad_module._platform_lib_name()
@@ -181,7 +182,7 @@ def test_required_speech_hops_reuses_shipped_ratio_not_a_new_knob():
 
 def test_analyze_vad_returns_none_when_library_unavailable(tmp_path, monkeypatch):
     """AC-4(a): no binary -> abstain. The single most common real-world path
-    (every non-Windows platform, every un-fetched checkout)."""
+    (every un-fetched checkout, and any platform with no pinned artifact)."""
     monkeypatch.setattr(vad_module, "resolve_ten_vad_lib", lambda: None)
     path = _write_wav(tmp_path / "audio.wav", np.random.uniform(-0.1, 0.1, 16000))
 
@@ -990,3 +991,98 @@ async def test_gate_latency_on_dictation_length_clip(tmp_path):
         f"AC 8 VIOLATED — a 3s dictation-length clip took {median_ms:.1f}ms (median of 5) "
         "through the pre-model gate, against spec 033's own 250ms bound."
     )
+
+
+def test_the_darwin_library_name_is_the_one_the_fetch_script_writes(monkeypatch):
+    """Spec 170 / ADR 070: upstream ships the macOS payload inside a framework
+    directory, and the fetch script writes that blob out under THIS name.
+    Renaming either half leaves a macOS sidecar that bundles a file nothing
+    ever opens — and because every VAD path fails open, nothing says so."""
+    monkeypatch.setattr("sys.platform", "darwin")
+
+    assert vad_module._platform_lib_name() == "libten_vad.dylib"
+
+
+def test_resolve_finds_the_frozen_dylib_on_darwin(tmp_path, monkeypatch):
+    """The macOS half of the frozen-bundle rung, which no Windows test run can
+    reach: PyInstaller places the collected binary at _MEIPASS/ten_vad/."""
+    monkeypatch.delenv("JUSTSAY_TEN_VAD_LIB", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    bundled = tmp_path / "ten_vad" / "libten_vad.dylib"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_bytes(b"stub")
+    monkeypatch.setattr(vad_module.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(vad_module.sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    assert resolve_ten_vad_lib() == bundled
+
+
+def test_selftest_names_the_missing_library_rung(tmp_path, monkeypatch):
+    monkeypatch.setattr(vad_module, "resolve_ten_vad_lib", lambda: None)
+
+    ok, message = vad_module.selftest()
+
+    assert ok is False
+    assert vad_module._platform_lib_name() in message
+
+
+def test_selftest_names_the_load_failure_rung(tmp_path, monkeypatch):
+    """A present-but-unloadable library is the exact failure PyInstaller's
+    Mach-O rewriting could introduce on macOS, and the one the bundled-artifact
+    presence check cannot see."""
+    bogus = tmp_path / "not_a_library.dylib"
+    bogus.write_bytes(b"definitely not a shared library")
+    monkeypatch.setattr(vad_module, "resolve_ten_vad_lib", lambda: bogus)
+
+    ok, message = vad_module.selftest()
+
+    assert ok is False
+    assert "did not load" in message
+    assert str(bogus) in message
+
+
+def test_selftest_names_the_abstention_rung(tmp_path, monkeypatch):
+    """A library that loads and then abstains on every clip degrades to the
+    energy guard exactly as a missing one does, so a selftest that stopped at
+    the load would report OK on the very bug this spec closes."""
+    resolved = tmp_path / "libten_vad.dylib"
+    resolved.write_bytes(b"stub")
+    monkeypatch.setattr(vad_module, "resolve_ten_vad_lib", lambda: resolved)
+    monkeypatch.setattr(vad_module, "_get_library", _BenignLibrary)
+    monkeypatch.setattr(vad_module, "analyze_vad", lambda path, settings: None)
+
+    ok, message = vad_module.selftest()
+
+    assert ok is False
+    assert "abstained" in message
+
+
+def test_selftest_reports_ok_when_the_library_returns_a_verdict(tmp_path, monkeypatch):
+    """The whole rung chain, end to end, on the stub double — so the shape of
+    the success answer (`(True, "ok")`, mirroring vector_store.selftest) is
+    pinned on every checkout and not only where the binary is vendored."""
+    resolved = tmp_path / "libten_vad.dylib"
+    resolved.write_bytes(b"stub")
+    monkeypatch.setattr(vad_module, "resolve_ten_vad_lib", lambda: resolved)
+    monkeypatch.setattr(vad_module, "_get_library", _BenignLibrary)
+
+    assert vad_module.selftest() == (True, "ok")
+
+
+def test_selftest_never_raises_when_the_probe_write_fails(tmp_path, monkeypatch):
+    """`--selftest-ten-vad` is a release gate: it must report a cause, not a
+    traceback, whatever the runner does to a temporary directory."""
+    resolved = tmp_path / "libten_vad.dylib"
+    resolved.write_bytes(b"stub")
+    monkeypatch.setattr(vad_module, "resolve_ten_vad_lib", lambda: resolved)
+    monkeypatch.setattr(vad_module, "_get_library", _BenignLibrary)
+
+    def _boom(*args, **kwargs):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(sf, "write", _boom)
+
+    ok, message = vad_module.selftest()
+
+    assert ok is False
+    assert "read-only file system" in message

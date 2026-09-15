@@ -232,6 +232,16 @@ jobs:
       - name: Install backend deps
         run: npm run backend:install
 
+      # Spec 170 / ADR 070: without this, test_vad.py's [DLL] tier skips on
+      # every leg and the neural silence gate is asserted by nothing until a
+      # tag push. The script pins one artifact per shipped platform and
+      # defaults to the runner's own sys.platform, so each leg fetches its
+      # own library. Deliberately ungated and deliberately not tolerated: a
+      # raw.githubusercontent.com outage reddens this job rather than quietly
+      # reverting the suite to the energy-guard-only coverage it had before.
+      - name: Fetch TEN VAD library
+        run: python backend/scripts/fetch_ten_vad.py
+
       - name: Run backend tests (pytest, not slow)
         run: npm run test -- -m "not slow"
 

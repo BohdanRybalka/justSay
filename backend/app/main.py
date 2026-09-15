@@ -152,7 +152,30 @@ def _cli() -> None:
             "Used by release.yml as a permanent CI gate — see ADR 001."
         ),
     )
+    parser.add_argument(
+        "--selftest-ten-vad",
+        action="store_true",
+        help=(
+            "Verify the neural silence gate is live in this build — that the "
+            "TEN VAD library resolves, loads through ctypes, and returns a "
+            "verdict on a synthetic probe clip — against the actual frozen "
+            "sidecar binary, then exit. Every VAD failure path fails open to "
+            "the energy guard, so a bundled-but-unloadable library is silent "
+            "at runtime; this is what makes it loud. Used by release.yml as a "
+            "permanent CI gate on both platform legs — see ADR 070."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.selftest_ten_vad:
+        from app.audio import vad
+
+        ok, msg = vad.selftest()
+        if ok:
+            print("OK")
+            sys.exit(0)
+        print(f"FAIL: {msg}")
+        sys.exit(1)
 
     if args.selftest_sqlite_vec:
         from app.transcripts import vector_store
