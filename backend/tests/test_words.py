@@ -7,10 +7,11 @@ import logging
 import time
 from html.parser import HTMLParser
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from app.core.errors import ResourceUnavailableError
 from app.transcripts import history, vector_store, words
 from app.transcripts.stopwords_en import STOPWORDS_EN
 from app.transcripts.stopwords_uk import STOPWORDS_UK
@@ -408,6 +409,88 @@ async def test_search_history_semantic_ranks_by_distance_with_plain_highlight():
 
     assert [h.id for h in hits] == [near.id, mid.id, far.id]
     assert all("<mark>" not in h.highlighted_text for h in hits)
+
+
+def _seed_one_embedded_entry() -> None:
+    """The zero-entries gate short-circuits before the embed call, so every test
+    below that needs to reach ``provider.embed`` has to get past it first."""
+    entry = history.save_entry(text="close match alpha", duration_ms=1)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
+        rowid = conn.execute("SELECT rowid FROM entries WHERE id = ?", (entry.id,)).fetchone()[0]
+        vector_store.insert_embedding(
+            conn, entry.id, rowid, [1.0, 0.0, 0.0], "cloud", "text-embedding-004"
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_embed_failure_keeps_the_class_name_out_of_the_message():
+    """The provider's exception type is diagnostic material for the log, not a
+    sentence a person reads. It travels in ``diagnostic``; ``message`` stays prose."""
+    _seed_one_embedded_entry()
+    fake_provider = AsyncMock()
+    fake_provider.model_name = "text-embedding-004"
+    fake_provider.embed = AsyncMock(side_effect=ZeroDivisionError("boom"))
+
+    with patch(
+        "app.embeddings.resolve_embedding_provider",
+        new=AsyncMock(return_value=(fake_provider, None)),
+    ):
+        with pytest.raises(vector_store.SemanticSearchUnavailableError) as excinfo:
+            await words.search_history_semantic("anything", limit=10)
+
+    assert excinfo.value.message == "Semantic search embedding failed"
+    assert "ZeroDivisionError" not in excinfo.value.message
+    assert excinfo.value.diagnostic == "ZeroDivisionError"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_provider_spends_no_vector_query():
+    """Zero-leak: when the Cloud/Local eligibility rule hands back no provider,
+    the lane refuses before anything downstream of the gate runs."""
+    query_similar = Mock()
+    with (
+        patch(
+            "app.embeddings.resolve_embedding_provider",
+            new=AsyncMock(return_value=(None, "Semantic search is disabled")),
+        ),
+        patch("app.transcripts.vector_store.query_similar", query_similar),
+    ):
+        with pytest.raises(vector_store.SemanticSearchUnavailableError) as excinfo:
+            await words.search_history_semantic("anything", limit=10)
+
+    assert excinfo.value.message == "Semantic search is disabled"
+    assert query_similar.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_the_only_embed_call_is_the_resolved_providers_own():
+    """``search_history_semantic`` embeds through the object eligibility handed it
+    and constructs no provider of its own. This pins the call site, not the
+    Local/Cloud rule itself, which is decided in ``app.embeddings``."""
+    _seed_one_embedded_entry()
+    fake_provider = AsyncMock()
+    fake_provider.model_name = "text-embedding-004"
+    fake_provider.embed = AsyncMock(return_value=[1.0, 0.0, 0.0])
+
+    with patch(
+        "app.embeddings.resolve_embedding_provider",
+        new=AsyncMock(return_value=(fake_provider, None)),
+    ):
+        await words.search_history_semantic("anything", limit=10)
+
+    assert fake_provider.embed.await_count == 1
+    assert fake_provider.embed.await_args.args == ("anything",)
+
+
+def test_the_semantic_refusal_is_inside_the_error_hierarchy():
+    """Replaces a prose claim in docs/style-guide.md §3.1: the class is a
+    ``ResourceUnavailableError``, so it answers 503 rather than becoming a 500 the
+    day something does route it to a response."""
+    assert issubclass(vector_store.SemanticSearchUnavailableError, ResourceUnavailableError)
+    assert vector_store.SemanticSearchUnavailableError("x").status_code == 503
+    assert vector_store.SemanticSearchUnavailableError("x").code == "resource_unavailable"
 
 
 

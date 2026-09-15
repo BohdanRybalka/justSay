@@ -380,16 +380,19 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
     ``search_history``'s own empty-query short-circuit — never reaches the
     availability checks below and never spends an embedding API call.
 
-    Raises ``vector_store.SemanticSearchUnavailableError`` for every
-    disabled/unready state, each with its own detail string: sqlite-vec
+    Raises ``vector_store.SemanticSearchUnavailableError`` -- a
+    ``app.core.errors.ResourceUnavailableError`` -- for every
+    disabled/unready state, each with its own ``message``: sqlite-vec
     failed to load, embeddings disabled by the Cloud/Local eligibility
     rule, zero entries embedded yet, or any other runtime failure from
     ``provider.embed()`` itself (auth error, network failure, malformed SDK
-    response). Since spec 017, the only caller is ``_semantic_lane``, which
-    catches this exception and degrades to an empty lane silently (see ADR
-    010) — there is no HTTP-level 503 surfaced for any of these states
-    anymore. The zero-entries check happens BEFORE the (network) embed call
-    so an empty index fails fast without spending an API call.
+    response), the last of which carries the raised class name in
+    ``diagnostic`` rather than in the message. Since spec 017, the only
+    caller is ``_semantic_lane``, which catches this exception and degrades
+    to an empty lane silently (see ADR 010) — there is no HTTP-level 503
+    surfaced for any of these states anymore. The zero-entries check happens
+    BEFORE the (network) embed call so an empty index fails fast without
+    spending an API call.
 
     ``highlighted_text`` is plain HTML-escaped text with no ``<mark>``
     spans — relevance here isn't token-based, so there's no single matched
@@ -425,7 +428,7 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
         query_vector = await provider.embed(q)
     except Exception as e:
         raise vector_store.SemanticSearchUnavailableError(
-            f"Semantic search embedding failed: {type(e).__name__}"
+            "Semantic search embedding failed", diagnostic=type(e).__name__
         ) from e
 
     with history._lock:
@@ -447,7 +450,7 @@ async def _semantic_lane(q: str, limit: int) -> list[HistorySearchHit]:
     try:
         return await search_history_semantic(q, limit=limit)
     except vector_store.SemanticSearchUnavailableError as e:
-        log.debug("Semantic lane unavailable, FTS-only: %s", e.detail)
+        log.debug("Semantic lane unavailable, FTS-only: %s (%s)", e.message, e.diagnostic)
         return []
     except Exception:
         log.warning("Semantic lane failed unexpectedly, falling back to FTS-only", exc_info=True)

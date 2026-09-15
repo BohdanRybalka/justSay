@@ -24,6 +24,7 @@ import time
 import sqlite_vec
 from pydantic import BaseModel
 
+from app.core.errors import ResourceUnavailableError
 from app.transcripts import history
 
 log = logging.getLogger(__name__)
@@ -59,14 +60,15 @@ NO_ENTRIES_EMBEDDED_DETAIL = (
 )
 
 
-class SemanticSearchUnavailableError(Exception):
+class SemanticSearchUnavailableError(ResourceUnavailableError):
     """Raised by ``words.search_history_semantic``. Caught and silenced by
     ``words._semantic_lane`` (spec 017 / ADR 010) -- never reaches the
-    router or an HTTP response; only logged at ``debug`` level."""
+    router or an HTTP response; only logged at ``debug`` level.
 
-    def __init__(self, detail: str):
-        super().__init__(detail)
-        self.detail = detail
+    It declares no ``status_code`` or ``code`` of its own, so it answers
+    ``resource_unavailable`` with 503 the day something does route it to a
+    response.
+    """
 
 
 class BackfillResult(BaseModel):
