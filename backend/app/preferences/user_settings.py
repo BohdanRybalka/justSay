@@ -286,7 +286,6 @@ def _forbidden_parents() -> list[Path]:
             Path("/sbin"),
             Path("/dev"),
             Path("/private/etc"),
-            Path("/private/var"),
         ]
     else:
         roots = [
