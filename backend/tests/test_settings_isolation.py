@@ -153,7 +153,11 @@ def test_the_core_config_module_holds_nothing_but_its_re_export():
     to catch it; only an import from the composition root is accepted now, and
     only one. The docstring is taken from `body[0]` rather than by skipping any
     string constant anywhere, so a bare string cannot ride along after
-    `__all__`.
+    `__all__`. Counting the re-exports was not enough on its own: zero of them
+    passed as readily as one, so deleting the import left a module whose
+    `__all__` named nothing and whose every caller broke, and a star import
+    satisfied the same branch without naming what it re-exported. Both are
+    rejected explicitly.
 
     Mutation-checked against the full suite, with the count each one actually
     reddens rather than the count predicted for it. A second `from app.config
@@ -179,6 +183,11 @@ def test_the_core_config_module_holds_nothing_but_its_re_export():
             and not node.level
             and node.module == composition_root.__name__
         ):
+            if any(alias.name == "*" for alias in node.names):
+                offenders.append(
+                    f"line {node.lineno}: a star import from {composition_root.__name__}"
+                )
+                continue
             re_exports += 1
             if re_exports > 1:
                 offenders.append(
@@ -195,6 +204,13 @@ def test_the_core_config_module_holds_nothing_but_its_re_export():
             else type(node).__name__
         )
         offenders.append(f"line {node.lineno}: {described}")
+
+    assert re_exports == 1, (
+        f"app/core/config.py re-exports the composition root {re_exports} times, "
+        "not once. The module exists to be that one doorway; without the import "
+        "it is an empty file whose __all__ names nothing, and every call site "
+        "spelling app.core.config.settings breaks."
+    )
 
     assert not offenders, (
         "app/core/config.py must stay a docstring, one import from "

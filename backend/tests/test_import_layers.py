@@ -28,8 +28,8 @@ Eight properties are pinned here:
    is not required, so a PEP 420 namespace package cannot be exempt by being
    forgotten — and no exemption survives the import it covers, nor the package
    it names. The modules sitting directly under `app/` are checked at the same
-   time, with `main.py` the one exemption: it is the composition root and
-   building the FastAPI app is its job.
+   time, with `main.py` the one exemption: building the FastAPI application
+   is its job. The composition root is `app/config.py`, a different module.
 4. The set of *two-node* package cycles does not grow and does not outlive the
    pairs it lists, and — separately — the set of packages that all reach each
    other does not change in either direction. The first instrument sees one
@@ -228,15 +228,21 @@ _KNOWN_TWO_NODE_PACKAGE_CYCLES = {
 
 _MUTUALLY_DEPENDENT_PACKAGES = frozenset(
     {
-        "app.audio",
-        "app.config",
-        "app.core",
-        "app.embeddings",
-        "app.preferences",
-        "app.stt",
-        "app.transcripts",
+        frozenset(
+            {
+                "app.audio",
+                "app.config",
+                "app.core",
+                "app.embeddings",
+                "app.preferences",
+                "app.stt",
+                "app.transcripts",
+            }
+        ),
     }
 )
+
+_NON_FEATURE_PACKAGES = {"core"}
 
 _FEATURE_PACKAGES = {
     "audio",
@@ -729,12 +735,12 @@ def _two_node_package_cycles() -> set[tuple[str, str]]:
     return {
         tuple(sorted(pair))
         for pair in edges
-        if (pair[1], pair[0]) in edges and pair[0] != "app.main"
+        if (pair[1], pair[0]) in edges and "app.main" not in pair
     }
 
 
-def _mutually_dependent_packages() -> frozenset[str]:
-    """The largest set of packages each of which reaches every other.
+def _mutually_dependent_packages() -> frozenset[frozenset[str]]:
+    """Every set of packages each of which reaches every other.
 
     The transitive closure of the package graph, grouped by mutual
     reachability. Computed rather than enumerated: a list of elementary cycles
@@ -759,13 +765,13 @@ def _mutually_dependent_packages() -> frozenset[str]:
                 reaches[node] = grown
                 growing = True
 
-    components = [
+    components = {
         frozenset(
             other for other in nodes if other in reaches[node] and node in reaches[other]
         )
         for node in nodes
-    ]
-    return max(components, key=len, default=frozenset())
+    }
+    return frozenset(component for component in components if len(component) > 1)
 
 
 def test_no_two_node_package_cycle_beyond_the_ones_already_accounted_for():
@@ -801,13 +807,47 @@ def test_the_known_two_node_cycle_list_does_not_outlive_the_cycles():
     )
 
 
+def test_every_backend_package_is_classified_as_feature_or_not():
+    """The feature-package rule above only sees the names in
+    `_FEATURE_PACKAGES`, so a package absent from it is exempt in full rather
+    than checked.
+
+    The same hole `test_every_backend_package_is_covered_by_the_web_framework_allowlist`
+    closes for the web-framework gate, and it is not hypothetical here:
+    `app/llm/` existed until JS-169 deleted it, so packages do get added and
+    removed. Without this, a new `app/newpkg/` could be imported from inside
+    `core` and every rule in this file would stay green.
+
+    Mutation-checked: creating a directory under `app/` that is named in
+    neither set reddens this test and nothing else.
+    """
+    unclassified = [
+        package
+        for package in _package_directories()
+        if package not in _FEATURE_PACKAGES and package not in _NON_FEATURE_PACKAGES
+    ]
+
+    assert not unclassified, (
+        f"These packages are in neither set, so the feature-package rule does "
+        f"not see them: {unclassified}. Add each one to _FEATURE_PACKAGES, or "
+        "to _NON_FEATURE_PACKAGES if it is shared ground every package may "
+        "import."
+    )
+
+
 def test_the_mutually_dependent_package_set_has_not_changed():
     """Seven packages all reach each other, so none can be read, moved or
     tested without the other six. This pins which seven.
 
+    Every such group is pinned, not the largest one. Returning only the biggest
+    left a second tangle invisible and made the answer depend on dictionary
+    order when two tied on size, so a three-package loop sharing no edge with
+    the seven passed unseen and the test could change verdict between runs on
+    interpreter start-up alone.
+
     The instrument the two-node tests are not. Compared as an exact set, so it
-    fails in both directions: a package joining the component means a change
-    made the tangle bigger and has to say so, and a package leaving means a spec
+    fails in both directions: a package joining a group means a change made the
+    tangle bigger and has to say so, and a package leaving means a spec
     genuinely untangled something and this constant is the stale half.
 
     Had this test existed before spec 165 it would have reddened on that branch
@@ -818,8 +858,8 @@ def test_the_mutually_dependent_package_set_has_not_changed():
     measured = _mutually_dependent_packages()
 
     assert measured == _MUTUALLY_DEPENDENT_PACKAGES, (
-        f"pinned:   {sorted(_MUTUALLY_DEPENDENT_PACKAGES)}; "
-        f"measured: {sorted(measured)}. "
+        f"pinned:   {sorted(sorted(group) for group in _MUTUALLY_DEPENDENT_PACKAGES)}; "
+        f"measured: {sorted(sorted(group) for group in measured)}. "
         "Update _MUTUALLY_DEPENDENT_PACKAGES deliberately and say in the spec "
         "which direction it moved: growing it is a cost this change is paying, "
         "shrinking it is progress worth naming. See ADR 076."
