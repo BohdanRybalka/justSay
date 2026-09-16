@@ -11,8 +11,8 @@ Two mechanisms per value where the shape allows it. A **declared-sites table**
 maps each path to one extractor and catches a site that went stale. An **orphan
 scan** over a bounded, enumerated file set catches a site nobody added to the
 table. The scan set is enumerated rather than globbed from the repository root
-because ``backend/build/`` is gitignored and holds a stale copy of
-``app/core/config.py``: an unbounded walk would fail on any machine that has run
+because ``backend/build/`` is gitignored and holds a stale copy of the
+backend tree: an unbounded walk would fail on any machine that has run
 ``pip install -e`` and pass in CI.
 
 The eight are the backend port, the masked-key sentinel, the upload allowlist
@@ -34,7 +34,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-CONFIG_PY = REPO_ROOT / "backend" / "app" / "core" / "config.py"
+CONFIG_PY = REPO_ROOT / "backend" / "app" / "config.py"
 CONSTANTS_PY = REPO_ROOT / "backend" / "app" / "core" / "constants.py"
 AUDIO_FORMATS_PY = REPO_ROOT / "backend" / "app" / "core" / "audio_formats.py"
 APP_PATHS_PY = REPO_ROOT / "backend" / "app" / "core" / "app_paths.py"
@@ -261,7 +261,7 @@ def _canonical_port() -> str:
 def test_the_backend_port_is_the_same_number_everywhere() -> None:
     """Every nominated declaration of the backend port carries one number.
 
-    Mutation-checked: changing the default in app/core/config.py and nothing
+    Mutation-checked: changing the default in app/config.py and nothing
     else fails this test, and the message names all nine declaring files.
     """
     declared = {path: _extract(path, pattern) for path, pattern in _PORT_SITES.items()}
