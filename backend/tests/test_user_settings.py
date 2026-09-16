@@ -242,7 +242,7 @@ def test_initial_prompt_max_length_validation():
 def test_env_nested_stt_key_override(monkeypatch):
     """ENV override flows through STTSettings's own ``env_prefix="JUSTSAY_STT_"``
     on every fresh ``AppSettings()`` construction. ``Field(default_factory=...)``
-    in ``core/config.py`` is what makes this true: the factory re-runs on each
+    in ``app/config.py`` is what makes this true: the factory re-runs on each
     instance, picking up env mutations after module import.
     """
     monkeypatch.setenv("JUSTSAY_STT_GEMINI_API_KEY", "env-injected-key")

@@ -10,11 +10,19 @@ keys -- leaked into whatever test ran next.
 Two things are pinned here. That the restore round-trips, and that its field
 list still matches `sync_to_runtime`'s own source: the second is what stops the
 list going stale the next time a field is added there.
+
+Since spec 165 the singleton is *defined* in `app/config.py` and re-exported by
+`app/core/config.py`, so two spellings reach one object. `app.core.config` is
+the spelling used throughout this file and everywhere else in the repository;
+`app.config` appears below only in the two tests that exist to pin the
+relationship between the two modules. ADR 076 records why both exist.
 """
 
 import ast
 from pathlib import Path
 
+import app.config as composition_root
+import app.core.config as core_config_module
 import app.preferences.user_settings as user_settings_module
 from app.core.config import settings
 from tests.conftest import (
@@ -112,3 +120,52 @@ def test_restore_returns_every_field_to_its_snapshot_value():
         if value != original[key]
     }
     assert not still_wrong, f"fields not restored (field: got, expected): {still_wrong}"
+
+
+def test_both_spellings_of_the_settings_module_bind_one_object():
+    """`app.core.config` re-exports what `app.config` defines, so the singleton
+    and its class have one identity each rather than two constructions.
+
+    A second `AppSettings()` would read the environment again and diverge the
+    moment anything wrote onto either copy — and every `monkeypatch` in this
+    suite writes *through* the object (`setattr(settings.audio, ...)`) rather
+    than rebinding a module attribute, which only works while there is one
+    object to write through.
+    """
+    assert core_config_module.settings is composition_root.settings
+    assert core_config_module.AppSettings is composition_root.AppSettings
+    assert settings is composition_root.settings
+
+
+def test_the_core_config_module_holds_nothing_but_its_re_export():
+    """`app/core/config.py` declares no class and assigns nothing but `__all__`.
+
+    Read from the AST rather than trusted to the docstring saying so. The
+    failure this pins is the re-export re-growing into a second composition
+    root: a settings class defined here imports a feature package from inside
+    `core`, which is what put three of the four entries into
+    `test_import_layers._KNOWN_PACKAGE_CYCLES` before spec 165.
+
+    Mutation-checked: a `class ExtraSettings(AppSettings)` appended to that file
+    and named in `__all__` fails this test and no other. Left out of `__all__`
+    it fails `test_dead_code_gate` as well, which is the mutation being
+    unreferenced rather than anything this assertion is claiming.
+    """
+    source = Path(core_config_module.__file__).read_text(encoding="utf-8")
+    offenders = []
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            continue
+        if isinstance(node, ast.ImportFrom):
+            continue
+        if isinstance(node, ast.Assign) and [
+            target.id for target in node.targets if isinstance(target, ast.Name)
+        ] == ["__all__"]:
+            continue
+        offenders.append(f"line {node.lineno}: {type(node).__name__}")
+
+    assert not offenders, (
+        "app/core/config.py must stay a docstring, an import and `__all__`, "
+        f"but holds {offenders}. Whatever this is belongs in app/config.py, the "
+        "composition root above — see ADR 076."
+    )

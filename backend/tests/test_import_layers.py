@@ -5,10 +5,13 @@ records why. Prose rots; this file fails.
 
 Eight properties are pinned here:
 
-1. `app.core` is a leaf. Only `config.py` (the composition root) and
-   `router.py` (operational endpoints) may import a feature package. Letting a
-   third module do it is exactly how `core` previously came to hold the
-   transcript store, the user preferences and four routers at once.
+1. `app.core` is a leaf: no module under it imports a feature package, with no
+   exception at all. The composition root lives at `app/config.py` instead,
+   above every package, and `core/config.py` re-exports it — so exactly one
+   module here may name `app.config`, and a second one reaching upward for the
+   singleton fails too (ADR 076). Letting a `core` module import a feature
+   package is exactly how `core` previously came to hold the transcript store,
+   the user preferences and four routers at once.
 2. `app.audio.analysis` imports nothing the frozen PyInstaller sidecar lacks,
    and is imported *from* rather than importing — its own docstring names the
    libraries that would break the packaged build, and ADR 015 depends on it.
@@ -51,6 +54,15 @@ with the number of tests each one reddens:
 - a core module made to import a feature package, in the absolute
   (`from app.audio import analysis`) and the relative (`from ..audio import
   analysis`) spelling alike -- one test each
+- `from app.audio.config import AudioSettings` planted in `app/core/router.py`,
+  which held that permission until spec 165 emptied the list -- **two** tests,
+  not one: the core-leaf test, and the cycle test below, because
+  `app.core <-> app.audio` left `_KNOWN_PACKAGE_CYCLES` in the same change and
+  so is a new pair again. On `99e05e4` that same line reddened **zero**
+- `from app.config import settings` planted in the same module in place of its
+  `app.core.config` import, so the module still works and only the spelling
+  reaches past the one doorway -- one test. The two mutations are separate
+  because the first assertion firing would hide the second
 - `import fastapi` planted in `app/audio/analysis.py`, the base DSP module --
   three tests, because that module is a non-exempt file of a
   web-framework-free package, is the module property 2 guards, and sits on
@@ -137,10 +149,9 @@ from tests.conftest import assert_import_loads_no_module
 
 _APP_DIR = Path(__file__).resolve().parent.parent / "app"
 
-_CORE_MAY_IMPORT_UPWARD_FROM = {
-    "config.py",
-    "router.py",
-}
+_COMPOSITION_ROOT = "app.config"
+
+_CORE_MAY_REACH_THE_COMPOSITION_ROOT = {"config.py"}
 
 _SIDECAR_ABSENT_LIBRARIES = {
     "audio/analysis.py": {
@@ -177,9 +188,6 @@ _WEB_FRAMEWORK_FREE_APP_ROOT_EXCEPT = {"main.py"}
 _IMPORT_FREE_PACKAGE_INITS = {"audio"}
 
 _KNOWN_PACKAGE_CYCLES = {
-    ("app.core", "app.audio"),
-    ("app.core", "app.embeddings"),
-    ("app.core", "app.stt"),
     ("app.preferences", "app.stt"),
 }
 
@@ -267,27 +275,44 @@ def _package_of(module: str) -> str:
     return ".".join(parts[:2]) if len(parts) > 1 else module
 
 
-def test_core_reaches_a_feature_package_only_from_its_two_documented_modules():
+def test_core_imports_no_feature_package_and_only_config_reaches_the_root():
     """`app.core` is the layer every package may import, so it must not import
-    them back. The two exceptions are named in `app/core/__init__.py`."""
-    offenders = []
+    them back — and since spec 165 nothing here is exempt from that.
+
+    The permission that replaced the old exception list is narrower and runs the
+    other way: `core/config.py` alone may name `app.config`, the composition
+    root above it, which it re-exports so that `core` stays a leaf while every
+    call site keeps spelling the singleton `app.core.config.settings`. Without
+    the second assertion any `core` module could reach upward for the singleton
+    with nothing in the diff to see (ADR 076)."""
+    reaching_down = []
+    reaching_up = []
     for module, path in _modules().items():
         if not module.startswith("app.core"):
             continue
         relative = path.relative_to(_APP_DIR).as_posix().removeprefix("core/")
-        if relative in _CORE_MAY_IMPORT_UPWARD_FROM:
-            continue
         for imported in _imported_names(path):
             head = imported.split(".")
             if len(head) >= 2 and head[0] == "app" and head[1] in _FEATURE_PACKAGES:
-                offenders.append(f"{module} -> {imported}")
+                reaching_down.append(f"{module} -> {imported}")
+            if (
+                imported == _COMPOSITION_ROOT
+                and relative not in _CORE_MAY_REACH_THE_COMPOSITION_ROOT
+            ):
+                reaching_up.append(f"{module} -> {imported}")
 
-    assert not offenders, (
+    assert not reaching_down, (
         "These app/core modules import a feature package: "
-        f"{offenders}. Either the module belongs outside core (see "
-        "docs/style-guide.md §1a) or it is a new documented exception, which "
-        "means adding it to _CORE_MAY_IMPORT_UPWARD_FROM here AND to the "
-        "app/core/__init__.py docstring."
+        f"{reaching_down}. There is no exception list any more: the module "
+        "belongs outside core (see docs/style-guide.md §1a), or the settings "
+        "class it wants belongs in the package that reads it (ADR 073)."
+    )
+    assert not reaching_up, (
+        f"These app/core modules import {_COMPOSITION_ROOT} directly: "
+        f"{reaching_up}. Import `app.core.config`, the one doorway, which "
+        "re-exports the same objects. Adding a second doorway to "
+        "_CORE_MAY_REACH_THE_COMPOSITION_ROOT is a decision, not a formality — "
+        "see ADR 076."
     )
 
 
