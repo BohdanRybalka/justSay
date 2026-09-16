@@ -18,6 +18,7 @@ import time
 
 import pyaudiowpatch as pyaudio
 
+from app.audio.analysis import interleaved_buffer_to_mono
 from app.audio.config import AudioSettings
 from app.audio.endpoint_selection import resolve_loopback_device
 from app.audio.system_source import (
@@ -26,7 +27,6 @@ from app.audio.system_source import (
     SystemAudioSource,
     SystemAudioUnavailableError,
 )
-from app.audio.timeline import interleaved_buffer_to_mono
 from app.audio.windows_endpoints import render_endpoint_names
 
 log = logging.getLogger(__name__)

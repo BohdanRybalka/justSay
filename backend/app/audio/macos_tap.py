@@ -37,6 +37,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+from app.audio.analysis import interleaved_buffer_to_mono
 from app.audio.config import AudioSettings
 from app.audio.system_source import (
     BlockSink,
@@ -44,7 +45,6 @@ from app.audio.system_source import (
     SystemAudioSource,
     SystemAudioUnavailableError,
 )
-from app.audio.timeline import interleaved_buffer_to_mono
 
 log = logging.getLogger(__name__)
 

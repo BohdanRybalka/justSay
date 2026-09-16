@@ -21,8 +21,6 @@ from dataclasses import dataclass
 import numpy as np
 import soxr
 
-from app.audio.analysis import to_mono
-
 
 @dataclass(frozen=True)
 class Segment:
@@ -232,18 +230,3 @@ def normalize_in_place(timeline: np.ndarray, chunk_frames: int) -> None:
         return
     for start in range(0, len(timeline), chunk_frames):
         timeline[start:start + chunk_frames] /= peak
-
-
-def interleaved_buffer_to_mono(buffer: bytes, channels: int, dtype: str) -> np.ndarray:
-    """Read a raw interleaved capture buffer and downmix it to mono float32.
-
-    Both system-audio sources arrive at this same shape from different places —
-    a PortAudio callback on Windows, a pipe read from the macOS helper — and
-    differ only in dtype spelling. Keeping the deinterleave in one function is
-    what stops the two platforms drifting into different channel handling,
-    which would be inaudible in tests and obvious in a recording.
-    """
-    interleaved = np.frombuffer(buffer, dtype=dtype)
-    if channels > 1:
-        interleaved = interleaved.reshape(-1, channels)
-    return to_mono(interleaved)

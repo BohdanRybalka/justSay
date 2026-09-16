@@ -52,7 +52,23 @@ class SystemAudioUnsupportedError(SystemAudioUnavailableError):
 
 
 class SystemAudioSource(ABC):
-    """Contract: start delivering timestamped mono blocks → stop."""
+    """Contract: start delivering timestamped mono blocks → stop.
+
+    ``endpoint_name`` answers before ``start()``, and both implementations
+    promise that by different means: ``WindowsLoopbackSource.__init__`` opens
+    PortAudio and resolves the loopback endpoint there, while ``MacOSTapSource``
+    returns a constant — its tap has one name on every Mac — and does not spawn
+    its helper until ``start()``. ``MeetingRecorder`` depends on the promise: it
+    publishes ``source.endpoint_name`` under the lock that marks the meeting
+    live and calls ``start()`` after releasing that lock, because PortAudio
+    begins delivering blocks inside ``open()`` and a name published afterwards
+    leaves a window answering "not recording" for audio already being kept.
+
+    ``native_sample_rate`` carries no such promise. On macOS it reads back the
+    configured rate until ``start()`` parses the tap header, so it is answerable
+    only once capture is running, which is why ``MeetingRecorder`` reads it at
+    stop time rather than at start.
+    """
 
     @abstractmethod
     def start(self, on_block: BlockSink, on_failure: FailureSink | None = None) -> None:

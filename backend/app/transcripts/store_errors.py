@@ -8,6 +8,12 @@ store busy", "Stats store busy", "Words store busy" and an unreachable default
 — which read as three different stores to a client and to a reader. There is
 one store.
 
+The detail names it ``History``, which is what the screen, the route and the
+frontend's own feature name already call it. ``transcript`` is this package's
+name rather than the user's, and this refusal was the single place it reached
+a person — who is already having a bad time and does not need a fourth noun
+for the thing they are looking at.
+
 The refusal is a ``ResourceUnavailableError``, which already answers 503 and
 carries the ``Retry-After`` header to the handler, so this module needs no web
 framework of its own.
@@ -20,7 +26,7 @@ from contextlib import contextmanager
 from app.core.errors import ResourceUnavailableError
 
 _BUSY_MARKER = "locked"
-_BUSY_DETAIL = "Transcript store busy"
+_BUSY_DETAIL = "History busy"
 _RETRY_AFTER_SECONDS = "1"
 
 

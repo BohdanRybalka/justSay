@@ -80,12 +80,12 @@ def test_the_diagnostic_reaches_the_log_and_never_the_wire(
 
 
 def test_a_refusal_carries_the_headers_it_was_given() -> None:
-    exc = ResourceUnavailableError("Transcript store busy", headers={"Retry-After": "1"})
+    exc = ResourceUnavailableError("History busy", headers={"Retry-After": "1"})
     with TestClient(_app_raising(exc)) as client:
         response = client.get("/boom")
     assert response.status_code == 503
     assert response.headers["Retry-After"] == "1"
-    assert response.json() == {"detail": "Transcript store busy", "code": "resource_unavailable"}
+    assert response.json() == {"detail": "History busy", "code": "resource_unavailable"}
 
 
 def test_a_subclass_of_a_subclass_is_caught_by_the_one_registration() -> None:
