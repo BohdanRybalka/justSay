@@ -7,10 +7,10 @@ its own ``env_prefix`` (e.g. ``JUSTSAY_STT_GEMINI_API_KEY`` → ``settings.stt.g
 underscore form (``JUSTSAY_STT__GEMINI_API_KEY``).
 
 It sits at the package root rather than inside a package because it imports
-every feature package's settings class and is therefore above all of them;
-``app/main.py`` is the only other module at this level, for the same reason.
-Callers keep spelling it ``app.core.config``, which re-exports what is defined
-here. See ADR 076.
+every feature package's settings class and is therefore above all of them.
+``app/main.py`` is the only other module at this level, for a different
+reason: it builds the FastAPI application. Callers keep spelling this module
+``app.core.config``, which re-exports what is defined here. See ADR 076.
 """
 
 from pydantic import Field

@@ -138,34 +138,67 @@ def test_both_spellings_of_the_settings_module_bind_one_object():
 
 
 def test_the_core_config_module_holds_nothing_but_its_re_export():
-    """`app/core/config.py` declares no class and assigns nothing but `__all__`.
+    """`app/core/config.py` holds a docstring, one import from the composition
+    root, and `__all__`. Nothing else, in any position.
 
     Read from the AST rather than trusted to the docstring saying so. The
     failure this pins is the re-export re-growing into a second composition
     root: a settings class defined here imports a feature package from inside
-    `core`, which is what put three of the four entries into
-    `test_import_layers._KNOWN_PACKAGE_CYCLES` before spec 165.
+    `core`, which is what `app/core/config.py` did before spec 165 and what put
+    three package cycles through this one module.
 
-    Mutation-checked: a `class ExtraSettings(AppSettings)` appended to that file
-    and named in `__all__` fails this test and no other. Left out of `__all__`
-    it fails `test_dead_code_gate` as well, which is the mutation being
-    unreferenced rather than anything this assertion is claiming.
+    Each arm is exact for a reason it was not when this shipped. Every
+    `ImportFrom` was skipped unconditionally, so `from app.audio.config import
+    AudioSettings` — the precise regression named above — passed the test meant
+    to catch it; only an import from the composition root is accepted now, and
+    only one. The docstring is taken from `body[0]` rather than by skipping any
+    string constant anywhere, so a bare string cannot ride along after
+    `__all__`.
+
+    Mutation-checked against the full suite, with the count each one actually
+    reddens rather than the count predicted for it. A second `from app.config
+    import AppSettings`, a bare string statement appended after `__all__`, and a
+    `class ExtraSettings(AppSettings)` named in `__all__`: **one** test each,
+    this one. The `app.audio.config` import: **three** — this test, plus
+    `test_import_layers`'s feature-package rule and its two-node cycle list,
+    because a feature import inside `core/config.py` is all three defects at
+    once, which is precisely why it was worth catching here too. Leaving the
+    class out of `__all__` fails `test_dead_code_gate` as well, which is the
+    mutation being unreferenced rather than anything this assertion claims.
     """
     source = Path(core_config_module.__file__).read_text(encoding="utf-8")
+    body = list(ast.parse(source).body)
+    if body and ast.get_docstring(ast.Module(body=body, type_ignores=[])):
+        body = body[1:]
+
     offenders = []
-    for node in ast.parse(source).body:
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
-            continue
-        if isinstance(node, ast.ImportFrom):
+    re_exports = 0
+    for node in body:
+        if (
+            isinstance(node, ast.ImportFrom)
+            and not node.level
+            and node.module == composition_root.__name__
+        ):
+            re_exports += 1
+            if re_exports > 1:
+                offenders.append(
+                    f"line {node.lineno}: a second import from {composition_root.__name__}"
+                )
             continue
         if isinstance(node, ast.Assign) and [
             target.id for target in node.targets if isinstance(target, ast.Name)
         ] == ["__all__"]:
             continue
-        offenders.append(f"line {node.lineno}: {type(node).__name__}")
+        described = (
+            f"an import from {'.' * node.level}{node.module or ''}"
+            if isinstance(node, ast.ImportFrom)
+            else type(node).__name__
+        )
+        offenders.append(f"line {node.lineno}: {described}")
 
     assert not offenders, (
-        "app/core/config.py must stay a docstring, an import and `__all__`, "
-        f"but holds {offenders}. Whatever this is belongs in app/config.py, the "
-        "composition root above — see ADR 076."
+        "app/core/config.py must stay a docstring, one import from "
+        f"{composition_root.__name__} and `__all__`, but holds {offenders}. "
+        "Whatever this is belongs in app/config.py, the composition root above "
+        "— see ADR 076."
     )
