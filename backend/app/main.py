@@ -55,8 +55,9 @@ def _run_optional_step(
     The step is named, a failure is logged at WARNING under ``phase`` and the
     lifespan carries on; what the step returned comes back, or ``None`` when
     it raised. A step the app is *not* useful without is called directly
-    instead, so that it still ends the process -- see docs/style-guide.md
-    3.3, which decides which side of that line each lifespan step falls on.
+    instead, so that it still ends the process -- "is the app still useful
+    without it?" is the whole test, and which side of it each lifespan step
+    falls on is readable from the call sites below.
 
     A step whose own successful result is ``None`` cannot be told apart from
     a failed one by its return value. Neither caller that reads the result
@@ -88,12 +89,17 @@ async def lifespan(app: FastAPI):
     )
     us = get_user_settings()
     history_dir = repaired_dir if repaired_dir is not None else Path(us.output_dir)
-    _run_optional_step(
-        "startup",
-        "opening the history store",
-        lambda: history.bootstrap(history_dir),
+
+    def _open_history_store() -> Path:
+        history.bootstrap(history_dir)
+        return history_dir
+
+    opened_dir = _run_optional_step("startup", "opening the history store", _open_history_store)
+    log.info(
+        "History store: %s (%s)",
+        history.history_path().parent,
+        "open" if opened_dir is not None else "not open -- opens on the first request for it",
     )
-    log.info("Data root: %s", history.history_path().parent)
     sync_to_runtime(us)
     from app.stt.local_setup import maybe_prewarm_local_at_startup
     _run_optional_step(
@@ -123,12 +129,16 @@ async def lifespan(app: FastAPI):
         log.info("Backend shutdown: releasing model caches")
         from app.embeddings import clear_cache as clear_embeddings
         from app.stt import clear_cache as clear_stt
-        for step_name, step in (
+        release_steps: list[tuple[str, Callable[[], object]]] = [
             ("releasing the STT cache", clear_stt),
             ("releasing the embeddings cache", clear_embeddings),
             ("releasing the audio recorder", lambda: app.state.recorder.cleanup()),
-            ("releasing the meeting recorder", lambda: app.state.meeting_recorder.cleanup()),
-        ):
+        ]
+        if hasattr(app.state, "meeting_recorder"):
+            release_steps.append(
+                ("releasing the meeting recorder", lambda: app.state.meeting_recorder.cleanup())
+            )
+        for step_name, step in release_steps:
             _run_optional_step("shutdown", step_name, step)
 
 

@@ -24,7 +24,7 @@ from app.main import app as fastapi_app
 from app.preferences import user_settings
 from app.preferences.user_settings import UserSettings
 from app.stt import local_setup
-from app.transcripts import history
+from app.transcripts import history, schema
 
 STEP_FAILURE = "startup step blew up"
 
@@ -60,12 +60,21 @@ def _pin_output_dir(monkeypatch, directory: Path) -> None:
 
 
 class _IdleRecorder:
-    """The `get_recorder` override `/audio/start` needs, and nothing else."""
+    """The `get_recorder` override `/audio/start` needs, and nothing else.
 
-    is_recording = False
-    duration_seconds = 0.0
-    level_db = -60.0
-    session_id: str | None = None
+    State is per instance, and the override below hands out one instance for
+    the whole test -- the shape `get_recorder` has in the real app, where
+    `app.state.recorder` outlives every request. A class-attribute stub whose
+    `start()` writes instance attributes reads as shared state while being
+    per-instance, and a factory minting one per request would lose the
+    `is_recording` the previous request set.
+    """
+
+    def __init__(self) -> None:
+        self.is_recording = False
+        self.duration_seconds = 0.0
+        self.level_db = -60.0
+        self.session_id: str | None = None
 
     async def start(self, session_id: str | None = None) -> None:
         self.is_recording = True
@@ -113,6 +122,70 @@ def test_a_failing_repair_opens_the_store_at_the_configured_directory(
         response = client.get("/history")
         assert response.status_code == 200
         assert [entry["id"] for entry in response.json()["entries"]] == [seeded.id]
+
+
+def test_a_moved_history_is_read_at_its_new_home_when_the_setting_cannot_be_stored(
+    tmp_path, monkeypatch
+):
+    """The other half of the same defect, and what the fallback above is for.
+
+    `consolidate_into` merges the rows into the app-data root and renames the
+    source `history.db` aside, so the moment it succeeds the stored
+    `output_dir` names a directory with no database left in it. Writing the
+    new one can still fail -- a read-only settings file, a full disk -- and
+    the repair must not read as failed when it does: the fallback would then
+    open an empty store in the scratch tree, show an empty History and write
+    this session's transcripts where the next Clear Temp Files sweep is
+    aimed. The repair runs again on the next launch, where the merge is a
+    no-op.
+    """
+    scratch_history = tmp_path / "tmp" / "history"
+    scratch_history.mkdir(parents=True)
+    history.bootstrap(scratch_history)
+    history.save_entry(text="rows the user can already see", duration_ms=1)
+    with history._lock:
+        history._close_conn_locked()
+        history._output_dir = None
+
+    _pin_output_dir(monkeypatch, scratch_history)
+    monkeypatch.setattr(user_settings, "_save", _raise)
+
+    with TestClient(fastapi_app) as client:
+        assert history.history_path().parent == resolve_app_data_root()
+        assert Path(user_settings.get_user_settings().output_dir) == scratch_history
+        assert not (scratch_history / history.HISTORY_FILENAME).exists()
+        response = client.get("/history")
+        assert response.status_code == 200
+        assert [entry["text"] for entry in response.json()["entries"]] == [
+            "rows the user can already see"
+        ]
+
+
+def test_a_failed_schema_init_leaves_no_half_open_connection(tmp_path, monkeypatch):
+    """`bootstrap` assigns the connection and only then applies the schema,
+    while `_ensure_conn_locked` heals a store that has no connection at all.
+    A connection left behind by a failed schema step is therefore handed to
+    every read and write for the rest of the process -- writes into a
+    half-migrated database, where the process used to die instead.
+    """
+    configured = tmp_path / "half-migrated-history"
+    _pin_output_dir(monkeypatch, configured)
+    real_init_schema = schema._init_schema
+    attempts: list[object] = []
+
+    def _fail_the_first_attempt(conn):
+        attempts.append(conn)
+        if len(attempts) == 1:
+            raise RuntimeError(STEP_FAILURE)
+        return real_init_schema(conn)
+
+    monkeypatch.setattr(schema, "_init_schema", _fail_the_first_attempt)
+
+    with TestClient(fastapi_app) as client:
+        assert history._conn is None
+        assert client.get("/history").status_code == 200
+
+    assert len(attempts) == 2
 
 
 def test_a_failing_scratch_repair_leaves_the_backend_serving(monkeypatch, caplog):
@@ -176,7 +249,13 @@ def test_a_failing_meeting_recorder_leaves_dictation_working(monkeypatch, caplog
 
     Shutdown is pinned in the same test because an unbuilt meeting recorder
     used to break the release block while the step tuple was being *built* --
-    outside every guard -- taking the STT and embeddings caches with it.
+    outside every guard -- taking the STT and embeddings caches with it, and
+    with them `recorder.cleanup()`: the one release step with a real OS
+    resource behind it, and so the one asserted here by name.
+
+    Nothing was ever built to release, so the release list leaves the
+    meeting recorder out rather than warning about it: one failure logs one
+    warning, at the step that actually failed.
     """
     released: list[str] = []
     monkeypatch.setattr(app.audio.meeting_recorder, "MeetingRecorder", _raise)
@@ -184,7 +263,13 @@ def test_a_failing_meeting_recorder_leaves_dictation_working(monkeypatch, caplog
     monkeypatch.setattr(
         app.embeddings, "clear_cache", lambda: released.append("embeddings")
     )
-    fastapi_app.dependency_overrides[get_recorder] = lambda: _IdleRecorder()
+    monkeypatch.setattr(
+        app.audio.recorder.MicrophoneRecorder,
+        "cleanup",
+        lambda self: released.append("recorder"),
+    )
+    idle_recorder = _IdleRecorder()
+    fastapi_app.dependency_overrides[get_recorder] = lambda: idle_recorder
 
     with caplog.at_level(logging.WARNING, logger="app.main"):
         with TestClient(fastapi_app) as client:
@@ -194,8 +279,8 @@ def test_a_failing_meeting_recorder_leaves_dictation_working(monkeypatch, caplog
 
     warnings = [r.getMessage() for r in caplog.records]
     assert any("building the meeting recorder" in message for message in warnings)
-    assert any("releasing the meeting recorder" in message for message in warnings)
-    assert released == ["stt", "embeddings"]
+    assert not any("releasing the meeting recorder" in message for message in warnings)
+    assert released == ["stt", "embeddings", "recorder"]
 
 
 def test_a_failing_sync_to_runtime_still_takes_the_backend_down(monkeypatch):

@@ -177,7 +177,17 @@ def history_path() -> Path:
 
 
 def bootstrap(target: Path) -> None:
-    """Lifespan helper: open the SQLite connection at ``<target>/history.db``."""
+    """Lifespan helper: open the SQLite connection at ``<target>/history.db``.
+
+    Leaves no connection behind when it fails. ``_output_dir`` is kept, so
+    ``_ensure_conn_locked`` re-opens at ``target`` on the first request that
+    needs the store; a connection whose schema step did not finish is closed
+    and cleared instead of being handed out. ``_ensure_conn_locked`` heals
+    only when ``_conn`` is ``None``, and the caller in ``app.main.lifespan``
+    treats this as an optional step, so a connection surviving a failure here
+    would mean every later read and write using a half-migrated database for
+    the life of the process.
+    """
     global _output_dir, _conn
     with _lock:
         _close_conn_locked()
@@ -185,7 +195,11 @@ def bootstrap(target: Path) -> None:
         invalidate_derived_caches_locked()
         target.mkdir(parents=True, exist_ok=True)
         _conn = _connect(target / HISTORY_FILENAME)
-        schema._init_schema(_conn)
+        try:
+            schema._init_schema(_conn)
+        except Exception:
+            _close_conn_locked()
+            raise
 
 
 def _iso_to_epoch_ms(ts: str) -> int:
