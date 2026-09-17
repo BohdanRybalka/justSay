@@ -37,7 +37,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from app.audio.analysis import interleaved_buffer_to_mono
+from app.audio.analysis import MalformedCaptureBlockError, interleaved_buffer_to_mono
 from app.audio.config import AudioSettings
 from app.audio.system_source import (
     BlockSink,
@@ -257,6 +257,11 @@ class MacOSTapSource(SystemAudioSource):
         one of the ones `_shutdown` is joining -- sitting inside a join of its
         own would spend the shutdown's whole budget and get itself classified
         as parked on a pipe it is not reading.
+
+        A block that is not whole frames leaves the loop rather than killing
+        this thread, because the exit report below the loop is what names the
+        helper's own last words: the framing and the exit are two readings of
+        one failure, and dying inside the loop threw the second one away.
         """
         block_bytes = self._settings.meeting_block_frames * self._channels * 4
         stdout = process.stdout
@@ -268,7 +273,18 @@ class MacOSTapSource(SystemAudioSource):
                 sink = self._on_block
             if sink is None:
                 break
-            sink(time.monotonic(), interleaved_buffer_to_mono(chunk, self._channels, "<f4"))
+            try:
+                mono = interleaved_buffer_to_mono(chunk, self._channels, "<f4")
+            except MalformedCaptureBlockError as malformed:
+                log.exception(
+                    "The macOS system-audio helper stopped delivering usable audio"
+                )
+                self._report_failure(
+                    f"the macOS system-audio helper stopped delivering usable "
+                    f"audio — {malformed}"
+                )
+                break
+            sink(time.monotonic(), mono)
 
         code = process.poll()
         if code is not None and code != 0 and not self._stopping.is_set():
@@ -279,12 +295,23 @@ class MacOSTapSource(SystemAudioSource):
                 code,
                 self._stderr_text(),
             )
-            with self._lock:
-                on_failure = self._on_failure
-            if on_failure is not None:
-                on_failure(
-                    f"the macOS system-audio helper exited with code {code}"
-                )
+            self._report_failure(
+                f"the macOS system-audio helper exited with code {code}"
+            )
+
+    def _report_failure(self, reason: str) -> None:
+        """Tell the recorder once why system audio stopped arriving.
+
+        The sink is taken rather than read, because this thread can reach both
+        reports in one pass -- a block that is not whole frames leaves the loop
+        and lands on the exit report below it -- and
+        `SystemAudioSource.start` promises `on_failure` is called once.
+        """
+        with self._lock:
+            on_failure = self._on_failure
+            self._on_failure = None
+        if on_failure is not None:
+            on_failure(reason)
 
     def _drain_stderr(self, stream: object) -> None:
         """Read the helper's stderr from the moment it is spawned.

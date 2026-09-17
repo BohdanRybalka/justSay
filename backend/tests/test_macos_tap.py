@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 
 from app.audio import macos_tap
+from app.audio.analysis import MalformedCaptureBlockError
 from app.audio.config import AudioSettings
 from app.audio.macos_tap import (
     _STDERR_MAX_LINE_BYTES,
@@ -541,6 +542,85 @@ def test_a_helper_that_exits_tells_the_recorder_the_far_side_is_gone(tap_setting
         f"a helper that died mid-meeting told the recorder {reported}, so the "
         f"meeting keeps its indicator clean while system audio is gone"
     )
+
+
+def test_a_block_the_deinterleave_refuses_is_reported_not_raised(tap_settings):
+    """AC: a block that is not whole frames reaches the recorder.
+
+    `_read_blocks` runs on a daemon thread nobody joins for a result, so a
+    raise inside it ends system audio and tells no one: the meeting reports a
+    healthy capture while only the microphone is still arriving.
+
+    The refusal is injected rather than written to the fake helper's stdout
+    because this module owns both halves of the framing today — `block_bytes`
+    and the channel count are derived from the same two fields, so every chunk
+    `_read_exactly` hands over divides evenly by construction. What is under
+    test is what `_read_blocks` does with a refusal, not what produces one.
+    """
+    process = _FakeTapProcess(tap_stdout(blocks=3))
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+    received: list[np.ndarray] = []
+    reported: list[str] = []
+
+    with (
+        patch("app.audio.macos_tap.subprocess.Popen", return_value=process),
+        patch(
+            "app.audio.macos_tap.interleaved_buffer_to_mono",
+            side_effect=MalformedCaptureBlockError(
+                "a 512-byte capture block is not a whole number of "
+                "3-channel <f4 frames"
+            ),
+        ),
+    ):
+        source.start(lambda arrival, mono: received.append(mono), reported.append)
+        reader = source._reader
+        reader.join(timeout=5.0)
+        source.stop()
+
+    assert not reader.is_alive()
+    assert received == []
+    assert reported == [
+        "the macOS system-audio helper stopped delivering usable audio — "
+        "a 512-byte capture block is not a whole number of 3-channel <f4 frames"
+    ], (
+        f"a helper whose framing broke mid-meeting told the recorder {reported}, "
+        f"so the meeting keeps its indicator clean while system audio is gone"
+    )
+
+
+@pytest.mark.timeout(30)
+def test_a_refused_block_leaves_the_loop_so_the_exit_report_still_runs(
+    tap_settings, caplog
+):
+    """Leaving the loop is what keeps the report below it reachable.
+
+    The helper's own last words on stderr are the only channel separating a
+    revoked recording permission from a Core Audio error, and they are read by
+    the exit report under the `while`. A thread that died inside the loop threw
+    that half away; the recorder still hears one sentence, the first one.
+    """
+    process = _FakeTapProcess(
+        tap_stdout(blocks=3), returncode=3, stderr=b"fail: the tap was invalidated\n"
+    )
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+    reported: list[str] = []
+
+    with (
+        caplog.at_level(logging.ERROR, logger="app.audio.macos_tap"),
+        patch("app.audio.macos_tap.subprocess.Popen", return_value=process),
+        patch(
+            "app.audio.macos_tap.interleaved_buffer_to_mono",
+            side_effect=MalformedCaptureBlockError("a block that is not whole frames"),
+        ),
+    ):
+        source.start(lambda arrival, mono: None, reported.append)
+        source._reader.join(timeout=5.0)
+        source.stop()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("exited with code 3" in message for message in messages), messages
+    assert any("the tap was invalidated" in message for message in messages), messages
+    assert len(reported) == 1
 
 
 def test_a_helper_that_exits_cleanly_reports_no_failure(tap_settings):

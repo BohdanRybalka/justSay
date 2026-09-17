@@ -45,6 +45,10 @@ from app.core.errors import (
 )
 
 _ERRORS_SOURCE = Path(errors.__file__)
+_APP_DIR = Path(__file__).resolve().parents[1] / "app"
+_DELIBERATELY_OUTSIDE_THE_HIERARCHY = frozenset(
+    {"app.audio.analysis.MalformedCaptureBlockError"}
+)
 _WEB_FRAMEWORK_ROOTS = frozenset({"fastapi", "starlette"})
 
 
@@ -202,3 +206,37 @@ def test_every_refusal_that_declares_a_code_declares_a_distinct_one() -> None:
     assert duplicates == []
     assert JustSayError.code not in codes
     assert len(declared) >= 3
+
+
+def _declared_exception_class_names() -> set[str]:
+    """Every `*Error` class `backend/app/` declares, read from the source.
+
+    A source walk rather than a runtime one because the question is which
+    classes exist, and a class outside the hierarchy is reachable from no
+    `__subclasses__()` chain the runtime walk above can follow.
+    """
+    names: set[str] = set()
+    for path in sorted(_APP_DIR.rglob("*.py")):
+        module = ".".join(path.relative_to(_APP_DIR.parent).with_suffix("").parts)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ClassDef) and node.name.endswith("Error"):
+                names.add(f"{module}.{node.name}")
+    return names
+
+
+def test_every_declared_error_is_in_the_hierarchy_or_named_as_staying_out() -> None:
+    """A class leaving the hierarchy unnoticed is how the count went stale.
+
+    `docs/style-guide.md` §3.1 states how many exception classes `backend/app/`
+    declares and how many are members, and it named `tests/test_words.py` as
+    the pin -- a module that does not mention the hierarchy at all, so the
+    number was held by the paragraph asserting it. Staying out is legitimate
+    and §3.1 says which cases qualify: "an invariant that broke, a library
+    that misbehaved, a device that failed mid-use" keep propagating into a
+    500 rather than becoming a refusal. What this rejects is drifting out in
+    silence, so a class that belongs outside is added here and nowhere else.
+    """
+    inside = {f"{c.__module__}.{c.__name__}" for c in _every_subclass()}
+    inside.add(f"{JustSayError.__module__}.{JustSayError.__name__}")
+    outside = _declared_exception_class_names() - inside
+    assert sorted(outside) == sorted(_DELIBERATELY_OUTSIDE_THE_HIERARCHY)

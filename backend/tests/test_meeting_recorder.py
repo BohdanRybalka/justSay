@@ -742,6 +742,64 @@ def test_a_loopback_status_flag_reaches_the_recorder_once_per_capture(
     )
 
 
+def test_a_loopback_block_that_is_not_whole_frames_is_reported_not_raised(
+    fake_pyaudiowpatch, render_endpoints
+):
+    """AC: a block the callback cannot deinterleave reaches the recorder.
+
+    A raise out of a PortAudio callback reaches no Python caller at all —
+    PortAudio tears the stream down and the meeting goes on reporting a
+    healthy system-audio capture while only the microphone still arrives.
+    Three float32 samples cannot be split into stereo frames, which is the
+    shape a driver handing over a truncated buffer produces.
+    """
+    from app.audio.windows_loopback import WindowsLoopbackSource
+
+    source = WindowsLoopbackSource(AudioSettings())
+    received: list[np.ndarray] = []
+    reported: list[str] = []
+    source.start(lambda arrival, mono: received.append(mono), reported.append)
+
+    answer = source._stream_callback(
+        np.array([1.0, 0.0, 0.5], dtype="<f4").tobytes(), 2, None, 0
+    )
+
+    assert answer == (None, fake_pyaudiowpatch.paContinue)
+    assert received == []
+    assert len(reported) == 1, (
+        f"a loopback block that cannot be read told the recorder {reported}, so "
+        f"the meeting reports no incident while its far side is gone"
+    )
+    assert "not a whole number of 2-channel <f4 frames" in reported[0]
+
+
+def test_a_loopback_that_stopped_being_readable_delivers_and_reports_nothing_more(
+    fake_pyaudiowpatch, render_endpoints
+):
+    """One sentence per recording, and no block after the one that broke.
+
+    The status flag shares the report-once flag with this path on purpose: a
+    stream that has begun producing unreadable blocks usually raises a
+    PortAudio flag too, and the user needs the first reason rather than a new
+    one per callback.
+    """
+    from app.audio.windows_loopback import WindowsLoopbackSource
+
+    source = WindowsLoopbackSource(AudioSettings())
+    received: list[np.ndarray] = []
+    reported: list[str] = []
+    source.start(lambda arrival, mono: received.append(mono), reported.append)
+
+    source._stream_callback(np.array([1.0, 0.0, 0.5], dtype="<f4").tobytes(), 2, None, 0)
+    source._stream_callback(np.zeros(4, dtype="<f4").tobytes(), 2, None, 0)
+    source._stream_callback(
+        np.zeros(4, dtype="<f4").tobytes(), 2, None, fake_pyaudiowpatch.paInputUnderflow
+    )
+
+    assert received == []
+    assert len(reported) == 1
+
+
 def test_a_loopback_stream_with_no_status_flag_reports_no_failure(
     fake_pyaudiowpatch, render_endpoints
 ):

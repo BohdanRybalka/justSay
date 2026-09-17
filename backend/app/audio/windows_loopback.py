@@ -18,7 +18,7 @@ import time
 
 import pyaudiowpatch as pyaudio
 
-from app.audio.analysis import interleaved_buffer_to_mono
+from app.audio.analysis import MalformedCaptureBlockError, interleaved_buffer_to_mono
 from app.audio.config import AudioSettings
 from app.audio.endpoint_selection import resolve_loopback_device
 from app.audio.system_source import (
@@ -78,7 +78,7 @@ class WindowsLoopbackSource(SystemAudioSource):
         self._stream: object | None = None
         self._on_block: BlockSink | None = None
         self._on_failure: FailureSink | None = None
-        self._status_reported = False
+        self._failure_reported = False
         self._lock = threading.Lock()
         log.info(
             "WASAPI loopback endpoint: %s (%d Hz, %d ch)",
@@ -95,6 +95,41 @@ class WindowsLoopbackSource(SystemAudioSource):
     def endpoint_name(self) -> str:
         return self._endpoint_name
 
+    def _report_capture_failure(self, reason: str) -> bool:
+        """Hand the recorder the first reason this capture went wrong.
+
+        The one report-once path this source has, shared by the two things it
+        can observe: a non-zero PortAudio status flag and a block that is not
+        whole frames. Both, once they happen at all, happen on every callback,
+        and the user gets one sentence per recording rather than one per block.
+        The answer says whether this call was the first, so a caller logs once
+        per recording rather than once per block. It does not say the recorder
+        heard: `on_failure` is optional, and a source started without one
+        still reports exactly once into nothing.
+        """
+        with self._lock:
+            already = self._failure_reported
+            self._failure_reported = True
+            on_failure = self._on_failure
+        if already:
+            return False
+        if on_failure is not None:
+            on_failure(reason)
+        return True
+
+    def _stop_delivering(self, reason: str) -> None:
+        """End system-audio delivery, having said why once.
+
+        Clearing the block sink is how ``stop()`` already ends delivery, and it
+        is what keeps a stream that has begun producing unreadable blocks from
+        spending a realtime callback on each one. The stream itself stays open
+        until the recorder stops it: the meeting is still running and still
+        recording the microphone.
+        """
+        with self._lock:
+            self._on_block = None
+        self._report_capture_failure(reason)
+
     def _report_stream_status(self, status: int) -> None:
         """Log a non-zero PortAudio status flag once per recording.
 
@@ -110,15 +145,10 @@ class WindowsLoopbackSource(SystemAudioSource):
         a meeting whose far side stopped arriving is news the user gets while
         the call is still running rather than when they play the file back.
         """
-        with self._lock:
-            already = self._status_reported
-            self._status_reported = True
-            on_failure = self._on_failure
-        if not already:
-            if on_failure is not None:
-                on_failure(
-                    f"the WASAPI loopback stream reported PortAudio status {int(status)}"
-                )
+        reported = self._report_capture_failure(
+            f"the WASAPI loopback stream reported PortAudio status {int(status)}"
+        )
+        if reported:
             log.warning(
                 "WASAPI loopback stream reported PortAudio status %d "
                 "(paInputUnderflow=%d) — any silence in this recording may be "
@@ -134,7 +164,15 @@ class WindowsLoopbackSource(SystemAudioSource):
         with self._lock:
             sink = self._on_block
         if sink is not None and in_data:
-            sink(arrival, interleaved_buffer_to_mono(in_data, self._channels, "<f4"))
+            try:
+                mono = interleaved_buffer_to_mono(in_data, self._channels, "<f4")
+            except MalformedCaptureBlockError as malformed:
+                log.exception("The WASAPI loopback stream stopped delivering usable audio")
+                self._stop_delivering(
+                    f"the WASAPI loopback stream stopped delivering usable audio — {malformed}"
+                )
+                return (None, pyaudio.paContinue)
+            sink(arrival, mono)
         return (None, pyaudio.paContinue)
 
     def start(self, on_block: BlockSink, on_failure: FailureSink | None = None) -> None:

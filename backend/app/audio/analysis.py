@@ -27,6 +27,17 @@ _MIN_SPEECH_UNITS_FLOOR = 2
 _DBFS_FLOOR = 1e-10
 
 
+class MalformedCaptureBlockError(Exception):
+    """A raw capture buffer does not divide into whole interleaved frames.
+
+    Deliberately outside the `JustSayError` hierarchy (`app/core/errors.py`):
+    nothing routes it to a response, and both system-audio sources catch it
+    inside their capture callback and report it through `on_failure` instead.
+    That is the "broken while in use raises" half of docs/style-guide.md §3.3 —
+    the source stops delivering, the meeting keeps recording the microphone.
+    """
+
+
 def required_speech_units(total_unit_count: int, *, cap: int, ratio: float) -> int:
     """How many "speech" units a clip of ``total_unit_count`` units must show.
 
@@ -93,7 +104,21 @@ def interleaved_buffer_to_mono(buffer: bytes, channels: int, dtype: str) -> np.n
     ``np.frombuffer`` hands back a read-only view of the caller's bytes;
     ``to_mono`` is what guarantees the block that comes out of here can be
     written to, whatever the channel count.
+
+    A buffer that is not a whole number of ``channels``-wide frames raises
+    ``MalformedCaptureBlockError`` naming both numbers. ``np.frombuffer`` and
+    ``reshape`` each already refused such a buffer with a ``ValueError`` of its
+    own, from two libraries and in wording that mentions no audio; one named
+    raise is what a realtime capture callback can catch precisely enough to
+    report the far side as gone instead of dying where the caller cannot see.
     """
+    item_size = np.dtype(dtype).itemsize
+    sample_count, leftover_bytes = divmod(len(buffer), item_size)
+    if leftover_bytes or sample_count % channels:
+        raise MalformedCaptureBlockError(
+            f"a {len(buffer)}-byte capture block is not a whole number of "
+            f"{channels}-channel {dtype} frames"
+        )
     interleaved = np.frombuffer(buffer, dtype=dtype)
     if channels > 1:
         interleaved = interleaved.reshape(-1, channels)
