@@ -2285,15 +2285,20 @@ mod tests {
         );
     }
 
+    const CONTENDED_LOCK_HELD_FOR: Duration = Duration::from_millis(400);
+    const MIN_OBSERVED_CONTENDED_WAIT: Duration = Duration::from_millis(300);
+
     #[test]
     fn lock_with_wait_until_free_waits_for_contention_then_acquires() {
         let m: Mutex<i32> = Mutex::new(0);
+        let lock_is_held = std::sync::Barrier::new(2);
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 let _guard = m.lock().unwrap();
-                std::thread::sleep(Duration::from_millis(400));
+                lock_is_held.wait();
+                std::thread::sleep(CONTENDED_LOCK_HELD_FOR);
             });
-            std::thread::sleep(Duration::from_millis(50));
+            lock_is_held.wait();
 
             let start = std::time::Instant::now();
             let acquired = lock_with_wait(&m, LockWait::UntilFree);
@@ -2301,8 +2306,9 @@ mod tests {
 
             assert!(acquired.is_some(), "UntilFree must acquire the lock once it frees");
             assert!(
-                elapsed >= Duration::from_millis(300),
-                "expected UntilFree to wait at least 300ms for the contended lock, waited {:?}",
+                elapsed >= MIN_OBSERVED_CONTENDED_WAIT,
+                "expected UntilFree to wait at least {:?} for the contended lock, waited {:?}",
+                MIN_OBSERVED_CONTENDED_WAIT,
                 elapsed
             );
         });
@@ -2311,12 +2317,14 @@ mod tests {
     #[test]
     fn lock_with_wait_skip_returns_immediately_under_contention() {
         let m: Mutex<i32> = Mutex::new(0);
+        let lock_is_held = std::sync::Barrier::new(2);
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 let _guard = m.lock().unwrap();
-                std::thread::sleep(Duration::from_millis(400));
+                lock_is_held.wait();
+                std::thread::sleep(CONTENDED_LOCK_HELD_FOR);
             });
-            std::thread::sleep(Duration::from_millis(50));
+            lock_is_held.wait();
 
             let start = std::time::Instant::now();
             let acquired = lock_with_wait(&m, LockWait::Skip);
