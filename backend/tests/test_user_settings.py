@@ -160,10 +160,10 @@ def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
 
     cleared: list[str] = []
     monkeypatch.setattr(
-        "app.preferences.user_settings.clear_stt_cache", lambda: cleared.append("stt")
+        "app.stt.routing.clear_cache", lambda: cleared.append("stt")
     )
     monkeypatch.setattr(
-        "app.preferences.user_settings.clear_embeddings_cache", lambda: cleared.append("emb")
+        "app.embeddings.clear_cache", lambda: cleared.append("emb")
     )
 
     us = user_settings.UserSettings(stt_mode="cloud")
@@ -194,10 +194,10 @@ def test_sync_to_runtime_ollama_host_change_invalidates_embeddings_cache(monkeyp
 
     cleared: list[str] = []
     monkeypatch.setattr(
-        "app.preferences.user_settings.clear_stt_cache", lambda: cleared.append("stt")
+        "app.stt.routing.clear_cache", lambda: cleared.append("stt")
     )
     monkeypatch.setattr(
-        "app.preferences.user_settings.clear_embeddings_cache", lambda: cleared.append("emb")
+        "app.embeddings.clear_cache", lambda: cleared.append("emb")
     )
 
     us = user_settings.UserSettings(stt_mode="cloud", ollama_host="http://10.0.0.5:11434")
@@ -224,10 +224,10 @@ def test_sync_to_runtime_propagates_initial_prompt_and_invalidates_cache(monkeyp
 
     cleared: list[str] = []
     monkeypatch.setattr(
-        "app.preferences.user_settings.clear_stt_cache", lambda: cleared.append("stt")
+        "app.stt.routing.clear_cache", lambda: cleared.append("stt")
     )
     monkeypatch.setattr(
-        "app.preferences.user_settings.clear_embeddings_cache", lambda: cleared.append("emb")
+        "app.embeddings.clear_cache", lambda: cleared.append("emb")
     )
 
     us = user_settings.UserSettings(initial_prompt="Tauri Pydantic")
@@ -371,10 +371,10 @@ def test_sync_to_runtime_propagates_keys(monkeypatch):
 
     cleared: list[str] = []
     monkeypatch.setattr(
-        "app.preferences.user_settings.clear_stt_cache", lambda: cleared.append("stt")
+        "app.stt.routing.clear_cache", lambda: cleared.append("stt")
     )
     monkeypatch.setattr(
-        "app.preferences.user_settings.clear_embeddings_cache", lambda: cleared.append("emb")
+        "app.embeddings.clear_cache", lambda: cleared.append("emb")
     )
 
     us = user_settings.UserSettings(gemini_api_key="AIza-new", groq_api_key="gsk-new")
@@ -393,8 +393,8 @@ def test_sync_to_runtime_preserves_env_key_when_user_key_empty(monkeypatch):
     runtime_settings.stt.gemini_api_key = "env-key"
     runtime_settings.stt.groq_api_key = "env-groq"
 
-    monkeypatch.setattr("app.preferences.user_settings.clear_stt_cache", lambda: None)
-    monkeypatch.setattr("app.preferences.user_settings.clear_embeddings_cache", lambda: None)
+    monkeypatch.setattr("app.stt.routing.clear_cache", lambda: None)
+    monkeypatch.setattr("app.embeddings.clear_cache", lambda: None)
 
     us = user_settings.UserSettings(gemini_api_key="", groq_api_key="")
     user_settings.sync_to_runtime(us)

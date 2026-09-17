@@ -259,7 +259,7 @@ def test_a_failing_meeting_recorder_leaves_dictation_working(monkeypatch, caplog
     """
     released: list[str] = []
     monkeypatch.setattr(app.audio.meeting_recorder, "MeetingRecorder", _raise)
-    monkeypatch.setattr(app.stt, "clear_cache", lambda: released.append("stt"))
+    monkeypatch.setattr(app.stt.routing, "clear_cache", lambda: released.append("stt"))
     monkeypatch.setattr(
         app.embeddings, "clear_cache", lambda: released.append("embeddings")
     )

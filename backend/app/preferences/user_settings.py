@@ -15,11 +15,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
+from app import embeddings
 from app.core.app_paths import resolve_app_data_root, resolve_temp_dir
 from app.core.errors import ConfigurationError
 from app.core.types import ProviderMode
-from app.embeddings import clear_cache as clear_embeddings_cache
-from app.stt.routing import clear_cache as clear_stt_cache
+from app.stt import routing as stt_routing
 from app.transcripts import relocation
 
 
@@ -394,10 +394,10 @@ def sync_to_runtime(us: UserSettings) -> bool:
     settings.embeddings.ollama_host = us.ollama_host
 
     if changed_stt:
-        clear_stt_cache()
-        clear_embeddings_cache()
+        stt_routing.clear_cache()
+        embeddings.clear_cache()
     if changed_embeddings:
-        clear_embeddings_cache()
+        embeddings.clear_cache()
 
     return bool(changed_stt)
 

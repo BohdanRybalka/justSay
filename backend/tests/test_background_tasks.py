@@ -275,8 +275,8 @@ async def test_drain_reaches_the_active_load_created_by_real_ensure_local_ready(
     regression that changed the tuple's shape, stopped assigning
     `_active_load`, or moved the task behind a different accessor would leave
     them green while the drain reached nothing. Here `ensure_local_ready()`
-    itself creates the task (local_setup.py:348) and awaits it through
-    `asyncio.shield()` (:351); only `provider._get_model` -- the actual model
+    itself creates the task (local_setup.py:357) and awaits it through
+    `asyncio.shield()` (:360); only `provider._get_model` -- the actual model
     load -- is stubbed.
     """
     from app.core.types import ProviderMode
@@ -389,7 +389,7 @@ def teardown_probe(monkeypatch):
 
     monkeypatch.setattr(app.main, "_warm_gpu_probe_cache", _noop_probe)
     monkeypatch.setattr(app.audio.recorder, "MicrophoneRecorder", _FakeRecorder)
-    monkeypatch.setattr(app.stt, "clear_cache", lambda: order.append("clear_stt"))
+    monkeypatch.setattr(app.stt.routing, "clear_cache", lambda: order.append("clear_stt"))
     monkeypatch.setattr(
         app.embeddings, "clear_cache", lambda: order.append("clear_embeddings")
     )
@@ -473,7 +473,7 @@ async def test_lifespan_release_steps_do_not_skip_each_other_on_failure(
         teardown_probe.append("clear_stt_raised")
         raise RuntimeError("model release blew up")
 
-    monkeypatch.setattr(app.stt, "clear_cache", _boom)
+    monkeypatch.setattr(app.stt.routing, "clear_cache", _boom)
 
     with caplog.at_level(logging.WARNING, logger="app.main"):
         async with lifespan(fastapi_app):

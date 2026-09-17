@@ -229,8 +229,8 @@ def test_check_status_surfaces_last_load_error():
 
 
 def test_get_local_load_error_returns_none_before_provider_instantiation():
-    from app.stt import clear_cache as clear_stt_cache
-    from app.stt import get_local_load_error
+    from app.stt.routing import clear_cache as clear_stt_cache
+    from app.stt.routing import get_local_load_error
 
     clear_stt_cache()
     settings = STTSettings()
@@ -567,9 +567,12 @@ def test_check_status_probes_gpu_at_most_once_through_the_real_unmocked_provider
     of several call sites that independently reach `get_local_provider_kind()`
     with no vendor -- `get_local_provider_class()` (`local_factory.py:87`),
     reached via `_check_package_installed()`'s own WHISPER_CPP_SERVER branch
-    check, `is_model_loaded()` (called *twice* inside `check_status()`: once
-    for `model_loaded=`, once more inside the `model_ram_mb=... if
-    is_model_loaded() else None` ternary), and `get_local_load_error()`.
+    check, `is_model_loaded()` (called twice inside `check_status()` when
+    this was written: once for `model_loaded=`, once more inside a
+    `model_ram_mb=... if is_model_loaded() else None` ternary that no longer
+    exists -- one read answers both load fields now, and the call count this
+    test pins is the probe's, not that ternary's), and
+    `get_local_load_error()`.
 
     The prior version of this test (before this fix) only proved the
     call-count reduction held for `_detect_gpu()`'s single direct call,
@@ -818,7 +821,7 @@ async def test_a_cancelled_caller_still_gets_the_error_cleared_by_the_load_it_st
 
 
 def test_check_status_surfaces_prewarm_error_when_no_provider_level_error():
-    from app.stt import clear_cache as clear_stt_cache
+    from app.stt.routing import clear_cache as clear_stt_cache
 
     clear_stt_cache()
     settings = STTSettings()

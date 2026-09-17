@@ -15,7 +15,6 @@ import soundfile as sf
 from app.core.constants import GEMINI_TIMEOUT_SECONDS
 from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.core.types import ProviderMode
-from app.stt import clear_cache, get_provider
 from app.stt.base import (
     LOAD_FAILED_WITHOUT_A_MESSAGE,
     TranscriptionResult,
@@ -25,6 +24,7 @@ from app.stt.base import (
 from app.stt.cloud import GeminiSTTProvider
 from app.stt.config import STTSettings
 from app.stt.local import LocalSTTProvider
+from app.stt.routing import clear_cache, get_provider
 
 _UNANSWERED_REQUEST_TIMEOUT_MS = 500
 
@@ -807,8 +807,9 @@ def test_is_local_provider_costs_zero_gpu_probe_or_factory_calls_for_cloud(monke
     the real code path it exists to guard).
     """
     from app.core import gpu_probe
-    from app.stt import is_local_provider, local_factory
+    from app.stt import local_factory
     from app.stt.cloud import GeminiSTTProvider
+    from app.stt.routing import is_local_provider
 
     probe_calls = {"n": 0}
     factory_calls = {"n": 0}
@@ -843,7 +844,7 @@ def test_is_local_provider_costs_zero_gpu_probe_or_factory_calls_for_cloud(monke
 
 
 def test_is_local_provider_true_for_a_declared_local_provider():
-    from app.stt import is_local_provider
+    from app.stt.routing import is_local_provider
 
     provider = LocalSTTProvider(STTSettings())
     assert is_local_provider(provider) is True
@@ -853,8 +854,8 @@ def test_is_local_provider_defaults_false_for_an_undeclared_provider():
     """A provider that never overrides `is_local` (the STTProvider ABC
     default) must read as not-local -- proves the getattr default matters,
     not just the two named classes."""
-    from app.stt import is_local_provider
     from app.stt.groq_whisper import GroqWhisperSTTProvider
+    from app.stt.routing import is_local_provider
 
     provider = GroqWhisperSTTProvider(STTSettings(groq_api_key="test-key"))
     assert is_local_provider(provider) is False
