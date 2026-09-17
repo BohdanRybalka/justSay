@@ -57,7 +57,6 @@ _TERMINATE_TIMEOUT_SECONDS = 0.5
 _KILL_TIMEOUT_SECONDS = 0.5
 _READER_JOIN_TIMEOUT_SECONDS = 0.5
 _HEADER_TIMEOUT_SECONDS = 5.0
-_EXIT_WAIT_SECONDS = 0.2
 _STDERR_TAIL_LINES = 20
 _STDERR_MAX_LINE_BYTES = 4096
 
@@ -224,6 +223,7 @@ class MacOSTapSource(SystemAudioSource):
         with self._lock:
             self._on_block = on_block
             self._on_failure = on_failure
+            self._failure_reported = False
         self._process = process
         self._stderr_reader = stderr_reader
         self._reader = _start_reader(
@@ -256,7 +256,7 @@ class MacOSTapSource(SystemAudioSource):
         exit report below is what carries the helper's own last words: the
         framing and the exit are two readings of one failure, and dying inside
         the loop threw the second one away. It leaves on the first refusal
-        rather than after a few — see `MalformedCaptureBlockError` for why a
+        rather than after a few -- see `MalformedCaptureBlockError` for why a
         stream that has slipped out of frame does not come back.
 
         Closing the pipe is unconditional, and belongs to leaving the loop
@@ -266,12 +266,18 @@ class MacOSTapSource(SystemAudioSource):
         refusal left the other two exits, a cleared sink and a stream that
         ended, relying on `stop()` happening to follow. That was an ordering
         guarantee held in another method rather than a property of this one.
+
+        It also comes first, before the reason is reported. The sink belongs
+        to `MeetingRecorder` and can take as long as it likes; until the close
+        the helper is still wedged inside `write()` on a full pipe, holding
+        the tap, for however long foreign code spends behind the recorder's
+        lock. Nothing in the report needs the pipe open.
         """
         reason = self._deliver_until_refused(process)
+        self._stop_reading(process)
         if reason is not None:
             self._report_failure(reason)
-        self._stop_reading(process)
-        self._report_exit(process, stderr_reader)
+        self._report_exit(process, stderr_reader, refused=reason is not None)
 
     def _deliver_until_refused(self, process: subprocess.Popen) -> str | None:
         """Blocks to the sink until the helper stops, or why reading stopped.
@@ -336,7 +342,11 @@ class MacOSTapSource(SystemAudioSource):
             log.debug("Closing the macOS system-audio helper's stdout failed", exc_info=True)
 
     def _report_exit(
-        self, process: subprocess.Popen, stderr_reader: threading.Thread
+        self,
+        process: subprocess.Popen,
+        stderr_reader: threading.Thread,
+        *,
+        refused: bool,
     ) -> None:
         """Why the helper is gone, in its own words, once it actually is.
 
@@ -349,10 +359,27 @@ class MacOSTapSource(SystemAudioSource):
         while the meeting went on claiming a healthy system capture. A helper
         that has closed stdout and is still running past the wait is the same
         news with no number attached, and is reported as that rather than
-        dropped.
+        dropped -- as what was observed, since a helper tearing its tap down
+        exits milliseconds after the wait it just missed.
 
-        The drain is joined after the status, because the helper's last words
-        are written on the way out and arrive after its exit is observed.
+        A zero is news of nothing only when nothing was refused. After a
+        refusal the pipe was closed from here, and the helper answers a closed
+        stdout by logging it and exiting 0 -- so the zero says it obeyed the
+        close, not that the capture was fine, and returning on it dropped the
+        stderr tail. That tail is the only channel separating a revoked
+        recording permission from a Core Audio error (ADR 052), and after a
+        refusal it is the only account of the framing that exists.
+
+        Both waits share one `_READER_JOIN_TIMEOUT_SECONDS` deadline rather
+        than holding one each. This runs on a thread `_shutdown` joins against
+        that same budget, so a wait and a join that each spend it in full put
+        this thread past the deadline on a teardown that was going cleanly:
+        every `stop()` landing an instruction into the wait found the reader
+        parked, handed both descriptors to the detached closer and paid the
+        budget twice. One deadline is also the honest shape, because the
+        helper's last words are written on the way out: there is nothing to
+        join for until the wait is over, and a wait that returned early is
+        time the drain still has.
 
         `_stopping` is read twice, on either side of the wait, and the second
         read is the one that matters: a deliberate stop kills the helper, so
@@ -365,15 +392,16 @@ class MacOSTapSource(SystemAudioSource):
         """
         if self._stopping.is_set():
             return
-        code = _exit_code(process)
-        if code == 0 or self._stopping.is_set():
+        deadline = time.monotonic() + _READER_JOIN_TIMEOUT_SECONDS
+        code = _exit_code(process, deadline)
+        if self._stopping.is_set() or (code == 0 and not refused):
             return
-        stderr_reader.join(timeout=_READER_JOIN_TIMEOUT_SECONDS)
+        stderr_reader.join(timeout=max(0.0, deadline - time.monotonic()))
         gone = (
             f"exited with code {code}"
             if code is not None
-            else f"stopped writing audio and was still running "
-            f"{_EXIT_WAIT_SECONDS:.1f}s later"
+            else f"had not exited {_READER_JOIN_TIMEOUT_SECONDS:.1f}s after its "
+            f"stdout was closed"
         )
         log.error(
             "The macOS system-audio helper %s, so this meeting is being "
@@ -396,6 +424,15 @@ class MacOSTapSource(SystemAudioSource):
         refused block leaves the loop and lands on the exit report below it --
         and they are two readings of one failure, so the first reason is the
         one the recorder hears and the exit is carried by the log line above.
+
+        Released by `start()`, because `stop()` leaves this object usable: it
+        kills a helper and clears nothing else, and `start()` spawns another
+        one. A claim held for the life of the source therefore silenced every
+        capture after the first -- the second meeting's helper could die and
+        the recorder would be told nothing while its indicator stayed clean.
+        Windows holds its claim for the life of the source instead, because
+        there `stop()` terminates the PyAudio instance and a second `start()`
+        cannot open a stream at all.
 
         A raise out of the sink is caught here: it belongs to
         `MeetingRecorder`, and this report is the last thing this source can
@@ -554,17 +591,18 @@ class MacOSTapSource(SystemAudioSource):
             log.warning("Stopping the macOS system-audio helper failed", exc_info=True)
 
 
-def _exit_code(process: subprocess.Popen) -> int | None:
-    """The helper's exit status, waited for briefly, or None if it is still up.
+def _exit_code(process: subprocess.Popen, deadline: float) -> int | None:
+    """The helper's exit status, waited for until `deadline`, or None.
 
-    Bounded well inside `_READER_JOIN_TIMEOUT_SECONDS` rather than at it: this
-    runs on a thread `_shutdown` joins against that same budget, and a wait
-    equal to the budget guaranteed that any `stop()` overlapping it found the
-    reader parked, handed both descriptors to the detached closer and paid the
-    whole join on an otherwise clean teardown.
+    The deadline is the one the stderr drain's join then spends what is left
+    of, rather than a budget of its own: this runs on a thread `_shutdown`
+    joins against `_READER_JOIN_TIMEOUT_SECONDS`, and two waits each holding
+    that budget in full guaranteed that a `stop()` overlapping either of them
+    found the reader parked, handed both descriptors to the detached closer
+    and paid the whole join on an otherwise clean teardown.
     """
     try:
-        return process.wait(timeout=_EXIT_WAIT_SECONDS)
+        return process.wait(timeout=max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
         return None
 

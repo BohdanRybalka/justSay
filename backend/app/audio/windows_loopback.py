@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from enum import Enum
 
 import pyaudiowpatch as pyaudio
 
@@ -30,6 +31,24 @@ from app.audio.system_source import (
 from app.audio.windows_endpoints import render_endpoint_names
 
 log = logging.getLogger(__name__)
+
+_SAMPLE_DTYPE = "<f4"
+_SAMPLE_BYTES = 4
+
+
+class _CaptureFailure(Enum):
+    """The ways this source can go wrong, deduplicated apart from one another.
+
+    A degradation is the stream still delivering while PortAudio raises a
+    status flag on it. A raised callback is foreign code failing on this
+    thread, which says nothing about whether the device is still producing
+    audio. A stop is this source having ended delivery for the rest of the
+    recording.
+    """
+
+    DEGRADED = "degraded"
+    CALLBACK_RAISED = "callback raised"
+    STOPPED = "stopped"
 
 
 def _find_default_loopback(audio: pyaudio.PyAudio, settings: AudioSettings) -> dict:
@@ -78,8 +97,7 @@ class WindowsLoopbackSource(SystemAudioSource):
         self._stream: object | None = None
         self._on_block: BlockSink | None = None
         self._on_failure: FailureSink | None = None
-        self._degradation_reported = False
-        self._stop_reported = False
+        self._reported: set[_CaptureFailure] = set()
         self._status_logged = False
         self._lock = threading.Lock()
         log.info(
@@ -97,22 +115,17 @@ class WindowsLoopbackSource(SystemAudioSource):
     def endpoint_name(self) -> str:
         return self._endpoint_name
 
-    def _report_capture_failure(self, reason: str, *, terminal: bool) -> None:
+    def _report_capture_failure(self, reason: str, kind: _CaptureFailure) -> None:
         """Hand the recorder a reason this capture went wrong, once per kind.
 
-        Two kinds, and they are deduplicated apart. A non-zero PortAudio
-        status flag is a degradation: the stream is still delivering, and it
-        would otherwise hand the user a sentence per block. A block that
-        cannot be read, or anything else the callback raised, is terminal --
-        this source has stopped delivering for the rest of the recording.
-
-        One shared flag let whichever kind landed first silence the other, and
-        the order is not this source's to choose. PortAudio raises the flag on
-        the same callback whose block then fails to deinterleave, so the
-        degradation always arrives first and the terminal reason -- the one
-        saying system audio is gone rather than thin -- was the one swallowed.
-        A terminal reason therefore reports even after a degradation already
-        has; the reverse is pointless and is refused.
+        Three kinds, deduplicated apart, because one shared flag let whichever
+        kind landed first silence the others and the order is not this
+        source's to choose. PortAudio raises its status flag on the same
+        callback whose block then fails to deinterleave, so the degradation
+        always arrives first and the terminal reason -- the one saying system
+        audio is gone rather than thin -- was the one swallowed. Nothing is
+        reported after a stop, which is the one ordering that does hold: a
+        source that has gone has nothing left to degrade.
 
         Once per source, not once per `start()`: a source is one recording.
         `stop()` terminates this object's PyAudio instance, so starting it
@@ -127,21 +140,18 @@ class WindowsLoopbackSource(SystemAudioSource):
         The sink belongs to `MeetingRecorder`, not to this module, so a raise
         out of it is caught here rather than left to unwind a realtime
         callback, and the claim it raised on stands. Counting the kinds apart
-        is already what stops one raise costing the recorder both reasons, and
-        releasing the claim on top of that would only retry the same kind --
-        on a realtime callback, against a sink that just raised, once per
-        block for the rest of the recording. macOS releases its claim because
-        it has one for both reasons and a reader thread that reaches them
-        exactly twice.
+        is already what stops one raise costing the recorder every other
+        reason, and releasing the claim on top of that would only retry the
+        same kind -- on a realtime callback, against a sink that just raised,
+        once per block for the rest of the recording. macOS releases its claim
+        because it has one claim for every reason and a reader thread that
+        reaches them exactly twice.
         """
         with self._lock:
-            blocked = self._stop_reported or (
-                self._degradation_reported and not terminal
+            blocked = (
+                _CaptureFailure.STOPPED in self._reported or kind in self._reported
             )
-            if terminal:
-                self._stop_reported = True
-            else:
-                self._degradation_reported = True
+            self._reported.add(kind)
             on_failure = self._on_failure
         if blocked or on_failure is None:
             return
@@ -180,7 +190,7 @@ class WindowsLoopbackSource(SystemAudioSource):
         """
         with self._lock:
             self._on_block = None
-        self._report_capture_failure(reason, terminal=True)
+        self._report_capture_failure(reason, _CaptureFailure.STOPPED)
 
     def _report_stream_status(self, status: int) -> None:
         """Log a non-zero PortAudio status flag once per recording.
@@ -202,7 +212,7 @@ class WindowsLoopbackSource(SystemAudioSource):
         """
         self._report_capture_failure(
             f"the WASAPI loopback stream reported PortAudio status {int(status)}",
-            terminal=False,
+            _CaptureFailure.DEGRADED,
         )
         if self._claim_status_log():
             log.warning(
@@ -213,15 +223,35 @@ class WindowsLoopbackSource(SystemAudioSource):
                 pyaudio.paInputUnderflow,
             )
 
-    def _deliver_block(self, in_data, status) -> None:
-        """One callback's worth of work: report the flag, downmix, hand over."""
+    def _deliver_block(self, in_data, frame_count, status) -> None:
+        """One callback's worth of work: report the flag, downmix, hand over.
+
+        `frame_count` is the host API's own count of the frames in `in_data`,
+        and it is the only framing input here that is not derived from the
+        endpoint's mix format. The deinterleave below refuses a buffer that is
+        not whole frames, which cannot see a block short by a whole frame:
+        such a block divides evenly and reaches the recorder as audio that is
+        simply missing. So the length is checked against the count PortAudio
+        states rather than against divisibility alone.
+        """
         arrival = time.monotonic()
         if status:
             self._report_stream_status(status)
         with self._lock:
             sink = self._on_block
-        if sink is not None and in_data:
-            sink(arrival, interleaved_buffer_to_mono(in_data, self._channels, "<f4"))
+        if sink is None or not in_data:
+            return
+        expected_bytes = frame_count * self._channels * _SAMPLE_BYTES
+        if len(in_data) != expected_bytes:
+            raise MalformedCaptureBlockError(
+                f"PortAudio delivered a {len(in_data)}-byte block where "
+                f"{frame_count} frames of {self._channels}-channel "
+                f"{_SAMPLE_DTYPE} audio is {expected_bytes} bytes"
+            )
+        sink(
+            arrival,
+            interleaved_buffer_to_mono(in_data, self._channels, _SAMPLE_DTYPE),
+        )
 
     def _stream_callback(self, in_data, frame_count, time_info, status):
         """Nothing raises out of here, whatever the block or the sink does.
@@ -234,15 +264,19 @@ class WindowsLoopbackSource(SystemAudioSource):
         this module neither owns nor can promise about, which is why the
         catch is the whole body rather than the deinterleave alone.
 
-        Both handlers end delivery rather than continuing into whatever comes
-        next, because a callback that has failed once fails on every block and
-        the stream stays open for the recorder to close. There is no count of
-        blocks to forgive first — see `MalformedCaptureBlockError`, which is
-        the one being caught here and says why forgiving one would record
-        audio that is wrong rather than missing.
+        The two handlers end differently, because the two failures say
+        different things about the device. A refused block means the byte
+        stream has slipped out of frame and every later block is misframed
+        too -- see `MalformedCaptureBlockError` -- so delivery ends, and there
+        is no count of blocks to forgive first. Anything else is that same
+        foreign caller raising on this thread and says nothing about the
+        device, so it is reported once and the next block is still delivered:
+        ending the capture on it would cost the far side the rest of the
+        meeting for one transient raise, and leave the stream open on a sink
+        nothing sets again.
         """
         try:
-            self._deliver_block(in_data, status)
+            self._deliver_block(in_data, frame_count, status)
         except MalformedCaptureBlockError as malformed:
             log.exception("The WASAPI loopback stream stopped delivering usable audio")
             self._stop_delivering(
@@ -250,9 +284,10 @@ class WindowsLoopbackSource(SystemAudioSource):
             )
         except Exception as failure:
             log.exception("The WASAPI loopback callback failed")
-            self._stop_delivering(
+            self._report_capture_failure(
                 f"the WASAPI loopback capture failed with an unexpected "
-                f"{type(failure).__name__}"
+                f"{type(failure).__name__}",
+                _CaptureFailure.CALLBACK_RAISED,
             )
         return (None, pyaudio.paContinue)
 

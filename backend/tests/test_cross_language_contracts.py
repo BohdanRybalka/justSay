@@ -1123,10 +1123,14 @@ def test_the_macos_tap_helper_and_its_reader_agree_on_the_header() -> None:
         f"at startup"
     )
 
-    documented = [
-        json.loads(re.search(_DOCUMENTED_HEADER_PATTERN, _read(path)).group(1))
-        for path in (AUDIO_TAP_SWIFT, MACOS_TAP_PY)
-    ]
+    documented = []
+    for path in (AUDIO_TAP_SWIFT, MACOS_TAP_PY):
+        written_down = re.search(_DOCUMENTED_HEADER_PATTERN, _read(path))
+        assert written_down, (
+            f"{path.name} no longer writes down the stdout line, which is the "
+            f"half of this contract a reader of the other file goes by"
+        )
+        documented.append(json.loads(written_down.group(1)))
     assert documented[0] == documented[1], (
         f"the helper's header comment and the macos_tap.py docstring describe "
         f"different stdout lines: {documented[0]} against {documented[1]}"
@@ -1135,7 +1139,10 @@ def test_the_macos_tap_helper_and_its_reader_agree_on_the_header() -> None:
         f"the two prose halves of the contract describe keys {sorted(documented[0])} "
         f"while writeHeader emits {sorted(emitted)}"
     )
-    assert documented[0]["format"] == accepted_format.group(1)
+    assert documented[0].get("format") == accepted_format.group(1), (
+        f"the documented header declares format {documented[0].get('format')!r} "
+        f"and macos_tap.py accepts {accepted_format.group(1)!r}"
+    )
 
 
 def test_the_macos_tap_helper_and_its_reader_frame_blocks_the_same_way() -> None:
@@ -1172,7 +1179,13 @@ def test_the_macos_tap_helper_and_its_reader_frame_blocks_the_same_way() -> None
     )
 
     accepted_format = re.search(r'^SAMPLE_FORMAT = "([^"]+)"$', _read(MACOS_TAP_PY), re.MULTILINE)
-    element, width = _TAP_SAMPLE_SPELLINGS[accepted_format.group(1)]
+    assert accepted_format, "macos_tap.py no longer declares SAMPLE_FORMAT"
+    spelling = _TAP_SAMPLE_SPELLINGS.get(accepted_format.group(1))
+    assert spelling, (
+        f"the contract declares format {accepted_format.group(1)!r}, which this "
+        f"test knows no Swift spelling for, so nothing below compares anything"
+    )
+    element, width = spelling
     swift = _read(AUDIO_TAP_SWIFT)
     assert element in swift and width in swift, (
         f"the contract declares {accepted_format.group(1)!r}, which is 4 bytes a "

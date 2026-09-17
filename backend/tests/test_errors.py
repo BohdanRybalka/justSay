@@ -23,13 +23,18 @@ each one reddens across this file and `tests/test_error_handler.py` together:
 
 The sixth property is the repo-wide one, and it is the only thing holding a
 hierarchy whose classes are declared in the package that raises them rather
-than in `app/core/errors.py` (ADR 060). It walks every subclass reachable
-after `app.main` is imported, so a package-local class is covered by exactly
-the two rules the module-scoped tests above apply to the three base ones.
+than in `app/core/errors.py` (ADR 060). It imports the modules the source walk
+below found an exception class in and then walks every subclass reachable from
+`JustSayError`, so a package-local class is covered by exactly the two rules
+the module-scoped tests above apply to the three base ones, and the two halves
+describe the same set by construction rather than by whatever else the test
+process happened to import.
 Mutation run: `SessionMismatchError.code` set to `"not_ready"` -- one test.
 """
 
 import ast
+import builtins
+import functools
 import importlib
 import subprocess
 import sys
@@ -50,7 +55,11 @@ _APP_DIR = Path(__file__).resolve().parents[1] / "app"
 _DELIBERATELY_OUTSIDE_THE_HIERARCHY = frozenset(
     {"app.audio.analysis.MalformedCaptureBlockError"}
 )
-_BUILTIN_EXCEPTION_BASES = frozenset({"BaseException", "Exception"})
+_BUILTIN_EXCEPTION_BASES = frozenset(
+    name
+    for name, value in vars(builtins).items()
+    if isinstance(value, type) and issubclass(value, BaseException)
+)
 _DECLARED_EXCEPTION_CLASS_COUNT = 14
 _HIERARCHY_MEMBER_COUNT = 13
 _WEB_FRAMEWORK_ROOTS = frozenset({"fastapi", "starlette"})
@@ -318,8 +327,14 @@ def _declared_classes_in(source: str, module: str, package: str) -> dict[str, li
     }
 
 
+@functools.cache
 def _module_level_classes() -> dict[str, list[str]]:
-    """Every class `backend/app/` declares at module level, by its bases."""
+    """Every class `backend/app/` declares at module level, by its bases.
+
+    Cached because `backend/app/` is rglob'd and parsed in full to build it,
+    and four tests in this module ask for it. Every caller reads and none
+    writes, which is what makes one shared answer safe to hand out.
+    """
     declarations: dict[str, list[str]] = {}
     for path in sorted(_APP_DIR.rglob("*.py")):
         module, package = _module_and_package(path)
@@ -329,12 +344,8 @@ def _module_level_classes() -> dict[str, list[str]]:
     return declarations
 
 
-def _declared_exception_class_names() -> set[str]:
-    """Every exception class `backend/app/` declares, read from the source.
-
-    A source walk rather than a runtime one because the question is which
-    classes exist, and a class outside the hierarchy is reachable from no
-    `__subclasses__()` chain the runtime walk above can follow.
+def _exception_class_names(declarations: dict[str, list[str]]) -> set[str]:
+    """Which of `declarations` are exception classes, by what they derive from.
 
     Membership is decided by what a class derives from, not by its name ending
     in `Error`: `class CaptureRefused(Exception)` is exactly the declaration a
@@ -343,8 +354,13 @@ def _declared_exception_class_names() -> set[str]:
     `_declared_classes_in` and resolved to a fixpoint, so a class three levels
     down from `Exception` is found however the intermediate classes are named
     and wherever they were imported from.
+
+    Every builtin exception counts as a root, not just `Exception` and
+    `BaseException`. `class CaptureRefused(ValueError)` is an exception class
+    by every rule §3.1 states, and a two-name root set left it invisible here
+    -- all three assertions below stayed green for the exact drift this gate
+    exists to catch.
     """
-    declarations = _module_level_classes()
 
     def _derives_from_an_exception(bases: list[str]) -> bool:
         return any(
@@ -362,6 +378,39 @@ def _declared_exception_class_names() -> set[str]:
         exceptions |= found
         growing = bool(found)
     return exceptions
+
+
+def _declared_exception_class_names() -> set[str]:
+    """Every exception class `backend/app/` declares, read from the source.
+
+    A source walk rather than a runtime one because the question is which
+    classes exist, and a class outside the hierarchy is reachable from no
+    `__subclasses__()` chain the runtime walk above can follow.
+    """
+    return _exception_class_names(_module_level_classes())
+
+
+def test_a_class_deriving_from_a_builtin_other_than_exception_is_still_one() -> None:
+    """`class CaptureRefused(ValueError)` is an exception, and was invisible here.
+
+    The root set was `Exception` and `BaseException` alone, so a declaration
+    rooted anywhere else in the builtin tree -- `ValueError`, `OSError`,
+    `RuntimeError` -- counted as an ordinary class. The stray set, the declared
+    count and the member count all stayed green while `backend/app/` grew an
+    exception outside the hierarchy, which is the one drift this gate is for.
+    """
+    declarations = _declared_classes_in(
+        "class CaptureRefused(ValueError):\n    pass\n"
+        "class Louder(CaptureRefused):\n    pass\n"
+        "class Settings(dict):\n    pass\n",
+        "app.demo",
+        "app",
+    )
+
+    assert _exception_class_names(declarations) == {
+        "app.demo.CaptureRefused",
+        "app.demo.Louder",
+    }
 
 
 def test_every_declared_error_is_in_the_hierarchy_or_named_as_staying_out() -> None:

@@ -71,6 +71,18 @@ def header_line(
     )
 
 
+class _GateNeverOpened(BaseException):
+    """A test forgot to open the stdout gate, said where the reader cannot eat it.
+
+    Derived from `BaseException` rather than from `Exception` because the read
+    happens inside `_deliver_until_refused`, whose whole point is that nothing
+    foreign escapes it: an `AssertionError` from here was caught there and
+    turned into "the macOS system-audio capture failed with an unexpected
+    AssertionError", so a forgotten gate failed five seconds later on a
+    mismatched list of reasons instead of saying what went wrong.
+    """
+
+
 class _GatedStdout(io.BytesIO):
     """Stdout that holds the audio body back until the gate is opened.
 
@@ -80,7 +92,7 @@ class _GatedStdout(io.BytesIO):
     hands every block a near-identical arrival, which is not what a call
     looks like on the timeline.
 
-    The wait's result is asserted rather than discarded: a gate that is never
+    The wait's result is raised on rather than discarded: a gate that is never
     opened has to fail the test that forgot to open it, not delay every read
     by the timeout and then hand the body over anyway.
     """
@@ -90,7 +102,8 @@ class _GatedStdout(io.BytesIO):
         self.gate = threading.Event()
 
     def read(self, size: int = -1) -> bytes:
-        assert self.gate.wait(timeout=5.0), "the test never opened the stdout gate"
+        if not self.gate.wait(timeout=5.0):
+            raise _GateNeverOpened("the test never opened the stdout gate")
         return super().read(size)
 
 
@@ -621,13 +634,19 @@ def test_a_refused_block_leaves_the_loop_so_the_exit_report_still_runs(
     the exit report under the `while`. A thread that died inside the loop threw
     that half away.
 
+    The helper exits 0 here, which is what it really does on this path:
+    leaving the loop closes the read end, and `flushWholeBlocks` answers a
+    closed stdout with `logLine("stdout is closed")` and `exit(0)`. Pinning a
+    3 instead hid the whole defect -- an exit report that returned on a zero
+    dropped the stderr tail on the one path that closes the pipe itself.
+
     Which reason the recorder hears is asserted, not just how many: the first
     one, the way Windows reports, with the exit carried by the log line beside
     it. A count alone passed whether the sink survived the first report or was
     taken and cleared by it.
     """
     process = _FakeTapProcess(
-        tap_stdout(blocks=3), returncode=3, stderr=b"fail: the tap was invalidated\n"
+        tap_stdout(blocks=3), returncode=0, stderr=b"fail: the tap was invalidated\n"
     )
     source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
     reported: list[str] = []
@@ -645,8 +664,11 @@ def test_a_refused_block_leaves_the_loop_so_the_exit_report_still_runs(
         source.stop()
 
     messages = [record.getMessage() for record in caplog.records]
-    assert any("exited with code 3" in message for message in messages), messages
-    assert any("the tap was invalidated" in message for message in messages), messages
+    assert any("the tap was invalidated" in message for message in messages), (
+        f"the helper exited 0 because this side closed its stdout, and the exit "
+        f"report read that as nothing to say, so its own account of the framing "
+        f"is gone: {messages}"
+    )
     assert reported == [
         f"the macOS system-audio helper stopped delivering usable audio — "
         f"{REFUSAL_IN_ITS_OWN_WORDS}"
@@ -712,6 +734,48 @@ def test_a_refused_block_closes_the_pipe_the_helper_is_still_writing_into(
         "held, which is where SIGTERM will find it"
     )
     assert broke, "the helper's write ended without the pipe breaking"
+
+
+@pytest.mark.timeout(30)
+def test_the_pipe_is_closed_before_the_recorder_is_told_why(tap_settings):
+    """The helper stops being wedged first, and hears the reason afterwards.
+
+    The failure sink is `MeetingRecorder._note_incident`, which takes the
+    recorder's lock and can wait behind whatever else holds it. Until the read
+    end is closed the helper is parked inside `write()` on a full pipe still
+    holding its Core Audio tap, so reporting first put the length of that wait
+    between the refusal and the release -- for a report that needs nothing
+    from the pipe.
+
+    The sink waits for the close rather than the test timing the two, so the
+    order is asserted rather than sampled: reporting first leaves the wait to
+    expire.
+    """
+    process = _FakeTapProcess(tap_stdout(blocks=1), returncode=0)
+    closed = threading.Event()
+    process.stdout.close = closed.set
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+    pipe_was_closed_first: list[bool] = []
+
+    with (
+        patch("app.audio.macos_tap.subprocess.Popen", return_value=process),
+        patch(
+            "app.audio.macos_tap.interleaved_buffer_to_mono",
+            side_effect=MalformedCaptureBlockError(REFUSAL_IN_ITS_OWN_WORDS),
+        ),
+    ):
+        source.start(
+            lambda arrival, mono: None,
+            lambda reason: pipe_was_closed_first.append(closed.wait(timeout=2.0)),
+        )
+        source._reader.join(timeout=5.0)
+        source.stop()
+
+    assert pipe_was_closed_first == [True], (
+        "the recorder was told why before the read end was closed, so the "
+        "helper stayed wedged inside write() with its tap held for as long as "
+        "the sink took"
+    )
 
 
 @pytest.mark.timeout(30)
@@ -902,11 +966,11 @@ def test_a_helper_that_stops_writing_without_exiting_is_reported_anyway(
         source.stop()
 
     assert reported == [
-        "the macOS system-audio helper stopped writing audio and was still "
-        "running 0.2s later"
+        "the macOS system-audio helper had not exited 0.5s after its stdout "
+        "was closed"
     ], reported
     messages = [record.getMessage() for record in caplog.records]
-    assert any("stopped writing audio" in message for message in messages), messages
+    assert any("had not exited" in message for message in messages), messages
 
 
 def test_a_reader_leaving_during_a_stop_waits_for_no_exit_code(tap_settings):
@@ -937,22 +1001,90 @@ def test_a_reader_leaving_during_a_stop_waits_for_no_exit_code(tap_settings):
         source._on_failure = reported.append
     source._stopping.set()
 
-    source._report_exit(process, drain)
+    source._report_exit(process, drain, refused=False)
 
     assert waited == [], "a deliberate stop waited on the helper it had just killed"
     assert reported == [], "a deliberate stop was reported to the recorder as a failure"
 
 
-def test_the_exit_wait_fits_inside_the_join_budget_it_shares(tap_settings):
-    """The post-loop wait must be shorter than the join that overlaps it.
+def test_the_exit_report_spends_one_join_budget_on_the_wait_and_the_drain(
+    tap_settings, monkeypatch
+):
+    """The two waits after the loop share one deadline rather than one each.
 
-    Set equal, every `stop()` landing inside the wait found the reader still
-    running when the shared join expired, so it was classified as parked, both
-    pipes went to the detached closer, and the teardown paid the full budget
-    on a clean stop. The relation is the whole point of the constant, and
-    nothing else in the module states it.
+    This thread is one of the ones `_shutdown` joins against
+    `_READER_JOIN_TIMEOUT_SECONDS`. A wait for the exit and a join on the drain
+    that each held that whole budget put it past the deadline on a teardown
+    that was going cleanly: a `stop()` landing an instruction into the wait
+    found the reader still running when the shared join expired, so both pipes
+    went to the detached closer and the stop paid the budget twice.
+
+    Asserted on the budgets the two calls are actually given, because the
+    relation is what matters and `0.2 < 0.5` is not it -- that comparison
+    stayed true while the pair spent 0.7s. The fake exit wait spends the
+    budget it was handed, which is the case the deadline exists for: what the
+    drain may then join for is whatever is left, and that is the number this
+    reads.
     """
-    assert macos_tap._EXIT_WAIT_SECONDS < macos_tap._READER_JOIN_TIMEOUT_SECONDS
+    monkeypatch.setattr(macos_tap, "_READER_JOIN_TIMEOUT_SECONDS", 0.1)
+    budgets: list[float] = []
+
+    def spend_the_whole_budget(timeout=None):
+        budgets.append(timeout)
+        spent = time.monotonic() + timeout
+        while time.monotonic() < spent:
+            time.sleep(0.005)
+        raise macos_tap.subprocess.TimeoutExpired(cmd="justsay-audiotap", timeout=timeout)
+
+    class _RecordingDrain:
+        name = "recording-drain"
+
+        def join(self, timeout=None):
+            budgets.append(timeout)
+
+        def is_alive(self):
+            return False
+
+    process = _FakeTapProcess(b"", returncode=3, reaped=False)
+    process.wait = spend_the_whole_budget
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+
+    source._report_exit(process, _RecordingDrain(), refused=False)
+
+    assert len(budgets) == 2, budgets
+    assert sum(budgets) <= macos_tap._READER_JOIN_TIMEOUT_SECONDS, (
+        f"the exit wait and the drain join were given {budgets}, so a stop "
+        f"overlapping them finds this reader parked past the budget it shares "
+        f"with every other reader"
+    )
+
+
+@pytest.mark.timeout(30)
+def test_a_restarted_tap_source_reports_the_second_capture_that_failed(tap_settings):
+    """`stop()` leaves this source usable, so its report-once claim cannot outlive a capture.
+
+    Nothing here is terminated the way Windows terminates its PyAudio instance:
+    `stop()` kills a helper and `start()` spawns another, clearing `_stopping`
+    on the way in. A claim taken in `__init__` and never released therefore made
+    every capture after the first silent -- the second meeting's helper could
+    die and the recorder would be told nothing while its indicator stayed clean.
+    """
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+    captures: list[list[str]] = []
+
+    for _ in range(2):
+        process = _FakeTapProcess(tap_stdout(blocks=1), returncode=3)
+        reported: list[str] = []
+        with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
+            source.start(lambda arrival, mono: None, reported.append)
+            source._reader.join(timeout=5.0)
+            source.stop()
+        captures.append(reported)
+
+    assert captures == [
+        ["the macOS system-audio helper exited with code 3"],
+        ["the macOS system-audio helper exited with code 3"],
+    ], captures
 
 
 @pytest.mark.timeout(30)

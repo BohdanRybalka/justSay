@@ -79,7 +79,7 @@ paths = ["app"]
 min_confidence = 60
 ignore_decorators = ["@router.*"]
 ignore_names = [
-    "time_info", "frame_count",
+    "time_info",
     "model_config", "size_bytes",
     "copied_to_clipboard", "discarded_reason",
     "temp_size_bytes", "freed_bytes", "gemini_key_set", "groq_key_set",

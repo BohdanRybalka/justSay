@@ -84,15 +84,21 @@ class SystemAudioSource(ABC):
         quiet with no flag set is indistinguishable from a machine playing
         silence and reaches nobody.
 
-        At most twice per source: once for a degradation, where the source is
-        still delivering, and once for the stop, after which it is not.
-        Deduplicated apart rather than together, because a source raising the
-        same PortAudio flag on every block must not hand the user a sentence
-        per block, and must not silence the later news that it has stopped
-        delivering altogether -- which is the order the two actually arrive
-        in, since the flag is raised on the same callback whose block then
-        fails to deinterleave. Windows observes both kinds; macOS reads a pipe
-        and can observe only the stop, so it never sends the first.
+        At most once per kind of failure, and nothing at all after the stop.
+        Deduplicated per kind rather than together, because a source raising
+        the same PortAudio flag on every block must not hand the user a
+        sentence per block, and must not silence the later news that it has
+        stopped delivering altogether -- which is the order the two actually
+        arrive in, since the flag is raised on the same callback whose block
+        then fails to deinterleave. Windows counts a degradation, a raise out
+        of the block sink and a stop apart; macOS reads a pipe and can observe
+        only a stop, so it keeps one claim and releases it on `start()`.
+
+        Only a block this source cannot read is a stop. A raise out of the
+        block sink is foreign code failing on the capture thread and says
+        nothing about whether the device is still producing audio, so it is
+        reported and delivery continues: ending a capture on it would cost the
+        far side the rest of the meeting for one transient raise.
 
         `reason` is a diagnostic, not a sentence for a panel: it reaches
         `MeetingRecorder._note_incident`, which logs it and publishes only the

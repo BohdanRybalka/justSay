@@ -34,7 +34,7 @@ from app.audio.meeting_recorder import (
     CaptureIncident,
     MeetingRecorder,
     MeetingWriteFailedError,
-    capture_has_stalled,
+    microphone_has_stalled,
 )
 from app.audio.meeting_spool import MeetingSpool
 from app.main import app
@@ -435,7 +435,7 @@ async def test_capture_stops_accumulating_while_the_disk_cannot_hold_the_assembl
 )
 def test_when_a_microphone_counts_as_stalled(last_arrival, now, expected):
     """The whole staleness decision, with no recorder and no clock."""
-    assert capture_has_stalled(last_arrival, now, 3.0) is expected
+    assert microphone_has_stalled(last_arrival, now, 3.0) is expected
 
 
 @pytest.mark.asyncio
@@ -516,61 +516,6 @@ async def test_a_system_source_that_fails_is_named_and_the_microphone_keeps_reco
         assert snapshot.is_recording is True
         assert recorder._microphone_spool.frames == 4 * BLOCK_FRAMES, (
             "the microphone stopped being recorded when the far side ended"
-        )
-    finally:
-        recorder.cleanup()
-
-
-@pytest.mark.asyncio
-async def test_a_far_side_that_stopped_arriving_stops_reading_a_level(
-    tmp_path, source, microphone_stream
-):
-    """AC: the far-side meter shows silence once its blocks stop arriving.
-
-    `system_level_db` exists so that a meeting capturing only the microphone
-    is visible while it is happening rather than when the file is played back.
-    It held the level of the last block the source managed to deliver, so a
-    loopback that stopped after a block it could not read, or a macOS helper
-    that died, left the meter sitting at -6 dBFS for the rest of the call —
-    reading exactly like a far side still being captured.
-
-    Derived from the arrival rather than reset by whoever reported the
-    failure: a source that simply stops calling back reports nothing at all
-    and freezes the meter just the same.
-
-    The tolerance is the microphone's, shortened here for the same reason the
-    stall tests shorten it.
-    """
-    stalling = AudioSettings(
-        sample_rate=16000,
-        channels=1,
-        temp_dir=tmp_path / "tmp",
-        meeting_stall_tolerance_seconds=0.05,
-    )
-    recorder = MeetingRecorder(stalling)
-
-    try:
-        await recorder.start()
-        source.deliver(recorder._start_time, fill=0.5)
-
-        assert recorder.system_level_db > -12.0, (
-            "the far side delivered a loud block and the meter did not move, "
-            "so what follows would prove nothing"
-        )
-
-        source.fail("the WASAPI loopback stream stopped delivering usable audio")
-        await asyncio.sleep(0.2)
-
-        snapshot = recorder.status_snapshot()
-        assert snapshot.is_recording is True
-        assert recorder.system_level_db == float("-inf"), (
-            f"the far-side meter reads {recorder.system_level_db} dBFS while "
-            f"nothing has arrived from it, so a meeting that lost system audio "
-            f"looks identical to one still capturing it"
-        )
-        assert snapshot.system_level_db == float("-inf"), (
-            "the status snapshot and the property disagree about the same "
-            "instant, which is what reading them apart was supposed to end"
         )
     finally:
         recorder.cleanup()

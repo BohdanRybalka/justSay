@@ -772,7 +772,10 @@ def test_a_loopback_block_that_is_not_whole_frames_is_reported_not_raised(
         f"a loopback block that cannot be read told the recorder {reported}, so "
         f"the meeting reports no incident while its far side is gone"
     )
-    assert "not a whole number of 2-channel <f4 frames" in reported[0]
+    assert (
+        "PortAudio delivered a 12-byte block where 2 frames of 2-channel "
+        "<f4 audio is 16 bytes" in reported[0]
+    )
     source.stop()
 
 
@@ -822,7 +825,7 @@ def test_a_loopback_that_stopped_being_readable_delivers_and_reports_nothing_mor
     source.stop()
 
 
-def test_a_loopback_sink_that_raises_does_not_escape_into_portaudio(
+def test_a_loopback_sink_that_raises_is_reported_once_and_keeps_delivering(
     fake_pyaudiowpatch, render_endpoints
 ):
     """The escape a malformed block never had, by the path that is reachable.
@@ -832,22 +835,40 @@ def test_a_loopback_sink_that_raises_does_not_escape_into_portaudio(
     not raise. An exception crossing a PortAudio callback is not reported back
     — the stream is torn down, `on_failure` is never called, and the meeting
     goes on reporting a healthy capture while holding the microphone alone.
+
+    Reported once and survived, not treated as the end of the capture. The
+    docstring above says this source neither owns that caller nor can promise
+    about it, and that cuts both ways: one transient raise out of foreign code
+    says nothing about whether the device is still producing audio, so ending
+    delivery on it costs the far side the rest of the meeting and leaves the
+    stream running on a sink nothing sets again. Only a refused block, whose
+    byte stream has provably slipped out of frame, is terminal.
     """
     from app.audio.windows_loopback import WindowsLoopbackSource
 
+    attempted: list[int] = []
+
     def raise_from_the_sink(arrival, mono):
+        attempted.append(len(mono))
         raise RuntimeError("the recorder's own callback failed")
 
     source = WindowsLoopbackSource(AudioSettings())
     reported: list[str] = []
     source.start(raise_from_the_sink, reported.append)
 
-    answer = source._stream_callback(np.zeros(4, dtype="<f4").tobytes(), 2, None, 0)
+    answers = [
+        source._stream_callback(np.zeros(4, dtype="<f4").tobytes(), 2, None, 0)
+        for _ in range(3)
+    ]
 
-    assert answer == (None, fake_pyaudiowpatch.paContinue)
+    assert answers == [(None, fake_pyaudiowpatch.paContinue)] * 3
+    assert attempted == [2, 2, 2], (
+        f"the sink was offered {len(attempted)} of 3 blocks, so one raise out "
+        f"of the recorder's callback ended system audio for the whole meeting"
+    )
     assert reported == [
         "the WASAPI loopback capture failed with an unexpected RuntimeError"
-    ]
+    ], reported
     source.stop()
 
 
@@ -961,8 +982,9 @@ def test_a_stopped_loopback_supersedes_the_degradation_it_reported_first(
 
     assert reported[:1] == ["the WASAPI loopback stream reported PortAudio status 2"]
     assert reported[1:] == [
-        "the WASAPI loopback stream stopped delivering usable audio — a "
-        "12-byte capture block is not a whole number of 2-channel <f4 frames"
+        "the WASAPI loopback stream stopped delivering usable audio — "
+        "PortAudio delivered a 12-byte block where 2 frames of 2-channel "
+        "<f4 audio is 16 bytes"
     ], (
         f"the recorder was told {reported}, so a loopback that reported a "
         f"status flag first can never report that it stopped delivering"
@@ -1000,8 +1022,9 @@ def test_a_sink_that_raises_on_the_degradation_still_hears_the_stop(
     )
 
     assert heard[1:] == [
-        "the WASAPI loopback stream stopped delivering usable audio — a "
-        "12-byte capture block is not a whole number of 2-channel <f4 frames"
+        "the WASAPI loopback stream stopped delivering usable audio — "
+        "PortAudio delivered a 12-byte block where 2 frames of 2-channel "
+        "<f4 audio is 16 bytes"
     ], heard
     source.stop()
 

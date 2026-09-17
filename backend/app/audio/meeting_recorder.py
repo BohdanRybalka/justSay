@@ -120,19 +120,13 @@ class CaptureIncident(str, Enum):
     STORAGE_BACKLOG = "storage_backlog"
 
 
-def capture_has_stalled(last_arrival: float | None, now: float, tolerance: float) -> bool:
-    """Whether one half of a capture has gone quiet for longer than `tolerance`.
+def microphone_has_stalled(last_arrival: float | None, now: float, tolerance: float) -> bool:
+    """Whether the microphone has gone quiet for longer than `tolerance`.
 
     Derived from the last arrival rather than watched by a background task,
     so nothing new touches a device handle off the owner thread — ADR 048's
-    invariant is untouched. `last_arrival` is `None` only when that half is
-    not running, which is not a stall.
-
-    Both halves use it and they answer differently. A stalled microphone is
-    an incident, because nothing else observes it. A stalled system source
-    only silences its own meter: the source reports its own stop, and what
-    the meter must not do is go on showing the level of the last block it
-    measured for the rest of the meeting.
+    invariant is untouched. `last_arrival` is `None` only when no capture is
+    running, which is not a stall.
     """
     return last_arrival is not None and now - last_arrival > tolerance
 
@@ -305,7 +299,6 @@ class MeetingRecorder(AudioRecorder):
         self._microphone_spool: MeetingSpool | None = None
         self._system_spool: MeetingSpool | None = None
         self._last_microphone_arrival: float | None = None
-        self._last_system_arrival: float | None = None
         self._incident: CaptureIncident | None = None
         self._stream: sd.InputStream | None = None
         self._system_source: SystemAudioSource | None = None
@@ -564,16 +557,11 @@ class MeetingRecorder(AudioRecorder):
         The level write is a second lock hold here too, so a stop landing in
         the gap must not be followed by the ended meeting's far-side level,
         and it is reached past a refused store for the same reason.
-
-        The arrival is kept for the same reason the microphone's is: it is
-        what separates a meter reading a live far side from one frozen at the
-        last block a stopped source delivered.
         """
         self._store(token, SYSTEM_SOURCE, arrival, mono)
         with self._lock:
             if self._session_token == token:
                 self._system_level = rms_dbfs(mono)
-                self._last_system_arrival = arrival
 
     async def start(self) -> None:
         """Send the owner thread a start command and wait for its answer.
@@ -622,7 +610,6 @@ class MeetingRecorder(AudioRecorder):
         self._microphone_spool = None
         self._system_spool = None
         self._last_microphone_arrival = None
-        self._last_system_arrival = None
         self._session_token = None
         self._start_time = None
         self._endpoint_name = None
@@ -686,7 +673,6 @@ class MeetingRecorder(AudioRecorder):
                 self._start_time = started_at
                 self._endpoint_name = source.endpoint_name
                 self._last_microphone_arrival = started_at
-                self._last_system_arrival = started_at
                 self._microphone_spool = spools[MICROPHONE_SOURCE]
                 self._system_spool = spools[SYSTEM_SOURCE]
                 self._spill_queue = work
@@ -1004,29 +990,6 @@ class MeetingRecorder(AudioRecorder):
         with self._lock:
             return self._current_level
 
-    def _far_side_level(self) -> float:
-        """The far side's level, or silence once its blocks stopped arriving.
-
-        Caller holds `self._lock`. A source that stops delivering leaves
-        `_system_level` at whatever the last block it managed to read
-        measured, and a meter frozen at -30 dBFS looks exactly like a far side
-        still being captured — the one thing `system_level_db` exists to make
-        visible. Both platforms reach that state: the loopback callback stops
-        delivering after a block it could not read, and the macOS reader
-        leaves its loop when the helper dies.
-
-        Derived from the arrival rather than reset by whoever reported the
-        failure, because a source that simply stops calling back reports
-        nothing at all and freezes the meter just the same.
-        """
-        if capture_has_stalled(
-            self._last_system_arrival,
-            time.monotonic(),
-            self._settings.meeting_stall_tolerance_seconds,
-        ):
-            return float("-inf")
-        return self._system_level
-
     @property
     def system_level_db(self) -> float:
         """The system half's level, so a silent far side is visible while it happens.
@@ -1036,7 +999,7 @@ class MeetingRecorder(AudioRecorder):
         the difference visible at the machine.
         """
         with self._lock:
-            return self._far_side_level()
+            return self._system_level
 
     @property
     def system_endpoint(self) -> str | None:
@@ -1071,7 +1034,7 @@ class MeetingRecorder(AudioRecorder):
         stalled = False
         with self._lock:
             start_time = self._start_time
-            if start_time is not None and capture_has_stalled(
+            if start_time is not None and microphone_has_stalled(
                 self._last_microphone_arrival,
                 time.monotonic(),
                 self._settings.meeting_stall_tolerance_seconds,
@@ -1084,7 +1047,7 @@ class MeetingRecorder(AudioRecorder):
                 ),
                 level_db=self._current_level,
                 system_endpoint=self._endpoint_name,
-                system_level_db=self._far_side_level(),
+                system_level_db=self._system_level,
                 capture_incident=None if start_time is None else self._incident,
             )
         if not stalled:
