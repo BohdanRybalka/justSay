@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.core.app_paths import resolve_app_data_root, resolve_temp_dir
 from app.core.errors import ConfigurationError
+from app.embeddings import clear_cache as clear_embeddings_cache
 from app.stt.routing import clear_cache as clear_stt_cache
 from app.transcripts import relocation
 
@@ -394,10 +395,8 @@ def sync_to_runtime(us: UserSettings) -> bool:
 
     if changed_stt:
         clear_stt_cache()
-        from app.embeddings import clear_cache as clear_embeddings_cache
         clear_embeddings_cache()
     if changed_embeddings:
-        from app.embeddings import clear_cache as clear_embeddings_cache
         clear_embeddings_cache()
 
     return bool(changed_stt)

@@ -164,11 +164,11 @@ def test_check_status_reports_amd_gpu_name_and_vendor_but_not_available():
 
 def test_check_status_surfaces_last_load_error():
     """When _get_model latched an error, status.last_error must contain it."""
-    from app.stt import clear_cache as clear_stt_cache
+    from app.stt.routing import _get_local
+    from app.stt.routing import clear_cache as clear_stt_cache
 
     clear_stt_cache()
     settings = STTSettings()
-    from app.stt.routing import _get_local
 
     provider = _get_local(settings)
     provider._last_load_error = "OSError: [WinError 126] DLL not found"
@@ -786,8 +786,8 @@ def test_check_status_surfaces_prewarm_error_when_no_provider_level_error():
 
 
 def test_check_status_prefers_provider_error_over_prewarm_error():
-    from app.stt import clear_cache as clear_stt_cache
     from app.stt.routing import _get_local
+    from app.stt.routing import clear_cache as clear_stt_cache
 
     clear_stt_cache()
     settings = STTSettings()
@@ -811,8 +811,8 @@ def test_check_status_merge_is_deterministic_when_package_missing_and_provider_e
     coexist. Force that "impossible" combined state anyway and pin the merge
     outcome: get_local_load_error() or _prewarm_error -> the provider error
     always wins, regardless of package_installed being False."""
-    from app.stt import clear_cache as clear_stt_cache
     from app.stt.routing import _get_local
+    from app.stt.routing import clear_cache as clear_stt_cache
 
     clear_stt_cache()
     settings = STTSettings()

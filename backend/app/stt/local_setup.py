@@ -327,9 +327,7 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
 
         if not _check_package_installed():
             if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
-                from app.stt.local_whisper_cpp_cmd import binary_not_found_message
-
-                _prewarm_error = binary_not_found_message()
+                _prewarm_error = local_whisper_cpp_cmd.binary_not_found_message()
                 return
             _prewarm_error = None
             exit_code, output = await asyncio.to_thread(_run_pip_install)

@@ -111,7 +111,7 @@ def test_every_shared_field_reaches_the_runtime_object(monkeypatch, restored_run
     runtime_settings = restored_runtime_settings
 
     monkeypatch.setattr("app.preferences.user_settings.clear_stt_cache", lambda: None)
-    monkeypatch.setattr("app.embeddings.clear_cache", lambda: None)
+    monkeypatch.setattr("app.preferences.user_settings.clear_embeddings_cache", lambda: None)
 
     runtime_settings.stt.mode = ProviderMode.CLOUD
 

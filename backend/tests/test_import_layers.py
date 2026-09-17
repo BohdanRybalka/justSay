@@ -52,19 +52,29 @@ Ten properties are pinned here:
    sibling of its own package is the arrangement working, not a reach-in. The
    allowlist for it ships empty, and `app/` is the whole scope: a test
    legitimately reaches internals and is deliberately not walked.
-8. A package `__init__.py` named as re-export-only declares names and defines
-   none: no function, no class, and no module-level assignment beyond the
-   `__all__` it publishes. `app/stt/__init__.py` held a routing layer, a
-   provider cache and a `threading.Lock` across 215 lines, which is why the
-   HTTP router could not take the obvious name and why seven call sites
-   imported the package from inside a function body. This is the weaker
-   sibling of property 5: the packages listed there hold nothing at all, the
-   ones listed here hold a list of names and no behaviour.
+8. A package `__init__.py` named as re-export-only holds a docstring, imports
+   and the `__all__` it publishes, and nothing else in any position. It is an
+   allowlist rather than a list of banned node types: a cache and a lock
+   wrapped in `if TYPE_CHECKING:` or in `try: … except ImportError:` are
+   neither a definition nor a top-level assignment, and a gate that classifies
+   what it recognises accepts everything it does not. `app/stt/__init__.py`
+   held a routing layer, a provider cache and a `threading.Lock` across 215
+   lines, which is why the HTTP router could not take the obvious name and why
+   seven call sites imported the package from inside a function body. This is
+   the weaker sibling of property 5: the packages listed there hold nothing at
+   all, the ones listed here hold a list of names and no behaviour. The
+   allowlist covers `stt` alone; `app/embeddings/__init__.py` still holds the
+   same shape — two locks, three cache globals, a Protocol and two functions —
+   and adding it here would fail rather than pin, because making it pass means
+   splitting that package too.
 9. Nothing under `app/` defers an import of the `app.stt` package into a
-   function body except `app/main.py`, where deferral is what keeps sidecar
-   startup fast. `docs/style-guide.md` reads every other function-local
-   `from app.…` as a cycle being hidden; this one is measured rather than
-   read, and the package is named because it is the package that had seven of
+   function body except `app/main.py`, where the deferral buys late binding
+   rather than startup time: `import app.main` has already loaded the package
+   through `app/main.py:31` before `lifespan()` runs, and three tests replace
+   `clear_cache` on the module object the shutdown body reads it from.
+   `docs/style-guide.md` reads every other function-local `from app.…` as a
+   cycle being hidden; this gate does not enforce that general rule, only the
+   `app.stt` package half of it, because that is the package that had seven of
    them.
 10. A system-audio capture source reaches neither `soxr` nor the module that
    imports it. Both capture callbacks run on the audio thread and neither has
@@ -182,12 +192,39 @@ with the number of tests each one reddens:
   blind spot the probe is there for
 - `_get_or_create` moved back into `app/stt/__init__.py`, and separately
   `_cache_lock = threading.Lock()` put back beside it -- one test each, the
-  re-export-only surface. The second is why the gate counts assignments rather
-  than definitions alone: a cache and a lock are what that file actually held
+  re-export-only surface. The second is why the allowlist names `__all__`
+  rather than permitting assignments generally: a cache and a lock are what
+  that file actually held
+- `if True:` wrapped around `import threading`, `_cache_lock`, `_providers`
+  and `def _get_or_create`, appended to `app/stt/__init__.py` -- **one** test,
+  the same surface, reported as `stt/__init__.py:37 If`. It reddened **zero**
+  while that gate listed node types to reject instead of statements to accept:
+  an `ast.If` is neither a definition nor an assignment, so the block and
+  everything nested in it was waved through, and `try: ... except ImportError:`
+  and `if TYPE_CHECKING:` carry the same load
+- `from app.stt import clear_cache` planted in `app/pipeline/service.py`'s
+  `process_audio` -- **one** test, the deferred-import gate, in the absolute
+  package spelling
+- `from .. import stt` planted in the same function -- **one** test, and it
+  reddened **zero** until Stage 5. That spelling already resolves to `app.stt`,
+  so the trailing-name strip the bare relative branch applied took it to `app`
+  and matched nothing; accepting either resolution is what the branch does now
+- `from . import clear_cache` planted in `app/stt/local_setup.py`, the bare
+  relative spelling that resolves to a name *inside* the package -- **one**
+  test, and the strip is what catches it. The two mutations pull the branch in
+  opposite directions, which is why it asks for both
 - the hoisted `from app.stt.routing import get_provider, peek_local_provider`
-  in `app/stt/local_setup.py` re-deferred into `ensure_local_ready` -- **one**
-  test, the deferred-import gate. The same statement left at module level
-  reddens nothing, which is the negative control
+  in `app/stt/local_setup.py` re-deferred into `ensure_local_ready` -- **zero**
+  tests here, the negative control for the gate's scope rather than the one
+  test this entry claimed until Stage 5. `from app.stt.routing import ...`
+  names a module, not the package, so it never reaches the gate. Re-run in
+  full: **27 failed, 1403 passed**, none of them in this file -- 25
+  `AttributeError: module 'app.stt.local_setup' has no attribute
+  'get_provider'` out of `monkeypatch.setattr` in `tests/test_local_setup.py`,
+  one more in `tests/test_background_tasks.py`, and a `NameError` in
+  `tests/test_pipeline.py` from the two call sites that sit outside the
+  function the import moved into. The same statement left at module level
+  reddens nothing anywhere
 
 Each list below is an allowlist, not a description: adding an entry is a
 deliberate act a reviewer can see in the diff.
@@ -757,18 +794,33 @@ def _module_level_assigned_names(node: ast.stmt) -> list[str]:
 
 def test_a_re_export_only_package_init_declares_names_rather_than_defining_them():
     """`docs/style-guide.md` §1a: a package `__init__.py` re-exports; it does
-    not implement. `app/stt/__init__.py` and `app/embeddings/__init__.py` are
-    deliberately absent from `_IMPORT_FREE_PACKAGE_INITS` above because
-    re-exporting is what they are for -- which left the weaker half of the rule
-    with nothing enforcing it, and `app/stt/__init__.py` grew a routing layer,
-    a provider cache and a `threading.Lock` inside it.
+    not implement. `app/stt/__init__.py` is deliberately absent from
+    `_IMPORT_FREE_PACKAGE_INITS` above because re-exporting is what it is for
+    -- which left the weaker half of the rule with nothing enforcing it, and
+    the file grew a routing layer, a provider cache and a `threading.Lock`
+    inside it. `_RE_EXPORT_ONLY_PACKAGE_INITS` names `stt` alone:
+    `app/embeddings/__init__.py` still holds that same shape, so listing it
+    would fail this gate rather than pin it.
 
     A re-export surface is a list of names: imports, an `__all__`, a docstring.
-    A function, a class or any other module-level assignment is an
-    implementation, and the module it belongs in is a sibling with a name --
-    `app/stt/routing.py`. The allowlist is per package and names the
-    assignments each may keep, so publishing `__all__` stays legal and
-    planting a cache beside it does not."""
+    Everything else is an implementation, and the module it belongs in is a
+    sibling with a name -- `app/stt/routing.py`. The allowlist is per package
+    and names the assignments each may keep, so publishing `__all__` stays
+    legal and planting a cache beside it does not.
+
+    An allowlist over statements, not a list of node types to reject. Rejecting
+    `FunctionDef`, `ClassDef` and a bare assignment accepted everything it did
+    not recognise: an `if True:` block holding `_cache_lock`, `_providers` and
+    `_get_or_create` is an `ast.If`, which is none of the three, and the same
+    goes for the `try: … except ImportError:` and `if TYPE_CHECKING:` blocks
+    that are the likeliest accidental carriers. Classifying the top-level body
+    is exhaustive under the inverted form, because no accepted statement can
+    contain another: an import and an `__all__` assignment have no body, so a
+    nested definition is only reachable through a compound statement that is
+    itself the offender. This is the shape
+    `tests/test_settings_isolation.py`'s
+    `test_the_core_config_module_holds_nothing_but_its_re_export` already
+    implements, and the docstring-strip idiom below was taken from it."""
     offenders = []
     for package, allowed in sorted(_RE_EXPORT_ONLY_PACKAGE_INITS.items()):
         path = _APP_DIR / package / "__init__.py"
@@ -781,23 +833,23 @@ def test_a_re_export_only_package_init_declares_names_rather_than_defining_them(
         if body and ast.get_docstring(ast.Module(body=body, type_ignores=[])):
             body = body[1:]
         for node in body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                offenders.append(f"{package}/__init__.py: {_statement_description(node)}")
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
                 continue
-            planted = [
-                name for name in _module_level_assigned_names(node) if name not in allowed
-            ]
-            if planted:
-                offenders.append(
-                    f"{package}/__init__.py: assigns {', '.join(planted)}"
-                )
+            assigned = _module_level_assigned_names(node)
+            if assigned and all(name in allowed for name in assigned):
+                continue
+            described = (
+                f"assigns {', '.join(assigned)}" if assigned else _statement_description(node)
+            )
+            offenders.append(f"{package}/__init__.py:{node.lineno} {described}")
 
     assert not offenders, (
         f"These re-export surfaces implement something: {offenders}. A package "
         "`__init__.py` listed in _RE_EXPORT_ONLY_PACKAGE_INITS holds a "
-        "docstring, imports and the names it publishes — the behaviour belongs "
-        "in a sibling module, which is what `app/stt/routing.py` is. See "
-        "docs/style-guide.md §1a."
+        "docstring, imports and the names it publishes — nothing else, in any "
+        "position, including inside an `if` or a `try` block. The behaviour "
+        "belongs in a sibling module, which is what `app/stt/routing.py` is. "
+        "See docs/style-guide.md §1a."
     )
 
 
@@ -828,30 +880,51 @@ def _names_the_stt_package(node: ast.stmt, package: str) -> bool:
     app.stt.local_setup`, which names a module that happens to live in the
     package.
 
-    The bare relative spelling a module inside `app/stt/` can write --
-    `from . import clear_cache` -- needs its own branch: `_import_from_names`
-    resolves it to the imported *name* (`app.stt.clear_cache`) rather than to
-    the package, so asking for `app.stt` in that list answers no and the
-    deferral walks past this gate. Stripping the trailing name is what makes
-    the two spellings the same question, and it reuses that function's own
-    level arithmetic rather than repeating it."""
+    The bare relative spelling has two resolutions and both name the package,
+    so the branch accepts either. `from . import clear_cache` inside
+    `app/stt/` resolves to the imported *name* (`app.stt.clear_cache`), and
+    stripping the trailing segment is what turns it into the package;
+    `from .. import stt` written outside the package already resolves to
+    `app.stt` itself, and stripping it there yields `app` and matches nothing,
+    which is how an unconditional strip lost that spelling. Both stay confined
+    to the bare form: `from app.stt.routing import get_provider` strips to
+    `app.stt` too, and this gate is scoped to the package rather than to every
+    function-local `from app.…`."""
     if isinstance(node, ast.ImportFrom):
         names = _import_from_names(node, package)
-        if node.level and not node.module:
-            return bool(names) and all(
-                name.rsplit(".", 1)[0] == _STT_PACKAGE for name in names
-            )
-        return _STT_PACKAGE in names
+        if _STT_PACKAGE in names:
+            return True
+        return (
+            bool(node.level)
+            and not node.module
+            and any(name.rsplit(".", 1)[0] == _STT_PACKAGE for name in names)
+        )
     return any(alias.name == _STT_PACKAGE for alias in node.names)
 
 
 def test_only_the_sidecar_entry_point_defers_an_import_of_the_stt_package():
     """`docs/style-guide.md`: a function-local `from app.…` is a cycle being
-    hidden and should be read as a defect, and `main.py` is the one legitimate
-    exception, where deferral keeps sidecar startup fast. Seven sites in three
-    files deferred an `app.stt` import while the package held the routing
-    layer; six of them had nowhere else to go, because the names they wanted
-    existed only in `__init__.py`.
+    hidden and should be read as a defect. Seven sites in three files deferred
+    an `app.stt` import while the package held the routing layer; six of them
+    had nowhere else to go, because the names they wanted existed only in
+    `__init__.py`.
+
+    Scoped to the `app.stt` package, not to the general rule it quotes. A
+    deferral naming a *module* — `from app.stt.routing import get_provider`,
+    `from app.core.gpu_probe import GpuVendor` — walks past this gate and is
+    meant to: catching every function-local `from app.…` needs a measured
+    allowlist keyed on file and imported module, which eleven such deferrals in
+    this package alone would have to be read into first.
+
+    `main.py`'s entry is not a startup-time exemption, whatever the style guide
+    says. Measured: `import app.main` leaves `app.stt`, `app.stt.routing` and
+    `app.stt.local_setup` in `sys.modules` through the module-level
+    `from app.stt.router import router` at `app/main.py:31`, so by the time
+    `lifespan()` runs there is nothing left to defer. What the deferral buys is
+    **late binding** — `monkeypatch.setattr(app.stt, "clear_cache", …)` at
+    `tests/test_background_tasks.py:392` and `:476` and
+    `tests/test_startup.py:262` replaces the attribute on the module object,
+    and only a name read inside the shutdown body sees the replacement.
 
     The set of files is pinned, not a count: a second deferral in `main.py`
     would be the same decision already taken, while the first one anywhere else
@@ -876,8 +949,11 @@ def test_only_the_sidecar_entry_point_defers_an_import_of_the_stt_package():
         "Import `app.stt` — or the module that actually holds the name, which "
         "for the routing layer is `app.stt.routing` — at module level. Adding "
         "a file to _MAY_DEFER_THE_STT_PACKAGE_IMPORT claims the deferral buys "
-        "startup time the way `main.py`'s does; a file leaving the measured "
-        "set means its entry is now dead and should go."
+        "late binding the way `main.py`'s does, where the shutdown body reads "
+        "`clear_cache` through the module object three tests replace it on; it "
+        "does not buy startup time, because `app/main.py:31` has already "
+        "imported the package by then. A file leaving the measured set means "
+        "its entry is now dead and should go."
     )
 
 

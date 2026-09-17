@@ -213,9 +213,8 @@ def test_contract_shape_via_get_or_create(monkeypatch):
     `clear_cache()` — all `getattr(provider, ...)`-based or a bare
     `provider.cleanup()` call — must work against this class with no code
     change in `app/stt/routing.py`."""
-    from app.stt import clear_cache as clear_stt_cache
-    from app.stt import get_local_load_error, is_model_loaded
-    from app.stt.routing import _get_or_create
+    from app.stt.routing import _get_or_create, get_local_load_error, is_model_loaded
+    from app.stt.routing import clear_cache as clear_stt_cache
 
     monkeypatch.setattr(
         "app.stt.local_factory.get_local_provider_class",
