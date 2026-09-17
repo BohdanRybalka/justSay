@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -42,6 +43,23 @@ async def _warm_gpu_probe_cache() -> None:
         log.warning("GPU probe warm-up failed -- will be probed lazily on first use", exc_info=True)
 
 
+def _run_optional_startup_step(step_name: str, step: Callable[[], None]) -> None:
+    """Run a startup step the app is still useful without.
+
+    The startup half of the same shape the release block below already has:
+    the step is named, a failure is logged at WARNING and startup continues.
+    A step the app is *not* useful without is called directly instead, so
+    that it still ends the process -- see docs/style-guide.md 3.3, which
+    decides which side of that line each lifespan step falls on.
+    """
+    try:
+        step()
+    except Exception:
+        log.warning(
+            "Backend startup: %s failed -- continuing without it", step_name, exc_info=True
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from app.preferences.user_settings import (
@@ -54,12 +72,18 @@ async def lifespan(app: FastAPI):
     log.info("Backend startup: version=%s port=%s", __version__, settings.port)
     settings.audio.temp_dir.mkdir(parents=True, exist_ok=True)
 
-    history.bootstrap(repair_scratch_output_dir())
+    _run_optional_startup_step(
+        "opening the history store",
+        lambda: history.bootstrap(repair_scratch_output_dir()),
+    )
     us = get_user_settings()
     log.info("Data root: %s", history.history_path().parent)
     sync_to_runtime(us)
     from app.stt.local_setup import maybe_prewarm_local_at_startup
-    maybe_prewarm_local_at_startup(settings.stt)
+    _run_optional_startup_step(
+        "prewarming the local model",
+        lambda: maybe_prewarm_local_at_startup(settings.stt),
+    )
     tasks.spawn_background_task(_warm_gpu_probe_cache(), name="gpu-probe-warmup")
     from app.transcripts import vector_store
     tasks.spawn_background_task(vector_store.run_background_indexer(), name="vector-store-indexer")
