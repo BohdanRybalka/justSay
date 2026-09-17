@@ -9,6 +9,7 @@ break the packaged build — see
 docs/adr/015-pipeline-level-silence-guard.md.
 """
 
+import functools
 import logging
 import math
 from dataclasses import dataclass
@@ -35,6 +36,23 @@ class MalformedCaptureBlockError(Exception):
     inside their capture callback and report it through `on_failure` instead.
     That is the "broken while in use raises" half of docs/style-guide.md §3.3 —
     the source stops delivering, the meeting keeps recording the microphone.
+
+    An assertion about a contract, not a tolerance to be tuned. Each source
+    derives a block's length and its channel count from one declaration — the
+    macOS helper's stdout header, the WASAPI endpoint's own mix format — so a
+    buffer that does not divide evenly means the byte stream has slipped out
+    of frame, and a stream that has slipped stays slipped. Every later block
+    is misframed too, and continuing past one would record audio that sounds
+    plausible and is wrong, which is worse than recording none. So there is no
+    counter and no retry: the first refusal ends delivery.
+
+    Whether the declaration and the framing can disagree at all is checked
+    rather than assumed. On macOS the helper refuses to capture a buffer whose
+    channel count differs from the one it announced, and
+    `tests/test_cross_language_contracts.py` pins that refusal, the header and
+    both sides' frame arithmetic against the Swift source — the only place
+    either half of that contract could drift, and the one file nothing here
+    can compile.
     """
 
 
@@ -84,6 +102,20 @@ def to_mono(block: np.ndarray) -> np.ndarray:
     return mono if mono.flags.writeable else mono.copy()
 
 
+@functools.cache
+def _sample_dtype(dtype: str) -> np.dtype:
+    """``dtype`` parsed once per spelling rather than once per capture block.
+
+    Both callers of the deinterleave below are realtime capture callbacks, and
+    this module exists to keep work off that thread. Parsing a dtype string is
+    cheap in isolation and still pointless 47 times a second per source,
+    forever, for two spellings that never change. The cache is unbounded
+    because its key space is the set of format strings the sources declare,
+    which is one.
+    """
+    return np.dtype(dtype)
+
+
 def interleaved_buffer_to_mono(buffer: bytes, channels: int, dtype: str) -> np.ndarray:
     """Read a raw interleaved capture buffer and downmix it to mono float32.
 
@@ -120,14 +152,14 @@ def interleaved_buffer_to_mono(buffer: bytes, channels: int, dtype: str) -> np.n
         raise MalformedCaptureBlockError(
             f"a capture block cannot be read as {channels}-channel frames"
         )
-    item_size = np.dtype(dtype).itemsize
-    sample_count, leftover_bytes = divmod(len(buffer), item_size)
+    sample_dtype = _sample_dtype(dtype)
+    sample_count, leftover_bytes = divmod(len(buffer), sample_dtype.itemsize)
     if leftover_bytes or sample_count % channels:
         raise MalformedCaptureBlockError(
             f"a {len(buffer)}-byte capture block is not a whole number of "
             f"{channels}-channel {dtype} frames"
         )
-    interleaved = np.frombuffer(buffer, dtype=dtype)
+    interleaved = np.frombuffer(buffer, dtype=sample_dtype)
     if channels > 1:
         interleaved = interleaved.reshape(-1, channels)
     return to_mono(interleaved)

@@ -78,7 +78,8 @@ class WindowsLoopbackSource(SystemAudioSource):
         self._stream: object | None = None
         self._on_block: BlockSink | None = None
         self._on_failure: FailureSink | None = None
-        self._failure_reported = False
+        self._degradation_reported = False
+        self._stop_reported = False
         self._status_logged = False
         self._lock = threading.Lock()
         log.info(
@@ -96,32 +97,53 @@ class WindowsLoopbackSource(SystemAudioSource):
     def endpoint_name(self) -> str:
         return self._endpoint_name
 
-    def _report_capture_failure(self, reason: str) -> None:
-        """Hand the recorder the first reason this capture went wrong.
+    def _report_capture_failure(self, reason: str, *, terminal: bool) -> None:
+        """Hand the recorder a reason this capture went wrong, once per kind.
 
-        The one report-once path this source has, shared by everything it can
-        observe: a non-zero PortAudio status flag, a block that is not whole
-        frames, and anything else the callback raises. All of them, once they
-        happen at all, happen on every callback, and the user gets one
-        sentence per recording rather than one per block. Per recording and
-        not per source: `start()` clears the flag, so a source started a
-        second time can report again, which is what macOS already meant by
-        "once" and Windows did not.
+        Two kinds, and they are deduplicated apart. A non-zero PortAudio
+        status flag is a degradation: the stream is still delivering, and it
+        would otherwise hand the user a sentence per block. A block that
+        cannot be read, or anything else the callback raised, is terminal --
+        this source has stopped delivering for the rest of the recording.
+
+        One shared flag let whichever kind landed first silence the other, and
+        the order is not this source's to choose. PortAudio raises the flag on
+        the same callback whose block then fails to deinterleave, so the
+        degradation always arrives first and the terminal reason -- the one
+        saying system audio is gone rather than thin -- was the one swallowed.
+        A terminal reason therefore reports even after a degradation already
+        has; the reverse is pointless and is refused.
+
+        Once per source, not once per `start()`: a source is one recording.
+        `stop()` terminates this object's PyAudio instance, so starting it
+        again would open a stream on a terminated PortAudio, and
+        `MeetingRecorder._begin_capture` builds a fresh source per meeting
+        rather than reusing one.
 
         Reporting is all this does. Deciding whether a caller has anything to
-        say once is `_claim_status_log`'s job, and it keeps its own flag,
-        because this one is shared and the caller's need is not.
+        log once is `_claim_status_log`'s job, and it keeps its own flag,
+        because a log line and a report are not answerable to each other.
 
         The sink belongs to `MeetingRecorder`, not to this module, so a raise
         out of it is caught here rather than left to unwind a realtime
-        callback: the report is the last thing this source can do about a
-        capture that has already failed.
+        callback, and the claim it raised on stands. Counting the kinds apart
+        is already what stops one raise costing the recorder both reasons, and
+        releasing the claim on top of that would only retry the same kind --
+        on a realtime callback, against a sink that just raised, once per
+        block for the rest of the recording. macOS releases its claim because
+        it has one for both reasons and a reader thread that reaches them
+        exactly twice.
         """
         with self._lock:
-            already = self._failure_reported
-            self._failure_reported = True
+            blocked = self._stop_reported or (
+                self._degradation_reported and not terminal
+            )
+            if terminal:
+                self._stop_reported = True
+            else:
+                self._degradation_reported = True
             on_failure = self._on_failure
-        if already or on_failure is None:
+        if blocked or on_failure is None:
             return
         try:
             on_failure(reason)
@@ -134,13 +156,13 @@ class WindowsLoopbackSource(SystemAudioSource):
     def _claim_status_log(self) -> bool:
         """True the first time this recording sees a PortAudio status flag.
 
-        Its own flag rather than `_report_capture_failure`'s, which is shared
-        with the malformed-block path: a malformed block arriving first used
-        to claim that one and silence this log for the rest of the recording.
-        The log is the only thing separating PortAudio substituting zeros
-        from WASAPI handing over a genuinely silent mix, and discarding it
-        cost a full diagnosis pass during spec 066, so it does not answer to
-        whichever path reached a shared flag first.
+        Its own flag rather than one of `_report_capture_failure`'s. This log
+        is the only thing separating PortAudio substituting zeros from WASAPI
+        handing over a genuinely silent mix, and discarding it cost a full
+        diagnosis pass during spec 066, so what reaches the recorder and what
+        reaches the log are counted apart: a sink that refuses the report is
+        not a reason to lose the diagnostic, and neither is the other's
+        evidence.
         """
         with self._lock:
             already = self._status_logged
@@ -158,7 +180,7 @@ class WindowsLoopbackSource(SystemAudioSource):
         """
         with self._lock:
             self._on_block = None
-        self._report_capture_failure(reason)
+        self._report_capture_failure(reason, terminal=True)
 
     def _report_stream_status(self, status: int) -> None:
         """Log a non-zero PortAudio status flag once per recording.
@@ -174,11 +196,13 @@ class WindowsLoopbackSource(SystemAudioSource):
         has degraded, so it is reported to the recorder as well as logged:
         a meeting whose far side stopped arriving is news the user gets while
         the call is still running rather than when they play the file back.
-        The two are deduplicated separately, because the report is shared with
-        the malformed-block path and the log is not.
+        It is a degradation and not a stop -- the stream is still delivering
+        blocks -- which is what keeps it from standing in for the report that
+        says this source has gone.
         """
         self._report_capture_failure(
-            f"the WASAPI loopback stream reported PortAudio status {int(status)}"
+            f"the WASAPI loopback stream reported PortAudio status {int(status)}",
+            terminal=False,
         )
         if self._claim_status_log():
             log.warning(
@@ -212,7 +236,10 @@ class WindowsLoopbackSource(SystemAudioSource):
 
         Both handlers end delivery rather than continuing into whatever comes
         next, because a callback that has failed once fails on every block and
-        the stream stays open for the recorder to close.
+        the stream stays open for the recorder to close. There is no count of
+        blocks to forgive first — see `MalformedCaptureBlockError`, which is
+        the one being caught here and says why forgiving one would record
+        audio that is wrong rather than missing.
         """
         try:
             self._deliver_block(in_data, status)
@@ -233,8 +260,6 @@ class WindowsLoopbackSource(SystemAudioSource):
         with self._lock:
             self._on_block = on_block
             self._on_failure = on_failure
-            self._failure_reported = False
-            self._status_logged = False
         self._stream = self._audio.open(
             format=pyaudio.paFloat32,
             channels=self._channels,

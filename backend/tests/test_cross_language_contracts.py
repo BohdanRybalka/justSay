@@ -1,9 +1,13 @@
-"""Eight values exist in two or three languages at once; the copies must agree.
+"""Nine values exist in two or three languages at once; the copies must agree.
 
 Each value has exactly one nominated declaration per language, and this module
 reads every declaration as **text** so it needs no TypeScript compiler, no Rust
-toolchain and no TOML parser -- the same shape ``test_version_consistency.py``
-uses for the three version manifests (ADR 030). Nothing here imports ``app``:
+toolchain, no Swift toolchain and no TOML parser -- the same shape
+``test_version_consistency.py`` uses for the three version manifests (ADR 030).
+Reading rather than compiling is what lets the ninth value be pinned at all:
+``macos/JustSayAudioTap`` is built only by the macOS release job, so nothing
+here can compile a line of it, and until now nothing compared it to the Python
+that reads its output either. Nothing here imports ``app``:
 ``app.audio.__init__`` pulls fastapi and both recorders, and the ``backend-lint``
 CI job installs no audio extra, so an import would pass locally and fail there.
 
@@ -15,10 +19,11 @@ because ``backend/build/`` is gitignored and holds a stale copy of the
 backend tree: an unbounded walk would fail on any machine that has run
 ``pip install -e`` and pass in CI.
 
-The eight are the backend port, the masked-key sentinel, the upload allowlist
+The nine are the backend port, the masked-key sentinel, the upload allowlist
 and its cap, the Tauri event names, the session-id alphabet, the Tauri command
-names, the two application data directory names, and the capture-incident
-tokens a meeting recording can report.
+names, the two application data directory names, the capture-incident tokens a
+meeting recording can report, and the stdout contract between the macOS audio
+tap helper and the Python that reads it.
 
 ADR 045 records why these values are pinned rather than generated. Its
 amendment nominates Rust as the canonical declaration for the Tauri command
@@ -28,6 +33,7 @@ names, which have exactly two parties and one definer.
 from __future__ import annotations
 
 import functools
+import json
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -40,6 +46,10 @@ AUDIO_FORMATS_PY = REPO_ROOT / "backend" / "app" / "core" / "audio_formats.py"
 APP_PATHS_PY = REPO_ROOT / "backend" / "app" / "core" / "app_paths.py"
 SESSION_PY = REPO_ROOT / "backend" / "app" / "audio" / "session.py"
 MEETING_RECORDER_PY = REPO_ROOT / "backend" / "app" / "audio" / "meeting_recorder.py"
+MACOS_TAP_PY = REPO_ROOT / "backend" / "app" / "audio" / "macos_tap.py"
+AUDIO_TAP_SWIFT = (
+    REPO_ROOT / "macos" / "JustSayAudioTap" / "Sources" / "JustSayAudioTap" / "main.swift"
+)
 CONTRACTS_TS = REPO_ROOT / "src" / "contracts.ts"
 LIB_RS = REPO_ROOT / "src-tauri" / "src" / "lib.rs"
 BACKEND_RS = REPO_ROOT / "src-tauri" / "src" / "backend.rs"
@@ -117,6 +127,31 @@ _RUST_ENTRY_ATTRIBUTE_PATTERN = r"#\[[^\]]*\]"
 _RUST_HANDLER_ENTRY_PATTERN = r"(?:[A-Za-z_]\w*\s*::\s*)*([A-Za-z_]\w*)"
 
 _RUST_DATA_DIR_PATTERN = r'if\s+\w+\s*\{\s*"([^"]*)"\s*\}\s*else\s*\{\s*"([^"]*)"\s*\}'
+
+_DOCUMENTED_HEADER_PATTERN = r"stdout: (\{[^}]*\})"
+
+_SWIFT_HEADER_KEY_PATTERN = r'\\"(\w+)\\":'
+
+_SWIFT_HEADER_FORMAT_PATTERN = r'\\"format\\":\\"([A-Za-z0-9]+)\\"'
+
+_PYTHON_HEADER_KEY_PATTERN = r'header(?:\.get\(|\[)"(\w+)"'
+
+_TAP_BLOCK_FRAMES_FLAG = "--block-frames"
+
+_SWIFT_BLOCK_SAMPLES = "blockFrames * channels"
+
+_PYTHON_BLOCK_BYTES = "self._settings.meeting_block_frames * self._channels * 4"
+
+_PYTHON_DEINTERLEAVE = 'interleaved_buffer_to_mono(chunk, self._channels, "<f4")'
+
+_TAP_SAMPLE_SPELLINGS: dict[str, tuple[str, str]] = {
+    "f32le": ("private var pending: [Float] = []", "MemoryLayout<Float>.size"),
+}
+
+_SWIFT_CHANNEL_GUARDS: tuple[tuple[str, str], ...] = (
+    ("consume", "Int(buffer.mNumberChannels) == channels"),
+    ("resolveTapBufferIndex", "Int(format.mChannelsPerFrame) == channels"),
+)
 
 _TYPESCRIPT_COMMENT_OR_STRING_PATTERN = re.compile(
     r'"(?:\\.|[^"\\\n])*"' r"|'(?:\\.|[^'\\\n])*'" r"|`(?:\\.|[^`\\])*`" r"|/\*.*?\*/" r"|//[^\n]*",
@@ -1017,4 +1052,158 @@ def test_the_shell_reads_every_data_directory_variable_the_backend_reads() -> No
         f"{backend_rel} picks its name from the build profile alone, so a release build that "
         "inherits that variable writes the log under the production name while the backend "
         "resolves the development one"
+    )
+
+
+def _swift_function_body(name: str) -> str:
+    """One Swift function of ``main.swift``, from its signature to the next one.
+
+    Bounded by the next ``func`` at the same indentation rather than by a brace
+    count, because nothing here parses Swift and a brace counter over string
+    literals and generics would be a parser pretending not to be one.
+    """
+    source = _read(AUDIO_TAP_SWIFT)
+    opening = re.search(rf"^(\s*)(?:private\s+)?func {re.escape(name)}\b", source, re.MULTILINE)
+    assert opening, f"{AUDIO_TAP_SWIFT.name} no longer defines func {name}"
+    rest = source[opening.end() :]
+    following = re.search(rf"^{opening.group(1)}(?:private\s+)?func \b", rest, re.MULTILINE)
+    return rest[: following.start()] if following else rest
+
+
+def _python_function_body(path: Path, name: str) -> str:
+    """One Python function, from its ``def`` to the next line at that indent."""
+    source = _read(path)
+    opening = re.search(rf"^(\s*)def {re.escape(name)}\b", source, re.MULTILINE)
+    assert opening, f"{path.name} no longer defines def {name}"
+    rest = source[opening.end() :]
+    following = re.search(rf"^{opening.group(1)}\S", rest, re.MULTILINE)
+    return rest[: following.start()] if following else rest
+
+
+def test_the_macos_tap_helper_and_its_reader_agree_on_the_header() -> None:
+    """The helper writes this line; ``parse_tap_header`` reads it. Four parties.
+
+    ``macos/JustSayAudioTap`` is Swift, is built only by the macOS release job
+    and cannot be compiled -- let alone run -- anywhere in this repository.
+    ``CLAUDE.md`` exempts it from the comment ban for exactly that reason and
+    says what the exemption costs: its file header and the module docstring in
+    ``app/audio/macos_tap.py`` "are the two halves of one contract" and
+    "nothing in the repository checks the two against each other". This is that
+    check, and it is why the two prose halves are compared here as well as the
+    code that implements them -- a header key renamed in the Swift and in its
+    own comment, with the Python left alone, is the drift that ships.
+
+    The tap helper is the only source of macOS system audio, so a header the
+    Python refuses is a meeting recorded with the microphone alone, reported
+    through `SystemAudioUnavailableError` at start time at best.
+    """
+    emitted = set(re.findall(_SWIFT_HEADER_KEY_PATTERN, _swift_function_body("writeHeader")))
+    required = set(
+        re.findall(
+            _PYTHON_HEADER_KEY_PATTERN, _python_function_body(MACOS_TAP_PY, "parse_tap_header")
+        )
+    )
+
+    assert emitted == required, (
+        f"{AUDIO_TAP_SWIFT.name} writes the header keys {sorted(emitted)} and "
+        f"parse_tap_header reads {sorted(required)}; the helper is the only "
+        f"source of macOS system audio and this line is the only thing that "
+        f"describes its bytes"
+    )
+
+    declared_format = re.search(
+        _SWIFT_HEADER_FORMAT_PATTERN, _swift_function_body("writeHeader")
+    )
+    assert declared_format, f"{AUDIO_TAP_SWIFT.name} no longer writes a format literal"
+    accepted_format = re.search(r'^SAMPLE_FORMAT = "([^"]+)"$', _read(MACOS_TAP_PY), re.MULTILINE)
+    assert accepted_format, "macos_tap.py no longer declares SAMPLE_FORMAT"
+    assert declared_format.group(1) == accepted_format.group(1), (
+        f"the helper declares format {declared_format.group(1)!r} and the reader "
+        f"accepts only {accepted_format.group(1)!r}, so every capture is refused "
+        f"at startup"
+    )
+
+    documented = [
+        json.loads(re.search(_DOCUMENTED_HEADER_PATTERN, _read(path)).group(1))
+        for path in (AUDIO_TAP_SWIFT, MACOS_TAP_PY)
+    ]
+    assert documented[0] == documented[1], (
+        f"the helper's header comment and the macos_tap.py docstring describe "
+        f"different stdout lines: {documented[0]} against {documented[1]}"
+    )
+    assert set(documented[0]) == emitted, (
+        f"the two prose halves of the contract describe keys {sorted(documented[0])} "
+        f"while writeHeader emits {sorted(emitted)}"
+    )
+    assert documented[0]["format"] == accepted_format.group(1)
+
+
+def test_the_macos_tap_helper_and_its_reader_frame_blocks_the_same_way() -> None:
+    """Both sides count interleaved frames off the channel count in the header.
+
+    The helper writes ``blockFrames * channels`` samples at a time and the
+    reader asks the pipe for exactly that many bytes. Nothing in the byte
+    stream marks a block boundary, so the two arithmetics *are* the framing: a
+    Swift edit that multiplied by something else, or sent a wider sample, would
+    hand the reader blocks it either splits in the wrong place -- recording
+    audio that is silently wrong rather than absent -- or refuses as malformed.
+    Neither is observable from this side of the pipe without this test.
+
+    The channel count both sides multiply by is the one the header declares,
+    which is what makes the two agree by construction rather than by luck. The
+    helper refuses to capture a buffer disagreeing with it, twice over, and
+    those two guards are pinned below for the same reason the arithmetic is.
+    """
+    flush = _swift_function_body("flushWholeBlocks")
+    assert _SWIFT_BLOCK_SAMPLES in flush, (
+        f"{AUDIO_TAP_SWIFT.name} no longer sizes a block as "
+        f"{_SWIFT_BLOCK_SAMPLES!r}, so the helper and macos_tap.py cut the "
+        f"stream in different places and nothing in the bytes says so"
+    )
+
+    deliver = _python_function_body(MACOS_TAP_PY, "_deliver_until_refused")
+    assert _PYTHON_BLOCK_BYTES in deliver, (
+        f"macos_tap.py no longer reads {_PYTHON_BLOCK_BYTES!r} bytes per block"
+    )
+    assert _PYTHON_DEINTERLEAVE in deliver, (
+        f"macos_tap.py no longer deinterleaves with {_PYTHON_DEINTERLEAVE!r}, so "
+        f"the channel count it read blocks by and the one it splits frames by "
+        f"can differ"
+    )
+
+    accepted_format = re.search(r'^SAMPLE_FORMAT = "([^"]+)"$', _read(MACOS_TAP_PY), re.MULTILINE)
+    element, width = _TAP_SAMPLE_SPELLINGS[accepted_format.group(1)]
+    swift = _read(AUDIO_TAP_SWIFT)
+    assert element in swift and width in swift, (
+        f"the contract declares {accepted_format.group(1)!r}, which is 4 bytes a "
+        f"sample, but {AUDIO_TAP_SWIFT.name} no longer buffers {element!r} or "
+        f"measures {width!r} -- every block the reader asks for would be the "
+        f"wrong length"
+    )
+
+    for function, guard in _SWIFT_CHANNEL_GUARDS:
+        assert guard in _swift_function_body(function), (
+            f"{AUDIO_TAP_SWIFT.name}'s {function} no longer checks {guard!r}, so "
+            f"a buffer whose channel count disagrees with the header would be "
+            f"written into the stream and the reader has no way to notice"
+        )
+
+
+def test_the_macos_tap_helper_and_its_reader_agree_on_the_command_line() -> None:
+    """One flag, spelled by the spawner and parsed by the helper.
+
+    A helper that fell back to its own default block size would produce blocks
+    the reader is not asking for, which is the framing failure above arrived at
+    through the argument vector instead of the header.
+    """
+    spawn = _python_function_body(MACOS_TAP_PY, "_spawn")
+    parse = _swift_function_body("parseBlockFrames")
+
+    assert f'"{_TAP_BLOCK_FRAMES_FLAG}"' in spawn, (
+        f"macos_tap.py no longer passes {_TAP_BLOCK_FRAMES_FLAG!r} to the helper"
+    )
+    assert f'"{_TAP_BLOCK_FRAMES_FLAG}"' in parse, (
+        f"{AUDIO_TAP_SWIFT.name} no longer parses {_TAP_BLOCK_FRAMES_FLAG!r}, so "
+        f"it falls back to its own default block size and the reader waits for "
+        f"bytes that arrive in different-sized pieces"
     )

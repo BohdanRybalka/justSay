@@ -74,15 +74,25 @@ class SystemAudioSource(ABC):
     def start(self, on_block: BlockSink, on_failure: FailureSink | None = None) -> None:
         """Begin capturing, calling `on_block(arrival_monotonic, mono_block)`.
 
-        `on_failure(reason)` is called once per `start()` if the source stops
-        delivering for a reason it can actually observe -- a helper that
-        exited, a PortAudio status flag, a block that is not whole frames, or
-        anything else the capture callback raised, named by its exception
-        type. It is optional because both implementations are useful without
-        it, and it is a report rather than a raise: the meeting keeps
-        recording the microphone, and the caller decides what to tell the
-        user. A render endpoint that goes quiet with no flag set is
-        indistinguishable from a machine playing silence and reaches nobody.
+        `on_failure(reason)` carries whatever the source can observe about a
+        capture going wrong -- a helper that exited, a PortAudio status flag,
+        a block that is not whole frames, or anything else the capture
+        callback raised, named by its exception type. It is optional because
+        both implementations are useful without it, and it is a report rather
+        than a raise: the meeting keeps recording the microphone, and the
+        caller decides what to tell the user. A render endpoint that goes
+        quiet with no flag set is indistinguishable from a machine playing
+        silence and reaches nobody.
+
+        At most twice per source: once for a degradation, where the source is
+        still delivering, and once for the stop, after which it is not.
+        Deduplicated apart rather than together, because a source raising the
+        same PortAudio flag on every block must not hand the user a sentence
+        per block, and must not silence the later news that it has stopped
+        delivering altogether -- which is the order the two actually arrive
+        in, since the flag is raised on the same callback whose block then
+        fails to deinterleave. Windows observes both kinds; macOS reads a pipe
+        and can observe only the stop, so it never sends the first.
 
         `reason` is a diagnostic, not a sentence for a panel: it reaches
         `MeetingRecorder._note_incident`, which logs it and publishes only the

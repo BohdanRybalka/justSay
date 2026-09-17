@@ -627,6 +627,8 @@ def fake_pyaudiowpatch(monkeypatch):
             yield self.get_default_wasapi_loopback()
 
         def open(self, **kwargs):
+            if self.terminated:
+                raise OSError("PortAudio is not initialized")
             self.opened_kwargs = kwargs
             return self.stream
 
@@ -877,35 +879,131 @@ def test_a_loopback_failure_sink_that_raises_does_not_escape_into_portaudio(
     source.stop()
 
 
-def test_a_restarted_loopback_source_can_report_a_second_recording(
+def test_a_stopped_loopback_source_cannot_be_started_again(
     fake_pyaudiowpatch, render_endpoints
 ):
-    """"Once" means once per recording on both platforms, not once per source.
+    """`stop()` terminates this object's PyAudio, so the source is spent.
 
-    Latent rather than live — `MeetingRecorder` builds a fresh source per
-    meeting — but a sticky flag makes Windows and macOS mean different things
-    by the same promise, and the second meeting is the one that would find out.
+    The test that stood here started one source twice and asserted it could
+    report each time, which no machine can do: `open()` on a terminated
+    PortAudio instance fails. It was green because the fake's `terminate()`
+    only set a flag while its `open()` went on answering, and it justified a
+    report-once flag cleared in `start()` for a `start()` nothing repeats.
     """
     from app.audio.windows_loopback import WindowsLoopbackSource
 
     source = WindowsLoopbackSource(AudioSettings())
+    source.start(lambda arrival, mono: None)
+    source.stop()
+
+    with pytest.raises(OSError):
+        source.start(lambda arrival, mono: None)
+
+
+def test_each_recording_reports_through_a_loopback_source_of_its_own(
+    fake_pyaudiowpatch, render_endpoints
+):
+    """"Once" is scoped to the source, because a source is one recording.
+
+    `MeetingRecorder._begin_capture` calls `create_system_audio_source` every
+    time it opens a meeting, so a second meeting degrading is news again —
+    through an object whose flags were never set rather than through a flag
+    somebody remembered to clear.
+    """
+    from app.audio.windows_loopback import WindowsLoopbackSource
+
     silence = np.zeros(4, dtype="<f4").tobytes()
+    captures: list[list[str]] = []
 
-    first: list[str] = []
-    source.start(lambda arrival, mono: None, first.append)
-    source._stream_callback(silence, 2, None, fake_pyaudiowpatch.paInputUnderflow)
-    source.stop()
+    for _ in range(2):
+        source = WindowsLoopbackSource(AudioSettings())
+        reported: list[str] = []
+        source.start(lambda arrival, mono: None, reported.append)
+        source._stream_callback(silence, 2, None, fake_pyaudiowpatch.paInputUnderflow)
+        source.stop()
+        captures.append(reported)
 
-    second: list[str] = []
-    source.start(lambda arrival, mono: None, second.append)
-    source._stream_callback(silence, 2, None, fake_pyaudiowpatch.paInputUnderflow)
-    source.stop()
+    assert captures == [
+        ["the WASAPI loopback stream reported PortAudio status 2"],
+        ["the WASAPI loopback stream reported PortAudio status 2"],
+    ]
 
-    assert first == ["the WASAPI loopback stream reported PortAudio status 2"]
-    assert second == first, (
-        f"the second recording on the same source reported {second}, so a "
-        f"loopback that degrades is news exactly once in the life of the process"
+
+def test_a_stopped_loopback_supersedes_the_degradation_it_reported_first(
+    fake_pyaudiowpatch, render_endpoints
+):
+    """A source that has gone must be able to say so after saying it was thin.
+
+    PortAudio raises its status flag on the same callback whose block then
+    fails to deinterleave, so the degradation always lands first. Sharing one
+    report-once flag between the two therefore did not dedupe them — it fixed
+    which one the recorder would ever hear, and the one it silenced was the
+    one saying system audio is gone rather than degraded.
+
+    Both orders are driven: the two reasons inside a single callback, and then
+    a second callback that must add nothing.
+    """
+    from app.audio.windows_loopback import WindowsLoopbackSource
+
+    source = WindowsLoopbackSource(AudioSettings())
+    reported: list[str] = []
+    source.start(lambda arrival, mono: None, reported.append)
+
+    source._stream_callback(
+        np.array([1.0, 0.0, 0.5], dtype="<f4").tobytes(),
+        2,
+        None,
+        fake_pyaudiowpatch.paInputUnderflow,
     )
+    source._stream_callback(
+        np.zeros(4, dtype="<f4").tobytes(), 2, None, fake_pyaudiowpatch.paInputUnderflow
+    )
+
+    assert reported[:1] == ["the WASAPI loopback stream reported PortAudio status 2"]
+    assert reported[1:] == [
+        "the WASAPI loopback stream stopped delivering usable audio — a "
+        "12-byte capture block is not a whole number of 2-channel <f4 frames"
+    ], (
+        f"the recorder was told {reported}, so a loopback that reported a "
+        f"status flag first can never report that it stopped delivering"
+    )
+    source.stop()
+
+
+def test_a_sink_that_raises_on_the_degradation_still_hears_the_stop(
+    fake_pyaudiowpatch, render_endpoints
+):
+    """One raising report must not cost the recorder the other reason.
+
+    The claim is taken before the sink is called, so a sink that raised on the
+    status flag used to leave the claim standing and the terminal report behind
+    it silently dropped — one raise, both reasons gone.
+    """
+    from app.audio.windows_loopback import WindowsLoopbackSource
+
+    heard: list[str] = []
+
+    def refuse_the_first_report(reason: str) -> None:
+        if not heard:
+            heard.append(reason)
+            raise RuntimeError("the recorder refused the report")
+        heard.append(reason)
+
+    source = WindowsLoopbackSource(AudioSettings())
+    source.start(lambda arrival, mono: None, refuse_the_first_report)
+
+    source._stream_callback(
+        np.zeros(4, dtype="<f4").tobytes(), 2, None, fake_pyaudiowpatch.paInputUnderflow
+    )
+    source._stream_callback(
+        np.array([1.0, 0.0, 0.5], dtype="<f4").tobytes(), 2, None, 0
+    )
+
+    assert heard[1:] == [
+        "the WASAPI loopback stream stopped delivering usable audio — a "
+        "12-byte capture block is not a whole number of 2-channel <f4 frames"
+    ], heard
+    source.stop()
 
 
 def test_a_loopback_stream_with_no_status_flag_reports_no_failure(
