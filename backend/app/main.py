@@ -2,6 +2,8 @@ import asyncio
 import logging
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import TypeVar
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +20,8 @@ setup_logging()
 log = logging.getLogger(__name__)
 
 SHUTDOWN_CONNECTION_DRAIN_SECONDS = 2.0
+
+StepResult = TypeVar("StepResult")
 
 try:
     from app.audio.router import router as audio_router
@@ -43,21 +47,28 @@ async def _warm_gpu_probe_cache() -> None:
         log.warning("GPU probe warm-up failed -- will be probed lazily on first use", exc_info=True)
 
 
-def _run_optional_startup_step(step_name: str, step: Callable[[], None]) -> None:
-    """Run a startup step the app is still useful without.
+def _run_optional_step(
+    phase: str, step_name: str, step: Callable[[], StepResult]
+) -> StepResult | None:
+    """Run a lifespan step the app is still useful without, in either half.
 
-    The startup half of the same shape the release block below already has:
-    the step is named, a failure is logged at WARNING and startup continues.
-    A step the app is *not* useful without is called directly instead, so
-    that it still ends the process -- see docs/style-guide.md 3.3, which
-    decides which side of that line each lifespan step falls on.
+    The step is named, a failure is logged at WARNING under ``phase`` and the
+    lifespan carries on; what the step returned comes back, or ``None`` when
+    it raised. A step the app is *not* useful without is called directly
+    instead, so that it still ends the process -- see docs/style-guide.md
+    3.3, which decides which side of that line each lifespan step falls on.
+
+    A step whose own successful result is ``None`` cannot be told apart from
+    a failed one by its return value. Neither caller that reads the result
+    has that shape, and the log line says which happened.
     """
     try:
-        step()
+        return step()
     except Exception:
         log.warning(
-            "Backend startup: %s failed -- continuing without it", step_name, exc_info=True
+            "Backend %s: %s failed -- continuing without it", phase, step_name, exc_info=True
         )
+        return None
 
 
 @asynccontextmanager
@@ -72,15 +83,21 @@ async def lifespan(app: FastAPI):
     log.info("Backend startup: version=%s port=%s", __version__, settings.port)
     settings.audio.temp_dir.mkdir(parents=True, exist_ok=True)
 
-    _run_optional_startup_step(
-        "opening the history store",
-        lambda: history.bootstrap(repair_scratch_output_dir()),
+    repaired_dir = _run_optional_step(
+        "startup", "repairing the history location", repair_scratch_output_dir
     )
     us = get_user_settings()
+    history_dir = repaired_dir if repaired_dir is not None else Path(us.output_dir)
+    _run_optional_step(
+        "startup",
+        "opening the history store",
+        lambda: history.bootstrap(history_dir),
+    )
     log.info("Data root: %s", history.history_path().parent)
     sync_to_runtime(us)
     from app.stt.local_setup import maybe_prewarm_local_at_startup
-    _run_optional_startup_step(
+    _run_optional_step(
+        "startup",
         "prewarming the local model",
         lambda: maybe_prewarm_local_at_startup(settings.stt),
     )
@@ -90,7 +107,13 @@ async def lifespan(app: FastAPI):
     from app.audio.meeting_recorder import MeetingRecorder
     from app.audio.recorder import MicrophoneRecorder
     app.state.recorder = MicrophoneRecorder(settings.audio)
-    app.state.meeting_recorder = MeetingRecorder(settings.audio)
+    meeting_recorder = _run_optional_step(
+        "startup",
+        "building the meeting recorder",
+        lambda: MeetingRecorder(settings.audio),
+    )
+    if meeting_recorder is not None:
+        app.state.meeting_recorder = meeting_recorder
     yield
     log.info("Backend shutdown: draining background tasks")
     from app.stt.local_setup import peek_active_load
@@ -101,17 +124,12 @@ async def lifespan(app: FastAPI):
         from app.embeddings import clear_cache as clear_embeddings
         from app.stt import clear_cache as clear_stt
         for step_name, step in (
-            ("STT cache", clear_stt),
-            ("embeddings cache", clear_embeddings),
-            ("audio recorder", app.state.recorder.cleanup),
-            ("meeting recorder", app.state.meeting_recorder.cleanup),
+            ("releasing the STT cache", clear_stt),
+            ("releasing the embeddings cache", clear_embeddings),
+            ("releasing the audio recorder", lambda: app.state.recorder.cleanup()),
+            ("releasing the meeting recorder", lambda: app.state.meeting_recorder.cleanup()),
         ):
-            try:
-                step()
-            except Exception:
-                log.warning(
-                    "Backend shutdown: releasing %s failed -- continuing", step_name, exc_info=True
-                )
+            _run_optional_step("shutdown", step_name, step)
 
 
 app = FastAPI(

@@ -1309,6 +1309,32 @@ async def test_maybe_prewarm_local_at_startup_routes_through_spawn_background_ta
 
 
 @pytest.mark.prewarm
+def test_maybe_prewarm_local_at_startup_rolls_back_the_guard_when_the_spawn_fails(
+    isolated_crash_guard_root, monkeypatch
+):
+    """A launch that never started a load must not burn one of the
+    MAX_CONSECUTIVE_INCOMPLETE_PREWARMS attempts.
+
+    `app.main.lifespan()` guards this call and swallows the failure, so
+    without the rollback the raised counter would stay raised for good:
+    after two such launches `should_skip_prewarm` disables startup prewarm
+    and the log blames a crash that never happened."""
+    from app.core import tasks
+
+    def _failing_spawn(coro, *, name):
+        coro.close()
+        raise RuntimeError("no running event loop")
+
+    monkeypatch.setattr(tasks, "spawn_background_task", _failing_spawn)
+    local_setup._write_consecutive_incomplete_prewarms(1)
+
+    with pytest.raises(RuntimeError, match="no running event loop"):
+        local_setup.maybe_prewarm_local_at_startup(STTSettings(mode=ProviderMode.LOCAL))
+
+    assert local_setup._read_consecutive_incomplete_prewarms() == 1
+
+
+@pytest.mark.prewarm
 def test_maybe_prewarm_local_at_startup_skips_after_max_consecutive_crashes(
     isolated_crash_guard_root, monkeypatch, caplog
 ):

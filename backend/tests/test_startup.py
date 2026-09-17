@@ -8,13 +8,21 @@ mirror of the teardown tests in tests/test_background_tasks.py.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+import app.audio.meeting_recorder
+import app.audio.recorder
+import app.embeddings
 import app.main
+import app.stt
+from app.audio.dependencies import get_recorder
+from app.core.app_paths import resolve_app_data_root
 from app.main import app as fastapi_app
 from app.preferences import user_settings
+from app.preferences.user_settings import UserSettings
 from app.stt import local_setup
 from app.transcripts import history
 
@@ -38,6 +46,32 @@ def _raise(*_args, **_kwargs):
     raise RuntimeError(STEP_FAILURE)
 
 
+def _pin_output_dir(monkeypatch, directory: Path) -> None:
+    """Point the stored settings at `directory` through the real
+    `get_user_settings()`, which reads this cache when it is warm.
+
+    conftest's autouse `_isolated_app_data` clears the cache before every
+    test and monkeypatch restores that `None` afterwards, so nothing here
+    outlives the test.
+    """
+    monkeypatch.setattr(
+        user_settings, "_settings", UserSettings(output_dir=str(directory))
+    )
+
+
+class _IdleRecorder:
+    """The `get_recorder` override `/audio/start` needs, and nothing else."""
+
+    is_recording = False
+    duration_seconds = 0.0
+    level_db = -60.0
+    session_id: str | None = None
+
+    async def start(self, session_id: str | None = None) -> None:
+        self.is_recording = True
+        self.session_id = session_id
+
+
 def test_a_failing_history_bootstrap_leaves_the_backend_serving(monkeypatch, caplog):
     """The user-visible half. An unreadable history file used to end the
     process, and the shell then reported only "Backend process exited
@@ -49,24 +83,43 @@ def test_a_failing_history_bootstrap_leaves_the_backend_serving(monkeypatch, cap
         with TestClient(fastapi_app) as client:
             assert client.get("/health").status_code == 200
 
-    assert any("opening the history store" in r.getMessage() for r in caplog.records)
+    warnings = [r.getMessage() for r in caplog.records]
+    assert any("opening the history store" in message for message in warnings)
+    assert not any("repairing the history location" in message for message in warnings)
 
 
-def test_history_opens_lazily_after_a_failed_bootstrap(monkeypatch):
-    """Skipping bootstrap is a defined path rather than a hole, which is what
-    makes this step guardable: `_ensure_conn_locked` opens the connection on
-    first use, so the store answers once the app is running.
+def test_a_failing_repair_opens_the_store_at_the_configured_directory(
+    tmp_path, monkeypatch
+):
+    """The defect the GitHub review of PR #127 found. Guarding the repair and
+    the store open as one step meant a failed repair skipped `bootstrap`,
+    left `history._output_dir` unset, and sent every read and write to
+    `resolve_app_data_root()` -- an empty History on screen and that
+    session's transcripts written where nothing reads them.
     """
-    monkeypatch.setattr(history, "bootstrap", _raise)
+    configured = tmp_path / "configured-history"
+    history.bootstrap(configured)
+    seeded = history.save_entry(text="rows the user can already see", duration_ms=1)
+    with history._lock:
+        history._close_conn_locked()
+        history._output_dir = None
 
-    with TestClient(fastapi_app):
-        assert history.get_page(limit=1).entries == []
+    _pin_output_dir(monkeypatch, configured)
+    monkeypatch.setattr(user_settings, "repair_scratch_output_dir", _raise)
+
+    with TestClient(fastapi_app) as client:
+        assert history.history_path().parent == configured
+        assert history.history_path().parent != resolve_app_data_root()
+        response = client.get("/history")
+        assert response.status_code == 200
+        assert [entry["id"] for entry in response.json()["entries"]] == [seeded.id]
 
 
 def test_a_failing_scratch_repair_leaves_the_backend_serving(monkeypatch, caplog):
     """`repair_scratch_output_dir` runs before the store is opened and already
     survives its own failed merge internally; raising outward must not be
-    worse than the outcome it handles.
+    worse than the outcome it handles. It is its own named step, so the
+    warning must not blame the store open that did in fact run.
     """
     monkeypatch.setattr(user_settings, "repair_scratch_output_dir", _raise)
 
@@ -74,7 +127,32 @@ def test_a_failing_scratch_repair_leaves_the_backend_serving(monkeypatch, caplog
         with TestClient(fastapi_app) as client:
             assert client.get("/health").status_code == 200
 
-    assert any("opening the history store" in r.getMessage() for r in caplog.records)
+    warnings = [r.getMessage() for r in caplog.records]
+    assert any("repairing the history location" in message for message in warnings)
+    assert not any("opening the history store" in message for message in warnings)
+
+
+def test_an_unreadable_store_answers_the_request_instead_of_ending_the_process(
+    tmp_path, monkeypatch
+):
+    """The honest outcome for a store that genuinely cannot be opened, with
+    `bootstrap` left real: the process serves, and the cost lands on the
+    History requests themselves rather than on the whole app.
+
+    500 rather than a typed 503 -- `store_busy_as_503` maps only the "locked"
+    marker and nothing registers a handler for a bare
+    `sqlite3.OperationalError`. Deliberate and cut to a future spec; what is
+    pinned here is that the request is answered at all, twice.
+    """
+    configured = tmp_path / "unreadable-history"
+    configured.mkdir()
+    (configured / history.HISTORY_FILENAME).mkdir()
+    _pin_output_dir(monkeypatch, configured)
+
+    with TestClient(fastapi_app, raise_server_exceptions=False) as client:
+        assert client.get("/health").status_code == 200
+        assert 500 <= client.get("/history").status_code < 600
+        assert 500 <= client.get("/history").status_code < 600
 
 
 def test_a_failing_prewarm_leaves_the_backend_serving(monkeypatch, caplog):
@@ -89,6 +167,35 @@ def test_a_failing_prewarm_leaves_the_backend_serving(monkeypatch, caplog):
             assert client.get("/health").status_code == 200
 
     assert any("prewarming the local model" in r.getMessage() for r in caplog.records)
+
+
+def test_a_failing_meeting_recorder_leaves_dictation_working(monkeypatch, caplog):
+    """Meeting recording is not a shipped feature and its consumers already
+    model its absence, so the app is useful without it: dictation, History
+    and Settings all work, and only the meeting endpoints fail.
+
+    Shutdown is pinned in the same test because an unbuilt meeting recorder
+    used to break the release block while the step tuple was being *built* --
+    outside every guard -- taking the STT and embeddings caches with it.
+    """
+    released: list[str] = []
+    monkeypatch.setattr(app.audio.meeting_recorder, "MeetingRecorder", _raise)
+    monkeypatch.setattr(app.stt, "clear_cache", lambda: released.append("stt"))
+    monkeypatch.setattr(
+        app.embeddings, "clear_cache", lambda: released.append("embeddings")
+    )
+    fastapi_app.dependency_overrides[get_recorder] = lambda: _IdleRecorder()
+
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        with TestClient(fastapi_app) as client:
+            assert client.get("/health").status_code == 200
+            assert not hasattr(fastapi_app.state, "meeting_recorder")
+            assert client.post("/audio/start").status_code == 200
+
+    warnings = [r.getMessage() for r in caplog.records]
+    assert any("building the meeting recorder" in message for message in warnings)
+    assert any("releasing the meeting recorder" in message for message in warnings)
+    assert released == ["stt", "embeddings"]
 
 
 def test_a_failing_sync_to_runtime_still_takes_the_backend_down(monkeypatch):
@@ -108,6 +215,34 @@ def test_unreadable_user_settings_still_take_the_backend_down(monkeypatch):
     reason: there is no settings object to apply and no honest default.
     """
     monkeypatch.setattr(user_settings, "get_user_settings", _raise)
+
+    with pytest.raises(RuntimeError, match=STEP_FAILURE):
+        with TestClient(fastapi_app):
+            pass
+
+
+def test_an_unwritable_temp_dir_still_takes_the_backend_down(tmp_path, monkeypatch):
+    """The scratch directory holds every capture on its way to the STT
+    provider, so a backend that cannot create it can transcribe nothing.
+
+    The failure is the real one rather than a patched `mkdir`: the parent of
+    the configured scratch directory is an ordinary file, which is what a
+    user pointing the app at one looks like from here.
+    """
+    blocker = tmp_path / "a-file-where-a-directory-should-be"
+    blocker.write_text("not a directory")
+    monkeypatch.setattr(app.main.settings.audio, "temp_dir", blocker / "tmp")
+
+    with pytest.raises(OSError):
+        with TestClient(fastapi_app):
+            pass
+
+
+def test_a_failing_microphone_recorder_still_takes_the_backend_down(monkeypatch):
+    """Without it there is no dictation, which is the shipped product -- the
+    same test docs/style-guide.md 3.3 applies to every lifespan step.
+    """
+    monkeypatch.setattr(app.audio.recorder, "MicrophoneRecorder", _raise)
 
     with pytest.raises(RuntimeError, match=STEP_FAILURE):
         with TestClient(fastapi_app):
