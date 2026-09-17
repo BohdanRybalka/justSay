@@ -57,6 +57,7 @@ _TERMINATE_TIMEOUT_SECONDS = 0.5
 _KILL_TIMEOUT_SECONDS = 0.5
 _READER_JOIN_TIMEOUT_SECONDS = 0.5
 _HEADER_TIMEOUT_SECONDS = 5.0
+_BROKEN_PIPE_EXIT_SECONDS = 0.5
 _STDERR_TAIL_LINES = 20
 _STDERR_MAX_LINE_BYTES = 4096
 
@@ -186,6 +187,7 @@ class MacOSTapSource(SystemAudioSource):
         )
         self._on_block: BlockSink | None = None
         self._on_failure: FailureSink | None = None
+        self._failure_reported = False
         self._native_sample_rate = settings.sample_rate
         self._channels = 1
 
@@ -222,6 +224,7 @@ class MacOSTapSource(SystemAudioSource):
         with self._lock:
             self._on_block = on_block
             self._on_failure = on_failure
+            self._failure_reported = False
         self._process = process
         self._stderr_reader = stderr_reader
         self._reader = _start_reader(
@@ -250,68 +253,141 @@ class MacOSTapSource(SystemAudioSource):
     ) -> None:
         """Frames until the helper stops producing them, then why it stopped.
 
-        The exit report joins the drain first, because the helper's last words
-        are written on the way out and arrive after its exit is observed. That
-        join is skipped once `stop()` has been entered: a deliberate stop kills
-        the helper, so a non-zero code there says nothing, and this thread is
-        one of the ones `_shutdown` is joining -- sitting inside a join of its
-        own would spend the shutdown's whole budget and get itself classified
-        as parked on a pipe it is not reading.
+        A refusal leaves the loop rather than killing this thread, because the
+        exit report below is what carries the helper's own last words: the
+        framing and the exit are two readings of one failure, and dying inside
+        the loop threw the second one away. Leaving is also the only way the
+        helper is told to stop -- `_stop_reading` closes the pipe it is
+        writing into -- so the two steps are one sequence and not two choices.
+        """
+        reason = self._deliver_until_refused(process)
+        if reason is not None:
+            self._report_failure(reason)
+            self._stop_reading(process)
+        self._report_exit(process, stderr_reader)
 
-        A block that is not whole frames leaves the loop rather than killing
-        this thread, because the exit report below the loop is what names the
-        helper's own last words: the framing and the exit are two readings of
-        one failure, and dying inside the loop threw the second one away.
+    def _deliver_until_refused(self, process: subprocess.Popen) -> str | None:
+        """Blocks to the sink until the helper stops, or why reading stopped.
+
+        Returns None when the helper simply ran out, and the sentence the
+        recorder should hear when it did not. Nothing raises out of here into
+        the reader thread, which nobody joins for a result: a raise ends
+        system audio and tells no one, which is the failure this whole path
+        exists to prevent. The sink is `MeetingRecorder._system_callback` --
+        a caller this module neither owns nor can promise about -- so the
+        catch is the whole loop rather than the deinterleave alone.
         """
         block_bytes = self._settings.meeting_block_frames * self._channels * 4
         stdout = process.stdout
-        while True:
-            chunk = _read_exactly(stdout, block_bytes)
-            if chunk is None:
-                break
-            with self._lock:
-                sink = self._on_block
-            if sink is None:
-                break
-            try:
-                mono = interleaved_buffer_to_mono(chunk, self._channels, "<f4")
-            except MalformedCaptureBlockError as malformed:
-                log.exception(
-                    "The macOS system-audio helper stopped delivering usable audio"
-                )
-                self._report_failure(
-                    f"the macOS system-audio helper stopped delivering usable "
-                    f"audio — {malformed}"
-                )
-                break
-            sink(time.monotonic(), mono)
+        try:
+            while True:
+                chunk = _read_exactly(stdout, block_bytes)
+                if chunk is None:
+                    return None
+                with self._lock:
+                    sink = self._on_block
+                if sink is None:
+                    return None
+                sink(time.monotonic(), interleaved_buffer_to_mono(chunk, self._channels, "<f4"))
+        except MalformedCaptureBlockError as malformed:
+            log.exception(
+                "The macOS system-audio helper stopped delivering usable audio"
+            )
+            return (
+                f"the macOS system-audio helper stopped delivering usable "
+                f"audio — {malformed}"
+            )
+        except Exception as failure:
+            log.exception("Reading the macOS system-audio helper failed")
+            return (
+                f"the macOS system-audio capture failed with an unexpected "
+                f"{type(failure).__name__}"
+            )
 
+    def _stop_reading(self, process: subprocess.Popen) -> None:
+        """Close the pipe the helper is writing into, so it exits.
+
+        Nothing reads stdout once the loop is left and the helper keeps
+        producing: at 1024-frame stereo blocks a 64 KB pipe fills in about
+        eight of them, roughly 170 ms of a call, and the helper then parks
+        inside `write()` still holding its Core Audio tap. It is still parked
+        when SIGTERM arrives, so `_terminate` spends its whole budget before
+        falling through to `kill()` -- ADR 052's hazard, on the other pipe.
+
+        Closing the read end turns that wedge into a broken pipe the helper
+        dies on, which is also what makes the exit report below reachable at
+        all: a helper still running has no exit code to name. Safe from this
+        thread and only from this thread, because it is the sole reader of
+        that pipe and has already left the read (ADR 052 again: closing under
+        a parked reader deadlocks on the buffer lock).
+        """
+        try:
+            if process.stdout is not None:
+                process.stdout.close()
+        except OSError:
+            log.debug("Closing the macOS system-audio helper's stdout failed", exc_info=True)
+        try:
+            process.wait(timeout=_BROKEN_PIPE_EXIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            log.warning(
+                "The macOS system-audio helper is still running %.1fs after its "
+                "stdout was closed, so its exit code is not part of this report",
+                _BROKEN_PIPE_EXIT_SECONDS,
+            )
+
+    def _report_exit(
+        self, process: subprocess.Popen, stderr_reader: threading.Thread
+    ) -> None:
+        """Why the helper is gone, in its own words, once it actually is.
+
+        The drain is joined first, because the helper's last words are written
+        on the way out and arrive after its exit is observed. That join is
+        skipped once `stop()` has been entered: a deliberate stop kills the
+        helper, so a non-zero code there says nothing, and this thread is one
+        of the ones `_shutdown` is joining -- sitting inside a join of its own
+        would spend the shutdown's whole budget and get itself classified as
+        parked on a pipe it is not reading.
+        """
         code = process.poll()
-        if code is not None and code != 0 and not self._stopping.is_set():
-            stderr_reader.join(timeout=_READER_JOIN_TIMEOUT_SECONDS)
-            log.error(
-                "The macOS system-audio helper exited with code %d, so this meeting "
-                "is being recorded without system audio: %s",
-                code,
-                self._stderr_text(),
-            )
-            self._report_failure(
-                f"the macOS system-audio helper exited with code {code}"
-            )
+        if code is None or code == 0 or self._stopping.is_set():
+            return
+        stderr_reader.join(timeout=_READER_JOIN_TIMEOUT_SECONDS)
+        log.error(
+            "The macOS system-audio helper exited with code %d, so this meeting "
+            "is being recorded without system audio: %s",
+            code,
+            self._stderr_text(),
+        )
+        self._report_failure(f"the macOS system-audio helper exited with code {code}")
 
     def _report_failure(self, reason: str) -> None:
-        """Tell the recorder once why system audio stopped arriving.
+        """Tell the recorder once per capture why system audio stopped arriving.
 
-        The sink is taken rather than read, because this thread can reach both
-        reports in one pass -- a block that is not whole frames leaves the loop
-        and lands on the exit report below it -- and
-        `SystemAudioSource.start` promises `on_failure` is called once.
+        A flag rather than taking the sink, so the sink survives to be cleared
+        by `stop()` alone and "once" means the same thing here as it does on
+        Windows. This thread reaches both reports in one pass -- a refused
+        block leaves the loop and lands on the exit report below it -- and
+        `SystemAudioSource.start` promises `on_failure` is called once, so the
+        first reason is the one the recorder hears and the exit is carried by
+        the log line above.
+
+        A raise out of the sink is caught here: it belongs to
+        `MeetingRecorder`, and this report is the last thing this source can
+        do about a capture that has already failed.
         """
         with self._lock:
+            already = self._failure_reported
+            self._failure_reported = True
             on_failure = self._on_failure
-            self._on_failure = None
-        if on_failure is not None:
+        if already or on_failure is None:
+            return
+        try:
             on_failure(reason)
+        except Exception:
+            log.exception(
+                "The macOS system-audio failure sink raised, so this capture "
+                "failure reaches the recorder as this log line and nothing else"
+            )
 
     def _drain_stderr(self, stream: object) -> None:
         """Read the helper's stderr from the moment it is spawned.

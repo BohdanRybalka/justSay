@@ -49,6 +49,9 @@ _APP_DIR = Path(__file__).resolve().parents[1] / "app"
 _DELIBERATELY_OUTSIDE_THE_HIERARCHY = frozenset(
     {"app.audio.analysis.MalformedCaptureBlockError"}
 )
+_BUILTIN_EXCEPTION_BASES = frozenset({"BaseException", "Exception"})
+_DECLARED_EXCEPTION_CLASS_COUNT = 14
+_HIERARCHY_MEMBER_COUNT = 13
 _WEB_FRAMEWORK_ROOTS = frozenset({"fastapi", "starlette"})
 
 
@@ -208,20 +211,70 @@ def test_every_refusal_that_declares_a_code_declares_a_distinct_one() -> None:
     assert len(declared) >= 3
 
 
+def _base_name(base: ast.expr) -> str:
+    """The trailing name of a base expression, so `errors.JustSayError` reads
+    the same as `JustSayError`."""
+    if isinstance(base, ast.Attribute):
+        return base.attr
+    return base.id if isinstance(base, ast.Name) else ""
+
+
+def _module_level_classes() -> dict[str, list[str]]:
+    """Every class `backend/app/` declares at module level, by its base names.
+
+    Module level rather than `ast.walk`: a class declared inside a function
+    body or under `if TYPE_CHECKING:` has no runtime counterpart any
+    `__subclasses__()` walk could find, so counting it would fail this test
+    over a class that does not exist at runtime.
+    """
+    declarations: dict[str, list[str]] = {}
+    for path in sorted(_APP_DIR.rglob("*.py")):
+        module = ".".join(path.relative_to(_APP_DIR.parent).with_suffix("").parts)
+        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            if isinstance(node, ast.ClassDef):
+                declarations[f"{module}.{node.name}"] = [
+                    _base_name(base) for base in node.bases
+                ]
+    return declarations
+
+
 def _declared_exception_class_names() -> set[str]:
-    """Every `*Error` class `backend/app/` declares, read from the source.
+    """Every exception class `backend/app/` declares, read from the source.
 
     A source walk rather than a runtime one because the question is which
     classes exist, and a class outside the hierarchy is reachable from no
     `__subclasses__()` chain the runtime walk above can follow.
+
+    Membership is decided by what a class derives from, not by its name ending
+    in `Error`: `class CaptureRefused(Exception)` is exactly the declaration a
+    naming convention hides, and the counts §3.1 states are about the
+    hierarchy rather than about a spelling. In-app bases are resolved to a
+    fixpoint, so a class three levels down from `Exception` is found however
+    the intermediate classes are named.
     """
-    names: set[str] = set()
-    for path in sorted(_APP_DIR.rglob("*.py")):
-        module = ".".join(path.relative_to(_APP_DIR.parent).with_suffix("").parts)
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.ClassDef) and node.name.endswith("Error"):
-                names.add(f"{module}.{node.name}")
-    return names
+    declarations = _module_level_classes()
+    qualified_by_name: dict[str, list[str]] = {}
+    for qualified in declarations:
+        qualified_by_name.setdefault(qualified.rsplit(".", 1)[1], []).append(qualified)
+
+    def _derives_from_an_exception(bases: list[str]) -> bool:
+        return any(
+            base in _BUILTIN_EXCEPTION_BASES
+            or any(target in exceptions for target in qualified_by_name.get(base, []))
+            for base in bases
+        )
+
+    exceptions: set[str] = set()
+    growing = True
+    while growing:
+        found = {
+            qualified
+            for qualified, bases in declarations.items()
+            if qualified not in exceptions and _derives_from_an_exception(bases)
+        }
+        exceptions |= found
+        growing = bool(found)
+    return exceptions
 
 
 def test_every_declared_error_is_in_the_hierarchy_or_named_as_staying_out() -> None:
@@ -235,8 +288,17 @@ def test_every_declared_error_is_in_the_hierarchy_or_named_as_staying_out() -> N
     that misbehaved, a device that failed mid-use" keep propagating into a
     500 rather than becoming a refusal. What this rejects is drifting out in
     silence, so a class that belongs outside is added here and nowhere else.
+
+    Both numbers are asserted, not just the set of strays: a fifteenth class
+    deriving from `NotReadyError` is a legitimate member and would leave the
+    stray set empty while §3.1's "declares 14 ... 13 are inside" went stale --
+    the identical failure this test exists to close, relocated rather than
+    fixed.
     """
+    declared = _declared_exception_class_names()
     inside = {f"{c.__module__}.{c.__name__}" for c in _every_subclass()}
     inside.add(f"{JustSayError.__module__}.{JustSayError.__name__}")
-    outside = _declared_exception_class_names() - inside
-    assert sorted(outside) == sorted(_DELIBERATELY_OUTSIDE_THE_HIERARCHY)
+
+    assert sorted(declared - inside) == sorted(_DELIBERATELY_OUTSIDE_THE_HIERARCHY)
+    assert len(declared) == _DECLARED_EXCEPTION_CLASS_COUNT
+    assert len(declared & inside) == _HIERARCHY_MEMBER_COUNT

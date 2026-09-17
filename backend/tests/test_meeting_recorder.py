@@ -771,10 +771,11 @@ def test_a_loopback_block_that_is_not_whole_frames_is_reported_not_raised(
         f"the meeting reports no incident while its far side is gone"
     )
     assert "not a whole number of 2-channel <f4 frames" in reported[0]
+    source.stop()
 
 
 def test_a_loopback_that_stopped_being_readable_delivers_and_reports_nothing_more(
-    fake_pyaudiowpatch, render_endpoints
+    fake_pyaudiowpatch, render_endpoints, caplog
 ):
     """One sentence per recording, and no block after the one that broke.
 
@@ -782,6 +783,13 @@ def test_a_loopback_that_stopped_being_readable_delivers_and_reports_nothing_mor
     stream that has begun producing unreadable blocks usually raises a
     PortAudio flag too, and the user needs the first reason rather than a new
     one per callback.
+
+    The log is not shared, and this is where that is pinned. `paInputUnderflow`
+    is the only thing separating PortAudio substituting zeros from WASAPI
+    handing over a genuinely silent mix — indistinguishable in the samples
+    themselves, and a full diagnosis pass during spec 066 went into finding
+    that out. A malformed block reaching the recorder first used to claim the
+    shared flag and silence that line for the rest of the recording.
     """
     from app.audio.windows_loopback import WindowsLoopbackSource
 
@@ -790,14 +798,114 @@ def test_a_loopback_that_stopped_being_readable_delivers_and_reports_nothing_mor
     reported: list[str] = []
     source.start(lambda arrival, mono: received.append(mono), reported.append)
 
-    source._stream_callback(np.array([1.0, 0.0, 0.5], dtype="<f4").tobytes(), 2, None, 0)
-    source._stream_callback(np.zeros(4, dtype="<f4").tobytes(), 2, None, 0)
-    source._stream_callback(
-        np.zeros(4, dtype="<f4").tobytes(), 2, None, fake_pyaudiowpatch.paInputUnderflow
-    )
+    with caplog.at_level(logging.WARNING, logger="app.audio.windows_loopback"):
+        source._stream_callback(
+            np.array([1.0, 0.0, 0.5], dtype="<f4").tobytes(), 2, None, 0
+        )
+        source._stream_callback(np.zeros(4, dtype="<f4").tobytes(), 2, None, 0)
+        source._stream_callback(
+            np.zeros(4, dtype="<f4").tobytes(),
+            2,
+            None,
+            fake_pyaudiowpatch.paInputUnderflow,
+        )
 
     assert received == []
     assert len(reported) == 1
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("reported PortAudio status 2" in message for message in messages), (
+        f"a malformed block silenced the substituted-silence diagnostic for the "
+        f"rest of the recording, leaving only {messages}"
+    )
+    source.stop()
+
+
+def test_a_loopback_sink_that_raises_does_not_escape_into_portaudio(
+    fake_pyaudiowpatch, render_endpoints
+):
+    """The escape a malformed block never had, by the path that is reachable.
+
+    `MeetingRecorder._system_callback` measures the block's level and writes
+    it to a spill queue; nothing in this module owns it or can promise it will
+    not raise. An exception crossing a PortAudio callback is not reported back
+    — the stream is torn down, `on_failure` is never called, and the meeting
+    goes on reporting a healthy capture while holding the microphone alone.
+    """
+    from app.audio.windows_loopback import WindowsLoopbackSource
+
+    def raise_from_the_sink(arrival, mono):
+        raise RuntimeError("the recorder's own callback failed")
+
+    source = WindowsLoopbackSource(AudioSettings())
+    reported: list[str] = []
+    source.start(raise_from_the_sink, reported.append)
+
+    answer = source._stream_callback(np.zeros(4, dtype="<f4").tobytes(), 2, None, 0)
+
+    assert answer == (None, fake_pyaudiowpatch.paContinue)
+    assert reported == [
+        "the WASAPI loopback capture failed with an unexpected RuntimeError"
+    ]
+    source.stop()
+
+
+def test_a_loopback_failure_sink_that_raises_does_not_escape_into_portaudio(
+    fake_pyaudiowpatch, render_endpoints
+):
+    """The report is the last thing this source can do, so it cannot be the
+    thing that takes the stream down.
+
+    Driven by a malformed block rather than a status flag, because that is the
+    reachable half: a status flag reports from inside `_deliver_block`, where
+    the callback's own handlers still catch it, while a malformed block
+    reports from inside one of those handlers — and an exception raised there
+    is not caught by its siblings.
+    """
+    from app.audio.windows_loopback import WindowsLoopbackSource
+
+    def raise_from_the_failure_sink(reason):
+        raise RuntimeError("the recorder refused the report")
+
+    source = WindowsLoopbackSource(AudioSettings())
+    source.start(lambda arrival, mono: None, raise_from_the_failure_sink)
+
+    answer = source._stream_callback(
+        np.array([1.0, 0.0, 0.5], dtype="<f4").tobytes(), 2, None, 0
+    )
+
+    assert answer == (None, fake_pyaudiowpatch.paContinue)
+    source.stop()
+
+
+def test_a_restarted_loopback_source_can_report_a_second_recording(
+    fake_pyaudiowpatch, render_endpoints
+):
+    """"Once" means once per recording on both platforms, not once per source.
+
+    Latent rather than live — `MeetingRecorder` builds a fresh source per
+    meeting — but a sticky flag makes Windows and macOS mean different things
+    by the same promise, and the second meeting is the one that would find out.
+    """
+    from app.audio.windows_loopback import WindowsLoopbackSource
+
+    source = WindowsLoopbackSource(AudioSettings())
+    silence = np.zeros(4, dtype="<f4").tobytes()
+
+    first: list[str] = []
+    source.start(lambda arrival, mono: None, first.append)
+    source._stream_callback(silence, 2, None, fake_pyaudiowpatch.paInputUnderflow)
+    source.stop()
+
+    second: list[str] = []
+    source.start(lambda arrival, mono: None, second.append)
+    source._stream_callback(silence, 2, None, fake_pyaudiowpatch.paInputUnderflow)
+    source.stop()
+
+    assert first == ["the WASAPI loopback stream reported PortAudio status 2"]
+    assert second == first, (
+        f"the second recording on the same source reported {second}, so a "
+        f"loopback that degrades is news exactly once in the life of the process"
+    )
 
 
 def test_a_loopback_stream_with_no_status_flag_reports_no_failure(

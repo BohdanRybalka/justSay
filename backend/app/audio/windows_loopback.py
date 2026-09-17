@@ -79,6 +79,7 @@ class WindowsLoopbackSource(SystemAudioSource):
         self._on_block: BlockSink | None = None
         self._on_failure: FailureSink | None = None
         self._failure_reported = False
+        self._status_logged = False
         self._lock = threading.Lock()
         log.info(
             "WASAPI loopback endpoint: %s (%d Hz, %d ch)",
@@ -95,27 +96,56 @@ class WindowsLoopbackSource(SystemAudioSource):
     def endpoint_name(self) -> str:
         return self._endpoint_name
 
-    def _report_capture_failure(self, reason: str) -> bool:
+    def _report_capture_failure(self, reason: str) -> None:
         """Hand the recorder the first reason this capture went wrong.
 
-        The one report-once path this source has, shared by the two things it
-        can observe: a non-zero PortAudio status flag and a block that is not
-        whole frames. Both, once they happen at all, happen on every callback,
-        and the user gets one sentence per recording rather than one per block.
-        The answer says whether this call was the first, so a caller logs once
-        per recording rather than once per block. It does not say the recorder
-        heard: `on_failure` is optional, and a source started without one
-        still reports exactly once into nothing.
+        The one report-once path this source has, shared by everything it can
+        observe: a non-zero PortAudio status flag, a block that is not whole
+        frames, and anything else the callback raises. All of them, once they
+        happen at all, happen on every callback, and the user gets one
+        sentence per recording rather than one per block. Per recording and
+        not per source: `start()` clears the flag, so a source started a
+        second time can report again, which is what macOS already meant by
+        "once" and Windows did not.
+
+        Reporting is all this does. Deciding whether a caller has anything to
+        say once is `_claim_status_log`'s job, and it keeps its own flag,
+        because this one is shared and the caller's need is not.
+
+        The sink belongs to `MeetingRecorder`, not to this module, so a raise
+        out of it is caught here rather than left to unwind a realtime
+        callback: the report is the last thing this source can do about a
+        capture that has already failed.
         """
         with self._lock:
             already = self._failure_reported
             self._failure_reported = True
             on_failure = self._on_failure
-        if already:
-            return False
-        if on_failure is not None:
+        if already or on_failure is None:
+            return
+        try:
             on_failure(reason)
-        return True
+        except Exception:
+            log.exception(
+                "The loopback failure sink raised, so this capture failure "
+                "reaches the recorder as this log line and nothing else"
+            )
+
+    def _claim_status_log(self) -> bool:
+        """True the first time this recording sees a PortAudio status flag.
+
+        Its own flag rather than `_report_capture_failure`'s, which is shared
+        with the malformed-block path: a malformed block arriving first used
+        to claim that one and silence this log for the rest of the recording.
+        The log is the only thing separating PortAudio substituting zeros
+        from WASAPI handing over a genuinely silent mix, and discarding it
+        cost a full diagnosis pass during spec 066, so it does not answer to
+        whichever path reached a shared flag first.
+        """
+        with self._lock:
+            already = self._status_logged
+            self._status_logged = True
+        return not already
 
     def _stop_delivering(self, reason: str) -> None:
         """End system-audio delivery, having said why once.
@@ -144,11 +174,13 @@ class WindowsLoopbackSource(SystemAudioSource):
         has degraded, so it is reported to the recorder as well as logged:
         a meeting whose far side stopped arriving is news the user gets while
         the call is still running rather than when they play the file back.
+        The two are deduplicated separately, because the report is shared with
+        the malformed-block path and the log is not.
         """
-        reported = self._report_capture_failure(
+        self._report_capture_failure(
             f"the WASAPI loopback stream reported PortAudio status {int(status)}"
         )
-        if reported:
+        if self._claim_status_log():
             log.warning(
                 "WASAPI loopback stream reported PortAudio status %d "
                 "(paInputUnderflow=%d) — any silence in this recording may be "
@@ -157,28 +189,52 @@ class WindowsLoopbackSource(SystemAudioSource):
                 pyaudio.paInputUnderflow,
             )
 
-    def _stream_callback(self, in_data, frame_count, time_info, status):
+    def _deliver_block(self, in_data, status) -> None:
+        """One callback's worth of work: report the flag, downmix, hand over."""
         arrival = time.monotonic()
         if status:
             self._report_stream_status(status)
         with self._lock:
             sink = self._on_block
         if sink is not None and in_data:
-            try:
-                mono = interleaved_buffer_to_mono(in_data, self._channels, "<f4")
-            except MalformedCaptureBlockError as malformed:
-                log.exception("The WASAPI loopback stream stopped delivering usable audio")
-                self._stop_delivering(
-                    f"the WASAPI loopback stream stopped delivering usable audio — {malformed}"
-                )
-                return (None, pyaudio.paContinue)
-            sink(arrival, mono)
+            sink(arrival, interleaved_buffer_to_mono(in_data, self._channels, "<f4"))
+
+    def _stream_callback(self, in_data, frame_count, time_info, status):
+        """Nothing raises out of here, whatever the block or the sink does.
+
+        PortAudio does not report an exception crossing this boundary — it
+        tears the stream down, so `on_failure` is never called and the meeting
+        goes on reporting a healthy capture while holding the microphone
+        alone. The block sink is `MeetingRecorder._system_callback`, which
+        measures the block's level and writes it to a spill queue: a caller
+        this module neither owns nor can promise about, which is why the
+        catch is the whole body rather than the deinterleave alone.
+
+        Both handlers end delivery rather than continuing into whatever comes
+        next, because a callback that has failed once fails on every block and
+        the stream stays open for the recorder to close.
+        """
+        try:
+            self._deliver_block(in_data, status)
+        except MalformedCaptureBlockError as malformed:
+            log.exception("The WASAPI loopback stream stopped delivering usable audio")
+            self._stop_delivering(
+                f"the WASAPI loopback stream stopped delivering usable audio — {malformed}"
+            )
+        except Exception as failure:
+            log.exception("The WASAPI loopback callback failed")
+            self._stop_delivering(
+                f"the WASAPI loopback capture failed with an unexpected "
+                f"{type(failure).__name__}"
+            )
         return (None, pyaudio.paContinue)
 
     def start(self, on_block: BlockSink, on_failure: FailureSink | None = None) -> None:
         with self._lock:
             self._on_block = on_block
             self._on_failure = on_failure
+            self._failure_reported = False
+            self._status_logged = False
         self._stream = self._audio.open(
             format=pyaudio.paFloat32,
             channels=self._channels,

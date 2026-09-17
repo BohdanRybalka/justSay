@@ -111,7 +111,15 @@ def interleaved_buffer_to_mono(buffer: bytes, channels: int, dtype: str) -> np.n
     own, from two libraries and in wording that mentions no audio; one named
     raise is what a realtime capture callback can catch precisely enough to
     report the far side as gone instead of dying where the caller cannot see.
+
+    A ``channels`` below 1 raises that same named error rather than being
+    divided by, which is the one way this function could still hand a capture
+    callback an exception it does not catch by type.
     """
+    if channels < 1:
+        raise MalformedCaptureBlockError(
+            f"a capture block cannot be read as {channels}-channel frames"
+        )
     item_size = np.dtype(dtype).itemsize
     sample_count, leftover_bytes = divmod(len(buffer), item_size)
     if leftover_bytes or sample_count % channels:

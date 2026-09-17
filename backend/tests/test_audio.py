@@ -517,6 +517,21 @@ def test_a_sample_count_that_does_not_fill_whole_frames_is_named():
     assert "2-channel" in str(refused.value)
 
 
+@pytest.mark.parametrize("channels", [0, -1])
+def test_a_channel_count_below_one_is_refused_rather_than_divided_by(channels):
+    """The named raise has to cover every way this function can fail.
+
+    A zero channel count reaches `sample_count % channels` before anything
+    validates it, and a `ZeroDivisionError` escapes a capture callback exactly
+    as the two untyped `ValueError`s used to — in the function whose whole job
+    is now to make that impossible.
+    """
+    with pytest.raises(MalformedCaptureBlockError) as refused:
+        interleaved_buffer_to_mono(np.zeros(8, dtype="<f4").tobytes(), channels, "<f4")
+
+    assert f"{channels}-channel" in str(refused.value)
+
+
 @pytest.mark.asyncio
 async def test_recorder_level_db_matches_pre_extraction_formula(audio_settings, mock_stream):
     """AC-2: `recorder.level_db` returns the exact same value the old
