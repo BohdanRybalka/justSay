@@ -8,7 +8,6 @@ from app.core.config import settings
 from app.core.errors import JustSayError
 from app.core.types import ProviderMode
 from app.preferences.user_settings import update_user_settings
-from app.stt import clear_cache, get_provider
 from app.stt.local_setup import (
     LocalSttStatus,
     install_local_packages,
@@ -16,6 +15,7 @@ from app.stt.local_setup import (
 from app.stt.local_setup import (
     check_status as check_local_status,
 )
+from app.stt.routing import clear_cache, get_provider
 
 _LOCAL_LOAD_CRASHED_DETAIL = "Loading the local engine failed unexpectedly. Check the backend log."
 

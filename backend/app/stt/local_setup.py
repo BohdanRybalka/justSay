@@ -82,7 +82,15 @@ class LocalSttStatus(BaseModel):
 
 
 def check_status(stt_settings: STTSettings) -> LocalSttStatus:
-    """Check local STT readiness: package installed + load state + GPU + last error."""
+    """Check local STT readiness: package installed + load state + GPU + last error.
+
+    The cache is read for the loaded state exactly once and both load fields
+    answer from that one read. Reading it twice let one payload contradict
+    itself in two ways: with the package uninstalled the ``installed`` gate
+    reported ``model_loaded=False`` while the size ternary still asked the
+    cache and reported a number beside it, and a ``clear_cache()`` landing
+    between the two reads reported a loaded model with no size at all.
+    """
     installed = _check_package_installed()
     cuda_probe_available, gpu_name, gpu_vendor = _detect_gpu()
 
@@ -104,12 +112,13 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
     gpu_available = is_accelerated_device(device, kind)
 
     last_error = get_local_load_error(stt_settings) or _prewarm_error
+    model_is_loaded = is_model_loaded() if installed else False
 
     return LocalSttStatus(
         package_installed=installed,
-        model_loaded=is_model_loaded() if installed else False,
+        model_loaded=model_is_loaded,
         model_name=stt_settings.whisper_model_size,
-        model_ram_mb=_estimate_model_ram_mb() if is_model_loaded() else None,
+        model_ram_mb=_estimate_model_ram_mb() if model_is_loaded else None,
         gpu_available=gpu_available,
         gpu_name=gpu_name,
         gpu_vendor=gpu_vendor,

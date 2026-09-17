@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.core.app_paths import resolve_app_data_root, resolve_temp_dir
 from app.core.errors import ConfigurationError
+from app.core.types import ProviderMode
 from app.embeddings import clear_cache as clear_embeddings_cache
 from app.stt.routing import clear_cache as clear_stt_cache
 from app.transcripts import relocation
@@ -365,7 +366,6 @@ def sync_to_runtime(us: UserSettings) -> bool:
     (put_settings()'s prewarm gate) don't have to re-derive it themselves.
     """
     from app.core.config import settings
-    from app.core.types import ProviderMode
 
     stt_mode = ProviderMode(us.stt_mode)
 

@@ -148,6 +148,53 @@ def test_check_status_reports_missing_package():
     assert status.model_loaded is False
 
 
+def test_check_status_reports_no_model_size_when_the_package_is_gone():
+    """`faster_whisper` uninstalled while a provider is still cached.
+
+    The `installed` gate answers `model_loaded=False`. The size has to answer
+    from that same gate rather than ask the cache a second time, which still
+    holds a loaded provider and would put a RAM figure on screen beside "not
+    loaded"."""
+    settings = STTSettings()
+
+    with _apply(
+        _patches(False, (False, None, "none"))
+        + [
+            patch.object(local_setup, "is_model_loaded", return_value=True),
+            patch.object(local_setup, "_estimate_model_ram_mb", return_value=743),
+        ]
+    ):
+        status = check_status(settings)
+
+    assert status.package_installed is False
+    assert status.model_loaded is False
+    assert status.model_ram_mb is None
+
+
+def test_check_status_answers_both_load_fields_from_one_read_of_the_cache():
+    """A `clear_cache()` landing between two reads of the same fact.
+
+    `is_model_loaded()` says True and then False, which is what a cache
+    invalidation racing `check_status()` looks like from inside it. Asking
+    twice reported a loaded model with no size at all; one read cannot
+    contradict itself, whichever of the two answers it gets."""
+    settings = STTSettings()
+    loaded = MagicMock(side_effect=[True, False])
+
+    with _apply(
+        _patches(True, (False, None, "none"))
+        + [
+            patch.object(local_setup, "is_model_loaded", loaded),
+            patch.object(local_setup, "_estimate_model_ram_mb", return_value=743),
+        ]
+    ):
+        status = check_status(settings)
+
+    assert loaded.call_count == 1
+    assert status.model_loaded is True
+    assert status.model_ram_mb == 743
+
+
 def test_check_status_reports_amd_gpu_name_and_vendor_but_not_available():
     """AMD is detected (name + vendor populated) but gpu_available stays False
     — faster-whisper has no AMD backend (spec 014)."""

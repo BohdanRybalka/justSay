@@ -17,7 +17,7 @@ from app.audio.analysis import analyze_silence
 from app.audio.vad import analyze_vad
 from app.core.config import settings
 from app.pipeline.utils import detect_duration
-from app.stt import get_routed_provider, is_local_provider
+from app.stt.routing import get_routed_provider, is_local_provider
 from app.transcripts.history import save_entry
 
 log = logging.getLogger(__name__)
