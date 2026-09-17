@@ -14,6 +14,7 @@ from app.core import tasks
 from app.core.errors import ResourceUnavailableError
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
+from app.stt import local_whisper_cpp_cmd
 from app.stt.base import latched_load_error
 from app.stt.config import STTSettings
 from app.stt.local_factory import (
@@ -22,6 +23,12 @@ from app.stt.local_factory import (
     get_local_provider_kind,
     is_accelerated_device,
     is_macos_arm64,
+)
+from app.stt.routing import (
+    get_local_load_error,
+    get_provider,
+    is_model_loaded,
+    peek_local_provider,
 )
 
 log = logging.getLogger(__name__)
@@ -95,8 +102,6 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
 
     compute_type = compute_type_for_device(device, kind)
     gpu_available = is_accelerated_device(device, kind)
-
-    from app.stt import get_local_load_error, is_model_loaded
 
     last_error = get_local_load_error(stt_settings) or _prewarm_error
 
@@ -254,8 +259,6 @@ async def _run_get_model(provider) -> None:
     else:
         _prewarm_error = None
     finally:
-        from app.stt import peek_local_provider
-
         if peek_local_provider() is not provider:
             try:
                 provider.cleanup()
@@ -316,8 +319,6 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
     async with _prewarm_lock:
         if stt_settings.mode != ProviderMode.LOCAL:
             return
-
-        from app.stt import get_provider, peek_local_provider
 
         provider = get_provider(ProviderMode.LOCAL, stt_settings)
         if provider.is_loaded:
@@ -409,8 +410,6 @@ async def await_local_ready(
             f"Local speech-to-text model did not become ready within {timeout:.0f}s"
         ) from e
 
-    from app.stt import peek_local_provider
-
     provider = peek_local_provider()
     return provider is not None and provider.is_loaded
 
@@ -450,8 +449,6 @@ def _check_package_installed() -> bool:
     checks for the importable `faster_whisper` package.
     """
     if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
-        from app.stt import local_whisper_cpp_cmd
-
         return local_whisper_cpp_cmd.resolve_binary_path() is not None
 
     try:

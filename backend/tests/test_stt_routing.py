@@ -6,7 +6,6 @@ from app.core.audio_formats import ALLOWED_AUDIO_EXTENSIONS
 from app.core.types import ProviderMode
 from app.stt import (
     GROQ_SUPPORTED_FORMATS,
-    _providers,
     clear_cache,
     get_routed_provider,
 )
@@ -15,6 +14,7 @@ from app.stt.config import STTSettings
 from app.stt.groq_whisper import GroqWhisperSTTProvider
 from app.stt.local import LocalSTTProvider
 from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
+from app.stt.routing import _providers
 
 
 @pytest.fixture(autouse=True)

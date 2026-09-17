@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.core.app_paths import resolve_app_data_root, resolve_temp_dir
 from app.core.errors import ConfigurationError
+from app.stt.routing import clear_cache as clear_stt_cache
 from app.transcripts import relocation
 
 
@@ -392,7 +393,6 @@ def sync_to_runtime(us: UserSettings) -> bool:
     settings.embeddings.ollama_host = us.ollama_host
 
     if changed_stt:
-        from app.stt import clear_cache as clear_stt_cache
         clear_stt_cache()
         from app.embeddings import clear_cache as clear_embeddings_cache
         clear_embeddings_cache()

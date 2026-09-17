@@ -1040,18 +1040,18 @@ def test_clear_cache_records_a_provider_cleanup_failure(caplog):
     refuses to release left the cache emptied and the reason nowhere — the
     invalidation still has to succeed, but silently is not the same as
     cleanly."""
-    import app.stt as stt_module
+    import app.stt.routing as routing_module
 
     provider = MagicMock()
     provider.cleanup.side_effect = OSError("the model is still loading")
-    stt_module._providers[object()] = provider
+    routing_module._providers[object()] = provider
 
-    with caplog.at_level(logging.DEBUG, logger="app.stt"):
+    with caplog.at_level(logging.DEBUG, logger="app.stt.routing"):
         clear_cache()
 
-    failures = [r for r in caplog.records if r.name == "app.stt" and r.exc_info]
+    failures = [r for r in caplog.records if r.name == "app.stt.routing" and r.exc_info]
     assert len(failures) == 1
-    assert not stt_module._providers
+    assert not routing_module._providers
 
 def test_gemini_client_carries_a_timeout_in_milliseconds():
     """AC: the budget reaches the SDK in the unit it documents.

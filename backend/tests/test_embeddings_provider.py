@@ -117,7 +117,7 @@ async def test_local_mode_never_constructs_the_cloud_provider(tmp_path, monkeypa
     )
     monkeypatch.setenv("JUSTSAY_DATA_DIR", str(settings_dir))
     monkeypatch.setattr(user_settings, "_settings", None)
-    monkeypatch.setattr("app.stt.clear_cache", lambda: None)
+    monkeypatch.setattr("app.preferences.user_settings.clear_stt_cache", lambda: None)
 
     saved_mode = runtime_settings.stt.mode
     try:

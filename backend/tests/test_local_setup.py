@@ -168,7 +168,7 @@ def test_check_status_surfaces_last_load_error():
 
     clear_stt_cache()
     settings = STTSettings()
-    from app.stt import _get_local
+    from app.stt.routing import _get_local
 
     provider = _get_local(settings)
     provider._last_load_error = "OSError: [WinError 126] DLL not found"
@@ -615,8 +615,8 @@ def test_estimate_model_ram_mb_returns_none_for_vulkan_kind(monkeypatch):
 async def test_ensure_local_ready_vulkan_kind_skips_pip_install_when_binary_present(monkeypatch):
     _stub_whisper_cpp_server_kind(monkeypatch)
     provider = _FakePrewarmProvider()
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
 
     def _boom():
@@ -637,7 +637,7 @@ async def test_ensure_local_ready_vulkan_kind_sets_actionable_error_when_binary_
 ):
     _stub_whisper_cpp_server_kind(monkeypatch)
     provider = _FakePrewarmProvider()
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
 
     def _boom():
@@ -661,8 +661,8 @@ async def test_ensure_local_ready_clears_a_stale_error_once_the_load_succeeds(mo
     reporting a fixed problem until the backend restarts."""
     _stub_whisper_cpp_server_kind(monkeypatch)
     provider = _FakePrewarmProvider()
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
     settings = STTSettings(mode=ProviderMode.LOCAL)
 
@@ -684,8 +684,8 @@ async def test_ensure_local_ready_clears_a_stale_error_when_the_provider_is_alre
     retry click reaches once a prewarm already finished elsewhere."""
     _stub_whisper_cpp_server_kind(monkeypatch)
     provider = _FakePrewarmProvider()
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
     settings = STTSettings(mode=ProviderMode.LOCAL)
 
@@ -713,8 +713,8 @@ async def test_ensure_local_ready_replaces_a_stale_error_when_the_load_itself_fa
         raise RuntimeError("model load exploded")
 
     provider = _FakePrewarmProvider(get_model=_fail)
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
     settings = STTSettings(mode=ProviderMode.LOCAL)
 
@@ -751,8 +751,8 @@ async def test_a_cancelled_caller_still_gets_the_error_cleared_by_the_load_it_st
 
     loop = asyncio.get_running_loop()
     provider = _FakePrewarmProvider(get_model=_slow)
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
     local_setup._prewarm_error = "pip install failed"
     settings = STTSettings(mode=ProviderMode.LOCAL)
@@ -786,8 +786,8 @@ def test_check_status_surfaces_prewarm_error_when_no_provider_level_error():
 
 
 def test_check_status_prefers_provider_error_over_prewarm_error():
-    from app.stt import _get_local
     from app.stt import clear_cache as clear_stt_cache
+    from app.stt.routing import _get_local
 
     clear_stt_cache()
     settings = STTSettings()
@@ -811,8 +811,8 @@ def test_check_status_merge_is_deterministic_when_package_missing_and_provider_e
     coexist. Force that "impossible" combined state anyway and pin the merge
     outcome: get_local_load_error() or _prewarm_error -> the provider error
     always wins, regardless of package_installed being False."""
-    from app.stt import _get_local
     from app.stt import clear_cache as clear_stt_cache
+    from app.stt.routing import _get_local
 
     clear_stt_cache()
     settings = STTSettings()
@@ -953,7 +953,7 @@ async def test_ensure_local_ready_noop_when_mode_not_local_at_entry(monkeypatch)
     def _boom(mode, stt_settings):
         raise AssertionError("get_provider must not be called")
 
-    monkeypatch.setattr("app.stt.get_provider", _boom)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", _boom)
     settings = STTSettings(mode=ProviderMode.CLOUD)
     await local_setup.ensure_local_ready(settings)
 
@@ -963,7 +963,7 @@ async def test_ensure_local_ready_fast_path_when_already_loaded(monkeypatch):
     """No install/load attempted once `provider.is_loaded` is already True."""
     provider = _FakePrewarmProvider()
     provider.is_loaded = True
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
 
     def _boom():
         raise AssertionError("_check_package_installed must not be called")
@@ -977,8 +977,8 @@ async def test_ensure_local_ready_fast_path_when_already_loaded(monkeypatch):
 @pytest.mark.asyncio
 async def test_ensure_local_ready_installs_then_loads_on_success(monkeypatch):
     provider = _FakePrewarmProvider()
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
     monkeypatch.setattr(local_setup, "_run_pip_install", lambda: (0, "ok"))
 
@@ -993,7 +993,7 @@ async def test_ensure_local_ready_installs_then_loads_on_success(monkeypatch):
 @pytest.mark.asyncio
 async def test_ensure_local_ready_sets_prewarm_error_on_install_failure_and_skips_load(monkeypatch):
     provider = _FakePrewarmProvider()
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
     monkeypatch.setattr(local_setup, "_run_pip_install", lambda: (1, "pip: something went wrong"))
 
@@ -1015,8 +1015,8 @@ async def test_ensure_local_ready_aborts_load_if_mode_changes_during_install(mon
     that aborts the load (spec 015, RED-1)."""
     provider = _FakePrewarmProvider()
     cache = {"current": provider}
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: cache["current"])
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: cache["current"])
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: cache["current"])
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: cache["current"])
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
 
     settings = STTSettings(mode=ProviderMode.LOCAL)
@@ -1051,8 +1051,8 @@ async def test_ensure_local_ready_cleans_up_orphan_after_mode_change_mid_load(mo
 
     provider = _FakePrewarmProvider(get_model=_flip_mode_during_load)
     cache["current"] = provider
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: cache["current"])
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: cache["current"])
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: cache["current"])
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: cache["current"])
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
 
     await local_setup.ensure_local_ready(settings)
@@ -1081,8 +1081,8 @@ async def test_a_superseded_provider_that_refuses_to_release_does_not_fail_the_l
     provider = _FakePrewarmProvider(get_model=_supersede_during_load)
     provider.cleanup = MagicMock(side_effect=RuntimeError("torch is not importable"))
     cache["current"] = provider
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: cache["current"])
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: cache["current"])
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: cache["current"])
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: cache["current"])
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
 
     with caplog.at_level(logging.DEBUG, logger="app.stt.local_setup"):
@@ -1104,8 +1104,8 @@ async def test_ensure_local_ready_swallows_get_model_exception_without_cleanup(m
         raise RuntimeError("boom")
 
     provider = _FakePrewarmProvider(get_model=_raise)
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
 
     settings = STTSettings(mode=ProviderMode.LOCAL)
@@ -1135,8 +1135,8 @@ async def test_prewarm_lock_serialises_concurrent_ensure_local_ready(monkeypatch
             pass
 
     provider = _SlowFakeProvider()
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
 
     settings = STTSettings(mode=ProviderMode.LOCAL)
@@ -1180,8 +1180,8 @@ async def test_ensure_local_ready_cleans_up_orphan_when_cache_cleared_without_a_
             cache["current"] = provider
         return cache["current"]
 
-    monkeypatch.setattr("app.stt.get_provider", _fake_get_provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: cache["current"])
+    monkeypatch.setattr("app.stt.local_setup.get_provider", _fake_get_provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: cache["current"])
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
 
     await asyncio.gather(
@@ -1406,8 +1406,8 @@ async def test_maybe_prewarm_local_resets_crash_guard_counter_on_explicit_trigge
 async def test_await_local_ready_fast_path_when_already_loaded(monkeypatch):
     provider = _FakePrewarmProvider()
     provider.is_loaded = True
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
 
     def _boom():
         raise AssertionError("_check_package_installed must not be called")
@@ -1424,8 +1424,8 @@ async def test_await_local_ready_fast_path_when_already_loaded(monkeypatch):
 @pytest.mark.asyncio
 async def test_await_local_ready_returns_true_after_successful_load(monkeypatch):
     provider = _FakePrewarmProvider()
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
 
     settings = STTSettings(mode=ProviderMode.LOCAL)
@@ -1455,8 +1455,8 @@ async def test_await_local_ready_shares_prewarm_lock_no_second_get_model(monkeyp
             pass
 
     provider = _SlowFakeProvider()
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
 
     settings = STTSettings(mode=ProviderMode.LOCAL)
@@ -1486,8 +1486,8 @@ async def test_await_local_ready_raises_typed_timeout_on_stuck_load(monkeypatch)
             pass
 
     provider = _StuckProvider()
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
 
     settings = STTSettings(mode=ProviderMode.LOCAL)
@@ -1511,8 +1511,8 @@ async def test_await_local_ready_returns_false_not_raises_when_mode_changes_mid_
     provider's own lazy _get_model() fallback)."""
     provider = _FakePrewarmProvider()
     cache = {"current": provider}
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: cache["current"])
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: cache["current"])
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: cache["current"])
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: cache["current"])
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
 
     settings = STTSettings(mode=ProviderMode.LOCAL)
@@ -1546,8 +1546,8 @@ async def test_await_local_ready_returns_false_not_raises_when_cache_moves_on_mi
 
     provider = _FakePrewarmProvider(get_model=_flip_cache_during_load)
     cache["current"] = provider
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: cache["current"])
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: cache["current"])
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: cache["current"])
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: cache["current"])
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
 
     result = await local_setup.await_local_ready(settings, timeout=5.0)
@@ -1592,8 +1592,8 @@ async def test_timeout_then_retry_joins_in_flight_load_instead_of_starting_a_sec
             pass
 
     provider = _SlowProvider()
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
 
     settings = STTSettings(mode=ProviderMode.LOCAL)
@@ -1634,8 +1634,8 @@ async def test_prewarm_latch_shows_the_reason_without_the_class_name(monkeypatch
         raise ResourceUnavailableError("whisper-server exited early (code 3)")
 
     provider = _FakePrewarmProvider(get_model=_fail)
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
 
     await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
@@ -1659,8 +1659,8 @@ async def test_prewarm_latch_is_never_empty_when_the_load_failed(monkeypatch):
         raise RuntimeError("")
 
     provider = _FakePrewarmProvider(get_model=_fail)
-    monkeypatch.setattr("app.stt.get_provider", lambda mode, s: provider)
-    monkeypatch.setattr("app.stt.peek_local_provider", lambda: provider)
+    monkeypatch.setattr("app.stt.local_setup.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.local_setup.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
 
     await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))

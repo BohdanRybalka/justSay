@@ -209,12 +209,13 @@ def test_is_loaded_false_and_last_load_error_none_initially():
 
 
 def test_contract_shape_via_get_or_create(monkeypatch):
-    """`app.stt.__init__`'s `is_model_loaded()`/`get_local_load_error()`/
+    """`app.stt.routing`'s `is_model_loaded()`/`get_local_load_error()`/
     `clear_cache()` — all `getattr(provider, ...)`-based or a bare
     `provider.cleanup()` call — must work against this class with no code
-    change in `app/stt/__init__.py`."""
-    from app.stt import _get_or_create, get_local_load_error, is_model_loaded
+    change in `app/stt/routing.py`."""
     from app.stt import clear_cache as clear_stt_cache
+    from app.stt import get_local_load_error, is_model_loaded
+    from app.stt.routing import _get_or_create
 
     monkeypatch.setattr(
         "app.stt.local_factory.get_local_provider_class",
