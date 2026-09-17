@@ -183,6 +183,16 @@ def maybe_prewarm_local_at_startup(stt_settings: STTSettings) -> None:
     call maybe_prewarm_local() directly and require an already-running,
     already-healthy backend to receive the request, so none of them is part
     of the automatic every-process-start loop this guards against.
+
+    The counter is written before the task is spawned, because a process
+    that dies during the load is exactly what it counts. A spawn that never
+    happened is not such a death, so a raising spawn puts the counter back
+    where it was and re-raises: the caller in app.main.lifespan() guards
+    this call and logs the failure, and a launch that never started a load
+    must not burn one of the MAX_CONSECUTIVE_INCOMPLETE_PREWARMS attempts.
+    The coroutine built for that spawn is closed on the same path: nothing
+    will ever await it, and an abandoned one surfaces later as a
+    RuntimeWarning raised from wherever the garbage collector happens to run.
     """
     if stt_settings.mode != ProviderMode.LOCAL:
         return
@@ -203,9 +213,13 @@ def maybe_prewarm_local_at_startup(stt_settings: STTSettings) -> None:
         return
 
     _write_consecutive_incomplete_prewarms(consecutive + 1)
-    tasks.spawn_background_task(
-        _prewarm_then_clear_crash_guard(stt_settings), name="local-stt-prewarm-startup"
-    )
+    prewarm = _prewarm_then_clear_crash_guard(stt_settings)
+    try:
+        tasks.spawn_background_task(prewarm, name="local-stt-prewarm-startup")
+    except Exception:
+        prewarm.close()
+        _write_consecutive_incomplete_prewarms(consecutive)
+        raise
 
 
 async def _prewarm_then_clear_crash_guard(stt_settings: STTSettings) -> None:

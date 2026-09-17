@@ -20,11 +20,19 @@ Recorder = TypeVar("Recorder")
 
 
 def _require(recorder: Recorder | None, attribute: str, dependency: str) -> Recorder:
-    """The recorder, or a RuntimeError naming the override a test should set."""
+    """The recorder, or a RuntimeError naming why there is none.
+
+    Two conditions reach this on a real install, not only in tests: the
+    lifespan startup did not run at all, and a guarded startup step that
+    could not build its recorder and let the backend carry on without it
+    (main.py's `_run_optional_step`) -- in which case the WARNING that step
+    logged says what failed.
+    """
     if recorder is None:
         raise RuntimeError(
-            f"app.state.{attribute} is not set — it is only created by "
-            f"main.py's lifespan startup. In tests, set "
+            f"app.state.{attribute} is not set — main.py's lifespan startup "
+            f"either did not run or could not build it, and the startup log "
+            f"says which. In tests, set "
             f"app.dependency_overrides[{dependency}] instead of relying on "
             f"the real recorder."
         )
@@ -42,10 +50,13 @@ def get_recorder(request: Request) -> MicrophoneRecorder:
 
 
 def get_meeting_recorder(request: Request) -> MeetingRecorder:
-    """FastAPI dependency — the app-lifetime MeetingRecorder.
+    """FastAPI dependency — the app-lifetime MeetingRecorder, when there is one.
 
-    Same shape and same lifecycle as get_recorder: created once in main.py's
-    lifespan startup, stored on app.state.meeting_recorder. See
+    Same shape as get_recorder and built in the same place, but not on the
+    same terms: building it is a guarded startup step, because dictation,
+    History and Settings all work without it. So an install where that step
+    failed serves every other endpoint and raises here, and the meeting
+    endpoints answer 500 for the life of the process. See
     docs/adr/005-audio-recorder-di-lifespan.md.
     """
     return _require(

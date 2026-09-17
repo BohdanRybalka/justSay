@@ -174,16 +174,20 @@ def _reject_scratch_directory(candidate: Path) -> None:
 def repair_scratch_output_dir() -> Path:
     """Startup repair for history that already lives inside the scratch tree.
 
-    Returns the directory history should be opened from. A healthy
-    configuration is returned untouched and nothing is written.
+    Returns the directory history should be opened from, on every path:
 
-    On a broken one the rows are merged into the app-data root, the stored
-    ``output_dir`` is rewritten so the repair runs once, and the old file is
-    kept aside by ``consolidate_into``. If the merge fails the *old*
-    directory is returned deliberately: serving the user's real rows from a
-    risky location beats serving an empty database from a safe one, and the
-    ownership-scoped cleanup (ADR 033) already stops that location from
-    being emptied.
+    - a healthy configuration comes back untouched and nothing is written;
+    - a merge that failed returns the *old* directory deliberately, because
+      serving the user's real rows from a risky location beats serving an
+      empty database from a safe one, and the ownership-scoped cleanup
+      (ADR 033) already stops that location from being emptied;
+    - a merge that succeeded returns the app-data root even when the new
+      ``output_dir`` could not be persisted. ``consolidate_into`` has already
+      moved the rows and renamed the source file aside, so the old directory
+      no longer holds a database to fall back to; the stored setting is the
+      only thing left behind, and the repair simply runs again on the next
+      launch, where ``consolidate_into``'s ``INSERT OR IGNORE`` makes it a
+      no-op. The in-memory settings are left matching the file on disk.
 
     Must run before ``history.bootstrap`` -- bootstrap opens the connection,
     so a later repair would already have served the wrong file.
@@ -205,7 +209,17 @@ def repair_scratch_output_dir() -> Path:
     with _lock:
         global _settings
         merged = get_user_settings().model_copy(update={"output_dir": str(safe)})
-        _save(merged)
+        try:
+            _save(merged)
+        except Exception:
+            log.warning(
+                "Moved history out of the scratch directory (%s → %s) but could not "
+                "store the new output_dir: this launch reads and writes the moved rows, "
+                "and the repair runs again on the next launch, where the merge is a "
+                "no-op.",
+                current, safe, exc_info=True,
+            )
+            return safe
         _settings = merged
     log.warning("Moved history out of the scratch directory: %s → %s", current, safe)
     return safe

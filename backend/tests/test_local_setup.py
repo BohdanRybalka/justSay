@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import pathlib
 import threading
@@ -1306,6 +1307,42 @@ async def test_maybe_prewarm_local_at_startup_routes_through_spawn_background_ta
     await asyncio.gather(*spawn_spy.tasks)
 
     assert spawn_spy.names == ["local-stt-prewarm-startup"]
+
+
+@pytest.mark.prewarm
+def test_maybe_prewarm_local_at_startup_rolls_back_the_guard_when_the_spawn_fails(
+    isolated_crash_guard_root, monkeypatch
+):
+    """A launch that never started a load must not burn one of the
+    MAX_CONSECUTIVE_INCOMPLETE_PREWARMS attempts.
+
+    `app.main.lifespan()` guards this call and swallows the failure, so
+    without the rollback the raised counter would stay raised for good:
+    after two such launches `should_skip_prewarm` disables startup prewarm
+    and the log blames a crash that never happened.
+
+    The coroutine built for the spawn is closed on the same path. Nothing
+    can await one that was never scheduled, and leaving it alive costs a
+    `RuntimeWarning: coroutine ... was never awaited` raised whenever the
+    garbage collector next runs -- in another test, or in another launch's
+    logs. The stub below deliberately does not close it, so that this test
+    fails when the production path stops doing so."""
+    from app.core import tasks
+
+    spawned: list[object] = []
+
+    def _failing_spawn(coro, *, name):
+        spawned.append(coro)
+        raise RuntimeError("no running event loop")
+
+    monkeypatch.setattr(tasks, "spawn_background_task", _failing_spawn)
+    local_setup._write_consecutive_incomplete_prewarms(1)
+
+    with pytest.raises(RuntimeError, match="no running event loop"):
+        local_setup.maybe_prewarm_local_at_startup(STTSettings(mode=ProviderMode.LOCAL))
+
+    assert local_setup._read_consecutive_incomplete_prewarms() == 1
+    assert inspect.getcoroutinestate(spawned[0]) == inspect.CORO_CLOSED
 
 
 @pytest.mark.prewarm
