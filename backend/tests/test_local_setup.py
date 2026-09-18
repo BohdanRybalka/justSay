@@ -17,7 +17,7 @@ from app.stt.config import STTSettings
 from app.stt.local_factory import get_local_provider_class as _real_get_local_provider_class
 from app.stt.local_factory import get_local_provider_kind as _real_get_local_provider_kind
 from app.stt.local_setup import (
-    LocalSttStatus,
+    LocalSTTStatus,
     _check_package_installed,
     _detect_gpu,
     check_status,
@@ -69,7 +69,7 @@ def test_check_status_reports_installed_package():
     with _apply(_patches(True, (False, None, "none"))):
         status = check_status(settings)
 
-    assert isinstance(status, LocalSttStatus)
+    assert isinstance(status, LocalSTTStatus)
     assert status.package_installed is True
     assert status.model_loaded is False
     assert status.last_error is None

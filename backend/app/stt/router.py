@@ -9,7 +9,7 @@ from app.core.errors import JustSayError
 from app.core.types import ProviderMode
 from app.preferences.user_settings import update_user_settings
 from app.stt.local_setup import (
-    LocalSttStatus,
+    LocalSTTStatus,
     install_local_packages,
 )
 from app.stt.local_setup import (
@@ -39,7 +39,7 @@ async def set_stt_mode(body: _ModeBody):
     return {"stt_mode": settings.stt.mode, "model": provider.model_name}
 
 
-@router.get("/local/status", response_model=LocalSttStatus)
+@router.get("/local/status", response_model=LocalSTTStatus)
 async def stt_local_status():
     """Check local STT readiness: package, model loaded, GPU."""
     return await asyncio.to_thread(check_local_status, settings.stt)

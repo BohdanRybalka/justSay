@@ -564,7 +564,7 @@ export interface CloudKeyStatus {
   groq_key_set: boolean;
 }
 
-export interface LocalSttStatus {
+export interface LocalSTTStatus {
   package_installed: boolean;
   model_loaded: boolean;
   model_name: string;
@@ -732,7 +732,7 @@ export const api = {
   getMeetingStatus: () =>
     request<MeetingStatus>("GET", "/audio/meeting/status", undefined, REREADABLE),
 
-  sttLocalStatus: () => request<LocalSttStatus>("GET", "/stt/local/status", undefined, REREADABLE),
+  sttLocalStatus: () => request<LocalSTTStatus>("GET", "/stt/local/status", undefined, REREADABLE),
 
   getSettings: () => request<UserSettings>("GET", "/settings", undefined, REREADABLE),
 
