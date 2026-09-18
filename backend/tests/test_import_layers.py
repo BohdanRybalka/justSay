@@ -1732,9 +1732,11 @@ def _unreadable_attribute_shapes(path: Path) -> list[str]:
     Two shapes, both at module level, and both of them a whole namespace
     rather than one name. `from <anything> import *` binds whatever the other
     module happens to hold, which no walk over *this* module's tree can list.
-    A module-level `def __getattr__` (PEP 562) answers for names that were
-    never bound at all, so a routing function is served off the module with no
-    statement naming it anywhere.
+    A module-level `__getattr__` (PEP 562) answers for names that were never
+    bound at all, so a routing function is served off the module with no
+    statement naming it anywhere. Both spellings of it count: `def
+    __getattr__` and a plain assignment binding that name to a callable
+    defined elsewhere, which is the same hook and reads as ordinary code.
 
     Reported rather than skipped. The gate below counts the names it can see,
     and these are the two cases where seeing nothing is not the same as there
@@ -1749,6 +1751,13 @@ def _unreadable_attribute_shapes(path: Path) -> list[str]:
         elif (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name == "__getattr__"
+        ):
+            found.append(f"{node.lineno} module-level __getattr__")
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)) and any(
+            isinstance(target, ast.Name) and target.id == "__getattr__"
+            for target in (
+                node.targets if isinstance(node, ast.Assign) else [node.target]
+            )
         ):
             found.append(f"{node.lineno} module-level __getattr__")
     return found
