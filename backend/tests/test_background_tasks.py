@@ -275,12 +275,12 @@ async def test_drain_reaches_the_active_load_created_by_real_ensure_local_ready(
     regression that changed the tuple's shape, stopped assigning
     `_active_load`, or moved the task behind a different accessor would leave
     them green while the drain reached nothing. Here `ensure_local_ready()`
-    itself creates the task (local_setup.py:357) and awaits it through
-    `asyncio.shield()` (:360); only `provider._get_model` -- the actual model
+    itself creates the task (local_setup.py:351) and awaits it through
+    `asyncio.shield()` (:354); only `provider._get_model` -- the actual model
     load -- is stubbed.
     """
     from app.core.types import ProviderMode
-    from app.stt import local_setup
+    from app.stt import local_setup, routing
     from app.stt.config import STTSettings
 
     release = threading.Event()
@@ -299,8 +299,8 @@ async def test_drain_reaches_the_active_load_created_by_real_ensure_local_ready(
 
     provider = _BlockingProvider()
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
-    monkeypatch.setattr(local_setup, "get_provider", lambda mode, stt_settings: provider)
-    monkeypatch.setattr(local_setup, "peek_local_provider", lambda: provider)
+    monkeypatch.setattr(routing, "get_provider", lambda mode, stt_settings: provider)
+    monkeypatch.setattr(routing, "peek_local_provider", lambda: provider)
 
     # background-task-ok: test fixture standing in for the prewarm caller;
     waiter = asyncio.create_task(

@@ -14,7 +14,7 @@ from app.core import tasks
 from app.core.errors import ResourceUnavailableError
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
-from app.stt import local_whisper_cpp_cmd
+from app.stt import local_whisper_cpp_cmd, routing
 from app.stt.base import latched_load_error
 from app.stt.config import STTSettings
 from app.stt.local_factory import (
@@ -23,12 +23,6 @@ from app.stt.local_factory import (
     get_local_provider_kind,
     is_accelerated_device,
     is_macos_arm64,
-)
-from app.stt.routing import (
-    get_local_load_error,
-    get_provider,
-    is_model_loaded,
-    peek_local_provider,
 )
 
 log = logging.getLogger(__name__)
@@ -111,8 +105,8 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
     compute_type = compute_type_for_device(device, kind)
     gpu_available = is_accelerated_device(device, kind)
 
-    last_error = get_local_load_error(stt_settings) or _prewarm_error
-    model_is_loaded = is_model_loaded() if installed else False
+    last_error = routing.get_local_load_error(stt_settings) or _prewarm_error
+    model_is_loaded = routing.is_model_loaded() if installed else False
 
     return LocalSttStatus(
         package_installed=installed,
@@ -268,7 +262,7 @@ async def _run_get_model(provider) -> None:
     else:
         _prewarm_error = None
     finally:
-        if peek_local_provider() is not provider:
+        if routing.peek_local_provider() is not provider:
             try:
                 provider.cleanup()
             except Exception:
@@ -282,7 +276,7 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
     The entry check is ``stt_settings.mode``-based (no point starting an
     attempt at all once mode has already moved on). The mid-install and
     mid-load rechecks are cache-*identity* checks instead
-    (``peek_local_provider() is not provider``), not mode checks — a mode
+    (``routing.peek_local_provider() is not provider``), not mode checks — a mode
     check is structurally insufficient here: ``clear_cache()`` can evict the
     captured ``provider`` from the cache without ``stt_settings.mode`` ever
     changing (e.g. an unrelated ``PUT /settings`` edit routed through
@@ -316,8 +310,8 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
 
     ``asyncio.shield()`` is called from *inside* the ``_prewarm_lock``
     block, matching the lock's original scope, deliberately: moving it
-    outside would let a second caller's own ``get_provider()`` lookup run
-    concurrently with the first attempt's in-flight ``_get_model()`` side
+    outside would let a second caller's own ``routing.get_provider()`` lookup
+    run concurrently with the first attempt's in-flight ``_get_model()`` side
     effects (e.g. a settings change clearing the provider cache mid-load),
     which changes the ordering spec 015's RED-1 orphan-cleanup regression
     test depends on. Keeping the lock's scope unchanged means the only
@@ -329,7 +323,7 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
         if stt_settings.mode != ProviderMode.LOCAL:
             return
 
-        provider = get_provider(ProviderMode.LOCAL, stt_settings)
+        provider = routing.get_provider(ProviderMode.LOCAL, stt_settings)
         if provider.is_loaded:
             _prewarm_error = None
             return
@@ -345,7 +339,7 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
                 return
             _prewarm_error = None
 
-        if peek_local_provider() is not provider:
+        if routing.peek_local_provider() is not provider:
             return
 
         if (
@@ -417,7 +411,7 @@ async def await_local_ready(
             f"Local speech-to-text model did not become ready within {timeout:.0f}s"
         ) from e
 
-    provider = peek_local_provider()
+    provider = routing.peek_local_provider()
     return provider is not None and provider.is_loaded
 
 
