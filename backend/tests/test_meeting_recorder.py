@@ -21,7 +21,6 @@ import time
 import types
 import typing
 import wave
-from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -399,56 +398,6 @@ def recording_microphone_stream():
 
     with patch("app.audio.meeting_recorder.sd.InputStream", _factory):
         yield types.SimpleNamespace(calls=calls, idents=idents, streams=streams)
-
-
-def _record_submissions(
-    recorder: MeetingRecorder, owner: str, submitted: list[tuple[str, Future]]
-) -> None:
-    """Note every callable handed to one of the recorder's executors."""
-    executor = getattr(recorder, owner)
-    submit = executor.submit
-
-    def recording_submit(fn, *args, **kwargs):
-        future = submit(fn, *args, **kwargs)
-        submitted.append((owner, future))
-        return future
-
-    executor.submit = recording_submit
-
-
-@pytest.fixture(autouse=True)
-def _no_recorder_carries_work_into_the_next_test():
-    """Fail the test that leaves work queued, not the test it lands on.
-
-    A `MeetingRecorder` owns three executors that outlive the test body
-    unless something drains them, and a callable still queued when the test
-    ends runs under the *next* test's patches. That is not hypothetical: the
-    write `test_a_cancelled_stop_still_returns_the_recorder_to_idle` left
-    behind ran inside the `write_wav_streaming` patch of whatever test
-    followed it and failed an assertion there. CI shuffles with
-    `-p randomly`, so the pair that collided was a different one every run
-    and the report named a test the leak had never touched.
-
-    Every submission each recorder makes is recorded here, and a future
-    neither finished nor cancelled at teardown is work handed to the next
-    test.
-    """
-    submitted: list[tuple[str, Future]] = []
-    construct = MeetingRecorder.__init__
-
-    def recording_construct(recorder: MeetingRecorder, settings: AudioSettings) -> None:
-        construct(recorder, settings)
-        for owner in ("_devices", "_writer", "_spill"):
-            _record_submissions(recorder, owner, submitted)
-
-    with patch.object(MeetingRecorder, "__init__", recording_construct):
-        yield
-
-    pending = sorted({owner for owner, future in submitted if not future.done()})
-    assert not pending, (
-        f"the test ended with work still queued on {pending}, which runs under "
-        f"the next test's patches instead of this one's"
-    )
 
 
 @pytest.mark.asyncio
@@ -1485,7 +1434,6 @@ async def test_the_system_half_gets_its_own_level_meter(
     assert recorder.level_db == float("-inf")
 
     recorder.cleanup()
-    _wait_for_devices(recorder)
 
 
 @pytest.mark.asyncio
@@ -2133,7 +2081,6 @@ async def test_a_cancelled_stop_still_returns_the_recorder_to_idle(
 
         source.release_close.set()
         _wait_for_devices(recorder)
-        _wait_for_writes(recorder)
 
     assert recorder.is_busy is False, (
         "the cancelled stop left the recorder permanently busy"
@@ -2273,7 +2220,6 @@ async def test_a_stop_cancelled_while_still_queued_releases_the_devices_anyway(
 
     gate.set()
     _wait_for_devices(recorder)
-    _wait_for_writes(recorder)
 
     assert fake_system_source.stopped is True
     assert [stream.closes for stream in recording_microphone_stream.streams] == [1]
@@ -3438,7 +3384,6 @@ async def test_a_status_during_the_microphone_open_names_what_it_is_capturing(
         )
     finally:
         recorder.cleanup()
-        _wait_for_devices(recorder)
 
 
 def test_a_failed_write_carries_the_cause_and_not_a_second_sentence(audio_settings):
@@ -3798,7 +3743,6 @@ async def test_a_far_side_block_kept_during_the_open_is_already_reported_recordi
         )
     finally:
         recorder.cleanup()
-        _wait_for_devices(recorder)
 
 
 @pytest.mark.asyncio
@@ -3891,7 +3835,6 @@ async def test_both_level_meters_keep_reading_when_a_block_is_refused(
         )
     finally:
         recorder.cleanup()
-        _wait_for_devices(recorder)
 
 
 @pytest.mark.asyncio

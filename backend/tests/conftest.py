@@ -16,12 +16,16 @@ import re
 import shutil
 import warnings
 from collections.abc import Callable
+from concurrent.futures import Future
+from concurrent.futures import wait as wait_for_futures
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.audio.meeting_recorder import MeetingRecorder
 from app.core.app_paths import DEV_DIR_NAME, PROD_DIR_NAME
 from app.core.config import settings
 from app.core.gpu_probe import clear_cache as clear_gpu_probe_cache
@@ -582,6 +586,125 @@ def _clear_lifespan_app_state():
     for attribute in _LIFESPAN_APP_STATE_ATTRIBUTES:
         if hasattr(app.state, attribute):
             delattr(app.state, attribute)
+
+
+_MEETING_RECORDER_EXECUTORS = ("_devices", "_writer", "_spill")
+_MEETING_RECORDER_TEARDOWN_SECONDS = 10.0
+
+
+def _record_meeting_submissions(
+    recorder: MeetingRecorder, owner: str, submitted: list[tuple[str, str, Future]]
+) -> None:
+    """Note every callable handed to one of the recorder's executors.
+
+    The recorder queues its own work through this same attribute, so a write
+    or a device release the recorder submitted for itself is recorded here
+    as well as anything a test submits by hand.
+
+    The callable's name is kept beside the future because the executor alone
+    names the symptom: `_writer` says work was left behind, and
+    `_write_captured_meeting` says which work.
+    """
+    executor = getattr(recorder, owner)
+    submit = executor.submit
+
+    def recording_submit(fn, *args, **kwargs):
+        future = submit(fn, *args, **kwargs)
+        submitted.append((owner, getattr(fn, "__name__", repr(fn)), future))
+        return future
+
+    executor.submit = recording_submit
+
+
+def _restore_meeting_submissions(recorder: MeetingRecorder) -> None:
+    """Uncover the executors' own `submit` again.
+
+    `_record_meeting_submissions` shadows it per instance, and the closure it
+    installs holds the finished test's list. Deleting the instance attribute
+    stops a recorder that outlives its test from appending into a list
+    nothing reads any more.
+    """
+    for owner in _MEETING_RECORDER_EXECUTORS:
+        getattr(recorder, owner).__dict__.pop("submit", None)
+
+
+def _retire_meeting_executors(recorder: MeetingRecorder, drained: bool) -> None:
+    """Shut the three executors down, joining them only when `drained`.
+
+    Joining a pool whose work has not finished is how this teardown would
+    hang instead of reporting: `_drain_spill` sits on `work.get()` until the
+    sentinel reaches it, and `concurrent.futures.thread` registers an atexit
+    hook that joins every pool thread. So the join happens only once every
+    future is accounted for; otherwise the queue is cancelled, which keeps
+    work that has not started yet from running under the next test, and the
+    leak is reported instead.
+    """
+    for owner in _MEETING_RECORDER_EXECUTORS:
+        getattr(recorder, owner).shutdown(wait=drained, cancel_futures=not drained)
+
+
+@pytest.fixture(autouse=True)
+def _every_meeting_recorder_is_retired_when_its_test_ends():
+    """Retire every `MeetingRecorder` the test built, before the next starts.
+
+    A recorder owns three single-worker executors, and a callable still
+    queued when the test body ends runs under the *next* test's patches. The
+    write `test_a_cancelled_stop_still_returns_the_recorder_to_idle` left
+    behind ran inside the `write_wav_streaming` patch of whatever test
+    followed it and failed an assertion there. CI shuffles with `-p
+    randomly`, so the pair that collided was a different one every run and
+    the report named a test the leak had never touched (JS-184).
+
+    Construction is patched rather than a `meeting_recorder` fixture offered,
+    because construction is what has to be caught: 82 sites across
+    `test_meeting_recorder.py`, `test_meeting_incidents.py` and
+    `test_macos_tap.py` build one by hand, and `main.py`'s lifespan builds
+    one more that no test fixture is asked for at all. A fixture reaches only
+    the sites that request it.
+
+    `cleanup()` is the recorder's own retirement -- the path the app takes at
+    shutdown, and the one that releases the spill worker from `work.get()` --
+    so the teardown calls it, waits for everything queued, and only then
+    joins the pools. Work still unfinished after that fails the test that
+    left it, which is the whole point: the failure lands on the test with the
+    bug rather than on whichever test ran next.
+
+    What is covered is the three executors. Work a recorder hands to a raw
+    thread -- `MacOSTapSource._reader`, a `SystemAudioSource` callback
+    thread, the `threading.Timer` in `test_meeting_recorder.py` -- is not an
+    executor submission and is not seen here.
+    """
+    recorders: list[MeetingRecorder] = []
+    submitted: list[tuple[str, str, Future]] = []
+    construct = MeetingRecorder.__init__
+
+    def recording_construct(recorder: MeetingRecorder, *args, **kwargs) -> None:
+        construct(recorder, *args, **kwargs)
+        recorders.append(recorder)
+        for owner in _MEETING_RECORDER_EXECUTORS:
+            _record_meeting_submissions(recorder, owner, submitted)
+
+    with patch.object(MeetingRecorder, "__init__", recording_construct):
+        yield
+
+    for recorder in recorders:
+        recorder.cleanup()
+    wait_for_futures(
+        [future for _, _, future in submitted],
+        timeout=_MEETING_RECORDER_TEARDOWN_SECONDS,
+    )
+    leaked = sorted(
+        {f"{owner}.{name}" for owner, name, future in submitted if not future.done()}
+    )
+    for recorder in recorders:
+        _retire_meeting_executors(recorder, drained=not leaked)
+        _restore_meeting_submissions(recorder)
+
+    assert not leaked, (
+        f"the test ended with {leaked} still queued on a meeting recorder, so "
+        f"it would have run under the next test's patches instead of this "
+        f"test's"
+    )
 
 
 @pytest.fixture(autouse=True)
