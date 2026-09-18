@@ -23,13 +23,19 @@ each one reddens across this file and `tests/test_error_handler.py` together:
 
 The sixth property is the repo-wide one, and it is the only thing holding a
 hierarchy whose classes are declared in the package that raises them rather
-than in `app/core/errors.py` (ADR 060). It walks every subclass reachable
-after `app.main` is imported, so a package-local class is covered by exactly
-the two rules the module-scoped tests above apply to the three base ones.
+than in `app/core/errors.py` (ADR 060). It imports the modules the source walk
+below found an exception class in and then walks every subclass reachable from
+`JustSayError`, so a package-local class is covered by exactly the two rules
+the module-scoped tests above apply to the three base ones, and the two halves
+describe the same set by construction rather than by whatever else the test
+process happened to import.
 Mutation run: `SessionMismatchError.code` set to `"not_ready"` -- one test.
 """
 
 import ast
+import builtins
+import functools
+import importlib
 import subprocess
 import sys
 from pathlib import Path
@@ -45,6 +51,17 @@ from app.core.errors import (
 )
 
 _ERRORS_SOURCE = Path(errors.__file__)
+_APP_DIR = Path(__file__).resolve().parents[1] / "app"
+_DELIBERATELY_OUTSIDE_THE_HIERARCHY = frozenset(
+    {"app.audio.analysis.MalformedCaptureBlockError"}
+)
+_BUILTIN_EXCEPTION_BASES = frozenset(
+    name
+    for name, value in vars(builtins).items()
+    if isinstance(value, type) and issubclass(value, BaseException)
+)
+_DECLARED_EXCEPTION_CLASS_COUNT = 14
+_HIERARCHY_MEMBER_COUNT = 13
 _WEB_FRAMEWORK_ROOTS = frozenset({"fastapi", "starlette"})
 
 
@@ -165,12 +182,23 @@ def test_importing_the_module_does_not_pull_a_web_framework_into_the_process() -
 def _every_subclass() -> list[type[JustSayError]]:
     """Every subclass in the process, however deep and wherever declared.
 
-    `app.main` is imported first because a class in a module nothing has
-    imported does not exist yet: the composition root is what makes the walk
-    repo-wide rather than errors-module-wide, and `tests/conftest.py` already
-    imports it for every other test in the suite.
+    The walk supplies its own imports, because a class in a module nothing has
+    imported does not exist yet and `__subclasses__()` cannot reach it. Being
+    reached by `app.main` is not the same thing: after importing it alone the
+    walk finds 11 of the 14 declarations, and
+    `app.transcripts.vector_store.SemanticSearchUnavailableError` arrived only
+    because an autouse fixture in `tests/conftest.py` imports that module for
+    an unrelated reason. `pytest --noconftest tests/test_errors.py` therefore
+    failed here, naming a class that had never left the hierarchy.
+
+    The modules imported are the ones the source walk below found a class in,
+    so the runtime half and the source half describe the same set by
+    construction rather than by whatever else the process happened to load.
     """
-    import app.main  # noqa: F401
+    for module in sorted(
+        name.rsplit(".", 1)[0] for name in _declared_exception_class_names()
+    ):
+        importlib.import_module(module)
 
     found: list[type[JustSayError]] = []
     pending = [JustSayError]
@@ -202,3 +230,262 @@ def test_every_refusal_that_declares_a_code_declares_a_distinct_one() -> None:
     assert duplicates == []
     assert JustSayError.code not in codes
     assert len(declared) >= 3
+
+
+def _dotted_name(expression: ast.expr) -> str:
+    """A base expression as the source spells it, or "" if it is not a name."""
+    parts: list[str] = []
+    while isinstance(expression, ast.Attribute):
+        parts.append(expression.attr)
+        expression = expression.value
+    if not isinstance(expression, ast.Name):
+        return ""
+    parts.append(expression.id)
+    return ".".join(reversed(parts))
+
+
+def _module_and_package(path: Path) -> tuple[str, str]:
+    """What `cls.__module__` says for a class in `path`, and its package.
+
+    `__init__.py` is dropped rather than kept as a part. A class declared in
+    `app/x/__init__.py` reports `app.x` at runtime while the file path spells
+    `app.x.__init__`, so keeping it made that class a permanent stray: present
+    in the source walk under one name and in the runtime walk under another.
+    The package is what a relative import counts back from, and for a package
+    `__init__` that is the package itself.
+    """
+    parts = path.relative_to(_APP_DIR.parent).with_suffix("").parts
+    if parts[-1] == "__init__":
+        return ".".join(parts[:-1]), ".".join(parts[:-1])
+    return ".".join(parts), ".".join(parts[:-1])
+
+
+def _import_aliases(tree: ast.Module, package: str) -> dict[str, str]:
+    """Every name this module's imports bind, mapped to what it names elsewhere.
+
+    `from app.core.errors import NotReadyError as Base` binds `Base` to
+    `app.core.errors.NotReadyError`, and `import ctypes` binds `ctypes` to
+    itself. Relative imports are counted back from `package`.
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+                else:
+                    head = alias.name.split(".")[0]
+                    aliases[head] = head
+        elif isinstance(node, ast.ImportFrom):
+            root = package
+            if node.level:
+                root = ".".join(package.split(".")[: len(package.split(".")) - node.level + 1])
+            source = ".".join(part for part in (root if node.level else "", node.module) if part)
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = (
+                    f"{source}.{alias.name}" if source else alias.name
+                )
+    return aliases
+
+
+def _declared_classes_in(source: str, module: str, package: str) -> dict[str, list[str]]:
+    """Every class `source` declares at module level, by its qualified bases.
+
+    Module level rather than `ast.walk`: a class declared inside a function
+    body or under `if TYPE_CHECKING:` has no runtime counterpart any
+    `__subclasses__()` walk could find, so counting it would fail this test
+    over a class that does not exist at runtime.
+
+    Bases are resolved through this module's own imports rather than by their
+    trailing name against a repo-wide index. The index answered `Timeout` with
+    whatever else in the repository happened to be called `Timeout`, so
+    `class Budget(Timeout)` over a third-party class read as an app exception,
+    while `from app.core.errors import NotReadyError as Base` followed by
+    `class Refused(Base)` was missed entirely -- the two failures a name
+    lookup produces, one in each direction. A name the imports do not bind is
+    either declared here, and is qualified with `module`, or is a builtin and
+    is left as it was written.
+    """
+    tree = ast.parse(source)
+    aliases = _import_aliases(tree, package)
+    local = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+
+    def _qualified(base: ast.expr) -> str:
+        dotted = _dotted_name(base)
+        head, _, attribute = dotted.partition(".")
+        if head in aliases:
+            target = aliases[head]
+            return f"{target}.{attribute}" if attribute else target
+        if not attribute and head in local:
+            return f"{module}.{head}"
+        return dotted
+
+    return {
+        f"{module}.{node.name}": [_qualified(base) for base in node.bases]
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+    }
+
+
+@functools.cache
+def _module_level_classes() -> dict[str, list[str]]:
+    """Every class `backend/app/` declares at module level, by its bases.
+
+    Cached because `backend/app/` is rglob'd and parsed in full to build it,
+    and four tests in this module ask for it. Every caller reads and none
+    writes, which is what makes one shared answer safe to hand out.
+    """
+    declarations: dict[str, list[str]] = {}
+    for path in sorted(_APP_DIR.rglob("*.py")):
+        module, package = _module_and_package(path)
+        declarations.update(
+            _declared_classes_in(path.read_text(encoding="utf-8"), module, package)
+        )
+    return declarations
+
+
+def _exception_class_names(declarations: dict[str, list[str]]) -> set[str]:
+    """Which of `declarations` are exception classes, by what they derive from.
+
+    Membership is decided by what a class derives from, not by its name ending
+    in `Error`: `class CaptureRefused(Exception)` is exactly the declaration a
+    naming convention hides, and the counts §3.1 states are about the
+    hierarchy rather than about a spelling. In-app bases are qualified by
+    `_declared_classes_in` and resolved to a fixpoint, so a class three levels
+    down from `Exception` is found however the intermediate classes are named
+    and wherever they were imported from.
+
+    Every builtin exception counts as a root, not just `Exception` and
+    `BaseException`. `class CaptureRefused(ValueError)` is an exception class
+    by every rule §3.1 states, and a two-name root set left it invisible here
+    -- all three assertions below stayed green for the exact drift this gate
+    exists to catch.
+    """
+
+    def _derives_from_an_exception(bases: list[str]) -> bool:
+        return any(
+            base in _BUILTIN_EXCEPTION_BASES or base in exceptions for base in bases
+        )
+
+    exceptions: set[str] = set()
+    growing = True
+    while growing:
+        found = {
+            qualified
+            for qualified, bases in declarations.items()
+            if qualified not in exceptions and _derives_from_an_exception(bases)
+        }
+        exceptions |= found
+        growing = bool(found)
+    return exceptions
+
+
+def _declared_exception_class_names() -> set[str]:
+    """Every exception class `backend/app/` declares, read from the source.
+
+    A source walk rather than a runtime one because the question is which
+    classes exist, and a class outside the hierarchy is reachable from no
+    `__subclasses__()` chain the runtime walk above can follow.
+    """
+    return _exception_class_names(_module_level_classes())
+
+
+def test_a_class_deriving_from_a_builtin_other_than_exception_is_still_one() -> None:
+    """`class CaptureRefused(ValueError)` is an exception, and was invisible here.
+
+    The root set was `Exception` and `BaseException` alone, so a declaration
+    rooted anywhere else in the builtin tree -- `ValueError`, `OSError`,
+    `RuntimeError` -- counted as an ordinary class. The stray set, the declared
+    count and the member count all stayed green while `backend/app/` grew an
+    exception outside the hierarchy, which is the one drift this gate is for.
+    """
+    declarations = _declared_classes_in(
+        "class CaptureRefused(ValueError):\n    pass\n"
+        "class Louder(CaptureRefused):\n    pass\n"
+        "class Settings(dict):\n    pass\n",
+        "app.demo",
+        "app",
+    )
+
+    assert _exception_class_names(declarations) == {
+        "app.demo.CaptureRefused",
+        "app.demo.Louder",
+    }
+
+
+def test_every_declared_error_is_in_the_hierarchy_or_named_as_staying_out() -> None:
+    """A class leaving the hierarchy unnoticed is how the count went stale.
+
+    `docs/style-guide.md` §3.1 states how many exception classes `backend/app/`
+    declares and how many are members, and it named `tests/test_words.py` as
+    the pin -- a module that does not mention the hierarchy at all, so the
+    number was held by the paragraph asserting it. Staying out is legitimate
+    and §3.1 says which cases qualify: "an invariant that broke, a library
+    that misbehaved, a device that failed mid-use" keep propagating into a
+    500 rather than becoming a refusal. What this rejects is drifting out in
+    silence, so a class that belongs outside is added here and nowhere else.
+
+    Both numbers are asserted, not just the set of strays: a fifteenth class
+    deriving from `NotReadyError` is a legitimate member and would leave the
+    stray set empty while §3.1's "declares 14 ... 13 are inside" went stale --
+    the identical failure this test exists to close, relocated rather than
+    fixed.
+    """
+    declared = _declared_exception_class_names()
+    inside = {f"{c.__module__}.{c.__name__}" for c in _every_subclass()}
+    inside.add(f"{JustSayError.__module__}.{JustSayError.__name__}")
+
+    assert sorted(declared - inside) == sorted(_DELIBERATELY_OUTSIDE_THE_HIERARCHY)
+    assert len(declared) == _DECLARED_EXCEPTION_CLASS_COUNT
+    assert len(declared & inside) == _HIERARCHY_MEMBER_COUNT
+
+
+def test_a_class_in_a_package_init_is_named_the_way_the_runtime_names_it() -> None:
+    """The source walk and the runtime walk compare qualified names.
+
+    A class in `app/x/__init__.py` answers `app.x` for `__module__`, so a
+    source walk spelling it `app.x.__init__` reports a class that never left
+    the hierarchy as a permanent stray -- and one that did leave it as
+    accounted for.
+    """
+    assert _module_and_package(_APP_DIR / "audio" / "__init__.py") == (
+        "app.audio",
+        "app.audio",
+    )
+    assert _module_and_package(_APP_DIR / "audio" / "analysis.py") == (
+        "app.audio.analysis",
+        "app.audio",
+    )
+
+
+def test_a_base_is_resolved_through_the_module_s_own_imports() -> None:
+    """Both directions a trailing-name lookup gets wrong.
+
+    Judging a base by its last component against a repo-wide index calls
+    `class Budget(Timeout)` an app exception because something unrelated in
+    the repository is named `Timeout`, and misses
+    `from app.core.errors import NotReadyError as Base` entirely, because
+    `Base` is not the name of anything.
+    """
+    source = (
+        "from app.core.errors import NotReadyError as Base\n"
+        "from httpx import Timeout\n"
+        "class Refused(Base):\n    pass\n"
+        "class Budget(Timeout):\n    pass\n"
+        "class Nested(Refused):\n    pass\n"
+    )
+
+    assert _declared_classes_in(source, "app.demo", "app") == {
+        "app.demo.Refused": ["app.core.errors.NotReadyError"],
+        "app.demo.Budget": ["httpx.Timeout"],
+        "app.demo.Nested": ["app.demo.Refused"],
+    }
+
+
+def test_a_relative_import_is_resolved_against_the_declaring_package() -> None:
+    """`from .errors import ...` inside `app/core/` is `app.core.errors`."""
+    source = "from .errors import JustSayError\nclass Refused(JustSayError):\n    pass\n"
+
+    assert _declared_classes_in(source, "app.core.thing", "app.core") == {
+        "app.core.thing.Refused": ["app.core.errors.JustSayError"]
+    }

@@ -27,6 +27,32 @@ _MIN_SPEECH_UNITS_FLOOR = 2
 _DBFS_FLOOR = 1e-10
 
 
+class MalformedCaptureBlockError(Exception):
+    """A raw capture buffer does not divide into whole interleaved frames.
+
+    Deliberately outside the `JustSayError` hierarchy (`app/core/errors.py`):
+    nothing routes it to a response, and both system-audio sources call this
+    function from inside a capture callback that catches everything and
+    reports it through `on_failure`. That is the "broken while in use raises"
+    half of docs/style-guide.md §3.3 — the source reports, and the meeting
+    keeps recording the microphone.
+
+    One named raise rather than two bare `ValueError`s from two libraries, in
+    wording that mentions no audio. That is the whole of what this class
+    buys, and it is worth saying what it does not: neither caller can produce
+    a buffer that reaches it. Each derives a block's length and its channel
+    count from one declaration — the macOS helper's stdout header, the WASAPI
+    endpoint's own mix format — so both arithmetics are the same numbers
+    twice. A `try/except` for it at either call site was a guard against a
+    condition that cannot occur, and four review rounds went into defending
+    one. The framing this function cannot check is checked where it can be:
+    `tests/test_cross_language_contracts.py` reads the Swift helper and pins
+    its header, its channel-count guards and its block arithmetic against the
+    Python that consumes them — the only place that contract could drift, and
+    the one file nothing here can compile.
+    """
+
+
 def required_speech_units(total_unit_count: int, *, cap: int, ratio: float) -> int:
     """How many "speech" units a clip of ``total_unit_count`` units must show.
 
@@ -93,8 +119,32 @@ def interleaved_buffer_to_mono(buffer: bytes, channels: int, dtype: str) -> np.n
     ``np.frombuffer`` hands back a read-only view of the caller's bytes;
     ``to_mono`` is what guarantees the block that comes out of here can be
     written to, whatever the channel count.
+
+    A buffer that is not a whole number of ``channels``-wide frames raises
+    ``MalformedCaptureBlockError`` naming both numbers, and so does a
+    ``channels`` below 1 rather than being divided by. ``np.frombuffer`` and
+    ``reshape`` each already refused such a buffer with a ``ValueError`` of
+    its own, from two libraries and in wording that mentions no audio; one
+    named raise is what puts the block size and the channel count into the
+    sentence the recorder is handed.
+
+    It is not the only raise a caller has to be ready for: ``dtype`` is the
+    caller's own declaration and ``np.dtype`` refuses an unparseable one with
+    a ``TypeError``. Both capture callbacks catch by `Exception` for that
+    reason, and name the type in what they report.
     """
-    interleaved = np.frombuffer(buffer, dtype=dtype)
+    if channels < 1:
+        raise MalformedCaptureBlockError(
+            f"a capture block cannot be read as {channels}-channel frames"
+        )
+    sample_dtype = np.dtype(dtype)
+    sample_count, leftover_bytes = divmod(len(buffer), sample_dtype.itemsize)
+    if leftover_bytes or sample_count % channels:
+        raise MalformedCaptureBlockError(
+            f"a {len(buffer)}-byte capture block is not a whole number of "
+            f"{channels}-channel {dtype} frames"
+        )
+    interleaved = np.frombuffer(buffer, dtype=sample_dtype)
     if channels > 1:
         interleaved = interleaved.reshape(-1, channels)
     return to_mono(interleaved)

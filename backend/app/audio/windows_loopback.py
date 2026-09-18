@@ -22,7 +22,9 @@ from app.audio.analysis import interleaved_buffer_to_mono
 from app.audio.config import AudioSettings
 from app.audio.endpoint_selection import resolve_loopback_device
 from app.audio.system_source import (
+    SAMPLE_DTYPE,
     BlockSink,
+    CaptureFailure,
     FailureSink,
     SystemAudioSource,
     SystemAudioUnavailableError,
@@ -60,9 +62,21 @@ class WindowsLoopbackSource(SystemAudioSource):
     Downmixing to mono is the only work done in the callback, and resampling
     to the pipeline's rate happens later, off the realtime thread, in
     `app.audio.timeline`.
+
+    Nothing this stream delivers can be unreadable, which is why `stop()` is
+    the only thing that ends delivery here. PortAudio builds each block as
+    `frame_count` frames of the sample size and channel count the stream was
+    opened with, so its length and its framing are the endpoint's own mix
+    format restated -- a guard comparing them compares three numbers with
+    themselves. What this source can observe is a status flag on a stream
+    still delivering and a raise out of the block sink, and `CaptureFailure`
+    names both.
     """
 
+    _capture_name = "the WASAPI loopback capture"
+
     def __init__(self, settings: AudioSettings):
+        super().__init__()
         self._settings = settings
         self._audio = pyaudio.PyAudio()
         try:
@@ -77,8 +91,6 @@ class WindowsLoopbackSource(SystemAudioSource):
         self._endpoint_name = str(device.get("name", "Unknown endpoint"))
         self._stream: object | None = None
         self._on_block: BlockSink | None = None
-        self._on_failure: FailureSink | None = None
-        self._status_reported = False
         self._lock = threading.Lock()
         log.info(
             "WASAPI loopback endpoint: %s (%d Hz, %d ch)",
@@ -109,16 +121,18 @@ class WindowsLoopbackSource(SystemAudioSource):
         has degraded, so it is reported to the recorder as well as logged:
         a meeting whose far side stopped arriving is news the user gets while
         the call is still running rather than when they play the file back.
+        It is a degradation and not a stop -- the stream is still delivering
+        blocks -- which is what keeps it from standing in for the report that
+        says the block sink has begun raising.
+
+        The report and the log are claimed apart, so a sink that refuses the
+        report does not also cost the diagnostic above.
         """
-        with self._lock:
-            already = self._status_reported
-            self._status_reported = True
-            on_failure = self._on_failure
-        if not already:
-            if on_failure is not None:
-                on_failure(
-                    f"the WASAPI loopback stream reported PortAudio status {int(status)}"
-                )
+        self._report_capture_failure(
+            f"the WASAPI loopback stream reported PortAudio status {int(status)}",
+            CaptureFailure.DEGRADED,
+        )
+        if self._claim_failure_log(CaptureFailure.DEGRADED):
             log.warning(
                 "WASAPI loopback stream reported PortAudio status %d "
                 "(paInputUnderflow=%d) — any silence in this recording may be "
@@ -127,20 +141,54 @@ class WindowsLoopbackSource(SystemAudioSource):
                 pyaudio.paInputUnderflow,
             )
 
-    def _stream_callback(self, in_data, frame_count, time_info, status):
+    def _deliver_block(self, in_data, status) -> None:
+        """One callback's worth of work: report the flag, downmix, hand over.
+
+        `frame_count` is not read. It is PortAudio's own count of the frames
+        it just built `in_data` out of, at the sample size and channel count
+        this stream was opened with, so `len(in_data)` and
+        `frame_count * self._channels * SAMPLE_BYTES` are the same three
+        numbers and a guard between them can only fire if PortAudio
+        contradicts itself.
+        """
         arrival = time.monotonic()
         if status:
             self._report_stream_status(status)
         with self._lock:
             sink = self._on_block
-        if sink is not None and in_data:
-            sink(arrival, interleaved_buffer_to_mono(in_data, self._channels, "<f4"))
+        if sink is None or not in_data:
+            return
+        mono = interleaved_buffer_to_mono(in_data, self._channels, SAMPLE_DTYPE)
+        self._deliver_to_sink(sink, arrival, mono)
+
+    def _stream_callback(self, in_data, frame_count, time_info, status):
+        """Nothing raises out of here, whatever the block or the sink does.
+
+        PortAudio does not report an exception crossing this boundary: it
+        tears the stream down, so `on_failure` is never called and the meeting
+        goes on reporting a healthy capture while holding the microphone
+        alone. The block sink is `MeetingRecorder._system_callback`, which
+        measures the block's level and writes it to a spill queue -- a caller
+        this module neither owns nor can promise about, which is why the catch
+        is the whole body rather than the deinterleave alone.
+
+        Nothing here ends the capture. A raise says something about that
+        caller or about this module, not about a device that is still handing
+        over blocks, so it is reported once and the next block is still
+        delivered: ending on one transient raise would cost the far side the
+        rest of the meeting and leave the stream open on a sink nothing sets
+        again.
+        """
+        try:
+            self._deliver_block(in_data, status)
+        except Exception as failure:
+            self._report_callback_failure(failure)
         return (None, pyaudio.paContinue)
 
     def start(self, on_block: BlockSink, on_failure: FailureSink | None = None) -> None:
         with self._lock:
             self._on_block = on_block
-            self._on_failure = on_failure
+        self._begin_failure_reports(on_failure)
         self._stream = self._audio.open(
             format=pyaudio.paFloat32,
             channels=self._channels,
@@ -155,7 +203,7 @@ class WindowsLoopbackSource(SystemAudioSource):
     def stop(self) -> None:
         with self._lock:
             self._on_block = None
-            self._on_failure = None
+        self._end_failure_reports()
         stream = self._stream
         self._stream = None
         if stream is not None:

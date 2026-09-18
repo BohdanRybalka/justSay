@@ -16,6 +16,7 @@ import soundfile as sf
 from pydantic import ValidationError
 
 from app.audio.analysis import (
+    MalformedCaptureBlockError,
     SilenceAnalysis,
     analyze_silence,
     interleaved_buffer_to_mono,
@@ -488,6 +489,47 @@ def test_interleaved_buffer_of_one_channel_is_passed_through_contiguous():
     assert mono == pytest.approx([0.1, -0.2, 0.3])
     assert mono.flags["C_CONTIGUOUS"]
     assert mono.flags["WRITEABLE"]
+
+
+def test_a_buffer_that_is_not_whole_samples_is_named_rather_than_left_to_numpy():
+    """The first of the two ways this used to raise from inside a library.
+
+    `np.frombuffer` refuses a byte count that does not divide by the item size
+    with a `ValueError` that mentions no audio, raised inside a realtime
+    capture callback where nothing can catch it by type.
+    """
+    with pytest.raises(MalformedCaptureBlockError) as refused:
+        interleaved_buffer_to_mono(b"\x00" * 9, 1, "<f4")
+
+    assert "9-byte" in str(refused.value)
+    assert "1-channel" in str(refused.value)
+
+
+def test_a_sample_count_that_does_not_fill_whole_frames_is_named():
+    """The second way: whole float32 samples, but an odd number of them for a
+    stereo endpoint, so the buffer has no frame boundary to reshape on."""
+    three_samples = np.array([0.1, 0.2, 0.3], dtype="<f4").tobytes()
+
+    with pytest.raises(MalformedCaptureBlockError) as refused:
+        interleaved_buffer_to_mono(three_samples, 2, "<f4")
+
+    assert "12-byte" in str(refused.value)
+    assert "2-channel" in str(refused.value)
+
+
+@pytest.mark.parametrize("channels", [0, -1])
+def test_a_channel_count_below_one_is_refused_rather_than_divided_by(channels):
+    """The named raise has to cover every way this function can fail.
+
+    A zero channel count reaches `sample_count % channels` before anything
+    validates it, and a `ZeroDivisionError` escapes a capture callback exactly
+    as the two untyped `ValueError`s used to — in the function whose whole job
+    is now to make that impossible.
+    """
+    with pytest.raises(MalformedCaptureBlockError) as refused:
+        interleaved_buffer_to_mono(np.zeros(8, dtype="<f4").tobytes(), channels, "<f4")
+
+    assert f"{channels}-channel" in str(refused.value)
 
 
 @pytest.mark.asyncio
