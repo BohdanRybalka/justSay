@@ -57,7 +57,16 @@ class UserSettings(BaseModel):
 
     ollama_host: str = "http://localhost:11434"
 
-    cloud_routing_threshold: float = Field(default=30.0, gt=0)
+    cloud_routing_threshold: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Seconds of audio at or below which Cloud mode routes to Groq instead of "
+            "Gemini. Cloud routing only: Local mode's short-clip boundary is "
+            "app.stt.local.SHORT_CLIP_SECONDS, which this field deliberately does not "
+            "decide (ADR 073). The two hold the same number and are two different facts."
+        ),
+    )
 
     initial_prompt: str = Field(default="", max_length=500)
 

@@ -217,13 +217,13 @@ def test_kind_is_faster_whisper_on_non_windows_amd_or_intel(monkeypatch, vendor_
 def test_every_local_provider_the_factory_resolves_carries_the_status_trio(monkeypatch):
     """The local status contract, pinned where Local mode is chosen (ADR 075).
 
-    `_get_model`, `is_loaded` and `last_load_error` carry the whole local-STT
-    status surface and none of them is on `STTProvider`. A kind whose class
-    spells one of them differently -- `_load_model` for `_get_model` is the
-    shape this module's own docstring anticipates -- raises nowhere: the
-    status endpoint reports "not loaded, no error" for the life of the
-    process, the Settings models tab draws a healthy indicator, and
-    `POST /stt/local/load` answers 500 with a generic crash detail.
+    The members of `local_factory.LOCAL_STATUS_CONTRACT` carry the whole
+    local-STT status surface and none of them is on `STTProvider`. A kind
+    whose class spells one of them differently -- the misspelling this
+    module's own docstring anticipates -- raises nowhere: the status endpoint
+    reports "not loaded, no error" for the life of the process, the Settings
+    models tab draws a healthy indicator, and `POST /stt/local/load` answers
+    500 with a generic crash detail.
 
     `LocalProviderKind` is walked rather than a hand-written list of classes,
     so a fourth kind cannot be added without this test seeing it. Walking it is
@@ -236,14 +236,20 @@ def test_every_local_provider_the_factory_resolves_carries_the_status_trio(monke
     What this does not cover: a kind wired to a class that declares all three
     names and implements one of them wrongly. The three are checked for
     existence, which is what ADR 075 pins; behaviour is each provider's own
-    tests. The enum is imported inside the function body, like every other test
-    here -- the module-level import test below drops `app.stt.local_factory`
-    from `sys.modules` and re-imports it, which would leave a module-level
-    binding pointing at a dead module object.
+    tests. The names are read off `LOCAL_STATUS_CONTRACT` rather than copied
+    here, so renaming a member reddens this test instead of leaving it green
+    against a name nothing declares any more.
+
+    The import sits in the function body because every other test in this
+    module puts it there, and for no stronger reason: the module-level import
+    check below runs in a subprocess (`assert_module_binds_no_third_party`)
+    and `test_sys_modules_hygiene.py` forbids any test from removing a module
+    from `sys.modules` at all, so nothing in this file ever rebinds
+    `app.stt.local_factory`.
     """
     from app.stt import local_factory
 
-    required = ("_get_model", "is_loaded", "last_load_error")
+    required = local_factory.LOCAL_STATUS_CONTRACT
 
     for kind in local_factory.LocalProviderKind:
         monkeypatch.setattr(

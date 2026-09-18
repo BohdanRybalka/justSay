@@ -121,22 +121,33 @@ def get_local_provider_kind(vendor: "GpuVendor | None" = None) -> LocalProviderK
     return LocalProviderKind.FASTER_WHISPER
 
 
+LOCAL_STATUS_CONTRACT: tuple[str, ...] = ("_get_model", "is_loaded", "last_load_error")
+"""The members a Local-mode provider class owes, spelled once.
+
+`POST /stt/local/load` and the prewarm task call the first; `GET
+/stt/local/status`'s `model_loaded` and `last_error` are the other two, read
+through `app.stt.routing`. None of them sits on `app.stt.base.STTProvider`, and
+no base class can supply them without making a misspelling quieter rather than
+louder (ADR 075).
+
+Every docstring that states the obligation points here instead of respelling
+the names, and `tests/test_local_factory.py` imports this tuple rather than
+copying it, so renaming a member cannot leave prose naming a dead one.
+"""
+
+
 def get_local_provider_class() -> type[STTProvider]:
     """The concrete provider class Local mode runs on this machine.
 
-    This is the boundary the local status contract is pinned at. Every class
-    reachable from here must declare `_get_model()`, `is_loaded` and
-    `last_load_error` -- the three members `POST /stt/local/load` and
-    `GET /stt/local/status` read, none of which sits on `STTProvider` and
-    none of which any base class can supply without making the failure
-    quieter (ADR 075).
+    This is the boundary the local status contract is pinned at: every class
+    reachable from here must declare every member of `LOCAL_STATUS_CONTRACT`.
 
     `tests/test_local_factory.py` walks `LocalProviderKind` and checks the
-    class this function resolves for each one, so a kind added with a class
-    that spells a name differently fails there. Unpinned, it reports "not
-    loaded, no error" for the life of the process: the Settings models tab
-    draws a healthy indicator and `POST /stt/local/load` answers 500 with a
-    generic crash detail.
+    class this function resolves for each one against that tuple, so a kind
+    added with a class that spells a name differently fails there. Unpinned,
+    it reports "not loaded, no error" for the life of the process: the
+    Settings models tab draws a healthy indicator and `POST /stt/local/load`
+    answers 500 with a generic crash detail.
     """
     if get_local_provider_kind() is LocalProviderKind.WHISPER_CPP_SERVER:
         from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider

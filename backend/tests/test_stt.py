@@ -612,35 +612,56 @@ async def test_local_short_path_boundary_is_short_clip_seconds(
     A duration exactly at `SHORT_CLIP_SECONDS` is still short; half a second
     past it is not. Written against the constant so moving the number moves
     the test with it rather than leaving a stale 30 behind.
+
+    Both kwargs are asserted, not the beam alone. They are set from the same
+    `is_short` flag today, and the boundary is the one place a split between
+    them would live: made inclusive on one side and strict on the other, a
+    30.0-second clip ships with beam 1 *and* cross-segment context while the
+    5 s and 120 s tests either side stay green.
     """
     provider = LocalSTTProvider(STTSettings(mode=ProviderMode.LOCAL))
     model = _mock_local_model(provider)
 
     await provider.transcribe(sample_wav, language="uk", audio_duration=audio_duration)
 
-    assert model.transcribe.call_args.kwargs["beam_size"] == expected_beam
+    kwargs = model.transcribe.call_args.kwargs
+    assert kwargs["beam_size"] == expected_beam
+    assert kwargs["condition_on_previous_text"] is (expected_beam == 5)
 
 
 @pytest.mark.asyncio
-async def test_local_beam_size_ignores_the_cloud_routing_threshold(sample_wav):
+@pytest.mark.parametrize(
+    "cloud_routing_threshold,audio_duration,expected_beam",
+    [(45.0, 40.0, 5), (10.0, 20.0, 1)],
+)
+async def test_local_beam_size_ignores_the_cloud_routing_threshold(
+    sample_wav, cloud_routing_threshold, audio_duration, expected_beam
+):
     """Tuning cloud routing must not retune local transcription (ADR 073).
 
     `cloud_routing_threshold` picks Groq against Gemini in Cloud mode. It used
     to decide the local beam size too, so raising it to 45 to send more audio
     to Groq also dropped a 40-second local clip to beam 1 without
     cross-segment context — a coupling invisible at both call sites. The local
-    boundary is `SHORT_CLIP_SECONDS`, so 40 seconds stays on the accuracy path
-    whatever the cloud field says.
+    boundary is `SHORT_CLIP_SECONDS` whatever the cloud field says.
+
+    Both directions are here because either alone leaves the coupling
+    reachable. 45/40 catches the cloud field *widening* the local short path.
+    10/20 catches it *narrowing* it, which is what a
+    `min(SHORT_CLIP_SECONDS, cloud_routing_threshold)` boundary would do and
+    what the 45/40 case on its own lets through.
     """
-    settings = STTSettings(mode=ProviderMode.LOCAL, cloud_routing_threshold=45.0)
+    settings = STTSettings(
+        mode=ProviderMode.LOCAL, cloud_routing_threshold=cloud_routing_threshold
+    )
     provider = LocalSTTProvider(settings)
     model = _mock_local_model(provider)
 
-    await provider.transcribe(sample_wav, language="uk", audio_duration=40.0)
+    await provider.transcribe(sample_wav, language="uk", audio_duration=audio_duration)
 
     kwargs = model.transcribe.call_args.kwargs
-    assert kwargs["beam_size"] == 5
-    assert kwargs["condition_on_previous_text"] is True
+    assert kwargs["beam_size"] == expected_beam
+    assert kwargs["condition_on_previous_text"] is (expected_beam == 5)
 
 
 @pytest.mark.asyncio
@@ -883,9 +904,12 @@ def test_is_local_provider_true_for_a_declared_local_provider():
 
 
 def test_is_local_provider_defaults_false_for_an_undeclared_provider():
-    """A provider that never overrides `is_local` (the STTProvider ABC
-    default) must read as not-local -- proves the getattr default matters,
-    not just the two named classes."""
+    """A provider that never overrides `is_local` must read as not-local.
+
+    The value read is the `ClassVar` on the `STTProvider` ABC, inherited
+    rather than declared on this class -- which is what makes the direct
+    attribute read in `is_local_provider` total over every provider, not just
+    the two that set the flag themselves."""
     from app.stt.groq_whisper import GroqWhisperSTTProvider
     from app.stt.routing import is_local_provider
 

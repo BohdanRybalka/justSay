@@ -609,14 +609,13 @@ def _force_faster_whisper_for_local(monkeypatch, request):
     already-resolved vendor to avoid double-probing the GPU, and this stub
     must accept that same call shape.
 
-    Patched on `app.stt.local_setup`'s own already-bound name (mirroring
-    `is_macos_arm64`'s existing import style), NOT on `app.stt.local_factory`
-    directly — `test_local_factory.py`'s
-    `test_factory_module_imports_no_third_party_at_module_level` deletes and
-    re-imports `app.stt.local_factory` from `sys.modules`, which would
-    silently split the patched module object from the one `local_setup.py`
-    already imported its name from, un-patching this fixture for every test
-    that runs after that one in the same session.
+    `get_local_provider_kind` is patched on `app.stt.local_setup`'s own
+    already-bound name, NOT on `app.stt.local_factory` — `local_setup.py`
+    binds it with a module-level `from app.stt.local_factory import ...`, so a
+    patch on the factory module's attribute is never read there.
+    `get_local_provider_class` is the other way round: its caller imports it
+    inside a function body (`routing._get_local`), re-reading the factory
+    module's attribute on every call, so that is where its patch goes.
 
     `@pytest.mark.no_factory_stub` (spec 028 iteration-2 review, RED 2) is
     the single opt-out marker: this fixture stubs `get_local_provider_class`

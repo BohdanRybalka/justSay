@@ -142,11 +142,10 @@ class STTProvider(ABC):
     """Contract: Audio file in -> transcribed text out.
 
     Local providers owe three further members that are deliberately absent
-    from this class: ``_get_model()``, ``is_loaded`` and ``last_load_error``.
-    Between them they carry the whole local-STT status surface —
-    ``POST /stt/local/load`` and the prewarm task call ``_get_model()``, and
-    ``GET /stt/local/status``'s ``model_loaded`` and ``last_error`` are the
-    other two, read through :mod:`app.stt.routing`.
+    from this class. :data:`app.stt.local_factory.LOCAL_STATUS_CONTRACT` is
+    where they are spelled and where what each one carries is stated; this
+    docstring points at it rather than keeping a second copy of the names,
+    so renaming one cannot leave a dead name here.
 
     They are not promoted onto this class, because a no-op default would make
     the failure worse rather than better: every cloud provider would acquire

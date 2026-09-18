@@ -204,6 +204,43 @@ def test_different_providers_coexist_in_cache():
     assert groq is not gemini
 
 
+def test_the_status_reads_raise_on_a_provider_that_declares_neither_member():
+    """ADR 075's second half, pinned: a missing member must raise, not answer.
+
+    `get_local_load_error()` and `is_model_loaded()` read `last_load_error`
+    and `is_loaded` straight off the cached local provider. Read through a
+    defaulting `getattr` instead, a local provider class that spells either
+    name differently gets "no error" and "not loaded" answered on its behalf:
+    `GET /stt/local/status` draws a healthy indicator and reports a model that
+    never loads, for the life of the process, which is the defect ADR 075
+    exists to end rather than to relocate.
+
+    Nothing else in the suite reaches this. Every class
+    `get_local_provider_class()` can return today declares both members, so
+    restoring the two defaults leaves every other test green -- which is why
+    the object here is planted in the cache rather than resolved from the
+    factory. The class it stands for is the one the factory does not have yet.
+
+    The factory is imported in the function body, not at module level: the
+    autouse `_force_faster_whisper_for_local` fixture patches it on
+    `app.stt.local_factory` itself, and only a body-local import reads the
+    same object the two functions under test resolve.
+    """
+    from app.stt.local_factory import get_local_provider_class
+    from app.stt.routing import get_local_load_error, is_model_loaded
+
+    class _ProviderDeclaringNothing:
+        pass
+
+    _providers[get_local_provider_class()] = _ProviderDeclaringNothing()
+
+    with pytest.raises(AttributeError, match="last_load_error"):
+        get_local_load_error(STTSettings(mode=ProviderMode.LOCAL))
+
+    with pytest.raises(AttributeError, match="is_loaded"):
+        is_model_loaded()
+
+
 def test_clear_cache_triggers_cleanup_on_all():
     s = _cloud_settings()
     groq, _ = get_routed_provider(s, audio_duration=5.0)
