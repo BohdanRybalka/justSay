@@ -15,8 +15,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
+from app import embeddings
 from app.core.app_paths import resolve_app_data_root, resolve_temp_dir
 from app.core.errors import ConfigurationError
+from app.core.types import ProviderMode
+from app.stt import routing as stt_routing
 from app.transcripts import relocation
 
 
@@ -363,7 +366,6 @@ def sync_to_runtime(us: UserSettings) -> bool:
     (put_settings()'s prewarm gate) don't have to re-derive it themselves.
     """
     from app.core.config import settings
-    from app.core.types import ProviderMode
 
     stt_mode = ProviderMode(us.stt_mode)
 
@@ -392,13 +394,10 @@ def sync_to_runtime(us: UserSettings) -> bool:
     settings.embeddings.ollama_host = us.ollama_host
 
     if changed_stt:
-        from app.stt import clear_cache as clear_stt_cache
-        clear_stt_cache()
-        from app.embeddings import clear_cache as clear_embeddings_cache
-        clear_embeddings_cache()
+        stt_routing.clear_cache()
+        embeddings.clear_cache()
     if changed_embeddings:
-        from app.embeddings import clear_cache as clear_embeddings_cache
-        clear_embeddings_cache()
+        embeddings.clear_cache()
 
     return bool(changed_stt)
 

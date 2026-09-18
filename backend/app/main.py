@@ -128,7 +128,7 @@ async def lifespan(app: FastAPI):
     finally:
         log.info("Backend shutdown: releasing model caches")
         from app.embeddings import clear_cache as clear_embeddings
-        from app.stt import clear_cache as clear_stt
+        from app.stt.routing import clear_cache as clear_stt
         release_steps: list[tuple[str, Callable[[], object]]] = [
             ("releasing the STT cache", clear_stt),
             ("releasing the embeddings cache", clear_embeddings),
