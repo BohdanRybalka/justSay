@@ -303,13 +303,12 @@ class MacOSTapSource(SystemAudioSource):
         failing in a way `_read_exactly` does not already answer.
         """
         block_bytes = self._settings.meeting_block_frames * self._channels * SAMPLE_BYTES
-        frame_bytes = self._channels * SAMPLE_BYTES
         stdout = process.stdout
         try:
             while True:
                 chunk = _read_exactly(stdout, block_bytes)
                 if len(chunk) < block_bytes:
-                    return self._ran_out(len(chunk) % frame_bytes)
+                    return self._ran_out(len(chunk), block_bytes)
                 with self._lock:
                     sink = self._on_block
                 if sink is None:
@@ -324,17 +323,23 @@ class MacOSTapSource(SystemAudioSource):
                 f"{type(failure).__name__}"
             )
 
-    def _ran_out(self, partial_frame_bytes: int) -> str | None:
-        """Why the helper's stream ended, when its last frame was cut in half.
+    def _ran_out(self, partial_block_bytes: int, block_bytes: int) -> str | None:
+        """Why the helper's stream ended, when it ended short of a block.
 
-        The helper writes whole blocks and nothing else writes to this pipe,
-        so the frame boundaries are the byte count and nothing marks them.
-        `writeAll` in `main.swift` retries until every byte of a block is
-        out and gives up only by stopping altogether, which is what makes a
-        tail that is not a whole number of frames a fact rather than a
-        possibility: the stream was cut mid-frame on the way out, and every
-        frame this side cut before it was cut at an offset that cannot be
-        recovered from here.
+        The whole-block guarantee is what this rests on, because it is the
+        one the helper actually gives. `writeAll` in `main.swift` retries
+        until every byte it was handed is out and gives up only by stopping
+        altogether, and `flushWholeBlocks` hands it
+        `pending.count - (pending.count % blockSamples)` samples, so nothing
+        but whole blocks ever enters this pipe. A stream that ended cleanly
+        therefore reads zero bytes here, and any tail at all is proof the
+        stream was cut on the way out.
+
+        Read against the frame size instead, the tail was evidence only when
+        the cut happened to be frame-misaligned -- for a two-channel float32
+        stream, seven cuts in eight. The eighth reported nothing and the
+        recording went on looking healthy with the far side gone, which is
+        the defect this path exists to close.
 
         Reported as a stop rather than tolerated, because there is nothing to
         tolerate -- the stream is over either way. What the report buys is
@@ -345,12 +350,11 @@ class MacOSTapSource(SystemAudioSource):
         write interrupted by the kill explains the cut, and the same read is
         how every clean teardown ends.
         """
-        if not partial_frame_bytes or self._stopping.is_set():
+        if not partial_block_bytes or self._stopping.is_set():
             return None
         return (
             f"the macOS system-audio helper stopped delivering usable audio -- its "
-            f"stream ended {partial_frame_bytes} bytes into a {self._channels}-channel "
-            f"{SAMPLE_DTYPE} frame"
+            f"stream ended {partial_block_bytes} bytes into a {block_bytes}-byte block"
         )
 
     def _stop_reading(self, process: subprocess.Popen) -> None:
@@ -650,10 +654,10 @@ def _read_exactly(stream: object, size: int) -> bytes:
     """`size` bytes, or fewer once the stream cannot supply them.
 
     A short answer is the end of the stream, and how short it is is the
-    evidence the caller reads: the helper writes whole frames, so a tail that
-    is not a whole number of them says the byte stream was cut mid-frame.
-    Returning None threw that length away, which left the one framing failure
-    this side can observe indistinguishable from a clean end.
+    evidence the caller reads: the helper writes whole blocks and nothing
+    else, so any tail shorter than one says the stream was cut. Returning
+    None threw that length away, which left the one framing failure this side
+    can observe indistinguishable from a clean end.
     """
     parts: list[bytes] = []
     remaining = size

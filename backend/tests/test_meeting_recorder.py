@@ -852,6 +852,44 @@ def test_a_loopback_sink_that_raises_is_reported_once_and_keeps_delivering(
     ], reported
 
 
+def test_a_block_the_callback_cannot_frame_still_answers_portaudio_to_keep_going(
+    fake_pyaudiowpatch, render_endpoints, loopback_source
+):
+    """What the outer catch answers PortAudio, pinned rather than assumed.
+
+    `paAbort` is the teardown this whole path exists to prevent: PortAudio
+    stops the stream, the sink is never called again, and the meeting goes on
+    reporting a healthy capture while holding the microphone alone. Every
+    other test on this callback drives a raise one of the inner guards
+    catches, so all of them stay green with this handler answering `paAbort`
+    -- the change's central promise was held by nothing.
+
+    The buffer is one PortAudio cannot build. `in_data` is always
+    `frame_count * channels * Pa_GetSampleSize(paFloat32)` bytes, so a length
+    that is not a whole number of samples arrives from a test and from nowhere
+    else, and that is the point rather than a flaw in it: what is under test
+    is the answer, not the reachability of the input. It is also the only way
+    into that handler from this repository -- `_deliver_to_sink` swallows a
+    raising block sink and `_report_capture_failure` swallows a raising
+    failure sink -- which is exactly why the answer was never observed.
+    """
+    source = loopback_source()
+    reported: list[str] = []
+    source.start(lambda arrival, mono: None, reported.append)
+    ragged = np.zeros(4, dtype="<f4").tobytes() + b"\x00"
+
+    answer = source._stream_callback(ragged, 2, None, 0)
+
+    assert answer == (None, fake_pyaudiowpatch.paContinue), (
+        f"the callback answered {answer}, and PortAudio tears the stream down "
+        f"on anything but paContinue: the far side is gone for the rest of the "
+        f"meeting and nothing is left running to report it"
+    )
+    assert reported == [
+        "the WASAPI loopback capture failed with an unexpected MalformedCaptureBlockError"
+    ], reported
+
+
 def test_a_stopped_loopback_source_cannot_be_started_again(
     fake_pyaudiowpatch, render_endpoints
 ):

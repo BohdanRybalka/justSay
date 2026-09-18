@@ -38,10 +38,12 @@ from app.audio.system_source import SystemAudioUnavailableError, create_system_a
 BLOCK_FRAMES = 64
 NEWLINE = b"\n"
 
-STREAM_CUT_MID_FRAME = (
-    "the macOS system-audio helper stopped delivering usable audio -- its stream "
-    "ended 7 bytes into a 2-channel <f4 frame"
-)
+def stream_cut(tail_bytes: int, channels: int = 2) -> str:
+    return (
+        f"the macOS system-audio helper stopped delivering usable audio -- its "
+        f"stream ended {tail_bytes} bytes into a "
+        f"{BLOCK_FRAMES * channels * 4}-byte block"
+    )
 
 
 @pytest.fixture
@@ -160,17 +162,17 @@ def tap_stdout(blocks: int, channels: int = 2, fill: float = 0.25, **header) -> 
     return header_line(channels=channels, **header) + frames.tobytes()
 
 
-def tap_stdout_cut_mid_frame(blocks: int, channels: int = 2) -> bytes:
-    """A helper stream whose last bytes stop part-way through a frame.
+def tap_stdout_cut(blocks: int, tail_bytes: int, channels: int = 2) -> bytes:
+    """A helper stream whose last bytes stop part-way through a block.
 
     The one framing failure this side can observe, written as the bytes that
     produce it rather than injected by patching the deinterleave. A helper
-    writing whole blocks through `writeAll` cannot leave a partial frame
+    writing whole blocks through `writeAll` cannot leave a partial block
     behind and carry on -- it retries until every byte is out, or stops -- so
-    the tail is where the evidence is, and `tests/test_cross_language_contracts`
-    is what holds the Swift to that.
+    any tail at all is where the evidence is, whatever its length, and
+    `tests/test_cross_language_contracts` is what holds the Swift to that.
     """
-    return tap_stdout(blocks=blocks, channels=channels) + b"\x00" * (channels * 4 - 1)
+    return tap_stdout(blocks=blocks, channels=channels) + b"\x00" * tail_bytes
 
 
 @pytest.fixture
@@ -659,8 +661,9 @@ def test_a_helper_that_exits_tells_the_recorder_the_far_side_is_gone(tap_setting
     )
 
 
-def test_a_stream_cut_mid_frame_is_reported_rather_than_read_as_whole_blocks(
-    tap_settings, tap_source
+@pytest.mark.parametrize("tail_bytes", [1, 7, 8, 504])
+def test_a_stream_cut_short_of_a_block_is_reported_rather_than_read_as_a_clean_end(
+    tap_settings, tap_source, tail_bytes
 ):
     """AC: a helper stream this side cannot frame reaches the recorder.
 
@@ -673,10 +676,17 @@ def test_a_stream_cut_mid_frame_is_reported_rather_than_read_as_whole_blocks(
     refuse anything this module hands it -- `block_bytes` and the channel
     count come from the same header field, so every full chunk divides evenly
     by construction, and a test that injected a refusal was asserting its own
-    `side_effect`. What the helper can leave behind is a tail that is not a
-    whole frame, and that is these seven bytes.
+    `side_effect`. What the helper can leave behind is a tail shorter than a
+    whole block, and that is what each of these lengths is.
+
+    Parametrised because two of the four -- 8 and 504 -- are whole numbers of
+    two-channel float32 frames. The check these replace read
+    `len(chunk) % frame_bytes`, so a cut landing on a frame boundary, one in
+    eight of them, reached nobody at all: the recording kept its healthy
+    marker while the far side was gone. A single length proved nothing about
+    the other seven, and the one this file happened to use was misaligned.
     """
-    process = _FakeTapProcess(tap_stdout_cut_mid_frame(blocks=3))
+    process = _FakeTapProcess(tap_stdout_cut(blocks=3, tail_bytes=tail_bytes))
     source = tap_source()
     received: list[np.ndarray] = []
     reported: list[str] = []
@@ -688,10 +698,10 @@ def test_a_stream_cut_mid_frame_is_reported_rather_than_read_as_whole_blocks(
 
     assert not reader.is_alive()
     assert len(received) == 3, "the whole blocks before the cut were dropped too"
-    assert reported == [STREAM_CUT_MID_FRAME], (
-        f"a helper whose stream was cut mid-frame told the recorder {reported}, "
-        f"so the meeting keeps its indicator clean while what it recorded of "
-        f"the far side ends in a frame nobody can place"
+    assert reported == [stream_cut(tail_bytes)], (
+        f"a helper whose stream was cut {tail_bytes} bytes into a block told "
+        f"the recorder {reported}, so the meeting keeps its indicator clean "
+        f"while what it recorded of the far side ends where nobody can place it"
     )
 
 
@@ -717,7 +727,7 @@ def test_a_cut_stream_leaves_the_loop_so_the_exit_report_still_runs(
     whether the sink survived the first report or was taken and cleared by it.
     """
     process = _FakeTapProcess(
-        tap_stdout_cut_mid_frame(blocks=3),
+        tap_stdout_cut(blocks=3, tail_bytes=7),
         returncode=0,
         stderr=b"fail: the tap was invalidated\n",
     )
@@ -737,7 +747,7 @@ def test_a_cut_stream_leaves_the_loop_so_the_exit_report_still_runs(
         f"report read that as nothing to say, so its own account of the framing "
         f"is gone: {messages}"
     )
-    assert reported == [STREAM_CUT_MID_FRAME]
+    assert reported == [stream_cut(7)]
 
 
 @pytest.mark.timeout(30)
@@ -755,7 +765,7 @@ def test_the_pipe_is_closed_before_the_recorder_is_told_why(tap_settings, tap_so
     order is asserted rather than sampled: reporting first leaves the wait to
     expire.
     """
-    process = _FakeTapProcess(tap_stdout_cut_mid_frame(blocks=1), returncode=0)
+    process = _FakeTapProcess(tap_stdout_cut(blocks=1, tail_bytes=7), returncode=0)
     closed = threading.Event()
     process.stdout.close = closed.set
     source = tap_source()
@@ -863,7 +873,7 @@ def test_a_tap_failure_sink_that_raises_still_closes_the_pipe_and_reports_the_ex
     wedged in and reading its last words both come after it.
     """
     process = _FakeTapProcess(
-        tap_stdout_cut_mid_frame(blocks=1), returncode=3, stderr=b"fail: gone\n"
+        tap_stdout_cut(blocks=1, tail_bytes=7), returncode=3, stderr=b"fail: gone\n"
     )
     source = tap_source()
 
@@ -896,7 +906,7 @@ def test_a_sink_that_raises_on_the_framing_still_hears_the_helper_s_exit(
     and a claim spent on a report nobody received would drop the exit silently.
     `_report_capture_failure` spends a kind only when the sink took it.
     """
-    process = _FakeTapProcess(tap_stdout_cut_mid_frame(blocks=1), returncode=3)
+    process = _FakeTapProcess(tap_stdout_cut(blocks=1, tail_bytes=7), returncode=3)
     source = tap_source()
     heard: list[str] = []
 
@@ -911,7 +921,7 @@ def test_a_sink_that_raises_on_the_framing_still_hears_the_helper_s_exit(
         source._reader.join(timeout=5.0)
 
     assert heard == [
-        STREAM_CUT_MID_FRAME,
+        stream_cut(7),
         "the macOS system-audio helper exited with code 3",
     ], heard
 
@@ -1183,14 +1193,17 @@ def test_a_cleared_block_sink_closes_the_pipe_the_helper_writes_into(
 def test_a_helper_that_exits_cleanly_reports_no_failure(tap_settings, tap_source):
     """A helper reaching the end of its stream is not a failed capture.
 
-    The stream ends on a partial *block* here, which is the ordinary way a
-    capture ends: `flushWholeBlocks` writes whole frames and the reader asks
-    for whole blocks, so the tail left over is frames the reader has no use
-    for rather than evidence of anything. Only a tail that is not a whole
-    number of frames is reported.
+    The stream ends on a block boundary here, which is the only way a helper
+    that was not cut can end: `flushWholeBlocks` writes
+    `pending.count - (pending.count % blockSamples)` samples and `writeAll`
+    puts every one of them out, so whatever this side reads is a whole number
+    of blocks and a clean end reads zero bytes. This test and the cut-stream
+    one above it are the two halves of that: nothing left over is silence,
+    anything left over is a cut. The version this replaces ended on half a
+    block and called it clean, which is the premise that let a frame-aligned
+    cut pass as an ordinary end of stream.
     """
-    whole_frames = np.full(BLOCK_FRAMES, 0.1, dtype="<f4").tobytes()
-    process = _FakeTapProcess(tap_stdout(blocks=1) + whole_frames, returncode=0)
+    process = _FakeTapProcess(tap_stdout(blocks=1), returncode=0)
     source = tap_source()
     reported: list[str] = []
 
