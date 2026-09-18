@@ -180,7 +180,12 @@ _SWIFT_STDOUT_WRITERS = ["flushWholeBlocks", "writeHeader"]
 
 _SWIFT_FLUSH_CALLERS = ["consume", "stop"]
 
-_SWIFT_COMMENT_OR_STRING_PATTERN = re.compile(r'"(?:\\.|[^"\\\n])*"' r"|//[^\n]*")
+_SWIFT_COMMENT_OR_STRING_PATTERN = re.compile(
+    r'"(?:\\.|[^"\\\n])*"' r"|/\*.*?\*/" r"|//[^\n]*",
+    re.DOTALL,
+)
+
+_NOT_A_NEWLINE = re.compile(r"[^\n]")
 
 _SWIFT_FUNCTION_PATTERN = re.compile(r"^[ \t]*(?:private\s+)?func (\w+)\b", re.MULTILINE)
 
@@ -1097,16 +1102,26 @@ def _swift_code() -> str:
     doc block would redden this suite with the Swift behaviour untouched, and
     whoever wrote that sentence has no way to see the failure is spurious.
 
+    Both spellings are blanked. ``/* ... */`` is not a variant this can skip:
+    a block comment holding a line that is a closing brace at a function's own
+    indent -- prose about the code it sits in, or code commented out -- ends
+    that function as far as the reader below is concerned, which cut
+    ``flushWholeBlocks`` from 521 characters to 21 and turned
+    ``_swift_call_sites("writeAll")`` into ``['writeHeader', '<top level>']``.
+    A block comment merely naming ``writeAll(`` counted as a call site by the
+    same omission.
+
     Comment bodies become spaces rather than disappearing, so every line and
     every column stays where it was and the indentation the reader below
-    captures is unchanged. String literals are matched first and passed
-    through, so a ``//`` inside a quoted value is not read as a comment.
+    captures is unchanged. Newlines inside a block comment are kept for the
+    same reason. String literals are matched first and passed through, so a
+    ``//`` inside a quoted value is not read as a comment.
     """
 
     def blank(match: re.Match[str]) -> str:
         token = match.group(0)
-        if token.startswith("//"):
-            return " " * len(token)
+        if token.startswith("/"):
+            return _NOT_A_NEWLINE.sub(" ", token)
         return token
 
     return _SWIFT_COMMENT_OR_STRING_PATTERN.sub(blank, _read(AUDIO_TAP_SWIFT))
