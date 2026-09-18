@@ -14,6 +14,7 @@ from app.core import tasks
 from app.core.errors import ResourceUnavailableError
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
+from app.stt import local_whisper_cpp_cmd, routing
 from app.stt.base import latched_load_error
 from app.stt.config import STTSettings
 from app.stt.local_factory import (
@@ -75,7 +76,15 @@ class LocalSttStatus(BaseModel):
 
 
 def check_status(stt_settings: STTSettings) -> LocalSttStatus:
-    """Check local STT readiness: package installed + load state + GPU + last error."""
+    """Check local STT readiness: package installed + load state + GPU + last error.
+
+    The cache is read for the loaded state exactly once and both load fields
+    answer from that one read. Reading it twice let one payload contradict
+    itself in two ways: with the package uninstalled the ``installed`` gate
+    reported ``model_loaded=False`` while the size ternary still asked the
+    cache and reported a number beside it, and a ``clear_cache()`` landing
+    between the two reads reported a loaded model with no size at all.
+    """
     installed = _check_package_installed()
     cuda_probe_available, gpu_name, gpu_vendor = _detect_gpu()
 
@@ -96,15 +105,14 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
     compute_type = compute_type_for_device(device, kind)
     gpu_available = is_accelerated_device(device, kind)
 
-    from app.stt import get_local_load_error, is_model_loaded
-
-    last_error = get_local_load_error(stt_settings) or _prewarm_error
+    last_error = routing.get_local_load_error(stt_settings) or _prewarm_error
+    model_is_loaded = routing.is_model_loaded() if installed else False
 
     return LocalSttStatus(
         package_installed=installed,
-        model_loaded=is_model_loaded() if installed else False,
+        model_loaded=model_is_loaded,
         model_name=stt_settings.whisper_model_size,
-        model_ram_mb=_estimate_model_ram_mb() if is_model_loaded() else None,
+        model_ram_mb=_estimate_model_ram_mb() if model_is_loaded else None,
         gpu_available=gpu_available,
         gpu_name=gpu_name,
         gpu_vendor=gpu_vendor,
@@ -254,9 +262,7 @@ async def _run_get_model(provider) -> None:
     else:
         _prewarm_error = None
     finally:
-        from app.stt import peek_local_provider
-
-        if peek_local_provider() is not provider:
+        if routing.peek_local_provider() is not provider:
             try:
                 provider.cleanup()
             except Exception:
@@ -270,7 +276,7 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
     The entry check is ``stt_settings.mode``-based (no point starting an
     attempt at all once mode has already moved on). The mid-install and
     mid-load rechecks are cache-*identity* checks instead
-    (``peek_local_provider() is not provider``), not mode checks — a mode
+    (``routing.peek_local_provider() is not provider``), not mode checks — a mode
     check is structurally insufficient here: ``clear_cache()`` can evict the
     captured ``provider`` from the cache without ``stt_settings.mode`` ever
     changing (e.g. an unrelated ``PUT /settings`` edit routed through
@@ -304,8 +310,8 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
 
     ``asyncio.shield()`` is called from *inside* the ``_prewarm_lock``
     block, matching the lock's original scope, deliberately: moving it
-    outside would let a second caller's own ``get_provider()`` lookup run
-    concurrently with the first attempt's in-flight ``_get_model()`` side
+    outside would let a second caller's own ``routing.get_provider()`` lookup
+    run concurrently with the first attempt's in-flight ``_get_model()`` side
     effects (e.g. a settings change clearing the provider cache mid-load),
     which changes the ordering spec 015's RED-1 orphan-cleanup regression
     test depends on. Keeping the lock's scope unchanged means the only
@@ -317,18 +323,14 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
         if stt_settings.mode != ProviderMode.LOCAL:
             return
 
-        from app.stt import get_provider, peek_local_provider
-
-        provider = get_provider(ProviderMode.LOCAL, stt_settings)
+        provider = routing.get_provider(ProviderMode.LOCAL, stt_settings)
         if provider.is_loaded:
             _prewarm_error = None
             return
 
         if not _check_package_installed():
             if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
-                from app.stt.local_whisper_cpp_cmd import binary_not_found_message
-
-                _prewarm_error = binary_not_found_message()
+                _prewarm_error = local_whisper_cpp_cmd.binary_not_found_message()
                 return
             _prewarm_error = None
             exit_code, output = await asyncio.to_thread(_run_pip_install)
@@ -337,7 +339,7 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
                 return
             _prewarm_error = None
 
-        if peek_local_provider() is not provider:
+        if routing.peek_local_provider() is not provider:
             return
 
         if (
@@ -409,9 +411,7 @@ async def await_local_ready(
             f"Local speech-to-text model did not become ready within {timeout:.0f}s"
         ) from e
 
-    from app.stt import peek_local_provider
-
-    provider = peek_local_provider()
+    provider = routing.peek_local_provider()
     return provider is not None and provider.is_loaded
 
 
@@ -450,8 +450,6 @@ def _check_package_installed() -> bool:
     checks for the importable `faster_whisper` package.
     """
     if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
-        from app.stt import local_whisper_cpp_cmd
-
         return local_whisper_cpp_cmd.resolve_binary_path() is not None
 
     try:
