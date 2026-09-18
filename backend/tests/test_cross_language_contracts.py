@@ -166,6 +166,29 @@ _SWIFT_CHANNEL_GUARDS: tuple[tuple[str, str], ...] = (
     ("resolveTapBufferIndex", "Int(format.mChannelsPerFrame) == channels"),
 )
 
+_SWIFT_TAP_SERIAL_QUEUE = re.compile(
+    r'private let queue = DispatchQueue\(\s*label: "com\.justsay\.audiotap\.io"\s*\)'
+)
+
+_SWIFT_IOPROC_ON_THE_TAP_QUEUE = re.compile(
+    r"AudioDeviceCreateIOProcIDWithBlock\(\s*&ioProcID\s*,\s*aggregateID\s*,\s*queue\s*\)"
+)
+
+_SWIFT_FLUSH_FROM_STOP = re.compile(r"queue\.sync\s*\{\s*flushWholeBlocks\(\)\s*\}")
+
+_SWIFT_STDOUT_WRITERS = ["flushWholeBlocks", "writeHeader"]
+
+_SWIFT_FLUSH_CALLERS = ["consume", "stop"]
+
+_SWIFT_COMMENT_OR_STRING_PATTERN = re.compile(
+    r'"(?:\\.|[^"\\\n])*"' r"|/\*.*?\*/" r"|//[^\n]*",
+    re.DOTALL,
+)
+
+_NOT_A_NEWLINE = re.compile(r"[^\n]")
+
+_SWIFT_FUNCTION_PATTERN = re.compile(r"^[ \t]*(?:private\s+)?func (\w+)\b", re.MULTILINE)
+
 _TYPESCRIPT_COMMENT_OR_STRING_PATTERN = re.compile(
     r'"(?:\\.|[^"\\\n])*"' r"|'(?:\\.|[^'\\\n])*'" r"|`(?:\\.|[^`\\])*`" r"|/\*.*?\*/" r"|//[^\n]*",
     re.DOTALL,
@@ -1068,30 +1091,104 @@ def test_the_shell_reads_every_data_directory_variable_the_backend_reads() -> No
     )
 
 
-def _swift_function_body(name: str) -> str:
-    r"""One Swift function of ``main.swift``, from its signature to the next one.
+def _swift_code() -> str:
+    """``main.swift`` with its comment bodies blanked out.
 
-    Bounded by the next ``func`` at the same indentation rather than by a brace
-    count, because nothing here parses Swift and a brace counter over string
-    literals and generics would be a parser pretending not to be one.
+    ``macos/JustSayAudioTap/**`` is the one tree ``CLAUDE.md`` exempts from
+    the comment ban and encourages comments in: the Swift cannot be compiled
+    anywhere in this repository, so the constraints it obeys are written down
+    beside it. A scan that reads raw lines therefore fails on prose. One more
+    ``///`` sentence naming ``flushWholeBlocks()`` in ``stop()``'s existing
+    doc block would redden this suite with the Swift behaviour untouched, and
+    whoever wrote that sentence has no way to see the failure is spurious.
+
+    Both spellings are blanked. ``/* ... */`` is not a variant this can skip:
+    a block comment holding a line that is a closing brace at a function's own
+    indent -- prose about the code it sits in, or code commented out -- ends
+    that function as far as the reader below is concerned, which cut
+    ``flushWholeBlocks`` from 521 characters to 21 and turned
+    ``_swift_call_sites("writeAll")`` into ``['writeHeader', '<top level>']``.
+    A block comment merely naming ``writeAll(`` counted as a call site by the
+    same omission.
+
+    Comment bodies become spaces rather than disappearing, so every line and
+    every column stays where it was and the indentation the reader below
+    captures is unchanged. Newlines inside a block comment are kept for the
+    same reason. String literals are matched first and passed through, so a
+    ``//`` inside a quoted value is not read as a comment.
+    """
+
+    def blank(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if token.startswith("/"):
+            return _NOT_A_NEWLINE.sub(" ", token)
+        return token
+
+    return _SWIFT_COMMENT_OR_STRING_PATTERN.sub(blank, _read(AUDIO_TAP_SWIFT))
+
+
+def _swift_function_body(name: str) -> str:
+    r"""One Swift function of ``main.swift``, from its signature to its close.
+
+    Bounded by the closing brace at the signature's own indentation rather
+    than by a brace count, because nothing here parses Swift and a brace
+    counter over string literals and generics would be a parser pretending
+    not to be one. Every brace nested inside a function in this file closes
+    further in, so the first line that is exactly the signature's indent
+    followed by ``}`` is that function's own end.
+
+    It used to end at the *next* ``func`` at that indent, which is not the
+    same thing: the last function of a type has no successor, so its body ran
+    to the end of the file and any assertion over it degraded into a
+    whole-file grep. ``stop()`` is that last function, and the
+    ``queue.sync { flushWholeBlocks() }`` pin below passed on a file where
+    that flush had been moved out of ``stop()`` into the top-level code under
+    the class -- which is the SIGTERM flush gone. Measured on the tree that
+    fixed it: 1116 characters before, 601 after. It was the second time the
+    same degradation shipped: ``flushWholeBlocks`` is followed by a ``///``
+    doc comment rather than a blank line, which once made the old terminator
+    overrun it too (1855 characters before, 726 after). Closing on the brace
+    ends both, because a function's own close is in the file whatever comes
+    after it.
 
     The indent is captured with ``[ \t]`` and not ``\s``: under
     ``re.MULTILINE`` the latter matches the newline of the blank line *before*
     the signature, so the captured indent began with one and the terminator
-    then demanded a blank line immediately before the next ``func``.
-    ``flushWholeBlocks`` is followed by a ``///`` doc comment rather than a
-    blank line, so its body ran to the end of the file and the block-framing
-    assertion below degraded into a whole-file grep. Measured on the tree that
-    fixed it: 1855 characters before, 726 after.
+    then demanded a blank line immediately before it.
     """
-    source = _read(AUDIO_TAP_SWIFT)
+    source = _swift_code()
     opening = re.search(
         rf"^([ \t]*)(?:private\s+)?func {re.escape(name)}\b", source, re.MULTILINE
     )
     assert opening, f"{AUDIO_TAP_SWIFT.name} no longer defines func {name}"
     rest = source[opening.end() :]
-    following = re.search(rf"\n{opening.group(1)}(?:private\s+)?func \b", rest)
-    return rest[: following.start()] if following else rest
+    closing = re.search(rf"\n{opening.group(1)}\}}", rest)
+    assert closing, (
+        f"{AUDIO_TAP_SWIFT.name}'s func {name} has no closing brace at its own "
+        f"indent, so this reader cannot say where it ends"
+    )
+    return rest[: closing.start()]
+
+
+def _swift_call_sites(callee: str) -> list[str]:
+    """Every call to ``callee`` in ``main.swift``, named by what encloses it.
+
+    Sorted function names, with ``"<top level>"`` standing for a call outside
+    every function -- ``main.swift`` runs its last twenty lines at file scope,
+    so "which function calls this" is not on its own the whole answer. The
+    callee's own definition is never counted: ``_swift_function_body`` starts
+    a body after the name in its signature, so the only way ``callee(`` shows
+    up inside it is a recursive call.
+    """
+    call = re.compile(rf"(?<!\w){re.escape(callee)}\(")
+    code = _swift_code()
+    enclosed: list[str] = []
+    for name in _SWIFT_FUNCTION_PATTERN.findall(code):
+        enclosed.extend([name] * len(call.findall(_swift_function_body(name))))
+    everywhere = len(call.findall(code)) - len(
+        re.findall(rf"func {re.escape(callee)}\(", code)
+    )
+    return sorted(enclosed) + ["<top level>"] * (everywhere - len(enclosed))
 
 
 def _python_function_body(path: Path, name: str) -> str:
@@ -1267,6 +1364,85 @@ def test_the_macos_tap_helper_and_its_reader_frame_blocks_the_same_way() -> None
             f"a buffer whose channel count disagrees with the header would be "
             f"written into the stream and the reader has no way to notice"
         )
+
+
+def test_the_macos_tap_helper_writes_its_stdout_from_one_writer_at_a_time() -> None:
+    """Every write to the helper's stdout is serialised, so none interleave.
+
+    `_ran_out` in macos_tap.py decides a capture was cut short by measuring a
+    partial block against a whole one, and the test above pins the three
+    literals that make every write a whole number of blocks. Those literals
+    are only half of what that check rests on. The other half is that one
+    write finishes before the next begins, and nothing read it until here.
+
+    `writeAll` is the write -- it is the only call to `write(STDOUT_FILENO,
+    ...)` in the helper -- and it has exactly two call sites. One is
+    `flushWholeBlocks`, reached from `consume` on the IOProc block, which
+    `AudioDeviceCreateIOProcIDWithBlock` is told to dispatch on the tap's own
+    queue rather than on a real-time thread of its own, and reached again
+    from `stop()` -- the SIGTERM teardown, which arrives on the main queue --
+    through `queue.sync`. That queue is created with a label and nothing
+    else, so it is serial, and those two take turns. The other is
+    `writeHeader`, which `start()` calls once, before `startIOProc()` has
+    created anything that could be writing beside it.
+
+    Make the queue `.concurrent`, hand the IOProc `nil` and let Core Audio
+    pick the thread, or add a third `writeAll` from anywhere -- a status
+    trailer on teardown, a debug dump -- and two writes can land inside each
+    other. A block is 8192 bytes against a `PIPE_BUF` that Darwin's
+    `sys/syslimits.h` puts at 512, so `writeAll` finishes neither of them
+    atomically and the reader is handed the two spliced into one full-sized
+    block. Every later block is then cut in the wrong place, the short-read
+    check never fires because nothing ever reads short, and the recording is
+    silently wrong rather than absent -- the failure the reader cannot see
+    from its side of the pipe, which is why it is checked from this one.
+    """
+    assert _SWIFT_TAP_SERIAL_QUEUE.search(_swift_code()), (
+        f"{AUDIO_TAP_SWIFT.name} no longer declares its io queue as a plain "
+        f"labelled DispatchQueue -- a concurrent one lets the teardown flush "
+        f"interleave with the IOProc's, and the reader is handed two "
+        f"half-blocks spliced into one"
+    )
+
+    assert _SWIFT_IOPROC_ON_THE_TAP_QUEUE.search(_swift_function_body("startIOProc")), (
+        f"{AUDIO_TAP_SWIFT.name} no longer hands the IOProc the tap's own "
+        f"queue, so its blocks run on a thread the teardown flush does not "
+        f"take turns with"
+    )
+
+    assert _swift_call_sites("writeAll") == _SWIFT_STDOUT_WRITERS, (
+        f"{AUDIO_TAP_SWIFT.name} writes stdout from {_swift_call_sites('writeAll')} "
+        f"and not from {_SWIFT_STDOUT_WRITERS} -- every write has to be one of "
+        f"the two this test can account for, and a third is a writer nothing "
+        f"serialises against the other two"
+    )
+
+    assert _swift_call_sites("flushWholeBlocks") == _SWIFT_FLUSH_CALLERS, (
+        f"{AUDIO_TAP_SWIFT.name} flushes from "
+        f"{_swift_call_sites('flushWholeBlocks')} and not from "
+        f"{_SWIFT_FLUSH_CALLERS} -- the capture-time writer is serialised only "
+        f"while the IOProc block and stop() are the only two that reach it"
+    )
+
+    assert _SWIFT_FLUSH_FROM_STOP.search(_swift_function_body("stop")), (
+        f"{AUDIO_TAP_SWIFT.name}'s stop no longer flushes through queue.sync, "
+        f"so the SIGTERM flush writes from the main queue while the IOProc is "
+        f"writing from its own"
+    )
+
+    assert _swift_call_sites("writeHeader") == ["start"], (
+        f"{AUDIO_TAP_SWIFT.name} writes its header from "
+        f"{_swift_call_sites('writeHeader')} -- the header is safe to write off "
+        f"the tap queue only because start() is the one caller and nothing is "
+        f"capturing yet when it runs"
+    )
+
+    start = _swift_function_body("start")
+    assert start.index("writeHeader(") < start.index("startIOProc("), (
+        f"{AUDIO_TAP_SWIFT.name}'s start() creates the IOProc before it writes "
+        f"the header, so the first blocks can reach stdout while the header "
+        f"write is still going"
+    )
 
 
 def test_the_macos_tap_helper_and_its_reader_agree_on_the_command_line() -> None:

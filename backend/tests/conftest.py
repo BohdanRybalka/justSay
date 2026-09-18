@@ -14,14 +14,20 @@ os.environ["JUSTSAY_TRUSTED_HOSTS"] = (
 import logging
 import re
 import shutil
+import threading
+import time
 import warnings
 from collections.abc import Callable
+from concurrent.futures import Future
+from concurrent.futures import wait as wait_for_futures
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.audio.meeting_recorder import MeetingRecorder
 from app.core.app_paths import DEV_DIR_NAME, PROD_DIR_NAME
 from app.core.config import settings
 from app.core.gpu_probe import clear_cache as clear_gpu_probe_cache
@@ -582,6 +588,225 @@ def _clear_lifespan_app_state():
     for attribute in _LIFESPAN_APP_STATE_ATTRIBUTES:
         if hasattr(app.state, attribute):
             delattr(app.state, attribute)
+
+
+_MEETING_RECORDER_EXECUTORS = ("_devices", "_writer", "_spill")
+_MEETING_RECORDER_TEARDOWN_SECONDS = 10.0
+
+
+class _MeetingSubmissions:
+    """Every callable the tests' recorders handed to one of their executors.
+
+    Appended from the recorders' own worker threads -- a `_end_capture`
+    running on `_devices` submits the meeting write on `_writer` -- while the
+    teardown reads it, so both sides go through the lock rather than sharing
+    a bare list across two threads.
+    """
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._entries: list[tuple[MeetingRecorder, str, str, Future]] = []
+
+    def note(
+        self, recorder: MeetingRecorder, owner: str, name: str, future: Future
+    ) -> None:
+        with self._guard:
+            self._entries.append((recorder, owner, name, future))
+
+    def snapshot(self) -> list[tuple[MeetingRecorder, str, str, Future]]:
+        with self._guard:
+            return list(self._entries)
+
+
+def _submitted_callable_name(fn: Callable, args: tuple[object, ...]) -> str:
+    """The name of the work a submission is really about.
+
+    `_submit_on_devices` queues `self._counted(fn, *args)` rather than `fn`,
+    so every device submission would otherwise be reported under the one name
+    `_counted` and a leaked `_end_capture`, `_begin_capture`,
+    `_abandon_capture` and `_shutdown_capture` would be indistinguishable in
+    a report whose whole purpose is to say which work was left behind. The
+    wrapper carries the real callable as its first argument.
+    """
+    if getattr(fn, "__func__", None) is MeetingRecorder._counted and args:
+        fn = args[0]
+    return getattr(fn, "__name__", repr(fn))
+
+
+def _record_meeting_submissions(
+    recorder: MeetingRecorder, owner: str, submitted: _MeetingSubmissions
+) -> None:
+    """Note every callable handed to one of the recorder's executors.
+
+    The recorder queues its own work through this same attribute, so a write
+    or a device release the recorder submitted for itself is recorded here
+    as well as anything a test submits by hand.
+
+    The callable's name is kept beside the future because the executor alone
+    names the symptom: `_writer` says work was left behind, and
+    `_write_captured_meeting` says which work.
+    """
+    executor = getattr(recorder, owner)
+    submit = executor.submit
+
+    def recording_submit(fn, *args, **kwargs):
+        future = submit(fn, *args, **kwargs)
+        submitted.note(recorder, owner, _submitted_callable_name(fn, args), future)
+        return future
+
+    executor.submit = recording_submit
+
+
+def _restore_meeting_submissions(recorder: MeetingRecorder) -> None:
+    """Uncover the executors' own `submit` again.
+
+    `_record_meeting_submissions` shadows it per instance, and the closure it
+    installs holds the finished test's record. Deleting the instance
+    attribute stops a recorder that outlives its test from appending into a
+    record nothing reads any more.
+    """
+    for owner in _MEETING_RECORDER_EXECUTORS:
+        getattr(recorder, owner).__dict__.pop("submit", None)
+
+
+def _wait_out_meeting_submissions(
+    submitted: _MeetingSubmissions,
+) -> list[tuple[MeetingRecorder, str, str, Future]]:
+    """Wait for every submission, including the ones the waiting sets off.
+
+    Draining submits more work. A `_end_capture` still on the device queue
+    when the test body ended releases both handles and then submits the
+    meeting write on `_writer`, so the future that most needs waiting for is
+    appended *after* a single snapshot was taken -- and a recheck against the
+    live record then reports it as a leak against a test that left nothing
+    undrainable behind. So the wait repeats while the record is still
+    growing, against one deadline for all of it rather than a fresh timeout
+    per round.
+    """
+    deadline = time.monotonic() + _MEETING_RECORDER_TEARDOWN_SECONDS
+    waited = submitted.snapshot()
+    while True:
+        wait_for_futures(
+            [future for _, _, _, future in waited],
+            timeout=max(0.0, deadline - time.monotonic()),
+        )
+        grown = submitted.snapshot()
+        if len(grown) == len(waited) or time.monotonic() >= deadline:
+            return grown
+        waited = grown
+
+
+def _meeting_work_left_behind(
+    entries: list[tuple[MeetingRecorder, str, str, Future]],
+) -> dict[MeetingRecorder, list[str]]:
+    """The unfinished work of each recorder that has any, keyed by recorder.
+
+    Per recorder rather than one verdict for the whole test, because the
+    verdict decides whether that recorder's pools are joined or cancelled and
+    the reason is about one recorder at a time: a recorder whose work cannot
+    be drained must not be joined, and a recorder beside it whose work
+    finished has no reason to have its queue cancelled and its join skipped.
+    """
+    left: dict[MeetingRecorder, set[str]] = {}
+    for recorder, owner, name, future in entries:
+        if not future.done():
+            left.setdefault(recorder, set()).add(f"{owner}.{name}")
+    return {recorder: sorted(names) for recorder, names in left.items()}
+
+
+def _retire_meeting_executors(recorder: MeetingRecorder, drained: bool) -> None:
+    """Release the spill worker, then shut the three executors down.
+
+    `cancel_futures=True` empties the pending queue and does nothing to a
+    callable already running, and `_drain_spill` is running -- parked on
+    `work.get()` until the sentinel reaches it. `_finish_spill` is what puts
+    that sentinel, so the teardown puts it rather than trusting `cleanup()`
+    to have got there: the shutdown command `cleanup()` queues is itself
+    cancellable, and a wedged device queue is exactly when it is cancelled.
+    Without the sentinel the spill thread outlives the test, and
+    `concurrent.futures.thread` registers an atexit hook that joins every
+    pool thread, so the session hangs after printing the report instead of
+    exiting.
+
+    The device pool is retired first: that cancels a `_end_capture` still
+    pending there, which would otherwise race this thread for the spill
+    queue and read the spools while the drain was still writing them.
+
+    The join then waits only when `drained`, because joining a pool whose
+    work has not finished is that same hang from the other side.
+    """
+    recorder._devices.shutdown(wait=drained, cancel_futures=not drained)
+    recorder._finish_spill()
+    recorder._writer.shutdown(wait=drained, cancel_futures=not drained)
+    recorder._spill.shutdown(wait=drained, cancel_futures=not drained)
+
+
+@pytest.fixture(autouse=True)
+def _every_meeting_recorder_is_retired_when_its_test_ends():
+    """Retire every `MeetingRecorder` the test built, before the next starts.
+
+    A recorder owns three single-worker executors, and a callable still
+    queued when the test body ends runs under the *next* test's patches. The
+    write `test_a_cancelled_stop_still_returns_the_recorder_to_idle` left
+    behind ran inside the `write_wav_streaming` patch of whatever test
+    followed it and failed an assertion there. CI shuffles with `-p
+    randomly`, so the pair that collided was a different one every run and
+    the report named a test the leak had never touched (JS-184).
+
+    Construction is patched rather than a `meeting_recorder` fixture offered,
+    because construction is what has to be caught: 82 sites across
+    `test_meeting_recorder.py`, `test_meeting_incidents.py` and
+    `test_macos_tap.py` build one by hand, and `main.py`'s lifespan builds
+    one more that no test fixture is asked for at all. A fixture reaches only
+    the sites that request it.
+
+    `cleanup()` is the recorder's own retirement -- the path the app takes at
+    shutdown, and the one that releases the spill worker from `work.get()` --
+    so the teardown calls it and then waits out everything queued, including
+    the work that waiting itself sets off. A test that leaks a drainable
+    callable therefore stays green: the callable ran here, under that test's
+    own patches, which is the defect being closed. The assertion reports the
+    narrower case of work no drain could finish -- a wedged device queue, a
+    worker that never returned -- which the next test inherits whatever this
+    teardown does.
+
+    What is covered is the three executors. Work a recorder hands to a raw
+    thread -- `MacOSTapSource._reader`, a `SystemAudioSource` callback
+    thread, the `threading.Timer` in `test_meeting_recorder.py` -- is not an
+    executor submission and is not seen here.
+    """
+    recorders: list[MeetingRecorder] = []
+    submitted = _MeetingSubmissions()
+    construct = MeetingRecorder.__init__
+
+    def recording_construct(recorder: MeetingRecorder, *args, **kwargs) -> None:
+        construct(recorder, *args, **kwargs)
+        recorders.append(recorder)
+        for owner in _MEETING_RECORDER_EXECUTORS:
+            _record_meeting_submissions(recorder, owner, submitted)
+
+    with patch.object(MeetingRecorder, "__init__", recording_construct):
+        yield
+
+    left_behind: dict[MeetingRecorder, list[str]] | None = None
+    try:
+        for recorder in recorders:
+            recorder.cleanup()
+        left_behind = _meeting_work_left_behind(_wait_out_meeting_submissions(submitted))
+    finally:
+        for recorder in recorders:
+            _retire_meeting_executors(
+                recorder,
+                drained=left_behind is not None and recorder not in left_behind,
+            )
+            _restore_meeting_submissions(recorder)
+
+    undrainable = sorted(name for names in (left_behind or {}).values() for name in names)
+    assert not undrainable, (
+        f"the test ended with {undrainable} still queued on a meeting recorder "
+        f"and undrainable, so it would have run under the next test's patches "
+        f"instead of this test's"
+    )
 
 
 @pytest.fixture(autouse=True)
