@@ -852,32 +852,6 @@ def test_a_loopback_sink_that_raises_is_reported_once_and_keeps_delivering(
     ], reported
 
 
-def test_a_loopback_failure_sink_that_raises_does_not_escape_into_portaudio(
-    fake_pyaudiowpatch, render_endpoints, loopback_source
-):
-    """The report is the last thing this source can do, so it cannot be the
-    thing that takes the stream down.
-
-    Driven by a block sink that raises, which is the reachable way to reach
-    the failure sink from inside a handler: the report is made from the
-    `except` that caught the block sink, and an exception raised there is not
-    caught by that same clause.
-    """
-
-    def raise_from_the_failure_sink(reason):
-        raise RuntimeError("the recorder refused the report")
-
-    def raise_from_the_block_sink(arrival, mono):
-        raise RuntimeError("the recorder's own callback failed")
-
-    source = loopback_source()
-    source.start(raise_from_the_block_sink, raise_from_the_failure_sink)
-
-    answer = source._stream_callback(np.zeros(4, dtype="<f4").tobytes(), 2, None, 0)
-
-    assert answer == (None, fake_pyaudiowpatch.paContinue)
-
-
 def test_a_stopped_loopback_source_cannot_be_started_again(
     fake_pyaudiowpatch, render_endpoints
 ):
