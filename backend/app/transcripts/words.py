@@ -1,21 +1,11 @@
 """Word frequency over stored transcripts.
 
-Phase 1 of Plan 013. Architectural rules:
-
-- Derived from ``entries`` on demand. No incremental counter table, no
-  writes inside ``save_entry``'s lock window, no decrement-on-delete.
-- Tokenisation runs in Python over result rows; the SQLite-function
-  alternative was rejected for testability and connection-threading
-  simplicity.
-- Both Ukrainian and English stop-word lists are always applied — real
-  transcripts code-switch, and ``entries.language`` is not a reliable
-  content-language signal: it's the user's explicit choice when they made
-  one, the provider-detected language when they requested ``"auto"``, and
-  the literal ``"auto"`` sentinel only when detection itself produced
-  nothing (spec 029 / docs/adr/016-detected-language-on-stt-contract.md).
-
-Searching transcripts lives in ``app.transcripts.search``, which spec 164
-split out of this module.
+Derived from ``entries`` on demand: no counter table, no writes inside
+``save_entry``'s lock window, no decrement-on-delete. Tokenisation runs in
+Python over result rows. Both the Ukrainian and the English stop-word lists are
+always applied, because real transcripts code-switch and ``entries.language``
+records the dictation mode rather than the language of the text (ADR 016).
+Searching transcripts lives in ``app.transcripts.search``.
 """
 
 from __future__ import annotations
@@ -62,23 +52,10 @@ def top_words(
     lang: Literal["all", "uk", "en"] = "all",
     limit: int = 50,
 ) -> TopWordsResponse:
-    """Compute top-N words across (filtered) entries.
+    """Top-N words across (filtered) entries, merged UK+EN stop-words applied.
 
-    Always applies the merged UK+EN stop-word set. ``limit`` clamps the
-    *output* to ``[1, TOP_LIMIT_MAX]`` and nothing else: a miss reads every row
-    of ``entries`` and tokenises each one, so the cost is proportional to the
-    whole history rather than to ``limit``.
-
-    Two things keep that cost off the Words tab's five-second poll. The counts
-    are cached per language against ``history.derived_generation_locked()``, the
-    counter every mutator bumps, so an unchanged history is answered without a
-    scan however often it is asked — the mechanism ``compute_stats`` already
-    uses for the cheaper half of the same poll. And ``words_router.words_top``,
-    the only caller, runs a miss through ``asyncio.to_thread``; calling this
-    from the event loop directly puts the scan back on it.
-
-    The scan holds ``history._lock`` only for the SQL. Tokenising runs outside
-    it, because it needs no connection and the lock is the one every write takes.
+    ``limit`` clamps the output only: a miss reads and tokenises every row, so run
+    it off the event loop. Counts cache on ``history.derived_generation_locked``.
     """
     clamped_limit = max(1, min(int(limit), TOP_LIMIT_MAX))
 

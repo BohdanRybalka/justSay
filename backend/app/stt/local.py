@@ -1,19 +1,10 @@
 """Local STT provider — Faster-Whisper Large-v3.
 
-Selected by `app.stt.local_factory.get_local_provider_class()` on
-Windows NVIDIA/no-GPU, Linux and macOS-Intel. On macOS Apple Silicon and on
-Windows AMD/Intel the factory returns `WhisperCppServerSTTProvider` instead,
-which drives a GPU-accelerated whisper.cpp `whisper-server` child process.
-
-The factory is imported inside `_get_model`, not at module level. It imports
-this module back -- lazily, inside `get_local_provider_class()` -- so a
-module-level import here closes a real cycle, and the two ends would then
-disagree about module identity whenever one of them is reimported: a
-`LocalProviderKind` member bound before the reimport still indexes the new
-module's dict, because `Enum.__hash__` is `hash(self._name_)` and the `str`
-mixin supplies `__eq__`. That coincidence is what makes such a split silent
-rather than loud, and `tests/conftest.py`'s module-identity fixtures exist
-because this project has already paid for one.
+`app.stt.local_factory.get_local_provider_class` selects this provider on
+Windows NVIDIA/no-GPU, Linux and macOS-Intel, and returns
+`WhisperCppServerSTTProvider` elsewhere. That factory is imported inside
+`_get_model` and not at module level: it imports this module back, so a
+module-level import here would close an import cycle.
 """
 
 import asyncio
@@ -39,9 +30,8 @@ SHORT_CLIP_SECONDS = 30.0
 class LocalSTTProvider(STTProvider):
     """Faster-Whisper Large-v3 — local privacy-first STT provider.
 
-    Model is auto-downloaded on first use (~3GB).
-    GPU (CUDA) is used if available, falls back to CPU.
-    Requires: pip install justsay-backend[local]
+    The model is auto-downloaded on first use (~3GB) and runs on CUDA when
+    available, CPU otherwise. Requires `pip install justsay-backend[local]`.
     """
 
     is_local = True
@@ -127,20 +117,9 @@ class LocalSTTProvider(STTProvider):
     async def transcribe(
         self, audio_path: Path, language: str = "uk", **kwargs
     ) -> TranscriptionResult:
-        """Transcribe locally.
-
-        ``audio_duration`` (kwarg, seconds) — when provided, drives a
-        latency-vs-accuracy decision against `SHORT_CLIP_SECONDS`: short clips
-        get ``beam_size=1`` and ``condition_on_previous_text=False`` (kills
-        silence-hallucination cascade); long clips keep ``beam_size=5`` and
-        cross-segment context. An unknown duration takes the long path.
-
-        That boundary is this module's own constant and not
-        ``cloud_routing_threshold``, which decides Groq against Gemini in
-        Cloud mode and nothing here. Raising it to send more audio to Groq
-        must not also drop local transcription to beam 1 without
-        cross-segment context — a coupling invisible at both call sites
-        (ADR 073). The two numbers agree today and are two different facts.
+        """Transcribe locally. ``audio_duration`` (kwarg, seconds) picks beam 1
+        without cross-segment context at or below `SHORT_CLIP_SECONDS`, beam 5
+        with it otherwise -- never `cloud_routing_threshold` (ADR 073).
         """
         model = await asyncio.to_thread(self._get_model)
         audio_duration = kwargs.get("audio_duration")
@@ -194,15 +173,8 @@ class LocalSTTProvider(STTProvider):
     def cleanup(self) -> None:
         """Release whisper model and GPU memory.
 
-        `cleanup()` is reachable synchronously from `PUT /stt/mode`'s
-        `clear_cache()` on the FastAPI event-loop thread, so it must never
-        block on `_load_lock` for the length of a multi-minute first-run
-        model download — that would stall the entire event loop. A
-        non-blocking acquire lets an in-flight `_get_model()` call win: if
-        the lock is busy, log and return without touching `self._model`,
-        `gc.collect()`, or `torch.cuda` (the load's own caller is
-        responsible for cleaning up an orphaned load after the fact, e.g.
-        `ensure_local_ready()`'s post-load mode recheck).
+        Never blocks: an in-flight load wins the lock and this returns having
+        touched nothing, leaving that load's own caller to release it.
         """
         if not self._load_lock.acquire(blocking=False):
             log.info("cleanup() skipped: a model load is in flight (lock busy)")

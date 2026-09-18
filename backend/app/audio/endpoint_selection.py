@@ -47,9 +47,8 @@ def _match_loopback_analogue(
 ) -> Mapping[str, object] | None:
     """Exact match first, substring second.
 
-    `pyaudiowpatch`'s own helper matches by substring alone and returns
-    whichever candidate enumeration yields first, so two devices whose names
-    share a prefix resolve differently depending on enumeration order.
+    Matching by substring alone resolves two devices whose names share a prefix differently
+    depending on enumeration order.
     """
     exact = endpoint_name + LOOPBACK_SUFFIX
     for device in loopback_devices:

@@ -1,20 +1,10 @@
 """Platform-aware local STT provider selection.
 
-Two concrete `STTProvider`s exist for Local mode:
-`WhisperCppServerSTTProvider` (macOS Apple Silicon via Metal, and Windows
-AMD/Intel via Vulkan -- one class, the backend baked into the binary) and
-`LocalSTTProvider` (everything else, faster-whisper -- CUDA on NVIDIA, CPU
-otherwise). `get_local_provider_kind()` centralizes the "which local
-provider" decision in one place (mirroring `app.core.gpu_probe`'s own
-"centralize vendor detection once" philosophy), and
-`get_local_provider_class()` is a thin dispatch on top of it. The factory
-keeps the rest of the codebase -- `STTProvider` contract, cache layer,
-router endpoints -- agnostic of which concrete class is in play.
-
-No third-party imports at module level: `faster_whisper` (and the
-httpx-dependent `local_whisper_cpp` module) are pulled in only when the
-factory returns the corresponding class, so this module is safe to import
-on every platform regardless of which extras are installed.
+Local mode runs on `WhisperCppServerSTTProvider` (macOS Apple Silicon via
+Metal, Windows AMD/Intel via Vulkan) or `LocalSTTProvider` (faster-whisper,
+CUDA on NVIDIA, CPU otherwise). `get_local_provider_kind` owns that decision
+and `get_local_provider_class` dispatches on it. No third-party import at
+module level, so this module imports on any platform whatever is installed.
 """
 
 import os
@@ -41,18 +31,8 @@ _ACCELERATED_DEVICES: dict[LocalProviderKind, frozenset[str]] = {
 def is_accelerated_device(device: str, kind: LocalProviderKind) -> bool:
     """Whether the provider that will load actually reaches a GPU on `device`.
 
-    The rule keys on the provider because the device string alone does not
-    settle it. faster-whisper reaches CTranslate2, which has a CUDA backend
-    and no Metal or Vulkan one, so a `whisper_device` hand-set to `"metal"` on
-    a machine routed to faster-whisper is an int8 CPU load however it is
-    spelled -- reporting a GPU for it describes a path that cannot load.
-    whisper.cpp is the opposite: Metal and Vulkan are exactly its fp16 GPU
-    backends.
-
-    A kind this mapping does not list -- a third `LocalProviderKind` is
-    anticipated by this module's own docstring -- accelerates nothing, so the
-    answer degrades to the conservative CPU one instead of raising a `KeyError`
-    into `GET /stt/local/status`.
+    faster-whisper accelerates only on `"cuda"`, whisper.cpp only on
+    `"metal"`/`"vulkan"`, and an unlisted kind accelerates nothing.
     """
     return device in _ACCELERATED_DEVICES.get(kind, frozenset())
 
@@ -60,10 +40,8 @@ def is_accelerated_device(device: str, kind: LocalProviderKind) -> bool:
 def compute_type_for_device(device: str, kind: LocalProviderKind) -> str:
     """The compute type a device implies for the provider that will load it.
 
-    fp16 is exactly what an accelerated device buys, so this is the same rule
-    `is_accelerated_device` states, read as a compute type. Every other device
-    -- `"cpu"`, and any unrecognized `whisper_device` the user typed -- gets
-    `"int8"`.
+    `"float16"` on an accelerated device, `"int8"` on every other one,
+    including an unrecognized `whisper_device`.
     """
     return "float16" if is_accelerated_device(device, kind) else "int8"
 
@@ -71,9 +49,8 @@ def compute_type_for_device(device: str, kind: LocalProviderKind) -> str:
 def is_macos_arm64() -> bool:
     """True only when running natively on Apple Silicon.
 
-    `sys.platform == "darwin" and platform.machine() == "arm64"` excludes
-    Rosetta-x86 Python (where `machine()` reports `"x86_64"`); macOS Intel
-    therefore falls back to the faster-whisper CPU path.
+    Rosetta-x86 Python reports `"x86_64"` and is therefore False, as is
+    macOS Intel.
     """
     import sys
 
@@ -87,23 +64,8 @@ def is_macos_arm64() -> bool:
 def get_local_provider_kind(vendor: "GpuVendor | None" = None) -> LocalProviderKind:
     """Resolve which local STT provider kind applies to this machine.
 
-    Routing rule: macOS arm64 -> `WHISPER_CPP_SERVER` (wins regardless of
-    `os.name`/vendor, and involves no GPU probe -- Apple Silicon always has
-    Metal); Windows + AMD/Intel GPU -> `WHISPER_CPP_SERVER`; everything else
-    (Windows NVIDIA/none, and non-Windows entirely -- Linux/macOS-Intel are
-    not supported Local-mode target platforms per CLAUDE.md) ->
-    `FASTER_WHISPER`.
-
-    `vendor`: an already-resolved `GpuVendor`, for callers that have already
-    paid for a `probe_gpu()` call this cycle (e.g. `local_setup.check_status()`,
-    which already calls `_detect_gpu()`) -- skips this function's own
-    `probe_gpu()` call so the same uncached, already-expensive probe
-    (`docs/TODO.md` -> Tech Debt) doesn't run twice per invocation. Every
-    pre-existing caller omits it (default `None`), preserving the original
-    self-probing behavior unchanged. This is the single source of truth for
-    the AMD/Intel-on-Windows routing rule -- callers that already have a
-    vendor must pass it through here rather than re-deriving the rule
-    themselves, so the two never drift apart.
+    macOS arm64 and Windows-with-AMD/Intel get `WHISPER_CPP_SERVER`, anything
+    else `FASTER_WHISPER`. Pass `vendor` to reuse an existing `probe_gpu()`.
     """
     if is_macos_arm64():
         return LocalProviderKind.WHISPER_CPP_SERVER
@@ -127,26 +89,8 @@ LOCAL_STATUS_CONTRACT: tuple[str, ...] = ("_get_model", "is_loaded", "last_load_
 def get_local_provider_class() -> type[STTProvider]:
     """The concrete provider class Local mode runs on this machine, contract checked.
 
-    Every class reachable from here must declare every member of
-    `LOCAL_STATUS_CONTRACT`, and this function is where that is enforced.
-    `POST /stt/local/load` and the prewarm task call `_get_model`; `GET
-    /stt/local/status`'s `model_loaded` and `last_error` are `is_loaded` and
-    `last_load_error`, read through `app.stt.routing`. None of the three sits
-    on `app.stt.base.STTProvider`, and no base class can supply them without
-    making a misspelling quieter rather than louder (ADR 075).
-
-    A class missing one raises `TypeError` here, on the machine that would have
-    run it, instead of reporting "not loaded, no error" for the life of the
-    process while the Settings models tab draws a healthy indicator and `POST
-    /stt/local/load` answers 500 with a generic crash detail. The raise covers
-    every caller; `tests/test_local_factory.py` additionally walks
-    `LocalProviderKind` so a misspelling shows up in CI rather than only on the
-    machine it would break.
-
-    Every docstring that states the obligation points at
-    `LOCAL_STATUS_CONTRACT` instead of respelling the names, and the test
-    imports that tuple rather than copying it, so renaming a member cannot
-    leave prose naming a dead one.
+    Raises `TypeError` unless that class declares every member of
+    `LOCAL_STATUS_CONTRACT`, which no base class supplies (ADR 075).
     """
     if get_local_provider_kind() is LocalProviderKind.WHISPER_CPP_SERVER:
         from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider

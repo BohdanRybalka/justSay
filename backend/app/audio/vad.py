@@ -1,25 +1,11 @@
 """Neural voice-activity detection via TEN VAD, loaded through ctypes.
 
-The primary pre-model no-speech detector (spec 033 /
-docs/adr/019-ten-vad-neural-silence-gate.md), layered in FRONT of
-`app.audio.analysis`'s energy guard rather than replacing it. Energy
-thresholding has a blind spot no tuning can close — loud non-speech
-(keyboard clicks, breathing, hum, noise) clears a loudness gate by
-definition — and a residual false-positive zone on quiet speech. A neural
-verdict fixes both directions at once.
+The primary pre-model no-speech detector, in FRONT of `app.audio.analysis`'s
+energy guard rather than replacing it (ADR 019). stdlib and numpy only: TEN
+VAD is a prebuilt C library reached through `ctypes`, costing no new pip dep.
 
-Deliberately stdlib + numpy only: the backend ships as a frozen PyInstaller
-sidecar whose venv contains only numpy/soundfile/sounddevice, so Silero
-(needs onnxruntime/torch) and webrtcvad (pip dep, C extension, pre-neural
-quality) are both ruled out. TEN VAD is a prebuilt C library consumed via
-`ctypes`, which costs zero new pip dependencies.
-
-EVERY failure path fails OPEN — `analyze_vad` returns ``None`` and never
-raises, never reports ``is_silent=True``. A detector that eats the user's
-real words is a far worse bug than one that lets a hallucination through;
-spec 029 paid two review iterations to learn that, and this module does not
-relearn it. ``None`` means "this layer abstains, fall back to the energy
-verdict", never "silent".
+EVERY failure path fails OPEN: `analyze_vad` returns ``None`` rather than
+raising or reporting silence, and ``None`` means "abstain", not "silent".
 """
 
 import ctypes
@@ -65,16 +51,9 @@ def _platform_lib_name() -> str:
 def resolve_ten_vad_lib() -> Path | None:
     """Locate the TEN VAD shared library, or ``None`` when unavailable.
 
-    Degrade-only chain mirroring `local_whisper_cpp_cmd.resolve_binary_path()`:
-    env override -> frozen bundle -> dev vendor dir -> ``None``. Each source
-    is accepted only when the resolved file actually EXISTS, so a stale env
-    var pointing at a deleted file falls through to the next source instead
-    of hard-failing the dictation.
-
-    ``None`` is a normal, expected outcome — every platform with no pinned
-    artifact in `backend/scripts/fetch_ten_vad.py` (spec 170 pins Windows and
-    macOS; Linux is deliberately unpinned), and every checkout that hasn't run
-    that script. The caller degrades to the energy guard alone.
+    Env override, then frozen bundle, then dev vendor dir; each is accepted
+    only when the resolved file exists, so a stale override falls through
+    rather than failing. ``None`` is normal — the caller degrades to energy.
     """
     lib_name = _platform_lib_name()
 
@@ -105,16 +84,9 @@ def resolve_ten_vad_lib() -> Path | None:
 class _TenVadLibrary:
     """Minimal typed ctypes binding for TEN VAD's C API.
 
-    Signatures confirmed against include/ten_vad.h at the pinned tag (v1.0):
-        int ten_vad_create(ten_vad_handle_t *handle, size_t hop_size, float threshold);
-        int ten_vad_process(ten_vad_handle_t handle, const int16_t *audio_data,
-                            size_t audio_data_length, float *out_probability, int *out_flag);
-        int ten_vad_destroy(ten_vad_handle_t *handle);
-    All three return 0 on success, -1 on error. ``hop_size`` is in SAMPLES.
-
-    We write our own binding rather than vendoring upstream's example .py --
-    that file is not part of the pinned artifact set and would be a second
-    thing to keep in sync.
+    Signatures are pinned against ``include/ten_vad.h`` at the vendored tag;
+    every entry point returns 0 on success and -1 on error, ``hop_size`` is
+    in samples, and `create` and `process` raise on a non-zero rc.
     """
 
     def __init__(self, lib_path: Path) -> None:
@@ -167,9 +139,8 @@ class _TenVadLibrary:
 class _LoadFailed:
     """Sentinel type for a cached failed load.
 
-    A plain ``object()`` would force the cache annotation to include ``object``,
-    which subsumes every other union member and makes the type meaningless to
-    a checker. A dedicated class keeps the union assertive.
+    A dedicated class rather than ``object()`` keeps the cache's union type
+    assertive; ``object`` would subsume every other member of it.
     """
 
 
@@ -218,13 +189,10 @@ def _reset_library_cache() -> None:
 
 
 def _required_speech_hops(total_hop_count: int, settings: AudioSettings) -> int:
-    """Length-proportional speech-hop requirement.
+    """Length-proportional speech-hop requirement for the neural VAD.
 
-    The VAD's 16 ms hops, capped by ``silence_vad_min_speech_frames`` — the
-    one field distinguishing this from the energy guard's frame requirement.
-    Reuses the SHIPPED ``silence_min_speech_ratio`` (0.15) rather than
-    minting a new knob; the rule itself lives in
-    `analysis.required_speech_units` — see its docstring for the rationale.
+    16 ms hops, capped by ``silence_vad_min_speech_frames`` — the one field
+    distinguishing this from the energy guard's frame requirement.
     """
     return analysis.required_speech_units(
         total_hop_count,
@@ -236,17 +204,9 @@ def _required_speech_hops(total_hop_count: int, settings: AudioSettings) -> int:
 def _to_mono_16k(block: np.ndarray, samplerate: int) -> np.ndarray:
     """Mean-collapse to mono and linear-resample to 16 kHz.
 
-    The recorder path is already 16 kHz mono (``AudioSettings.sample_rate``),
-    so dictation — the latency-sensitive case — skips resampling entirely.
-    Uploads at 44.1/48 kHz get a linear-interpolation approximation, which is
-    adequate for speech-PRESENCE detection; the file handed to the STT
-    provider is never touched by any of this.
-
-    Each block is resampled INDEPENDENTLY, which duplicates the boundary
-    sample and drifts the time base by ~1 sample per block on non-16 kHz
-    input. Harmless for a presence verdict (and never hit on the dictation
-    path, which is already 16 kHz), but it means the caller's carry buffer
-    stitches approximately-continuous audio, not sample-exact audio.
+    Blocks are resampled independently, so on non-16 kHz input the time base
+    drifts about a sample per block: the caller's carry buffer stitches
+    approximately-continuous audio, which a presence verdict tolerates.
     """
     mono = analysis.to_mono(block)
     if samplerate == _VAD_SAMPLE_RATE or mono.size == 0:
@@ -263,28 +223,9 @@ def _to_mono_16k(block: np.ndarray, samplerate: int) -> np.ndarray:
 def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None:
     """Stream ``audio_path`` through TEN VAD and decide whether it is silent.
 
-    A 16 ms hop counts as speech when its probability clears
-    ``settings.silence_vad_probability`` (0.5 — upstream TEN VAD's and
-    Silero's shared reference default, NOT a number fitted to this project's
-    single recording). The number of speech hops required scales with clip
-    length via `_required_speech_hops`. ``is_silent`` is then simply
-    "fewer speech hops than required".
-
-    Returns ``None`` — never raises, never reports ``is_silent=True`` — when:
-      - the library is unavailable or fails to load/call (energy-only),
-      - the file cannot be decoded (``.m4a``/``.webm`` uploads libsndfile
-        can't open — same fail-open rule as `analyze_silence`),
-      - fewer than ``settings.silence_min_analysis_ms`` of audio decoded
-        (a truncated-but-header-valid WAV yields a handful of samples, which
-        is not enough for ANY detector to judge).
-    Callers MUST treat ``None`` as "this layer abstains", falling back to the
-    energy verdict.
-
-    Streams via ``soundfile.blocks()`` and EXITS EARLY the moment the
-    required speech-hop count is met — so the common (speech-bearing) case
-    never decodes the whole file, and only genuine silence pays for a full
-    scan. That scan replaces a wasted model inference, so it is cheap in the
-    only accounting that matters.
+    Silent means fewer hops clearing ``silence_vad_probability`` than
+    `_required_speech_hops` asks for. ``None`` — never a raise, never a silent
+    verdict — means this layer abstains and the energy verdict decides.
     """
     library = _get_library()
     if library is None:
@@ -371,19 +312,9 @@ def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None
 def selftest() -> tuple[bool, str]:
     """``--selftest-ten-vad`` backend. Never raises.
 
-    Presence is not loadability. `build_sidecar.spec` bundles whatever
-    `fetch_ten_vad.py` left in backend/vendor/ten-vad, and on macOS
-    PyInstaller rewrites Mach-O load commands and ad-hoc re-signs what it
-    touches — so the shipped copy of the library is not byte-identical to the
-    fetched one, and a broken shipped copy is INVISIBLE at runtime because
-    every failure path here fails open to the energy guard. This walks the
-    three rungs that separate "the file is in the bundle" from "the neural
-    gate actually decides", and names which one gave way: it resolves the
-    library, loads it through ctypes, and runs a synthetic one-second 16 kHz
-    probe clip through `analyze_vad`, whose abstention (``None``) is the very
-    degradation the caller can never see. Modelled on
-    `app.transcripts.vector_store.selftest`, and run by `release.yml` against
-    the frozen sidecar on both platform legs.
+    Resolves the library, loads it through ctypes and runs a synthetic
+    one-second 16 kHz probe through `analyze_vad`, reporting which of the
+    three gave way — the abstention a dead neural gate hides behind.
     """
     library_path = resolve_ten_vad_lib()
     if library_path is None:

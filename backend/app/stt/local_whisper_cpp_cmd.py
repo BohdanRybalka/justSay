@@ -1,18 +1,10 @@
-"""Pure command-construction and path-resolution helpers for the
-whisper.cpp ``whisper-server`` binary -- Vulkan-backed on Windows,
-Metal-backed on macOS Apple Silicon. The GPU backend is a property of the
-compiled binary, so the only platform-dependent thing here is which vendor
-directory and file name to look for.
+"""Pure command-construction and path-resolution helpers for the whisper.cpp
+``whisper-server`` binary -- Vulkan on Windows, Metal on macOS Apple Silicon.
 
-Kept separate from ``local_whisper_cpp.py`` so ``build_server_argv()`` is
-unit-testable with zero process/network I/O -- mirrors the *intent* of the
-sibling project ``local-llm-helper``'s ADR-013 ``buildCmd()`` pattern: a
-pure function that builds the argument list, kept apart from the actual
-spawn call. Python's ``subprocess.Popen(argv, shell=False)`` never goes
-through a shell and needs no manual quoting -- the isolation here buys
-testability of the argument *set* (right flags/paths in the right order),
-not a quoting-bug fix that doesn't exist in this invocation path. See
-``docs/adr/011-whisper-cpp-vulkan-stt-provider.md``.
+The GPU backend is a property of the compiled binary, so the only
+platform-dependent thing here is which vendor directory and file name to look
+for. Kept apart from ``local_whisper_cpp.py`` so ``build_server_argv()`` is
+unit-testable with zero process or network I/O (ADR 011).
 """
 
 import os
@@ -30,12 +22,9 @@ _VENDOR_ROOT = Path(__file__).resolve().parent.parent.parent / "vendor"
 
 
 def vendor_dir_name() -> str | None:
-    """The per-platform vendor directory leaf, or ``None`` on a platform
-    that ships no whisper.cpp binary.
-
-    Public because ``backend/tests/test_build_definitions.py`` compares this
-    mapping against the resource directories the Tauri platform configs
-    declare, so the two sides cannot drift apart silently.
+    """The per-platform vendor directory leaf, or ``None`` on a platform that
+    ships no whisper.cpp binary. Public so the build-definition test can
+    compare it against the resource directories the Tauri configs declare.
     """
     return VENDOR_DIR_NAMES.get(sys.platform)
 
@@ -76,17 +65,10 @@ def build_server_argv(binary_path: Path, model_path: Path, host: str, port: int)
 
 
 def resolve_binary_path() -> Path | None:
-    """Resolution order: ``JUSTSAY_WHISPER_CPP_BIN`` env override -> the
-    bundled resource directory sibling to ``sys.executable`` when frozen ->
-    a local dev-vendor directory (``backend/vendor/<vendor_dir_name()>/``)
-    -> ``None``.
-
-    Each source is accepted only when the resolved file actually exists --
-    an override/frozen path that doesn't resolve degrades to the next
-    source rather than failing outright, mirroring gpu_probe.py's
-    degrade-only chain philosophy. A platform with no entry in
-    ``VENDOR_DIR_NAMES`` degrades to ``None`` after the env override rather
-    than constructing a directory name that means nothing there.
+    """Resolution order: ``JUSTSAY_WHISPER_CPP_BIN`` env override -> the bundled
+    resource directory beside ``sys.executable`` when frozen -> the dev-vendor
+    directory -> ``None``. A source is accepted only when the resolved file
+    exists, so one that does not resolve degrades to the next rather than fails.
     """
     override = os.environ.get(_WHISPER_CPP_BIN_ENV_VAR)
     if override:

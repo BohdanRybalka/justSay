@@ -2,21 +2,10 @@
 
 Both routers in this package read the same SQLite file through the same
 connection and lock, so "database is locked" means one thing wherever it
-surfaces: another writer holds it, and the caller should retry. It used to be
-written out at six call sites with four different detail strings — "History
-store busy", "Stats store busy", "Words store busy" and an unreachable default
-— which read as three different stores to a client and to a reader. There is
-one store.
-
-The detail names it ``History``, which is what the screen, the route and the
-frontend's own feature name already call it. ``transcript`` is this package's
-name rather than the user's, and this refusal was the single place it reached
-a person — who is already having a bad time and does not need a fourth noun
-for the thing they are looking at.
-
-The refusal is a ``ResourceUnavailableError``, which already answers 503 and
-carries the ``Retry-After`` header to the handler, so this module needs no web
-framework of its own.
+surfaces: another writer holds it, and the caller should retry. The detail
+names it ``History``, the noun the screen and the route already use. The
+refusal is a ``ResourceUnavailableError``, which answers 503 and carries the
+``Retry-After`` header, so this module needs no web framework of its own.
 """
 
 import sqlite3
@@ -39,9 +28,8 @@ def is_store_busy(error: sqlite3.OperationalError) -> bool:
 def store_busy_as_503() -> Iterator[None]:
     """Map lock contention to 503 + Retry-After, and let everything else pass.
 
-    Any other ``OperationalError`` propagates unchanged so a caller that needs
-    to recognise it — the search endpoint distinguishing an FTS5 syntax error —
-    can still do so in an enclosing handler.
+    Any other ``OperationalError`` propagates unchanged, so an enclosing handler
+    can still recognise it — the search endpoint distinguishes FTS5 syntax errors.
     """
     try:
         yield

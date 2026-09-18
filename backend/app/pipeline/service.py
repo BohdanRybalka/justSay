@@ -44,10 +44,8 @@ async def process_audio(
 ) -> ProcessingResult:
     """Full pipeline: route STT by duration+format -> transcribe -> clipboard.
 
-    ``background_tasks``, when provided, schedules embedding generation via
-    ``BackgroundTasks.add_task`` — FastAPI guarantees these run AFTER the
-    response is sent, which is the actual mechanism that keeps embedding
-    latency off the Instant Prompt budget. Never awaited synchronously here.
+    ``background_tasks``, when provided, schedules embedding generation to run
+    after the response is sent. Never awaited synchronously here.
     """
     start = time.perf_counter()
 

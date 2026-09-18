@@ -1,20 +1,10 @@
 """whisper.cpp `whisper-server` local STT provider -- one class, two GPU backends.
 
-Selected by `app.stt.local_factory.get_local_provider_class()` on Windows
-when `app.core.gpu_probe.probe_gpu()` reports AMD or Intel (Vulkan-backed
-binary), and on macOS Apple Silicon unconditionally (Metal-backed binary).
-faster-whisper (CTranslate2, `LocalSTTProvider`) has no AMD/Intel backend at
-all, and the GPU backend here is a property of the compiled binary rather
-than of this driver code, so both platforms share every line below. Full
-design rationale in `docs/adr/011-whisper-cpp-vulkan-stt-provider.md` and
-`docs/adr/036-one-whisper-cpp-server-provider-for-both-platforms.md`.
-
-Runs whisper.cpp's `whisper-server` binary as a **persistent** local HTTP
-child process (never spawned per-request -- a one-shot `whisper-cli`
-invocation would reload a multi-GB GGML model into VRAM on every single
-dictation, making the "accelerated" path slower than the CPU fallback it
-replaces). `transcribe()` talks to the already-running server over
-`http://127.0.0.1:<port>/inference`.
+`app.stt.local_factory.get_local_provider_class` selects it on Windows with an
+AMD or Intel GPU (Vulkan binary) and on macOS Apple Silicon (Metal binary); the
+backend is baked into the binary, so both platforms share every line below
+(ADR 011, ADR 036). That binary runs as a persistent local HTTP child process,
+never one per request, and `transcribe()` posts to `/inference` on it.
 """
 
 import asyncio
@@ -85,13 +75,10 @@ def _deregister_child(process: subprocess.Popen) -> None:
 
 
 def _reap_orphans() -> None:
-    """atexit hook: terminate any whisper-server child still registered when
-    the interpreter exits -- i.e. one `_terminate_process()` (called from
-    either `cleanup()` or `_get_model()`'s own except-branch orphan cleanup)
-    never ran for it. A single `.terminate()` is deliberately simpler than
-    `_terminate_process()`'s full terminate -> grace-poll -> kill sequence:
-    this is the portable floor, not the real guarantee (the Windows Job
-    Object is) -- see the module-level comment above.
+    """atexit hook: terminate any whisper-server child still registered at exit.
+
+    A single `.terminate()`, not `_terminate_process()`'s full sequence: this
+    is the portable floor, and the Windows Job Object is the real guarantee.
     """
     with _live_children_lock:
         orphans = list(_live_children.values())
@@ -162,12 +149,9 @@ _kernel32_dll = None
 
 
 def _kernel32():
-    """Lazily load `kernel32` and declare explicit `restype`/`argtypes` on
-    every Job Object call before first use (spec 028 iteration-2 review, AC
-    16a). Without them, ctypes marshals return/argument values as 32-bit
-    `c_int` by default, which silently truncates a real 64-bit `HANDLE` --
-    it happens to work today only because handle values for a young process
-    are small (observed 368/372 in review), which is luck, not a contract.
+    """Lazily load `kernel32` with explicit `restype`/`argtypes` on every Job
+    Object call. Without them ctypes marshals as 32-bit `c_int` by default,
+    which silently truncates a real 64-bit `HANDLE`.
     """
     global _kernel32_dll
     if _kernel32_dll is None:
@@ -255,13 +239,8 @@ def _assign_to_job_object(process: subprocess.Popen) -> None:
 
 class WhisperCppServerSTTProvider(STTProvider):
     """whisper.cpp `whisper-server` -- local privacy-first STT on Windows
-    AMD/Intel (Vulkan) and macOS Apple Silicon (Metal).
-
-    Model is auto-downloaded on first use (GGML format, ~1.6 GB for
-    large-v3-turbo) into ``~/.justsay/models/whisper-cpp/``. The
-    ``whisper-server`` binary is bundled with the app (both platform
-    releases) or resolved from a local dev-vendor directory -- see
-    ``local_whisper_cpp_cmd.resolve_binary_path()``.
+    AMD/Intel (Vulkan) and macOS Apple Silicon (Metal). The GGML model
+    auto-downloads on first use into ``~/.justsay/models/whisper-cpp/``.
     """
 
     is_local = True
@@ -275,16 +254,10 @@ class WhisperCppServerSTTProvider(STTProvider):
 
     @property
     def model_name(self) -> str:
-        """Derived from the platform's vendor directory so Windows keeps
-        emitting the byte-identical ``whisper-cpp-vulkan/<size>`` it has
-        always emitted: this value is persisted into every history row
-        (``app/pipeline/service.py``), and a neutral rename would split
-        existing Windows history across two labels for one engine.
+        """``<vendor dir>/<model size>``, from the platform's vendor directory.
 
-        The fallback covers a platform with no vendor directory. The factory
-        never builds this provider there, but the value is persisted rather
-        than displayed, so a literal ``"None/<size>"`` would outlive the
-        mistake in the user's history.
+        Persisted into every history row, so it is a stored label rather than a
+        display name; renaming it splits existing history across two labels.
         """
         return f"{vendor_dir_name() or 'whisper-cpp'}/{self._settings.whisper_model_size}"
 
@@ -297,18 +270,9 @@ class WhisperCppServerSTTProvider(STTProvider):
         return self._last_load_error
 
     def _get_model(self) -> None:
-        """Sync lazy-load entrypoint: resolve the binary, lazy-download the
-        GGML model if missing, spawn `whisper-server` once, health-poll it,
-        then mark `is_loaded=True`.
-
-        Named `_get_model` -- not `_ensure_server`, this method's conceptual
-        name in the ADR -- because `router.py`'s `POST /stt/local/load` and
-        `local_setup.ensure_local_ready()` both call `provider._get_model`
-        unconditionally on whatever provider `get_provider(LOCAL, ...)`
-        returns. The sibling providers' `_get_model` name is a load-bearing
-        duck-typed convention across concrete `STTProvider`s, not a
-        documented part of the ABC itself -- confirmed by reading
-        `app/stt/router.py` and `app/stt/local_setup.py` directly.
+        """Sync lazy-load entrypoint: resolve the binary, download the GGML model
+        if missing, spawn `whisper-server` once, health-poll it, then set
+        `is_loaded`. The name is the duck-typed one every local provider owes.
         """
         with self._load_lock:
             if self._server_ready and self._process is not None and self._process.poll() is None:
@@ -340,21 +304,10 @@ class WhisperCppServerSTTProvider(STTProvider):
                 raise
 
     def _download_model(self, model_path: Path) -> None:
-        """Stream the GGML model to a `.part` temp file, renaming only on a
-        fully-successful download -- a partial download from an interrupted
-        first run must never be mistaken for a complete model on the next
-        launch.
+        """Stream the GGML model to a `.part` file, renaming only on success.
 
-        Holds `_download_lock` for the entire body: `_get_model()`'s own
-        `model_path.is_file()` check happens *before* this method is called,
-        so two independent provider instances (e.g. an old instance's Spec
-        015 eager pre-warm still downloading, racing a new instance created
-        by a rapid Local->Cloud->Local switch) can both decide the model is
-        missing and both call in here. Re-checks `model_path.is_file()` right
-        after acquiring the lock so whichever instance loses the race skips
-        the redundant multi-GB re-download entirely once it sees the winner
-        already finished, instead of interleaving writes into the same
-        `.part` file.
+        Holds `_download_lock` throughout and re-checks the model file after
+        acquiring it, so a racing second instance skips the download entirely.
         """
         with _download_lock:
             if model_path.is_file():
@@ -397,26 +350,8 @@ class WhisperCppServerSTTProvider(STTProvider):
     def _terminate_process(self, process: subprocess.Popen | None) -> None:
         """`.terminate()` -> grace-poll -> `.kill()` fallback for one process.
 
-        Synchronous and blocking (up to `_GRACE_POLL_MAX_ATTEMPTS *
-        _GRACE_POLL_INTERVAL` plus a further blocking `wait(timeout=3.0)` on
-        the kill fallback) -- callers that must not block the FastAPI
-        event-loop thread (`cleanup()`) run this on a background daemon
-        thread instead of calling it directly.
-
-        Holds `_port_lock` for its entire body -- this is the one helper
-        both `cleanup()`'s background thread and `_get_model()`'s
-        except-branch orphan-cleanup already funnel through, so serializing
-        here serializes both callers against `_get_model()`'s own
-        `_port_lock`-guarded spawn without either call site needing its own
-        locking.
-
-        Never itself raises: the `.kill()` fallback's `wait(timeout=3.0)`
-        can raise `subprocess.TimeoutExpired` if the process is still
-        stubbornly alive after being killed (e.g. a hung Vulkan driver or AV
-        interference) -- that's logged, not propagated, so callers (notably
-        `_get_model()`'s except-branch) are guaranteed to reach their own
-        cleanup (`self._process = None`) and callers see only the original
-        triggering error, not a confusing `TimeoutExpired` traceback.
+        Blocks for several seconds and holds `_port_lock` throughout, so a
+        caller that must not block the event loop runs it on a thread. Never raises.
         """
         if process is None:
             return
@@ -469,18 +404,8 @@ class WhisperCppServerSTTProvider(STTProvider):
     ) -> TranscriptionResult:
         """Transcribe via the already-running whisper-server's `POST /inference`.
 
-        The `audio_duration` kwarg is accepted for interface parity
-        but ignored -- this spec's own scope explicitly does not replicate
-        `LocalSTTProvider`'s duration-driven beam_size/VAD tuning (plan 018,
-        Cuts deferred: proving the base accelerated path works is the job;
-        quality/latency tuning is a follow-up).
-
-        `response_format` escalates to ``verbose_json`` only when
-        ``language == "auto"`` -- plain ``"json"`` has no ``language`` field
-        at all, but the explicit-language hot path (latency-sensitive, and
-        on this Vulkan backend hardware this project cannot test against)
-        keeps its exact current wire format unchanged (spec 029 / docs/adr/
-        016-detected-language-on-stt-contract.md).
+        `audio_duration` is accepted for parity and ignored; `response_format`
+        escalates to ``verbose_json`` only when ``language == "auto"`` (ADR 016).
         """
         await asyncio.to_thread(self._get_model)
 
@@ -520,25 +445,8 @@ class WhisperCppServerSTTProvider(STTProvider):
     def cleanup(self) -> None:
         """Terminate the whisper-server child.
 
-        Mirrors `LocalSTTProvider.cleanup()`'s established
-        non-blocking-lock-guard shape exactly: `cleanup()` is
-        reachable synchronously from `PUT /stt/mode`'s `clear_cache()` on the
-        FastAPI event-loop thread, so it must never block on `_load_lock`
-        for the duration of a multi-minute first-run download/spawn. If the
-        lock is busy, log and return without touching the process handle --
-        the load's own caller is responsible for cleaning up an orphaned
-        load afterwards (e.g. `ensure_local_ready()`'s post-load identity
-        recheck).
-
-        The lock-acquire/bookkeeping above is cheap and stays synchronous,
-        but the actual `.terminate()` -> grace-poll -> `.kill()` sequence
-        (up to ~6s: `_GRACE_POLL_MAX_ATTEMPTS * _GRACE_POLL_INTERVAL` plus a
-        further blocking `wait(timeout=3.0)` on the kill fallback) runs on a
-        background daemon thread instead, so `cleanup()` itself returns
-        immediately -- matching the sibling providers' near-instant
-        `cleanup()` contract that `PUT /stt/mode` already relies on (an
-        `async def` endpoint calling `clear_cache()` synchronously,
-        unawaited).
+        Returns immediately: a load in flight wins `_load_lock` and this leaves
+        the process handle alone, and the terminate sequence runs on a thread.
         """
         if not self._load_lock.acquire(blocking=False):
             log.info("cleanup() skipped: a server load is in flight (lock busy)")

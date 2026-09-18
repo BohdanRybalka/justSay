@@ -25,10 +25,8 @@ log = logging.getLogger(__name__)
 class GroqWhisperSTTProvider(STTProvider):
     """Groq-hosted Whisper (whisper-large-v3-turbo) for fast short-audio transcription.
 
-    Notes:
-        - Free tier file size limit: 25 MB (enforced upstream by /transcribe route).
-        - Accepted formats: WAV, MP3, FLAC, OGG. NOT .webm.
-        - Timeout on the SDK call: GROQ_TIMEOUT_SECONDS (generous for short audio).
+    Free-tier file size limit 25 MB, enforced upstream. Accepts WAV, MP3, FLAC
+    and OGG, not .webm. The SDK call times out at `GROQ_TIMEOUT_SECONDS`.
     """
 
     def __init__(self, settings: STTSettings):
@@ -96,12 +94,8 @@ class GroqWhisperSTTProvider(STTProvider):
     ) -> tuple[str, str | None, float | None]:
         """Isolated SDK call — mockable in tests without installing groq.
 
-        Returns ``(text, detected_language_raw, no_speech_prob)``. ``response_format``
-        escalates to ``"verbose_json"`` only when ``language == "auto"`` --
-        that's the only path that needs a detected language back. The
-        explicit-language hot path keeps its exact current wire format
-        (``"text"``, a bare string with no metadata) unchanged (spec 029 /
-        docs/adr/016-detected-language-on-stt-contract.md).
+        Returns ``(text, detected_language_raw, no_speech_prob)``; only
+        ``language == "auto"`` escalates ``response_format`` to ``"verbose_json"``.
         """
         response_format = "verbose_json" if language == "auto" else "text"
         try:

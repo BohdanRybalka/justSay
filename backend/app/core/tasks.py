@@ -34,28 +34,10 @@ async def cancel_all(
     *,
     timeout: float = SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
 ) -> list[str]:
-    """Cancel every registered background task (plus any in ``extra``) and
-    wait, bounded by ``timeout``, for the cancellations to settle.
+    """Cancel every registered task and any in ``extra``; return those that did not settle in time.
 
-    Returns the names of the tasks that did NOT settle within the budget.
-
-    Nothing a drained task does can propagate out: `asyncio.wait()` reports
-    cancellations and failures through its result sets instead of re-raising.
-    The one exception that CAN escape is a `CancelledError` delivered to the
-    *caller's own* task while it is awaiting here -- `asyncio.wait()` re-raises
-    that. Callers whose subsequent steps must run regardless (see
-    `app.main.lifespan`) need a `try/finally` around this call.
-
-    BOUNDARY -- the registry is snapshotted at entry, before the first await.
-    A task spawned via `spawn_background_task()` AFTER that point is NOT
-    cancelled by this call and dies with the event loop, unobserved -- the
-    exact defect Spec 036 removes. So: do not call `spawn_background_task()`
-    from shutdown code running concurrently with, or after, this drain, and
-    that includes anything a cancelled task starts from its own
-    `except CancelledError` / `finally` block. No call site does this today;
-    if one ever needs to, add a bounded second pass here (a fixed number of
-    passes, never a `while` loop -- a task that respawns on cancel would make
-    it non-terminating).
+    Only a ``CancelledError`` aimed at the caller's own task escapes: a caller whose next steps must
+    run needs ``try``/``finally``. The registry snapshots at entry — never spawn during a drain.
     """
     pending = {t for t in (*_background_tasks, *extra) if t is not None and not t.done()}
     if not pending:

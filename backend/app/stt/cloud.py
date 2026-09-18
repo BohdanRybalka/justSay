@@ -21,9 +21,8 @@ log = logging.getLogger(__name__)
 class GeminiSTTProvider(STTProvider):
     """Gemini 2.5 Flash Native Audio — cloud STT provider.
 
-    Uses the google-genai SDK to send audio to Gemini and receive transcription.
-
-    Requires: pip install justsay-backend[cloud]
+    Sends audio through the google-genai SDK. Requires
+    `pip install justsay-backend[cloud]`.
     """
 
     def __init__(self, settings: STTSettings):
@@ -124,13 +123,8 @@ class GeminiSTTProvider(STTProvider):
     def _transcript_from_response(response) -> str:
         """The transcript, or a raise naming why the response carries none.
 
-        A candidate can come back with no text part at all — a safety block, a
-        ``RECITATION`` stop, a ``MAX_TOKENS`` truncation. Reading that as an
-        empty transcription made it indistinguishable from a successful silent
-        dictation: `process_audio` copied nothing, wrote a zero-word history row
-        and returned ``discarded_reason=None``, so the widget showed no status,
-        no badge and no error. Raising instead puts the reason on screen, since
-        `process_audio` and the pipeline router both propagate.
+        A candidate with no text part — a safety block, a ``RECITATION`` stop,
+        a ``MAX_TOKENS`` truncation — raises rather than reading as silence.
         """
         try:
             text = response.text

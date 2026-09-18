@@ -4,11 +4,7 @@ The `HTTPException` raises left here are this layer's own guards -- consent,
 "already recording", "not recording" -- decided from state the router can read
 before it calls anything. Every refusal the recorders themselves produce
 carries its own status on its exception class and reaches the client through
-`app/core/error_handler.py`, so the statuses those calls can answer with are
-documented where they are raised: `SessionMismatchError` (403),
-`NotRecordingError` (409), `MeetingCaptureAbortedError` (409),
-`MeetingCaptureEmptyError` (410), `MeetingWriteFailedError` (507),
-`SystemAudioUnavailableError` (503) and `SystemAudioUnsupportedError` (501).
+the error handler, so those statuses are documented where they are raised.
 """
 
 import asyncio
@@ -36,11 +32,8 @@ class RecordingStatus(BaseModel):
     """`session_id` is the live capture's owner, or `null` when idle.
 
     Echoed rather than compared here: a caller that minted the id compares it
-    locally, which is what lets a window tell its own abandoned start from
-    somebody else's recording without the backend knowing anything about
-    windows. It is an identity, not a secret — any caller holding the launch
-    token can read it — so ADR 026's per-launch shared secret remains the
-    security boundary.
+    locally. It is an identity, not a secret — ADR 026's per-launch shared
+    secret remains the security boundary.
     """
 
     is_recording: bool
@@ -67,10 +60,8 @@ class DiscardResponse(BaseModel):
 class MeetingStopResponse(BaseModel):
     """Deliberately separate from StopResponse.
 
-    The Instant Prompt response model must stay untouched by this feature, and
-    the meeting path reports one thing dictation does not: whether anything
-    went wrong during the capture, named by a `CaptureIncident` token, or
-    `null` when nothing did.
+    The meeting path reports what dictation does not: whether anything went
+    wrong during the capture, named by a `CaptureIncident` token, or `null`.
     """
 
     filename: str
@@ -100,8 +91,9 @@ _CONSENT_REQUIRED_DETAIL = (
 
 
 def _recording_status(recorder: MicrophoneRecorder) -> RecordingStatus:
-    """The dictation status, built in one place so `/start` and `/status`
-    cannot answer with different fields."""
+    """The dictation status, built once so `/start` and `/status` cannot
+    answer with different fields.
+    """
     return RecordingStatus(
         is_recording=recorder.is_recording,
         duration_seconds=recorder.duration_seconds,
@@ -114,10 +106,8 @@ def _meeting_status(recorder: MeetingRecorder) -> MeetingStatus:
     """Build the response from one snapshot rather than five property reads.
 
     Read one at a time, the device thread can finish a stop between two of
-    them and the response describes two different moments — a live meeting
-    with no elapsed time and no endpoint. `syncMeetingIndicator` runs once at
-    widget load and nothing polls after it, so such a response leaves a
-    ticking indicator up for a call that has already ended.
+    them and the response would describe two different moments — a live
+    meeting with no elapsed time and no endpoint.
     """
     snapshot = recorder.status_snapshot()
     return MeetingStatus(
@@ -140,9 +130,8 @@ async def start_recording(
 ):
     """Open the microphone, recording the caller's session id as its owner.
 
-    The body is optional and its absence is the pre-spec-119 contract: a
-    request with no body at all, and one with `Content-Type: application/json`
-    and an empty body, both bind `None` and start an unowned capture.
+    The body is optional: no body at all, and `Content-Type: application/json`
+    with an empty body, both bind `None` and start an unowned capture.
     """
     if meeting_recorder is not None and meeting_recorder.is_busy:
         raise HTTPException(status_code=409, detail="A meeting recording is in progress")
@@ -159,10 +148,9 @@ async def stop_recording(
 ):
     """Harvest the capture to a WAV, refusing a stranger's session.
 
-    Kept guarded although no frontend caller remains — the Settings
-    microphone test moved to `/discard` and the widget dictates — because this
-    is the documented Audio-In contract and an unguarded third mutating
-    endpoint is exactly how the ownership race would come back.
+    Kept guarded although no frontend caller remains: this is the documented
+    Audio-In contract, and an unguarded mutating endpoint is how the
+    ownership race would come back.
     """
     if not recorder.is_recording:
         raise HTTPException(status_code=409, detail="Not recording")
@@ -181,16 +169,9 @@ async def discard_recording(
 ):
     """End the caller's own capture and write nothing.
 
-    The session id is required here because there is no legacy caller to keep
-    compatible, and because an unowned discard would be a way for any window
-    to end any capture — the race this spec closes, reopened at a new
-    endpoint.
-
-    Both refusals are answers, which is what makes this the probe a client
-    uses to find out whether a request it abandoned was ever processed: 200
-    means the backend still held that session, so nothing downstream of the
-    start had run; 403 and 409 mean it did not, so something else already
-    happened to it.
+    The session id is required: an unowned discard would let any window end
+    any capture. Both refusals are answers, so a client can use this to learn
+    whether a start it abandoned was processed — 200 means it was not.
     """
     dropped_seconds = await recorder.discard(ref.session_id)
     return DiscardResponse(duration_seconds=dropped_seconds)
@@ -208,16 +189,9 @@ async def start_meeting_recording(
 ):
     """Begin capturing the microphone and the system output together.
 
-    Answers 403 until the meeting disclosure has been acknowledged, which is
-    what makes the dialog impossible to drive around with curl — see
-    docs/adr/040-recording-other-people-is-not-covered-by-zero-leak.md. A
-    platform with no system-audio implementation answers 501 and opens no
-    stream at all.
-
-    The `is_busy` guard is a conservative filter, not a decision: it can only
-    refuse, never permit something the recorder would refuse, because the
-    recorder re-checks on the thread that owns the answer and raises
-    `MeetingCaptureAbortedError` — a 409 — when it declines.
+    Answers 403 until the meeting disclosure has been acknowledged (ADR 040),
+    and 501 on a platform with no system-audio path. The `is_busy` guard can
+    only refuse — the recorder re-checks on the thread that owns the answer.
     """
     if not get_user_settings().meeting_consent_acknowledged:
         raise HTTPException(status_code=403, detail=_CONSENT_REQUIRED_DETAIL)
@@ -233,28 +207,9 @@ async def start_meeting_recording(
 async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting_recorder)):
     """End the recording and return the written file.
 
-    The guard is `is_busy`, not `is_recording`, so a stop that arrives while
-    the devices are still opening reaches `recorder.stop()` and is answered
-    after that open rather than being refused before it. Like the other two
-    guards it can only refuse: the recorder decides on its own thread and
-    raises `MeetingCaptureAbortedError` when there is no file to return.
-
-    Every 409, the one 410 and the one 507 this endpoint can produce mean
-    nothing is being recorded and both devices are released — which is what
-    lets the widget take its indicator down on all three
-    (`src/widget/meeting-toggle.ts`). They are three codes rather than three
-    wordings because a stop that found nothing recording, a meeting that
-    captured nothing and a meeting whose audio was lost on the way to disk
-    are different outcomes, and the widget must not describe any of them as
-    a double click. 507 in particular replaces the 500 a failed write used to
-    raise: the recorder is idle by then, but a 500 is indistinguishable from
-    an unreachable backend, so the widget kept the indicator lit.
-
-    `duration_seconds` and `capture_incident` arrive with the file, inside
-    the `MeetingRecording` the write produces, rather than being read off the
-    recorder: the harvest clears the live clock, so reading it here answers
-    `0.0`, and a meeting started while this file is still being written owns
-    the recorder's live incident by then.
+    Guarded on `is_busy`, not `is_recording`, so a stop arriving while the
+    devices are still opening is answered after that open. Every 409, the 410
+    and the 507 all mean nothing is recording and both devices are released.
     """
     if not recorder.is_busy:
         raise HTTPException(status_code=409, detail="Not recording")

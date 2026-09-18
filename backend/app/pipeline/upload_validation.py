@@ -1,32 +1,11 @@
 """Audio upload validation — magic-bytes detector + family check.
 
-The upload endpoint (`/pipeline/process-file`)
-used to trust the filename's extension alone. That accepted any payload
-renamed to `.wav` — including executables, polyglots, or zero-byte files
-that crash the STT provider with a noisy 500.
-
-The validator here:
-
-1. Rejects sub-16-byte payloads (no audio container fits in 16 bytes).
-2. Rejects unknown extensions (already enforced upstream, defended again).
-3. For containers we can recognise via magic bytes (WAV / MP3 / OGG /
-   FLAC / M4A+MP4 / WebM / AIFF / WMA), the detected MIME must belong to
-   the extension's family — `.wav` content under a `.mp3` filename is a
-   400, even though the .mp3 path is allowed in general.
-4. For extensions we genuinely cannot disambiguate via magic bytes
-   (currently `.aac`: ADTS frame sync `0xFFF1`/`0xFFF9` collides with MP3
-   frame sync), we trust the extension at face value rather than over-
-   reject. Listed in ``TRUSTED_EXTENSIONS`` so reviewers see the gap.
-
-The tables and the detector itself live in ``app.core.audio_formats``, which
-carries no web-framework dependency so the STT providers can read the MIME
-map without acquiring one.
-
-This module also owns the upload size limit — a transport concern that sits
-alongside content validation rather than in a shared utility drawer.
-``read_upload_with_limit`` is the 413 to ``validate_audio_upload``'s 400: one
-refuses a payload that is too big to read, the other refuses one whose bytes
-are not what the filename claims.
+``validate_audio_upload`` refuses a sub-16-byte payload, an unknown extension,
+and content whose magic bytes name a different container family than the
+filename claims; ``TRUSTED_EXTENSIONS`` lists what magic bytes cannot
+disambiguate. ``read_upload_with_limit`` is the 413 beside that 400. The
+tables and the detector live in ``app.core.audio_formats``, which carries no
+web-framework dependency so the STT providers can read the MIME map.
 """
 
 from pathlib import Path
@@ -46,10 +25,8 @@ from app.core.audio_formats import (
 def validate_audio_upload(content: bytes, filename: str | None) -> str:
     """Validate an uploaded audio payload and return its canonical MIME.
 
-    Raises HTTPException(400) on:
-        - empty / sub-16-byte payload
-        - missing or disallowed extension
-        - magic-bytes match a different container family than the extension
+    Raises ``HTTPException(400)`` on an empty or sub-16-byte payload, a missing
+    or disallowed extension, or magic bytes from a different container family.
     """
     if len(content) < MIN_MAGIC_BYTES:
         raise HTTPException(

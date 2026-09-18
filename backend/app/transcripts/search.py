@@ -1,14 +1,11 @@
 """Transcript search — the FTS5 lane, the LIKE fallback, the semantic lane and RRF fusion.
 
-Split out of ``words.py`` by spec 164; the code itself is unchanged. What lives
-here is the whole query side of the store: ``search_history`` (FTS5 BM25 prefix
-match plus a paged ``LIKE`` walk), ``search_history_semantic`` (vector distance
-over ``vec_entries``) and ``search_history_hybrid``, which fuses both with RRF.
-
-This module owns no connection. It borrows ``history._lock`` and
-``history._ensure_conn_locked`` for every statement it issues and takes its
-column lists from ``schema``, so the locking discipline holds unchanged here:
-the lock covers a statement, never a walk of the table.
+``search_history`` is FTS5 BM25 prefix match plus a paged ``LIKE`` walk,
+``search_history_semantic`` is vector distance over ``vec_entries``, and
+``search_history_hybrid`` fuses both with RRF. This module owns no connection:
+it borrows ``history._lock`` and ``history._ensure_conn_locked`` for every
+statement and takes its column lists from ``schema``, so a lock covers a
+statement and never a walk of the table.
 """
 
 from __future__ import annotations
@@ -38,12 +35,8 @@ _SANITIZE_KEEP_RE = re.compile(r"[^\w\s'’‘]", re.UNICODE)
 def _sanitize_fts_query(q: str) -> tuple[str, list[str]]:
     """Whitelist-sanitize ``q`` and return ``(fts_expression, tokens)``.
 
-    Returns ``("", [])`` when the sanitised query is empty.
-
-    Tokens are lowercased so the FTS5 operator keywords ``NOT``/``AND``/
-    ``OR``/``NEAR`` cease to be operators (uppercase ``NOT*`` raises
-    ``OperationalError: fts5: syntax error near "NOT"``; lowercase ``not*``
-    is a plain prefix term).
+    ``("", [])`` when the sanitised query is empty. Tokens are lowercased so that
+    ``NOT``/``AND``/``OR``/``NEAR`` cease to be FTS5 operators and stay terms.
     """
     if not q:
         return "", []
@@ -55,17 +48,10 @@ def _sanitize_fts_query(q: str) -> tuple[str, list[str]]:
 
 
 def _build_highlight(text: str | None, tokens: list[str]) -> str:
-    """HTML-escape ``text`` and wrap occurrences of any ``tokens`` (case-
-    insensitive) in ``<mark>…</mark>``.
+    """HTML-escape ``text`` and wrap any ``tokens`` in it in ``<mark>…</mark>``.
 
-    Single-pass design: offsets are found on the RAW (un-escaped) text, the
-    spans are merged so overlapping/adjacent ranges produce one ``<mark>``,
-    and ``html.escape`` is applied only on the segments BETWEEN spans (and
-    on the content inside each ``<mark>``). This avoids three classes of
-    bug from the iterative-``re.sub`` approach:
-      - matches inside HTML entities (e.g. ``amp`` in ``&amp;``)
-      - overlapping tokens producing nested/broken ``<mark>`` tags
-      - XSS via raw ``<script>`` in the transcript content
+    Case-insensitive. Offsets come from the raw text, overlapping spans merge into
+    one ``<mark>``, and every segment is escaped, so no raw markup ever survives.
     """
     if not text:
         return ""
@@ -133,16 +119,8 @@ def _substring_page_locked(
 ):
     """Caller MUST hold ``history._lock``. One page of the substring walk.
 
-    Reuses ``history._CURSOR_PAGE_WHERE`` and ``history._CURSOR_PAGE_ORDER``
-    verbatim rather than respelling the seek, for the reason
-    ``history._has_more_locked`` already gives: the row-value predicate is the
-    only spelling that plans as a seek into ``entries_ts_id_idx`` instead of a
-    scan from the top of it on every page.
-
-    The projection is three small columns on purpose. ``matched`` keeps the
-    ``LIKE`` evaluation inside SQLite's C implementation, and ``id``/``ts`` carry
-    the cursor for the next page even when the last row of the page does not
-    match -- which a page filtered down to matching rows could not do.
+    Reuses ``history._CURSOR_PAGE_WHERE``/``_CURSOR_PAGE_ORDER`` rather than
+    respelling the seek; ``id``/``ts`` carry the next page's cursor regardless.
     """
     where = history._CURSOR_PAGE_WHERE if before is not None else ""
     params: dict[str, object] = {**like_params, "row_limit": chunk}
@@ -157,25 +135,10 @@ def _substring_page_locked(
 
 
 def _substring_lane(tokens: list[str], exclude_ids: set[str], wanted: int) -> list[sqlite3.Row]:
-    """The mid-word substring lane, walked in bounded pages.
+    """The mid-word substring lane, walked in bounded pages, in ``ts DESC, id DESC``.
 
-    ``history._lock`` is taken once per page and released before the next one,
-    so the hold is a function of ``SEARCH_SCAN_CHUNK_ROWS`` and never of the size
-    of the user's history: a dictation finishing during a search waits for a page
-    rather than for the table (ADR 061).
-
-    ``wanted <= 0`` returns before any lock is taken. That is the case where the
-    FTS lane has already filled the caller's limit, and without the guard the lane
-    would spend an acquisition and a statement to learn it has nothing to collect.
-
-    Collection order is the walk order, ``ts DESC, id DESC``, and the final
-    ``id IN (...)`` fetch is re-ordered back into it in Python because ``IN`` does
-    not preserve it. At most ``SEARCH_LIMIT_MAX`` ids reach that fetch.
-
-    The walk is not one snapshot of ``entries``: a row written or deleted between
-    two pages can be missed, which is the exposure ``history.get_page`` already
-    carries since ADR 055. Duplicates cannot happen, because ``exclude_ids``
-    de-duplicates against the FTS lane and each row is seen by one page only.
+    ``history._lock`` is taken once per page, so the hold is bounded by
+    ``SEARCH_SCAN_CHUNK_ROWS`` (ADR 061). The walk is not one snapshot of the table.
     """
     if wanted <= 0:
         return []
@@ -218,29 +181,10 @@ def _substring_lane(tokens: list[str], exclude_ids: set[str], wanted: int) -> li
 
 
 def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
-    """Two-lane search: FTS5 BM25 prefix-match (primary) + LIKE substring
-    fallback (secondary).
+    """Two-lane search: FTS5 BM25 prefix match, then a ``LIKE`` substring fallback.
 
-    The FTS5 lane uses the sanitized prefix query (``прав*``-style) on
-    ``entry_fts``, orders by BM25 ascending (best first), and holds
-    ``history._lock`` for its single statement only.
-
-    The substring lane catches mid-word substrings the prefix path misses
-    (e.g. ``"кадабр"`` inside ``"абракадабра"``). SQLite can answer no
-    leading-wildcard ``LIKE`` from an index, so it is a walk of ``entries``; it
-    runs after the FTS lane's acquisition has been released, in pages of at most
-    ``SEARCH_SCAN_CHUNK_ROWS`` rows with one acquisition per page, and it
-    de-duplicates against the FTS rows in Python rather than with an
-    ``id NOT IN (...)`` clause. The two lanes therefore no longer read one
-    snapshot -- see ``_substring_lane`` and ADR 061 for what that costs and buys.
-
-    Match highlights are computed by ``_build_highlight`` on the raw
-    ``cleaned_text`` joined in from ``entries`` — FTS5's own ``highlight()``
-    aux function is NOT used because it does not HTML-escape the content
-    text (verified at entry-gate iter 1) and would open a stored-XSS vector
-    in the Tauri WebView.
-
-    Logs only ``len(q)`` (NEVER ``q`` itself, NEVER ``len(sanitized)``).
+    The lanes run one after the other and de-duplicate in Python, so they do not
+    read one snapshot (ADR 061). Only ``len(q)`` is ever logged, never ``q``.
     """
     clamped_limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
     log.debug("search len=%d", len(q or ""))
@@ -271,30 +215,10 @@ def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
 
 
 async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearchHit]:
-    """Embed ``q`` with the currently-resolved embedding provider and rank
-    entries by vector distance via ``vec_entries``.
+    """Embed ``q`` and rank entries by vector distance over ``vec_entries``.
 
-    Empty/whitespace ``q`` returns ``[]`` immediately, mirroring
-    ``search_history``'s own empty-query short-circuit — never reaches the
-    availability checks below and never spends an embedding API call.
-
-    Raises ``vector_store.SemanticSearchUnavailableError`` -- a
-    ``app.core.errors.ResourceUnavailableError`` -- for every
-    disabled/unready state, each with its own ``message``: sqlite-vec
-    failed to load, embeddings disabled by the Cloud/Local eligibility
-    rule, zero entries embedded yet, or any other runtime failure from
-    ``provider.embed()`` itself (auth error, network failure, malformed SDK
-    response), the last of which carries the raised class name in
-    ``diagnostic`` rather than in the message. Since spec 017, the only
-    caller is ``_semantic_lane``, which catches this exception and degrades
-    to an empty lane silently (see ADR 010) — there is no HTTP-level 503
-    surfaced for any of these states anymore. The zero-entries check happens
-    BEFORE the (network) embed call so an empty index fails fast without
-    spending an API call.
-
-    ``highlighted_text`` is plain HTML-escaped text with no ``<mark>``
-    spans — relevance here isn't token-based, so there's no single matched
-    span to highlight.
+    Empty or whitespace ``q`` returns ``[]`` without an embedding call; every
+    unready state raises ``SemanticSearchUnavailableError``. No ``<mark>`` spans.
     """
     from app.core.config import settings
     from app.embeddings import resolve_embedding_provider
@@ -339,9 +263,7 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
 
 async def _semantic_lane(q: str, limit: int) -> list[HistorySearchHit]:
     """Wraps ``search_history_semantic`` so every failure mode degrades to an
-    empty lane instead of propagating — see ADR 010. This is what
-    structurally closes the exception-leak bug: there is no response path
-    left that can carry an embedding-provider error string to the client.
+    empty lane instead of propagating (ADR 010).
     """
     from app.transcripts import vector_store
 
@@ -360,11 +282,10 @@ def _rrf_fuse(
     semantic_hits: list[HistorySearchHit],
     limit: int,
 ) -> list[HistorySearchHit]:
-    """Reciprocal Rank Fusion: ``score(entry) = sum over lanes of
-    1 / (RRF_K + rank_in_lane)``. The FTS lane is folded in first, so
-    ``by_id.setdefault`` keeps its ``<mark>``-tagged ``highlighted_text``
-    for any entry present in both lanes — the semantic lane's plain-escaped
-    text never overwrites it.
+    """Reciprocal Rank Fusion: ``score = sum over lanes of 1 / (RRF_K + rank)``.
+
+    The FTS lane is folded in first, so ``by_id.setdefault`` keeps its
+    ``<mark>``-tagged ``highlighted_text`` for an entry present in both lanes.
     """
     scores: dict[str, float] = {}
     by_id: dict[str, HistorySearchHit] = {}
@@ -379,16 +300,10 @@ def _rrf_fuse(
 
 
 async def search_history_hybrid(q: str, limit: int = 20) -> list[HistorySearchHit]:
-    """Always-on hybrid search: runs the FTS5/BM25+LIKE lane and the
-    semantic (vector-distance) lane concurrently via ``asyncio.gather`` and
-    fuses them with RRF. Both lanes fetch a fixed ``SEARCH_LIMIT_MAX``-row
-    candidate pool regardless of the caller's ``limit`` so ranking has full
-    context before truncation.
+    """Run the FTS/LIKE lane and the semantic lane concurrently and fuse with RRF.
 
-    ``search_history`` is synchronous/blocking (a real SQLite query under
-    ``history._lock``), so it runs via ``asyncio.to_thread`` — that's what
-    lets it genuinely overlap the semantic lane's own ``await`` in wall-clock
-    time instead of the two lanes running sequentially.
+    Both lanes fetch a fixed ``SEARCH_LIMIT_MAX`` candidate pool whatever ``limit``
+    is, and the blocking FTS lane runs via ``asyncio.to_thread`` so they overlap.
     """
     clamped_limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
     if not q or not q.strip():

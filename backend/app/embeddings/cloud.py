@@ -1,14 +1,11 @@
 """Cloud embedding provider — Gemini embeddings via google-genai.
 
-Reuses the Gemini API key already used for cloud STT
-(``settings.stt.gemini_api_key``) — no separate embeddings key. See
-``docs/adr/001-sqlite-vec-embedding-provider-selection.md``.
+Reuses ``settings.stt.gemini_api_key``, the key already present for cloud STT;
+there is no separate embeddings key (ADR 001).
 
-Call shape verified against the pinned SDK (``google-genai==1.70.0``,
-satisfies the ``>=1.0.0`` pin in ``pyproject.toml``) at implementation
-time: ``client.models.embed_content(model=..., contents=text)`` returns an
-``EmbedContentResponse`` with ``.embeddings: list[ContentEmbedding]``, each
-carrying ``.values: list[float]``.
+The SDK call shape: ``client.models.embed_content(model=..., contents=text)``
+returns an ``EmbedContentResponse`` with ``.embeddings: list[ContentEmbedding]``,
+each carrying ``.values: list[float]``.
 """
 
 import asyncio
@@ -18,10 +15,9 @@ from app.core.errors import ConfigurationError
 
 
 class CloudEmbeddingProvider:
-    """Gemini cloud embedding provider — model id comes from
-    ``EmbeddingSettings.cloud_model`` (settings layer owns the concrete
-    default; see ``docs/adr/001-sqlite-vec-embedding-provider-selection.md``).
+    """Gemini cloud embedding provider.
 
+    The model id comes from ``EmbeddingSettings.cloud_model`` (ADR 001).
     Requires: pip install justsay-backend[cloud]
     """
 
@@ -54,19 +50,8 @@ class CloudEmbeddingProvider:
     async def embed(self, text: str) -> list[float]:
         """One embedding, on a worker that a request timeout can end.
 
-        `asyncio.to_thread` cannot be cancelled, and this is reached from
-        `/history/search` and from the background indexer, so an unanswered
-        embed parks a default-executor worker for the life of the process and
-        the search request never returns. The client's own budget is the only
-        thing that ends it.
-
-        That budget is its own constant, not `GeminiSTTProvider`'s. The STT one
-        is 300 s because it covers uploading a recording of up to
-        `MAX_UPLOAD_SIZE`; this call sends one short string and answers in well
-        under a second, so borrowing 300 s here means a few dozen unanswered
-        embeds -- `/history/search` plus the background indexer -- hold the
-        shared default executor for five minutes each and starve every other
-        `to_thread` caller in the process.
+        `asyncio.to_thread` cannot be cancelled, so the client's own
+        `GEMINI_EMBEDDING_TIMEOUT_SECONDS` budget is what ends an unanswered embed.
         """
         client = self._get_client()
         return await asyncio.to_thread(self._call_embed, client, self._model, text)

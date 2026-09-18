@@ -2,8 +2,7 @@
 
 One abstract class with one implementation per platform, in the same shape as
 the STT providers: nothing else in the audio package knows which OS it is
-running on. See docs/adr/037-system-audio-capture-is-a-per-platform-source.md
-and docs/adr/041-macos-system-audio-comes-from-a-core-audio-tap.md.
+running on (ADR 037, ADR 041).
 """
 
 from __future__ import annotations
@@ -36,18 +35,9 @@ SAMPLE_BYTES = 4
 class CaptureFailure(Enum):
     """The ways a capture can go wrong, deduplicated apart from one another.
 
-    A degradation is a stream still delivering while the platform says
-    something is wrong with it. A raised callback is foreign code failing on
-    the capture thread, which says nothing about whether the device is still
-    producing audio. A stop is a source that has ended delivery for the rest
-    of the recording.
-
-    Each platform registers only what it can observe. Windows watches a
-    PortAudio callback, so it sees a status flag and a raise and never a stop
-    -- nothing a WASAPI callback can deliver is unreadable, since PortAudio
-    derives the block length from the same mix format the stream was opened
-    with. macOS reads a pipe, so it sees a raise and an end of stream and
-    never a degradation.
+    A degradation is a stream still delivering while the platform reports a
+    problem, a raised callback is foreign code failing on the capture thread,
+    and a stop has ended delivery. Each platform registers what it observes.
     """
 
     DEGRADED = "degraded"
@@ -58,21 +48,17 @@ class CaptureFailure(Enum):
 class SystemAudioUnavailableError(ResourceUnavailableError):
     """This machine could not open the capture path its platform has.
 
-    A missing loopback device, a denied macOS recording permission, a helper
-    binary that would not spawn, a COM call that failed: every raise of this
-    class is an open-time failure of one machine, so 503 is the honest answer
-    and the next attempt may succeed. The platform having no capture path at
-    all is a different fact and has its own subclass.
+    An open-time failure of one machine — a missing loopback device, a denied
+    permission, a helper that would not spawn — so 503 is honest and the next
+    attempt may succeed. A platform with no path at all has its own subclass.
     """
 
 
 class SystemAudioUnsupportedError(SystemAudioUnavailableError):
     """This operating system has no system-audio capture path at all.
 
-    Permanent for as long as the app runs on this OS, which is why it keeps
-    the 501 its base gave up: `ResourceUnavailableError` promises that
-    retrying later may work, and here it never will. See
-    docs/adr/060-a-platform-without-audio-is-not-a-broken-device.md.
+    Permanent for as long as the app runs on this OS, which is why it answers
+    501 rather than the retryable 503 its base promises (ADR 060).
     """
 
     status_code: ClassVar[int] = 501
@@ -82,26 +68,9 @@ class SystemAudioUnsupportedError(SystemAudioUnavailableError):
 class SystemAudioSource(ABC):
     """Contract: start delivering timestamped mono blocks → stop.
 
-    ``endpoint_name`` answers before ``start()``, and both implementations
-    promise that by different means: ``WindowsLoopbackSource.__init__`` opens
-    PortAudio and resolves the loopback endpoint there, while ``MacOSTapSource``
-    returns a constant — its tap has one name on every Mac — and does not spawn
-    its helper until ``start()``. ``MeetingRecorder`` depends on the promise: it
-    publishes ``source.endpoint_name`` under the lock that marks the meeting
-    live and calls ``start()`` after releasing that lock, because PortAudio
-    begins delivering blocks inside ``open()`` and a name published afterwards
-    leaves a window answering "not recording" for audio already being kept.
-
-    ``native_sample_rate`` carries no such promise. On macOS it reads back the
-    configured rate until ``start()`` parses the tap header, so it is answerable
-    only once capture is running, which is why ``MeetingRecorder`` reads it at
-    stop time rather than at start.
-
-    Reporting a failed capture is implemented here, not per platform: the two
-    implementations had grown the same nine lines twice, with opposite answers
-    for a sink that raises and a docstring each explaining why the other one
-    was different. ``_capture_name`` is the only part of it a platform still
-    owns -- it names the capture in every reason the recorder is handed.
+    ``endpoint_name`` answers before ``start()``; ``native_sample_rate`` only
+    once capture is running. Failure reporting lives here rather than per
+    platform, and ``_capture_name`` is the part of it a platform still owns.
     """
 
     _capture_name: ClassVar[str] = "this system-audio capture"
@@ -117,37 +86,9 @@ class SystemAudioSource(ABC):
     def start(self, on_block: BlockSink, on_failure: FailureSink | None = None) -> None:
         """Begin capturing, calling `on_block(arrival_monotonic, mono_block)`.
 
-        `on_failure(reason)` carries whatever the source can observe about a
-        capture going wrong -- a helper that exited, a PortAudio status flag,
-        a block that is not whole frames, or anything else the capture
-        callback raised, named by its exception type. It is optional because
-        both implementations are useful without it, and it is a report rather
-        than a raise: the meeting keeps recording the microphone, and the
-        caller decides what to tell the user. A render endpoint that goes
-        quiet with no flag set is indistinguishable from a machine playing
-        silence and reaches nobody.
-
-        At most once per `CaptureFailure`, and nothing at all after `stop()`.
-        The rule is implemented once, in `_report_capture_failure` below,
-        rather than per platform: two copies of it drifted into opposite
-        answers for a raise out of the block sink while this paragraph
-        described only one of them.
-
-        A raise out of the block sink is forgiven on both platforms. It is
-        foreign code failing on the capture thread and says nothing about
-        whether the device is still producing audio, so it is reported and
-        delivery continues: ending a capture on it would cost the far side the
-        rest of the meeting for one transient raise. `_deliver_to_sink` is
-        where both sources hand a block over, so neither can end on one.
-
-        `reason` is a diagnostic, not a sentence for a panel: it reaches
-        `MeetingRecorder._note_incident`, which logs it and publishes only the
-        `CaptureIncident` the user's meeting status carries.
-
-        Neither implementation lets anything escape its capture callback, at
-        the cost of a sink that raises being logged and swallowed -- a raise
-        crossing a PortAudio callback or ending the macOS reader thread is
-        how a failed capture reached nobody in the first place.
+        `on_failure(reason)` reports what the source can observe about a
+        capture going wrong, at most once per `CaptureFailure` and never after
+        `stop()`. A raise out of `on_block` is reported, never fatal.
         """
 
     @abstractmethod
@@ -167,13 +108,8 @@ class SystemAudioSource(ABC):
     def _begin_failure_reports(self, on_failure: FailureSink | None) -> None:
         """Take the sink this capture reports to, and its own set of claims.
 
-        Per capture rather than per source, because `MacOSTapSource.stop()`
-        leaves its object usable: it kills a helper, and `start()` spawns
-        another. A claim held for the life of that source silenced every
-        capture after the first. `WindowsLoopbackSource.stop()` terminates its
-        PyAudio instance instead, so a second `start()` cannot open a stream
-        at all and the release is unobservable there -- which is a fact about
-        that one `stop()`, not a reason for the base to hold two rules.
+        Per capture rather than per source, so a source reused across a
+        `stop()`/`start()` pair reports again instead of staying silent.
         """
         with self._failure_lock:
             self._failure_sink = on_failure
@@ -189,24 +125,9 @@ class SystemAudioSource(ABC):
     def _report_capture_failure(self, reason: str, kind: CaptureFailure) -> None:
         """Hand the recorder a reason this capture went wrong, once per kind.
 
-        Counted per kind rather than together, because a source raising the
-        same PortAudio flag on every block must not hand the user a sentence
-        per block, and must not silence the later news that it has stopped
-        delivering -- which is the order the two arrive in, since the flag is
-        raised on the same callback whose sink then raises.
-
-        A kind's one report is spent only when a sink actually took it. No
-        sink registered, or a sink that raised, leaves the claim standing:
-        "once" means once the recorder has heard it, and a claim spent on a
-        report nobody received is this machinery silencing the source on its
-        own. The retry that buys is bounded by the caller -- Windows reports
-        at most once per kind per callback, macOS at most twice per reader
-        pass -- and costs one sink call rather than a traceback, because the
-        log below is claimed separately and only once.
-
-        The sink belongs to `MeetingRecorder`, not to this package, so a raise
-        out of it is caught here rather than left to unwind a realtime
-        callback or a reader thread.
+        A kind's one report is spent only once a sink has actually taken it:
+        no sink, or a sink that raised, leaves the claim standing. A raise out
+        of the sink is caught and logged here rather than left to unwind.
         """
         with self._failure_lock:
             if kind in self._reported:
@@ -232,12 +153,8 @@ class SystemAudioSource(ABC):
     def _claim_failure_log(self, kind: CaptureFailure) -> bool:
         """True the first time this capture logs `kind`.
 
-        Counted apart from the report above, because a sink that refuses the
-        report is not a reason to lose the diagnostic, and because a failure
-        that repeats per block would otherwise spend a capture thread
-        formatting the same traceback ~47 times a second for the rest of the
-        meeting -- which produces the input underflow the next log line then
-        blames the device for.
+        Claimed apart from the report above, so a sink that refuses the report
+        does not also cost the diagnostic.
         """
         with self._failure_lock:
             already = kind in self._logged
@@ -260,9 +177,8 @@ class SystemAudioSource(ABC):
     def _deliver_to_sink(self, sink: BlockSink, arrival: float, block: np.ndarray) -> None:
         """Hand one block over, reporting a raise out of the sink rather than ending on it.
 
-        The one place either source calls `on_block`, so the contract above --
-        a transient raise out of foreign code does not cost the far side the
-        rest of the meeting -- is executed rather than described twice.
+        The only route either source takes to `on_block`, so the contract
+        above is executed rather than restated per platform.
         """
         try:
             sink(arrival, block)
@@ -275,20 +191,9 @@ def create_system_audio_source(
 ) -> SystemAudioSource | None:
     """The system-audio source for this platform.
 
-    Returns None only when this platform has no capture path at all, which is
-    a fact about the operating system and the same on every machine running
-    it. A platform that *has* one and could not open it raises
-    ``SystemAudioUnavailableError`` carrying the reason, because that is a
-    fact about this machine and the user is the only person who can act on
-    it. Collapsing the two into None is what made the caller tell a Windows
-    user that meeting recording requires Windows.
-
-    Both platform modules are imported here and nowhere else: `pyaudiowpatch`
-    is a Windows-only wheel, and the macOS source reaches a helper binary that
-    exists only inside a macOS bundle.
-
-    `platform_name` is injectable so both branches are covered on the ubuntu
-    CI runner.
+    ``None`` only when this platform has no capture path at all; a platform
+    that has one and could not open it raises ``SystemAudioUnavailableError``
+    carrying the reason. ``platform_name`` is injectable for tests.
     """
     platform_name = sys.platform if platform_name is None else platform_name
 

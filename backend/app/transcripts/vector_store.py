@@ -1,18 +1,10 @@
 """SQLite-side embeddings storage — ``vec0`` virtual table + ``entry_embeddings``.
 
-Lives next to ``history.py`` (not ``app/embeddings/``) because it shares its
-``_lock`` and connection — mirrors how ``search.py`` keeps its SQL narrowly
-scoped and delegates provider selection to
-``app.embeddings.resolve_embedding_provider``.
-
-Import direction: this module imports ``app.transcripts.history`` at module level
-(needs ``_lock``/``_ensure_conn_locked``). ``app.transcripts.schema``
-imports THIS module back, but only via a lazy import inside ``_init_schema``
-and ``_migrate_to_v5_locked`` (function body, not module top) — that keeps
-both modules importable in either order without a circular-import crash at
-load time. ``app.embeddings`` is also
-always lazy-imported here, same discipline ``search.py`` uses for
-``app.embeddings.resolve_embedding_provider``.
+Lives next to ``history.py`` rather than in ``app/embeddings/`` because it
+shares that module's ``_lock`` and connection, which it imports at module level.
+``app.transcripts.schema`` imports this module back, but only from inside a
+function body, and ``app.embeddings`` is always lazy-imported here: both keep
+the package importable in either order.
 """
 
 from __future__ import annotations
@@ -62,13 +54,10 @@ NO_ENTRIES_EMBEDDED_DETAIL = (
 
 
 class SemanticSearchUnavailableError(ResourceUnavailableError):
-    """Raised by ``search.search_history_semantic``. Caught and silenced by
-    ``search._semantic_lane`` (spec 017 / ADR 010) -- never reaches the
-    router or an HTTP response; only logged at ``debug`` level.
+    """Raised by ``search.search_history_semantic``, silenced by its caller (ADR 010).
 
     It declares no ``status_code`` or ``code`` of its own, so it answers
-    ``resource_unavailable`` with 503 the day something does route it to a
-    response.
+    ``resource_unavailable`` with 503 the day something does route it to one.
     """
 
 
@@ -78,16 +67,10 @@ class BackfillResult(BaseModel):
 
 
 def recreate_delete_trigger_locked(conn: sqlite3.Connection) -> None:
-    """Caller MUST hold ``history._lock``.
+    """Caller MUST hold ``history._lock``. Re-declares ``entries_ad_vec``.
 
-    ``entries_ad_vec`` is a trigger ON ``entries``, so anything that drops that
-    table takes it with it -- the v4 rebuild does. Without it a deleted
-    transcript leaves its vector behind, and SQLite reuses rowids, so a later
-    entry inherits it. Declared here rather than at the two call sites so the
-    two cannot drift.
-
-    A no-op while ``vec_entries`` does not exist: the trigger's body names it,
-    and it is created lazily on the first successful embed.
+    A trigger ON ``entries``, so dropping that table takes it with it and a deleted
+    transcript would leave its vector behind. A no-op until ``vec_entries`` exists.
     """
     exists = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vec_entries'"
@@ -101,15 +84,10 @@ def recreate_delete_trigger_locked(conn: sqlite3.Connection) -> None:
 
 
 def ensure_vec_table_locked(conn: sqlite3.Connection, provider: str, model: str, dim: int) -> None:
-    """Caller MUST hold ``history._lock``.
+    """Caller MUST hold ``history._lock``. Prepares ``vec_entries`` for a model.
 
-    Idempotent no-op if ``(provider, model)`` already matches
-    ``embeddings_meta``. Otherwise performs the full-wipe-on-model-change
-    migration: drop `vec_entries`, delete all `entry_embeddings` rows,
-    recreate `vec_entries` at the new dimension, and overwrite
-    `embeddings_meta` LAST (only after the table exists) so a crash
-    mid-wipe self-heals via `IF NOT EXISTS` + this same comparison on the
-    next call.
+    A no-op if ``(provider, model)`` already matches ``embeddings_meta``; otherwise
+    wipes and recreates at the new dimension, writing ``embeddings_meta`` LAST.
     """
     row = conn.execute(
         "SELECT provider, model, dim FROM embeddings_meta WHERE id = 1"
@@ -141,14 +119,10 @@ def insert_embedding(
     provider: str,
     model: str,
 ) -> None:
-    """Caller MUST hold ``history._lock``. Assumes ``ensure_vec_table_locked``
-    has already run for ``(provider, model)`` on this connection.
+    """Caller MUST hold ``history._lock``. Writes one vector and its metadata.
 
-    ``vec0`` virtual tables do NOT support ``INSERT OR REPLACE`` (raises
-    ``UNIQUE constraint failed`` — verified empirically against the pinned
-    ``sqlite-vec==0.1.9``); a plain ``DELETE`` + ``INSERT`` is used instead.
-    ``entry_embeddings`` is a normal table so ``INSERT OR REPLACE`` works
-    there and also re-triggers the dim guard on the new row.
+    ``ensure_vec_table_locked`` must already have run for ``(provider, model)``.
+    ``vec0`` rejects ``INSERT OR REPLACE``, so the vector is DELETEd then INSERTed.
     """
     dim = len(vector)
     packed = sqlite_vec.serialize_float32(vector)
@@ -182,15 +156,10 @@ def query_similar(
 
 
 async def embed_entry_background(entry_id: str, text: str) -> None:
-    """``BackgroundTasks`` entrypoint — runs AFTER the response is sent, so
-    embedding latency structurally cannot land inside the request cycle
-    (see ``pipeline.service.process_audio``).
+    """``BackgroundTasks`` entrypoint — runs after the response is sent.
 
-    Best-effort by contract: the common case (embeddings disabled) returns
-    quietly at ``debug`` level — must not warn-spam most users most of the
-    time. Every other exception (provider network failure, malformed
-    response, SQLite error) is caught and logged at ``warning``, never
-    re-raised.
+    Best-effort by contract and never raises: embeddings disabled returns at
+    ``debug``, and every other failure is caught and logged at ``warning``.
     """
     if not history._vec_available:
         log.debug("sqlite-vec unavailable — skipping background embed for %s", entry_id)
@@ -276,17 +245,10 @@ _indexer_lock = asyncio.Lock()
 
 
 async def run_background_indexer() -> None:
-    """Silently drains the not-yet-embedded backlog. Nudged once at app
-    startup and once per completed dictation (see ADR 010) -- never awaited
-    by its callers, never blocks a request/response cycle. Serialized via
-    _indexer_lock so overlapping nudges collapse into at most one active
-    sweep; a nudge that arrives mid-sweep becomes a fast no-op once it
-    acquires the lock and finds remaining == 0.
+    """Silently drains the not-yet-embedded backlog. Never raises, never awaited.
 
-    Must never raise -- same "never raise" contract embed_entry_background
-    already documents, for the same reason: both are BackgroundTasks/
-    asyncio.create_task entrypoints with no caller able to observe or react
-    to an exception raised here.
+    Nudged at startup and after a dictation (ADR 010), and serialized on
+    ``_indexer_lock``, so overlapping nudges collapse into one active sweep.
     """
     if not history._vec_available:
         return
@@ -310,10 +272,8 @@ async def run_background_indexer() -> None:
 def _row_value_version_failure() -> str | None:
     """The bundled library is new enough to parse ``(ts, id) < (?, ?)`` at all.
 
-    Row values arrived in SQLite 3.15.0; below that the shipped history page read
-    is a syntax error rather than a wrong answer, so every history read would fail
-    for that user. Checked here rather than at startup or on the request path,
-    where it would take dictation and settings down with it.
+    Row values arrived in SQLite 3.15.0; below that the history page read is a
+    syntax error. Checked here rather than at startup, which it would take down.
     """
     if sqlite3.sqlite_version_info >= history.ROW_VALUE_MIN_SQLITE_VERSION:
         return None
@@ -327,10 +287,8 @@ def _row_value_version_failure() -> str | None:
 def _vec_extension_failure() -> str | None:
     """sqlite-vec loads and answers a KNN query inside this build.
 
-    Opens an in-memory connection independent of ``history``'s shared connection
-    (this must work even if the sidecar has never bootstrapped history), loads the
-    extension, creates a 3-dim ``vec0`` table, inserts and queries one vector, and
-    asserts the inserted row comes back.
+    Opens its own in-memory connection, so it works before history has ever
+    bootstrapped, and queries an inserted vector back out of a 3-dim ``vec0``.
     """
     try:
         conn = sqlite3.connect(":memory:")
@@ -367,16 +325,8 @@ def _cursor_seek_plan_failure() -> str | None:
 def selftest() -> tuple[bool, str]:
     """``--selftest-sqlite-vec`` backend. Never raises.
 
-    Three assertions about the SQLite the frozen sidecar actually bundles, which
-    only a packaged build can answer: the library parses row values, its planner
-    seeks ``entries_ts_id_idx`` for both statements of the cursored history read --
-    the page projection and the has-more probe -- and sqlite-vec loads. **Every
-    check runs**, and a failure reports all of them -- an old
-    library is exactly the build whose sqlite-vec status is worth knowing, so
-    stopping at the first failure would throw that answer away. Each check
-    reports rather than raises, and the loop guards them anyway: the promise in
-    the first line has to survive a fourth check being added by someone who
-    forgets it.
+    Assertions only a packaged build can answer: the library parses row values, its
+    planner seeks ``entries_ts_id_idx``, sqlite-vec loads. **Every check runs.**
     """
     checks = (
         _row_value_version_failure,

@@ -23,16 +23,9 @@ log = logging.getLogger(__name__)
 class NotRecordingError(NotReadyError):
     """A request to end a capture arrived when no capture was running.
 
-    Named rather than raised as a bare ``RuntimeError`` so that exactly this
-    state answers 409, instead of a whole coroutine body being wrapped in
-    ``except RuntimeError``. That shape is the one [JS-107] was: any unrelated
-    ``RuntimeError`` raised later inside the handler's call would be answered
-    as "not recording", and the client reads that 409 as *proof* that its
-    abandoned request was already processed.
-
-    Both ways a capture can end -- ``stop()`` and ``discard()`` -- raise it,
-    so the one state has one class and one status rather than the bare
-    ``RuntimeError``/409 split it carried until spec 150.
+    Named rather than a bare ``RuntimeError`` so exactly this state answers
+    409: a client reads that 409 as proof its abandoned request was already
+    processed. Both ``stop()`` and ``discard()`` raise it.
     """
 
     code: ClassVar[str] = "not_recording"
@@ -66,16 +59,9 @@ class MicrophoneRecorder(AudioRecorder):
     async def start(self, session_id: str | None = None) -> None:
         """Open the device, recording `session_id` as the capture's owner.
 
-        An already-open device keeps the owner it was opened with and this call
-        does nothing. The id names a capture rather than a caller, so writing a
-        second caller's id over a live one would hand that capture to a window
-        which never opened it and could then stop or discard it — the exact
-        confusion the id exists to remove. `POST /audio/start` refuses this case
-        with 409 before reaching here, so no caller observes the difference.
-
-        `None` keeps the unowned semantics every caller had before spec 119:
-        the recorder answers to anyone, which is what a curl caller and
-        `smoke_sidecar.py` still rely on.
+        An already-open device keeps the owner it was opened with and this
+        call does nothing. `None` starts an unowned capture the recorder
+        answers to anyone about, which curl and `smoke_sidecar.py` rely on.
         """
         with self._lock:
             if self._recording:
@@ -103,11 +89,8 @@ class MicrophoneRecorder(AudioRecorder):
     async def stop(self, session_id: str | None = None) -> Path:
         """Harvest the capture, refusing a session that does not own it.
 
-        The guard and the state change are indivisible because they share one
-        `with self._lock` acquisition and because no `await` appears inside
-        any such block in this module — both facts are asserted by an AST test
-        in `backend/tests/test_audio.py`, so a future edit that moves either
-        out turns the suite red rather than reopening the race.
+        The guard and the state change are indivisible: one `with self._lock`
+        acquisition, and no `await` inside any such block in this module.
         """
         with self._lock:
             if not self._recording or self._stream is None:
@@ -140,11 +123,8 @@ class MicrophoneRecorder(AudioRecorder):
     async def discard(self, session_id: str | None = None) -> float:
         """End the capture and drop its frames, writing no file at all.
 
-        The counterpart of `stop()` for a recording nobody is going to
-        transcribe: an abandoned start the client reclaims, or the Settings
-        microphone test, neither of which ever wanted the WAV that `stop()`
-        leaves in the scratch directory for nothing to delete ([JS-122]).
-        Returns the duration that was dropped, which is the only thing left to
+        The counterpart of `stop()` for a recording nobody will transcribe.
+        Returns the duration that was dropped, which is all there is left to
         report about it.
         """
         with self._lock:
@@ -167,11 +147,10 @@ class MicrophoneRecorder(AudioRecorder):
         return dropped_seconds
 
     def _concatenate_and_write(self, frames: list[np.ndarray], output_path: Path) -> Path:
-        """The dictation counterpart of the meeting recorder's off-loop write.
+        """Concatenate the captured frames and write the WAV.
 
-        Smaller -- a dictation clip is seconds, not a 45-minute call -- but the
-        same shape, reached from the same `async def`, so a long recording
-        stalls every other endpoint for the length of the write.
+        Runs off the event loop, so a long recording does not stall every
+        other endpoint for the length of the write.
         """
         return write_wav(
             output_path,
@@ -189,8 +168,7 @@ class MicrophoneRecorder(AudioRecorder):
         """Who owns the live capture, or `None` when nothing is being recorded.
 
         Never a stale name: every exit path clears it inside the same locked
-        block that clears `_recording`, which
-        `test_a_stopped_recorder_never_names_an_owner` asserts on all four.
+        block that clears `_recording`.
         """
         return self._session_id
 
@@ -211,16 +189,12 @@ class MicrophoneRecorder(AudioRecorder):
         return self._final_duration
 
     def cleanup(self) -> None:
-        """Release the audio stream if one is open. Safe to call any time,
-        including when never started. Discards buffered frames without writing
-        a WAV — call on app shutdown, or to roll a failed start() back to a
-        stopped state, but never as a substitute for stop().
+        """Release the audio stream if one is open. Safe to call any time.
 
-        `stop()` and `close()` get a `try` each, as `meeting_recorder.py` does
-        for the same pair: the reference is already dropped and
-        `sounddevice._StreamBase` has no finalizer, so a `stop()` that raises —
-        the unplugged-headset case — would otherwise skip the `close()` and
-        hold that PortAudio stream for the life of the process."""
+        Discards buffered frames without writing a WAV — for app shutdown or
+        to roll a failed `start()` back, never as a substitute for `stop()`.
+        `stop()` and `close()` get a `try` each so neither is skipped.
+        """
         with self._lock:
             stream = self._stream
             self._stream = None

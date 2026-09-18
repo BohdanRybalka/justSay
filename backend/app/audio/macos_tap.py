@@ -1,29 +1,11 @@
-"""macOS system audio, read from the bundled Core Audio tap helper.
+"""macOS system audio, from the bundled `justsay-audiotap` helper (ADR 041).
 
-The helper is `macos/JustSayAudioTap`, built as `justsay-audiotap` and signed
-inside the app bundle. Its contract, which is also written down in the helper's
-own header comment:
-
-    justsay-audiotap --block-frames <N>
-
+Built from `macos/JustSayAudioTap`; its Swift header is the other half of this
+contract, so changing one alone makes the other wrong.
     stdout: {"sample_rate":48000,"channels":2,"format":"f32le","tap_stream_index":0}\\n
             then raw interleaved little-endian float32 frames, forever
     stderr: log lines, one per line
     SIGTERM: flush whole blocks, exit 0
-
-Nothing in this repository compiles or runs the helper, so this docstring and
-the Swift header comment are the two halves of one contract; changing either
-alone makes the other wrong.
-
-`tap_stream_index` is required here for exactly that reason. The helper reads
-one buffer out of the aggregate device's input list, and buffer 0 is the wrong
-one whenever the default output device is a headset that also has a microphone
-— the recording then contains the microphone twice and no system audio, at the
-right sample rate and channel count, so nothing about the bytes gives it away.
-The field is the helper stating which buffer it derived; a helper that cannot
-state it is refused at startup rather than trusted.
-
-See docs/adr/041-macos-system-audio-comes-from-a-core-audio-tap.md.
 """
 
 from __future__ import annotations
@@ -72,10 +54,8 @@ _DEV_TAP_PATH = (
 def resolve_audio_tap_path(executable: Path, override: Path | None) -> Path:
     """Where the tap helper lives, without executing anything.
 
-    `override` wins unconditionally. A frozen sidecar at
-    `…/Resources/justsay-backend/justsay-backend` resolves to its sibling
-    resource `…/Resources/justsay-audiotap`; anything else is a dev tree and
-    resolves to the SwiftPM build output.
+    `override` wins unconditionally; a frozen sidecar resolves to its sibling
+    `…/Resources/justsay-audiotap`, anything else to the SwiftPM build output.
     """
     if override is not None:
         return Path(override)
@@ -87,11 +67,8 @@ def resolve_audio_tap_path(executable: Path, override: Path | None) -> Path:
 def _start_reader(target, name: str) -> threading.Thread:
     """A started daemon thread, handed back so the caller can shut it down.
 
-    Every thread this module starts reads one of the helper's pipes, and
-    whoever tears the helper down has to know which of them are still parked
-    inside a read before closing anything (ADR 052). Returning the thread makes
-    that a value the caller holds rather than something a function was trusted
-    to append to a list it was passed.
+    Whoever tears the helper down must know which readers are still parked
+    inside a read before closing any pipe (ADR 052).
     """
     reader = threading.Thread(target=target, name=name, daemon=True)
     reader.start()
@@ -99,19 +76,10 @@ def _start_reader(target, name: str) -> threading.Thread:
 
 
 def _await_header(reader: threading.Thread, header: list[bytes]) -> bytes:
-    """The helper's first line, bounded, or a raise saying it never arrived.
+    """The helper's first line, or a raise once `_HEADER_TIMEOUT_SECONDS` passes.
 
-    The helper writes its header only after both `AudioHardwareCreateProcessTap`
-    and the aggregate device succeed. Spawned but stalled before that -- a
-    permission prompt being the obvious candidate -- a plain `readline()` never
-    returns, and `MacOSTapSource.start` is reached from an `async def`, so it
-    takes the whole backend with it rather than just meeting recording. Every
-    other blocking call in this module is already bounded; this was the one
-    that was not, and the Windows loopback source has no equivalent.
-
-    On the timeout path `reader` is still parked inside `readline()` on the
-    helper's stdout, which is why the caller holds it: that pipe must not be
-    closed under a blocked read.
+    Bounded because the caller is reached from an `async def`. On the timeout
+    path `reader` is still parked in `readline()`, so that pipe must not be closed.
     """
     reader.join(timeout=_HEADER_TIMEOUT_SECONDS)
     if not header:
@@ -255,26 +223,8 @@ class MacOSTapSource(SystemAudioSource):
     ) -> None:
         """Frames until the helper stops producing them, then why it stopped.
 
-        Every step is inside the catch, not only the loop. This runs on a
-        daemon thread nobody joins for a result, so a raise anywhere in it
-        ends system audio and tells no one -- the defect this whole path
-        exists to prevent, reintroduced by the three calls that used to sit
-        outside the guarded loop. `Popen.wait` raising `ChildProcessError` for
-        a child `stop()` reaped concurrently is the concrete one.
-
-        Closing the pipe is unconditional, and belongs to leaving the loop
-        rather than to the reason for leaving. Every way out ends the reading,
-        and a helper still writing into a pipe with no reader parks inside
-        `write()` holding its Core Audio tap -- so tying the close to a
-        refusal left the other two exits, a cleared sink and a stream that
-        ended, relying on `stop()` happening to follow. That was an ordering
-        guarantee held in another method rather than a property of this one.
-
-        It also comes first, before the reason is reported. The sink belongs
-        to `MeetingRecorder` and can take as long as it likes; until the close
-        the helper is still wedged inside `write()` on a full pipe, holding
-        the tap, for however long foreign code spends behind the recorder's
-        lock. Nothing in the report needs the pipe open.
+        Runs on a daemon thread nobody joins, so every step is inside the catch.
+        The pipe is closed on every way out of the loop, before anything is reported.
         """
         try:
             reason = self._deliver_until_refused(process)
@@ -286,21 +236,10 @@ class MacOSTapSource(SystemAudioSource):
             self._report_callback_failure(failure)
 
     def _deliver_until_refused(self, process: subprocess.Popen) -> str | None:
-        """Blocks to the sink until the helper stops, or why reading stopped.
+        """Blocks to the sink until the helper stops, or why reading stopped. Never raises.
 
-        Returns None when the helper ran out cleanly or when the block sink
-        has been cleared, and the sentence the recorder should hear when
-        neither is what happened. Nothing raises out of here into the reader
-        thread, which nobody joins for a result: a raise ends system audio and
-        tells no one, which is the failure this whole path exists to prevent.
-
-        A raise out of the block sink is not one of those sentences and does
-        not leave the loop -- `_deliver_to_sink` reports it and the next block
-        is still read. That sink is `MeetingRecorder._system_callback`, a
-        caller this module neither owns nor can promise about, and ending a
-        capture on one transient raise costs the far side the rest of the
-        meeting. What is left for the catch below is this module and the pipe
-        failing in a way `_read_exactly` does not already answer.
+        None when the helper ran out cleanly or the sink was cleared, otherwise the
+        sentence the recorder hears. A raise out of the sink does not leave the loop.
         """
         block_bytes = self._settings.meeting_block_frames * self._channels * SAMPLE_BYTES
         stdout = process.stdout
@@ -326,29 +265,8 @@ class MacOSTapSource(SystemAudioSource):
     def _ran_out(self, partial_block_bytes: int, block_bytes: int) -> str | None:
         """Why the helper's stream ended, when it ended short of a block.
 
-        The whole-block guarantee is what this rests on, because it is the
-        one the helper actually gives. `writeAll` in `main.swift` retries
-        until every byte it was handed is out and gives up only by stopping
-        altogether, and `flushWholeBlocks` hands it
-        `pending.count - (pending.count % blockSamples)` samples, so nothing
-        but whole blocks ever enters this pipe. A stream that ended cleanly
-        therefore reads zero bytes here, and any tail at all is proof the
-        stream was cut on the way out.
-
-        Read against the frame size instead, the tail was evidence only when
-        the cut happened to be frame-misaligned -- for a two-channel float32
-        stream, seven cuts in eight. The eighth reported nothing and the
-        recording went on looking healthy with the far side gone, which is
-        the defect this path exists to close.
-
-        Reported as a stop rather than tolerated, because there is nothing to
-        tolerate -- the stream is over either way. What the report buys is
-        that the recorder hears the capture ended badly instead of hearing
-        that it simply ended.
-
-        Silent during a deliberate stop, where `stop()` kills the helper: a
-        write interrupted by the kill explains the cut, and the same read is
-        how every clean teardown ends.
+        The helper writes whole blocks only, so any tail at all is proof the
+        stream was cut; None for a clean end and for a deliberate `stop()`.
         """
         if not partial_block_bytes or self._stopping.is_set():
             return None
@@ -360,19 +278,8 @@ class MacOSTapSource(SystemAudioSource):
     def _stop_reading(self, process: subprocess.Popen) -> None:
         """Close the pipe the helper is writing into, so it exits.
 
-        Nothing reads stdout once the loop is left and the helper keeps
-        producing: at 1024-frame stereo blocks a 64 KB pipe fills in about
-        eight of them, roughly 170 ms of a call, and the helper then parks
-        inside `write()` still holding its Core Audio tap. It is still parked
-        when SIGTERM arrives, so `_terminate` spends its whole budget before
-        falling through to `kill()` -- ADR 052's hazard, on the other pipe.
-
-        Closing the read end turns that wedge into a broken pipe the helper
-        dies on, which is also what gives the exit report below something to
-        name: a helper still running has no exit code. Safe from this thread
-        and only from this thread, because it is the sole reader of that pipe
-        and has already left the read (ADR 052 again: closing under a parked
-        reader deadlocks on the buffer lock).
+        Safe from this thread and only from this thread: it is the sole reader
+        of that pipe and has already left the read (ADR 052).
         """
         try:
             if process.stdout is not None:
@@ -389,53 +296,8 @@ class MacOSTapSource(SystemAudioSource):
     ) -> None:
         """Why the helper is gone, in its own words, once it actually is.
 
-        The exit status is waited for rather than sampled. `poll()` answers
-        None for a child that has closed its descriptors and not yet been
-        reaped, which is exactly what the one helper death this module can
-        observe looks like from here: the helper crashes, stdout hits EOF, the
-        loop returns, and the exit is read microseconds before the kernel has
-        it. Returning on that answer left a crashed helper reported to nobody
-        while the meeting went on claiming a healthy system capture. A helper
-        that has closed stdout and is still running past the wait is the same
-        news with no number attached, and is reported as that rather than
-        dropped -- as what was observed, since a helper tearing its tap down
-        exits milliseconds after the wait it just missed.
-
-        Every reason this source can observe is a stop -- it reads a pipe,
-        and a pipe that is still delivering has nothing to complain about --
-        so this report and the framing one above it share the single
-        `CaptureFailure.STOPPED` claim. They are two readings of one failure:
-        the first reason is the one the recorder hears and the exit is carried
-        by the log line above, unless that first report was refused, in which
-        case the claim was never spent and this one takes it.
-
-        A zero is news of nothing only when nothing was refused. After a
-        refusal the pipe was closed from here, and the helper answers a closed
-        stdout by logging it and exiting 0 -- so the zero says it obeyed the
-        close, not that the capture was fine, and returning on it dropped the
-        stderr tail. That tail is the only channel separating a revoked
-        recording permission from a Core Audio error (ADR 052), and after a
-        refusal it is the only account of the framing that exists.
-
-        Both waits share one `_READER_JOIN_TIMEOUT_SECONDS` deadline rather
-        than holding one each. This runs on a thread `_shutdown` joins against
-        that same budget, so a wait and a join that each spend it in full put
-        this thread past the deadline on a teardown that was going cleanly:
-        every `stop()` landing an instruction into the wait found the reader
-        parked, handed both descriptors to the detached closer and paid the
-        budget twice. One deadline is also the honest shape, because the
-        helper's last words are written on the way out: there is nothing to
-        join for until the wait is over, and a wait that returned early is
-        time the drain still has.
-
-        `_stopping` is read twice, on either side of the wait, and the second
-        read is the one that matters: a deliberate stop kills the helper, so
-        neither its code nor its stderr says anything about the capture, and
-        the wait is where such a stop most often lands. The first read is what
-        keeps this thread out of the wait at all during a shutdown -- it is
-        one of the threads `_shutdown` is joining, and time spent here is
-        budget spent getting itself classified as parked on a pipe it is not
-        reading.
+        Waits for the exit status rather than sampling it, silent during a
+        deliberate stop, and silent on a zero exit unless the framing was refused.
         """
         if self._stopping.is_set():
             return
@@ -461,26 +323,10 @@ class MacOSTapSource(SystemAudioSource):
         )
 
     def _drain_stderr(self, stream: object) -> None:
-        """Read the helper's stderr from the moment it is spawned.
+        """Read the helper's stderr from the moment it is spawned, until EOF.
 
-        A pipe nobody reads fills, and the helper then blocks inside its own
-        write instead of producing audio (ADR 052). The read starts before the
-        header read does, because the Core Audio setup the helper logs during
-        is exactly the phase that precedes the header.
-
-        What is bounded is what is kept, not what is read. Each read stops at
-        `_STDERR_MAX_LINE_BYTES`, and the remainder of a line longer than that
-        is read and dropped rather than kept as further entries: a single
-        100 KB Core Audio dump would otherwise become 25 of the
-        `_STDERR_TAIL_LINES` the buffer holds and evict the `fail(...)` line
-        the buffer exists to preserve. So one written line is at most one
-        entry, of at most `_STDERR_MAX_LINE_BYTES` characters -- characters,
-        not bytes, because `errors="replace"` turns each undecodable byte into
-        a U+FFFD that re-encodes to three.
-
-        Returns at EOF, which is the helper's exit closing the write end --
-        never a close of this stream from another thread, which would deadlock
-        on the buffer lock this read holds.
+        A pipe nobody reads fills and the helper blocks inside its own write
+        (ADR 052). Never close this stream from another thread: it deadlocks.
         """
         if stream is None:
             return
@@ -518,10 +364,8 @@ class MacOSTapSource(SystemAudioSource):
     def _failure_message(self, reason: str) -> str:
         """A startup failure, carrying whatever the helper said about it.
 
-        13 of the helper's 15 stderr sites are `fail(...)`, written on the way
-        out, and that line is the only channel that separates a refused
-        recording permission from a Core Audio error. A startup path that
-        discards it leaves the user with a guess (ADR 052).
+        The helper's stderr is the only channel separating a refused recording
+        permission from a Core Audio error (ADR 052).
         """
         tail = self._stderr_text()
         if not tail:
@@ -547,28 +391,8 @@ class MacOSTapSource(SystemAudioSource):
     ) -> None:
         """End the helper, then close its pipes once nothing is reading them.
 
-        Killing the helper is what ends every read: the child's exit closes the
-        write end and each reader sees EOF. Closing a pipe to end a read
-        instead is a deadlock -- `close()` waits on the buffer lock the reader
-        holds inside `readline()`, and this runs on the thread that owns the
-        recording, so `MeetingRecorder.stop()` never returns and the meeting
-        stays in `STOPPING` for the life of the process (ADR 052).
-
-        The readers share one `_READER_JOIN_TIMEOUT_SECONDS` deadline rather
-        than getting one each, because this runs on `MeetingRecorder`'s single
-        device worker (ADR 048), which serialises every lifecycle transition:
-        the time spent here is time the awaiting `stop()` request waits and the
-        next `start()` cannot begin, and a per-reader budget multiplies it by
-        however many readers there are. It is not the event loop that blocks --
-        an earlier draft of this docstring, of ADR 052 and of the test below
-        all said it was, citing an `await recorder.start()` in
-        `pipeline/router.py` that does not exist; the call is
-        `audio/router.py:100` and `:154`, and it awaits a future the worker
-        resolves. Whatever is still parked when the deadline passes keeps its pipe
-        open here and is handed to `_close_when_idle`, so a stuck reader delays
-        the close instead of leaking the descriptor: `stop()` has already
-        dropped every reference this object held, and without that handoff
-        nothing could ever close them again.
+        Killing it is what ends every read; closing a pipe to end one deadlocks
+        (ADR 052). Readers still parked at the deadline keep their pipes open.
         """
         self._terminate(process)
         deadline = time.monotonic() + _READER_JOIN_TIMEOUT_SECONDS
@@ -598,12 +422,8 @@ class MacOSTapSource(SystemAudioSource):
 def _exit_code(process: subprocess.Popen, deadline: float) -> int | None:
     """The helper's exit status, waited for until `deadline`, or None.
 
-    The deadline is the one the stderr drain's join then spends what is left
-    of, rather than a budget of its own: this runs on a thread `_shutdown`
-    joins against `_READER_JOIN_TIMEOUT_SECONDS`, and two waits each holding
-    that budget in full guaranteed that a `stop()` overlapping either of them
-    found the reader parked, handed both descriptors to the detached closer
-    and paid the whole join on an otherwise clean teardown.
+    `deadline` is shared with the stderr drain's join that follows rather than
+    being a budget of its own.
     """
     try:
         return process.wait(timeout=max(0.0, deadline - time.monotonic()))
@@ -632,12 +452,8 @@ def _close_when_idle(
 ) -> None:
     """Close the helper's pipes once the readers still parked on them are out.
 
-    The wait is unbounded and therefore never on the caller's thread: `stop()`
-    runs inside `MeetingRecorder.stop()`'s `finally` on the thread that owns
-    the recording. A reader parked on a pipe whose writer is gone leaves within
-    milliseconds of the helper dying; one that never leaves holds two
-    descriptors, which is what the old "return and hope the `Popen` is
-    collected" path did for as long as this thread would have.
+    The wait is unbounded and runs on a new daemon thread, never the caller's:
+    `stop()` runs on the thread that owns the recording.
     """
 
     def _wait_then_close() -> None:
@@ -653,11 +469,8 @@ def _close_when_idle(
 def _read_exactly(stream: object, size: int) -> bytes:
     """`size` bytes, or fewer once the stream cannot supply them.
 
-    A short answer is the end of the stream, and how short it is is the
-    evidence the caller reads: the helper writes whole blocks and nothing
-    else, so any tail shorter than one says the stream was cut. Returning
-    None threw that length away, which left the one framing failure this side
-    can observe indistinguishable from a clean end.
+    How short the answer is is the evidence the caller reads: the helper writes
+    whole blocks, so any shorter tail says the stream was cut.
     """
     parts: list[bytes] = []
     remaining = size

@@ -1,10 +1,8 @@
 """Ollama model-listing helpers used by the local embedding availability probe.
 
-``list_models``/``model_matches``/``OllamaModel`` are consumed by
+``list_models``, ``model_matches`` and ``OllamaModel`` are consumed by
 ``app.embeddings.local.is_model_available`` to check whether Ollama reports a
-given model pulled. The Ollama-management surface (health/version/pull/start/
-load/unload, ``LocalLlmStatus``, GPU hints) was removed in Spec 045 / ADR 029
-along with the dead ``/llm/*`` router that was its only caller.
+given model pulled (ADR 029).
 """
 
 import logging
@@ -58,13 +56,10 @@ async def list_models(
 
 
 def model_matches(actual: str, target: str) -> bool:
-    """Compare Ollama model names tolerating a missing tag on either side.
+    """Compare Ollama model names, tolerating a missing tag on either side.
 
-    Rules:
-      - Exact match wins.
-      - If target has no ':' tag, any actual that starts with 'target:' matches
-        (e.g. target='gemma3' matches actual 'gemma3:4b' and 'gemma3:latest').
-      - Symmetrically, if actual has no ':' tag, it matches 'actual:<any>' target.
+    An exact match wins; otherwise a side carrying no ``:`` tag matches the other
+    when that other one starts with it plus ``:``.
     """
     if actual == target:
         return True
