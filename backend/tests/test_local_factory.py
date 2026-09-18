@@ -276,6 +276,43 @@ def test_every_local_provider_the_factory_resolves_carries_the_status_trio(monke
         )
 
 
+def test_factory_raises_when_the_resolved_class_is_missing_a_contract_member(monkeypatch):
+    """The contract is enforced in production, not only over the enum walk.
+
+    `test_every_local_provider_the_factory_resolves_carries_the_status_trio`
+    covers the kinds `LocalProviderKind` names. This covers the factory itself:
+    whatever class the dispatch reaches, a missing member of
+    `LOCAL_STATUS_CONTRACT` raises on the machine that would have run it rather
+    than reporting "not loaded, no error" for the life of the process.
+
+    A `TypeError` and not a `JustSayError`: a provider class that does not
+    satisfy its own contract is a broken invariant, and `app/core/errors.py`
+    reserves that hierarchy for refusals the user is meant to read.
+    """
+    from app.stt import local_factory
+
+    class _MisnamedLocalProvider:
+        def _load_model(self):
+            return None
+
+        is_loaded = False
+        last_load_error = None
+
+    monkeypatch.setattr(
+        local_factory,
+        "get_local_provider_kind",
+        lambda: local_factory.LocalProviderKind.FASTER_WHISPER,
+    )
+    monkeypatch.setattr(
+        "app.stt.local.LocalSTTProvider", _MisnamedLocalProvider, raising=True
+    )
+
+    with pytest.raises(TypeError) as excinfo:
+        local_factory.get_local_provider_class()
+
+    assert "_get_model" in str(excinfo.value)
+
+
 def test_factory_module_imports_no_third_party_at_module_level():
     """Importing the factory must not pull in faster_whisper or httpx-backed
     provider modules.

@@ -61,10 +61,12 @@ class UserSettings(BaseModel):
         default=30.0,
         gt=0,
         description=(
-            "Seconds of audio at or below which Cloud mode routes to Groq instead of "
-            "Gemini. Cloud routing only: Local mode's short-clip boundary is "
-            "app.stt.local.SHORT_CLIP_SECONDS, which this field deliberately does not "
-            "decide (ADR 073). The two hold the same number and are two different facts."
+            "Seconds of audio that decide Cloud mode's automatic engine choice: a "
+            "recording at or below this length goes to Groq, a longer one to Gemini, "
+            "and one in a format Groq cannot read goes to Gemini whatever its length. "
+            "Read only while the Cloud engine is left on automatic -- pinning it to "
+            "Groq or to Gemini ignores this field, and so does Local mode, whose own "
+            "short-clip boundary is a separate fixed number."
         ),
     )
 

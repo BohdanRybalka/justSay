@@ -206,7 +206,9 @@ def is_local_provider(provider: STTProvider) -> bool:
     :class:`ClassVar` on :class:`app.stt.base.STTProvider` itself, so every
     provider -- cloud included -- inherits it whether or not it overrides it.
     A default here could only answer for an object that is not an
-    ``STTProvider`` at all, which the signature already rules out.
+    ``STTProvider`` at all -- which the annotation declares but Python does not
+    enforce at run time, so such an object is a caller bug and the
+    ``AttributeError`` it raises here is how it should surface.
     """
     return provider.is_local
 

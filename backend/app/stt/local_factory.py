@@ -122,37 +122,46 @@ def get_local_provider_kind(vendor: "GpuVendor | None" = None) -> LocalProviderK
 
 
 LOCAL_STATUS_CONTRACT: tuple[str, ...] = ("_get_model", "is_loaded", "last_load_error")
-"""The members a Local-mode provider class owes, spelled once.
-
-`POST /stt/local/load` and the prewarm task call the first; `GET
-/stt/local/status`'s `model_loaded` and `last_error` are the other two, read
-through `app.stt.routing`. None of them sits on `app.stt.base.STTProvider`, and
-no base class can supply them without making a misspelling quieter rather than
-louder (ADR 075).
-
-Every docstring that states the obligation points here instead of respelling
-the names, and `tests/test_local_factory.py` imports this tuple rather than
-copying it, so renaming a member cannot leave prose naming a dead one.
-"""
 
 
 def get_local_provider_class() -> type[STTProvider]:
-    """The concrete provider class Local mode runs on this machine.
+    """The concrete provider class Local mode runs on this machine, contract checked.
 
-    This is the boundary the local status contract is pinned at: every class
-    reachable from here must declare every member of `LOCAL_STATUS_CONTRACT`.
+    Every class reachable from here must declare every member of
+    `LOCAL_STATUS_CONTRACT`, and this function is where that is enforced.
+    `POST /stt/local/load` and the prewarm task call `_get_model`; `GET
+    /stt/local/status`'s `model_loaded` and `last_error` are `is_loaded` and
+    `last_load_error`, read through `app.stt.routing`. None of the three sits
+    on `app.stt.base.STTProvider`, and no base class can supply them without
+    making a misspelling quieter rather than louder (ADR 075).
 
-    `tests/test_local_factory.py` walks `LocalProviderKind` and checks the
-    class this function resolves for each one against that tuple, so a kind
-    added with a class that spells a name differently fails there. Unpinned,
-    it reports "not loaded, no error" for the life of the process: the
-    Settings models tab draws a healthy indicator and `POST /stt/local/load`
-    answers 500 with a generic crash detail.
+    A class missing one raises `TypeError` here, on the machine that would have
+    run it, instead of reporting "not loaded, no error" for the life of the
+    process while the Settings models tab draws a healthy indicator and `POST
+    /stt/local/load` answers 500 with a generic crash detail. The raise covers
+    every caller; `tests/test_local_factory.py` additionally walks
+    `LocalProviderKind` so a misspelling shows up in CI rather than only on the
+    machine it would break.
+
+    Every docstring that states the obligation points at
+    `LOCAL_STATUS_CONTRACT` instead of respelling the names, and the test
+    imports that tuple rather than copying it, so renaming a member cannot
+    leave prose naming a dead one.
     """
     if get_local_provider_kind() is LocalProviderKind.WHISPER_CPP_SERVER:
         from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
 
-        return WhisperCppServerSTTProvider
-    from app.stt.local import LocalSTTProvider
+        provider_class: type[STTProvider] = WhisperCppServerSTTProvider
+    else:
+        from app.stt.local import LocalSTTProvider
 
-    return LocalSTTProvider
+        provider_class = LocalSTTProvider
+
+    missing = [name for name in LOCAL_STATUS_CONTRACT if not hasattr(provider_class, name)]
+    if missing:
+        raise TypeError(
+            f"{provider_class.__name__} is the local STT provider on this machine "
+            f"but does not declare {missing}, which GET /stt/local/status and "
+            f"POST /stt/local/load read"
+        )
+    return provider_class
