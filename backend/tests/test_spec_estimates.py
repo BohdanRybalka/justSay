@@ -76,6 +76,26 @@ def _size_estimate_block(text: str) -> str | None:
     return rest if end == -1 else rest[:end]
 
 
+def _split_cells(row: str) -> list[str]:
+    """The row's cells, reading a backslash-escaped pipe as literal text."""
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in row:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "|":
+            cells.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    cells.append("".join(current))
+    return cells
+
+
 def _table_rows(block: str) -> list[tuple[str, ...]]:
     """Every pipe-delimited row of the block, with the `| --- |` separators dropped."""
     rows: list[tuple[str, ...]] = []
@@ -83,7 +103,7 @@ def _table_rows(block: str) -> list[tuple[str, ...]]:
         stripped = line.strip()
         if not (stripped.startswith("|") and stripped.endswith("|") and len(stripped) > 1):
             continue
-        cells = tuple(cell.strip() for cell in stripped[1:-1].split("|"))
+        cells = tuple(cell.strip() for cell in _split_cells(stripped[1:-1]))
         if all(cell and set(cell) <= {"-", ":"} for cell in cells):
             continue
         rows.append(cells)
@@ -342,6 +362,7 @@ def test_a_bare_estimate_fails_and_a_table_passes(tmp_path, monkeypatch):
 
 def test_a_row_with_no_source_fails_and_a_sourced_row_passes(tmp_path, monkeypatch):
     sourceless = "| `backend/app/foo.py` | 60 |  |"
+    piped = "| `backend/tests/` | 60 | `wc -l \\| sort` over the suite gave 60 |"
 
     failed = _offenders_over(
         tmp_path, monkeypatch, _row_content_offenders, _sample(sourceless, _REVIEW_ROW)
@@ -352,6 +373,9 @@ def test_a_row_with_no_source_fails_and_a_sourced_row_passes(tmp_path, monkeypat
 
     assert failed and all("names no source" in message for message in failed)
     assert not passed
+    assert not _offenders_over(
+        tmp_path, monkeypatch, _row_content_offenders, _sample(piped, _REVIEW_ROW)
+    )
 
 
 def test_a_non_integer_lines_cell_fails_and_an_integer_one_passes(tmp_path, monkeypatch):
