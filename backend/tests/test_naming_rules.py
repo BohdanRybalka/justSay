@@ -3,30 +3,32 @@
 The suffix rule splits two endings that read alike: a `*Outcome` names a closed
 set of tokens and is therefore an `Enum`, while a `*Result` carries a payload
 and is therefore not. Prose cannot stop the next payload class from being
-called `SomethingOutcome`; this file fails when it is.
+called `SomethingOutcome`; this file fails when it is. It is a Python rule and
+is read over `app` only.
 
 The acronym rule covers the family whose members spell `STT` and `LLM` in
 capitals — `STTProvider`, `STTSettings`, `LocalSTTProvider`,
-`WhisperCppServerSTTProvider`. One member carried a title-case `Stt` until
-JS-178 recased it, and nothing failed while it did; this rule is what fails now.
+`WhisperCppServerSTTProvider` — and leaves `Gpu`, `Vad` and `Api` alone, the
+separate title-case family §2.1 names. It reads both declarations of a wire
+type, because §7.1 makes the TypeScript interface mirror the Pydantic class
+name exactly and neither declaration knows the other exists.
 
-What the acronym rule does **not** cover, deliberately: `Gpu`, `Vad` and `Api`,
-a separate title-case family that §2.1 leaves alone; acronyms it does not list,
-because §2.1's rule is "match the neighbours of the type you are adding", so a
-new acronym joins `_ALL_CAPS_ACRONYMS` only once its own family is settled;
-names that are not class declarations; and anything outside `app`, so the
-TypeScript mirror of these types in `src/api.ts` is not read here. `LLM` is
-listed because §2.1 lists it, and has no class under `app` today.
-
-Both checks read the AST rather than importing, so a module whose import needs
-an optional `[cloud]` or `[local]` extra is still covered.
+Python is read through the AST rather than imported, so a module whose import
+needs an optional `[cloud]` or `[local]` extra is still covered. TypeScript is
+read as text, the shape `test_cross_language_contracts.py` uses, so this needs
+no compiler.
 """
 
 import ast
+import functools
 import re
 from pathlib import Path
 
-_APP_DIR = Path(__file__).resolve().parent.parent / "app"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+_APP_DIR = _REPO_ROOT / "backend" / "app"
+
+_SRC_DIR = _REPO_ROOT / "src"
 
 _ENUM_BASES = {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"}
 
@@ -34,7 +36,12 @@ _ALL_CAPS_ACRONYMS = {"STT", "LLM"}
 
 _CAMEL_SEGMENT = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
 
+_TS_TYPE_DECLARATION = re.compile(
+    r"^(?:export )?(?:interface|type) ([A-Za-z0-9_]+)\b", re.MULTILINE
+)
 
+
+@functools.cache
 def _declared_classes() -> list[tuple[str, ast.ClassDef]]:
     """Every class declared under `app`, with the module that declares it."""
     found: list[tuple[str, ast.ClassDef]] = []
@@ -45,6 +52,28 @@ def _declared_classes() -> list[tuple[str, ast.ClassDef]]:
             if isinstance(node, ast.ClassDef):
                 found.append((module, node))
     return found
+
+
+@functools.cache
+def _declared_typescript_types() -> list[tuple[str, str]]:
+    """Every `interface` / `type` name declared under `src`, with its file.
+
+    A declaration starts its own line, which is what separates it from an
+    `import { type Thing }` specifier naming a type declared elsewhere.
+    """
+    found: list[tuple[str, str]] = []
+    for path in sorted(_SRC_DIR.rglob("*.ts")):
+        source = path.relative_to(_REPO_ROOT).as_posix()
+        for name in _TS_TYPE_DECLARATION.findall(path.read_text(encoding="utf-8")):
+            found.append((source, name))
+    return found
+
+
+def _declared_type_names() -> list[tuple[str, str]]:
+    """Every type name declared in either language, with the file declaring it."""
+    return [(f"app/{module}", node.name) for module, node in _declared_classes()] + list(
+        _declared_typescript_types()
+    )
 
 
 def _suffixed_classes() -> list[tuple[str, ast.ClassDef]]:
@@ -79,6 +108,16 @@ def _miscased_acronyms(name: str) -> list[str]:
     ]
 
 
+def _miscased_declarations() -> list[str]:
+    """Every declared type whose name miscases a listed acronym, reported once."""
+    reports: list[str] = []
+    for source, name in _declared_type_names():
+        segments = _miscased_acronyms(name)
+        if segments:
+            reports.append(f"{source}:{name} -> {segments}")
+    return reports
+
+
 def test_outcome_classes_are_enums():
     offenders = [
         f"{module}:{node.name}"
@@ -103,14 +142,25 @@ def test_result_classes_are_not_enums():
     )
 
 
-def test_stt_and_llm_acronyms_are_all_caps_in_class_names():
-    offenders = [
-        f"{module}:{node.name} -> {_miscased_acronyms(node.name)}"
-        for module, node in _declared_classes()
-        if _miscased_acronyms(node.name)
-    ]
+def test_the_acronym_predicate_reports_a_title_case_listed_acronym():
+    assert _miscased_acronyms("LocalSttStatus") == ["Stt"]
+    assert _miscased_acronyms("LlmSettings") == ["Llm"]
+
+
+def test_the_acronym_predicate_ignores_correct_casing_and_the_other_family():
+    assert _miscased_acronyms("LocalSTTStatus") == []
+    assert _miscased_acronyms("GpuVendor") == []
+
+
+def test_the_acronym_predicate_ignores_words_that_merely_contain_the_letters():
+    assert _miscased_acronyms("SmallModel") == []
+    assert _miscased_acronyms("Hallmark") == []
+
+
+def test_stt_and_llm_acronyms_are_all_caps_in_type_names():
+    offenders = _miscased_declarations()
     assert not offenders, (
-        "STT and LLM are all-caps in this class family (style-guide §2.1); "
+        "STT and LLM are all-caps in this type family (style-guide §2.1); "
         f"recase these: {offenders}"
     )
 
@@ -124,8 +174,15 @@ def test_the_walk_finds_the_declarations_it_is_meant_to_check():
 def test_the_walk_finds_the_acronym_family_it_is_meant_to_check():
     """The acronym rule passes vacuously on an empty walk, so pin that it is not.
 
-    Named here are family members this rule does not itself move, so a failure
-    of the rule above stays distinguishable from the walk going blind.
+    Named alongside the type JS-178 recased are family members this rule does
+    not itself move, so a failure of the rule above stays distinguishable from
+    the walk going blind.
     """
     names = {node.name for _, node in _declared_classes()}
-    assert {"STTProvider", "STTSettings", "LocalSTTProvider"} <= names
+    assert {"STTProvider", "STTSettings", "LocalSTTProvider", "LocalSTTStatus"} <= names
+
+
+def test_the_typescript_walk_finds_the_mirrored_types_it_is_meant_to_check():
+    """The acronym rule reaches `src` only while this walk finds declarations."""
+    names = {name for _, name in _declared_typescript_types()}
+    assert {"LocalSTTStatus", "UserSettings", "MeetingStatus"} <= names
