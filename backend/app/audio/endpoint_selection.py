@@ -3,7 +3,7 @@
 Pure: no COM, no PortAudio, no platform guard, nothing that cannot be imported
 on the ubuntu CI runner. Every test of the decision points here.
 
-See docs/adr/042-loopback-follows-the-communications-endpoint.md.
+See ADR 042.
 """
 
 from __future__ import annotations

@@ -169,8 +169,9 @@ def _iso_to_epoch_ms(ts: str) -> int:
 def _epoch_ms_to_iso(ms: int) -> str | None:
     """The stored ``ts`` as ISO 8601, or ``None`` when there is no date to show.
 
-    ``schema.UNKNOWN_TS`` and below, and any value that is not an ``int``, answer
-    ``None`` rather than raising: the row keeps its place and renders a dash.
+    Anything outside ``UNKNOWN_TS < ts <= schema.STORED_TS_MAX``, and any value
+    that is not an ``int``, answers ``None`` rather than raising: the row keeps its
+    place and renders a dash.
     """
     if not isinstance(ms, int) or not schema.UNKNOWN_TS < ms <= schema.STORED_TS_MAX:
         return None

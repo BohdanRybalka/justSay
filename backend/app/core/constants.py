@@ -1,8 +1,8 @@
 """Shared backend constants.
 
-Single source of truth for limits and identifiers used in more than one module.
-Implementation-detail constants (e.g. cache TTLs) intentionally stay local to
-their owning module.
+Single source of truth for limits and identifiers shared across the backend.
+Implementation-detail constants such as cache TTLs stay with the module that
+owns them.
 """
 
 MAX_UPLOAD_SIZE: int = 25 * 1024 * 1024

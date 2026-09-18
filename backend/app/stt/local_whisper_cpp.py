@@ -254,7 +254,7 @@ class WhisperCppServerSTTProvider(STTProvider):
 
     @property
     def model_name(self) -> str:
-        """``<vendor dir>/<model size>``, from the platform's vendor directory.
+        """``<vendor dir>/<model size>``; ``whisper-cpp`` stands in for an unknown vendor.
 
         Persisted into every history row, so it is a stored label rather than a
         display name; renaming it splits existing history across two labels.

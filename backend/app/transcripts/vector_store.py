@@ -70,7 +70,8 @@ def recreate_delete_trigger_locked(conn: sqlite3.Connection) -> None:
     """Caller MUST hold ``history._lock``. Re-declares ``entries_ad_vec``.
 
     A trigger ON ``entries``, so dropping that table takes it with it and a deleted
-    transcript would leave its vector behind. A no-op until ``vec_entries`` exists.
+    transcript would leave its vector behind for a later entry to inherit, SQLite
+    reusing the rowid. A no-op until ``vec_entries`` exists.
     """
     exists = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vec_entries'"

@@ -1,7 +1,9 @@
 """macOS system audio, from the bundled `justsay-audiotap` helper (ADR 041).
 
-Built from `macos/JustSayAudioTap`; its Swift header is the other half of this
-contract, so changing one alone makes the other wrong.
+Built from `macos/JustSayAudioTap`; its Swift header is the other half of this contract.
+
+    justsay-audiotap --block-frames <N>
+
     stdout: {"sample_rate":48000,"channels":2,"format":"f32le","tap_stream_index":0}\\n
             then raw interleaved little-endian float32 frames, forever
     stderr: log lines, one per line
