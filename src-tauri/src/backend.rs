@@ -2136,15 +2136,23 @@ mod tests {
             .join("\n")
     }
 
-    fn extract_span<'a>(source: &'a str, opening: &str) -> &'a str {
+    fn extract_span_closed_by<'a>(source: &'a str, opening: &str, closing: &str) -> &'a str {
         let start = source
             .find(opening)
             .unwrap_or_else(|| panic!("could not find `{}` in source", opening));
         let rest = &source[start..];
         let end = rest
-            .find("\n}\n")
+            .find(closing)
             .unwrap_or_else(|| panic!("could not find the end of `{}`", opening));
-        &rest[..end + "\n}\n".len()]
+        &rest[..end + closing.len()]
+    }
+
+    fn extract_span<'a>(source: &'a str, opening: &str) -> &'a str {
+        extract_span_closed_by(source, opening, "\n}\n")
+    }
+
+    fn extract_test_fn_body<'a>(source: &'a str, fn_name: &str) -> &'a str {
+        extract_span_closed_by(source, &format!("    fn {}(", fn_name), "\n    }\n")
     }
 
     fn extract_fn_body<'a>(source: &'a str, fn_name: &str) -> &'a str {
@@ -2285,25 +2293,39 @@ mod tests {
         );
     }
 
+    const CONTENDED_LOCK_HELD_FOR: Duration = Duration::from_millis(400);
+    const RENDEZVOUS_TIMEOUT: Duration = Duration::from_secs(10);
+
     #[test]
     fn lock_with_wait_until_free_waits_for_contention_then_acquires() {
         let m: Mutex<i32> = Mutex::new(0);
+        let contended = &m;
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (probing_tx, probing_rx) = std::sync::mpsc::channel::<std::time::Instant>();
         std::thread::scope(|scope| {
-            scope.spawn(|| {
-                let _guard = m.lock().unwrap();
-                std::thread::sleep(Duration::from_millis(400));
+            scope.spawn(move || {
+                let _guard = contended.lock().unwrap();
+                held_tx.send(()).unwrap();
+                let probe_started = probing_rx
+                    .recv_timeout(RENDEZVOUS_TIMEOUT)
+                    .expect("the waiter must announce its probe before the hold is timed");
+                std::thread::sleep(CONTENDED_LOCK_HELD_FOR.saturating_sub(probe_started.elapsed()));
             });
-            std::thread::sleep(Duration::from_millis(50));
+            held_rx
+                .recv_timeout(RENDEZVOUS_TIMEOUT)
+                .expect("the holder must announce that it holds the lock");
 
-            let start = std::time::Instant::now();
+            let probe_started = std::time::Instant::now();
+            probing_tx.send(probe_started).unwrap();
             let acquired = lock_with_wait(&m, LockWait::UntilFree);
-            let elapsed = start.elapsed();
+            let waited = probe_started.elapsed();
 
             assert!(acquired.is_some(), "UntilFree must acquire the lock once it frees");
             assert!(
-                elapsed >= Duration::from_millis(300),
-                "expected UntilFree to wait at least 300ms for the contended lock, waited {:?}",
-                elapsed
+                waited >= CONTENDED_LOCK_HELD_FOR,
+                "expected UntilFree to acquire only after the {:?} hold, acquired after {:?}",
+                CONTENDED_LOCK_HELD_FOR,
+                waited
             );
         });
     }
@@ -2311,24 +2333,55 @@ mod tests {
     #[test]
     fn lock_with_wait_skip_returns_immediately_under_contention() {
         let m: Mutex<i32> = Mutex::new(0);
+        let contended = &m;
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (probed_tx, probed_rx) = std::sync::mpsc::channel::<()>();
         std::thread::scope(|scope| {
-            scope.spawn(|| {
-                let _guard = m.lock().unwrap();
-                std::thread::sleep(Duration::from_millis(400));
+            scope.spawn(move || {
+                let _guard = contended.lock().unwrap();
+                held_tx.send(()).unwrap();
+                let _ = probed_rx.recv_timeout(RENDEZVOUS_TIMEOUT);
             });
-            std::thread::sleep(Duration::from_millis(50));
+            held_rx
+                .recv_timeout(RENDEZVOUS_TIMEOUT)
+                .expect("the holder must announce that it holds the lock");
 
-            let start = std::time::Instant::now();
+            let probe_started = std::time::Instant::now();
             let acquired = lock_with_wait(&m, LockWait::Skip);
-            let elapsed = start.elapsed();
+            let waited = probe_started.elapsed();
+            probed_tx.send(()).unwrap();
 
+            let retry_loop_budget =
+                SHUTDOWN_LOCK_WAIT_POLL_INTERVAL * SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS;
             assert!(acquired.is_none(), "Skip must not wait for a contended lock");
             assert!(
-                elapsed < Duration::from_millis(50),
-                "expected Skip to return immediately under contention, took {:?}",
-                elapsed
+                waited * 10 < retry_loop_budget,
+                "expected Skip to return without entering the {:?} retry loop, took {:?}",
+                retry_loop_budget,
+                waited
             );
         });
+    }
+
+    #[test]
+    fn a_contended_lock_test_hands_off_by_rendezvous_rather_than_by_sleeping() {
+        let backend_source = strip_doc_comment_lines(include_str!("backend.rs"));
+        for name in [
+            "lock_with_wait_until_free_waits_for_contention_then_acquires",
+            "lock_with_wait_skip_returns_immediately_under_contention",
+        ] {
+            let body = extract_test_fn_body(&backend_source, name);
+            assert!(
+                body.contains("recv_timeout(RENDEZVOUS_TIMEOUT)"),
+                "{}() must learn the lock is held from the holder, never from a sleep (JS-183)",
+                name
+            );
+            assert!(
+                !body.contains("Duration::from_millis("),
+                "{}() must time every wait from a named constant both sides share, not a literal",
+                name
+            );
+        }
     }
 
     #[test]
