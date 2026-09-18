@@ -1121,6 +1121,15 @@ def test_assign_to_job_object_swallows_assign_failure(monkeypatch):
 
     local_whisper_cpp_module._assign_to_job_object(process)
 
+    assert fake_kernel32.assign_calls == [(4242, 777)], (
+        "the assignment must actually have been attempted against the created job "
+        f"and the process handle before its failure was swallowed: {fake_kernel32.assign_calls}"
+    )
+    assert process.returncode is None and process.kill_calls == 0, (
+        "a job the process could not be assigned to is swallowed -- the helper keeps "
+        "running rather than being torn down under the caller"
+    )
+
 
 @_requires_windows
 def test_assign_to_job_object_swallows_missing_handle_attribute(monkeypatch):

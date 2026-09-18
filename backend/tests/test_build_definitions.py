@@ -314,6 +314,16 @@ def test_every_uv_export_refuses_to_resolve_around_a_stale_lock():
     )
 
 
+def test_the_dependency_definition_walk_finds_the_files_it_is_meant_to_check():
+    """The `--locked` rule passes vacuously on an empty walk, so pin that it is not."""
+    texts = _dependency_definition_texts()
+    assert {CI_WORKFLOW.name, RELEASE_WORKFLOW.name, PACKAGE_JSON.name} <= set(texts)
+    empty = sorted(name for name, text in texts.items() if not text.strip())
+    assert not empty, (
+        f"these definition files read back empty, so every rule over them is blind: {empty}"
+    )
+
+
 def test_every_install_path_pins_the_same_uv_version():
     """The binary that judges the lock's freshness is itself pinned, and the pin
     is written at three sites. A bump that misses one leaves CI green and fails

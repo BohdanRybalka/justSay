@@ -432,13 +432,21 @@ async def test_warm_gpu_probe_cache_swallows_probe_failure(monkeypatch):
     from app.main import _warm_gpu_probe_cache
 
     gpu_probe.clear_cache()
+    probe_calls: list[str] = []
 
     def _boom():
+        probe_calls.append("probed")
         raise RuntimeError("probe blew up")
 
     monkeypatch.setattr(gpu_probe, "probe_gpu", _boom)
 
     await _warm_gpu_probe_cache()
+    await _warm_gpu_probe_cache()
+
+    assert probe_calls == ["probed", "probed"], (
+        "a swallowed warm-up failure must leave the cache unset, so the next caller "
+        f"still runs a real probe rather than reading a result nothing produced: {probe_calls}"
+    )
 
 
 def test_lifespan_schedules_gpu_probe_warmup_task(spawn_spy):

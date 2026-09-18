@@ -246,6 +246,20 @@ def test_app_data_consumer_inventory_is_exhaustive():
     )
 
 
+def test_the_app_data_consumer_walk_finds_the_modules_it_is_meant_to_check():
+    """`discovered - expected` is empty on a blind scan too, so pin the scan itself.
+
+    Membership rather than a count: a count reddens on the next consumer anyone
+    registers, which is the failure direction that gets a gate deleted, not fixed.
+    """
+    discovered = _scan_app_data_consumers()
+    assert {"core/logging_config.py", "preferences/user_settings.py"} <= discovered, (
+        f"the app-data scan reached none of the consumers it is written against, so "
+        f"the exhaustiveness rule above reports nothing whatever backend/app holds: "
+        f"{sorted(discovered)}"
+    )
+
+
 
 
 def test_cleanup_data_dir_releases_the_log_handle_and_removes_the_directory(tmp_path):

@@ -891,6 +891,16 @@ def test_every_backend_package_is_covered_by_the_web_framework_allowlist():
     )
 
 
+def test_the_package_walk_finds_the_directories_it_is_meant_to_check():
+    """Both coverage rules over this walk pass vacuously when it is empty.
+
+    Membership rather than a count: a count reddens on the next package anyone
+    adds, which is the failure direction that gets a gate deleted, not fixed.
+    """
+    packages = set(_package_directories())
+    assert {"audio", "core", "stt", "transcripts", "preferences"} <= packages
+
+
 def test_no_web_framework_exemption_outlives_the_import_it_covers():
     """The mirror of `test_the_known_cycle_list_does_not_outlive_the_cycles`,
     for the other allowlist in this file. An exemption whose module has been
