@@ -139,7 +139,25 @@ def min_no_speech_prob(segments) -> float | None:
 
 
 class STTProvider(ABC):
-    """Contract: Audio file in -> transcribed text out."""
+    """Contract: Audio file in -> transcribed text out.
+
+    Local providers owe three further members that are deliberately absent
+    from this class. :data:`app.stt.local_factory.LOCAL_STATUS_CONTRACT` is
+    where they are spelled and
+    :func:`app.stt.local_factory.get_local_provider_class` is where what each
+    one carries is stated and where the obligation is enforced; this docstring
+    points at them rather than keeping a second copy of the names, so renaming
+    one cannot leave a dead name here.
+
+    They are not promoted onto this class: an abstract member here would
+    oblige every cloud provider to implement a local concept it has no use
+    for, and a concrete default would silently satisfy a future local provider
+    that spells one of the names wrong instead of leaving it merely unfound.
+    The obligation is pinned where Local mode is actually chosen — over
+    everything the factory can return, by the factory itself and by
+    ``tests/test_local_factory.py``. ADR 075 records the decision and why an
+    intermediate abstract class does not cover the case.
+    """
 
     is_local: ClassVar[bool] = False
 

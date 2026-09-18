@@ -102,7 +102,7 @@ def get_routed_provider(
         return _get_local(stt_settings), None
 
     ext = file_extension.lower() if file_extension else None
-    engine = getattr(stt_settings, "engine", "auto")
+    engine = stt_settings.engine
 
     if engine == "gemini":
         return _get_gemini(stt_settings), None
@@ -130,6 +130,15 @@ def get_local_load_error(stt_settings: STTSettings) -> str | None:
     Returns None when the local provider hasn't been instantiated yet — that's
     the same outcome a fresh process would observe before the first
     transcribe/load call. No error has occurred yet.
+
+    The latch is read directly rather than through a defaulting ``getattr``:
+    every class :func:`app.stt.local_factory.get_local_provider_class` can
+    return declares every member of
+    :data:`app.stt.local_factory.LOCAL_STATUS_CONTRACT`, pinned by
+    ``tests/test_local_factory.py``. A default would answer "no error" for a
+    provider that declares nothing, which is exactly the silence ADR 075
+    ends — a missing attribute must raise where someone can see it, not draw
+    a healthy indicator forever.
     """
     from app.stt.local_factory import get_local_provider_class
     cls = get_local_provider_class()
@@ -137,7 +146,7 @@ def get_local_load_error(stt_settings: STTSettings) -> str | None:
         provider = _providers.get(cls)
     if provider is None:
         return None
-    return getattr(provider, "last_load_error", None)
+    return provider.last_load_error
 
 
 def peek_local_provider() -> STTProvider | None:
@@ -159,14 +168,22 @@ def peek_local_provider() -> STTProvider | None:
 
 
 def is_model_loaded() -> bool:
-    """Check if the local whisper model is currently loaded in memory."""
+    """Check if the local whisper model is currently loaded in memory.
+
+    The flag is read directly for the same reason
+    :func:`get_local_load_error` reads its latch directly: a ``False``
+    default would report "not loaded" forever for a provider that declares
+    nothing of :data:`app.stt.local_factory.LOCAL_STATUS_CONTRACT`, and
+    paired with that function's ``None`` it is the "not loaded, no error"
+    status ADR 075 exists to stop.
+    """
     from app.stt.local_factory import get_local_provider_class
     cls = get_local_provider_class()
     with _cache_lock:
         provider = _providers.get(cls)
     if provider is None:
         return False
-    return getattr(provider, "is_loaded", False)
+    return provider.is_loaded
 
 
 def is_local_provider(provider: STTProvider) -> bool:
@@ -184,8 +201,16 @@ def is_local_provider(provider: STTProvider) -> bool:
     not a fact about the host -- deriving it from the platform was the
     wrong instrument. Used by :func:`app.pipeline.service.process_audio` to
     gate the Spec 028 Item 2 readiness barrier onto local routes only.
+
+    Read directly, with no ``getattr`` default: ``is_local`` is a
+    :class:`ClassVar` on :class:`app.stt.base.STTProvider` itself, so every
+    provider -- cloud included -- inherits it whether or not it overrides it.
+    A default here could only answer for an object that is not an
+    ``STTProvider`` at all -- which the annotation declares but Python does not
+    enforce at run time, so such an object is a caller bug and the
+    ``AttributeError`` it raises here is how it should surface.
     """
-    return getattr(provider, "is_local", False)
+    return provider.is_local
 
 
 def clear_cache() -> None:

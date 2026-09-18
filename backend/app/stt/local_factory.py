@@ -121,11 +121,47 @@ def get_local_provider_kind(vendor: "GpuVendor | None" = None) -> LocalProviderK
     return LocalProviderKind.FASTER_WHISPER
 
 
+LOCAL_STATUS_CONTRACT: tuple[str, ...] = ("_get_model", "is_loaded", "last_load_error")
+
+
 def get_local_provider_class() -> type[STTProvider]:
+    """The concrete provider class Local mode runs on this machine, contract checked.
+
+    Every class reachable from here must declare every member of
+    `LOCAL_STATUS_CONTRACT`, and this function is where that is enforced.
+    `POST /stt/local/load` and the prewarm task call `_get_model`; `GET
+    /stt/local/status`'s `model_loaded` and `last_error` are `is_loaded` and
+    `last_load_error`, read through `app.stt.routing`. None of the three sits
+    on `app.stt.base.STTProvider`, and no base class can supply them without
+    making a misspelling quieter rather than louder (ADR 075).
+
+    A class missing one raises `TypeError` here, on the machine that would have
+    run it, instead of reporting "not loaded, no error" for the life of the
+    process while the Settings models tab draws a healthy indicator and `POST
+    /stt/local/load` answers 500 with a generic crash detail. The raise covers
+    every caller; `tests/test_local_factory.py` additionally walks
+    `LocalProviderKind` so a misspelling shows up in CI rather than only on the
+    machine it would break.
+
+    Every docstring that states the obligation points at
+    `LOCAL_STATUS_CONTRACT` instead of respelling the names, and the test
+    imports that tuple rather than copying it, so renaming a member cannot
+    leave prose naming a dead one.
+    """
     if get_local_provider_kind() is LocalProviderKind.WHISPER_CPP_SERVER:
         from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
 
-        return WhisperCppServerSTTProvider
-    from app.stt.local import LocalSTTProvider
+        provider_class: type[STTProvider] = WhisperCppServerSTTProvider
+    else:
+        from app.stt.local import LocalSTTProvider
 
-    return LocalSTTProvider
+        provider_class = LocalSTTProvider
+
+    missing = [name for name in LOCAL_STATUS_CONTRACT if not hasattr(provider_class, name)]
+    if missing:
+        raise TypeError(
+            f"{provider_class.__name__} is the local STT provider on this machine "
+            f"but does not declare {missing}, which GET /stt/local/status and "
+            f"POST /stt/local/load read"
+        )
+    return provider_class

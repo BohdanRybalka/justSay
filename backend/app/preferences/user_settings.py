@@ -57,7 +57,18 @@ class UserSettings(BaseModel):
 
     ollama_host: str = "http://localhost:11434"
 
-    cloud_routing_threshold: float = Field(default=30.0, gt=0)
+    cloud_routing_threshold: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Seconds of audio that decide Cloud mode's automatic engine choice: a "
+            "recording at or below this length goes to Groq, a longer one to Gemini, "
+            "and one in a format Groq cannot read goes to Gemini whatever its length. "
+            "Read only while the Cloud engine is left on automatic -- pinning it to "
+            "Groq or to Gemini ignores this field, and so does Local mode, whose own "
+            "short-clip boundary is a separate fixed number."
+        ),
+    )
 
     initial_prompt: str = Field(default="", max_length=500)
 

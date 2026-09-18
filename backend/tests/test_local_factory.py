@@ -214,6 +214,105 @@ def test_kind_is_faster_whisper_on_non_windows_amd_or_intel(monkeypatch, vendor_
     assert get_local_provider_class() is LocalSTTProvider
 
 
+def test_every_local_provider_the_factory_resolves_carries_the_status_trio(monkeypatch):
+    """The local status contract, pinned where Local mode is chosen (ADR 075).
+
+    The members of `local_factory.LOCAL_STATUS_CONTRACT` carry the whole
+    local-STT status surface and none of them is on `STTProvider`. A kind
+    whose class spells one of them differently -- the misspelling this
+    module's own docstring anticipates -- raises nowhere: the status endpoint
+    reports "not loaded, no error" for the life of the process, the Settings
+    models tab draws a healthy indicator, and `POST /stt/local/load` answers
+    500 with a generic crash detail.
+
+    `LocalProviderKind` is walked rather than a hand-written list of classes,
+    so a fourth kind cannot be added without this test seeing it. Walking it is
+    not enough on its own: `get_local_provider_class()` ends in an unguarded
+    fall-through to `LocalSTTProvider`, so an unwired kind would resolve to a
+    class that does carry all three and pass here vacuously. The second
+    assertion is what makes the walk mean something -- only `FASTER_WHISPER`
+    may resolve to the fall-through.
+
+    What this does not cover: a kind wired to a class that declares all three
+    names and implements one of them wrongly. The three are checked for
+    existence, which is what ADR 075 pins; behaviour is each provider's own
+    tests. The names are read off `LOCAL_STATUS_CONTRACT` rather than copied
+    here, so renaming a member reddens this test instead of leaving it green
+    against a name nothing declares any more.
+
+    The import sits in the function body because every other test in this
+    module puts it there, and for no stronger reason: the module-level import
+    check below runs in a subprocess (`assert_module_binds_no_third_party`)
+    and `test_sys_modules_hygiene.py` forbids any test from removing a module
+    from `sys.modules` at all, so nothing in this file ever rebinds
+    `app.stt.local_factory`.
+    """
+    from app.stt import local_factory
+
+    required = local_factory.LOCAL_STATUS_CONTRACT
+
+    for kind in local_factory.LocalProviderKind:
+        monkeypatch.setattr(
+            local_factory, "get_local_provider_kind", lambda _kind=kind: _kind
+        )
+        provider_class = local_factory.get_local_provider_class()
+        missing = [name for name in required if not hasattr(provider_class, name)]
+
+        assert not missing, (
+            f"{kind.value} resolves to {provider_class.__name__}, which declares "
+            f"none of {missing} -- GET /stt/local/status would report "
+            f"'not loaded, no error' for the life of the process"
+        )
+
+        from app.stt.local import LocalSTTProvider
+
+        assert (
+            provider_class is not LocalSTTProvider
+            or kind is local_factory.LocalProviderKind.FASTER_WHISPER
+        ), (
+            f"{kind.value} resolves to the factory's unguarded fall-through, so it "
+            f"was added to LocalProviderKind without a branch in "
+            f"get_local_provider_class() -- it would run on faster-whisper silently"
+        )
+
+
+def test_factory_raises_when_the_resolved_class_is_missing_a_contract_member(monkeypatch):
+    """The contract is enforced in production, not only over the enum walk.
+
+    `test_every_local_provider_the_factory_resolves_carries_the_status_trio`
+    covers the kinds `LocalProviderKind` names. This covers the factory itself:
+    whatever class the dispatch reaches, a missing member of
+    `LOCAL_STATUS_CONTRACT` raises on the machine that would have run it rather
+    than reporting "not loaded, no error" for the life of the process.
+
+    A `TypeError` and not a `JustSayError`: a provider class that does not
+    satisfy its own contract is a broken invariant, and `app/core/errors.py`
+    reserves that hierarchy for refusals the user is meant to read.
+    """
+    from app.stt import local_factory
+
+    class _MisnamedLocalProvider:
+        def _load_model(self):
+            return None
+
+        is_loaded = False
+        last_load_error = None
+
+    monkeypatch.setattr(
+        local_factory,
+        "get_local_provider_kind",
+        lambda: local_factory.LocalProviderKind.FASTER_WHISPER,
+    )
+    monkeypatch.setattr(
+        "app.stt.local.LocalSTTProvider", _MisnamedLocalProvider, raising=True
+    )
+
+    with pytest.raises(TypeError) as excinfo:
+        local_factory.get_local_provider_class()
+
+    assert "_get_model" in str(excinfo.value)
+
+
 def test_factory_module_imports_no_third_party_at_module_level():
     """Importing the factory must not pull in faster_whisper or httpx-backed
     provider modules.

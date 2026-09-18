@@ -23,7 +23,7 @@ from app.stt.base import (
 )
 from app.stt.cloud import GeminiSTTProvider
 from app.stt.config import STTSettings
-from app.stt.local import LocalSTTProvider
+from app.stt.local import SHORT_CLIP_SECONDS, LocalSTTProvider
 from app.stt.routing import clear_cache, get_provider
 
 _UNANSWERED_REQUEST_TIMEOUT_MS = 500
@@ -571,8 +571,8 @@ def _mock_local_model(provider):
 
 @pytest.mark.asyncio
 async def test_local_short_clip_uses_beam_size_1_and_no_cross_segment_context(sample_wav):
-    """Short audio (<= threshold) hits the low-latency path."""
-    settings = STTSettings(mode=ProviderMode.LOCAL, cloud_routing_threshold=30.0)
+    """Short audio (<= SHORT_CLIP_SECONDS) hits the low-latency path."""
+    settings = STTSettings(mode=ProviderMode.LOCAL)
     provider = LocalSTTProvider(settings)
     model = _mock_local_model(provider)
 
@@ -587,7 +587,7 @@ async def test_local_short_clip_uses_beam_size_1_and_no_cross_segment_context(sa
 @pytest.mark.asyncio
 async def test_local_long_clip_keeps_beam_size_5_and_cross_segment_context(sample_wav):
     """Long audio keeps accuracy-tuned defaults so meeting transcripts stay coherent."""
-    settings = STTSettings(mode=ProviderMode.LOCAL, cloud_routing_threshold=30.0)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
     provider = LocalSTTProvider(settings)
     model = _mock_local_model(provider)
 
@@ -600,15 +600,68 @@ async def test_local_long_clip_keeps_beam_size_5_and_cross_segment_context(sampl
 
 
 @pytest.mark.asyncio
-async def test_local_short_path_follows_threshold_not_magic_30(sample_wav):
-    """Custom cloud_routing_threshold must drive the short/long decision (no drift)."""
-    settings = STTSettings(mode=ProviderMode.LOCAL, cloud_routing_threshold=45.0)
+@pytest.mark.parametrize(
+    "audio_duration,expected_beam",
+    [(SHORT_CLIP_SECONDS, 1), (SHORT_CLIP_SECONDS + 0.5, 5)],
+)
+async def test_local_short_path_boundary_is_short_clip_seconds(
+    sample_wav, audio_duration, expected_beam
+):
+    """The boundary is inclusive and is the constant itself, not a literal.
+
+    A duration exactly at `SHORT_CLIP_SECONDS` is still short; half a second
+    past it is not. Written against the constant so moving the number moves
+    the test with it rather than leaving a stale 30 behind.
+
+    Both kwargs are asserted, not the beam alone. They are set from the same
+    `is_short` flag today, and the boundary is the one place a split between
+    them would live: made inclusive on one side and strict on the other, a
+    30.0-second clip ships with beam 1 *and* cross-segment context while the
+    5 s and 120 s tests either side stay green.
+    """
+    provider = LocalSTTProvider(STTSettings(mode=ProviderMode.LOCAL))
+    model = _mock_local_model(provider)
+
+    await provider.transcribe(sample_wav, language="uk", audio_duration=audio_duration)
+
+    kwargs = model.transcribe.call_args.kwargs
+    assert kwargs["beam_size"] == expected_beam
+    assert kwargs["condition_on_previous_text"] is (expected_beam == 5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cloud_routing_threshold,audio_duration,expected_beam",
+    [(45.0, 40.0, 5), (10.0, 20.0, 1)],
+)
+async def test_local_beam_size_ignores_the_cloud_routing_threshold(
+    sample_wav, cloud_routing_threshold, audio_duration, expected_beam
+):
+    """Tuning cloud routing must not retune local transcription (ADR 073).
+
+    `cloud_routing_threshold` picks Groq against Gemini in Cloud mode. It used
+    to decide the local beam size too, so raising it to 45 to send more audio
+    to Groq also dropped a 40-second local clip to beam 1 without
+    cross-segment context — a coupling invisible at both call sites. The local
+    boundary is `SHORT_CLIP_SECONDS` whatever the cloud field says.
+
+    Both directions are here because either alone leaves the coupling
+    reachable. 45/40 catches the cloud field *widening* the local short path.
+    10/20 catches it *narrowing* it, which is what a
+    `min(SHORT_CLIP_SECONDS, cloud_routing_threshold)` boundary would do and
+    what the 45/40 case on its own lets through.
+    """
+    settings = STTSettings(
+        mode=ProviderMode.LOCAL, cloud_routing_threshold=cloud_routing_threshold
+    )
     provider = LocalSTTProvider(settings)
     model = _mock_local_model(provider)
 
-    await provider.transcribe(sample_wav, language="uk", audio_duration=40.0)
+    await provider.transcribe(sample_wav, language="uk", audio_duration=audio_duration)
 
-    assert model.transcribe.call_args.kwargs["beam_size"] == 1
+    kwargs = model.transcribe.call_args.kwargs
+    assert kwargs["beam_size"] == expected_beam
+    assert kwargs["condition_on_previous_text"] is (expected_beam == 5)
 
 
 @pytest.mark.asyncio
@@ -718,7 +771,7 @@ def test_gemini_prompt_is_byte_identical_to_the_pre_removal_normal_style_prompt(
 @pytest.mark.asyncio
 async def test_local_stt_explicit_language_passed_through_unchanged(sample_wav):
     """Regression: an explicit BCP-47 code must still reach faster-whisper as-is."""
-    settings = STTSettings(mode=ProviderMode.LOCAL, cloud_routing_threshold=30.0)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
     provider = LocalSTTProvider(settings)
     model = _mock_local_model(provider)
 
@@ -732,7 +785,7 @@ async def test_local_stt_auto_language_translates_to_none(sample_wav):
     """language="auto" must become language=None -- faster-whisper's own
     native auto-detect sentinel, not the literal string "auto" (which it
     would treat as an invalid two-letter code)."""
-    settings = STTSettings(mode=ProviderMode.LOCAL, cloud_routing_threshold=30.0)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
     provider = LocalSTTProvider(settings)
     model = _mock_local_model(provider)
 
@@ -747,7 +800,7 @@ async def test_local_stt_auto_language_logs_auto_not_none(sample_wav, caplog):
     not the translated None sentinel actually sent to faster-whisper."""
     import logging
 
-    settings = STTSettings(mode=ProviderMode.LOCAL, cloud_routing_threshold=30.0)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
     provider = LocalSTTProvider(settings)
     _mock_local_model(provider)
 
@@ -762,7 +815,7 @@ async def test_local_stt_auto_language_logs_auto_not_none(sample_wav, caplog):
 async def test_local_unknown_duration_falls_back_to_long_path(sample_wav):
     """When duration isn't known (detect_duration returned None), default to
     accuracy-tuned beam=5."""
-    settings = STTSettings(mode=ProviderMode.LOCAL, cloud_routing_threshold=30.0)
+    settings = STTSettings(mode=ProviderMode.LOCAL)
     provider = LocalSTTProvider(settings)
     model = _mock_local_model(provider)
 
@@ -851,9 +904,12 @@ def test_is_local_provider_true_for_a_declared_local_provider():
 
 
 def test_is_local_provider_defaults_false_for_an_undeclared_provider():
-    """A provider that never overrides `is_local` (the STTProvider ABC
-    default) must read as not-local -- proves the getattr default matters,
-    not just the two named classes."""
+    """A provider that never overrides `is_local` must read as not-local.
+
+    The value read is the `ClassVar` on the `STTProvider` ABC, inherited
+    rather than declared on this class -- which is what makes the direct
+    attribute read in `is_local_provider` total over every provider, not just
+    the two that set the flag themselves."""
     from app.stt.groq_whisper import GroqWhisperSTTProvider
     from app.stt.routing import is_local_provider
 
