@@ -109,9 +109,17 @@ Thirteen properties are pinned here:
    allowlist empty. What that pins is one import *spelling*, and it was
    called one address for two review rounds while never being one -- `from
    app.stt.routing import clear_cache` keeps a copy of its own, and counting
-   those copies is property 13. The names are read off the re-export block
-   rather than listed here, so one added there is covered the day it is
-   written.
+   those copies is property 13. `from app.stt import *` takes every one of
+   them and reported nothing, because matching each alias against the
+   re-export set reads `*` as a name nobody publishes. The names are read off
+   the re-export block rather than listed here, so one added there is covered
+   the day it is written -- and *which* names that block yields is itself a
+   selection that emptied this gate twice without emptying the set: a
+   `from .routing import <name>` resolved by string comparison rather than as
+   an import, and a name published out of a third module inside the package.
+   The block is resolved through the same helper every other rule here uses
+   now, and what it yields is checked against what `app/stt/routing.py`
+   defines.
 12. `app/stt/__init__.py` publishes exactly the names it imports, as the same
    objects. `__all__` and the import block above it are two halves of one
    surface and nothing read them against each other, so a name dropped from
@@ -139,6 +147,20 @@ Thirteen properties are pinned here:
    `routing.<name>()` -- reads the one attribute at call time and makes no
    copy. Two modules keep one and both predate this pin, checkably: on
    `2e2d099` each bound the same names off the package.
+   What it counts is a module attribute bound by an import or by a plain
+   module-level assignment, from any source module at all. It filtered on the
+   source for one round -- skipping any statement whose names led nowhere
+   inside `app.stt` -- and `from app.pipeline.service import
+   get_routed_provider` planted a fourth live `monkeypatch` target that a gate
+   named for counting addresses reported nothing for. It counts names, not
+   objects, so a same-named function from another package is reported too;
+   that over-count is an allowlist entry a reviewer reads, while an
+   under-count is the defect. An address built by an expression -- a class
+   attribute, a dict value, a default argument, `setattr` on the module
+   object, a name computed at run time -- is past a static walk and is not
+   claimed. The two shapes that would hide a whole namespace rather than one
+   name, a module-level star import and a module-level `__getattr__`, are
+   failures rather than misses.
 
 Every assertion below was mutation-checked when written. The list below is a
 ledger of mutations that were actually run, against the module actually named,
@@ -330,6 +352,45 @@ with the number of tests each one reddens:
   entry alone. It used to print all three recorded names under "entries with
   nothing left to cover", reporting two live deferrals as dead
 
+Six mutations below are the fifth review round, and every one of them is a
+hole in *name selection* rather than in what the gates then do with the names.
+All six ran green at **23 passed** against the round-4 file:
+
+- `peek_local_provider` moved to `from .routing import peek_local_provider` in
+  `app/stt/__init__.py`, with `app/stt/local_setup.py` taking it off the
+  package beside `routing` -- **two** tests, the import-source gate and the
+  third-address gate, and **zero** before. The re-export set compared
+  `node.module` against the dotted string, so the relative spelling took that
+  name out of the set *both* gates measure against while leaving the set
+  non-empty, which is why neither `assert re_exported` tripwire fired
+- `from app.pipeline.service import get_routed_provider` with `_probe =
+  get_routed_provider` appended to `app/pipeline/router.py` -- **one** test,
+  the third-address gate, and **zero** before. It skipped any statement whose
+  resolved names led nowhere inside `app.stt`, so a copy taken from the module
+  that already holds one was invisible; `app.pipeline.router
+  .get_routed_provider is app.stt.routing.get_routed_provider` was True at 23
+  passed, a fourth live target for a gate that exists to count them
+- `from app.stt import *` appended to `app/pipeline/router.py` -- **two**
+  tests, the import-source gate and the third-address gate, and **zero**
+  before: `*` is not a name the re-export set holds, so matching each alias
+  against that set reported nothing while the statement bound all eight
+- `from app.stt.routing import *` appended to the same file -- **one** test,
+  the third-address gate, and **zero** before, for the same reason one dot
+  along. It is reported as an unreadable shape rather than as eight names,
+  because what the statement binds is whatever the other module holds
+- `_lookup = stt_routing.get_provider` appended to
+  `app/preferences/user_settings.py` -- **one** test, the third-address gate,
+  and **zero** before. This was the blind spot the helper's own docstring
+  admitted; a module-level assignment off an attribute is readable and is read
+- `app/stt/shim.py` added with a `__getattr__` serving `app.stt.routing`, with
+  `app/stt/__init__.py` publishing `is_model_loaded` out of it and
+  `app/pipeline/router.py` then taking that name off the package -- **two**
+  tests, and **zero** before. The name left the re-export set while staying on
+  the package, so neither gate looked for it any more; the allowlist comparison
+  does not catch it either, because `is_model_loaded` is a name no module was
+  pinned as holding. The set is checked against `app/stt/routing.py`'s own
+  definitions now, and the shim's `__getattr__` is an unreadable shape besides
+
 Each list below is an allowlist, not a description: adding an entry is a
 deliberate act a reviewer can see in the diff.
 """
@@ -482,6 +543,33 @@ def _containing_package(path: Path) -> str:
     return ".".join(parts[:-1])
 
 
+def _import_from_base(node: ast.ImportFrom, package: str) -> str:
+    """The module one `from ... import ...` takes its names out of.
+
+    The base on its own, resolved through the relative spelling: `from
+    .routing import clear_cache` written inside `app/stt/` and `from
+    app.stt.routing import clear_cache` written anywhere both answer
+    `app.stt.routing`, and `from . import routing` answers `app.stt`, which is
+    the package those names are taken off rather than the module one of them
+    happens to name.
+
+    `_import_from_names` returns this and every submodule the statement names
+    beside it, which is what the package-level rules match on. A rule asking
+    which module a name *came from* needs the base alone: `from app.stt import
+    routing, clear_cache` has `app.stt.routing` among its resolved names while
+    taking `clear_cache` off the package, and reading that as "this statement
+    imports from the routing module" is the substitution two of this file's
+    gates were built on.
+    """
+    if not node.level:
+        return node.module or ""
+    parts = package.split(".") if package else []
+    parts = parts[: max(len(parts) - node.level + 1, 0)]
+    if node.module:
+        parts = parts + node.module.split(".")
+    return ".".join(parts)
+
+
 def _import_from_names(node: ast.ImportFrom, package: str) -> list[str]:
     """Resolve one `from ... import ...` to absolute dotted names.
 
@@ -496,14 +584,10 @@ def _import_from_names(node: ast.ImportFrom, package: str) -> list[str]:
     the submodule are returned now, so the package-level rules keep matching on
     the base while the module-level ones stop being a spelling choice.
     """
-    if not node.level:
-        bases = [node.module] if node.module else []
-    else:
-        parts = package.split(".") if package else []
-        parts = parts[: max(len(parts) - node.level + 1, 0)]
-        if not node.module:
-            return [".".join(parts + [alias.name]) for alias in node.names]
-        bases = [".".join(parts + node.module.split("."))]
+    base = _import_from_base(node, package)
+    if node.level and not node.module:
+        return [f"{base}.{alias.name}" if base else alias.name for alias in node.names]
+    bases = [base] if base else []
 
     names = list(bases)
     known = _modules()
@@ -1316,20 +1400,88 @@ def _deferred_stt_imports(path: Path, package: str) -> set[str]:
     return found
 
 
+def _routing_module_public_definitions() -> frozenset[str]:
+    """Every public name `app/stt/routing.py` defines at module level.
+
+    Definitions, not imports: `STTProvider` reaches that module from
+    `app.stt.base` and stays that module's name wherever it is read, so a rule
+    forbidding a second address for it would forbid the first one.
+
+    What it is for is the guard in `_stt_routing_re_exports`. Both routing
+    gates measure against the names the package re-exports, and that set is
+    read off one import block; a name published out of a third module inside
+    the package would leave the block, leave the set, and stay on the package,
+    with both gates still non-empty and so still green."""
+    found: set[str] = set()
+    for node in _tree(_modules()[_STT_ROUTING_MODULE]).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            found.add(node.name)
+        elif isinstance(node, ast.Assign):
+            found.update(
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            )
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            found.add(node.target.id)
+    return frozenset(name for name in found if not name.startswith("_"))
+
+
 def _stt_routing_re_exports() -> frozenset[str]:
     """The names `app/stt/__init__.py` publishes out of `app.stt.routing`.
 
-    Read off that file rather than listed here, so the gate below cannot fall
-    behind the surface it pins: a name added to the re-export block is covered
-    the moment it is written."""
+    Read off that file rather than listed here, so the gates below cannot fall
+    behind the surface they pin: a name added to the re-export block is covered
+    the moment it is written. Which statements count is resolved through
+    `_import_from_base`, the way every other rule in this file resolves an
+    import. It compared `node.module` against the dotted string for two review
+    rounds, and one `from .routing import peek_local_provider` took that name
+    out of the set both gates measure against while leaving the set non-empty,
+    so neither gate's `assert re_exported` tripwire fired and the name was free
+    at a third address.
+
+    Selecting the names is where both gates can be emptied without either one
+    reporting anything, so two shapes are a failure here rather than a miss.
+    `from app.stt.routing import *` names nothing this can enumerate. A name
+    published out of a third module that serves routing's object -- `from
+    app.stt.shim import is_model_loaded` -- leaves the block while staying on
+    the package, which is why the set is checked against what
+    `app/stt/routing.py` actually defines rather than trusted on its own."""
     path = _APP_DIR / "stt" / "__init__.py"
-    tree = _tree(path)
-    return frozenset(
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module == _STT_ROUTING_MODULE
-        for alias in node.names
+    package = _containing_package(path)
+    statements = [
+        node
+        for node in ast.walk(_tree(path))
+        if isinstance(node, ast.ImportFrom)
+        and _import_from_base(node, package) == _STT_ROUTING_MODULE
+    ]
+    starred = [
+        node.lineno
+        for node in statements
+        if any(alias.name == "*" for alias in node.names)
+    ]
+    assert not starred, (
+        f"app/stt/__init__.py re-exports {_STT_ROUTING_MODULE} with a star "
+        f"import at line(s) {starred}, so the names it publishes are whatever "
+        "that module happens to hold and this walk can list none of them. "
+        "Both routing gates would then measure against a set missing every "
+        "starred name. Spell each re-export out."
     )
+
+    re_exported = frozenset(alias.name for node in statements for alias in node.names)
+    expected = _routing_module_public_definitions() & set(
+        _package_init_imported_names("stt")
+    )
+    assert re_exported == expected, (
+        f"app/stt/__init__.py publishes {sorted(expected)} of "
+        f"{_STT_ROUTING_MODULE}'s own definitions and this walk sees "
+        f"{sorted(re_exported)} of them coming from that module. A routing "
+        "name the package publishes through anything else -- a third module "
+        "inside the package, or an `as` that renames it -- drops out of the "
+        "set both routing gates measure against while staying reachable as "
+        f"`{_STT_PACKAGE}.<name>`, and both gates stay green on a surface "
+        "they no longer cover. Import each one straight from "
+        f"`{_STT_ROUTING_MODULE}`, under the name that module gives it."
+    )
+    return re_exported
 
 
 def _routing_names_taken_from_the_package(
@@ -1347,7 +1499,10 @@ def _routing_names_taken_from_the_package(
     Binding the package object itself -- `import app.stt`, `from app import
     stt` -- counts as taking all of them, because the only reason to hold that
     object is to read a name off it, and an attribute chain is past what this
-    walk reads. `import app.stt.local_setup` counts for the same reason and
+    walk reads. `from app.stt import *` counts as taking all of them for the
+    opposite reason: it binds every re-exported name at once, and matching
+    each alias against the re-export set read `*` as a name nobody publishes
+    and reported nothing. `import app.stt.local_setup` counts for the same reason and
     matched nothing while this arm compared for equality: it binds `app` just
     as the shorter spelling does, so `app.stt.clear_cache()` planted beside it
     in `app/pipeline/service.py` left the file at 22 passed. It prefix-matches
@@ -1377,7 +1532,8 @@ def _routing_names_taken_from_the_package(
         return []
     names = set(_import_from_names(node, package))
     leaf = _STT_PACKAGE.rsplit(".", 1)[-1]
-    if _STT_PACKAGE in names and any(alias.name == leaf for alias in node.names):
+    takes_the_whole_surface = any(alias.name in (leaf, "*") for alias in node.names)
+    if _STT_PACKAGE in names and takes_the_whole_surface:
         return [_STT_PACKAGE]
     return sorted(
         alias.name
@@ -1505,7 +1661,14 @@ def test_no_module_under_app_takes_a_routing_name_off_the_stt_package():
     listed here, so a name added to that block is covered the day it is
     written, and the walk covers module level and function bodies alike --
     `app/main.py`'s own site is a function body, and a module-level-only walk
-    would have measured nothing there at all."""
+    would have measured nothing there at all. Reading them off that block is a
+    selection of its own, and `_stt_routing_re_exports` is where it is made to
+    fail closed: a name this walk cannot attribute to `app.stt.routing` must
+    redden that helper rather than quietly shrink the surface measured here.
+
+    `from app.stt import *` is reported, as `import app.stt` is: it binds
+    every re-exported name at once off the package, and matching `*` against
+    the re-export set read it as a name nobody publishes."""
     re_exported = _stt_routing_re_exports()
     assert re_exported, (
         "app/stt/__init__.py re-exports nothing from app.stt.routing, so this "
@@ -1563,6 +1726,34 @@ def _module_level_statements(tree: ast.Module) -> Iterator[ast.stmt]:
         )
 
 
+def _unreadable_attribute_shapes(path: Path) -> list[str]:
+    """Where one module builds module attributes this file cannot enumerate.
+
+    Two shapes, both at module level, and both of them a whole namespace
+    rather than one name. `from <anything> import *` binds whatever the other
+    module happens to hold, which no walk over *this* module's tree can list.
+    A module-level `def __getattr__` (PEP 562) answers for names that were
+    never bound at all, so a routing function is served off the module with no
+    statement naming it anywhere.
+
+    Reported rather than skipped. The gate below counts the names it can see,
+    and these are the two cases where seeing nothing is not the same as there
+    being nothing -- which is the failure this file has now shipped five times
+    in five different spellings."""
+    found = []
+    for node in _module_level_statements(_tree(path)):
+        if isinstance(node, ast.ImportFrom) and any(
+            alias.name == "*" for alias in node.names
+        ):
+            found.append(f"{node.lineno} star import")
+        elif (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "__getattr__"
+        ):
+            found.append(f"{node.lineno} module-level __getattr__")
+    return found
+
+
 def _routing_names_bound_at_module_level(
     path: Path, package: str, re_exported: frozenset[str]
 ) -> set[str]:
@@ -1574,19 +1765,42 @@ def _routing_names_bound_at_module_level(
     `<module>._lookup` holding the routing function exactly as the plain
     spelling leaves `<module>.get_provider` holding it.
 
-    A function-body import binds a local rather than a module attribute and is
+    The source module is not read at all, which is the correction this
+    arrived without. It skipped every statement whose resolved names led
+    nowhere inside `app.stt`, so a copy taken from a module that already holds
+    one -- `from app.pipeline.service import get_routed_provider` -- was
+    invisible to the one gate whose entire subject is how many modules hold a
+    copy. That was a source test wearing an address count's name, and a fourth
+    live `monkeypatch` target sat behind it with this file at 23 passed.
+    `app.stt.routing` is where these names are defined; it is not where a copy
+    has to come from.
+
+    Counted by name and not by object, because a static walk has no way to
+    tell `app.embeddings.clear_cache` from `app.stt.routing.clear_cache` at
+    the import line. That direction is the safe one: an over-count is an entry
+    in the allowlist below, which a reviewer reads in the diff, and an
+    under-count is the defect.
+
+    A plain `import app.stt.routing` binds the module and copies nothing, so
+    every read through it lands on the attribute a `monkeypatch` replaces. A
+    function-body import binds a local rather than a module attribute and is
     deliberately not counted; that is what `app/main.py`'s one deferral buys.
-    An address made by assignment -- `_lookup = routing.get_provider` -- is
-    past what a static walk reads, and this does not claim otherwise."""
+    A module-level `_lookup = routing.get_provider` is counted now and was the
+    admitted blind spot. An address built by an expression this walk does not
+    read -- a class attribute, a dict value, a default argument, `setattr` on
+    the module object, a name computed at run time -- is still past it and is
+    not claimed; `_unreadable_attribute_shapes` takes the two shapes that hide
+    a whole namespace out of that list and makes them failures."""
     bound: set[str] = set()
     for node in _module_level_statements(_tree(path)):
-        if not isinstance(node, ast.ImportFrom):
-            continue
-        if not any(
-            _reaches_the_stt_package(name) for name in _import_from_names(node, package)
-        ):
-            continue
-        bound.update(alias.name for alias in node.names if alias.name in re_exported)
+        if isinstance(node, ast.ImportFrom):
+            bound.update(alias.name for alias in node.names if alias.name in re_exported)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            value = node.value
+            if isinstance(value, ast.Attribute) and value.attr in re_exported:
+                bound.add(value.attr)
+            elif isinstance(value, ast.Name) and value.id in re_exported:
+                bound.add(value.id)
     return bound
 
 
@@ -1618,7 +1832,20 @@ def test_the_routing_names_gain_no_third_address_under_app():
     makes. Adding a third entry is the claim that a module needs its own copy.
 
     `app/stt/routing.py` defines the names and `app/stt/__init__.py` is the
-    re-export the package exists for, so neither is measured."""
+    re-export the package exists for, so neither is measured.
+
+    What this covers, stated so the docstring claims no more than the walk
+    proves: a module attribute bound by an import in any spelling, from any
+    source module, and one bound by a plain module-level assignment off an
+    attribute or a name. What it does not: an address built by an expression
+    it does not read -- a class attribute, a dict value, a default argument,
+    `setattr` on the module object, a name assembled at run time. Those are
+    past a static walk, and the runtime method that closed the identity half
+    of this file is not available here, because measuring every module's
+    attributes means importing every module under `app/` and
+    `app/audio/windows_loopback.py` imports `pyaudiowpatch`, which does not
+    exist on macOS. The two shapes that would hide a whole namespace rather
+    than one name are failures instead: `_unreadable_attribute_shapes`."""
     re_exported = _stt_routing_re_exports()
     assert re_exported, (
         "app/stt/__init__.py re-exports nothing from app.stt.routing, so this "
@@ -1628,21 +1855,37 @@ def test_the_routing_names_gain_no_third_address_under_app():
     )
 
     measured = {}
+    unreadable = {}
     for module, path in sorted(_modules().items()):
         if module in (_STT_PACKAGE, _STT_ROUTING_MODULE):
             continue
+        relative = path.relative_to(_APP_DIR.parent).as_posix()
+        shapes = _unreadable_attribute_shapes(path)
+        if shapes:
+            unreadable[relative] = shapes
         bound = _routing_names_bound_at_module_level(
             path, _containing_package(path), re_exported
         )
         if bound:
-            measured[path.relative_to(_APP_DIR.parent).as_posix()] = sorted(bound)
+            measured[relative] = sorted(bound)
+
+    assert not unreadable, (
+        f"these modules build module attributes this walk cannot enumerate: "
+        f"{unreadable}. A star import binds whatever the other module holds "
+        "and a module-level `__getattr__` serves names nothing binds, so "
+        "either one can put a routing function at a third address with no "
+        "statement here naming it and this gate counting zero. Spell the "
+        "imports out, and reach a lazy module through `import <module>` "
+        "instead of serving its names off this one."
+    )
 
     assert measured == {
         relative: sorted(names) for relative, names in _MAY_HOLD_A_ROUTING_NAME.items()
     }, (
         f"pinned:   {_MAY_HOLD_A_ROUTING_NAME}; measured: {measured}. A "
-        "module-level `from app.stt.routing import <name>` copies the function "
-        "onto the importing module, so `monkeypatch` has two addresses to "
+        "module-level import of a routing name, or an assignment holding one, "
+        "copies the function onto the importing module whatever module it was "
+        "taken from, so `monkeypatch` has two addresses to "
         "choose from and a test that picks the other one asserts nothing. Bind "
         "the module instead - `from app.stt import routing`, then "
         "`routing.<name>()` - which reads the one attribute at call time. "
