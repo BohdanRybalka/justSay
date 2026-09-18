@@ -122,6 +122,22 @@ def get_local_provider_kind(vendor: "GpuVendor | None" = None) -> LocalProviderK
 
 
 def get_local_provider_class() -> type[STTProvider]:
+    """The concrete provider class Local mode runs on this machine.
+
+    This is the boundary the local status contract is pinned at. Every class
+    reachable from here must declare `_get_model()`, `is_loaded` and
+    `last_load_error` -- the three members `POST /stt/local/load` and
+    `GET /stt/local/status` read, none of which sits on `STTProvider` and
+    none of which any base class can supply without making the failure
+    quieter (ADR 075).
+
+    `tests/test_local_factory.py` walks `LocalProviderKind` and checks the
+    class this function resolves for each one, so a kind added with a class
+    that spells a name differently fails there. Unpinned, it reports "not
+    loaded, no error" for the life of the process: the Settings models tab
+    draws a healthy indicator and `POST /stt/local/load` answers 500 with a
+    generic crash detail.
+    """
     if get_local_provider_kind() is LocalProviderKind.WHISPER_CPP_SERVER:
         from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
 

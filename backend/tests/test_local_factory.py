@@ -214,6 +214,42 @@ def test_kind_is_faster_whisper_on_non_windows_amd_or_intel(monkeypatch, vendor_
     assert get_local_provider_class() is LocalSTTProvider
 
 
+def test_every_local_provider_the_factory_resolves_carries_the_status_trio(monkeypatch):
+    """The local status contract, pinned where Local mode is chosen (ADR 075).
+
+    `_get_model`, `is_loaded` and `last_load_error` carry the whole local-STT
+    status surface and none of them is on `STTProvider`. A kind whose class
+    spells one of them differently -- `_load_model` for `_get_model` is the
+    shape this module's own docstring anticipates -- raises nowhere: the
+    status endpoint reports "not loaded, no error" for the life of the
+    process, the Settings models tab draws a healthy indicator, and
+    `POST /stt/local/load` answers 500 with a generic crash detail.
+
+    `LocalProviderKind` is walked rather than a hand-written list of classes,
+    so a fourth kind cannot be added without this test seeing it. The enum is
+    imported inside the function body, like every other test here: the
+    module-level import test below drops `app.stt.local_factory` from
+    `sys.modules` and re-imports it, which would leave a module-level binding
+    pointing at a dead module object.
+    """
+    from app.stt import local_factory
+
+    required = ("_get_model", "is_loaded", "last_load_error")
+
+    for kind in local_factory.LocalProviderKind:
+        monkeypatch.setattr(
+            local_factory, "get_local_provider_kind", lambda _kind=kind: _kind
+        )
+        provider_class = local_factory.get_local_provider_class()
+        missing = [name for name in required if not hasattr(provider_class, name)]
+
+        assert not missing, (
+            f"{kind.value} resolves to {provider_class.__name__}, which declares "
+            f"none of {missing} -- GET /stt/local/status would report "
+            f"'not loaded, no error' for the life of the process"
+        )
+
+
 def test_factory_module_imports_no_third_party_at_module_level():
     """Importing the factory must not pull in faster_whisper or httpx-backed
     provider modules.

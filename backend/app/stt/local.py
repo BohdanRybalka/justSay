@@ -33,6 +33,8 @@ from app.stt.config import STTSettings
 
 log = logging.getLogger(__name__)
 
+SHORT_CLIP_SECONDS = 30.0
+
 
 class LocalSTTProvider(STTProvider):
     """Faster-Whisper Large-v3 — local privacy-first STT provider.
@@ -128,15 +130,22 @@ class LocalSTTProvider(STTProvider):
         """Transcribe locally.
 
         ``audio_duration`` (kwarg, seconds) — when provided, drives a
-        latency-vs-accuracy decision: short clips get ``beam_size=1`` and
-        ``condition_on_previous_text=False`` (kills silence-hallucination
-        cascade); long clips keep ``beam_size=5`` and cross-segment context.
+        latency-vs-accuracy decision against `SHORT_CLIP_SECONDS`: short clips
+        get ``beam_size=1`` and ``condition_on_previous_text=False`` (kills
+        silence-hallucination cascade); long clips keep ``beam_size=5`` and
+        cross-segment context. An unknown duration takes the long path.
+
+        That boundary is this module's own constant and not
+        ``cloud_routing_threshold``, which decides Groq against Gemini in
+        Cloud mode and nothing here. Raising it to send more audio to Groq
+        must not also drop local transcription to beam 1 without
+        cross-segment context — a coupling invisible at both call sites
+        (ADR 073). The two numbers agree today and are two different facts.
         """
         model = await asyncio.to_thread(self._get_model)
         audio_duration = kwargs.get("audio_duration")
 
-        threshold = self._settings.cloud_routing_threshold
-        is_short = audio_duration is not None and audio_duration <= threshold
+        is_short = audio_duration is not None and audio_duration <= SHORT_CLIP_SECONDS
 
         beam_size = 1 if is_short else 5
         condition_on_previous_text = not is_short

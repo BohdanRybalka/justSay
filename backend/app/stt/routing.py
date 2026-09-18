@@ -130,6 +130,13 @@ def get_local_load_error(stt_settings: STTSettings) -> str | None:
     Returns None when the local provider hasn't been instantiated yet — that's
     the same outcome a fresh process would observe before the first
     transcribe/load call. No error has occurred yet.
+
+    ``last_load_error`` is read directly rather than through a defaulting
+    ``getattr``: every class :func:`app.stt.local_factory.get_local_provider_class`
+    can return declares it, pinned by ``tests/test_local_factory.py``. A
+    default would answer "no error" for a provider that declares nothing,
+    which is exactly the silence ADR 075 ends — a missing attribute must
+    raise where someone can see it, not draw a healthy indicator forever.
     """
     from app.stt.local_factory import get_local_provider_class
     cls = get_local_provider_class()
@@ -137,7 +144,7 @@ def get_local_load_error(stt_settings: STTSettings) -> str | None:
         provider = _providers.get(cls)
     if provider is None:
         return None
-    return getattr(provider, "last_load_error", None)
+    return provider.last_load_error
 
 
 def peek_local_provider() -> STTProvider | None:
@@ -159,14 +166,21 @@ def peek_local_provider() -> STTProvider | None:
 
 
 def is_model_loaded() -> bool:
-    """Check if the local whisper model is currently loaded in memory."""
+    """Check if the local whisper model is currently loaded in memory.
+
+    ``is_loaded`` is read directly for the same reason
+    :func:`get_local_load_error` reads ``last_load_error`` directly: a
+    ``False`` default would report "not loaded" forever for a provider that
+    declares nothing, and paired with that function's ``None`` it is the
+    "not loaded, no error" status ADR 075 exists to stop.
+    """
     from app.stt.local_factory import get_local_provider_class
     cls = get_local_provider_class()
     with _cache_lock:
         provider = _providers.get(cls)
     if provider is None:
         return False
-    return getattr(provider, "is_loaded", False)
+    return provider.is_loaded
 
 
 def is_local_provider(provider: STTProvider) -> bool:

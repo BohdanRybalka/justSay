@@ -19,7 +19,16 @@ class STTSettings(BaseSettings):
 
     engine: SttEngine = "auto"
 
-    cloud_routing_threshold: float = Field(default=30.0, gt=0)
+    cloud_routing_threshold: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Seconds of audio at or below which Cloud mode routes to Groq instead of "
+            "Gemini. Cloud routing only: Local mode's short-clip boundary is "
+            "app.stt.local.SHORT_CLIP_SECONDS, which this field deliberately does not "
+            "decide (ADR 073). The two hold the same number and are two different facts."
+        ),
+    )
 
     whisper_model_size: str = Field(default="large-v3-turbo", pattern=r"\A[A-Za-z0-9._-]+\z")
     whisper_device: str = "auto"

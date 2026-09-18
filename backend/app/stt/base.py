@@ -139,7 +139,25 @@ def min_no_speech_prob(segments) -> float | None:
 
 
 class STTProvider(ABC):
-    """Contract: Audio file in -> transcribed text out."""
+    """Contract: Audio file in -> transcribed text out.
+
+    Local providers owe three further members that are deliberately absent
+    from this class: ``_get_model()``, ``is_loaded`` and ``last_load_error``.
+    Between them they carry the whole local-STT status surface —
+    ``POST /stt/local/load`` and the prewarm task call ``_get_model()``, and
+    ``GET /stt/local/status``'s ``model_loaded`` and ``last_error`` are the
+    other two, read through :mod:`app.stt.routing`.
+
+    They are not promoted onto this class, because a no-op default would make
+    the failure worse rather than better: every cloud provider would acquire
+    two local concepts it has no use for, and a future local provider
+    spelling one of the names wrong would be silently satisfied by the base
+    class instead of merely unfound. The obligation is pinned where Local
+    mode is actually chosen — over everything
+    :func:`app.stt.local_factory.get_local_provider_class` can return, by
+    ``tests/test_local_factory.py``. ADR 075 records the decision and why an
+    intermediate abstract class does not cover the case.
+    """
 
     is_local: ClassVar[bool] = False
 

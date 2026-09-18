@@ -127,6 +127,22 @@ def test_threshold_boundary_exact_goes_to_groq():
     assert isinstance(p, GroqWhisperSTTProvider)
 
 
+def test_cloud_split_follows_a_custom_threshold():
+    """The field still decides the one thing it names (ADR 073).
+
+    Its other reader was `LocalSTTProvider.transcribe`, where 45 seconds used
+    to mean "a 40-second local clip gets beam 1". That reader is gone, so this
+    is the only behaviour left to move: at 45, a 40-second cloud clip is short
+    and routes to Groq, where at the default 30 it would reach Gemini. The
+    local half of the same claim is
+    `test_local_beam_size_ignores_the_cloud_routing_threshold` in
+    `test_stt.py`, on the same duration and the same threshold.
+    """
+    s = _cloud_settings(cloud_routing_threshold=45.0)
+    p, _ = get_routed_provider(s, audio_duration=40.0)
+    assert isinstance(p, GroqWhisperSTTProvider)
+
+
 def test_long_normal_goes_to_gemini():
     s = _cloud_settings()
     p, _ = get_routed_provider(s, audio_duration=60.0)
