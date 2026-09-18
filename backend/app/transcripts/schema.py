@@ -1,9 +1,8 @@
 """The ``entries`` schema — DDL, column lists and the version-aware migrator.
 
-Split out of ``history.py`` by spec 164; the SQL is unchanged. ``history``
-imports this module and this module names nothing in ``history``. The two
-``from app.transcripts import vector_store`` imports below stay inside their
-function bodies: ``vector_store`` imports ``history`` at module top, so
+``history`` imports this module and this module names nothing in ``history``.
+The ``from app.transcripts import vector_store`` imports below stay inside
+their function bodies: ``vector_store`` imports ``history`` at module top, so
 hoisting either makes ``schema -> vector_store -> history -> schema`` an
 ImportError at start-up.
 """
@@ -39,12 +38,8 @@ ENTRY_READ_COLUMNS = tuple(c for c in ENTRY_COLUMNS if c != "cleaned_text")
 def columns_sql(columns: Sequence[str], alias: str = "") -> str:
     """The column list for a SELECT or INSERT, optionally table-qualified.
 
-    The result is interpolated into SQL, which sqlite cannot parameterise for
-    identifiers, so nothing here is trusted: every name is checked against
-    ``ENTRY_COLUMNS``, and ``alias`` -- the table alias, written without its
-    dot -- must be a plain identifier. An ``entries`` column, qualified by at
-    most one identifier, is the only thing this can emit; anything else is a
-    ``ValueError`` rather than a query.
+    The result is interpolated into SQL, so every name is checked against
+    ``ENTRY_COLUMNS`` and ``alias`` must be an identifier; anything else raises.
     """
     unknown = [name for name in columns if name not in ENTRY_COLUMNS]
     if unknown:
@@ -173,40 +168,10 @@ END;
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
-    """Version-aware migrator. Run on every connection open.
+    """Version-aware migrator. Run on every connection open (ADR 053).
 
-    ``_DDL_V1`` and ``_REPLACE_TS_INDEX_WITH_TS_ID_INDEX`` both run
-    unconditionally and idempotently, so the ``entries_ts_idx`` ->
-    ``entries_ts_id_idx`` swap reaches an existing database without a
-    ``SCHEMA_VERSION`` bump. ``_DDL_V1`` still declares the pre-v5 shape and is
-    deliberately left alone: it is what an existing file already holds, and
-    ``_migrate_to_v5_locked`` is what replaces it. Why it is not bumped, and what that leaves
-    unrecorded, is ADR 053, "What it leaves unrecorded" -- stated there once,
-    because the version of it that lived in both places had to be corrected in
-    both places.
-
-    Branches:
-      - fresh v0 / upgrade from v1, v2, v3 or v4 → ``_migrate_to_v5_locked``,
-        which repairs every unreadable row, rebuilds ``entries`` behind
-        constraints that refuse the shape, re-runs v2 DDL, rebuilds FTS and
-        resets the vector index; then run v3 DDL (embeddings_meta +
-        entry_embeddings — both start empty, no rows to replay), and write
-        user_version=5 LAST so a crash before the PRAGMA leaves a retry-able
-        prior-version state. **A fresh database takes this path too**, on
-        nought rows, so a new install and a migrated one end up with the same
-        ``entries`` declaration rather than two that have to be kept in step by
-        hand. **If the rebuild does not land** -- an ``entries`` this build
-        cannot read at all -- nothing else is touched and the version is left
-        alone, so the app starts on the store it has and tries again next time.
-        The index swap sits inside the two branches for the same reason:
-        ``CREATE INDEX ... ON entries(ts DESC, id DESC)`` raises ``no such
-        column: id`` on such a table, and running it first meant the migration
-        never got to decide anything.
-      - already at v5 → re-run v2 DDL (IF NOT EXISTS makes this idempotent)
-        and probe FTS integrity; rebuild on OperationalError so a partial
-        migration that left user_version=5 but no FTS table self-heals.
-        Also re-run v3 DDL (IF NOT EXISTS) so a partial migration that left
-        user_version=5 but the embeddings tables missing self-heals too.
+    Below v5, and on a fresh database: ``_migrate_to_v5_locked``, the v3 DDL, then
+    ``user_version = 5`` LAST. At v5: re-run the idempotent DDL, rebuilding FTS.
     """
     from app.transcripts import vector_store
 
@@ -243,59 +208,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 def _migrate_to_v5_locked(conn: sqlite3.Connection) -> bool:
     """Rebuild ``entries`` so every stored row is one the app can read and order.
 
-    Returns whether the rebuild landed, and **never raises**: ``_init_schema``
-    runs inside ``bootstrap``, which the lifespan does not guard, so an
-    exception here is not a broken tab but a backend that does not start. A
-    store this cannot repair keeps the table it has and the caller leaves
-    ``user_version`` alone, so the next open tries again. The index and FTS work
-    after the commit is inside a handler for the same reason.
-
-    Runs when ``user_version`` is below 5. ``_DDL_V1`` is
-    ``CREATE TABLE IF NOT EXISTS``, so a constraint written there never reaches
-    a file that already exists, and SQLite cannot add one to a table in place --
-    hence the copy-drop-rename, which is SQLite's own documented procedure.
-
-    **The copy always writes all ten columns.** An adopted ``entries`` was
-    not necessarily created by this app: it can hold a negative ``duration_ms``,
-    a BLOB ``id``, or simply not have a column at all. A column this build no
-    longer knows -- a v4 store's ``style`` -- is not read: the select list is
-    built from ``ENTRY_COLUMNS``, not from the source. A present column is read
-    through ``_REPAIRED_COLUMN_SQL``, a missing one through
-    ``_MISSING_COLUMN_SQL``. Selecting only the columns the source
-    happens to have looks safer and is not: a source with no ``duration_ms``
-    leaves that ``NOT NULL`` column empty, ``INSERT OR IGNORE`` then refuses
-    every row, and the drop that follows destroys the user's entire history
-    with nothing to restore it from.
-
-    **``rowid`` is carried across.** ``entry_fts`` is external-content keyed on
-    ``entries.rowid`` and ``vec_entries`` addresses rows by it, and ``vec0`` has
-    no rebuild command -- so letting SQLite renumber would mean discarding every
-    embedding and recomputing it, which in Cloud mode is the user's whole
-    transcript history re-sent to a provider and paid for, over a migration that
-    changed no text. Only the embeddings of rows whose *id* was repaired are
-    dropped, because those no longer name a row -- and only once
-    ``entry_embeddings`` exists, which on a v1 or v2 store it does not until
-    the caller runs the v3 DDL after this.
-
-    **The copy is ``INSERT OR IGNORE`` and the count is compared.** Two source
-    rows can share an id when the stored table has no primary key, and a
-    duplicate must not abort a migration; a shortfall is logged with both
-    counts. Carrying *nothing* is refused outright rather than logged: at that
-    point the drop would be a deletion, not a migration.
-
-    **Four triggers are dropped first.** The three FTS ones are on ``entries``,
-    so ``entries_ai`` fires for every copied row -- work the rebuild discards,
-    and a hard failure on a store whose ``entry_fts`` is missing.
-    ``entries_ad_vec`` goes with the table either way and is put back by
-    ``vector_store.recreate_delete_trigger_locked``.
-
-    **The two ``executescript`` calls are after the COMMIT and have to stay
-    there.** Python's ``sqlite3`` issues an implicit COMMIT before running a
-    script, so one inside the transaction would end it before the copy.
-
-    The caller writes ``user_version`` last, so a crash between the commit and
-    the pragma re-runs this step, which is idempotent: after it every row
-    already satisfies the constraints.
+    Runs below v5 and on a fresh database. Returns whether the rebuild landed and
+    **never raises**: a store it cannot repair keeps the table and version it has.
     """
     from app.transcripts import vector_store
 

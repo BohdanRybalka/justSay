@@ -131,6 +131,8 @@ _RUST_DATA_DIR_PATTERN = r'if\s+\w+\s*\{\s*"([^"]*)"\s*\}\s*else\s*\{\s*"([^"]*)
 
 _DOCUMENTED_HEADER_PATTERN = r"stdout: (\{[^}]*\})"
 
+_DOCUMENTED_ARGV_PATTERN = r"justsay-audiotap --.*"
+
 _SWIFT_HEADER_KEY_PATTERN = r'\\"(\w+)\\":'
 
 _SWIFT_HEADER_FORMAT_PATTERN = r'\\"format\\":\\"([A-Za-z0-9]+)\\"'
@@ -1462,4 +1464,17 @@ def test_the_macos_tap_helper_and_its_reader_agree_on_the_command_line() -> None
         f"{AUDIO_TAP_SWIFT.name} no longer parses {_TAP_BLOCK_FRAMES_FLAG!r}, so "
         f"it falls back to its own default block size and the reader waits for "
         f"bytes that arrive in different-sized pieces"
+    )
+
+    declared = []
+    for path in (AUDIO_TAP_SWIFT, MACOS_TAP_PY):
+        written_down = re.search(_DOCUMENTED_ARGV_PATTERN, _read(path))
+        assert written_down, (
+            f"{path.name} no longer writes down the command line, the half of this "
+            f"contract a reader of the other file goes by"
+        )
+        declared.append(written_down.group(0).strip())
+    assert declared[0] == declared[1], (
+        f"the helper's header and the macos_tap.py docstring declare different "
+        f"command lines: {declared[0]!r} against {declared[1]!r}"
     )

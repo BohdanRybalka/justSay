@@ -1,14 +1,8 @@
-"""Vendor-aware GPU probe — priority-ordered, degrade-only detection.
+"""Vendor-aware GPU probe — priority-ordered, degrade-only detection (ADR 008).
 
-Replaces the CUDA-only `torch.cuda.is_available()` checks that used to be
-duplicated across `app.stt.local`, `app.stt.local_setup`, and
-`app.core.router`. Full design rationale, the priority order, and the
-Windows-registry-over-WMI-`AdapterRAM` decision (verified live against a real
-AMD card) are recorded in `docs/adr/008-gpu-vendor-probe.md`.
-
-No third-party import (`torch`) or Windows-only stdlib import (`winreg`) at
-module level — both are imported lazily inside the functions that need them,
-mirroring the existing convention in `app.stt.local_factory`.
+No third-party import (`torch`) and no Windows-only stdlib import (`winreg`)
+at module level: both are imported lazily inside the function that needs them,
+so this module stays importable on any platform.
 """
 
 import logging
@@ -46,18 +40,10 @@ _cached_result: GpuProbeResult | None = None
 
 
 def probe_gpu() -> GpuProbeResult:
-    """Detect the GPU vendor/name/VRAM via a priority-ordered, degrade-only chain.
+    """Detect the GPU vendor, name and VRAM; cached for the lifetime of the process.
 
-    Order: `JUSTSAY_GPU_VENDOR` env override -> `torch.cuda` -> `nvidia-smi`
-    CLI -> Windows registry (AMD/Intel) -> `GpuVendor.NONE`. Every source
-    catches its own failures and returns `None` on any problem; this function
-    also wraps each call so a source that raises anyway (rather than
-    returning `None`) still can't crash the caller.
-
-    Cached for the lifetime of the process after the first call -- see
-    `clear_cache()` to force a fresh probe (production code never needs
-    this; it's a test seam for exercising more than one probe outcome, e.g.
-    a changed `JUSTSAY_GPU_VENDOR`, within the same process).
+    Order: `JUSTSAY_GPU_VENDOR` -> `torch.cuda` -> `nvidia-smi` -> Windows registry (AMD/Intel)
+    -> `GpuVendor.NONE`. Never raises: a failing source is skipped. `clear_cache()` re-runs it.
     """
     global _cached_result
     with _cache_lock:
@@ -139,18 +125,8 @@ def _probe_torch_cuda() -> GpuProbeResult | None:
 def _probe_nvidia_smi() -> GpuProbeResult | None:
     """NVIDIA via the `nvidia-smi` CLI — the fallback when torch is absent.
 
-    Checked before any AMD/Intel source so an NVIDIA box is never
-    misclassified by an AMD/Intel-oriented probe finding an unrelated
-    secondary adapter.
-
-    An unparseable `memory.total` (`[N/A]`, `[Not Supported]`, a driver that
-    omits the column) yields `vram_total_mb=None` and still reports NVIDIA.
-    `nvidia-smi` having answered at all is the evidence that decides the
-    vendor; discarding the whole result over one number would fall through to
-    the AMD/Intel registry probe and route Local STT to the Vulkan provider on
-    a CUDA box. Nothing reads an NVIDIA `vram_total_mb` — only
-    `_probe_windows_registry()`'s max-VRAM pick reads the field at all, and it
-    never sees an NVIDIA result.
+    Runs before any AMD/Intel source, so a secondary adapter cannot misclassify an NVIDIA box. An
+    unparseable `memory.total` yields `vram_total_mb=None` and still reports NVIDIA.
     """
     try:
         result = subprocess.run(
@@ -181,10 +157,8 @@ def _probe_nvidia_smi() -> GpuProbeResult | None:
 def _probe_windows_registry() -> GpuProbeResult | None:
     """AMD/Intel via the Display Adapters registry class (Windows only).
 
-    Reads each numbered subkey's `ProviderName`/`DriverDesc`/
-    `HardwareInformation.qwMemorySize` (a 64-bit value — the 32-bit WMI
-    `AdapterRAM` field truncates any card above ~4 GiB, see ADR 008). Takes
-    the max-VRAM classified adapter across all subkeys (multi-GPU laptops).
+    Reads `ProviderName`, `DriverDesc` and `HardwareInformation.qwMemorySize` from each numbered
+    subkey and returns the classified adapter with the most VRAM — a laptop's discrete card.
     """
     if os.name != "nt":
         return None
@@ -215,11 +189,10 @@ def _probe_windows_registry() -> GpuProbeResult | None:
 
 
 def _read_adapter_subkey(class_key, subkey_name: str) -> GpuProbeResult | None:
-    """Read one numbered Display Adapters subkey; classify by ProviderName.
+    """Read one numbered Display Adapters subkey; classify by `ProviderName`.
 
-    Returns `None` for unclassifiable adapters (missing values, non-AMD/Intel
-    `ProviderName`, e.g. a software/basic render adapter) — every failure
-    degrades to "skip this adapter," never a crash.
+    Returns `None` for an unclassifiable adapter — a missing value, or a `ProviderName` that is
+    neither AMD nor Intel. Every failure degrades to skipping that adapter, never a crash.
     """
     import winreg
 

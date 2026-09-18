@@ -17,9 +17,8 @@ log = logging.getLogger(__name__)
 async def is_model_available(ollama_host: str, model: str) -> bool:
     """True if Ollama at ``ollama_host`` reports ``model`` as pulled.
 
-    Any connectivity failure (Ollama not running, unreachable host) is
-    treated as "not available" — the caller's job is to disable the
-    feature gracefully, not to distinguish failure modes here.
+    Any connectivity failure — Ollama not running, unreachable host — reads as
+    "not available" rather than distinguishing failure modes here.
     """
     timeout = httpx.Timeout(
         connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=READ_TIMEOUT
@@ -60,10 +59,7 @@ class LocalEmbeddingProvider:
         return await asyncio.to_thread(self._call_embed, client, self._model, text)
 
     def cleanup(self) -> None:
-        """Unload nomic-embed-text from Ollama's memory. The project's stated
-        8 GB unified-memory Local-mode target platform (CLAUDE.md) makes
-        leaving an embedding model resident indefinitely a real, not
-        hypothetical, cost."""
+        """Unload the configured embedding model from Ollama's memory."""
         if self._client is not None:
             try:
                 log.info("Unloading Ollama embedding model %s", self._model)

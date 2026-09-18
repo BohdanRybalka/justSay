@@ -1,16 +1,11 @@
 """Wall-clock timeline assembly for a two-source meeting recording.
 
-Pure functions only — no device access, no I/O of its own. Both capture
-sources spill their blocks to disk tagged with the `time.monotonic()` reading
-taken when the block arrived, and this module reconciles the two independent
-device clocks against that single shared wall clock. See
-docs/adr/038-two-capture-clocks-reconciled-by-measured-rate.md.
+Pure functions only — no device access, no I/O of its own. Both sources spill
+blocks to disk tagged with the `time.monotonic()` reading taken on arrival,
+and this module reconciles their two device clocks against that one shared
+wall clock (ADR 038).
 
-Everything here works in chunks over a whole source's frames rather than over
-a list of block arrays, because a meeting is captured to disk and assembled
-from a memmap — see
-docs/adr/058-a-meeting-is-captured-to-disk-not-to-memory.md. Nothing in this
-module ever holds a whole source at once.
+Everything works in chunks over a memmap and never holds a whole source (ADR 058).
 """
 
 from __future__ import annotations
@@ -26,9 +21,8 @@ import soxr
 class Segment:
     """A contiguous run of frames with no capture gap inside it.
 
-    Named by its half-open frame range in the source's spool rather than by
-    its samples: the spool appends in arrival order, so a segment is a slice
-    of one file and never has to be rebuilt by concatenation.
+    Named by its half-open frame range in the source's spool: the spool
+    appends in arrival order, so a segment is a slice and never a rebuild.
     """
 
     start_arrival: float
@@ -46,16 +40,9 @@ def segment_spool(
 ) -> list[Segment]:
     """Split a spool's arrival records wherever capture stalled.
 
-    A new segment starts when the gap between one block's arrival and the
-    next exceeds `gap_tolerance_blocks` times the duration of the earlier
-    block itself. A render endpoint that delivers nothing while the machine
-    plays silence therefore produces a hole in the timeline rather than
-    compressing the recording by the length of the stall.
-
-    Each segment's `end_arrival` is its last block's arrival plus that
-    block's own duration at `nominal_rate`, so a segment covers the span its
-    audio actually occupies rather than ending at the instant its final block
-    started.
+    A stall becomes a hole in the timeline rather than shortening the
+    recording: a segment breaks when the gap to the next block exceeds
+    `gap_tolerance_blocks` times the earlier block's own duration.
     """
     if index.size == 0:
         return []
@@ -89,18 +76,9 @@ def segment_spool(
 def segment_effective_rate(segment: Segment, nominal_rate: int, rate_tolerance: float) -> float:
     """The rate the device really ran at over this segment.
 
-    `frames / elapsed_wall_clock` — measured, never assumed, so no
-    parts-per-million constant for any particular device appears anywhere.
-
-    A measurement further than `rate_tolerance` from nominal is burst jitter
-    rather than a crystal, and falls back to nominal. The window is narrow on
-    purpose: real clock drift is parts per million, while a short
-    packet-bursted segment measures tens of percent off — ratios of 1.62,
-    0.83 and 1.18 were reproduced from three arrival patterns at nominal
-    48 kHz, all of which the old `[0.5x, 2x]` window admitted. The asymmetry
-    of the risk sets the direction: falsely rejecting a long segment throws
-    away the whole drift correction, while falsely trusting a short one
-    distorts only that segment, so the window errs wide of real drift.
+    `frames / elapsed_wall_clock`, measured rather than assumed. A
+    measurement further than `rate_tolerance` from nominal is burst jitter
+    rather than a crystal, and falls back to nominal.
     """
     elapsed = segment.end_arrival - segment.start_arrival
     if elapsed <= 0:
@@ -117,18 +95,9 @@ def resample_chunks(
 ) -> Iterator[np.ndarray]:
     """Band-limited resample to `target_rate`, a chunk at a time.
 
-    `soxr`, not linear interpolation. `app.audio.vad` interpolates and its
-    own docstring says why that is allowed there and not here: its output
-    feeds speech-presence detection and "the file handed to the STT provider
-    is never touched by any of this". This output *is* that file, and
-    downsampling 48 kHz to 16 kHz without an anti-alias filter folds
-    everything above 8 kHz back into the speech band.
-
-    `soxr.ResampleStream` rather than `soxr.resample`, because the input is a
-    memmap over a file that can be gigabytes long and the output is written
-    into another one: the filter state carries across chunk boundaries, so
-    the seam between two chunks is not the discontinuity independently
-    resampled pieces would leave.
+    `soxr`, not interpolation: this output is the file the STT provider gets,
+    and 48 kHz → 16 kHz with no anti-alias filter folds everything above
+    8 kHz into the speech band. Filter state carries across chunk seams.
     """
     source = np.asarray(samples)
     if source.size == 0:
@@ -160,24 +129,9 @@ def place_on_timeline(
 ) -> None:
     """Add one source's frames to `out` at the offsets their arrivals imply.
 
-    `out` spans the full wall-clock recording and is summed into rather than
-    replaced, so the two sources share one buffer and a source that produced
-    nothing contributes silence of the right length instead of shortening the
-    result. Each segment is resampled from its own measured rate — which
-    removes that segment's mean clock drift exactly — and written at the
-    absolute offset its arrival timestamp implies, so placement error cannot
-    accumulate from one segment to the next.
-
-    A segment's write stops at the next segment's own placement offset, and
-    at the end of the timeline for the last one. While a measured rate is
-    used this changes nothing — a segment resampled from `frames/elapsed`
-    ends exactly at its own `end_arrival`. It matters when
-    `segment_effective_rate` falls back to nominal, because a nominal-rate
-    length bears no relation to the span the segment really occupied: a
-    packet-bursted segment would otherwise be laid across its neighbour's
-    audio and *summed* into it. The overrun is dropped rather than mixed,
-    since the samples being discarded belong to the segment whose timing was
-    already rejected.
+    `out` spans the whole recording and is summed into, so a silent source
+    still contributes its full length. Each segment is written at its own
+    absolute offset and truncated at the next one's, so nothing accumulates.
     """
     total_samples = len(out)
     if total_samples == 0:
@@ -216,9 +170,7 @@ def normalize_in_place(timeline: np.ndarray, chunk_frames: int) -> None:
     """Scale the mixed timeline down only if it clips, a chunk at a time.
 
     Division is by the actual peak, so both sources keep their relative
-    loudness and neither is attenuated when the sum already fits. Two passes
-    over the buffer rather than one, because the peak is not known until the
-    whole mix has been read and the mix is too large to hold in memory.
+    loudness and neither is attenuated when the sum already fits.
     """
     peak = 0.0
     for start in range(0, len(timeline), chunk_frames):

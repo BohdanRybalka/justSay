@@ -27,11 +27,8 @@ _PIPELINE_CRASHED_DETAIL = (
 def _discard_scratch_file(path: Path) -> None:
     """Delete a scratch file without letting the delete replace the response.
 
-    Both call sites sit in a ``finally``, where an ``OSError`` would throw away
-    an already-built response: a completed transcription — copied to the
-    clipboard and saved to history — would reach the widget as a bare 500.
-    ``preferences/router.py``'s cleanup endpoint already guards the same
-    operation in the same directory.
+    Both call sites sit in a ``finally``, where an ``OSError`` would turn an
+    already-built response into a bare 500.
     """
     try:
         path.unlink(missing_ok=True)
@@ -59,14 +56,8 @@ async def dictate(
 ):
     """One-shot: stop recording -> transcribe -> clipboard.
 
-    Call POST /audio/start first, then call this endpoint when done speaking.
-    The recorder reports the captured duration via ``last_duration_seconds`` so
-    the pipeline can route short audio to Groq without re-reading the WAV.
-
-    The optional ``session_id`` body names the recording this dictation means,
-    and a stranger's is refused with 403 before anything is transcribed. The
-    stop is this handler's first act, which is what lets a client that never
-    got an answer ask ``POST /audio/discard`` whether the handler ran at all.
+    Call POST /audio/start first, then this when done speaking. An optional
+    ``session_id`` names the recording meant; a stranger's is refused with 403.
     """
     if not recorder.is_recording:
         raise HTTPException(status_code=409, detail="Not recording. Call POST /audio/start first")

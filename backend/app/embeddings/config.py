@@ -1,13 +1,10 @@
 """Embedding provider configuration — model names and the Ollama host.
 
-No ``mode`` field: eligibility is derived purely from ``STTSettings.mode``
-(see ``resolve_embedding_provider`` in ``app.embeddings``), never a toggle of
-its own. No API key field: Cloud embeddings reuse
-``settings.stt.gemini_api_key`` (already present for cloud STT) — a second
-Gemini key field would be pure duplication. ``ollama_host`` lives here because
-the local embedding provider is the only code that reads it. See
-``docs/adr/071-semantic-search-keys-on-the-dictation-mode.md`` and
-``docs/adr/001-sqlite-vec-embedding-provider-selection.md``.
+No ``mode`` field: eligibility is derived from ``STTSettings.mode`` by
+``resolve_embedding_provider``, never a toggle of its own. No API key field:
+cloud embeddings reuse ``settings.stt.gemini_api_key``, already present for
+cloud STT. ``ollama_host`` lives here because the local embedding provider is
+the only code that reads it. See ADR 071 and ADR 001.
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict

@@ -1,24 +1,10 @@
 """Provider routing and cache on top of the STT provider classes.
 
-Pipeline code calls :func:`get_routed_provider` with the audio metadata
-(mode, duration, format) and gets back the correct provider to use.
-Other endpoints (status) call :func:`get_provider`
-which returns the mode-level provider without engine/duration heuristics.
-
-Routing rules (see ``docs/plans/005-hybrid-stt-pipeline.md``):
-
-======================  ========================================================
-Mode / conditions        Provider
-======================  ========================================================
-LOCAL                    Platform-selected via
-                         :func:`app.stt.local_factory.get_local_provider_class`:
-                         :class:`~app.stt.local_whisper_cpp.WhisperCppServerSTTProvider`
-                         on macOS arm64 and on Windows AMD/Intel, else
-                         :class:`~app.stt.local.LocalSTTProvider`
-CLOUD + long audio       :class:`~app.stt.cloud.GeminiSTTProvider`
-CLOUD + short audio      :class:`~app.stt.groq_whisper.GroqWhisperSTTProvider`
-CLOUD + unknown length   :class:`~app.stt.cloud.GeminiSTTProvider` (safe default)
-======================  ========================================================
+:func:`get_routed_provider` picks a provider from the mode, the engine pin,
+the audio duration and the file format; :func:`get_provider` answers the
+mode-level question alone, for callers holding no audio. Local mode defers
+to :func:`app.stt.local_factory.get_local_provider_class`; Cloud mode routes
+short audio to Groq and everything else, including unknown length, to Gemini.
 """
 
 import logging
@@ -70,10 +56,8 @@ def _get_local(stt_settings: STTSettings) -> STTProvider:
 def get_provider(mode: ProviderMode, stt_settings: STTSettings) -> STTProvider:
     """Mode-level provider lookup, no routing heuristics.
 
-    For `/stt/local/load` and the status endpoints —
-    callers that don't have audio duration context. Cloud mode always
-    returns Gemini (engine pin and duration routing live in
-    :func:`get_routed_provider`).
+    For callers with no audio in hand. Cloud mode always returns Gemini; the
+    engine pin and duration routing live in :func:`get_routed_provider`.
     """
     if mode == ProviderMode.LOCAL:
         return _get_local(stt_settings)
@@ -85,18 +69,10 @@ def get_routed_provider(
     audio_duration: float | None = None,
     file_extension: str | None = None,
 ) -> tuple[STTProvider, str | None]:
-    """Select a provider based on engine pin + mode + audio duration + format.
+    """Select a provider from the engine pin, mode, audio duration and format.
 
-    Args:
-        stt_settings: Current STT configuration.
-        audio_duration: Known duration in seconds, or ``None`` when unknown.
-        file_extension: e.g. ``".wav"``, ``".webm"``. When a format isn't supported
-            by the routed provider, we fall back to the other cloud provider.
-
-    Returns:
-        ``(provider, fallback_reason)`` — the cached/created :class:`STTProvider`
-        plus an optional reason string when the *requested* engine had to be
-        overridden (used by the UI to show "fell back to Gemini for this format").
+    Returns ``(provider, fallback_reason)``; the reason is a sentence for the
+    UI when the requested engine had to be overridden, else ``None``.
     """
     if stt_settings.mode == ProviderMode.LOCAL:
         return _get_local(stt_settings), None
@@ -125,20 +101,10 @@ def get_routed_provider(
 
 
 def get_local_load_error(stt_settings: STTSettings) -> str | None:
-    """Return the most recent local-provider load failure, or None.
+    """Return the most recent local-provider load failure, or ``None``.
 
-    Returns None when the local provider hasn't been instantiated yet — that's
-    the same outcome a fresh process would observe before the first
-    transcribe/load call. No error has occurred yet.
-
-    The latch is read directly rather than through a defaulting ``getattr``:
-    every class :func:`app.stt.local_factory.get_local_provider_class` can
-    return declares every member of
-    :data:`app.stt.local_factory.LOCAL_STATUS_CONTRACT`, pinned by
-    ``tests/test_local_factory.py``. A default would answer "no error" for a
-    provider that declares nothing, which is exactly the silence ADR 075
-    ends — a missing attribute must raise where someone can see it, not draw
-    a healthy indicator forever.
+    ``None`` also when no local provider is cached — nothing has attempted a
+    load, so no error exists. The latch is read without a default (ADR 075).
     """
     from app.stt.local_factory import get_local_provider_class
     cls = get_local_provider_class()
@@ -150,16 +116,10 @@ def get_local_load_error(stt_settings: STTSettings) -> str | None:
 
 
 def peek_local_provider() -> STTProvider | None:
-    """Read-only peek at whichever provider is currently cached for the Local
-    provider class, or None. Never creates an instance — unlike
-    :func:`get_provider`/:func:`_get_local`.
+    """Read-only peek at the provider cached for the Local class, or ``None``.
 
-    Used by :func:`app.stt.local_setup.ensure_local_ready` to check whether
-    the provider it captured at the top of a prewarm attempt is still the
-    one anyone would look up (a cache-identity check), independent of
-    whatever ``stt_settings.mode`` currently reports — ``clear_cache()`` can
-    evict a provider from the cache without the mode itself ever changing
-    (spec 015, RED-1).
+    Never instantiates one, unlike :func:`get_provider`. Comparing identity
+    against an earlier peek detects a cache eviction the mode never reports.
     """
     from app.stt.local_factory import get_local_provider_class
     cls = get_local_provider_class()
@@ -168,14 +128,10 @@ def peek_local_provider() -> STTProvider | None:
 
 
 def is_model_loaded() -> bool:
-    """Check if the local whisper model is currently loaded in memory.
+    """Is the local whisper model currently loaded in memory?
 
-    The flag is read directly for the same reason
-    :func:`get_local_load_error` reads its latch directly: a ``False``
-    default would report "not loaded" forever for a provider that declares
-    nothing of :data:`app.stt.local_factory.LOCAL_STATUS_CONTRACT`, and
-    paired with that function's ``None`` it is the "not loaded, no error"
-    status ADR 075 exists to stop.
+    ``False`` when no local provider is cached. The flag is read without a
+    default (ADR 075).
     """
     from app.stt.local_factory import get_local_provider_class
     cls = get_local_provider_class()
@@ -188,27 +144,8 @@ def is_model_loaded() -> bool:
 
 def is_local_provider(provider: STTProvider) -> bool:
     """Is ``provider`` local? Reads the ``is_local`` class attribute the
-    provider itself declares (see :class:`app.stt.base.STTProvider` and
-    ``docs/adr/018-provider-declared-locality.md``) -- no I/O, no import of
-    ``local_factory``, no platform probe, no ``isinstance`` chain.
-
-    ADR 018 supersedes the first implementation of this function, which
-    asked the factory (``isinstance(provider, get_local_provider_class())``).
-    That performed a full GPU probe (``probe_gpu()``, ~126 ms) to answer
-    "is this local?" even for an obviously-Cloud provider, because resolving
-    *which* local provider class applies to this platform is not a free
-    lookup on Windows. Locality is a property of the object already held,
-    not a fact about the host -- deriving it from the platform was the
-    wrong instrument. Used by :func:`app.pipeline.service.process_audio` to
-    gate the Spec 028 Item 2 readiness barrier onto local routes only.
-
-    Read directly, with no ``getattr`` default: ``is_local`` is a
-    :class:`ClassVar` on :class:`app.stt.base.STTProvider` itself, so every
-    provider -- cloud included -- inherits it whether or not it overrides it.
-    A default here could only answer for an object that is not an
-    ``STTProvider`` at all -- which the annotation declares but Python does not
-    enforce at run time, so such an object is a caller bug and the
-    ``AttributeError`` it raises here is how it should surface.
+    provider itself declares -- no I/O, no platform probe, no ``isinstance``
+    chain, and no default (ADR 018).
     """
     return provider.is_local
 

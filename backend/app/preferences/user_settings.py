@@ -101,9 +101,8 @@ def get_user_settings() -> UserSettings:
 def update_user_settings(updates: dict) -> UpdateResult:
     """Merge partial updates into settings, validate, and save to disk.
 
-    For ``output_dir`` the flow is: validate → relocate history file →
-    only on success persist settings.json. On relocate failure the
-    in-memory + on-disk settings are left unchanged.
+    For ``output_dir``: validate, relocate the history file, then persist ``settings.json``. On a
+    relocate failure the in-memory and on-disk settings are left unchanged.
     """
     with _lock:
         current = get_user_settings()
@@ -135,12 +134,10 @@ def update_user_settings(updates: dict) -> UpdateResult:
 
 
 def _validate_whisper_model_size(value: object) -> None:
-    """Reject a whisper_model_size that could escape its model cache path.
+    """Reject a ``whisper_model_size`` that could escape its model cache path.
 
-    Raises ``ConfigurationError``, which answers 400 on its own, for any value
-    that is not a plain model-size token: it must consist only of ``[A-Za-z0-9._-]``
-    (full-string match -- a trailing newline is rejected) and must not contain
-    ``..``.
+    Raises ``ConfigurationError`` (400) unless the value matches ``[A-Za-z0-9._-]`` end to end — a
+    trailing newline is rejected — and contains no ``..``.
     """
     if (
         not isinstance(value, str)
@@ -154,19 +151,10 @@ def _validate_whisper_model_size(value: object) -> None:
 
 
 def _is_inside_scratch(candidate: Path) -> bool:
-    """Whether ``candidate`` would put history.db inside the scratch tree.
+    """Whether ``candidate`` would put ``history.db`` inside the scratch tree (ADR 033).
 
-    The rule is one-way on purpose (ADR 033). In the default layout the
-    scratch directory sits *inside* ``output_dir`` -- app-data root holds
-    ``history.db`` next to ``tmp/`` -- so a symmetric "these must not nest"
-    check would reject every healthy install. What must never happen is the
-    reverse: history living under the directory the cleanup endpoint empties.
-
-    Both sides are resolved here rather than at the call site. ``output_dir``
-    arrives from settings.json exactly as it was written, so a redirected
-    Windows profile or a stray ``..`` segment would otherwise compare unequal
-    to a path it in fact denotes -- and the startup repair would return
-    "healthy" for a database sitting in the scratch tree.
+    One-way on purpose: the scratch directory sits inside ``output_dir`` in the default layout.
+    Both sides are resolved here, so a redirected or ``..``-bearing path still compares equal.
     """
     try:
         scratch = resolve_temp_dir().resolve(strict=False)
@@ -188,23 +176,8 @@ def _reject_scratch_directory(candidate: Path) -> None:
 def repair_scratch_output_dir() -> Path:
     """Startup repair for history that already lives inside the scratch tree.
 
-    Returns the directory history should be opened from, on every path:
-
-    - a healthy configuration comes back untouched and nothing is written;
-    - a merge that failed returns the *old* directory deliberately, because
-      serving the user's real rows from a risky location beats serving an
-      empty database from a safe one, and the ownership-scoped cleanup
-      (ADR 033) already stops that location from being emptied;
-    - a merge that succeeded returns the app-data root even when the new
-      ``output_dir`` could not be persisted. ``consolidate_into`` has already
-      moved the rows and renamed the source file aside, so the old directory
-      no longer holds a database to fall back to; the stored setting is the
-      only thing left behind, and the repair simply runs again on the next
-      launch, where ``consolidate_into``'s ``INSERT OR IGNORE`` makes it a
-      no-op. The in-memory settings are left matching the file on disk.
-
-    Must run before ``history.bootstrap`` -- bootstrap opens the connection,
-    so a later repair would already have served the wrong file.
+    Returns the directory history should be opened from on every path: unchanged when healthy, the
+    old one when a merge failed, the app-data root when it succeeded. Run before ``bootstrap``.
     """
     current = Path(get_user_settings().output_dir)
     if not _is_inside_scratch(current):
@@ -287,13 +260,10 @@ def _validate_output_dir(value: object) -> Path:
 
 
 def _forbidden_parents() -> list[Path]:
-    """System roots an output_dir may not sit inside, in resolved form.
+    """System roots an ``output_dir`` may not sit inside, in resolved form (ADR 065).
 
-    Resolved because ``_validate_output_dir`` resolves the candidate before
-    comparing, and the two sides must live in the same space. On macOS
-    ``/etc`` is a symlink to ``/private/etc``, so an unresolved entry matches
-    nothing the user can actually type and the guard silently stops firing.
-    See docs/adr/065-a-system-directory-is-what-a-path-resolves-to.md.
+    Resolved because ``_validate_output_dir`` resolves the candidate before comparing, and the two
+    sides must live in the same space — on macOS ``/etc`` is a symlink to ``/private/etc``.
     """
     if sys.platform == "win32":
         roots = [
@@ -352,10 +322,8 @@ def _load() -> UserSettings:
 def _load_without_rejected_fields(data: dict, failure: ValidationError) -> UserSettings:
     """Keep every stored field that validates when one of them does not.
 
-    A single out-of-range value used to discard the entire file -- language,
-    shortcut, output directory and both API keys -- because the caller could
-    see only that validation had failed, not which field caused it. Each
-    rejected field falls back to its own default and the rest survive.
+    Each field named in ``failure`` falls back to its own default; every other stored value
+    survives, so one out-of-range number cannot discard the whole file.
     """
     rejected = {str(error["loc"][0]) for error in failure.errors() if error["loc"]}
     log.warning("Ignoring invalid stored settings, falling back to defaults for: %s",
@@ -369,12 +337,10 @@ def _load_without_rejected_fields(data: dict, failure: ValidationError) -> UserS
 
 
 def sync_to_runtime(us: UserSettings) -> bool:
-    """Push user settings into the runtime AppSettings objects.
+    """Push user settings into the runtime ``AppSettings`` objects.
 
-    Returns whether an STT-relevant field changed (the same `changed_stt`
-    check that already gates this function's own cache invalidation below),
-    so callers that need to react specifically to an STT-relevant change
-    (put_settings()'s prewarm gate) don't have to re-derive it themselves.
+    Returns whether an STT-relevant field changed — the same check that gates this function's own
+    cache invalidation — so a caller gating a prewarm does not have to re-derive it.
     """
     from app.core.config import settings
 

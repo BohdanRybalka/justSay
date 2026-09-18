@@ -37,8 +37,8 @@ except Exception as e:
 
 
 async def _warm_gpu_probe_cache() -> None:
-    """Off-thread, exception-swallowing warm-up of gpu_probe's process-
-    lifetime cache -- see the lifespan() call site (Spec 028 Item 2, AC 12)."""
+    """Off-thread, exception-swallowing warm-up of gpu_probe's process-lifetime
+    cache."""
     from app.core.gpu_probe import probe_gpu
 
     try:
@@ -52,16 +52,8 @@ def _run_optional_step(
 ) -> StepResult | None:
     """Run a lifespan step the app is still useful without, in either half.
 
-    The step is named, a failure is logged at WARNING under ``phase`` and the
-    lifespan carries on; what the step returned comes back, or ``None`` when
-    it raised. A step the app is *not* useful without is called directly
-    instead, so that it still ends the process -- "is the app still useful
-    without it?" is the whole test, and which side of it each lifespan step
-    falls on is readable from the call sites below.
-
-    A step whose own successful result is ``None`` cannot be told apart from
-    a failed one by its return value. Neither caller that reads the result
-    has that shape, and the log line says which happened.
+    A failure is logged at WARNING under ``phase`` and the lifespan carries on;
+    what the step returned comes back, or ``None`` when it raised.
     """
     try:
         return step()

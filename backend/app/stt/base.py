@@ -20,39 +20,17 @@ LOAD_FAILED_WITHOUT_A_MESSAGE = "The local engine failed to load and gave no rea
 def latched_load_error(exc: BaseException) -> str:
     """The sentence `GET /stt/local/status`'s `last_error` shows for a failed load.
 
-    An exception's `str()` can be empty, and an empty latch is worse than a
-    leaked class name rather than merely quieter. `src/status-indicator.ts`
-    treats a falsy `error` as not-an-error, so a failed load would be drawn as
-    a healthy indicator, while the Settings models tab would still raise a
-    toast carrying no text. `app/stt/local_setup.py`'s status read is
-    `get_local_load_error(stt_settings) or _prewarm_error`, so an empty
-    provider latch also falls through to an unrelated source.
-
-    The class name never belongs in this field: it is read by a person
-    deciding what to do next, and the class and its traceback are already in
-    the backend log at the same site.
+    Never empty and never a class name; an exception whose ``str()`` is empty
+    yields a fixed fallback sentence instead.
     """
     return str(exc) or LOAD_FAILED_WITHOUT_A_MESSAGE
 
 
 def normalize_detected_language(raw: str | None) -> str | None:
-    """Normalize a provider-reported language into a lowercase ISO-639-1
-    code, or ``None`` when unrecognised or empty.
+    """Normalize a provider-reported language into a lowercase ISO-639-1 code.
 
-    Handles the raw shapes providers actually return:
-      - An already-two-letter code, any case (``"EN"``) -> lowercased as-is.
-      - A region-tagged code (``"en-US"``, ``"pt_BR"``) -> the primary subtag.
-      - A full English language name (``"english"``, ``"Ukrainian"``) ->
-        looked up against `app.stt.languages.LANGUAGE_NAMES`, reversed —
-        covers at minimum the codes in that table.
-
-    Never passes an unrecognised value through — a garbage code reaching
-    `entries.language` / the Words tab's ``by_language`` bucket is worse
-    than the ``"auto"`` sentinel it replaces. The providers whose SDKs may
-    report a full language name rather than a code (Groq's ``verbose_json``
-    response, closed-source and undocumented) fall back to `None` here,
-    which downstream (`process_audio`) means "keep the auto sentinel" —
-    not an error.
+    Accepts a two-letter code in any case, a region-tagged code (``en-US``) or a
+    full English name from `LANGUAGE_NAMES`; anything else returns ``None``.
     """
     if not raw or not raw.strip():
         return None
@@ -69,15 +47,8 @@ def normalize_detected_language(raw: str | None) -> str | None:
 def clean_transcript_text(raw: str | None) -> str:
     """Coerce one provider's raw transcript into a stripped ``str``.
 
-    Every cloud SDK here types its text field as optional and means it:
-    google-genai returns ``None`` when the candidate carries no text part, and
-    Groq's ``verbose_json`` body is closed-source and undocumented. Both
-    providers inlined the same ``strip``-or-empty expression, which is one
-    defensive reader too few — the same reason `min_no_speech_prob` lives here.
-
-    It coerces and nothing else. A provider that decides a transcript should be
-    discarded says so through `TranscriptionResult` or by raising; deciding it
-    from the text itself is what deleted real speech for the whole of v0.12.
+    ``None`` becomes ``""``. It coerces and nothing else: a provider discards a
+    transcript through `TranscriptionResult` or by raising, never through text.
     """
     return raw.strip() if raw else ""
 
@@ -85,14 +56,8 @@ def clean_transcript_text(raw: str | None) -> str:
 def coerce_no_speech_prob(value) -> float | None:
     """Coerce one raw ``no_speech_prob`` value to a float, or ``None``.
 
-    ``bool`` is excluded explicitly: it is a subclass of ``int``, so a
-    stubbed ``"no_speech_prob": false`` would otherwise read as 0.0 — a
-    confident "definitely speech" verdict invented out of a missing value,
-    which the pipeline's post-model gate would then trust.
-
-    Shared by `min_no_speech_prob` (the ``verbose_json`` readers) and
-    `LocalSTTProvider._transcribe`'s lazy-generator loop, which cannot reuse
-    the aggregate helper but must not drift from its defensiveness.
+    ``True``/``False`` yield ``None`` rather than 1.0/0.0, so a stubbed
+    boolean field cannot read as a confident verdict.
     """
     if isinstance(value, bool):
         return None
@@ -104,24 +69,8 @@ def coerce_no_speech_prob(value) -> float | None:
 def min_no_speech_prob(segments) -> float | None:
     """Minimum ``no_speech_prob`` across ``segments``, or ``None``.
 
-    Shared by the two providers that read this off a ``verbose_json``
-    payload (`WhisperCppServerSTTProvider`, `GroqWhisperSTTProvider`) — one
-    defensive reader rather than two drifting copies.
-
-    Deliberately total: ``None``/non-sequence input, an empty list, segments
-    that are neither dicts nor attribute-objects, and a missing or
-    non-numeric ``no_speech_prob`` field all yield ``None`` rather than
-    raising. whisper.cpp builds vary in whether they populate the field at
-    all, and Groq's SDK returns attribute-objects or dicts depending on
-    version — a shape surprise must fail OPEN (keep the transcription), never
-    break a transcription that already succeeded.
-
-    Only ``list``/``tuple`` are accepted by design: any other sequence type a
-    future provider version might return (generator, pydantic sequence) fails
-    open to ``None`` rather than being consumed speculatively.
-
-    Per-value coercion — including the ``bool`` exclusion — is delegated to
-    `coerce_no_speech_prob`.
+    Total: only ``list``/``tuple`` are read, and an empty list, an unknown
+    segment shape or a missing field yield ``None`` rather than raising.
     """
     if not isinstance(segments, (list, tuple)):
         return None
@@ -141,22 +90,8 @@ def min_no_speech_prob(segments) -> float | None:
 class STTProvider(ABC):
     """Contract: Audio file in -> transcribed text out.
 
-    Local providers owe three further members that are deliberately absent
-    from this class. :data:`app.stt.local_factory.LOCAL_STATUS_CONTRACT` is
-    where they are spelled and
-    :func:`app.stt.local_factory.get_local_provider_class` is where what each
-    one carries is stated and where the obligation is enforced; this docstring
-    points at them rather than keeping a second copy of the names, so renaming
-    one cannot leave a dead name here.
-
-    They are not promoted onto this class: an abstract member here would
-    oblige every cloud provider to implement a local concept it has no use
-    for, and a concrete default would silently satisfy a future local provider
-    that spells one of the names wrong instead of leaving it merely unfound.
-    The obligation is pinned where Local mode is actually chosen — over
-    everything the factory can return, by the factory itself and by
-    ``tests/test_local_factory.py``. ADR 075 records the decision and why an
-    intermediate abstract class does not cover the case.
+    A local provider owes the further members that the factory enforces through
+    :data:`app.stt.local_factory.LOCAL_STATUS_CONTRACT` (ADR 075).
     """
 
     is_local: ClassVar[bool] = False
@@ -170,57 +105,10 @@ class STTProvider(ABC):
     async def transcribe(
         self, audio_path: Path, language: str = "uk", **kwargs
     ) -> TranscriptionResult:
-        """Transcribe audio file to text.
+        """Transcribe ``audio_path`` (WAV, 16 kHz, mono) into text.
 
-        Args:
-            audio_path: Path to audio file (WAV, 16kHz, mono).
-            language: BCP-47 language code, or the sentinel ``"auto"`` to
-                request the provider's own native auto-detect mechanism
-                instead of assuming a language. Each concrete provider
-                translates ``"auto"`` differently:
-                - ``GroqWhisperSTTProvider``: omits the ``language`` kwarg
-                  entirely from the Groq SDK call (mirrors the SDK's own
-                  ``Omit`` default).
-                - ``GeminiSTTProvider``: swaps the prompt's language clause
-                  for an instruction to detect the spoken language itself.
-                - ``LocalSTTProvider``: translates ``"auto"`` to
-                  ``language=None``, faster-whisper's own native auto-detect
-                  sentinel.
-                - ``WhisperCppServerSTTProvider``: forwards the literal string
-                  ``"auto"`` unchanged — whisper.cpp's core library treats it
-                  as its own native auto-detect sentinel, so no translation
-                  is needed.
-            **kwargs: Provider-specific extensions. Currently recognised:
-                - ``audio_duration`` (float, seconds): when known, the local
-                  provider uses it to pick a latency-vs-accuracy beam_size
-                  (1 for short clips, 5 for long). Cloud providers ignore it.
-
-        Returns:
-            TranscriptionResult with text, optional token count, and
-            ``detected_language`` (normalized ISO-639-1 code or ``None``).
-            Providers populate ``detected_language`` unevenly:
-                - ``LocalSTTProvider``: always, from the underlying whisper
-                  model's own language field (`TranscriptionInfo.language`)
-                  — populated whether or not ``language`` was ``"auto"``.
-                - ``WhisperCppServerSTTProvider`` / ``GroqWhisperSTTProvider``:
-                  only when ``language == "auto"`` — both escalate to a
-                  richer wire format (``verbose_json``) on that path only,
-                  keeping their current format/parsing unchanged for
-                  explicit-language requests. Always ``None`` otherwise.
-                - ``GeminiSTTProvider``: always ``None`` — no structured
-                  language field exists at any setting.
-
-            ``no_speech_prob`` (min across segments) is populated just as
-            unevenly, and for the same wire-format reasons:
-                - ``LocalSTTProvider``: always — faster-whisper's
-                  ``Segment.no_speech_prob`` is on every segment.
-                - ``WhisperCppServerSTTProvider`` / ``GroqWhisperSTTProvider``:
-                  only when ``language == "auto"`` (the only path that uses
-                  ``verbose_json``), and read defensively there — whisper.cpp
-                  builds vary in whether the field carries a live value, and a
-                  missing/stubbed field yields ``None``, never an exception.
-                - ``GeminiSTTProvider``: always ``None`` — no structured
-                  no-speech signal at any setting (ADR 016).
+        ``language`` is a BCP-47 code or ``"auto"``; ``**kwargs`` carries an
+        optional ``audio_duration`` in seconds. Unreported fields are ``None``.
         """
 
     def cleanup(self) -> None:

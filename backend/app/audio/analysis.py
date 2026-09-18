@@ -1,12 +1,8 @@
 """Audio DSP helpers: dBFS level calculation and streaming silence analysis.
 
-The project's first audio-DSP module — `app.core.audio_formats` is
-magic-bytes-only. Deliberately numpy-only: the backend ships as a frozen
-PyInstaller sidecar (`backend/build_sidecar.spec`) whose venv contains only
-numpy, soundfile and sounddevice. Real VAD libraries (`webrtcvad`,
-`silero-vad`, `torch`, `scipy`) are absent and a torch/onnx-based VAD would
-break the packaged build — see
-docs/adr/015-pipeline-level-silence-guard.md.
+numpy-only by constraint: the frozen sidecar's venv holds numpy, soundfile and
+sounddevice and nothing else, so anything added here that reaches for another
+package breaks the packaged build (ADR 015).
 """
 
 import logging
@@ -30,48 +26,16 @@ _DBFS_FLOOR = 1e-10
 class MalformedCaptureBlockError(Exception):
     """A raw capture buffer does not divide into whole interleaved frames.
 
-    Deliberately outside the `JustSayError` hierarchy (`app/core/errors.py`):
-    nothing routes it to a response, and both system-audio sources call this
-    function from inside a capture callback that catches everything and
-    reports it through `on_failure`. That is the "broken while in use raises"
-    half of docs/style-guide.md §3.3 — the source reports, and the meeting
-    keeps recording the microphone.
-
-    One named raise rather than two bare `ValueError`s from two libraries, in
-    wording that mentions no audio. That is the whole of what this class
-    buys, and it is worth saying what it does not: neither caller can produce
-    a buffer that reaches it. Each derives a block's length and its channel
-    count from one declaration — the macOS helper's stdout header, the WASAPI
-    endpoint's own mix format — so both arithmetics are the same numbers
-    twice. A `try/except` for it at either call site was a guard against a
-    condition that cannot occur, and four review rounds went into defending
-    one. The framing this function cannot check is checked where it can be:
-    `tests/test_cross_language_contracts.py` reads the Swift helper and pins
-    its header, its channel-count guards and its block arithmetic against the
-    Python that consumes them — the only place that contract could drift, and
-    the one file nothing here can compile.
+    Outside the `JustSayError` hierarchy on purpose: nothing routes it to a
+    response, and a capture callback reports it through `on_failure` instead.
     """
 
 
 def required_speech_units(total_unit_count: int, *, cap: int, ratio: float) -> int:
     """How many "speech" units a clip of ``total_unit_count`` units must show.
 
-    The ONE implementation of this rule, shared by both detectors: the energy
-    guard's 30 ms frames (`_required_speech_frames`) and the neural VAD's
-    16 ms hops (`vad._required_speech_hops`). It lives here because
-    `analysis` is the always-present base module — the optional VAD layer
-    depends on it, never the reverse.
-
-    Why proportional rather than absolute (spec 029, Stage 3 review RED-1):
-    an absolute floor cannot be satisfied by a short clip no matter how loud
-    it is — a 200 ms clip has only ~7 energy frames (~12 VAD hops) total, so
-    a flat requirement of 5 unconditionally called it silent. Scaling with
-    clip length fixes that without weakening the long-clip requirement at
-    all: ``cap`` keeps that regime byte-identical to the old absolute rule,
-    and the floor keeps a handful of units meaning something.
-
-    ``cap``/``ratio`` are keyword-only so the two callers cannot silently
-    transpose them.
+    The one rule both silence detectors scale by: proportional to clip length
+    between a floor and ``cap``. ``cap`` and ``ratio`` are keyword-only.
     """
     return min(cap, max(_MIN_SPEECH_UNITS_FLOOR, math.ceil(total_unit_count * ratio)))
 
@@ -79,18 +43,8 @@ def required_speech_units(total_unit_count: int, *, cap: int, ratio: float) -> i
 def to_mono(block: np.ndarray) -> np.ndarray:
     """Downmix an interleaved capture block to mono float32.
 
-    The one implementation, called from a realtime capture callback, from the
-    meeting timeline assembly and from both silence detectors. It lives in this
-    numpy-only module rather than beside the timeline code so that the
-    detectors can reach it without acquiring ``soxr``.
-
-    What comes back is always writable. Neither ``np.asarray`` nor
-    ``np.ascontiguousarray`` copies an array that already has the dtype and
-    layout asked for, so a read-only input — anything built by
-    ``np.frombuffer`` over a capture buffer — used to come straight back out
-    read-only when it was already 1-D float32, while the same buffer with two
-    channels came back writable because the averaging allocated. Whether a
-    caller could write to a block decided itself on the channel count.
+    What comes back is always writable, whatever the input's channel count or
+    flags, so a read-only ``np.frombuffer`` view is safe to pass in.
     """
     array = np.asarray(block, dtype=np.float32)
     if array.ndim > 1:
@@ -100,38 +54,11 @@ def to_mono(block: np.ndarray) -> np.ndarray:
 
 
 def interleaved_buffer_to_mono(buffer: bytes, channels: int, dtype: str) -> np.ndarray:
-    """Read a raw interleaved capture buffer and downmix it to mono float32.
+    """Read a raw interleaved capture buffer and downmix it to writable mono float32.
 
-    Both system-audio sources arrive at this same shape from different places —
-    a PortAudio callback on Windows, a pipe read from the macOS helper. Keeping
-    the deinterleave in one function is what stops the two platforms drifting
-    into different channel handling, which would be inaudible in tests and
-    obvious in a recording. ``dtype`` is passed rather than assumed for the
-    same reason: both callers spell it ``<f4`` today and each pins float32 at
-    its own end, so it is the seam a source delivering anything else would
-    arrive through, not a live difference between the two.
-
-    It sits beside ``to_mono`` for the reason ``to_mono`` sits here: both
-    callers are realtime capture callbacks, and the module they used to reach
-    for this imports ``soxr`` at module scope, so the deinterleave pulled the
-    resampling stack onto the audio thread for nothing.
-
-    ``np.frombuffer`` hands back a read-only view of the caller's bytes;
-    ``to_mono`` is what guarantees the block that comes out of here can be
-    written to, whatever the channel count.
-
-    A buffer that is not a whole number of ``channels``-wide frames raises
-    ``MalformedCaptureBlockError`` naming both numbers, and so does a
-    ``channels`` below 1 rather than being divided by. ``np.frombuffer`` and
-    ``reshape`` each already refused such a buffer with a ``ValueError`` of
-    its own, from two libraries and in wording that mentions no audio; one
-    named raise is what puts the block size and the channel count into the
-    sentence the recorder is handed.
-
-    It is not the only raise a caller has to be ready for: ``dtype`` is the
-    caller's own declaration and ``np.dtype`` refuses an unparseable one with
-    a ``TypeError``. Both capture callbacks catch by `Exception` for that
-    reason, and name the type in what they report.
+    Raises ``MalformedCaptureBlockError`` for a buffer that is not whole
+    ``channels``-wide frames or a ``channels`` below 1, ``TypeError`` for an
+    unparseable ``dtype``.
     """
     if channels < 1:
         raise MalformedCaptureBlockError(
@@ -153,9 +80,8 @@ def interleaved_buffer_to_mono(buffer: bytes, channels: int, dtype: str) -> np.n
 def to_dbfs(amplitude: float) -> float:
     """One amplitude in 0..1 expressed in dBFS.
 
-    Every dBFS answer in the codebase comes through here: the RMS level below,
-    and the peak measured by ``analyze_silence``. The ``_DBFS_FLOOR`` avoids
-    ``log10(0)`` on true digital silence.
+    Every dBFS answer in the codebase comes through here; ``_DBFS_FLOOR``
+    avoids ``log10(0)`` on true digital silence.
     """
     return float(20 * np.log10(max(amplitude, _DBFS_FLOOR)))
 
@@ -163,10 +89,8 @@ def to_dbfs(amplitude: float) -> float:
 def rms_dbfs(samples: np.ndarray) -> float:
     """RMS level of ``samples`` in dBFS.
 
-    The formula previously lived inline in
-    ``MicrophoneRecorder._audio_callback`` (recorder.py) — lifted here
-    verbatim so the guard and the Mic Test level meter share one
-    implementation and can't drift apart on what "level" means.
+    The one implementation, shared by the silence guard and the Mic Test
+    level meter so the two cannot drift on what "level" means.
     """
     rms = float(np.sqrt(np.mean(np.asarray(samples, dtype=np.float64) ** 2)))
     return to_dbfs(rms)
@@ -181,11 +105,10 @@ class SilenceAnalysis:
 
 
 def _required_speech_frames(total_frame_count: int, settings: AudioSettings) -> int:
-    """Length-proportional speech-frame requirement (spec 029, AC 25-27).
+    """Length-proportional speech-frame requirement for the energy guard.
 
-    The energy guard's 30 ms frames, capped by ``silence_min_speech_frames``.
-    The rule itself lives in `required_speech_units` — see its docstring for
-    the rationale.
+    30 ms frames, capped by ``silence_min_speech_frames``. The rule itself is
+    `required_speech_units`.
     """
     return required_speech_units(
         total_frame_count,
@@ -197,47 +120,9 @@ def _required_speech_frames(total_frame_count: int, settings: AudioSettings) -> 
 def analyze_silence(audio_path: Path, settings: AudioSettings) -> SilenceAnalysis | None:
     """Stream ``audio_path`` in 30 ms frames and decide whether it is silent.
 
-    Channels are mean-collapsed to mono per frame. A frame counts as
-    "speech" when its RMS level clears ``settings.silence_frame_dbfs``. The
-    number of speech frames required is **proportional to clip length**, not
-    an absolute count — see ``required_speech_frames`` below — because an
-    absolute floor cannot be satisfied by a short clip no matter how loud it
-    is (spec 029, Stage 3 review RED-1: a 200 ms clip has only ~7 frames
-    total). Silence is declared when the file's peak absolute sample never
-    clears ``settings.silence_peak_dbfs`` OR too few frames clear the
-    per-frame floor — either condition alone is enough to discard. That
-    ``OR`` is the AGGRESSIVE direction: it makes the guard MORE willing to
-    discard, not less, so on its own it biases toward eating real speech,
-    not toward letting a hallucination through. What actually protects real
-    speech is the calibrated thresholds themselves (measured 0/80 false
-    positives at 0 dB / −12 dB across 200–1000 ms — see plan.md's
-    Deviations), not the choice of operator. Do not "fix" this to ``AND``:
-    that would make the guard fail to fire whenever either signal is
-    ambiguous, which is the wrong direction for a false NEGATIVE (a
-    hallucination reaching the user) versus the false POSITIVE this design
-    already accepts and mitigates via calibration. ``silence_peak_dbfs`` and
-    ``silence_frame_dbfs`` must stay genuinely different (peak > frame): at
-    equal values ``rms(frame) <= max|frame| <= global peak`` makes the peak
-    check provably unreachable (RED-2) — see
-    docs/adr/015-pipeline-level-silence-guard.md.
-
-    Returns ``None`` — never raises, never reports ``is_silent=True`` — in
-    two cases:
-      - the file cannot be decoded at all (``/pipeline/process-file``
-        accepts ``.m4a``/``.webm`` that libsndfile cannot open; treating
-        "unreadable" as "silent" would silently break that tab), or
-      - fewer than ``settings.silence_min_analysis_ms`` of audio were
-        actually decoded (RED-3: a WAV with a valid header but truncated
-        data decodes cleanly and yields a handful of samples — not enough
-        for an energy heuristic to judge anything. Measured from decoded
-        samples, never from ``sf.info(...).duration``: libsndfile clamps
-        the declared frame count to the physical file size, so a
-        declared-vs-decoded comparison would never catch this).
-    Callers MUST treat ``None`` as "skip the guard, transcribe normally"
-    (fail open).
-
-    Streams via ``soundfile.blocks()`` rather than ``sf.read()`` — memory
-    use stays flat regardless of upload length.
+    Silent when the peak misses ``silence_peak_dbfs`` or too few frames clear
+    the lower ``silence_frame_dbfs``. ``None`` — never a raise, never a silent
+    verdict — means "skip the guard, transcribe anyway" (ADR 015).
     """
     try:
         import soundfile as sf

@@ -40,26 +40,18 @@ _READY_TIMEOUT = 300.0
 def peek_active_load() -> asyncio.Task | None:
     """Read-only view of the in-flight model-load task, if any.
 
-    Exists so `lifespan()`'s shutdown drain can cancel it. `_active_load` is
-    deliberately NOT registered in `app.core.tasks` (it holds its own strong
-    reference and its exception is retrieved via `shield()`), so the drain
-    cannot reach it through the registry -- but leaving it running while
-    `clear_stt()` fires is exactly the race this accessor closes.
+    Exists so `lifespan()`'s shutdown drain can cancel it: `_active_load` is
+    not registered in `app.core.tasks`, so the drain cannot find it there.
     """
     return _active_load[1] if _active_load is not None else None
 
 
 class LocalReadinessTimeoutError(ResourceUnavailableError):
-    """Raised by await_local_ready() when the bounded wait genuinely times
-    out -- i.e. ensure_local_ready() itself did not return within the
-    budget, as opposed to returning promptly via one of its own early-return
-    guards (see await_local_ready()'s docstring for why that distinction
-    matters).
+    """Raised by `await_local_ready` when its bounded wait genuinely times out.
 
-    A local engine that has not finished coming up is the base class's case
-    word for word: outside this process, nobody can fix it from Settings, and
-    the next attempt may well succeed. It therefore inherits both the 503 and
-    the `resource_unavailable` code rather than declaring its own."""
+    Never raised for `ensure_local_ready`'s own early returns, which come back
+    promptly. Inherits the base class's 503 and `resource_unavailable` code.
+    """
 
 
 class LocalSTTStatus(BaseModel):
@@ -78,12 +70,8 @@ class LocalSTTStatus(BaseModel):
 def check_status(stt_settings: STTSettings) -> LocalSTTStatus:
     """Check local STT readiness: package installed + load state + GPU + last error.
 
-    The cache is read for the loaded state exactly once and both load fields
-    answer from that one read. Reading it twice let one payload contradict
-    itself in two ways: with the package uninstalled the ``installed`` gate
-    reported ``model_loaded=False`` while the size ternary still asked the
-    cache and reported a number beside it, and a ``clear_cache()`` landing
-    between the two reads reported a loaded model with no size at all.
+    The provider cache is read for the loaded state exactly once, so
+    ``model_loaded`` and ``model_ram_mb`` cannot contradict each other.
     """
     installed = _check_package_installed()
     cuda_probe_available, gpu_name, gpu_vendor = _detect_gpu()
@@ -125,20 +113,8 @@ def check_status(stt_settings: STTSettings) -> LocalSTTStatus:
 def maybe_prewarm_local(stt_settings: STTSettings) -> None:
     """Fire-and-forget. No-op unless ``stt_settings.mode`` is LOCAL.
 
-    Called from every place the active STT mode can change or need
-    re-warming: ``set_stt_mode()``, ``put_settings()``, and the manual
-    ``POST /stt/local/prewarm`` retry — not just the literal toggle click, so
-    Local mode is always warm by the time the first dictation request needs
-    it. NOT called from ``lifespan()`` — the automatic every-process-start
-    trigger goes through ``maybe_prewarm_local_at_startup()`` instead, which
-    adds crash-loop protection this function deliberately does not have (see
-    that function's docstring).
-
-    [Spec 023] Resets the startup crash-loop guard's on-disk counter to 0
-    on every explicit trigger (mode switch, an STT-relevant settings edit,
-    or the manual POST /stt/local/prewarm retry) -- a deliberate,
-    user-initiated attempt is a fresh start, decoupled from the automatic
-    every-restart streak maybe_prewarm_local_at_startup() tracks.
+    For explicit triggers only — startup calls `maybe_prewarm_local_at_startup`
+    instead — and it resets the startup crash-loop counter to 0.
     """
     if stt_settings.mode != ProviderMode.LOCAL:
         return
@@ -182,25 +158,10 @@ def should_skip_prewarm(consecutive_incomplete_starts: int) -> bool:
 
 
 def maybe_prewarm_local_at_startup(stt_settings: STTSettings) -> None:
-    """Startup-only entry point, called once from app.main.lifespan().
+    """Startup-only entry point, called once from `app.main.lifespan`.
 
-    Guards against a crash loop: if the model load itself crashes the
-    process, an unconditional prewarm on every Spec 011 watchdog respawn
-    would re-attempt the same doomed load. Not used by set_stt_mode()/
-    put_settings()/the manual POST /stt/local/prewarm retry -- all three
-    call maybe_prewarm_local() directly and require an already-running,
-    already-healthy backend to receive the request, so none of them is part
-    of the automatic every-process-start loop this guards against.
-
-    The counter is written before the task is spawned, because a process
-    that dies during the load is exactly what it counts. A spawn that never
-    happened is not such a death, so a raising spawn puts the counter back
-    where it was and re-raises: the caller in app.main.lifespan() guards
-    this call and logs the failure, and a launch that never started a load
-    must not burn one of the MAX_CONSECUTIVE_INCOMPLETE_PREWARMS attempts.
-    The coroutine built for that spawn is closed on the same path: nothing
-    will ever await it, and an abandoned one surfaces later as a
-    RuntimeWarning raised from wherever the garbage collector happens to run.
+    Skips the prewarm after `MAX_CONSECUTIVE_INCOMPLETE_PREWARMS` process
+    starts whose load never completed; a spawn that raises restores the count.
     """
     if stt_settings.mode != ProviderMode.LOCAL:
         return
@@ -238,21 +199,10 @@ async def _prewarm_then_clear_crash_guard(stt_settings: STTSettings) -> None:
 
 
 async def _run_get_model(provider) -> None:
-    """The actual ``_get_model()`` attempt, run as an independent
-    ``asyncio.Task`` (created in ``ensure_local_ready`` below) rather than
-    awaited directly inline. That is what makes ``_active_load`` meaningful:
-    a Task keeps running to completion even if every caller currently
-    watching it (via ``asyncio.shield()``) gets cancelled -- unlike a plain
-    coroutine awaited in place, which a cancellation unwinds immediately.
-    Same swallow-and-latch / orphan-cleanup contract ``ensure_local_ready``
-    always had.
+    """Run one ``_get_model()`` attempt, swallowing and latching its failure.
 
-    The ``_prewarm_error`` latch is written here rather than in
-    ``ensure_local_ready`` because this task runs to completion regardless of
-    who is watching it. A caller cancelled by ``await_local_ready``'s own
-    ``wait_for`` timeout never reaches the code after its ``shield()``, so a
-    clear written there is skipped for exactly the load that then succeeds --
-    which is the stale-error symptom JS-98 exists to remove.
+    Runs as its own Task so it completes, and writes ``_prewarm_error``, even
+    when every watcher is cancelled; releases the provider the cache moved past.
     """
     global _prewarm_error
     try:
@@ -270,53 +220,10 @@ async def _run_get_model(provider) -> None:
 
 
 async def ensure_local_ready(stt_settings: STTSettings) -> None:
-    """Install (if needed) and load the Local STT model, serialized through
-    ``_prewarm_lock`` so overlapping calls collapse into one real attempt.
-
-    The entry check is ``stt_settings.mode``-based (no point starting an
-    attempt at all once mode has already moved on). The mid-install and
-    mid-load rechecks are cache-*identity* checks instead
-    (``routing.peek_local_provider() is not provider``), not mode checks — a mode
-    check is structurally insufficient here: ``clear_cache()`` can evict the
-    captured ``provider`` from the cache without ``stt_settings.mode`` ever
-    changing (e.g. an unrelated ``PUT /settings`` edit routed through
-    ``sync_to_runtime()``'s ``changed_stt`` branch while Local stays active
-    the whole time — spec 015, RED-1). The identity check is strictly more
-    general: it still catches every genuine Local -> Cloud switch (which
-    itself goes through ``clear_cache()``), plus the mode-stays-LOCAL case a
-    mode check would miss entirely. If the cache moved on, the now-orphaned
-    provider is cleaned up once the load settles (success or failure) —
-    regardless of what ``stt_settings.mode`` currently says.
-
-    The actual ``_get_model()`` call runs as an ``asyncio.Task``
-    (``_active_load``), awaited here via ``asyncio.shield()`` rather than
-    directly (Stage 5 GitHub review on PR #34, finding 1). If THIS caller
-    is itself cancelled (e.g. by ``await_local_ready()``'s own
-    ``wait_for`` timing out), ``shield()`` detaches only this caller's
-    *observation* of the task -- the task, and the worker thread
-    ``_get_model()`` runs on (which cannot be cancelled once started),
-    keep going. A later caller that reaches this same function while that
-    task is still running finds it in ``_active_load`` and re-joins it
-    instead of starting a genuinely second ``_get_model()`` call.
-
-    That ``asyncio.create_task()`` call (unlike every other fire-and-forget
-    call site in this module, which route through
-    ``app.core.tasks.spawn_background_task()``, Spec 032) is deliberately
-    left bare: ``_active_load`` already holds its own strong reference for
-    the task's whole lifetime, and its exception is already retrieved via
-    the ``asyncio.shield()`` below, so wrapping it in the shared helper
-    would add a redundant registry entry and a redundant exception
-    retrieval for no correctness gain.
-
-    ``asyncio.shield()`` is called from *inside* the ``_prewarm_lock``
-    block, matching the lock's original scope, deliberately: moving it
-    outside would let a second caller's own ``routing.get_provider()`` lookup
-    run concurrently with the first attempt's in-flight ``_get_model()`` side
-    effects (e.g. a settings change clearing the provider cache mid-load),
-    which changes the ordering spec 015's RED-1 orphan-cleanup regression
-    test depends on. Keeping the lock's scope unchanged means the only
-    behavioural difference from before is exactly the one this fix targets:
-    what survives a caller's own cancellation.
+    """Install if needed and load the Local STT model, serialized through
+    ``_prewarm_lock``. The load runs as a shielded Task, so a cancelled caller
+    neither stops it nor starts a second one; a caller whose provider the cache
+    has moved past returns early and lets that provider be released.
     """
     global _prewarm_error, _active_load
     async with _prewarm_lock:
@@ -358,49 +265,9 @@ async def await_local_ready(
     stt_settings: STTSettings, timeout: float | None = None
 ) -> bool:
     """Await the local STT provider's readiness before the request path uses it.
-
-    Reuses ensure_local_ready()'s own ``_prewarm_lock``, so a request arriving
-    while a prewarm is already in flight blocks on that lock and returns once
-    the *existing* load finishes -- no second ``_get_model()`` call (AC 11).
-
-    Bounded by ``asyncio.wait_for(..., timeout=timeout)`` so a genuinely stuck
-    load (dead network mid-download, a broken driver) cannot hang the request
-    path indefinitely. On a real timeout this raises ``LocalReadinessTimeoutError``
-    -- the one outcome callers SHOULD treat as fatal, since letting the
-    request proceed risks an even longer, unbounded hang inside
-    ``transcribe()``'s own lazy ``_get_model()`` fallback.
-
-    Returns whether the active local provider ended up loaded. A ``False``
-    return (no timeout, but not loaded either) covers ensure_local_ready()'s
-    own fast early-return guards racing in -- ``stt_settings.mode`` flipping
-    away from LOCAL, or the cache moving on to a different provider instance
-    -- while this call was queued on ``_prewarm_lock``. Those are NOT
-    failures: the caller must not treat a plain ``False`` as fatal, only a
-    raised ``LocalReadinessTimeoutError``. `LocalSTTProvider.transcribe()` (and
-    `WhisperCppServerSTTProvider`'s) retain their own lazy ``_get_model()`` fallback, so a
-    plain ``False`` return here is never fatal to the caller.
-
-    This is a trade, not a guarantee that nothing changes (Stage 5 GitHub
-    review on PR #34, finding 2 -- a prior version of this docstring claimed
-    "never turn a working request into a failing one", which does not hold
-    and should not have been written that way). A load that finishes within
-    ``timeout`` behaves exactly as it did before this barrier existed. A
-    load that would have EVENTUALLY succeeded but takes LONGER than
-    ``timeout`` -- a genuinely slow but working cold start: a large model on
-    a slow disk, a throttled first-time download -- is deliberately
-    converted into an explicit ``LocalReadinessTimeoutError`` (surfaced by
-    ``process_audio`` as a clear error) rather than the unbounded hang it
-    used to be. That trade is intentional -- an indefinite hang is worse
-    than a clear, actionable error -- but it does mean a request that would
-    previously have succeeded, given enough time, can now fail instead.
-    Choose ``timeout`` (or override it per call) with that trade in mind.
-
-    ``timeout=None`` (the default) reads the module-level ``_READY_TIMEOUT``
-    at call time rather than binding it as a default-argument value at
-    function-definition time -- the latter would freeze the value at import
-    time, defeating tests (and any future runtime override) that patch
-    ``_READY_TIMEOUT`` directly, mirroring this module's own
-    ``_HEALTH_POLL_MAX_ATTEMPTS``-style convention in ``local_whisper_cpp.py``.
+    Raises ``LocalReadinessTimeoutError`` after ``timeout`` seconds, or after
+    ``_READY_TIMEOUT`` read at call time when it is ``None``; that is the one
+    outcome a caller must treat as fatal. ``False`` means not loaded, not failed.
     """
     if timeout is None:
         timeout = _READY_TIMEOUT
@@ -418,14 +285,8 @@ async def await_local_ready(
 def _estimate_model_ram_mb() -> int | None:
     """Approximate the backend RSS-delta consumed by the loaded whisper model.
 
-    Returns the current process RSS in MB — coarse but informative; the user
-    sees "the backend is holding ~700 MB" rather than no number at all.
-
-    Returns `None` for the whisper.cpp-server kind: the actual model memory
-    lives in the separate `whisper-server` child process's own address
-    space, not this (the FastAPI backend's) process's RSS — reporting the
-    wrong process's RSS would be actively misleading rather than merely
-    imprecise. True on both platforms that kind covers.
+    The current process RSS in MB, or `None` for the whisper.cpp-server kind,
+    whose model memory lives in a separate process's address space.
     """
     if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
         return None
@@ -443,11 +304,8 @@ def _estimate_model_ram_mb() -> int | None:
 def _check_package_installed() -> bool:
     """Check if the platform/kind-appropriate local STT dependency is present.
 
-    macOS Apple Silicon and Windows AMD/Intel both check whether the
-    whisper.cpp `whisper-server` binary can be resolved (bundled resource
-    dir, dev-vendor dir, or env override) — there's nothing to `pip install`
-    for that kind, the binary is either bundled or it isn't. Everywhere else
-    checks for the importable `faster_whisper` package.
+    The whisper.cpp kind resolves the `whisper-server` binary — nothing is
+    pip-installable for it; everywhere else imports `faster_whisper`.
     """
     if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
         return local_whisper_cpp_cmd.resolve_binary_path() is not None
@@ -504,9 +362,8 @@ async def install_local_packages() -> AsyncIterator[str]:
 def _run_pip_install() -> tuple[int, str]:
     """Run pip install .[local] synchronously. Returns (exit_code, output).
 
-    One extras name for every platform that has a pip path at all: the
-    accelerated platforms resolve a bundled binary instead and never reach
-    here.
+    One extras name for every platform with a pip path; the accelerated ones
+    resolve a bundled binary and never reach here.
     """
     backend_dir = _get_backend_dir()
 
@@ -542,19 +399,8 @@ def _get_backend_dir():
 def _detect_gpu() -> tuple[bool, str | None, str]:
     """Detect GPU availability, a human-readable device name, and vendor.
 
-    On macOS arm64 returns the Apple-Silicon/Metal label without importing
-    torch or probing hardware — the Metal whisper.cpp binary is the
-    accelerator here. Everywhere else, delegates to `app.core.gpu_probe.probe_gpu()`. The
-    returned `available` bool stays NVIDIA/CUDA-only (faster-whisper/
-    CTranslate2 has no AMD/Intel backend) — it feeds only `check_status()`'s
-    "auto" -> cuda/cpu decision for that provider, not the status object's
-    own `gpu_available` field, which is computed separately in
-    `check_status()` from the final resolved `device` and also covers the
-    Vulkan-accelerated AMD/Intel path. `gpu_name`/vendor are always
-    populated when a GPU is detected, regardless of which provider ends up
-    accelerated.
-
-    Returns (available, device_name_or_none, vendor).
+    Returns `(available, device_name_or_none, vendor)`; `available` is
+    NVIDIA/CUDA-only and feeds the faster-whisper "auto" device decision alone.
     """
     if is_macos_arm64():
         return True, "Apple Silicon (Metal)", "apple"

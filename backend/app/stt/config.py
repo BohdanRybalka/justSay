@@ -10,19 +10,9 @@ STTEngine = Literal["auto", "groq", "gemini"]
 
 class STTSettings(BaseSettings):
     """Runtime STT configuration -- what the pipeline reads on every request.
-
-    `app.preferences.user_settings.sync_to_runtime` copies the user-editable
-    half of it here on every save, so each shared field is declared twice and
-    assigned a third time; `tests/test_settings_defaults_agree.py` pins the
-    copies against each other.
-
-    `cloud_routing_threshold` decides the Groq-against-Gemini split in
-    `app.stt.routing.get_routed_provider` and nothing else. Local mode's
-    short-clip boundary is `app.stt.local.SHORT_CLIP_SECONDS`, which this field
-    deliberately does not decide (ADR 073): raising the threshold to send more
-    audio to Groq must not also drop local transcription to beam 1 without
-    cross-segment context. The two hold the same number and are two different
-    facts.
+    `app.preferences.user_settings.sync_to_runtime` copies the user-editable half
+    here on every save, and `cloud_routing_threshold` decides the
+    Groq-against-Gemini split alone, never Local mode's boundary (ADR 073).
     """
 
     mode: ProviderMode = ProviderMode.CLOUD

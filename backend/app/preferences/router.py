@@ -52,14 +52,8 @@ async def get_settings():
 async def put_settings(updates: dict):
     """Apply a partial settings update.
 
-    ``update_user_settings`` refuses a directory or model size the user typed
-    with a ``ConfigurationError``, which answers 400 through the app-wide
-    handler and never reaches this function. What is left for ``except
-    ValueError`` is pydantic's ``ValidationError`` — a ``ValueError`` subclass
-    — raised by ``UserSettings.model_validate`` for a field constraint such as
-    the 500-character ``initial_prompt`` ceiling. ``except RuntimeError``
-    covers the one failure that is not a refusal: a history relocate that
-    broke mid-move.
+    ``update_user_settings`` raises ``ConfigurationError`` for a bad directory or model size, which
+    answers 400 app-wide; ``ValueError`` is pydantic, ``RuntimeError`` a relocate that broke midway.
     """
     allowed_fields = set(UserSettings.model_fields.keys())
     filtered = {
@@ -105,13 +99,8 @@ _SCRATCH_PREFIXES = ("rec_", "pipeline_", "meeting_")
 def _scratch_files(tmp_dir: Path) -> list[Path]:
     """Files in the scratch directory that this app wrote (ADR 033).
 
-    ``rec_*`` comes from the microphone recorder, ``pipeline_*`` from the
-    upload path and ``meeting_*`` from the meeting recorder. Deletion is
-    scoped by ownership rather than by location, so anything else found there
-    survives because it was never in scope, not because it was added to an
-    exception list. A user's ``history.db`` is the case that made this
-    necessary, and each new producer registers its own prefix here rather
-    than widening the rule.
+    ``rec_*`` from the microphone recorder, ``pipeline_*`` from the upload path, ``meeting_*`` from
+    the meeting recorder. Deletion is scoped by ownership, so anything else found there survives.
     """
     if not tmp_dir.is_dir():
         return []

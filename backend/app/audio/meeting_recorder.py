@@ -1,25 +1,11 @@
 """Meeting recorder — microphone plus system audio, mixed into one WAV.
 
 Writes the same 16 kHz mono 16-bit WAV `MicrophoneRecorder` does, so the file
-enters the pipeline through the same door and nothing downstream has to know a
-meeting was recorded. The `AudioRecorder` contract it shares covers starting
-and reporting, not stopping: `stop()` here answers with a `MeetingRecording`
-rather than the dictation path's bare `Path`, which is why the base class
-declares no `stop()` at all — see `app.audio.base`. `MicrophoneRecorder`
-itself is deliberately untouched by this module: the dictation path must not
-move.
-
-System audio arrives through `app.audio.system_source`, which is the only
-place that knows which platform it is running on — see
-docs/adr/037-system-audio-capture-is-a-per-platform-source.md.
-
-Every call that creates, starts, stops or destroys a device handle runs on
-the single worker of `self._devices`, and so does every lifecycle transition
-that describes one: the event loop submits commands and awaits results, and
-reads the state only in order to report it. The written file is the
-recorder's obligation too, so `self._writer` carries it on a second worker
-that the owner thread hands the capture to before it returns — see
-docs/adr/048-one-thread-owns-every-meeting-device-handle.md.
+enters the pipeline through the same door; `stop()` answers with a
+`MeetingRecording` rather than a bare `Path`, which is why `AudioRecorder`
+declares none. System audio comes from `app.audio.system_source` (ADR 037).
+Every device handle and lifecycle transition runs on `self._devices`' single
+worker, and the file write on `self._writer`'s (ADR 048).
 """
 
 from __future__ import annotations
@@ -67,9 +53,8 @@ _T = TypeVar("_T")
 def _drop_outcome(pending: asyncio.Future[object]) -> None:
     """Retrieve a finished future's exception so it is not reported unhandled.
 
-    A future nobody reads the exception of reaches the event loop's
-    exception handler as `Future exception was never retrieved`, with a
-    traceback, at ERROR level. Retrieving it here discards it instead.
+    An unread exception reaches the event loop's handler as `Future exception
+    was never retrieved`, at ERROR level with a traceback.
     """
     if not pending.cancelled():
         pending.exception()
@@ -78,19 +63,8 @@ def _drop_outcome(pending: asyncio.Future[object]) -> None:
 class MeetingState(str, Enum):
     """The four states a meeting recorder can be in.
 
-    `STARTING` exists because opening the two devices takes seconds on both
-    platforms, and during that window the devices are spoken for while the
-    second of them is not open yet. Collapsing that window into a single
-    boolean is what let a stop or a cleanup reach handles the opening thread
-    had not created yet. It is not a window in which nothing is captured:
-    the system source is started first and its audio is kept from that
-    moment, which is why `_start_time` rather than the state is what says
-    whether a recording is under way.
-
-    `STOPPING` is the mirror window: the capture has ended but both handles
-    are still open while the release runs, which on macOS budgets up to
-    1.5 s. Reporting the recorder as idle for that window let a second start
-    claim it and wipe the finished meeting's buffers.
+    `STARTING` and `STOPPING` are the windows in which the two device handles
+    are spoken for while one of them is not yet open, or not yet released.
     """
 
     IDLE = "idle"
@@ -102,15 +76,8 @@ class MeetingState(str, Enum):
 class CaptureIncident(str, Enum):
     """Something ended or degraded a capture, named so the widget can say it.
 
-    Exactly the tokens the code can produce, and no others: each one has a
-    site that observes the event, and `src/contracts.ts` carries the same set
-    pinned by `backend/tests/test_cross_language_contracts.py`. The first
-    incident of a capture wins — a later one does not overwrite it — because
-    what the user needs is the reason their recording went wrong, and the
-    first thing to go wrong is usually the cause of the rest.
-
-    A meeting with an incident is still a meeting: capture keeps running,
-    the file is still written, and the token says what is missing from it.
+    The first incident of a capture wins. A meeting with an incident is still a
+    meeting: capture keeps running and the file is still written.
     """
 
     MICROPHONE_STALLED = "microphone_stalled"
@@ -123,10 +90,8 @@ class CaptureIncident(str, Enum):
 def microphone_has_stalled(last_arrival: float | None, now: float, tolerance: float) -> bool:
     """Whether the microphone has gone quiet for longer than `tolerance`.
 
-    Derived from the last arrival rather than watched by a background task,
-    so nothing new touches a device handle off the owner thread — ADR 048's
-    invariant is untouched. `last_arrival` is `None` only when no capture is
-    running, which is not a stall.
+    Derived rather than watched, so nothing touches a device handle off the
+    owner thread (ADR 048). `None` means nothing is capturing, which is no stall.
     """
     return last_arrival is not None and now - last_arrival > tolerance
 
@@ -141,14 +106,8 @@ _SPILL_SENTINEL = object()
 class MeetingCaptureAbortedError(NotReadyError):
     """No meeting file can be produced, and it is the caller's situation.
 
-    Covers a start that found the recorder already spoken for and a stop with
-    nothing recording -- JustSay's own state machine refusing, which is what
-    `NotReadyError` means, so the 409 is inherited rather than declared.
-
-    It is deliberately no longer a `RuntimeError`: `_submit_on_devices`
-    converts the executor's own `RuntimeError` into this class, and the two
-    have to stay tellable apart now that one is a refusal and the other is
-    not.
+    Covers a start that found the recorder busy and a stop with nothing
+    recording. A `NotReadyError`, so the 409 is inherited rather than declared.
     """
 
     code: ClassVar[str] = "meeting_capture_aborted"
@@ -157,9 +116,7 @@ class MeetingCaptureAbortedError(NotReadyError):
 class MeetingCaptureEmptyError(MeetingCaptureAbortedError):
     """A meeting ran, both capture paths delivered nothing, and there is no file.
 
-    Separate from its base class because the two outcomes are different
-    outcomes rather than different wordings: this one answers 410 and a stop
-    that found nothing recording answers 409, and the widget picks its message
+    Answers 410 where its base answers 409, and the widget picks its message
     from the status rather than from the prose.
     """
 
@@ -170,16 +127,8 @@ class MeetingCaptureEmptyError(MeetingCaptureAbortedError):
 class MeetingWriteFailedError(ResourceUnavailableError):
     """The capture ended, both devices were released, and no file was written.
 
-    Deliberately outside the `MeetingCaptureAbortedError` hierarchy: those two
-    say a meeting never ran or captured nothing, and this one says a meeting
-    ran and its audio was lost on the way to disk — a full disk, a `temp_dir`
-    that vanished, a resample that failed. It answers 507 rather than its
-    base's 503, and that status is the whole point of the class: by the time
-    the write is submitted `_end_capture` has already released both handles
-    and returned the recorder to `IDLE`, so the widget must take its
-    indicator down. A bare 500 is indistinguishable from an unreachable
-    backend, which may still be recording, and left the indicator lit after
-    the meeting had ended.
+    Answers 507, not its base's 503: by then the recorder is `IDLE` and holds
+    nothing, so the widget must take its indicator down.
     """
 
     status_code: ClassVar[int] = 507
@@ -195,9 +144,8 @@ MEETING_BUSY_DETAIL = (
 class _CapturedMeeting(NamedTuple):
     """Everything the WAV needs, taken out of the recorder in one lock hold.
 
-    The two spools are files on disk rather than lists of blocks, so what
-    crosses to the writer thread is a pair of handles whatever the length of
-    the meeting. Discarding them is the writer's obligation from here on.
+    The two spools are files on disk; discarding them is the writer's
+    obligation from here on.
     """
 
     microphone_spool: MeetingSpool
@@ -211,11 +159,8 @@ class _CapturedMeeting(NamedTuple):
 class MeetingRecording(NamedTuple):
     """A written meeting file and the facts describing that same capture.
 
-    The duration and the incident travel with the path because they
-    are properties of the capture, not of the recorder: the recorder stops
-    being busy the moment the harvest returns, so a second meeting can start
-    and finish while this file is still being written, and anything stored on
-    the recorder would by then describe that other meeting instead.
+    The duration and the incident travel with the path because they are
+    properties of the capture: a later meeting may already own the recorder.
     """
 
     path: Path
@@ -226,12 +171,7 @@ class MeetingRecording(NamedTuple):
 class MeetingStatusSnapshot(NamedTuple):
     """The six reported facts as they stood in one lock hold.
 
-    Exists because reading the five properties one after another does not
-    describe one moment: each takes its own lock hold, and the owner thread
-    is free to finish `_end_capture` between any two of them, which produced
-    `{is_recording: true, duration_seconds: 0.0, system_endpoint: null}` —
-    the combination the harvest's single write hold exists to make
-    impossible. The properties stay for the callers that want one fact; a
+    Reading the properties one after another does not describe one moment; a
     status that reports several of them at once takes this instead.
     """
 
@@ -249,15 +189,7 @@ def _release_devices(
     """Close whichever of the two handles exists, never raising.
 
     Must run on the thread that created them: PortAudio's WASAPI host API
-    initialises COM on the calling thread, so an instance opened on one
-    thread has to be terminated on that same thread.
-
-    `stream.stop()` and `stream.close()` get a `try` each because the caller
-    has already dropped its reference and `sounddevice._StreamBase` has no
-    finalizer: a `stop()` that raises — the unplugged-headset case — would
-    otherwise skip the `close()` and hold that PortAudio stream for the life
-    of the process. Their failures are logged separately so the log says
-    which of the two calls failed.
+    initialises COM on the calling thread. Each close is guarded separately.
     """
     if stream is not None:
         try:
@@ -311,9 +243,8 @@ class MeetingRecorder(AudioRecorder):
     def _transition(self, state: MeetingState) -> None:
         """Move the lifecycle to `state` — the only site that assigns it.
 
-        Called only from callables running on `self._devices`, so the thread
-        that owns the two handles is the thread that writes the state
-        describing them.
+        Called only from callables running on `self._devices`, so the thread that
+        owns the two handles is the thread that writes the state describing them.
         """
         with self._lock:
             self._state = state
@@ -321,16 +252,8 @@ class MeetingRecorder(AudioRecorder):
     def _submit_on_devices(self, fn: Callable[..., _T], *args: object) -> Future[_T]:
         """Queue `fn` on the owner thread and count it as in flight at once.
 
-        The increment happens here, on the calling thread, before the submit:
-        a command that has been queued but not yet picked up leaves the state
-        untouched, and `is_busy` has to cover that window too or a dictation
-        start opens a second stream on a microphone this recorder still holds.
-
-        A submit onto the owner thread retired by `cleanup()` raises
-        `MeetingCaptureAbortedError` rather than the executor's bare
-        `RuntimeError`, so a start or a stop that lands in the shutdown
-        window is answered with the 409 both endpoints already produce
-        instead of a 500.
+        The increment precedes the submit, so `is_busy` covers a queued command
+        too. A submit onto a retired thread raises `MeetingCaptureAbortedError`.
         """
         with self._lock:
             self._devices_in_flight += 1
@@ -348,10 +271,8 @@ class MeetingRecorder(AudioRecorder):
     async def _detachable_result(self, pending: Future[_T]) -> _T:
         """Await work already submitted to a worker, detaching on cancellation.
 
-        The await is shielded: cancelling it detaches the awaiter from the
-        answer, and the submitted work still runs on its worker. One
-        implementation, because both the device command and the file write
-        are obligations the caller may stop waiting for but may not withdraw.
+        The await is shielded: cancelling it detaches the awaiter from the answer
+        and the submitted work still runs on its worker.
         """
         wrapped = asyncio.wrap_future(pending)
         try:
@@ -374,26 +295,8 @@ class MeetingRecorder(AudioRecorder):
     def _store(self, token: int, source: str, arrival: float, mono: np.ndarray) -> bool:
         """Hand the block to the spill thread and return, doing no I/O here.
 
-        Returns whether the block was queued. The device callbacks reach this
-        on a thread PortAudio calls with a deadline, so what happens here is a
-        bounded `put_nowait` and nothing else: a write to a file a slow disk
-        has stalled would be answered with substituted zeros and an underflow
-        flag, which is the failure this queue exists to avoid.
-
-        A full queue is an incident rather than an exception — the block is
-        lost and the user is told — because raising at the device would take
-        the stream down instead of the seconds it could not keep up with.
-
-        A block is kept only for the session that registered the callback,
-        and only while that session is capturing.
-
-        The put happens under the same lock hold as the state check, and not
-        after it: `_finish_spill` drops the queue under that lock before it
-        enqueues the sentinel, so a callback that passed the check cannot be
-        preempted and then land a block behind the sentinel, into a queue no
-        worker is draining any more. `put_nowait` never blocks, so the hold
-        stays as short as the check it joins, and the incident is recorded
-        after the lock is released because `_note_incident` takes it too.
+        Kept only for the session that registered the callback, and only while it
+        is capturing. Returns whether it was queued; a full queue is an incident.
         """
         full = False
         with self._lock:
@@ -419,10 +322,8 @@ class MeetingRecorder(AudioRecorder):
     def _note_incident(self, incident: CaptureIncident, detail: str) -> bool:
         """Record the first incident of this capture and log it once.
 
-        Returns whether this call was the one that recorded it, so a site
-        reached repeatedly — a status read deriving a stall, a callback
-        raising the same flag every block — logs one line per capture rather
-        than one per call.
+        Returns whether this call was the one that recorded it, so a site reached
+        repeatedly logs one line per capture rather than one per call.
         """
         with self._lock:
             first = self._incident is None
@@ -441,14 +342,8 @@ class MeetingRecorder(AudioRecorder):
     ) -> None:
         """Write every queued block to its spool until the sentinel arrives.
 
-        Stops accumulating — rather than stopping — on a storage failure or a
-        free-space floor, because the audio already on disk is a recording the
-        user can still have and the callbacks must keep finding a drained
-        queue whatever happened to the disk.
-
-        The free-space check runs every `meeting_free_space_check_blocks`
-        appends rather than every append: `disk_usage` is a syscall, and at
-        the default that is one every 10.9 s of 48 kHz audio.
+        Stops accumulating — rather than returning — on a storage failure or a
+        free-space floor, so the callbacks keep finding a drained queue.
         """
         appended = 0
         accumulating = True
@@ -482,9 +377,8 @@ class MeetingRecorder(AudioRecorder):
     def _finish_spill(self) -> None:
         """Drain everything already queued, then let the spill worker return.
 
-        Called on the owner thread once the state forbids further puts, so
-        the sentinel is the last item the queue can receive and every block
-        ahead of it is written before the spools are read.
+        Called on the owner thread once the state forbids further puts, so the
+        sentinel is the last item the queue can receive.
         """
         with self._lock:
             work = self._spill_queue
@@ -520,23 +414,8 @@ class MeetingRecorder(AudioRecorder):
     ) -> None:
         """Keep the block, then publish its level if the session is still live.
 
-        The keep and the level write are two separate lock holds, and a stop
-        can complete in the gap between them, so the session is re-checked in
-        the second one. Without that check a callback preempted mid-way
-        republishes an ended meeting's level after `_end_capture` cleared it.
-
-        The level is published whether or not the block was kept. `_store`
-        answers `False` for a block a full queue or a stopped session refused,
-        and gating the meter on that answer froze both readings at their last
-        accepted value, which is the opposite of what `system_level_db` exists
-        for. The re-check repeats `_store`'s own session token rather than its
-        return value, so a block belonging to a session that has already ended
-        still publishes nothing.
-
-        `status` is read rather than ignored: a non-zero `sd.CallbackFlags`
-        is PortAudio saying it substituted zeros for audio it could not
-        deliver, and a microphone that has stopped producing looks exactly
-        like a quiet room without it.
+        The keep and the level write are separate lock holds, so the session is
+        re-checked in the second. A non-zero `status` is a stall, not a quiet room.
         """
         arrival = time.monotonic()
         mono = to_mono(indata)
@@ -554,9 +433,8 @@ class MeetingRecorder(AudioRecorder):
     def _system_callback(self, token: int, arrival: float, mono: np.ndarray) -> None:
         """The far side's half of `_microphone_callback`, with the same re-check.
 
-        The level write is a second lock hold here too, so a stop landing in
-        the gap must not be followed by the ended meeting's far-side level,
-        and it is reached past a refused store for the same reason.
+        The level write is a second lock hold, so a stop landing in the gap must
+        not be followed by the ended meeting's far-side level.
         """
         self._store(token, SYSTEM_SOURCE, arrival, mono)
         with self._lock:
@@ -566,15 +444,8 @@ class MeetingRecorder(AudioRecorder):
     async def start(self) -> None:
         """Send the owner thread a start command and wait for its answer.
 
-        Reads no recorder state at all: whether this start may proceed is
-        answered by `_begin_capture`, on the only thread that can change the
-        answer. A failure — a device error or a cancelled await — sends an
-        abandonment behind it, carrying the token that says which capture it
-        is entitled to tear down.
-
-        The failure the caller sees is always the original one, cancellation
-        included: a `cleanup()` that retired the owner thread first makes the
-        abandonment unsendable, and that is logged rather than raised.
+        Reads no recorder state: `_begin_capture` decides. A failure sends an
+        abandonment behind it and re-raises the original, cancellation included.
         """
         token = next(self._tokens)
         try:
@@ -592,20 +463,8 @@ class MeetingRecorder(AudioRecorder):
     def _forget_capture(self) -> None:
         """Return every field describing a capture to its no-meeting value.
 
-        Called with `_lock` held, by all three sites that end a capture: a
-        start that failed on its devices, an abandoned start and a harvest.
-        They cleared the same eight fields in three separate copies, and a
-        copy that ended up clearing seven of them is how a recorder that
-        held no handle went on answering `is_recording: true` with a ticking
-        duration and a named endpoint.
-
-        `_incident` is deliberately not here. It belongs to the capture
-        being harvested and travels inside the `_CapturedMeeting`; the next
-        start clears it.
-
-        The two spools are taken out rather than discarded: whoever ends the
-        capture owns the files from here on, which is the writer for a
-        harvest and the caller itself for an abandoned start.
+        Called with `_lock` held by every site that ends a capture. `_incident` is
+        excluded; whoever ended the capture owns the two spool files from here on.
         """
         self._microphone_spool = None
         self._system_spool = None
@@ -619,24 +478,8 @@ class MeetingRecorder(AudioRecorder):
     def _begin_capture(self, token: int) -> None:
         """Open both devices and publish them, in one callable on the owner thread.
 
-        There is no publish check: nothing can happen between the open and
-        the publish, because they are one callable on the only thread that
-        writes the state. The token is claimed in the first lock hold, so the
-        two callbacks are admitted from the moment their devices are live.
-
-        `_start_time` is read immediately before the system source starts,
-        which is the earliest instant a far-side block can arrive, so a block
-        delivered while `start()` is still returning lands at a non-negative
-        offset instead of being trimmed by `place_on_timeline`. It is
-        published in that same lock hold, i.e. before that call rather than
-        after it: `WindowsLoopbackSource.start` hands PyAudio a
-        `stream_callback` and PyAudio starts the stream inside `open()`, so
-        far-side blocks are already being kept while `start()` has not
-        returned. Publishing afterwards left that window answering
-        `is_recording: false` for audio the recording already contains. Both
-        sources resolve `endpoint_name` in their constructor, so the name is
-        publishable at the same instant and no window can report a live
-        meeting it cannot name.
+        `_start_time` is read and published before the system source starts, which
+        is the earliest instant a far-side block can arrive.
         """
         with self._lock:
             if self._state is not MeetingState.IDLE:
@@ -707,19 +550,8 @@ class MeetingRecorder(AudioRecorder):
     async def stop(self) -> MeetingRecording:
         """End the capture on the owner thread and await the file it writes.
 
-        Answers with a `MeetingRecording` rather than the bare path the
-        dictation recorder returns: the duration and the incident belong to
-        the capture that produced the file and cannot be read off the
-        recorder afterwards, which by then may be serving a later meeting.
-
-        Both awaits are detachable and neither of them owns the work behind
-        it: once `_end_capture` has returned, the write is already submitted,
-        so a disconnect from that point on costs the answer and never the
-        recording, and the file's path reaches the log without it.
-
-        A cancellation that lands on the first await is different: the harvest
-        may not have run yet, and when it does it can still find both spools
-        empty and produce no file at all.
+        Both awaits are detachable: once `_end_capture` has returned the write is
+        submitted, so a disconnect costs the answer and never the recording.
         """
         try:
             writing = await self._run_on_devices(self._end_capture)
@@ -734,45 +566,8 @@ class MeetingRecorder(AudioRecorder):
     def _end_capture(self) -> Future[MeetingRecording]:
         """Harvest, release, submit the write and return its future.
 
-        Forgetting the capture, releasing it and returning to `IDLE` are all
-        three in the `finally`, and they hold the three halves of one
-        invariant: an idle recorder holds no device handle and describes no
-        meeting. The forgetting is there because a raise inside the harvest
-        hold used to leave the fields that name the capture — `_start_time`,
-        `_endpoint_name`, `_session_token` — set on a recorder that was
-        already `IDLE` and already empty-handed, which answered
-        `is_recording: true` with a duration ticking up and a named endpoint
-        for a call nothing was capturing, refused every stop with 409, and
-        healed only on the next successful start. The transition is there
-        because the loop-side task awaiting this may be cancelled — FastAPI
-        cancels the endpoint task when a client disconnects — and the
-        recorder must not be left reporting itself busy with both handles
-        already closed. The release is there because the mirror state is just
-        as reachable: the handles are taken out of the fields in the first
-        statements of the harvest hold, so anything that raises later in it —
-        `native_sample_rate`, which is a property on a live device object,
-        or the tuple build itself — would otherwise reach an `IDLE` recorder
-        holding an open microphone stream and an open loopback source that no
-        reference path survives to, and the next start would open a second
-        pair on top of them. `_release_devices` never raises, so it cannot
-        cost the transition behind it. Submitting the write here, as the last
-        act on the owner thread, is what puts the recording out of the
-        cancellation's reach: the `_CapturedMeeting` never crosses back to
-        the loop.
-
-        The incident is harvested in the same lock hold as the spools and
-        travels inside the `_CapturedMeeting`, because it describes this
-        capture while the live copy belongs to whichever meeting starts next.
-
-        The spill thread is drained before the harvest reads the spools, and
-        only after the transition to `STOPPING` has made `_store` refuse every
-        further block, so the sentinel is the last thing the queue can carry
-        and nothing captured is left unwritten.
-
-        Both level meters are cleared with the rest of the capture's identity,
-        by the same `_forget_capture` the abandoned-start path calls, so a
-        status read between a stop and the next start cannot report the ended
-        meeting's levels next to `system_endpoint: null`.
+        The `finally` holds one invariant: an idle recorder holds no device handle
+        and describes no meeting. The spill thread is drained before the harvest.
         """
         with self._lock:
             if self._state is not MeetingState.RECORDING:
@@ -818,14 +613,8 @@ class MeetingRecorder(AudioRecorder):
     def _write_captured_meeting(self, captured: _CapturedMeeting) -> MeetingRecording:
         """Write the harvested capture and describe the file it produced.
 
-        The log line is how a meeting recording is found: nothing reads the
-        stop response's filename, so the record of where the audio went has
-        to be made by the party that owns the write rather than by the one
-        that asked for it, which may already be gone.
-
-        The duration and the incident come back with the path so the answer
-        describes this capture whatever the recorder is doing by the time the
-        write lands.
+        The log line is how a meeting recording is found: nothing reads the stop
+        response's filename, and the party that asked may already be gone.
         """
         try:
             output_path = self._assemble_and_write(captured)
@@ -842,10 +631,8 @@ class MeetingRecorder(AudioRecorder):
     def _abandon_capture(self, token: int) -> None:
         """Tear down the capture `token` names, and only that one.
 
-        Runs behind the start it abandons, in submission order. A start that
-        failed before publishing owns no session, and a start whose slot a
-        later start has since taken does not match — either way this returns
-        without touching a recording that is not its own.
+        Runs behind the start it abandons, in submission order; a token that no
+        longer matches returns without touching the live recording.
         """
         with self._lock:
             if self._session_token != token:
@@ -855,10 +642,8 @@ class MeetingRecorder(AudioRecorder):
     def _discard_capture(self) -> None:
         """Release both handles and return to idle, writing no WAV.
 
-        Leaves the recorder exactly as a start that failed on its devices
-        does: the same fields, including both level meters, so a status read
-        after an abandoned start cannot report the discarded session's
-        levels next to `system_endpoint: null`.
+        Leaves the recorder exactly as a start that failed on its devices does,
+        both level meters included.
         """
         with self._lock:
             stream = self._stream
@@ -877,18 +662,8 @@ class MeetingRecorder(AudioRecorder):
     def _assemble_and_write(self, captured: _CapturedMeeting) -> Path:
         """Stream both spools into one mix file and read the WAV out of it.
 
-        Off the event loop, because run inline this blocked every other
-        endpoint for the whole write -- including `/health` and the meeting
-        status the widget polls, which is the moment the user is waiting on
-        their transcript.
-
-        The spools and the mix file go in the `finally` — they are transient
-        by construction, and a write that failed must not leave the raw
-        capture behind next to no recording. Every mapping `_mix_into` opens
-        is closed by that call's own `ExitStack` before it returns or
-        propagates, because an open mapping cannot be unlinked on Windows and
-        a raising call's frame -- and so its memmaps -- stays alive in the
-        traceback for as long as the exception does.
+        The spools and the mix file go in the `finally`: a write that failed must
+        not leave the raw capture behind next to no recording.
         """
         output_path = self._settings.temp_dir / f"meeting_{uuid.uuid4().hex[:12]}.wav"
         mix_path = self._settings.temp_dir / f"meeting_mix_{uuid.uuid4().hex[:12]}.f32"
@@ -907,16 +682,8 @@ class MeetingRecorder(AudioRecorder):
     ) -> Path:
         """Sum both spools into one mix file and read the WAV out of it.
 
-        The mix is a `np.memmap` over a temporary file rather than an array:
-        a meeting has no length limit, and the recording only has to fit on
-        the disk it was already being captured to. A fresh memmap is
-        zero-filled, which is the silence a source that produced nothing
-        contributes, so both sources are simply summed into it.
-
-        All three mappings — the mix and one over each spool — are registered
-        with an `ExitStack` as they are opened, so a write that fails part-way
-        leaves none of them open. Nothing reads any of them after the stack
-        unwinds; the caller's `finally` only removes the files they mapped.
+        The mix is a `np.memmap`, so a meeting has no length limit beyond the disk.
+        All three mappings are closed by an `ExitStack` before this returns.
         """
         target_rate = self._settings.sample_rate
         chunk_frames = self._settings.meeting_assembly_chunk_frames
@@ -955,12 +722,8 @@ class MeetingRecorder(AudioRecorder):
     def is_recording(self) -> bool:
         """Whether audio is arriving right now.
 
-        True from before the system source is asked to start, which is inside
-        `STARTING` and seconds before the microphone stream is up: far-side
-        audio is kept from the moment that call is made, and on Windows from
-        inside it, so this is what the widget's indicator must follow.
-        `_start_time` carries both this answer and `duration_seconds`, and
-        `status_snapshot` is what reads the two together.
+        True from before the system source is asked to start, inside `STARTING`:
+        far-side audio is kept from that moment, so the indicator must follow it.
         """
         with self._lock:
             return self._start_time is not None
@@ -969,10 +732,8 @@ class MeetingRecorder(AudioRecorder):
     def is_busy(self) -> bool:
         """Whether the microphone and the render endpoint are spoken for.
 
-        Counts the device commands in flight as well as the lifecycle state,
-        because a command that has been submitted but not yet picked up
-        leaves the state untouched. Its only failure direction is refusing
-        something it could have allowed.
+        Counts the device commands in flight as well as the state, so its only
+        failure direction is refusing something it could have allowed.
         """
         with self._lock:
             return self._state is not MeetingState.IDLE or self._devices_in_flight > 0
@@ -994,9 +755,8 @@ class MeetingRecorder(AudioRecorder):
     def system_level_db(self) -> float:
         """The system half's level, so a silent far side is visible while it happens.
 
-        A meeting recording that captured only the microphone is indistinguishable
-        from a working one until someone plays the file back; this is what makes
-        the difference visible at the machine.
+        A recording that captured only the microphone is otherwise indistinguishable
+        from a working one until someone plays the file back.
         """
         with self._lock:
             return self._system_level
@@ -1005,10 +765,8 @@ class MeetingRecorder(AudioRecorder):
     def system_endpoint(self) -> str | None:
         """The output being captured, or None when nothing is being captured.
 
-        Published in the same lock hold as the clock `is_recording` reads and
-        cleared in the same one. That makes the two consistent at any single
-        instant; a report that names both has to read them at one instant
-        too, which is `status_snapshot`.
+        Published and cleared in the same lock hold as the clock `is_recording`
+        reads; a report naming both reads them at one instant via `status_snapshot`.
         """
         with self._lock:
             return self._endpoint_name
@@ -1016,20 +774,8 @@ class MeetingRecorder(AudioRecorder):
     def status_snapshot(self) -> MeetingStatusSnapshot:
         """Read every reported fact in one lock hold.
 
-        The writes are already atomic — the harvest publishes and clears the
-        clock, the endpoint name and both meters together — and this is the
-        matching read, so what the caller reports describes one moment of
-        the recorder rather than up to six.
-
-        A stalled microphone is derived here rather than watched by a
-        background task: the last arrival is written by the callback that
-        already takes this lock, so the staleness is a comparison against the
-        clock and nothing new touches a device handle.
-
-        The incident is reported only while a capture is running, because
-        `_incident` deliberately outlives the harvest that reads it and a
-        status answering with a finished meeting's incident would degrade the
-        widget for a call that had already ended.
+        A stalled microphone is derived here rather than watched. The incident is
+        reported only while a capture is running.
         """
         stalled = False
         with self._lock:
@@ -1063,15 +809,8 @@ class MeetingRecorder(AudioRecorder):
     def cleanup(self) -> None:
         """Send the owner thread one last command, then retire it.
 
-        For app shutdown, not as a substitute for stop(). Returns without
-        waiting for the release to finish, the shape
-        `LocalWhisperCppSTTProvider.cleanup()` already uses for a teardown
-        reachable from the event-loop thread: the macOS release alone budgets
-        up to 1.5 s of terminate, kill and reader join.
-
-        Terminal for recording — a `start()` or `stop()` submitted after it
-        raises `MeetingCaptureAbortedError` — but idempotent in itself: a
-        second call finds the owner thread already retired and returns.
+        For app shutdown, not a substitute for `stop()`, and returns without
+        waiting for the release. Terminal for recording, but idempotent.
         """
         try:
             self._submit_on_devices(self._shutdown_capture)
@@ -1082,10 +821,8 @@ class MeetingRecorder(AudioRecorder):
     def _shutdown_capture(self) -> None:
         """Discard the capture, then retire the writer, on the owner thread.
 
-        The writer is retired here rather than from the event loop because a
-        `_end_capture` still sitting in the device queue has not submitted
-        its write yet; behind the discard, the queue's own order guarantees
-        it already has.
+        Retired here rather than from the event loop: behind the discard, the
+        device queue's own order guarantees an `_end_capture` has submitted its write.
         """
         self._discard_capture()
         self._writer.shutdown(wait=False)

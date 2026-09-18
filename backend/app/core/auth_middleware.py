@@ -1,13 +1,10 @@
-"""Per-launch shared-secret gate for the loopback API.
+"""Per-launch shared-secret gate for the loopback API (ADR 026).
 
-Rejects any request whose ``X-JustSay-Token`` header does not match the
-per-launch token in ``settings.api_token`` with ``401``. See
-docs/adr/026-loopback-api-request-authentication.md.
+Rejects with ``401`` any request whose ``X-JustSay-Token`` header does not
+match the per-launch token in ``settings.api_token``.
 
-Deliberately a **pure-ASGI** middleware, NOT ``BaseHTTPMiddleware`` /
-``@app.middleware("http")``: ``BaseHTTPMiddleware`` buffers the response body,
-which would break the ``StreamingResponse`` SSE endpoints
-(``GET /audio/level-stream`` and ``POST /stt/local/install``).
+Deliberately a **pure-ASGI** middleware and never ``BaseHTTPMiddleware``,
+which buffers the response body and would break the streaming SSE endpoints.
 """
 
 import secrets

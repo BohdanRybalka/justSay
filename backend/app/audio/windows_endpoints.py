@@ -1,16 +1,11 @@
-"""The default Windows render endpoint for each ERole, read through COM.
+"""The default Windows render endpoint for each ERole, read through COM (ADR 042).
 
-`IMMDeviceEnumerator::GetDefaultAudioEndpoint(eRender, role)` is the only way
-to ask for a role other than the console one, and `pyaudiowpatch` exposes no
-such parameter. `ctypes` rather than `comtypes`: stdlib, no third compiled
-extension in the sidecar, no runtime code generation for PyInstaller to trip
-over.
+`IMMDeviceEnumerator::GetDefaultAudioEndpoint(eRender, role)` is the only way to ask for a role
+other than the console one, and `pyaudiowpatch` exposes no such parameter. `ctypes` rather than
+`comtypes`: stdlib, no extra compiled extension in the sidecar, nothing generated at runtime.
 
-Every `ctypes.windll` and `ctypes.WINFUNCTYPE` reference lives inside a
-function body, so this module imports on any platform and the COM-lifetime
-rules below are unit-tested against a fake `ole32`.
-
-See docs/adr/042-loopback-follows-the-communications-endpoint.md.
+Every `ctypes.windll` and `ctypes.WINFUNCTYPE` reference lives inside a function body, so this
+module imports on any platform.
 """
 
 from __future__ import annotations
@@ -48,10 +43,8 @@ _GET_VALUE_SLOT = 5
 def com_result_is_usable(hresult: int) -> bool:
     """Whether a `CoInitializeEx` result means the thread's COM may be used.
 
-    Microsoft documents three non-error results: `S_OK` when this call did the
-    initialisation, `S_FALSE` when the thread was already initialised with the
-    same concurrency model, and `RPC_E_CHANGED_MODE` when it was already
-    initialised with a different one.
+    True for the non-error results Microsoft documents: `S_OK`, `S_FALSE` when the thread was
+    already initialised with the same concurrency model, and `RPC_E_CHANGED_MODE` when it was not.
     """
     return _as_unsigned(hresult) in _COM_USABLE_RESULTS
 

@@ -1,13 +1,11 @@
 """Moving the history file — relocation on a settings change, one-off consolidation.
 
-Split out of ``history.py`` by spec 164; the logic is unchanged. Both state
-machines borrow ``history``'s lock, connection factory and cache invalidation,
-and ``relocate`` assigns ``history._output_dir`` and ``history._conn`` through
-the module object. That import form is load-bearing rather than stylistic: a
+Both state machines borrow ``history``'s lock, connection factory and cache
+invalidation, and ``relocate`` assigns ``history._output_dir`` and
+``history._conn`` through the module object. That import form is load-bearing:
 ``from app.transcripts.history import _conn`` would bind a local name here and
 leave the live store on the connection it was told to stop using. ``history``
-names nothing here, so the edge runs one way and callers repoint rather than
-reach a re-export.
+names nothing here, so the edge runs one way.
 """
 
 from __future__ import annotations
@@ -38,23 +36,10 @@ class ConsolidateOutcome(str, Enum):
 
 
 def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
-    """Move history.db to new_dir. Mutates _output_dir + closes/reopens
-    connection inside the lock so a concurrent save_entry never sees a
-    torn intermediate. Always invalidates _stats_cache.
+    """Move history.db to ``new_dir``, reporting what it did and why.
 
-    Phase 2: after a successful copy the FTS5 index is always rebuilt on
-    the new connection BEFORE the point-of-no-return (``old_path.unlink``).
-    Copied FTS shadow tables can desync if the copy interleaved with a
-    write or if the source filesystem (Dropbox/iCloud) yielded a partial
-    image. Rebuild is cheap on small DBs and is the integrity contract.
-
-    Phase 3 (sqlite-vec): no new rebuild step is needed here. Unlike FTS5's
-    external-content table, ``vec0`` has no rebuild/integrity command, and
-    ``shutil.copy2`` is a raw byte-level file copy that preserves
-    ``entries.rowid`` (and therefore every rowid-keyed ``vec_entries`` row)
-    exactly. The ``schema._init_schema(new_conn)`` call below already re-attaches
-    the v3 tables via ``IF NOT EXISTS`` — a no-op on a file that already
-    has them.
+    Mutates ``history._output_dir`` and reopens the connection inside the lock, so
+    no torn intermediate is visible; FTS5 is rebuilt before ``old_path.unlink``.
     """
     with history._lock:
         old_dir = history._resolve_output_dir()
@@ -135,35 +120,8 @@ def _premigration_path(target_dir: Path) -> Path:
 def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateOutcome, str | None]:
     """Merge ``source_dir``'s history into ``target_dir`` and move the source aside.
 
-    Used once, at startup, when ``output_dir`` was found inside the scratch
-    directory (ADR 033). Deliberately NOT ``relocate()``: that returns
-    ``NEW_ALREADY_HAS_FILE`` and adopts the target whenever a file exists
-    there, which in the case this exists to repair is an *empty* database --
-    it would hide every row behind a zero-row file. Merging by row makes an
-    empty target harmless.
-
-    Rows are copied with ``INSERT OR IGNORE`` on the existing
-    ``id TEXT PRIMARY KEY``, so a repeated run is a no-op and no row is ever
-    overwritten. Only columns present in *both* databases are copied, so an
-    older source schema degrades to NULLs instead of raising.
-
-    Every column is repaired on the way in rather than copied verbatim,
-    through the same ``schema._REPAIRED_COLUMN_SQL`` the rebuild applies. Since v4
-    the target's ``entries`` refuses a value it cannot read back, and
-    ``INSERT OR IGNORE`` answers a refused row by **skipping it** -- measured,
-    not assumed -- so copying verbatim would drop the user's transcripts out of
-    a merged file with nothing said.
-
-    The repaired id is derived from the source row rather than minted at random,
-    which is what keeps the re-run above a no-op: a random one would give the
-    same source row a different id on every pass, and ``INSERT OR IGNORE`` would
-    have nothing to match it against. ``entry_fts``
-    is filled by the ``entries_ai`` trigger and embeddings by
-    ``run_background_indexer``, so no index is rebuilt here.
-
-    The source file is renamed aside, never deleted. Pure with respect to
-    module state: it opens its own connections and touches neither ``_conn``
-    nor ``_output_dir``, so the caller must run it before ``bootstrap``.
+    Rows copy with ``INSERT OR IGNORE`` on ``id``, each column repaired through
+    ``schema._REPAIRED_COLUMN_SQL``. Touches no module state; runs pre-``bootstrap``.
     """
     source_path = source_dir / history.HISTORY_FILENAME
     target_path = target_dir / history.HISTORY_FILENAME
