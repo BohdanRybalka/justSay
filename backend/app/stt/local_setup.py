@@ -62,7 +62,7 @@ class LocalReadinessTimeoutError(ResourceUnavailableError):
     the `resource_unavailable` code rather than declaring its own."""
 
 
-class LocalSttStatus(BaseModel):
+class LocalSTTStatus(BaseModel):
     package_installed: bool = False
     model_loaded: bool = False
     model_name: str = ""
@@ -75,7 +75,7 @@ class LocalSttStatus(BaseModel):
     last_error: str | None = None
 
 
-def check_status(stt_settings: STTSettings) -> LocalSttStatus:
+def check_status(stt_settings: STTSettings) -> LocalSTTStatus:
     """Check local STT readiness: package installed + load state + GPU + last error.
 
     The cache is read for the loaded state exactly once and both load fields
@@ -108,7 +108,7 @@ def check_status(stt_settings: STTSettings) -> LocalSttStatus:
     last_error = routing.get_local_load_error(stt_settings) or _prewarm_error
     model_is_loaded = routing.is_model_loaded() if installed else False
 
-    return LocalSttStatus(
+    return LocalSTTStatus(
         package_installed=installed,
         model_loaded=model_is_loaded,
         model_name=stt_settings.whisper_model_size,

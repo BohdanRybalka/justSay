@@ -1,7 +1,7 @@
 import {
   api,
   type UserSettings,
-  type LocalSttStatus,
+  type LocalSTTStatus,
 } from "../../api";
 import { loadSettings } from "../settings";
 import { notifyError } from "../../notify";
@@ -93,7 +93,7 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
     if (currentSttMode !== "local") return;
     const token = ++latestSttStatusToken;
     try {
-      const s: LocalSttStatus = await api.sttLocalStatus();
+      const s: LocalSTTStatus = await api.sttLocalStatus();
       if (isStaleStatusResponse(token, latestSttStatusToken) || currentSttMode !== "local") return;
       applyLocalIndicator(s.last_error, s.model_loaded, `${s.model_name} · ${s.device}`);
     } catch {
