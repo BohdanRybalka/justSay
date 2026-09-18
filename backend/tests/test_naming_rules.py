@@ -13,6 +13,14 @@ separate title-case family §2.1 names. It reads both declarations of a wire
 type, because §7.1 makes the TypeScript interface mirror the Pydantic class
 name exactly and neither declaration knows the other exists.
 
+It reads Python classes **and module-level type aliases**: `STTEngine` is an
+alias, not a class, and a class-only walk left it spelled `SttEngine` two lines
+above `STTSettings` while reporting the family clean. The TypeScript half
+matches `type X = ...` already, so a class-only Python walk also made the same
+name pass in one language and fail in the other. What it still does not read:
+TypeScript `class` and `enum` declarations, and any Python name that is not a
+class or a module-level assignment.
+
 Python is read through the AST rather than imported, so a module whose import
 needs an optional `[cloud]` or `[local]` extra is still covered. TypeScript is
 read as text, the shape `test_cross_language_contracts.py` uses, so this needs
@@ -36,6 +44,8 @@ _ALL_CAPS_ACRONYMS = {"STT", "LLM"}
 
 _CAMEL_SEGMENT = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
 
+_PYTHON_ALIAS_NAME = re.compile(r"\A[A-Z][A-Za-z0-9]*\Z")
+
 _TS_TYPE_DECLARATION = re.compile(
     r"^(?:export )?(?:interface|type) ([A-Za-z0-9_]+)\b", re.MULTILINE
 )
@@ -51,6 +61,35 @@ def _declared_classes() -> list[tuple[str, ast.ClassDef]]:
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef):
                 found.append((module, node))
+    return found
+
+
+@functools.cache
+def _declared_python_aliases() -> list[tuple[str, str]]:
+    """Every module-level alias-shaped name declared under `app`, with its module.
+
+    A type alias is an assignment, not a `ClassDef`, so the class walk cannot
+    see it. `_PYTHON_ALIAS_NAME` keeps this to CamelCase targets, which is what
+    separates `STTEngine` from `SHORT_CLIP_SECONDS` and every other
+    `UPPER_SNAKE` constant; a constant that happens to be CamelCase is harmless
+    here, because the only question asked of the name is whether it miscases a
+    listed acronym.
+    """
+    found: list[tuple[str, str]] = []
+    for path in sorted(_APP_DIR.rglob("*.py")):
+        module = path.relative_to(_APP_DIR).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            targets = (
+                node.targets
+                if isinstance(node, ast.Assign)
+                else [node.target]
+                if isinstance(node, ast.AnnAssign)
+                else []
+            )
+            for target in targets:
+                if isinstance(target, ast.Name) and _PYTHON_ALIAS_NAME.match(target.id):
+                    found.append((module, target.id))
     return found
 
 
@@ -71,8 +110,10 @@ def _declared_typescript_types() -> list[tuple[str, str]]:
 
 def _declared_type_names() -> list[tuple[str, str]]:
     """Every type name declared in either language, with the file declaring it."""
-    return [(f"app/{module}", node.name) for module, node in _declared_classes()] + list(
-        _declared_typescript_types()
+    return (
+        [(f"backend/app/{module}", node.name) for module, node in _declared_classes()]
+        + [(f"backend/app/{module}", name) for module, name in _declared_python_aliases()]
+        + list(_declared_typescript_types())
     )
 
 
@@ -178,11 +219,21 @@ def test_the_walk_finds_the_acronym_family_it_is_meant_to_check():
     not itself move, so a failure of the rule above stays distinguishable from
     the walk going blind.
     """
-    names = {node.name for _, node in _declared_classes()}
+    names = {name for _, name in _declared_type_names()}
     assert {"STTProvider", "STTSettings", "LocalSTTProvider", "LocalSTTStatus"} <= names
+    assert "STTEngine" in names, (
+        "the alias half of the walk went blind -- a class-only walk is what let "
+        "SttEngine sit two lines above STTSettings while the family read clean"
+    )
 
 
 def test_the_typescript_walk_finds_the_mirrored_types_it_is_meant_to_check():
-    """The acronym rule reaches `src` only while this walk finds declarations."""
-    names = {name for _, name in _declared_typescript_types()}
-    assert {"LocalSTTStatus", "UserSettings", "MeetingStatus"} <= names
+    """The acronym rule reaches `src` only while this walk finds declarations.
+
+    One anchor is deliberately not in `src/api.ts`: every type this task
+    renamed lives there, so a walk that stopped recursing into `src/settings`
+    and `src/widget` -- most of what it covers -- would leave an `api.ts`-only
+    guard green.
+    """
+    names = {name for _, name in _declared_type_names()}
+    assert {"LocalSTTStatus", "UserSettings", "MeetingStatus", "HistoryListNoun"} <= names

@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.types import ProviderMode
 
-SttEngine = Literal["auto", "groq", "gemini"]
+STTEngine = Literal["auto", "groq", "gemini"]
 
 
 class STTSettings(BaseSettings):
@@ -17,7 +17,7 @@ class STTSettings(BaseSettings):
     groq_api_key: str = ""
     groq_whisper_model: str = "whisper-large-v3-turbo"
 
-    engine: SttEngine = "auto"
+    engine: STTEngine = "auto"
 
     cloud_routing_threshold: float = Field(default=30.0, gt=0)
 
