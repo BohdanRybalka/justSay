@@ -226,11 +226,20 @@ def test_every_local_provider_the_factory_resolves_carries_the_status_trio(monke
     `POST /stt/local/load` answers 500 with a generic crash detail.
 
     `LocalProviderKind` is walked rather than a hand-written list of classes,
-    so a fourth kind cannot be added without this test seeing it. The enum is
-    imported inside the function body, like every other test here: the
-    module-level import test below drops `app.stt.local_factory` from
-    `sys.modules` and re-imports it, which would leave a module-level binding
-    pointing at a dead module object.
+    so a fourth kind cannot be added without this test seeing it. Walking it is
+    not enough on its own: `get_local_provider_class()` ends in an unguarded
+    fall-through to `LocalSTTProvider`, so an unwired kind would resolve to a
+    class that does carry all three and pass here vacuously. The second
+    assertion is what makes the walk mean something -- only `FASTER_WHISPER`
+    may resolve to the fall-through.
+
+    What this does not cover: a kind wired to a class that declares all three
+    names and implements one of them wrongly. The three are checked for
+    existence, which is what ADR 075 pins; behaviour is each provider's own
+    tests. The enum is imported inside the function body, like every other test
+    here -- the module-level import test below drops `app.stt.local_factory`
+    from `sys.modules` and re-imports it, which would leave a module-level
+    binding pointing at a dead module object.
     """
     from app.stt import local_factory
 
@@ -247,6 +256,17 @@ def test_every_local_provider_the_factory_resolves_carries_the_status_trio(monke
             f"{kind.value} resolves to {provider_class.__name__}, which declares "
             f"none of {missing} -- GET /stt/local/status would report "
             f"'not loaded, no error' for the life of the process"
+        )
+
+        from app.stt.local import LocalSTTProvider
+
+        assert (
+            provider_class is not LocalSTTProvider
+            or kind is local_factory.LocalProviderKind.FASTER_WHISPER
+        ), (
+            f"{kind.value} resolves to the factory's unguarded fall-through, so it "
+            f"was added to LocalProviderKind without a branch in "
+            f"get_local_provider_class() -- it would run on faster-whisper silently"
         )
 
 
