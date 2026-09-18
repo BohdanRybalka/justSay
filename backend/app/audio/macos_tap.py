@@ -37,10 +37,13 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from app.audio.analysis import MalformedCaptureBlockError, interleaved_buffer_to_mono
+from app.audio.analysis import interleaved_buffer_to_mono
 from app.audio.config import AudioSettings
 from app.audio.system_source import (
+    SAMPLE_BYTES,
+    SAMPLE_DTYPE,
     BlockSink,
+    CaptureFailure,
     FailureSink,
     SystemAudioSource,
     SystemAudioUnavailableError,
@@ -172,7 +175,10 @@ def parse_tap_header(line: bytes) -> tuple[int, int]:
 class MacOSTapSource(SystemAudioSource):
     """Everything the Mac is playing, read as float32 frames off a helper's stdout."""
 
+    _capture_name = "the macOS system-audio capture"
+
     def __init__(self, settings: AudioSettings, tap_path: Path):
+        super().__init__()
         self._settings = settings
         self._tap_path = Path(tap_path)
         self._process: subprocess.Popen | None = None
@@ -185,8 +191,6 @@ class MacOSTapSource(SystemAudioSource):
             maxlen=_STDERR_TAIL_LINES
         )
         self._on_block: BlockSink | None = None
-        self._on_failure: FailureSink | None = None
-        self._failure_reported = False
         self._native_sample_rate = settings.sample_rate
         self._channels = 1
 
@@ -222,8 +226,7 @@ class MacOSTapSource(SystemAudioSource):
 
         with self._lock:
             self._on_block = on_block
-            self._on_failure = on_failure
-            self._failure_reported = False
+        self._begin_failure_reports(on_failure)
         self._process = process
         self._stderr_reader = stderr_reader
         self._reader = _start_reader(
@@ -252,12 +255,12 @@ class MacOSTapSource(SystemAudioSource):
     ) -> None:
         """Frames until the helper stops producing them, then why it stopped.
 
-        A refusal leaves the loop rather than killing this thread, because the
-        exit report below is what carries the helper's own last words: the
-        framing and the exit are two readings of one failure, and dying inside
-        the loop threw the second one away. It leaves on the first refusal
-        rather than after a few -- see `MalformedCaptureBlockError` for why a
-        stream that has slipped out of frame does not come back.
+        Every step is inside the catch, not only the loop. This runs on a
+        daemon thread nobody joins for a result, so a raise anywhere in it
+        ends system audio and tells no one -- the defect this whole path
+        exists to prevent, reintroduced by the three calls that used to sit
+        outside the guarded loop. `Popen.wait` raising `ChildProcessError` for
+        a child `stop()` reaped concurrently is the concrete one.
 
         Closing the pipe is unconditional, and belongs to leaving the loop
         rather than to the reason for leaving. Every way out ends the reading,
@@ -273,50 +276,82 @@ class MacOSTapSource(SystemAudioSource):
         the tap, for however long foreign code spends behind the recorder's
         lock. Nothing in the report needs the pipe open.
         """
-        reason = self._deliver_until_refused(process)
-        self._stop_reading(process)
-        if reason is not None:
-            self._report_failure(reason)
-        self._report_exit(process, stderr_reader, refused=reason is not None)
+        try:
+            reason = self._deliver_until_refused(process)
+            self._stop_reading(process)
+            if reason is not None:
+                self._report_capture_failure(reason, CaptureFailure.STOPPED)
+            self._report_exit(process, stderr_reader, refused=reason is not None)
+        except Exception as failure:
+            self._report_callback_failure(failure)
 
     def _deliver_until_refused(self, process: subprocess.Popen) -> str | None:
         """Blocks to the sink until the helper stops, or why reading stopped.
 
-        Returns None when the helper simply ran out or when the block sink
+        Returns None when the helper ran out cleanly or when the block sink
         has been cleared, and the sentence the recorder should hear when
         neither is what happened. Nothing raises out of here into the reader
         thread, which nobody joins for a result: a raise ends system audio and
         tells no one, which is the failure this whole path exists to prevent.
-        The sink is `MeetingRecorder._system_callback` -- a caller this module
-        neither owns nor can promise about -- so the catch is the whole loop
-        rather than the deinterleave alone.
+
+        A raise out of the block sink is not one of those sentences and does
+        not leave the loop -- `_deliver_to_sink` reports it and the next block
+        is still read. That sink is `MeetingRecorder._system_callback`, a
+        caller this module neither owns nor can promise about, and ending a
+        capture on one transient raise costs the far side the rest of the
+        meeting. What is left for the catch below is this module and the pipe
+        failing in a way `_read_exactly` does not already answer.
         """
-        block_bytes = self._settings.meeting_block_frames * self._channels * 4
+        block_bytes = self._settings.meeting_block_frames * self._channels * SAMPLE_BYTES
+        frame_bytes = self._channels * SAMPLE_BYTES
         stdout = process.stdout
         try:
             while True:
                 chunk = _read_exactly(stdout, block_bytes)
-                if chunk is None:
-                    return None
+                if len(chunk) < block_bytes:
+                    return self._ran_out(len(chunk) % frame_bytes)
                 with self._lock:
                     sink = self._on_block
                 if sink is None:
                     return None
-                sink(time.monotonic(), interleaved_buffer_to_mono(chunk, self._channels, "<f4"))
-        except MalformedCaptureBlockError as malformed:
-            log.exception(
-                "The macOS system-audio helper stopped delivering usable audio"
-            )
-            return (
-                f"the macOS system-audio helper stopped delivering usable "
-                f"audio — {malformed}"
-            )
+                arrival = time.monotonic()
+                mono = interleaved_buffer_to_mono(chunk, self._channels, SAMPLE_DTYPE)
+                self._deliver_to_sink(sink, arrival, mono)
         except Exception as failure:
             log.exception("Reading the macOS system-audio helper failed")
             return (
                 f"the macOS system-audio capture failed with an unexpected "
                 f"{type(failure).__name__}"
             )
+
+    def _ran_out(self, partial_frame_bytes: int) -> str | None:
+        """Why the helper's stream ended, when its last frame was cut in half.
+
+        The helper writes whole blocks and nothing else writes to this pipe,
+        so the frame boundaries are the byte count and nothing marks them.
+        `writeAll` in `main.swift` retries until every byte of a block is
+        out and gives up only by stopping altogether, which is what makes a
+        tail that is not a whole number of frames a fact rather than a
+        possibility: the stream was cut mid-frame on the way out, and every
+        frame this side cut before it was cut at an offset that cannot be
+        recovered from here.
+
+        Reported as a stop rather than tolerated, because there is nothing to
+        tolerate -- the stream is over either way. What the report buys is
+        that the recorder hears the capture ended badly instead of hearing
+        that it simply ended.
+
+        Silent during a deliberate stop, where `stop()` kills the helper: a
+        write interrupted by the kill explains the cut, and the same read is
+        how every clean teardown ends.
+        """
+        if not partial_frame_bytes or self._stopping.is_set():
+            return None
+        return (
+            f"the macOS system-audio helper stopped delivering usable audio -- its "
+            f"stream ended {partial_frame_bytes} bytes into a {self._channels}-channel "
+            f"{SAMPLE_DTYPE} frame"
+        )
 
     def _stop_reading(self, process: subprocess.Popen) -> None:
         """Close the pipe the helper is writing into, so it exits.
@@ -361,6 +396,14 @@ class MacOSTapSource(SystemAudioSource):
         news with no number attached, and is reported as that rather than
         dropped -- as what was observed, since a helper tearing its tap down
         exits milliseconds after the wait it just missed.
+
+        Every reason this source can observe is a stop -- it reads a pipe,
+        and a pipe that is still delivering has nothing to complain about --
+        so this report and the framing one above it share the single
+        `CaptureFailure.STOPPED` claim. They are two readings of one failure:
+        the first reason is the one the recorder hears and the exit is carried
+        by the log line above, unless that first report was refused, in which
+        case the claim was never spent and this one takes it.
 
         A zero is news of nothing only when nothing was refused. After a
         refusal the pipe was closed from here, and the helper answers a closed
@@ -409,52 +452,9 @@ class MacOSTapSource(SystemAudioSource):
             gone,
             self._stderr_text(),
         )
-        self._report_failure(f"the macOS system-audio helper {gone}")
-
-    def _report_failure(self, reason: str) -> None:
-        """Tell the recorder once per capture why system audio stopped arriving.
-
-        Every reason this source can observe is a stop: it reads a pipe, and a
-        pipe that is still delivering has nothing to complain about. So there
-        is one claim here where Windows keeps two, and `SystemAudioSource`'s
-        degradation report is the half macOS never sends.
-
-        A flag rather than taking the sink, so the sink survives to be cleared
-        by `stop()` alone. This thread reaches both reports in one pass -- a
-        refused block leaves the loop and lands on the exit report below it --
-        and they are two readings of one failure, so the first reason is the
-        one the recorder hears and the exit is carried by the log line above.
-
-        Released by `start()`, because `stop()` leaves this object usable: it
-        kills a helper and clears nothing else, and `start()` spawns another
-        one. A claim held for the life of the source therefore silenced every
-        capture after the first -- the second meeting's helper could die and
-        the recorder would be told nothing while its indicator stayed clean.
-        Windows holds its claim for the life of the source instead, because
-        there `stop()` terminates the PyAudio instance and a second `start()`
-        cannot open a stream at all.
-
-        A raise out of the sink is caught here: it belongs to
-        `MeetingRecorder`, and this report is the last thing this source can
-        do about a capture that has already failed. The claim is released when
-        that happens, so a sink that raised on the framing does not also cost
-        the recorder the helper's own last words.
-        """
-        with self._lock:
-            already = self._failure_reported
-            self._failure_reported = True
-            on_failure = self._on_failure
-        if already or on_failure is None:
-            return
-        try:
-            on_failure(reason)
-        except Exception:
-            with self._lock:
-                self._failure_reported = False
-            log.exception(
-                "The macOS system-audio failure sink raised, so this capture "
-                "failure reaches the recorder as this log line and nothing else"
-            )
+        self._report_capture_failure(
+            f"the macOS system-audio helper {gone}", CaptureFailure.STOPPED
+        )
 
     def _drain_stderr(self, stream: object) -> None:
         """Read the helper's stderr from the moment it is spawned.
@@ -528,7 +528,7 @@ class MacOSTapSource(SystemAudioSource):
         self._stopping.set()
         with self._lock:
             self._on_block = None
-            self._on_failure = None
+        self._end_failure_reports()
         process = self._process
         self._process = None
         readers = [t for t in (self._reader, self._stderr_reader) if t is not None]
@@ -646,17 +646,24 @@ def _close_when_idle(
     ).start()
 
 
-def _read_exactly(stream: object, size: int) -> bytes | None:
-    """Exactly `size` bytes, or None once the stream cannot supply them."""
+def _read_exactly(stream: object, size: int) -> bytes:
+    """`size` bytes, or fewer once the stream cannot supply them.
+
+    A short answer is the end of the stream, and how short it is is the
+    evidence the caller reads: the helper writes whole frames, so a tail that
+    is not a whole number of them says the byte stream was cut mid-frame.
+    Returning None threw that length away, which left the one framing failure
+    this side can observe indistinguishable from a clean end.
+    """
     parts: list[bytes] = []
     remaining = size
     while remaining > 0:
         try:
             chunk = stream.read(remaining)
         except (OSError, ValueError):
-            return None
+            break
         if not chunk:
-            return None
+            break
         parts.append(chunk)
         remaining -= len(chunk)
     return b"".join(parts)

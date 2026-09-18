@@ -24,7 +24,6 @@ import numpy as np
 import pytest
 
 from app.audio import macos_tap
-from app.audio.analysis import MalformedCaptureBlockError
 from app.audio.config import AudioSettings
 from app.audio.macos_tap import (
     _STDERR_MAX_LINE_BYTES,
@@ -39,7 +38,10 @@ from app.audio.system_source import SystemAudioUnavailableError, create_system_a
 BLOCK_FRAMES = 64
 NEWLINE = b"\n"
 
-REFUSAL_IN_ITS_OWN_WORDS = "<what the deinterleave refused, verbatim>"
+STREAM_CUT_MID_FRAME = (
+    "the macOS system-audio helper stopped delivering usable audio -- its stream "
+    "ended 7 bytes into a 2-channel <f4 frame"
+)
 
 
 @pytest.fixture
@@ -156,6 +158,87 @@ class _FakeTapProcess:
 def tap_stdout(blocks: int, channels: int = 2, fill: float = 0.25, **header) -> bytes:
     frames = np.full(blocks * BLOCK_FRAMES * channels, fill, dtype="<f4")
     return header_line(channels=channels, **header) + frames.tobytes()
+
+
+def tap_stdout_cut_mid_frame(blocks: int, channels: int = 2) -> bytes:
+    """A helper stream whose last bytes stop part-way through a frame.
+
+    The one framing failure this side can observe, written as the bytes that
+    produce it rather than injected by patching the deinterleave. A helper
+    writing whole blocks through `writeAll` cannot leave a partial frame
+    behind and carry on -- it retries until every byte is out, or stops -- so
+    the tail is where the evidence is, and `tests/test_cross_language_contracts`
+    is what holds the Swift to that.
+    """
+    return tap_stdout(blocks=blocks, channels=channels) + b"\x00" * (channels * 4 - 1)
+
+
+@pytest.fixture
+def tap_source(tap_settings):
+    """Build sources that are stopped in teardown, whatever the assertions do.
+
+    `source.stop()` as the last statement of a test is skipped by the first
+    failing assertion above it, and what that leaks is a helper thread still
+    spinning inside `os.write` and two descriptors nobody closes. The next
+    test in the file then fails for a reason that is not its own.
+    """
+    sources: list[MacOSTapSource] = []
+
+    def build() -> MacOSTapSource:
+        source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+        sources.append(source)
+        return source
+
+    yield build
+    for source in sources:
+        source.stop()
+
+
+class _FakeClock:
+    """A monotonic clock this test advances by hand.
+
+    `time.monotonic()` is what the deadline arithmetic under test is made of,
+    and reading it for real makes the assertion a measurement: on a Windows
+    runner it can answer the same value twice in a row, and the float sum then
+    lands a rounding error above an exact budget.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def read(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture
+def helper_pipe():
+    """A real OS pipe whose ends are closed in teardown.
+
+    A `BytesIO` cannot fill, so it cannot show a helper's write ending rather
+    than blocking; a real pipe can, and leaks two descriptors when an
+    assertion above the cleanup fails.
+    """
+    opened: list = []
+
+    def build():
+        read_fd, write_fd = os.pipe()
+        reader = open(read_fd, "rb")
+        opened.append((reader, write_fd))
+        return reader, write_fd
+
+    yield build
+    for reader, write_fd in opened:
+        try:
+            reader.close()
+        except OSError:
+            pass
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
 
 
 def run_source(settings: AudioSettings, process: _FakeTapProcess) -> list[np.ndarray]:
@@ -576,56 +659,45 @@ def test_a_helper_that_exits_tells_the_recorder_the_far_side_is_gone(tap_setting
     )
 
 
-def test_a_block_the_deinterleave_refuses_is_reported_not_raised(tap_settings):
-    """AC: a block that is not whole frames reaches the recorder.
+def test_a_stream_cut_mid_frame_is_reported_rather_than_read_as_whole_blocks(
+    tap_settings, tap_source
+):
+    """AC: a helper stream this side cannot frame reaches the recorder.
 
     `_read_blocks` runs on a daemon thread nobody joins for a result, so a
     raise inside it ends system audio and tells no one: the meeting reports a
     healthy capture while only the microphone is still arriving.
 
-    The refusal is injected rather than written to the fake helper's stdout
-    because this module owns both halves of the framing today — `block_bytes`
-    and the channel count are derived from the same two fields, so every chunk
-    `_read_exactly` hands over divides evenly by construction. What is under
-    test is what `_read_blocks` does with a refusal, not what produces one.
-
-    The injected words are visibly not a real message, so the assertion below
-    reads as the pass-through it is. `tests/test_audio.py` owns the real
-    format; asserting it here would only assert the `side_effect` handed in
-    fifteen lines above, and would stay green through a reworded or deleted
-    guard.
+    Driven by the bytes rather than by patching the deinterleave, which is
+    what the four rounds before this one could not do. The deinterleave cannot
+    refuse anything this module hands it -- `block_bytes` and the channel
+    count come from the same header field, so every full chunk divides evenly
+    by construction, and a test that injected a refusal was asserting its own
+    `side_effect`. What the helper can leave behind is a tail that is not a
+    whole frame, and that is these seven bytes.
     """
-    process = _FakeTapProcess(tap_stdout(blocks=3))
-    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+    process = _FakeTapProcess(tap_stdout_cut_mid_frame(blocks=3))
+    source = tap_source()
     received: list[np.ndarray] = []
     reported: list[str] = []
 
-    with (
-        patch("app.audio.macos_tap.subprocess.Popen", return_value=process),
-        patch(
-            "app.audio.macos_tap.interleaved_buffer_to_mono",
-            side_effect=MalformedCaptureBlockError(REFUSAL_IN_ITS_OWN_WORDS),
-        ),
-    ):
+    with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
         source.start(lambda arrival, mono: received.append(mono), reported.append)
         reader = source._reader
         reader.join(timeout=5.0)
-        source.stop()
 
     assert not reader.is_alive()
-    assert received == []
-    assert reported == [
-        f"the macOS system-audio helper stopped delivering usable audio — "
-        f"{REFUSAL_IN_ITS_OWN_WORDS}"
-    ], (
-        f"a helper whose framing broke mid-meeting told the recorder {reported}, "
-        f"so the meeting keeps its indicator clean while system audio is gone"
+    assert len(received) == 3, "the whole blocks before the cut were dropped too"
+    assert reported == [STREAM_CUT_MID_FRAME], (
+        f"a helper whose stream was cut mid-frame told the recorder {reported}, "
+        f"so the meeting keeps its indicator clean while what it recorded of "
+        f"the far side ends in a frame nobody can place"
     )
 
 
 @pytest.mark.timeout(30)
-def test_a_refused_block_leaves_the_loop_so_the_exit_report_still_runs(
-    tap_settings, caplog
+def test_a_cut_stream_leaves_the_loop_so_the_exit_report_still_runs(
+    tap_settings, tap_source, caplog
 ):
     """Leaving the loop is what keeps the report below it reachable.
 
@@ -641,27 +713,23 @@ def test_a_refused_block_leaves_the_loop_so_the_exit_report_still_runs(
     dropped the stderr tail on the one path that closes the pipe itself.
 
     Which reason the recorder hears is asserted, not just how many: the first
-    one, the way Windows reports, with the exit carried by the log line beside
-    it. A count alone passed whether the sink survived the first report or was
-    taken and cleared by it.
+    one, with the exit carried by the log line beside it. A count alone passed
+    whether the sink survived the first report or was taken and cleared by it.
     """
     process = _FakeTapProcess(
-        tap_stdout(blocks=3), returncode=0, stderr=b"fail: the tap was invalidated\n"
+        tap_stdout_cut_mid_frame(blocks=3),
+        returncode=0,
+        stderr=b"fail: the tap was invalidated\n",
     )
-    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+    source = tap_source()
     reported: list[str] = []
 
     with (
         caplog.at_level(logging.ERROR, logger="app.audio.macos_tap"),
         patch("app.audio.macos_tap.subprocess.Popen", return_value=process),
-        patch(
-            "app.audio.macos_tap.interleaved_buffer_to_mono",
-            side_effect=MalformedCaptureBlockError(REFUSAL_IN_ITS_OWN_WORDS),
-        ),
     ):
         source.start(lambda arrival, mono: None, reported.append)
         source._reader.join(timeout=5.0)
-        source.stop()
 
     messages = [record.getMessage() for record in caplog.records]
     assert any("the tap was invalidated" in message for message in messages), (
@@ -669,75 +737,11 @@ def test_a_refused_block_leaves_the_loop_so_the_exit_report_still_runs(
         f"report read that as nothing to say, so its own account of the framing "
         f"is gone: {messages}"
     )
-    assert reported == [
-        f"the macOS system-audio helper stopped delivering usable audio — "
-        f"{REFUSAL_IN_ITS_OWN_WORDS}"
-    ]
+    assert reported == [STREAM_CUT_MID_FRAME]
 
 
 @pytest.mark.timeout(30)
-def test_a_refused_block_closes_the_pipe_the_helper_is_still_writing_into(
-    tap_settings,
-):
-    """A helper nobody reads parks inside `write()` still holding its tap.
-
-    Leaving the loop stops the reading and nothing else: the helper goes on
-    producing into a pipe with no reader, fills it within about eight blocks —
-    roughly 170 ms of a real call at 1024-frame stereo blocks — and parks. It
-    is still parked when SIGTERM arrives, so `_terminate` spends its whole
-    budget and falls through to `kill()`, which is ADR 052's hazard on the
-    other pipe. Closing the read end turns that into a broken pipe the helper
-    dies on.
-
-    Driven through a real OS pipe, because a `BytesIO` cannot fill and so
-    cannot show the write ending rather than blocking. Measured before
-    `stop()`, which closes that same pipe on its way out: after it, a helper
-    that was wedged for the whole meeting and one that was released
-    immediately look identical.
-    """
-    read_fd, write_fd = os.pipe()
-    stopped_writing = threading.Event()
-    broke: list[OSError] = []
-
-    def keep_producing() -> None:
-        block = np.zeros(BLOCK_FRAMES * 2, dtype="<f4").tobytes()
-        try:
-            os.write(write_fd, header_line(channels=2))
-            while True:
-                os.write(write_fd, block)
-        except OSError as pipe_broke:
-            broke.append(pipe_broke)
-        finally:
-            stopped_writing.set()
-            os.close(write_fd)
-
-    process = _FakeTapProcess(b"", returncode=1)
-    process.stdout = open(read_fd, "rb")
-    helper = threading.Thread(target=keep_producing, name="fake-helper", daemon=True)
-    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
-
-    with (
-        patch("app.audio.macos_tap.subprocess.Popen", return_value=process),
-        patch(
-            "app.audio.macos_tap.interleaved_buffer_to_mono",
-            side_effect=MalformedCaptureBlockError(REFUSAL_IN_ITS_OWN_WORDS),
-        ),
-    ):
-        helper.start()
-        source.start(lambda arrival, mono: None, lambda reason: None)
-        source._reader.join(timeout=5.0)
-        wedged = not stopped_writing.wait(timeout=5.0)
-        source.stop()
-
-    assert not wedged, (
-        "the helper is still blocked inside write() with its Core Audio tap "
-        "held, which is where SIGTERM will find it"
-    )
-    assert broke, "the helper's write ended without the pipe breaking"
-
-
-@pytest.mark.timeout(30)
-def test_the_pipe_is_closed_before_the_recorder_is_told_why(tap_settings):
+def test_the_pipe_is_closed_before_the_recorder_is_told_why(tap_settings, tap_source):
     """The helper stops being wedged first, and hears the reason afterwards.
 
     The failure sink is `MeetingRecorder._note_incident`, which takes the
@@ -751,25 +755,18 @@ def test_the_pipe_is_closed_before_the_recorder_is_told_why(tap_settings):
     order is asserted rather than sampled: reporting first leaves the wait to
     expire.
     """
-    process = _FakeTapProcess(tap_stdout(blocks=1), returncode=0)
+    process = _FakeTapProcess(tap_stdout_cut_mid_frame(blocks=1), returncode=0)
     closed = threading.Event()
     process.stdout.close = closed.set
-    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+    source = tap_source()
     pipe_was_closed_first: list[bool] = []
 
-    with (
-        patch("app.audio.macos_tap.subprocess.Popen", return_value=process),
-        patch(
-            "app.audio.macos_tap.interleaved_buffer_to_mono",
-            side_effect=MalformedCaptureBlockError(REFUSAL_IN_ITS_OWN_WORDS),
-        ),
-    ):
+    with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
         source.start(
             lambda arrival, mono: None,
             lambda reason: pipe_was_closed_first.append(closed.wait(timeout=2.0)),
         )
         source._reader.join(timeout=5.0)
-        source.stop()
 
     assert pipe_was_closed_first == [True], (
         "the recorder was told why before the read end was closed, so the "
@@ -779,47 +776,96 @@ def test_the_pipe_is_closed_before_the_recorder_is_told_why(tap_settings):
 
 
 @pytest.mark.timeout(30)
-def test_a_block_sink_that_raises_does_not_kill_the_reader_thread(tap_settings):
-    """The escape a refused block never had, by the path that is reachable.
+def test_a_block_sink_that_raises_is_reported_once_and_keeps_delivering(
+    tap_settings, tap_source
+):
+    """The contract both platforms are held to, on the path that is reachable.
 
     `MeetingRecorder._system_callback` measures the block's level and writes
     it to a spill queue; nothing in this module owns it or can promise it will
     not raise. This thread is joined for no result, so a raise out of it ends
-    system audio and tells nobody — the meeting reports a healthy capture
+    system audio and tells nobody -- the meeting reports a healthy capture
     while only the microphone is still arriving.
+
+    Reported once and survived, not treated as the end of the capture. One
+    transient raise out of foreign code says nothing about whether the helper
+    is still producing audio, and ending delivery on it costs the far side the
+    rest of the meeting. The Windows twin asserts the same three offers; this
+    one ended the capture on the first raise while the base class's docstring
+    said it did not.
     """
     process = _FakeTapProcess(tap_stdout(blocks=3), returncode=1)
-    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+    source = tap_source()
     reported: list[str] = []
+    attempted: list[int] = []
 
     def raise_from_the_sink(arrival, mono):
+        attempted.append(len(mono))
         raise RuntimeError("the recorder's own callback failed")
 
     with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
         source.start(raise_from_the_sink, reported.append)
         reader = source._reader
         reader.join(timeout=5.0)
-        source.stop()
 
     assert not reader.is_alive()
+    assert attempted == [BLOCK_FRAMES] * 3, (
+        f"the sink was offered {len(attempted)} of 3 blocks, so one raise out "
+        f"of the recorder's callback ended system audio for the whole meeting"
+    )
     assert reported == [
-        "the macOS system-audio capture failed with an unexpected RuntimeError"
-    ]
+        "the macOS system-audio capture failed with an unexpected RuntimeError",
+        "the macOS system-audio helper exited with code 1",
+    ], reported
+
+
+@pytest.mark.timeout(30)
+def test_a_repeating_block_sink_failure_costs_one_traceback_not_one_per_block(
+    tap_settings, tap_source, caplog
+):
+    """A sink that keeps raising must not be logged once a block.
+
+    Delivery deliberately continues, so the handler is re-entered on every
+    block: at 1024-frame blocks that is ~47 traceback formats and log writes a
+    second on the capture thread for the rest of the meeting, which is itself
+    enough to make the capture drop audio the log then blames the helper for.
+    The report is claimed once; this pins that the log is too.
+    """
+    process = _FakeTapProcess(tap_stdout(blocks=5), returncode=0)
+    source = tap_source()
+
+    def raise_from_the_sink(arrival, mono):
+        raise RuntimeError("the recorder's own callback failed")
+
+    with (
+        caplog.at_level(logging.ERROR, logger="app.audio.system_source"),
+        patch("app.audio.macos_tap.subprocess.Popen", return_value=process),
+    ):
+        source.start(raise_from_the_sink, lambda reason: None)
+        source._reader.join(timeout=5.0)
+
+    tracebacks = [record for record in caplog.records if record.exc_info]
+    assert len(tracebacks) == 1, (
+        f"five blocks into a sink that always raises cost {len(tracebacks)} "
+        f"tracebacks, which a realtime capture thread pays for in dropped audio"
+    )
 
 
 @pytest.mark.timeout(30)
 def test_a_tap_failure_sink_that_raises_still_closes_the_pipe_and_reports_the_exit(
-    tap_settings, caplog
+    tap_settings, tap_source, caplog
 ):
     """The report is the last thing this source can do about a failed capture,
     so it cannot be the thing that stops the rest of the sequence.
 
-    Driven through the refusal path, which is where a raise here costs
+    Driven through the cut stream, which is where a raise here costs
     something: the report comes first, and closing the pipe the helper is
     wedged in and reading its last words both come after it.
     """
-    process = _FakeTapProcess(tap_stdout(blocks=1), returncode=3, stderr=b"fail: gone\n")
-    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+    process = _FakeTapProcess(
+        tap_stdout_cut_mid_frame(blocks=1), returncode=3, stderr=b"fail: gone\n"
+    )
+    source = tap_source()
 
     def raise_from_the_failure_sink(reason):
         raise RuntimeError("the recorder refused the report")
@@ -827,15 +873,10 @@ def test_a_tap_failure_sink_that_raises_still_closes_the_pipe_and_reports_the_ex
     with (
         caplog.at_level(logging.ERROR, logger="app.audio.macos_tap"),
         patch("app.audio.macos_tap.subprocess.Popen", return_value=process),
-        patch(
-            "app.audio.macos_tap.interleaved_buffer_to_mono",
-            side_effect=MalformedCaptureBlockError(REFUSAL_IN_ITS_OWN_WORDS),
-        ),
     ):
         source.start(lambda arrival, mono: None, raise_from_the_failure_sink)
         source._reader.join(timeout=5.0)
         stdout_closed = process.stdout.closed
-        source.stop()
 
     messages = [record.getMessage() for record in caplog.records]
     assert stdout_closed, (
@@ -847,17 +888,16 @@ def test_a_tap_failure_sink_that_raises_still_closes_the_pipe_and_reports_the_ex
 
 @pytest.mark.timeout(30)
 def test_a_sink_that_raises_on_the_framing_still_hears_the_helper_s_exit(
-    tap_settings,
+    tap_settings, tap_source
 ):
     """One raising report must not cost the recorder the other reason.
 
-    The report-once claim is taken before the sink is called, so a sink that
-    raised on the framing used to leave the claim standing and the exit report
-    behind it silently dropped. Both reasons are readings of the same failure,
-    and the one that survives has to be a reason the recorder actually heard.
+    Both reasons this source can observe are stops, so they share one claim,
+    and a claim spent on a report nobody received would drop the exit silently.
+    `_report_capture_failure` spends a kind only when the sink took it.
     """
-    process = _FakeTapProcess(tap_stdout(blocks=1), returncode=3)
-    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+    process = _FakeTapProcess(tap_stdout_cut_mid_frame(blocks=1), returncode=3)
+    source = tap_source()
     heard: list[str] = []
 
     def refuse_the_first_report(reason: str) -> None:
@@ -866,18 +906,14 @@ def test_a_sink_that_raises_on_the_framing_still_hears_the_helper_s_exit(
             raise RuntimeError("the recorder refused the report")
         heard.append(reason)
 
-    with (
-        patch("app.audio.macos_tap.subprocess.Popen", return_value=process),
-        patch(
-            "app.audio.macos_tap.interleaved_buffer_to_mono",
-            side_effect=MalformedCaptureBlockError(REFUSAL_IN_ITS_OWN_WORDS),
-        ),
-    ):
+    with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
         source.start(lambda arrival, mono: None, refuse_the_first_report)
         source._reader.join(timeout=5.0)
-        source.stop()
 
-    assert heard[1:] == ["the macOS system-audio helper exited with code 3"], heard
+    assert heard == [
+        STREAM_CUT_MID_FRAME,
+        "the macOS system-audio helper exited with code 3",
+    ], heard
 
 
 @pytest.mark.timeout(30)
@@ -914,8 +950,8 @@ def test_a_helper_that_died_but_is_not_reaped_yet_still_reports(tap_settings):
     """The one helper death this module can observe, seen the way it arrives.
 
     A helper that crashes closes stdout on the way down, so this side meets
-    the death as EOF: `_read_exactly` returns None, the delivery loop returns
-    no reason, and the exit is read microseconds later — before the kernel has
+    the death as EOF: `_read_exactly` comes back short, the delivery loop
+    returns no reason, and the exit is read microseconds later — before the kernel has
     reaped the child. `poll()` answers None there. Returning on that answer
     left the crash reported to nobody: nothing was raised, nothing was logged,
     and the meeting went on showing a healthy system capture with only the
@@ -1008,7 +1044,7 @@ def test_a_reader_leaving_during_a_stop_waits_for_no_exit_code(tap_settings):
 
 
 def test_the_exit_report_spends_one_join_budget_on_the_wait_and_the_drain(
-    tap_settings, monkeypatch
+    tap_settings, tap_source, monkeypatch
 ):
     """The two waits after the loop share one deadline rather than one each.
 
@@ -1019,21 +1055,24 @@ def test_the_exit_report_spends_one_join_budget_on_the_wait_and_the_drain(
     found the reader still running when the shared join expired, so both pipes
     went to the detached closer and the stop paid the budget twice.
 
-    Asserted on the budgets the two calls are actually given, because the
-    relation is what matters and `0.2 < 0.5` is not it -- that comparison
-    stayed true while the pair spent 0.7s. The fake exit wait spends the
-    budget it was handed, which is the case the deadline exists for: what the
-    drain may then join for is whatever is left, and that is the number this
-    reads.
+    Driven against a clock this test advances, so the two budgets are exact
+    numbers rather than measurements. Read off the real clock they were not:
+    `time.monotonic()` on a Windows runner can answer the same value either
+    side of `deadline = time.monotonic() + budget`, and `(t + 0.1) - t` is
+    0.10000000000582077 for a `t` of that size -- so the sum this asserts on
+    exceeded the budget by 2e-14 and reddened CI on a correct implementation.
+    A tolerance would have swallowed the defect too, since spending two full
+    budgets is a factor of two rather than a rounding error. The comparison is
+    exact because the clock is.
     """
     monkeypatch.setattr(macos_tap, "_READER_JOIN_TIMEOUT_SECONDS", 0.1)
+    clock = _FakeClock()
+    monkeypatch.setattr(macos_tap.time, "monotonic", clock.read)
     budgets: list[float] = []
 
     def spend_the_whole_budget(timeout=None):
         budgets.append(timeout)
-        spent = time.monotonic() + timeout
-        while time.monotonic() < spent:
-            time.sleep(0.005)
+        clock.advance(timeout)
         raise macos_tap.subprocess.TimeoutExpired(cmd="justsay-audiotap", timeout=timeout)
 
     class _RecordingDrain:
@@ -1047,13 +1086,13 @@ def test_the_exit_report_spends_one_join_budget_on_the_wait_and_the_drain(
 
     process = _FakeTapProcess(b"", returncode=3, reaped=False)
     process.wait = spend_the_whole_budget
-    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+    source = tap_source()
 
     source._report_exit(process, _RecordingDrain(), refused=False)
 
-    assert len(budgets) == 2, budgets
-    assert sum(budgets) <= macos_tap._READER_JOIN_TIMEOUT_SECONDS, (
-        f"the exit wait and the drain join were given {budgets}, so a stop "
+    assert budgets == [0.1, 0.0], (
+        f"the exit wait and the drain join were given {budgets} out of one "
+        f"{macos_tap._READER_JOIN_TIMEOUT_SECONDS}s budget, so a stop "
         f"overlapping them finds this reader parked past the budget it shares "
         f"with every other reader"
     )
@@ -1088,7 +1127,9 @@ def test_a_restarted_tap_source_reports_the_second_capture_that_failed(tap_setti
 
 
 @pytest.mark.timeout(30)
-def test_a_cleared_block_sink_closes_the_pipe_the_helper_writes_into(tap_settings):
+def test_a_cleared_block_sink_closes_the_pipe_the_helper_writes_into(
+    tap_settings, tap_source, helper_pipe
+):
     """Leaving the loop is what closes the pipe, not the reason for leaving.
 
     A sink cleared under the reader is one of three ways out of the delivery
@@ -1102,7 +1143,7 @@ def test_a_cleared_block_sink_closes_the_pipe_the_helper_writes_into(tap_setting
     Driven through a real OS pipe, because a `BytesIO` cannot fill and so
     cannot show a write ending rather than blocking.
     """
-    read_fd, write_fd = os.pipe()
+    reader_end, write_fd = helper_pipe()
     stopped_writing = threading.Event()
     delivered = threading.Event()
 
@@ -1116,12 +1157,11 @@ def test_a_cleared_block_sink_closes_the_pipe_the_helper_writes_into(tap_setting
             pass
         finally:
             stopped_writing.set()
-            os.close(write_fd)
 
     process = _FakeTapProcess(b"", returncode=0)
-    process.stdout = open(read_fd, "rb")
+    process.stdout = reader_end
     helper = threading.Thread(target=keep_producing, name="fake-helper", daemon=True)
-    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+    source = tap_source()
 
     with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
         helper.start()
@@ -1132,7 +1172,6 @@ def test_a_cleared_block_sink_closes_the_pipe_the_helper_writes_into(tap_setting
             source._on_block = None
         reader.join(timeout=5.0)
         wedged = not stopped_writing.wait(timeout=5.0)
-        source.stop()
 
     assert not reader.is_alive()
     assert not wedged, (
@@ -1141,18 +1180,64 @@ def test_a_cleared_block_sink_closes_the_pipe_the_helper_writes_into(tap_setting
     )
 
 
-def test_a_helper_that_exits_cleanly_reports_no_failure(tap_settings):
-    """A helper reaching the end of its stream is not a failed capture."""
-    process = _FakeTapProcess(tap_stdout(blocks=1), returncode=0)
-    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+def test_a_helper_that_exits_cleanly_reports_no_failure(tap_settings, tap_source):
+    """A helper reaching the end of its stream is not a failed capture.
+
+    The stream ends on a partial *block* here, which is the ordinary way a
+    capture ends: `flushWholeBlocks` writes whole frames and the reader asks
+    for whole blocks, so the tail left over is frames the reader has no use
+    for rather than evidence of anything. Only a tail that is not a whole
+    number of frames is reported.
+    """
+    whole_frames = np.full(BLOCK_FRAMES, 0.1, dtype="<f4").tobytes()
+    process = _FakeTapProcess(tap_stdout(blocks=1) + whole_frames, returncode=0)
+    source = tap_source()
     reported: list[str] = []
 
     with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
         source.start(lambda arrival, mono: None, reported.append)
         source._reader.join(timeout=5.0)
-        source.stop()
 
     assert reported == []
+
+
+@pytest.mark.timeout(30)
+def test_a_reader_that_fails_after_the_loop_still_tells_the_recorder(
+    tap_settings, tap_source
+):
+    """The three calls under the delivery loop are inside the guard too.
+
+    Only the loop used to be, so a raise in the close, the report or the exit
+    read ended this daemon thread in exactly the silence the whole path exists
+    to prevent: system audio over, `on_failure` never called, the meeting
+    still reporting a healthy capture.
+
+    `Popen.wait` is the concrete one. `_exit_code` catches only
+    `TimeoutExpired`, and a child already reaped elsewhere answers
+    `ChildProcessError` -- which `stop()` does from `_terminate`, on the
+    recorder's device worker, concurrently with this wait by design.
+    """
+    process = _FakeTapProcess(tap_stdout(blocks=1), returncode=3, reaped=False)
+
+    def reaped_by_somebody_else(timeout=None):
+        raise ChildProcessError("no child processes")
+
+    process.wait = reaped_by_somebody_else
+    source = tap_source()
+    reported: list[str] = []
+
+    with patch("app.audio.macos_tap.subprocess.Popen", return_value=process):
+        source.start(lambda arrival, mono: None, reported.append)
+        reader = source._reader
+        reader.join(timeout=5.0)
+
+    assert not reader.is_alive()
+    assert reported == [
+        "the macOS system-audio capture failed with an unexpected ChildProcessError"
+    ], (
+        f"the reader thread died after the loop and told the recorder {reported}, "
+        f"so the meeting keeps its indicator clean while system audio is gone"
+    )
 
 
 class _PipedTapProcess:

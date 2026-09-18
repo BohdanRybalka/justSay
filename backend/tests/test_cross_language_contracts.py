@@ -47,6 +47,7 @@ APP_PATHS_PY = REPO_ROOT / "backend" / "app" / "core" / "app_paths.py"
 SESSION_PY = REPO_ROOT / "backend" / "app" / "audio" / "session.py"
 MEETING_RECORDER_PY = REPO_ROOT / "backend" / "app" / "audio" / "meeting_recorder.py"
 MACOS_TAP_PY = REPO_ROOT / "backend" / "app" / "audio" / "macos_tap.py"
+SYSTEM_SOURCE_PY = REPO_ROOT / "backend" / "app" / "audio" / "system_source.py"
 AUDIO_TAP_SWIFT = (
     REPO_ROOT / "macos" / "JustSayAudioTap" / "Sources" / "JustSayAudioTap" / "main.swift"
 )
@@ -140,13 +141,25 @@ _TAP_BLOCK_FRAMES_FLAG = "--block-frames"
 
 _SWIFT_BLOCK_SAMPLES = "blockFrames * channels"
 
-_PYTHON_BLOCK_BYTES = "self._settings.meeting_block_frames * self._channels * 4"
+_PYTHON_BLOCK_BYTES = (
+    "self._settings.meeting_block_frames * self._channels * SAMPLE_BYTES"
+)
 
-_PYTHON_DEINTERLEAVE = 'interleaved_buffer_to_mono(chunk, self._channels, "<f4")'
+_PYTHON_DEINTERLEAVE = "interleaved_buffer_to_mono(chunk, self._channels, SAMPLE_DTYPE)"
 
 _TAP_SAMPLE_SPELLINGS: dict[str, tuple[str, str]] = {
     "f32le": ("private var pending: [Float] = []", "MemoryLayout<Float>.size"),
 }
+
+_TAP_PYTHON_SPELLINGS: dict[str, tuple[str, int]] = {
+    "f32le": ("<f4", 4),
+}
+
+_SWIFT_WHOLE_BLOCK_WRITES: tuple[str, ...] = (
+    "pending.count % blockSamples",
+    "while offset < bytes.count",
+    "offset += written",
+)
 
 _SWIFT_CHANNEL_GUARDS: tuple[tuple[str, str], ...] = (
     ("consume", "Int(buffer.mNumberChannels) == channels"),
@@ -1056,27 +1069,48 @@ def test_the_shell_reads_every_data_directory_variable_the_backend_reads() -> No
 
 
 def _swift_function_body(name: str) -> str:
-    """One Swift function of ``main.swift``, from its signature to the next one.
+    r"""One Swift function of ``main.swift``, from its signature to the next one.
 
     Bounded by the next ``func`` at the same indentation rather than by a brace
     count, because nothing here parses Swift and a brace counter over string
     literals and generics would be a parser pretending not to be one.
+
+    The indent is captured with ``[ \t]`` and not ``\s``: under
+    ``re.MULTILINE`` the latter matches the newline of the blank line *before*
+    the signature, so the captured indent began with one and the terminator
+    then demanded a blank line immediately before the next ``func``.
+    ``flushWholeBlocks`` is followed by a ``///`` doc comment rather than a
+    blank line, so its body ran to the end of the file and the block-framing
+    assertion below degraded into a whole-file grep. Measured on the tree that
+    fixed it: 1855 characters before, 726 after.
     """
     source = _read(AUDIO_TAP_SWIFT)
-    opening = re.search(rf"^(\s*)(?:private\s+)?func {re.escape(name)}\b", source, re.MULTILINE)
+    opening = re.search(
+        rf"^([ \t]*)(?:private\s+)?func {re.escape(name)}\b", source, re.MULTILINE
+    )
     assert opening, f"{AUDIO_TAP_SWIFT.name} no longer defines func {name}"
     rest = source[opening.end() :]
-    following = re.search(rf"^{opening.group(1)}(?:private\s+)?func \b", rest, re.MULTILINE)
+    following = re.search(rf"\n{opening.group(1)}(?:private\s+)?func \b", rest)
     return rest[: following.start()] if following else rest
 
 
 def _python_function_body(path: Path, name: str) -> str:
-    """One Python function, from its ``def`` to the next line at that indent."""
+    r"""One Python function, from its ``def`` to the next line at that indent.
+
+    ``[ \t]`` rather than ``\s`` for the same reason as the Swift reader
+    above, where the difference was load-bearing: a captured indent starting
+    with a newline makes the terminator demand a blank line.
+
+    The terminator matches an explicit newline rather than a ``^`` under
+    ``re.MULTILINE``, because ``^`` also matches the start of the string --
+    which for a module-level function, whose indent is empty, is the middle of
+    its own signature line, so the body came back empty.
+    """
     source = _read(path)
-    opening = re.search(rf"^(\s*)def {re.escape(name)}\b", source, re.MULTILINE)
+    opening = re.search(rf"^([ \t]*)def {re.escape(name)}\b", source, re.MULTILINE)
     assert opening, f"{path.name} no longer defines def {name}"
     rest = source[opening.end() :]
-    following = re.search(rf"^{opening.group(1)}\S", rest, re.MULTILINE)
+    following = re.search(rf"\n{opening.group(1)}\S", rest)
     return rest[: following.start()] if following else rest
 
 
@@ -1160,13 +1194,32 @@ def test_the_macos_tap_helper_and_its_reader_frame_blocks_the_same_way() -> None
     which is what makes the two agree by construction rather than by luck. The
     helper refuses to capture a buffer disagreeing with it, twice over, and
     those two guards are pinned below for the same reason the arithmetic is.
+
+    So is the way the bytes leave the helper, which is what makes the reader's
+    framing safe to trust rather than merely checked. ``flushWholeBlocks``
+    hands ``writeAll`` a whole number of blocks, and ``writeAll`` loops until
+    every byte of them is out; the only thing it does instead is stop writing
+    altogether. A helper that wrote a partial frame and carried on would slip
+    the stream by an offset the reader re-cuts every later block at, which
+    nothing in the bytes reveals and no runtime guard on this side can see --
+    `MalformedCaptureBlockError` exists for the shape, and could not have
+    caught it. These three literals are where that is checked instead.
     """
+    swift_source = _read(AUDIO_TAP_SWIFT)
     flush = _swift_function_body("flushWholeBlocks")
     assert _SWIFT_BLOCK_SAMPLES in flush, (
         f"{AUDIO_TAP_SWIFT.name} no longer sizes a block as "
         f"{_SWIFT_BLOCK_SAMPLES!r}, so the helper and macos_tap.py cut the "
         f"stream in different places and nothing in the bytes says so"
     )
+
+    for literal in _SWIFT_WHOLE_BLOCK_WRITES:
+        assert literal in swift_source, (
+            f"{AUDIO_TAP_SWIFT.name} no longer writes {literal!r}, so the helper "
+            f"can leave a partial frame in the stream and carry on -- every block "
+            f"the reader cuts after it is misframed, and nothing in the bytes or "
+            f"on the Python side says so"
+        )
 
     deliver = _python_function_body(MACOS_TAP_PY, "_deliver_until_refused")
     assert _PYTHON_BLOCK_BYTES in deliver, (
@@ -1185,9 +1238,23 @@ def test_the_macos_tap_helper_and_its_reader_frame_blocks_the_same_way() -> None
         f"the contract declares format {accepted_format.group(1)!r}, which this "
         f"test knows no Swift spelling for, so nothing below compares anything"
     )
+    source_constants = _read(SYSTEM_SOURCE_PY)
+    dtype = re.search(r'^SAMPLE_DTYPE = "([^"]+)"$', source_constants, re.MULTILINE)
+    sample_bytes = re.search(r"^SAMPLE_BYTES = (\d+)$", source_constants, re.MULTILINE)
+    assert dtype and sample_bytes, (
+        "system_source.py no longer declares SAMPLE_DTYPE and SAMPLE_BYTES"
+    )
+    read_as = (dtype.group(1), int(sample_bytes.group(1)))
+    declared = _TAP_PYTHON_SPELLINGS.get(accepted_format.group(1))
+    assert read_as == declared, (
+        f"the contract declares format {accepted_format.group(1)!r}, which both "
+        f"sources must read as {declared}, but system_source.py declares "
+        f"{read_as} -- the block arithmetic above is pinned through those two "
+        f"names and would be pinned to nothing"
+    )
+
     element, width = spelling
-    swift = _read(AUDIO_TAP_SWIFT)
-    assert element in swift and width in swift, (
+    assert element in swift_source and width in swift_source, (
         f"the contract declares {accepted_format.group(1)!r}, which is 4 bytes a "
         f"sample, but {AUDIO_TAP_SWIFT.name} no longer buffers {element!r} or "
         f"measures {width!r} -- every block the reader asks for would be the "
