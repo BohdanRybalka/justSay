@@ -166,6 +166,14 @@ _SWIFT_CHANNEL_GUARDS: tuple[tuple[str, str], ...] = (
     ("resolveTapBufferIndex", "Int(format.mChannelsPerFrame) == channels"),
 )
 
+_SWIFT_TAP_SERIAL_QUEUE = 'private let queue = DispatchQueue(label: "com.justsay.audiotap.io")'
+
+_SWIFT_IOPROC_QUEUE_ARGUMENT = "&ioProcID, aggregateID, queue"
+
+_SWIFT_FLUSH_FROM_THE_IOPROC = "flushWholeBlocks()"
+
+_SWIFT_FLUSH_FROM_STOP = "queue.sync { flushWholeBlocks() }"
+
 _TYPESCRIPT_COMMENT_OR_STRING_PATTERN = re.compile(
     r'"(?:\\.|[^"\\\n])*"' r"|'(?:\\.|[^'\\\n])*'" r"|`(?:\\.|[^`\\])*`" r"|/\*.*?\*/" r"|//[^\n]*",
     re.DOTALL,
@@ -1267,6 +1275,71 @@ def test_the_macos_tap_helper_and_its_reader_frame_blocks_the_same_way() -> None
             f"a buffer whose channel count disagrees with the header would be "
             f"written into the stream and the reader has no way to notice"
         )
+
+
+def test_the_macos_tap_helper_writes_its_stdout_from_one_flush_at_a_time() -> None:
+    """Both flushes serialise on the tap's own queue, so no two interleave.
+
+    `_ran_out` in macos_tap.py decides a capture was cut short by measuring a
+    partial block against a whole one, and the test above pins the three
+    literals that make every write a whole number of blocks. Those literals
+    are only half of what that check rests on. The other half is that one
+    flush finishes before the next begins, and nothing read it until here.
+
+    There are exactly two flushes. `consume` runs on the IOProc block, which
+    `AudioDeviceCreateIOProcIDWithBlock` is told to dispatch on the tap's own
+    queue rather than on a real-time thread of its own, and `stop()` -- the
+    SIGTERM teardown, which arrives on the main queue -- enters through
+    `queue.sync`. That queue is created with a label and nothing else, so it
+    is serial, and the two flushes therefore take turns.
+
+    Make it `.concurrent`, or hand the IOProc `nil` and let Core Audio pick
+    the thread, and the teardown flush can land inside the IOProc's. A block
+    is 8192 bytes against a `PIPE_BUF` of 4096, so `writeAll` finishes
+    neither write atomically and the reader is handed the two spliced into
+    one full-sized block. Every later block is then cut in the wrong place,
+    the short-read check never fires because nothing ever reads short, and
+    the recording is silently wrong rather than absent -- the failure the
+    reader cannot see from its side of the pipe, which is why it is checked
+    from this one.
+    """
+    swift_source = _read(AUDIO_TAP_SWIFT)
+
+    assert _SWIFT_TAP_SERIAL_QUEUE in swift_source, (
+        f"{AUDIO_TAP_SWIFT.name} no longer declares its io queue as "
+        f"{_SWIFT_TAP_SERIAL_QUEUE!r} -- a concurrent queue lets the teardown "
+        f"flush interleave with the IOProc's, and the reader is handed two "
+        f"half-blocks spliced into one"
+    )
+
+    assert _SWIFT_IOPROC_QUEUE_ARGUMENT in _swift_function_body("startIOProc"), (
+        f"{AUDIO_TAP_SWIFT.name} no longer creates the IOProc with "
+        f"{_SWIFT_IOPROC_QUEUE_ARGUMENT!r}, so its blocks run on a thread the "
+        f"teardown flush does not take turns with"
+    )
+
+    assert _SWIFT_FLUSH_FROM_THE_IOPROC in _swift_function_body("consume"), (
+        f"{AUDIO_TAP_SWIFT.name}'s consume no longer flushes, so the only "
+        f"remaining writer is the teardown and the pin below proves nothing"
+    )
+
+    assert _SWIFT_FLUSH_FROM_STOP in _swift_function_body("stop"), (
+        f"{AUDIO_TAP_SWIFT.name}'s stop no longer flushes through "
+        f"{_SWIFT_FLUSH_FROM_STOP!r}, so the SIGTERM flush writes from the main "
+        f"queue while the IOProc is writing from its own"
+    )
+
+    flushes = [
+        line.strip()
+        for line in swift_source.splitlines()
+        if "flushWholeBlocks(" in line and "func flushWholeBlocks(" not in line
+    ]
+    assert flushes == [_SWIFT_FLUSH_FROM_THE_IOPROC, _SWIFT_FLUSH_FROM_STOP], (
+        f"{AUDIO_TAP_SWIFT.name} flushes from {flushes} -- the one-writer "
+        f"guarantee holds only while the IOProc block and the queue.sync in "
+        f"stop() are the only two, and a third call site is a writer nothing "
+        f"serialises"
+    )
 
 
 def test_the_macos_tap_helper_and_its_reader_agree_on_the_command_line() -> None:
