@@ -444,8 +444,8 @@ async def test_warm_gpu_probe_cache_swallows_probe_failure(monkeypatch):
     await _warm_gpu_probe_cache()
 
     assert probe_calls == ["probed", "probed"], (
-        "a swallowed warm-up failure must leave the cache unset, so the next caller "
-        f"still runs a real probe rather than reading a result nothing produced: {probe_calls}"
+        "a swallowed warm-up failure must not be cached as a result, so the second "
+        f"warm-up runs the probe again rather than short-circuiting: {probe_calls}"
     )
 
 

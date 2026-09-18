@@ -655,12 +655,15 @@ async def test_embed_entry_background_never_raises_on_provider_failure():
 
 
 @pytest.mark.asyncio
-async def test_embed_entry_background_skips_deleted_entry():
+async def test_embed_entry_background_skips_deleted_entry(caplog):
     """If the entry was deleted before the background task ran, insert is
     skipped instead of raising (rowid lookup returns None)."""
     fake = _FakeProvider("gemini/text-embedding-004")
-    with patch(
-        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+    with (
+        caplog.at_level(logging.WARNING, logger=vector_store.log.name),
+        patch(
+            "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+        ),
     ):
         await vector_store.embed_entry_background("does-not-exist", "text")
 
@@ -673,6 +676,11 @@ async def test_embed_entry_background_skips_deleted_entry():
     assert rows == [], (
         "an entry deleted before its background embed ran must leave no row behind, "
         f"rather than one pointing at an entry_id nothing resolves: {rows}"
+    )
+    assert not caplog.records, (
+        "the missing row must be skipped by the rowid guard, not swallowed by the "
+        "failure handler -- both leave the table empty, so only the absence of a "
+        f"warning tells them apart: {[record.getMessage() for record in caplog.records]}"
     )
 
 

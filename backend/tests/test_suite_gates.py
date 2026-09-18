@@ -2,11 +2,9 @@
 
 Rule 1 checks that a test can fail at all; rule 2 checks that a gate reporting
 offenders out of a walk also pins that walk non-empty. Neither checks whether a
-test's *name* describes what it asserts -- four candidate rules for that were
-measured against this suite and all four were unsound, so that half is read by a
-person in the round `docs/test-name-audit.md` records. Rule 2 resolves bindings by
-heuristic and a shape it cannot resolve is out of scope, so it under-reports. Only
-the Python suite is walked; the vitest files are prose names and are not covered.
+test's *name* describes what it asserts (ADR 079). Rule 2 resolves bindings by
+heuristic and a shape it cannot resolve is out of scope, so it under-reports.
+Only the Python suite is walked; the vitest files are not covered.
 """
 
 import ast
@@ -20,7 +18,7 @@ _TESTS_DIR = Path(__file__).resolve().parent
 _LEDGER = _TESTS_DIR.parent.parent / "docs" / "test-name-audit.md"
 
 _BASELINE_FUNCTIONS = 1309
-_BASELINE_LINES = 36514
+_BASELINE_LINES = 36536
 
 _FUNCTION_INTERVAL = 80
 _LINE_INTERVAL = 4000
@@ -93,9 +91,11 @@ def _is_trivially_true(node: ast.AST) -> bool:
     """True when no call inside the expression can change its truth."""
     if _is_constant_truthy(node):
         return True
-    return isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or) and any(
-        _is_trivially_true(value) for value in node.values
-    )
+    if not isinstance(node, ast.BoolOp):
+        return False
+    if isinstance(node.op, ast.Or):
+        return any(_is_trivially_true(value) for value in node.values)
+    return all(_is_trivially_true(value) for value in node.values)
 
 
 def _contains_an_assertion(node: ast.AST) -> bool:
@@ -448,6 +448,7 @@ def test_the_assertion_recogniser_separates_a_silent_test_from_a_failing_one():
         "def test_c():\n    result = compute()\n    print(result)\n",
         "def test_d():\n    assert 1\n",
         "def test_e():\n    assert True or compute()\n",
+        "def test_f():\n    assert True and 1\n",
     )
     asserting = (
         "def test_a():\n    assert result == 3\n",
@@ -465,9 +466,8 @@ def test_the_assertion_recogniser_separates_a_silent_test_from_a_failing_one():
         "a test whose whole body is `pass` cannot fail and must be reported"
     )
     assert _contains_an_assertion(ast.parse(asserting[-1]).body[0]), (
-        "a monkeypatched stub raising AssertionError is an assertion; reading it as "
-        "silent is what made an independent count of this suite report seven instead "
-        "of five, and it is the shape the two remaining hits both had"
+        "a monkeypatched stub raising AssertionError is an assertion: it fails the "
+        "test when the call it replaced happens"
     )
     missed = [s for s in silent if _contains_an_assertion(ast.parse(s).body[0])]
     flagged = [s for s in asserting if not _contains_an_assertion(ast.parse(s).body[0])]
