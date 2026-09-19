@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core import router as core_router
+from app.api import router as api_router
 from app.core import tasks
 from app.core.config import settings
 from app.main import SHUTDOWN_CONNECTION_DRAIN_SECONDS
@@ -48,7 +48,7 @@ def token(monkeypatch):
 @pytest.fixture
 def stop_signal_spy(monkeypatch):
     calls: list[None] = []
-    monkeypatch.setattr(core_router, "_raise_stop_signal", lambda: calls.append(None))
+    monkeypatch.setattr(api_router, "_raise_stop_signal", lambda: calls.append(None))
     return calls
 
 

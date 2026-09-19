@@ -273,7 +273,7 @@ function getToken(): Promise<string | null> {
 }
 
 /** The body every refusal answers with, mirroring `ErrorBody` in
- *  `backend/app/core/error_handler.py` field for field.
+ *  `backend/app/api/error_handler.py` field for field.
  *
  *  `code` is the refusal's stable machine-readable name, declared as a literal
  *  on the raising class. It is what a caller branches on, because the class

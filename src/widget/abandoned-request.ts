@@ -135,7 +135,7 @@ export function createAbandonedSessions(deps: {
      *  Everything else keeps the entry, and the next poll probes again. A
      *  `TimedOutError` or a transport failure is more silence. A `401` is the
      *  auth middleware refusing the request *before* the route handler runs
-     *  (`backend/app/core/auth_middleware.py`), and `src/api.ts` maps every
+     *  (`backend/app/api/auth_middleware.py`), and `src/api.ts` maps every
      *  `401` to `ApiAuthError` ahead of any endpoint-specific logic, so a
      *  stale launch token would otherwise discharge every owed session at once
      *  while the microphone stayed open — the [JS-121]/[JS-122] failure this
