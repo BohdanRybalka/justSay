@@ -1403,6 +1403,30 @@ def test_the_ownership_guard_cannot_be_separated_from_the_state_it_guards():
     )
 
 
+def test_the_ownership_walk_finds_the_transitions_it_is_meant_to_check():
+    """Both assertions above pass vacuously on an empty walk, so pin that it is not."""
+    tree = ast.parse(
+        (Path(__file__).parent.parent / "app" / "audio" / "recorder.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    transitions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name in ("start", "stop", "discard")
+    }
+    assert {"start", "stop", "discard"} <= set(transitions)
+    for name, node in transitions.items():
+        assert _lock_blocks(node), (
+            f"`{name}` holds no `with self._lock` block, so the rule above reads an "
+            "empty walk and reports nothing whatever the body does"
+        )
+        assert _session_state_sites(node), (
+            f"`{name}` touches neither `_recording` nor `_session_id`, so there is no "
+            "state left for the ownership rule to find unprotected"
+        )
+
+
 @pytest.mark.anyio
 async def test_a_stop_that_raced_a_stop_is_an_answer_rather_than_a_crash(client):
     """409, not the 500 the bare `RuntimeError` produced (spec 150).
