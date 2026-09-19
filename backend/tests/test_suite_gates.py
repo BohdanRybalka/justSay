@@ -4,6 +4,8 @@ Rule 1 checks that a test can fail at all; rule 2 checks that a gate reporting
 offenders out of a walk also pins that walk non-empty. Neither checks whether a
 test's *name* describes what it asserts (ADR 079). Rule 2 resolves bindings by
 heuristic and a shape it cannot resolve is out of scope, so it under-reports.
+The baseline is the round's clock zero rather than a floor: a shrink past the
+allowance means the clock is unreadable, not that the suite is too small.
 Only the Python suite is walked; the vitest files are not covered.
 """
 
@@ -22,6 +24,9 @@ _BASELINE_LINES = 36536
 
 _FUNCTION_INTERVAL = 80
 _LINE_INTERVAL = 4000
+
+_BASELINE_SHRINK_ALLOWANCE_FUNCTIONS = 8
+_BASELINE_SHRINK_ALLOWANCE_LINES = 400
 
 _BASELINE_PATTERN = re.compile(
     r"^Baseline: functions (\d+) · lines (\d+) · master ([0-9a-f]{7,40}) "
@@ -415,6 +420,29 @@ def _live_line_count() -> int:
     )
 
 
+def _audit_round_state(live_functions: int, live_lines: int) -> tuple[list[str], int, int]:
+    """One measurement's shrink offenders and its unclamped growth since the baseline.
+
+    Growth stays signed, so a deletion moves the round further away rather than
+    nearer; the allowance is the bound on how much delay that can buy.
+    """
+    fallen = [
+        f"{label} {live} against a baseline of {baseline}, {baseline - live} below it "
+        f"where {allowance} is tolerated"
+        for label, baseline, live, allowance in (
+            (
+                "functions",
+                _BASELINE_FUNCTIONS,
+                live_functions,
+                _BASELINE_SHRINK_ALLOWANCE_FUNCTIONS,
+            ),
+            ("lines", _BASELINE_LINES, live_lines, _BASELINE_SHRINK_ALLOWANCE_LINES),
+        )
+        if baseline - live > allowance
+    ]
+    return fallen, live_functions - _BASELINE_FUNCTIONS, live_lines - _BASELINE_LINES
+
+
 def test_every_test_contains_an_assertion_that_can_fail():
     silent = [
         f"{module}:{name}"
@@ -569,14 +597,14 @@ def test_the_test_name_audit_round_is_not_overdue():
     would have to skip in the one place that runs on every merge (ADR 079).
     """
     live_functions, live_lines = len(_test_functions()), _live_line_count()
+    fallen, grown_functions, grown_lines = _audit_round_state(live_functions, live_lines)
 
-    assert _BASELINE_FUNCTIONS <= live_functions and _BASELINE_LINES <= live_lines, (
-        f"the recorded baseline is above the live suite ({_BASELINE_FUNCTIONS} functions "
-        f"/ {_BASELINE_LINES} lines against {live_functions} / {live_lines}); recompute "
-        "both constants from this tree"
+    assert not fallen, (
+        f"the live suite has fallen further below the recorded baseline than the shrink "
+        f"allowance permits ({'; '.join(fallen)}), so the clock this round is measured on "
+        "can no longer be trusted; recompute _BASELINE_FUNCTIONS and _BASELINE_LINES from "
+        f"this tree and mirror them in {_LEDGER.name}"
     )
-    grown_functions = live_functions - _BASELINE_FUNCTIONS
-    grown_lines = live_lines - _BASELINE_LINES
     assert grown_functions < _FUNCTION_INTERVAL and grown_lines < _LINE_INTERVAL, (
         f"the test-name audit round is due: {grown_functions} test functions and "
         f"{grown_lines} lines added since the baseline, against an interval of "
@@ -584,6 +612,46 @@ def test_the_test_name_audit_round_is_not_overdue():
         f"function added since the baseline commit against the rubric in "
         f"{_LEDGER.name}, write the round's block, then recompute _BASELINE_FUNCTIONS "
         "and _BASELINE_LINES here and mirror them in that file's `Baseline:` line."
+    )
+
+
+def test_a_deletion_inside_the_allowance_delays_the_round_and_a_larger_one_fails_it():
+    """The baseline is the clock's zero; the allowance bounds what a deletion may cost.
+
+    A shrink makes growth smaller rather than larger, so the only thing it buys
+    is delay, and the allowance is how much of that is tolerated (ADR 079).
+    """
+    at_the_edge, delayed_functions, delayed_lines = _audit_round_state(
+        _BASELINE_FUNCTIONS - _BASELINE_SHRINK_ALLOWANCE_FUNCTIONS,
+        _BASELINE_LINES - _BASELINE_SHRINK_ALLOWANCE_LINES,
+    )
+    beyond = _audit_round_state(
+        _BASELINE_FUNCTIONS - _BASELINE_SHRINK_ALLOWANCE_FUNCTIONS - 1,
+        _BASELINE_LINES - _BASELINE_SHRINK_ALLOWANCE_LINES - 1,
+    )[0]
+    lines_only = _audit_round_state(
+        _BASELINE_FUNCTIONS, _BASELINE_LINES - _BASELINE_SHRINK_ALLOWANCE_LINES - 1
+    )[0]
+
+    assert len(beyond) == 2, (
+        f"one line past each allowance leaves the baseline untrustworthy on both terms "
+        f"and the gate has to name both rather than the first: {beyond}"
+    )
+    assert [term.split()[0] for term in lines_only] == ["lines"], (
+        f"the two terms are judged apart, so a line-only deletion must not accuse the "
+        f"function count: {lines_only}"
+    )
+    assert at_the_edge == [], (
+        f"a deletion landing exactly on the allowance is tolerated, not reported, or the "
+        f"allowance is a floor again under another name: {at_the_edge}"
+    )
+    assert (delayed_functions, delayed_lines) == (
+        -_BASELINE_SHRINK_ALLOWANCE_FUNCTIONS,
+        -_BASELINE_SHRINK_ALLOWANCE_LINES,
+    ), (
+        f"growth is `live - baseline` unclamped, so a tolerated deletion pushes the round "
+        f"further off; clamped at zero a deletion would buy unlimited delay and the round "
+        f"could never come due: {(delayed_functions, delayed_lines)}"
     )
 
 
