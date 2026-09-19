@@ -1,9 +1,11 @@
 import asyncio
+import gc
 import logging
 import socket
 import sys
 import threading
 import time
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -25,6 +27,7 @@ from app.stt.cloud import GeminiSTTProvider
 from app.stt.config import STTSettings
 from app.stt.local import SHORT_CLIP_SECONDS, LocalSTTProvider
 from app.stt.routing import clear_cache, get_provider
+from tests.conftest import drop_frames
 
 _UNANSWERED_REQUEST_TIMEOUT_MS = 500
 
@@ -1155,8 +1158,7 @@ def test_a_gemini_request_that_is_never_answered_raises_a_timeout():
     pytest.importorskip(
         "google.genai",
         reason="the real SDK is what carries the timeout to httpx; it lives in the "
-        "optional cloud extra, so this runs where that extra is installed and skips "
-        "in CI, which installs [dev,audio]",
+        "optional cloud extra, which CI installs deliberately so this gate runs there",
     )
     import httpx
     from google import genai
@@ -1168,19 +1170,21 @@ def test_a_gemini_request_that_is_never_answered_raises_a_timeout():
     port = listener.getsockname()[1]
 
     caught: list[BaseException] = []
+    client_ref: list[weakref.ref] = []
 
     def _call() -> None:
-        client = genai.Client(
+        with genai.Client(
             api_key="test-key",
             http_options=types.HttpOptions(
                 base_url=f"http://127.0.0.1:{port}",
                 timeout=_UNANSWERED_REQUEST_TIMEOUT_MS,
             ),
-        )
-        try:
-            client.models.generate_content(model="gemini-2.5-flash", contents="hi")
-        except BaseException as e:
-            caught.append(e)
+        ) as client:
+            client_ref.append(weakref.ref(client))
+            try:
+                client.models.generate_content(model="gemini-2.5-flash", contents="hi")
+            except BaseException as e:
+                caught.append(drop_frames(e))
 
     worker = threading.Thread(target=_call, name="gemini-timeout-probe", daemon=True)
     worker.start()
@@ -1198,6 +1202,13 @@ def test_a_gemini_request_that_is_never_answered_raises_a_timeout():
         "proves nothing about the budget on a request that was accepted; on "
         "Windows an unreachable port raises ConnectTimeout, which is also a "
         "TimeoutException and would make a looser assertion vacuous"
+    )
+    gc.collect()
+    assert client_ref and client_ref[0]() is None, (
+        "the timed-out client is still reachable after the probe returned -- the caught "
+        "error carries the traceback that pins the frame that built it, so the next test "
+        "to call gc.collect() inherits the aclose() task its finaliser schedules on "
+        "whatever event loop is running then"
     )
 
 

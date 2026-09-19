@@ -136,14 +136,17 @@ def _feed_tracked(recorder: MeetingRecorder, blocks: int) -> list:
     return tracked
 
 
+_GRAPH_BOUNDARY = (type, ModuleType, asyncio.AbstractEventLoop)
+
+
 def _audio_bytes_reachable_from(root: object) -> int:
     """Bytes of every array and byte string the object graph under `root` holds.
 
     Counted by walking references rather than by sampling an allocator, so the
-    answer is the same whatever else the machine is doing. Classes and modules
-    end a branch because they lead to the whole interpreter; a function is
-    followed into its closure cells and its bound receiver, which is where a
-    retained copy hides, but not into its globals, for the same reason.
+    answer is the same whatever else the machine is doing. A class, a module
+    and an event loop end a branch, each because it leads to the whole
+    interpreter; a function is followed into its closure cells and its bound
+    receiver, where a retained copy hides, but not into its globals.
     """
     seen: set[int] = set()
     pending = [root]
@@ -153,7 +156,7 @@ def _audio_bytes_reachable_from(root: object) -> int:
         if obj is None or id(obj) in seen:
             continue
         seen.add(id(obj))
-        if isinstance(obj, (type, ModuleType)):
+        if isinstance(obj, _GRAPH_BOUNDARY):
             continue
         if inspect.isroutine(obj):
             pending.extend(getattr(obj, "__closure__", None) or ())
@@ -316,6 +319,33 @@ async def test_what_capture_retains_does_not_grow_with_the_length_of_the_meeting
     ), (
         f"{short_size} and {long_size} bytes reached disk for 200 and 800 blocks -- "
         f"the spill file is not what the meeting's length is paid into"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_reference_walk_ends_at_an_event_loop_it_can_otherwise_reach(monkeypatch):
+    """AC: bytes behind the event loop are not counted, though the walk can reach them."""
+    loop = asyncio.get_running_loop()
+    sink: list = []
+    payload = b"x" * 4242
+    handle = loop.call_soon(sink.append, payload)
+    try:
+        bounded = _audio_bytes_reachable_from(loop)
+        monkeypatch.setattr(
+            "tests.test_meeting_incidents._GRAPH_BOUNDARY", (type, ModuleType)
+        )
+        unbounded = _audio_bytes_reachable_from(loop)
+    finally:
+        handle.cancel()
+
+    assert unbounded >= len(payload), (
+        f"with the boundary removed the walk reached {unbounded} bytes of the "
+        f"{len(payload)} parked on the loop -- it never enters the loop at all, so the "
+        f"bounded reading below proves nothing"
+    )
+    assert bounded == 0, (
+        f"{bounded} bytes behind the event loop were counted as capture; every pending "
+        f"callback in the process would land on whichever test holds a recorder"
     )
 
 

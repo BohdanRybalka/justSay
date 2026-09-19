@@ -1052,6 +1052,20 @@ def fake_genai_modules(client_class) -> dict[str, ModuleType]:
     }
 
 
+def drop_frames(error: BaseException) -> BaseException:
+    """Clears `error`'s traceback, context and cause in place, and returns it.
+
+    A traceback pins every frame of the call that raised, and a frame that
+    built a cloud client pins that client until some later test's
+    `gc.collect()` reaches the cycle -- inside a running event loop, where the
+    client's own finaliser schedules `aclose()` and leaves that test a task.
+    """
+    error.__traceback__ = None
+    error.__context__ = None
+    error.__cause__ = None
+    return error
+
+
 @pytest.fixture
 def insert_history_rows():
     """Writes ``(id, ts, text)`` rows into the open history store exactly as given.
