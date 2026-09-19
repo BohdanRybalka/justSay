@@ -3,7 +3,7 @@
 `docs/style-guide.md` §1a states where a backend module goes, and ADR 044
 records why. Prose rots; this file fails.
 
-Thirteen properties are pinned here:
+Fourteen properties are pinned here:
 
 1. No module under `app.core` imports a feature package or the HTTP boundary,
    with no exception at all: `core` is the layer every other package may
@@ -29,9 +29,11 @@ Thirteen properties are pinned here:
    `app/` holding any `.py` file is a key in that allowlist — an `__init__.py`
    is not required, so a PEP 420 namespace package cannot be exempt by being
    forgotten — and no exemption survives the import it covers, nor the package
-   it names. `core`'s exempt set is pinned empty by its own test: the allowlist
-   accepts whatever a future diff writes into it, so the emptiness is asserted
-   by name rather than left to the reader (ADR 082). The modules sitting
+   it names. Shared ground carries no exempt set at all, pinned by its own
+   test: the allowlist accepts whatever a future diff writes into it, so the
+   emptiness is asserted over the classification rather than over one package
+   name, and a key missing altogether is the same defect as a key with an entry
+   in it (ADR 082). The modules sitting
    directly under `app/` are checked at the same time, with `main.py` the one
    exemption: building the FastAPI application is its job. The composition root
    is `app/config.py`, a different module.
@@ -166,6 +168,18 @@ Thirteen properties are pinned here:
    claimed. The two shapes that would hide a whole namespace rather than one
    name, a module-level star import and a module-level `__getattr__`, are
    failures rather than misses.
+14. The HTTP boundary is imported by the module that builds the application and
+   by nothing else, imports no feature package, and holds nothing but boundary
+   code. The first two are property 1 read from the other two sides: `core` not
+   importing `app.api` leaves a feature package importing it, and a router
+   importing a feature package, both unchecked, and either one re-creates the
+   inversion the package was cut out of `core` to remove. The third is what the
+   exempt set means now that every module in the package is named in it and the
+   web-framework gate can therefore never fire inside it: the set is an
+   inventory, so a module arriving here must be named in it to satisfy one rule
+   and cannot be named in it without importing a web framework, which is the
+   other. The walk pins itself non-empty — emptying the classification set is
+   what would leave all three green while deleting them.
 
 Every assertion below was mutation-checked when written. The list below is a
 ledger of mutations that were actually run, against the module actually named,
@@ -178,7 +192,10 @@ with the number of tests each one reddens:
   -- **two** tests, not one: the feature-package rule, and the two-node cycle
   test below, because `app.core <-> app.audio` left
   `_KNOWN_TWO_NODE_PACKAGE_CYCLES` in the same change and so is a new pair
-  again. On `99e05e4` that same line reddened **zero**
+  again. On `99e05e4` that same line reddened **zero** planted in
+  `app/core/router.py`, the module that carried the exemption this gate has
+  since dropped, and **one** planted in `utils.py`, which never carried it —
+  both re-measured against a `git archive` of that commit
 - `from app.config import settings` planted in `app/transcripts/search.py` in
   place of its function-local `app.core.config` import, so the module still
   works and only the spelling reaches past the one doorway -- **one** test.
@@ -219,9 +236,13 @@ with the number of tests each one reddens:
 - a `fastapi` importer added as `app/handlers.py`, directly under `app/`, and
   as `app/newpkg/thing.py` in a directory with no `__init__.py` -- one test
   each
-- a package key deleted from the web-framework allowlist, a fictional file
-  added to an exempt set, and a fictional package key carrying an empty exempt
-  set -- one test each; deleting the `api` key specifically -- one test
+- a fictional file added to a feature package's exempt set, and a fictional
+  package key carrying an empty exempt set -- one test each. Deleting a real
+  package key is not one test: the `core` key deleted reddens **two**, the
+  coverage gate and the emptiness pin, which reads the dict through `.get` so
+  a key missing altogether reports that pin's message instead of a `KeyError`;
+  the `api` key deleted reddens **two**, the coverage gate and the boundary
+  inventory
 - `import fastapi` planted in `app/core/utils.py` -- **one** test, the
   web-framework gate. `core` names no exempt module any more, so there is
   nothing for the plant to hide behind
@@ -232,12 +253,37 @@ with the number of tests each one reddens:
   The same entry written back *without* the plant -- **two**, the emptiness pin
   and the mirror
 - `from app.api.router import router` planted in `app/core/utils.py` --
-  **three** tests: the rule over `core`, the two-node list, and the component
-  pin. Re-run with `api` moved out of `_HTTP_BOUNDARY_PACKAGES` and into
-  `_NON_FEATURE_PACKAGES`, the rule over `core` goes silent and only the two
-  cycle instruments report -- which is why the boundary gets a set of its own
-- `api` left out of all three classification sets -- one test; an import and an
-  `__all__` added to `app/api/__init__.py` -- one test
+  **four** tests: the rule over `core`, the rule over who may import the
+  boundary, the two-node list, and the component pin. Re-run with `api` moved
+  out of `_HTTP_BOUNDARY_PACKAGES` and into `_NON_FEATURE_PACKAGES`, the rule
+  over `core` does still go silent, and **five** report in its place -- the two
+  cycle instruments, the boundary's own walk finding nothing left to check, the
+  emptiness pin, which now reads `api` as shared ground carrying three
+  exemptions, and the classification pin. The silence of that one rule is no
+  longer the whole of the mutation
+- `api` moved into `_NON_FEATURE_PACKAGES` with no import planted -- **three**
+  tests, the last three of those; `api` added there while left in
+  `_HTTP_BOUNDARY_PACKAGES` -- **two**, the overlap half of the classification
+  pin and the emptiness pin; `audio` moved from `_FEATURE_PACKAGES` into
+  `_NON_FEATURE_PACKAGES` -- **two**, the same pair
+- `api` left out of all three classification sets -- **three** tests, the
+  classification gate, the allowlist coverage gate, and the boundary walk
+  reporting that it found nothing to check; an import and an `__all__` added to
+  `app/api/__init__.py` -- one test
+- `from app.api.error_handler import register_error_handlers` planted at the
+  top of `app/pipeline/service.py` -- **one** test, the rule over who may import
+  the boundary, and **zero** before that rule existed. Emptying
+  `_MAY_IMPORT_THE_HTTP_BOUNDARY`, so `app/main.py` itself offends -- **one**
+  test, which is that allowlist's own mirror
+- `from app.audio.config import AudioSettings` planted in `app/api/router.py`
+  -- **one** test, the boundary's downward rule, and **zero** before it existed
+- `app/api/helper.py` added, holding a function and importing no web framework
+  -- **one** test, the boundary inventory. Named in `api`'s exempt set to
+  satisfy that one -- **one** test instead, the exemption mirror, because the
+  entry then covers no import. A module that is not boundary code satisfies
+  neither rule without failing the other
+- `_HTTP_BOUNDARY_PACKAGES` emptied -- **three** tests: the classification
+  gate, the boundary walk finding nothing, and the emptiness pin
 - a recorder import planted in `app/audio/__init__.py` -- two tests, since it
   both grows the package surface and puts the capture stack back on
   `timeline`'s import path -- and a `__getattr__` re-export of the same, one
@@ -432,6 +478,8 @@ _APP_DIR = Path(__file__).resolve().parent.parent / "app"
 _COMPOSITION_ROOT = "app.config"
 
 _MAY_IMPORT_THE_COMPOSITION_ROOT = {"core/config.py"}
+
+_MAY_IMPORT_THE_HTTP_BOUNDARY = {"main.py"}
 
 _SIDECAR_ABSENT_LIBRARIES = {
     "audio/analysis.py": {
@@ -678,6 +726,104 @@ def test_no_core_module_imports_a_feature_package_or_the_http_boundary():
     )
 
 
+def test_only_the_module_that_builds_the_application_imports_the_http_boundary():
+    """The HTTP boundary is composed by the module that builds the FastAPI
+    application and by nothing else, so a feature package cannot acquire the
+    app's middleware and exception wiring by importing it.
+
+    Scoped to every module under `app/` rather than to the feature packages,
+    because the spelling is plantable anywhere, and it prefix-matches so a
+    submodule of the boundary cannot walk past. Its own function rather than a
+    second assertion in the rule above: the first `assert` to fire hides the
+    second (ADR 082)."""
+    boundary = {f"app.{package}" for package in _HTTP_BOUNDARY_PACKAGES}
+    reaching_in = []
+    for module, path in _modules().items():
+        if path.relative_to(_APP_DIR).as_posix() in _MAY_IMPORT_THE_HTTP_BOUNDARY:
+            continue
+        if _package_of(module) in boundary:
+            continue
+        for imported in _imported_names(path):
+            if any(
+                imported == name or imported.startswith(f"{name}.")
+                for name in boundary
+            ):
+                reaching_in.append(f"{module} -> {imported}")
+
+    assert not reaching_in, (
+        f"These modules import the HTTP boundary: {reaching_in}. Routes, "
+        "middleware and exception handlers are composed by app/main.py alone; "
+        "a package that wants one of them wants a primitive under app/core/ "
+        "instead. Adding a second consumer to _MAY_IMPORT_THE_HTTP_BOUNDARY is "
+        "a decision, not a formality — see ADR 082."
+    )
+
+
+def test_no_http_boundary_module_imports_a_feature_package():
+    """The boundary sits above the feature packages and below nothing, so it
+    reaches `app.core` and no further. A router that imports a feature package
+    puts the tangle this spec removed back one directory along.
+
+    The walk pins itself non-empty: emptying `_HTTP_BOUNDARY_PACKAGES` is the
+    mutation that would make this rule green while deleting it (ADR 079)."""
+    boundary = {f"app.{package}" for package in _HTTP_BOUNDARY_PACKAGES}
+    checked = []
+    reaching_across = []
+    for module, path in _modules().items():
+        if _package_of(module) not in boundary:
+            continue
+        checked.append(module)
+        for imported in _imported_names(path):
+            head = imported.split(".")
+            if len(head) >= 2 and head[0] == "app" and head[1] in _FEATURE_PACKAGES:
+                reaching_across.append(f"{module} -> {imported}")
+
+    assert checked, (
+        "the walk found no HTTP-boundary module at all, so this rule checks "
+        f"nothing: _HTTP_BOUNDARY_PACKAGES is {sorted(_HTTP_BOUNDARY_PACKAGES)}."
+    )
+    assert not reaching_across, (
+        f"These HTTP-boundary modules import a feature package: "
+        f"{reaching_across}. The boundary may reach app/core/ and nothing "
+        "else; a route that needs a feature package belongs in that package's "
+        "own router (see docs/style-guide.md §1a)."
+    )
+
+
+def test_every_http_boundary_module_is_named_in_its_exempt_set():
+    """Every module of the boundary imports a web framework by design, so the
+    exemption gate can never fire inside it and the exempt set is an inventory
+    rather than a carve-out.
+
+    Read with `test_no_web_framework_exemption_outlives_the_import_it_covers`,
+    which fails an entry importing no web framework, that inventory is what
+    stops a module that is not boundary code from landing here quietly: it has
+    to be named to satisfy this rule and cannot be named to satisfy that one
+    (ADR 082)."""
+    unnamed = []
+    for package in sorted(_HTTP_BOUNDARY_PACKAGES):
+        package_dir = _APP_DIR / package
+        assert package_dir.is_dir(), (
+            f"app/{package}/ does not exist, so the boundary inventory "
+            "describes nothing. Repoint _HTTP_BOUNDARY_PACKAGES."
+        )
+        exempt = _WEB_FRAMEWORK_FREE_PACKAGES.get(package) or set()
+        modules = {
+            path.relative_to(package_dir).as_posix()
+            for path in package_dir.rglob("*.py")
+            if path.name != "__init__.py"
+        }
+        assert modules, f"app/{package}/ holds no module — update this test."
+        unnamed.extend(f"{package}/{relative}" for relative in sorted(modules - exempt))
+
+    assert not unnamed, (
+        f"These HTTP-boundary modules are in no exempt set: {unnamed}. Name "
+        "each one in _WEB_FRAMEWORK_FREE_PACKAGES — and if it imports no web "
+        "framework it is not boundary code and belongs in the package that "
+        "reads it, because the mirror below then fails on the entry."
+    )
+
+
 def test_only_one_module_imports_the_composition_root_directly():
     """The singleton has two working spellings and both are policed, with one
     module allowed the upper one.
@@ -915,18 +1061,34 @@ def test_every_backend_package_is_covered_by_the_web_framework_allowlist():
     )
 
 
-def test_core_carries_no_web_framework_exemption():
-    """`core` is the layer every other package may import, so not one module in
-    it may reach a web framework — under any exemption, for any reason.
+def test_shared_ground_carries_no_web_framework_exemption():
+    """Shared ground is what every other package may import, so not one module
+    in it may reach a web framework — under any exemption, for any reason.
 
     The gate above accepts whatever exempt set the dict happens to carry,
-    including a fresh one for `core`. This is the assertion that fails the day
-    an entry comes back, and it is deliberately by name (ADR 082)."""
-    assert _WEB_FRAMEWORK_FREE_PACKAGES["core"] == set(), (
-        "app/core/ carries a web-framework exemption again: "
-        f"{sorted(_WEB_FRAMEWORK_FREE_PACKAGES['core'])}. A module that needs "
-        "fastapi or starlette is HTTP-boundary code and belongs in app/api/, "
-        "not in the package every other package may import."
+    including a fresh one. Stated over the classification rather than over one
+    package name, so a second package filed as shared ground inherits the rule
+    instead of arriving unguarded, and read through `.get` so a deleted key
+    reports this message rather than a `KeyError` (ADR 082)."""
+    offenders = sorted(
+        {
+            package
+            for package, exempt in _WEB_FRAMEWORK_FREE_PACKAGES.items()
+            if exempt and package not in _FEATURE_PACKAGES | _HTTP_BOUNDARY_PACKAGES
+        }
+        | {
+            package
+            for package in _NON_FEATURE_PACKAGES
+            if _WEB_FRAMEWORK_FREE_PACKAGES.get(package) != set()
+        }
+    )
+
+    assert not offenders, (
+        f"These packages are importable from anywhere and either carry a "
+        f"web-framework exemption or carry no allowlist entry at all: "
+        f"{offenders}. A module that needs fastapi or starlette is "
+        "HTTP-boundary code and belongs in app/api/, not in a package every "
+        "other package may import."
     )
 
 
@@ -998,6 +1160,11 @@ def test_a_docstring_only_package_surface_holds_nothing_else():
     import, so anything it holds is paid for by every consumer. `app.audio`
     once re-exported both recorders, which made the pure numpy module
     `app.audio.timeline` drag the whole capture stack behind it.
+
+    `app.api` is in the set for a different reason: the package surface is half
+    of what holds the HTTP boundary to boundary code, the per-module exempt set
+    being the other half, and a re-export there would hand any importer the
+    whole boundary under one name that no exempt set covers (ADR 082).
 
     Checked as "nothing but a docstring" rather than "no import statements",
     because a module-level `__getattr__` restores the same re-export while
@@ -2078,6 +2245,44 @@ def test_every_backend_package_is_classified_as_feature_boundary_or_shared():
         "_HTTP_BOUNDARY_PACKAGES if it holds routes, middleware or exception "
         "handlers, or to _NON_FEATURE_PACKAGES if it is shared ground every "
         "package may import."
+    )
+
+
+def test_shared_ground_is_pinned_and_the_three_classifications_do_not_overlap():
+    """The coverage rule above reads a union, so it asks only whether a package
+    is filed somewhere and cannot tell a correct filing from a wrong one.
+
+    Moving a name between the sets changes which rule sees it while leaving
+    every gate in this file green, and `_NON_FEATURE_PACKAGES` is the set that
+    move aims at: everything in it is importable from `core`, so it is the one
+    membership that is a decision rather than a fact about the tree and it is
+    pinned by name. The other two are read off the tree and are pinned only
+    disjoint, so no package is filed twice and read as either. The overlap
+    check asserts first: a package filed twice is the more specific diagnosis,
+    and the first `assert` to fire hides the second (ADR 082)."""
+    classifications = {
+        "_FEATURE_PACKAGES": _FEATURE_PACKAGES,
+        "_HTTP_BOUNDARY_PACKAGES": _HTTP_BOUNDARY_PACKAGES,
+        "_NON_FEATURE_PACKAGES": _NON_FEATURE_PACKAGES,
+    }
+    names = sorted(classifications)
+    overlaps = [
+        f"{left} and {right}: {sorted(classifications[left] & classifications[right])}"
+        for index, left in enumerate(names)
+        for right in names[index + 1 :]
+        if classifications[left] & classifications[right]
+    ]
+
+    assert not overlaps, (
+        f"These classification sets share a package: {overlaps}. A package "
+        "filed twice is read as whichever set a given rule happens to consult, "
+        "which is the hole the third set exists to close (ADR 082)."
+    )
+    assert _NON_FEATURE_PACKAGES == {"core"}, (
+        f"Shared ground is {sorted(_NON_FEATURE_PACKAGES)} rather than "
+        "['core']. Every package named there is one app/core/ may import, so "
+        "adding one widens the rule over core rather than documenting it — and "
+        "removing core empties that rule instead. See ADR 082."
     )
 
 

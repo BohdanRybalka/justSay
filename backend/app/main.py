@@ -10,8 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from app import __version__
-from app.api.auth_middleware import LaunchTokenMiddleware
-from app.api.error_handler import register_error_handlers
 from app.core import tasks
 from app.core.config import settings
 from app.core.logging_config import setup_logging
@@ -24,6 +22,8 @@ SHUTDOWN_CONNECTION_DRAIN_SECONDS = 2.0
 StepResult = TypeVar("StepResult")
 
 try:
+    from app.api.auth_middleware import LaunchTokenMiddleware
+    from app.api.error_handler import register_error_handlers
     from app.api.router import router as api_router
     from app.audio.router import router as audio_router
     from app.pipeline.router import router as pipeline_router
@@ -32,7 +32,9 @@ try:
     from app.transcripts.history_router import router as history_router
     from app.transcripts.words_router import router as words_router
 except Exception as e:
-    log.critical("Router import failed — sidecar will exit: %s", e, exc_info=True)
+    log.critical(
+        "HTTP boundary import failed — sidecar will exit: %s", e, exc_info=True
+    )
     raise
 
 
