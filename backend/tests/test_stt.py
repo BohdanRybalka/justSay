@@ -17,6 +17,7 @@ import soundfile as sf
 from app.core.constants import GEMINI_TIMEOUT_SECONDS
 from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.core.types import ProviderMode
+from app.preferences.user_settings import UserSettings
 from app.stt.base import (
     LOAD_FAILED_WITHOUT_A_MESSAGE,
     TranscriptionResult,
@@ -25,6 +26,12 @@ from app.stt.base import (
 )
 from app.stt.cloud import GeminiSTTProvider
 from app.stt.config import STTSettings
+from app.stt.glossary import (
+    WHISPER_PROMPT_CHAR_BUDGET,
+    glossary_summary,
+    glossary_text,
+    whisper_glossary,
+)
 from app.stt.local import SHORT_CLIP_SECONDS, LocalSTTProvider
 from app.stt.routing import clear_cache, get_provider
 from tests.conftest import drop_frames
@@ -688,6 +695,235 @@ async def test_local_empty_initial_prompt_passes_none_not_empty_string(sample_wa
     await provider.transcribe(sample_wav, language="uk", audio_duration=10.0)
 
     assert model.transcribe.call_args.kwargs["initial_prompt"] is None
+
+
+def _ukrainian_glossary(length: int) -> str:
+    """A comma-separated Ukrainian glossary of exactly `length` characters."""
+    term = "абревіатура"
+    assert length >= len(term), f"{length} cannot hold one {len(term)}-character term"
+    terms = [term]
+    while len(", ".join(terms)) + len(", ") + len(term) <= length:
+        terms.append(term)
+    joined = ", ".join(terms)
+    return joined + "и" * (length - len(joined))
+
+
+def _declared_max_length(model, field: str) -> int:
+    """The `max_length` a pydantic model declares on one string field."""
+    declared = [
+        item.max_length for item in model.model_fields[field].metadata
+        if hasattr(item, "max_length")
+    ]
+    assert declared, f"{model.__name__}.{field} declares no max_length to pin"
+    return declared[0]
+
+
+def test_glossary_text_strips_and_reads_a_blank_value_as_no_glossary():
+    assert glossary_text("  Tauri, Pydantic  ") == "Tauri, Pydantic"
+    assert glossary_text("   \n  ") is None
+    assert glossary_text("") is None
+
+
+@pytest.mark.parametrize("raw", ["Tauri,Pydantic", "Tauri\nPydantic", "Tauri、Pydantic"])
+def test_whisper_glossary_passes_a_fitting_value_through_byte_for_byte(raw):
+    """A glossary inside the budget reaches the decoder exactly as the user typed it.
+
+    A prompt conditions punctuation as well as spelling, so rewriting separators
+    nobody asked to have rewritten is a change to the transcript.
+    """
+    sent, cut = whisper_glossary(raw)
+
+    assert sent == raw
+    assert sent != "Tauri, Pydantic"
+    assert cut == 0
+
+
+@pytest.mark.parametrize("separator", ["、", "，", "；", ";", ",", "\n"])
+def test_whisper_glossary_reads_every_list_separator_as_a_term_boundary(separator):
+    """An over-budget list is cut between terms, never inside one, on any separator.
+
+    Observable only above the budget: below it the stored value is passed
+    through, so the separator class is what a trim chooses its boundary from.
+    """
+    raw = separator.join(["項目一"] * 200)
+    sent, cut = whisper_glossary(raw)
+
+    assert len(raw) > WHISPER_PROMPT_CHAR_BUDGET
+    assert cut > 0
+    assert all(term == "項目一" for term in sent.split(", "))
+
+
+def test_whisper_glossary_keeps_a_ceiling_length_ukrainian_glossary_within_the_budget():
+    """A Ukrainian glossary stored at the 500-character ceiling is cut to the budget.
+
+    The stored value is the one a user may keep; what a Whisper decoder receives
+    is capped at `WHISPER_PROMPT_CHAR_BUDGET`, and every surviving term is one
+    the user typed.
+    """
+    raw = _ukrainian_glossary(500)
+    sent, dropped = whisper_glossary(raw)
+
+    assert len(raw) == 500
+    assert sent is not None
+    assert len(sent) <= WHISPER_PROMPT_CHAR_BUDGET
+    assert sent != raw
+    assert dropped >= 1
+    assert all(term in raw.split(", ") for term in sent.split(", "))
+
+
+def test_whisper_glossary_drops_a_straddling_term_whole_rather_than_cutting_it():
+    """A character cut at the budget would land inside "Pydantic"; no prefix of it survives."""
+    head = ", ".join(["Tauri"] * 69)
+    raw = f"{head}, Pydantic"
+    sent, dropped = whisper_glossary(raw)
+
+    assert len(head) <= WHISPER_PROMPT_CHAR_BUDGET < len(raw)
+    assert sent == head
+    assert dropped == 10
+    assert "Pyd" not in sent
+    assert "Pyd" in raw[:WHISPER_PROMPT_CHAR_BUDGET]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Tauri FastAPI " * 43,
+        "項目" * 300,
+        "項目一、" * 150,
+        "Q" * (WHISPER_PROMPT_CHAR_BUDGET + 1),
+        f"{'Q' * (WHISPER_PROMPT_CHAR_BUDGET + 1)}, Tauri",
+    ],
+)
+def test_whisper_glossary_never_empties_a_non_empty_glossary(raw):
+    """A glossary the user filled in must reach the decoder as something (ADR 081)."""
+    sent, _dropped = whisper_glossary(raw)
+
+    assert sent is not None
+    assert 0 < len(sent) <= WHISPER_PROMPT_CHAR_BUDGET
+
+
+def test_whisper_glossary_keeps_short_terms_after_an_over_long_one():
+    """An over-long term in the middle is skipped, not a wall the walk stops at."""
+    raw = f"{'Q' * (WHISPER_PROMPT_CHAR_BUDGET + 1)}, Tauri"
+
+    assert whisper_glossary(raw) == ("Tauri", 490)
+
+
+def test_whisper_glossary_cuts_at_a_word_boundary_when_no_whole_term_fits():
+    """A glossary written with spaces falls back to whole words, never characters."""
+    raw = "Tauri " * 100
+    sent, dropped = whisper_glossary(raw)
+
+    words = sent.split()
+    next_word = raw.split()[len(words)]
+
+    assert words == raw.split()[:len(words)]
+    assert len(sent) + len(" ") + len(next_word) > WHISPER_PROMPT_CHAR_BUDGET
+    assert sent != raw[:WHISPER_PROMPT_CHAR_BUDGET]
+    assert dropped == 114
+
+
+def test_whisper_glossary_cuts_characters_only_inside_a_run_with_no_boundary():
+    """A CJK glossary typed with no separator has nothing else to cut on."""
+    raw = "項目" * 300
+    sent, dropped = whisper_glossary(raw)
+
+    assert sent == raw[:WHISPER_PROMPT_CHAR_BUDGET]
+    assert dropped == 113
+
+
+def test_glossary_summary_reports_a_length_and_never_the_glossary_itself():
+    secret = "MY_SECRET_TERM"
+
+    summary = glossary_summary(secret, 0)
+
+    assert summary == f"{len(secret)}chars"
+    assert secret not in summary
+
+
+def test_glossary_summary_names_the_cut_only_when_the_budget_shortened_the_value():
+    """A cut is counted in characters, the one unit all three passes shorten by."""
+    assert glossary_summary("Tauri") == "5chars"
+    assert glossary_summary("Tauri", 3) == "5chars -3cut"
+    assert glossary_summary(None) == "none"
+
+
+@pytest.mark.asyncio
+async def test_local_log_names_the_characters_the_budget_cut(sample_wav, caplog):
+    """A silent trim is a trim nobody can diagnose; faster-whisper says how much went.
+
+    The expected numbers are literals rather than the helper's own output, so a
+    wrong count fails here instead of being forwarded.
+    """
+    import logging
+    raw = _ukrainian_glossary(500)
+    settings = STTSettings(mode=ProviderMode.LOCAL, initial_prompt=raw)
+    provider = LocalSTTProvider(settings)
+    _mock_local_model(provider)
+
+    with caplog.at_level(logging.INFO, logger="app.stt.local"):
+        await provider.transcribe(sample_wav, language="uk", audio_duration=10.0)
+
+    full_log = "\n".join(record.getMessage() for record in caplog.records)
+
+    assert len(raw) == 500
+    assert "479chars -21cut" in full_log
+    assert raw not in full_log
+
+
+def test_the_whisper_send_budget_leaves_room_below_the_stored_ceiling():
+    """A budget at or above the stored ceiling makes the trim dead code."""
+    assert WHISPER_PROMPT_CHAR_BUDGET < _declared_max_length(STTSettings, "initial_prompt")
+
+
+def test_the_persisted_and_runtime_glossary_ceilings_agree():
+    """A value the disk model accepts must be one the runtime model also accepts."""
+    assert _declared_max_length(UserSettings, "initial_prompt") == _declared_max_length(
+        STTSettings, "initial_prompt"
+    )
+
+
+@pytest.mark.asyncio
+async def test_gemini_receives_a_ceiling_length_glossary_whole(sample_wav):
+    """Gemini reads a text prompt, not a Whisper decoder window — no budget applies."""
+    raw = _ukrainian_glossary(500)
+    settings = STTSettings(
+        mode=ProviderMode.CLOUD, gemini_api_key="test-key", initial_prompt=raw
+    )
+    provider = GeminiSTTProvider(settings)
+    provider._client = MagicMock()
+
+    captured: list[str] = []
+
+    def _spy(client, model, audio_bytes, prompt, mime_type):
+        captured.append(prompt)
+        return ("ok", None)
+
+    with patch.object(GeminiSTTProvider, "_call_gemini", side_effect=_spy):
+        await provider.transcribe(sample_wav, language="uk")
+
+    prompt = captured[0]
+    open_idx = prompt.rindex("<glossary>") + len("<glossary>")
+    fenced = prompt[open_idx:prompt.index("</glossary>")]
+
+    assert len(raw) == 500
+    assert fenced == raw
+
+
+@pytest.mark.asyncio
+async def test_local_glossary_reaches_faster_whisper_trimmed_to_whole_terms(sample_wav):
+    raw = _ukrainian_glossary(500)
+    settings = STTSettings(mode=ProviderMode.LOCAL, initial_prompt=raw)
+    provider = LocalSTTProvider(settings)
+    model = _mock_local_model(provider)
+
+    await provider.transcribe(sample_wav, language="uk", audio_duration=10.0)
+
+    sent = model.transcribe.call_args.kwargs["initial_prompt"]
+
+    assert sent != raw
+    assert len(sent) <= WHISPER_PROMPT_CHAR_BUDGET
+    assert all(term in raw.split(", ") for term in sent.split(", "))
 
 
 

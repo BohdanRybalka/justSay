@@ -18,6 +18,7 @@ import app.stt.local_whisper_cpp as local_whisper_cpp_module
 from app.core.errors import ResourceUnavailableError
 from app.stt.base import LOAD_FAILED_WITHOUT_A_MESSAGE
 from app.stt.config import STTSettings
+from app.stt.glossary import WHISPER_PROMPT_CHAR_BUDGET
 from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
 
 _requires_windows = pytest.mark.skipif(
@@ -160,7 +161,7 @@ def _install_fake_popen(monkeypatch, *, exit_after_terminate: bool = True):
 
 
 def _make_provider(
-    tmp_path, monkeypatch, *, model_exists: bool = True
+    tmp_path, monkeypatch, *, model_exists: bool = True, initial_prompt: str = ""
 ) -> WhisperCppServerSTTProvider:
     binary_path = tmp_path / "whisper-server.exe"
     binary_path.write_bytes(b"")
@@ -171,7 +172,7 @@ def _make_provider(
     monkeypatch.setattr(local_whisper_cpp_module, "resolve_binary_path", lambda: binary_path)
     monkeypatch.setattr(local_whisper_cpp_module, "resolve_model_path", lambda size: model_path)
 
-    settings = STTSettings(whisper_model_size="large-v3-turbo")
+    settings = STTSettings(whisper_model_size="large-v3-turbo", initial_prompt=initial_prompt)
     return WhisperCppServerSTTProvider(settings), model_path
 
 
@@ -1372,3 +1373,134 @@ def test_load_failure_leaves_through_the_original_exception(monkeypatch, tmp_pat
         provider._get_model()
 
     assert excinfo.value is raised
+
+
+_OVER_BUDGET_HEAD = ", ".join(["Tauri"] * 69)
+_OVER_BUDGET_GLOSSARY = f"{_OVER_BUDGET_HEAD}, Pydantic"
+
+
+def _capture_post(monkeypatch, captured: dict):
+    """Install a fake httpx whose POST records url/data/files and answers 200."""
+    def _post_impl(url, data, files):
+        captured["url"] = url
+        captured["data"] = data
+        captured["files"] = files
+        return _FakeResponse(200, {"text": "ok"})
+
+    _install_fake_httpx(monkeypatch, post_impl=_post_impl)
+    _install_fake_popen(monkeypatch)
+
+
+def _wav(tmp_path):
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+    return audio_path
+
+
+@pytest.mark.asyncio
+async def test_transcribe_sends_the_glossary_as_the_prompt_form_field(monkeypatch, tmp_path):
+    """The glossary reaches whisper-server at all — the defect this spec opens on."""
+    provider, _model_path = _make_provider(
+        tmp_path, monkeypatch, initial_prompt="Tauri, Pydantic"
+    )
+    captured: dict = {}
+    _capture_post(monkeypatch, captured)
+
+    await provider.transcribe(_wav(tmp_path), language="uk")
+
+    assert captured["data"]["prompt"] == "Tauri, Pydantic"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_always_sends_a_prompt_field_so_a_stale_glossary_cannot_survive(
+    monkeypatch, tmp_path
+):
+    """whisper-server reuses one params object, so an omitted field keeps the last one."""
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, initial_prompt="   \n ")
+    captured: dict = {}
+    _capture_post(monkeypatch, captured)
+
+    await provider.transcribe(_wav(tmp_path), language="uk")
+
+    assert captured["data"]["prompt"] == ""
+
+
+@pytest.mark.asyncio
+async def test_transcribe_sends_only_whole_terms_within_the_budget(monkeypatch, tmp_path, caplog):
+    """The straddling term is dropped whole and the drop is counted in the log."""
+    import logging
+
+    provider, _model_path = _make_provider(
+        tmp_path, monkeypatch, initial_prompt=_OVER_BUDGET_GLOSSARY
+    )
+    captured: dict = {}
+    _capture_post(monkeypatch, captured)
+
+    with caplog.at_level(logging.INFO, logger="app.stt.local_whisper_cpp"):
+        await provider.transcribe(_wav(tmp_path), language="uk")
+
+    sent = captured["data"]["prompt"]
+    full_log = "\n".join(record.getMessage() for record in caplog.records)
+
+    assert sent == _OVER_BUDGET_HEAD
+    assert "Pyd" not in sent
+    assert len(sent) <= WHISPER_PROMPT_CHAR_BUDGET < len(_OVER_BUDGET_GLOSSARY)
+    assert "481chars -10cut" in full_log
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("glossary", ["", "Tauri, Pydantic"])
+async def test_transcribe_always_sends_no_context(monkeypatch, tmp_path, glossary):
+    """One long-lived whisper-server must not carry one dictation into the next."""
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, initial_prompt=glossary)
+    captured: dict = {}
+    _capture_post(monkeypatch, captured)
+
+    await provider.transcribe(_wav(tmp_path), language="uk")
+
+    assert captured["data"]["no_context"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_sends_the_glossary_to_localhost_and_nowhere_else(monkeypatch, tmp_path):
+    """Local mode's zero-leak guarantee over the request that now carries the glossary."""
+    provider, _model_path = _make_provider(
+        tmp_path, monkeypatch, initial_prompt="Tauri, Pydantic"
+    )
+    seen: list[str] = []
+
+    def _get_impl(url):
+        seen.append(url)
+        return _FakeResponse(200)
+
+    def _post_impl(url, data, files):
+        seen.append(url)
+        return _FakeResponse(200, {"text": "ok"})
+
+    _install_fake_httpx(monkeypatch, get_impl=_get_impl, post_impl=_post_impl)
+    _install_fake_popen(monkeypatch)
+
+    await provider.transcribe(_wav(tmp_path), language="uk")
+
+    assert seen
+    assert all(url.startswith("http://127.0.0.1:") for url in seen), seen
+
+
+@pytest.mark.asyncio
+async def test_transcribe_log_redacts_glossary_content(monkeypatch, tmp_path, caplog):
+    """Glossary content must never reach the log — only its length."""
+    import logging
+
+    secret = "MY_SECRET_GLOSSARY_dont_log_this"
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, initial_prompt=secret)
+    captured: dict = {}
+    _capture_post(monkeypatch, captured)
+
+    with caplog.at_level(logging.INFO, logger="app.stt.local_whisper_cpp"):
+        await provider.transcribe(_wav(tmp_path), language="uk")
+
+    full_log = "\n".join(record.getMessage() for record in caplog.records)
+
+    assert captured["data"]["prompt"] == secret
+    assert secret not in full_log
+    assert f"{len(secret)}chars" in full_log

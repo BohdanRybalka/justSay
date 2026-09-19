@@ -41,7 +41,17 @@ class STTSettings(BaseSettings):
     whisper_model_size: str = Field(default="large-v3-turbo", pattern=r"\A[A-Za-z0-9._-]+\z")
     whisper_device: str = "auto"
 
-    initial_prompt: str = Field(default="", max_length=500)
+    initial_prompt: str = Field(
+        default="",
+        max_length=500,
+        description=(
+            "Custom vocabulary biasing transcription, stored whole and never truncated "
+            "on disk. Gemini receives all of it inside a fenced glossary block; the "
+            "Whisper-family engines receive it unchanged when it fits their send-time "
+            "budget, and otherwise whole terms, then whole words, then a character cut "
+            "only inside a run the user wrote no boundary into."
+        ),
+    )
 
     no_speech_prob_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
 

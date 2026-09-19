@@ -340,3 +340,66 @@ async def test_transcribe_threads_no_speech_prob_onto_the_contract(tmp_path):
         result = await provider.transcribe(_wav(tmp_path), language="auto")
 
     assert result.no_speech_prob == 0.88
+
+
+_UNDER_BUDGET_GLOSSARY = ", ".join(["Tauri"] * 69)
+_NON_CANONICAL_GLOSSARY = ",".join(["Tauri"] * 69)
+_OVER_BUDGET_GLOSSARY = f"{_UNDER_BUDGET_GLOSSARY}, Pydantic"
+
+
+@pytest.mark.asyncio
+async def test_groq_trims_an_over_budget_glossary_to_whole_terms(tmp_path):
+    """Groq's Whisper reads the same 224-token window, so the same budget applies."""
+    provider = GroqWhisperSTTProvider(_settings(initial_prompt=_OVER_BUDGET_GLOSSARY))
+    provider._client = MagicMock()
+    captured: dict = {}
+
+    def _spy(client, model, audio_path, language, prompt):
+        captured["prompt"] = prompt
+        return "ok", None, None
+
+    with patch.object(GroqWhisperSTTProvider, "_call_groq", side_effect=_spy):
+        await provider.transcribe(_wav(tmp_path), language="uk")
+
+    assert captured["prompt"] == _UNDER_BUDGET_GLOSSARY
+    assert captured["prompt"] != _OVER_BUDGET_GLOSSARY
+    assert "Pyd" not in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_groq_receives_a_fitting_glossary_exactly_as_it_was_stored(tmp_path):
+    """A value inside the budget reaches the SDK byte-for-byte, separators and all."""
+    provider = GroqWhisperSTTProvider(_settings(initial_prompt=_NON_CANONICAL_GLOSSARY))
+    provider._client = MagicMock()
+    captured: dict = {}
+
+    def _spy(client, model, audio_path, language, prompt):
+        captured["prompt"] = prompt
+        return "ok", None, None
+
+    with patch.object(GroqWhisperSTTProvider, "_call_groq", side_effect=_spy):
+        await provider.transcribe(_wav(tmp_path), language="uk")
+
+    assert _NON_CANONICAL_GLOSSARY != _UNDER_BUDGET_GLOSSARY
+    assert captured["prompt"] == _NON_CANONICAL_GLOSSARY
+
+
+@pytest.mark.asyncio
+async def test_groq_log_names_the_characters_the_budget_cut(tmp_path, caplog):
+    """A silent trim is a trim nobody can diagnose; the count rides in the log line."""
+    import logging
+
+    provider = GroqWhisperSTTProvider(_settings(initial_prompt=_OVER_BUDGET_GLOSSARY))
+    provider._client = MagicMock()
+
+    with patch.object(
+        GroqWhisperSTTProvider, "_call_groq", return_value=("ok", None, None)
+    ):
+        with caplog.at_level(logging.INFO, logger="app.stt.groq_whisper"):
+            await provider.transcribe(_wav(tmp_path), language="uk")
+
+    full_log = "\n".join(record.getMessage() for record in caplog.records)
+
+    assert "481chars -10cut" in full_log
+    assert _OVER_BUDGET_GLOSSARY not in full_log
+    assert _UNDER_BUDGET_GLOSSARY not in full_log

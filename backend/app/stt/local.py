@@ -21,6 +21,7 @@ from app.stt.base import (
     normalize_detected_language,
 )
 from app.stt.config import STTSettings
+from app.stt.glossary import glossary_summary, whisper_glossary
 
 log = logging.getLogger(__name__)
 
@@ -129,7 +130,7 @@ class LocalSTTProvider(STTProvider):
 
         beam_size = 1 if is_short else 5
         condition_on_previous_text = not is_short
-        glossary = self._settings.initial_prompt.strip() or None
+        glossary, dropped_terms = whisper_glossary(self._settings.initial_prompt)
         whisper_language = None if language == "auto" else language
 
         log.info(
@@ -138,7 +139,7 @@ class LocalSTTProvider(STTProvider):
             self._settings.whisper_model_size, audio_path.name, language,
             f"{audio_duration:.1f}s" if audio_duration is not None else "?",
             beam_size, condition_on_previous_text,
-            f"{len(glossary)}chars" if glossary else "none",
+            glossary_summary(glossary, dropped_terms),
         )
 
         def _transcribe() -> tuple[str, str | None, float | None]:
