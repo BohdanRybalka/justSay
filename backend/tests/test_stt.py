@@ -27,7 +27,7 @@ from app.stt.cloud import GeminiSTTProvider
 from app.stt.config import STTSettings
 from app.stt.local import SHORT_CLIP_SECONDS, LocalSTTProvider
 from app.stt.routing import clear_cache, get_provider
-from tests.conftest import holding_no_frames
+from tests.conftest import drop_frames
 
 _UNANSWERED_REQUEST_TIMEOUT_MS = 500
 
@@ -1158,8 +1158,7 @@ def test_a_gemini_request_that_is_never_answered_raises_a_timeout():
     pytest.importorskip(
         "google.genai",
         reason="the real SDK is what carries the timeout to httpx; it lives in the "
-        "optional cloud extra, so this runs where that extra is installed and skips "
-        "in CI, which installs [dev,audio]",
+        "optional cloud extra, which CI installs deliberately so this gate runs there",
     )
     import httpx
     from google import genai
@@ -1171,7 +1170,7 @@ def test_a_gemini_request_that_is_never_answered_raises_a_timeout():
     port = listener.getsockname()[1]
 
     caught: list[BaseException] = []
-    client_ref: list = []
+    client_ref: list[weakref.ref] = []
 
     def _call() -> None:
         with genai.Client(
@@ -1185,7 +1184,7 @@ def test_a_gemini_request_that_is_never_answered_raises_a_timeout():
             try:
                 client.models.generate_content(model="gemini-2.5-flash", contents="hi")
             except BaseException as e:
-                caught.append(holding_no_frames(e))
+                caught.append(drop_frames(e))
 
     worker = threading.Thread(target=_call, name="gemini-timeout-probe", daemon=True)
     worker.start()

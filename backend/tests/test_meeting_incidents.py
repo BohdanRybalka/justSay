@@ -324,7 +324,7 @@ async def test_what_capture_retains_does_not_grow_with_the_length_of_the_meeting
 
 @pytest.mark.asyncio
 async def test_the_reference_walk_ends_at_an_event_loop_it_can_otherwise_reach(monkeypatch):
-    """AC: a pending callback's payload is never counted as audio the recorder holds."""
+    """AC: bytes behind the event loop are not counted, though the walk can reach them."""
     loop = asyncio.get_running_loop()
     sink: list = []
     payload = b"x" * 4242

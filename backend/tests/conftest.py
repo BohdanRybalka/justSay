@@ -1052,13 +1052,13 @@ def fake_genai_modules(client_class) -> dict[str, ModuleType]:
     }
 
 
-def holding_no_frames(error: BaseException) -> BaseException:
-    """The same error with its frames dropped, so the failing call's locals die with it.
+def drop_frames(error: BaseException) -> BaseException:
+    """Clears `error`'s traceback, context and cause in place, and returns it.
 
     A traceback pins every frame of the call that raised, and a frame that
-    built a `google.genai` client pins that client until some later test's
-    `gc.collect()` reaches the cycle -- inside a running event loop, where
-    `AsyncClient.__del__` schedules `aclose()` and leaves that test a task.
+    built a cloud client pins that client until some later test's
+    `gc.collect()` reaches the cycle -- inside a running event loop, where the
+    client's own finaliser schedules `aclose()` and leaves that test a task.
     """
     error.__traceback__ = None
     error.__context__ = None

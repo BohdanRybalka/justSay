@@ -27,7 +27,7 @@ from app.embeddings.cloud import CloudEmbeddingProvider
 from app.embeddings.config import EmbeddingSettings
 from app.embeddings.local import LocalEmbeddingProvider
 from app.stt.config import STTSettings
-from tests.conftest import holding_no_frames
+from tests.conftest import drop_frames
 
 
 @pytest.fixture(autouse=True)
@@ -468,7 +468,7 @@ def test_an_embedding_request_that_is_never_answered_raises_a_timeout():
     port = listener.getsockname()[1]
 
     caught: list[BaseException] = []
-    client_ref: list = []
+    client_ref: list[weakref.ref] = []
 
     def _call() -> None:
         with genai.Client(
@@ -482,7 +482,7 @@ def test_an_embedding_request_that_is_never_answered_raises_a_timeout():
             try:
                 CloudEmbeddingProvider._call_embed(client, "text-embedding-004", "hello")
             except BaseException as e:
-                caught.append(holding_no_frames(e))
+                caught.append(drop_frames(e))
 
     worker = threading.Thread(target=_call, name="embed-timeout-probe", daemon=True)
     worker.start()
