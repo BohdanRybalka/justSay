@@ -1,8 +1,8 @@
 """`latched_load_error` and the latch every local provider writes through it.
 
-The frontend reads a falsy `last_error` as no error at all, so a failed load
-would draw a healthy indicator over it (ADR 078). Two halves: the helper is
-checked against failures carrying no message, and an AST walk over `app/stt/`
+The frontend reads a falsy `last_error` as no error and a blank one as a toast
+with no text in it (ADR 078). Two halves: the helper is checked against failures
+whose message is missing or only whitespace, and an AST walk over `app/stt/`
 pins every store to the latch -- plain, annotated, augmented, unpacked, looped
 or through `setattr` -- to `None`, a call to the helper, or a name its own scope
 binds exactly once to such a call. A store it cannot resolve is reported, never
@@ -234,6 +234,25 @@ def test_no_failure_shape_latches_an_error_the_widget_would_read_as_healthy() ->
 
 def test_a_failure_carrying_a_message_latches_that_message_rather_than_its_class() -> None:
     latched = latched_load_error(RuntimeError("The model file is missing."))
+    assert latched == "The model file is missing."
+
+
+def test_a_whitespace_only_failure_message_latches_the_fallback_sentence() -> None:
+    assert latched_load_error(RuntimeError("   ")) == LOAD_FAILED_WITHOUT_A_MESSAGE
+
+
+def test_no_failure_shape_latches_a_message_the_toast_would_render_empty() -> None:
+    blank = [_SilentLoadError(), _SilentLoadError(" "), OSError("\n"), ValueError("\t \r\n")]
+    empty = [type(exc).__name__ for exc in blank if not latched_load_error(exc).strip()]
+    assert empty == [], (
+        f"these failures latch a blank `last_error`, which the Settings tab hands to "
+        f"`notifyError` verbatim and shows as a toast occupying the screen and saying "
+        f"nothing: {empty}"
+    )
+
+
+def test_a_padded_failure_message_latches_its_text_without_the_padding() -> None:
+    latched = latched_load_error(RuntimeError("  The model file is missing.\n"))
     assert latched == "The model file is missing."
 
 

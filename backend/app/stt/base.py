@@ -20,10 +20,10 @@ LOAD_FAILED_WITHOUT_A_MESSAGE = "The local engine failed to load and gave no rea
 def latched_load_error(exc: BaseException) -> str:
     """The sentence `GET /stt/local/status`'s `last_error` shows for a failed load.
 
-    Never empty and never a class name; an exception whose ``str()`` is empty
-    yields a fixed fallback sentence instead.
+    Never blank and never a class name; an exception whose ``str()`` is empty or
+    only whitespace yields a fixed fallback sentence instead.
     """
-    return str(exc) or LOAD_FAILED_WITHOUT_A_MESSAGE
+    return str(exc).strip() or LOAD_FAILED_WITHOUT_A_MESSAGE
 
 
 def normalize_detected_language(raw: str | None) -> str | None:
