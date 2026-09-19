@@ -343,6 +343,7 @@ async def test_transcribe_threads_no_speech_prob_onto_the_contract(tmp_path):
 
 
 _UNDER_BUDGET_GLOSSARY = ", ".join(["Tauri"] * 69)
+_NON_CANONICAL_GLOSSARY = ",".join(["Tauri"] * 69)
 _OVER_BUDGET_GLOSSARY = f"{_UNDER_BUDGET_GLOSSARY}, Pydantic"
 
 
@@ -366,9 +367,9 @@ async def test_groq_trims_an_over_budget_glossary_to_whole_terms(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_groq_leaves_a_glossary_under_the_budget_byte_identical(tmp_path):
-    """A value just under the budget must reach the SDK unchanged."""
-    provider = GroqWhisperSTTProvider(_settings(initial_prompt=_UNDER_BUDGET_GLOSSARY))
+async def test_groq_receives_the_glossary_in_canonical_comma_space_form(tmp_path):
+    """Whatever separators the user typed, one shape reaches the SDK."""
+    provider = GroqWhisperSTTProvider(_settings(initial_prompt=_NON_CANONICAL_GLOSSARY))
     provider._client = MagicMock()
     captured: dict = {}
 
@@ -379,6 +380,7 @@ async def test_groq_leaves_a_glossary_under_the_budget_byte_identical(tmp_path):
     with patch.object(GroqWhisperSTTProvider, "_call_groq", side_effect=_spy):
         await provider.transcribe(_wav(tmp_path), language="uk")
 
+    assert _NON_CANONICAL_GLOSSARY != _UNDER_BUDGET_GLOSSARY
     assert captured["prompt"] == _UNDER_BUDGET_GLOSSARY
 
 
@@ -400,3 +402,4 @@ async def test_groq_log_names_the_terms_the_budget_dropped(tmp_path, caplog):
 
     assert "-1terms" in full_log
     assert _OVER_BUDGET_GLOSSARY not in full_log
+    assert _UNDER_BUDGET_GLOSSARY not in full_log

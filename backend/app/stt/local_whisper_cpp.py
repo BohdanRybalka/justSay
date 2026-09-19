@@ -408,7 +408,7 @@ class WhisperCppServerSTTProvider(STTProvider):
         `audio_duration` is accepted for parity and ignored; `response_format`
         escalates to ``verbose_json`` only when ``language == "auto"`` (ADR 016).
         Every request carries `no_context`, so one dictation never conditions the
-        next, and the glossary rides as `prompt` when it survives its budget.
+        next, and `prompt` rides every request, empty when there is no glossary.
         """
         await asyncio.to_thread(self._get_model)
 
@@ -419,9 +419,8 @@ class WhisperCppServerSTTProvider(STTProvider):
             "language": language,
             "response_format": response_format,
             "no_context": "true",
+            "prompt": glossary or "",
         }
-        if glossary is not None:
-            data["prompt"] = glossary
 
         log.info(
             "whisper-server: transcribe model=%s file=%s lang=%s format=%s glossary=%s",

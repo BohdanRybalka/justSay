@@ -47,10 +47,9 @@ class STTSettings(BaseSettings):
         description=(
             "Custom vocabulary biasing transcription, stored whole up to 500 characters "
             "and never truncated on disk. Gemini receives all of it inside a fenced "
-            "glossary block; the Whisper-family engines receive only whole "
-            "comma-separated terms fitting a smaller send-time character budget, "
-            "because their prompt window is 224 tokens and a term cut mid-word biases "
-            "the decoder toward a spelling nobody typed."
+            "glossary block; the Whisper-family engines receive whole terms wherever "
+            "whole terms fit, otherwise whole words, and a character cut only inside a "
+            "run with no boundary in it -- at most 487 characters either way."
         ),
     )
 

@@ -700,6 +700,7 @@ async def test_local_empty_initial_prompt_passes_none_not_empty_string(sample_wa
 def _ukrainian_glossary(length: int) -> str:
     """A comma-separated Ukrainian glossary of exactly `length` characters."""
     term = "абревіатура"
+    assert length >= len(term), f"{length} cannot hold one {len(term)}-character term"
     terms = [term]
     while len(", ".join(terms)) + len(", ") + len(term) <= length:
         terms.append(term)
@@ -723,17 +724,21 @@ def test_glossary_text_strips_and_reads_a_blank_value_as_no_glossary():
     assert glossary_text("") is None
 
 
-def test_whisper_glossary_leaves_a_value_under_the_budget_byte_identical():
-    sent, dropped = whisper_glossary("Tauri, Pydantic, whisper.cpp")
+@pytest.mark.parametrize("raw", ["Tauri,Pydantic", "Tauri\nPydantic", "Tauri、Pydantic"])
+def test_whisper_glossary_normalises_every_separator_to_comma_space(raw):
+    """One shape reaches the wire whichever separator the user typed."""
+    sent, dropped = whisper_glossary(raw)
 
-    assert sent == "Tauri, Pydantic, whisper.cpp"
+    assert raw != "Tauri, Pydantic"
+    assert sent == "Tauri, Pydantic"
     assert dropped == 0
 
 
-def test_whisper_glossary_reads_a_newline_as_a_term_separator():
-    sent, dropped = whisper_glossary("Tauri\nPydantic\n")
+def test_whisper_glossary_reads_a_cjk_list_separator_as_a_term_separator():
+    """`、`, `，` and `；` make a Japanese or Chinese glossary a list of terms."""
+    sent, dropped = whisper_glossary("項目一、項目二，項目三；項目四")
 
-    assert sent == "Tauri, Pydantic"
+    assert sent == "項目一, 項目二, 項目三, 項目四"
     assert dropped == 0
 
 
@@ -768,12 +773,51 @@ def test_whisper_glossary_drops_a_straddling_term_whole_rather_than_cutting_it()
     assert "Pyd" in raw[:WHISPER_PROMPT_CHAR_BUDGET]
 
 
-def test_whisper_glossary_is_none_when_the_first_term_alone_exceeds_the_budget():
-    """A single over-long term is not a glossary, and a fragment of it is a wrong bias."""
-    raw = "Q" * (WHISPER_PROMPT_CHAR_BUDGET + 1)
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Tauri FastAPI " * 43,
+        "項目" * 300,
+        "項目一、" * 150,
+        "Q" * (WHISPER_PROMPT_CHAR_BUDGET + 1),
+        f"{'Q' * (WHISPER_PROMPT_CHAR_BUDGET + 1)}, Tauri",
+    ],
+)
+def test_whisper_glossary_never_empties_a_non_empty_glossary(raw):
+    """A glossary the user filled in must reach the decoder as something (ADR 081)."""
+    sent, _dropped = whisper_glossary(raw)
+
+    assert sent is not None
+    assert 0 < len(sent) <= WHISPER_PROMPT_CHAR_BUDGET
+
+
+def test_whisper_glossary_keeps_short_terms_after_an_over_long_one():
+    """An over-long term in the middle is skipped, not a wall the walk stops at."""
+    raw = f"{'Q' * (WHISPER_PROMPT_CHAR_BUDGET + 1)}, Tauri"
+
+    assert whisper_glossary(raw) == ("Tauri", 1)
+
+
+def test_whisper_glossary_cuts_at_a_word_boundary_when_no_whole_term_fits():
+    """A glossary written with spaces falls back to whole words, never characters."""
+    raw = "Tauri " * 100
     sent, dropped = whisper_glossary(raw)
 
-    assert sent is None
+    words = sent.split()
+    next_word = raw.split()[len(words)]
+
+    assert words == raw.split()[:len(words)]
+    assert len(sent) + len(" ") + len(next_word) > WHISPER_PROMPT_CHAR_BUDGET
+    assert sent != raw[:WHISPER_PROMPT_CHAR_BUDGET]
+    assert dropped == 1
+
+
+def test_whisper_glossary_cuts_characters_only_inside_a_run_with_no_boundary():
+    """A CJK glossary typed with no separator has nothing else to cut on."""
+    raw = "項目" * 300
+    sent, dropped = whisper_glossary(raw)
+
+    assert sent == raw[:WHISPER_PROMPT_CHAR_BUDGET]
     assert dropped == 1
 
 
@@ -814,9 +858,9 @@ async def test_local_log_names_the_terms_the_budget_dropped(sample_wav, caplog):
     assert raw not in full_log
 
 
-def test_the_whisper_send_budget_never_exceeds_the_runtime_stored_ceiling():
-    """A budget above the stored ceiling makes the trim dead code."""
-    assert WHISPER_PROMPT_CHAR_BUDGET <= _declared_max_length(STTSettings, "initial_prompt")
+def test_the_whisper_send_budget_leaves_room_below_the_stored_ceiling():
+    """A budget at or above the stored ceiling makes the trim dead code."""
+    assert WHISPER_PROMPT_CHAR_BUDGET < _declared_max_length(STTSettings, "initial_prompt")
 
 
 def test_the_persisted_and_runtime_glossary_ceilings_agree():

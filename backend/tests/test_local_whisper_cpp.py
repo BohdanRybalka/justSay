@@ -1412,15 +1412,17 @@ async def test_transcribe_sends_the_glossary_as_the_prompt_form_field(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_transcribe_omits_the_prompt_field_when_the_glossary_is_blank(monkeypatch, tmp_path):
-    """A blank glossary must not become `prompt=""` on the wire."""
+async def test_transcribe_always_sends_a_prompt_field_so_a_stale_glossary_cannot_survive(
+    monkeypatch, tmp_path
+):
+    """whisper-server reuses one params object, so an omitted field keeps the last one."""
     provider, _model_path = _make_provider(tmp_path, monkeypatch, initial_prompt="   \n ")
     captured: dict = {}
     _capture_post(monkeypatch, captured)
 
     await provider.transcribe(_wav(tmp_path), language="uk")
 
-    assert "prompt" not in captured["data"]
+    assert captured["data"]["prompt"] == ""
 
 
 @pytest.mark.asyncio

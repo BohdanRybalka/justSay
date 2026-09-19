@@ -13,7 +13,7 @@ from app.core.constants import GEMINI_TIMEOUT_SECONDS
 from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.stt.base import STTProvider, TranscriptionResult, clean_transcript_text
 from app.stt.config import STTSettings
-from app.stt.glossary import glossary_text
+from app.stt.glossary import glossary_summary, glossary_text
 from app.stt.languages import LANGUAGE_NAMES
 
 log = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ class GeminiSTTProvider(STTProvider):
             "size=%.1fKB lang=%s glossary=%s",
             self._settings.gemini_model, audio_path.name, mime_type,
             len(audio_bytes) / 1024, language,
-            f"{len(glossary)}chars" if glossary else "none",
+            glossary_summary(glossary, 0),
         )
 
         try:
