@@ -68,7 +68,7 @@ class GeminiSTTProvider(STTProvider):
             "size=%.1fKB lang=%s glossary=%s",
             self._settings.gemini_model, audio_path.name, mime_type,
             len(audio_bytes) / 1024, language,
-            glossary_summary(glossary, 0),
+            glossary_summary(glossary),
         )
 
         try:

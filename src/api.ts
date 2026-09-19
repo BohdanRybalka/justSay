@@ -548,9 +548,9 @@ export interface UserSettings {
   /** Custom vocabulary / glossary, plumbed into all four STT providers. Stored
    *  whole under a backend-enforced 500-character ceiling and never truncated on
    *  disk. Gemini receives the stored value whole; the Whisper-family engines
-   *  (faster-whisper, whisper.cpp, Groq) receive whole terms wherever whole terms
-   *  fit, otherwise whole words, and a character cut only inside a run with no
-   *  boundary in it — at most 487 characters either way. */
+   *  (faster-whisper, whisper.cpp, Groq) receive it unchanged when it fits their
+   *  send-time budget, and otherwise whole terms, then whole words, then a
+   *  character cut only inside a run with no boundary in it. */
   initial_prompt: string;
   /** Cloud API keys. Always returned as `MASKED_API_KEY` (set) or `""` (not set)
    *  by GET/PUT. Send the real key to set it; sending `MASKED_API_KEY` back is a

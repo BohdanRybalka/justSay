@@ -1445,7 +1445,7 @@ async def test_transcribe_sends_only_whole_terms_within_the_budget(monkeypatch, 
     assert sent == _OVER_BUDGET_HEAD
     assert "Pyd" not in sent
     assert len(sent) <= WHISPER_PROMPT_CHAR_BUDGET < len(_OVER_BUDGET_GLOSSARY)
-    assert "-1terms" in full_log
+    assert "481chars -10cut" in full_log
 
 
 @pytest.mark.asyncio

@@ -725,21 +725,32 @@ def test_glossary_text_strips_and_reads_a_blank_value_as_no_glossary():
 
 
 @pytest.mark.parametrize("raw", ["Tauri,Pydantic", "Tauri\nPydantic", "Tauri、Pydantic"])
-def test_whisper_glossary_normalises_every_separator_to_comma_space(raw):
-    """One shape reaches the wire whichever separator the user typed."""
-    sent, dropped = whisper_glossary(raw)
+def test_whisper_glossary_passes_a_fitting_value_through_byte_for_byte(raw):
+    """A glossary inside the budget reaches the decoder exactly as the user typed it.
 
-    assert raw != "Tauri, Pydantic"
-    assert sent == "Tauri, Pydantic"
-    assert dropped == 0
+    A prompt conditions punctuation as well as spelling, so rewriting separators
+    nobody asked to have rewritten is a change to the transcript.
+    """
+    sent, cut = whisper_glossary(raw)
+
+    assert sent == raw
+    assert sent != "Tauri, Pydantic"
+    assert cut == 0
 
 
-def test_whisper_glossary_reads_a_cjk_list_separator_as_a_term_separator():
-    """`、`, `，` and `；` make a Japanese or Chinese glossary a list of terms."""
-    sent, dropped = whisper_glossary("項目一、項目二，項目三；項目四")
+@pytest.mark.parametrize("separator", ["、", "，", "；", ";", ",", "\n"])
+def test_whisper_glossary_reads_every_list_separator_as_a_term_boundary(separator):
+    """An over-budget list is cut between terms, never inside one, on any separator.
 
-    assert sent == "項目一, 項目二, 項目三, 項目四"
-    assert dropped == 0
+    Observable only above the budget: below it the stored value is passed
+    through, so the separator class is what a trim chooses its boundary from.
+    """
+    raw = separator.join(["項目一"] * 200)
+    sent, cut = whisper_glossary(raw)
+
+    assert len(raw) > WHISPER_PROMPT_CHAR_BUDGET
+    assert cut > 0
+    assert all(term == "項目一" for term in sent.split(", "))
 
 
 def test_whisper_glossary_keeps_a_ceiling_length_ukrainian_glossary_within_the_budget():
@@ -768,7 +779,7 @@ def test_whisper_glossary_drops_a_straddling_term_whole_rather_than_cutting_it()
 
     assert len(head) <= WHISPER_PROMPT_CHAR_BUDGET < len(raw)
     assert sent == head
-    assert dropped == 1
+    assert dropped == 10
     assert "Pyd" not in sent
     assert "Pyd" in raw[:WHISPER_PROMPT_CHAR_BUDGET]
 
@@ -795,7 +806,7 @@ def test_whisper_glossary_keeps_short_terms_after_an_over_long_one():
     """An over-long term in the middle is skipped, not a wall the walk stops at."""
     raw = f"{'Q' * (WHISPER_PROMPT_CHAR_BUDGET + 1)}, Tauri"
 
-    assert whisper_glossary(raw) == ("Tauri", 1)
+    assert whisper_glossary(raw) == ("Tauri", 490)
 
 
 def test_whisper_glossary_cuts_at_a_word_boundary_when_no_whole_term_fits():
@@ -809,7 +820,7 @@ def test_whisper_glossary_cuts_at_a_word_boundary_when_no_whole_term_fits():
     assert words == raw.split()[:len(words)]
     assert len(sent) + len(" ") + len(next_word) > WHISPER_PROMPT_CHAR_BUDGET
     assert sent != raw[:WHISPER_PROMPT_CHAR_BUDGET]
-    assert dropped == 1
+    assert dropped == 114
 
 
 def test_whisper_glossary_cuts_characters_only_inside_a_run_with_no_boundary():
@@ -818,7 +829,7 @@ def test_whisper_glossary_cuts_characters_only_inside_a_run_with_no_boundary():
     sent, dropped = whisper_glossary(raw)
 
     assert sent == raw[:WHISPER_PROMPT_CHAR_BUDGET]
-    assert dropped == 1
+    assert dropped == 113
 
 
 def test_glossary_summary_reports_a_length_and_never_the_glossary_itself():
@@ -830,20 +841,22 @@ def test_glossary_summary_reports_a_length_and_never_the_glossary_itself():
     assert secret not in summary
 
 
-def test_glossary_summary_names_dropped_terms_only_when_the_budget_dropped_some():
-    """The whole-glossary-dropped case reads as a count, not as an absent glossary."""
-    assert glossary_summary("Tauri", 0) == "5chars"
-    assert glossary_summary("Tauri", 3) == "5chars -3terms"
-    assert glossary_summary(None, 0) == "none"
-    assert glossary_summary(None, 1) == "none -1terms"
+def test_glossary_summary_names_the_cut_only_when_the_budget_shortened_the_value():
+    """A cut is counted in characters, the one unit all three passes shorten by."""
+    assert glossary_summary("Tauri") == "5chars"
+    assert glossary_summary("Tauri", 3) == "5chars -3cut"
+    assert glossary_summary(None) == "none"
 
 
 @pytest.mark.asyncio
-async def test_local_log_names_the_terms_the_budget_dropped(sample_wav, caplog):
-    """A silent trim is a trim nobody can diagnose; faster-whisper says how much went."""
+async def test_local_log_names_the_characters_the_budget_cut(sample_wav, caplog):
+    """A silent trim is a trim nobody can diagnose; faster-whisper says how much went.
+
+    The expected numbers are literals rather than the helper's own output, so a
+    wrong count fails here instead of being forwarded.
+    """
     import logging
     raw = _ukrainian_glossary(500)
-    sent, dropped = whisper_glossary(raw)
     settings = STTSettings(mode=ProviderMode.LOCAL, initial_prompt=raw)
     provider = LocalSTTProvider(settings)
     _mock_local_model(provider)
@@ -853,8 +866,8 @@ async def test_local_log_names_the_terms_the_budget_dropped(sample_wav, caplog):
 
     full_log = "\n".join(record.getMessage() for record in caplog.records)
 
-    assert dropped > 0
-    assert f"-{dropped}terms" in full_log
+    assert len(raw) == 500
+    assert "479chars -21cut" in full_log
     assert raw not in full_log
 
 

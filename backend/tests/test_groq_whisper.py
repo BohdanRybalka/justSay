@@ -367,8 +367,8 @@ async def test_groq_trims_an_over_budget_glossary_to_whole_terms(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_groq_receives_the_glossary_in_canonical_comma_space_form(tmp_path):
-    """Whatever separators the user typed, one shape reaches the SDK."""
+async def test_groq_receives_a_fitting_glossary_exactly_as_it_was_stored(tmp_path):
+    """A value inside the budget reaches the SDK byte-for-byte, separators and all."""
     provider = GroqWhisperSTTProvider(_settings(initial_prompt=_NON_CANONICAL_GLOSSARY))
     provider._client = MagicMock()
     captured: dict = {}
@@ -381,11 +381,11 @@ async def test_groq_receives_the_glossary_in_canonical_comma_space_form(tmp_path
         await provider.transcribe(_wav(tmp_path), language="uk")
 
     assert _NON_CANONICAL_GLOSSARY != _UNDER_BUDGET_GLOSSARY
-    assert captured["prompt"] == _UNDER_BUDGET_GLOSSARY
+    assert captured["prompt"] == _NON_CANONICAL_GLOSSARY
 
 
 @pytest.mark.asyncio
-async def test_groq_log_names_the_terms_the_budget_dropped(tmp_path, caplog):
+async def test_groq_log_names_the_characters_the_budget_cut(tmp_path, caplog):
     """A silent trim is a trim nobody can diagnose; the count rides in the log line."""
     import logging
 
@@ -400,6 +400,6 @@ async def test_groq_log_names_the_terms_the_budget_dropped(tmp_path, caplog):
 
     full_log = "\n".join(record.getMessage() for record in caplog.records)
 
-    assert "-1terms" in full_log
+    assert "481chars -10cut" in full_log
     assert _OVER_BUDGET_GLOSSARY not in full_log
     assert _UNDER_BUDGET_GLOSSARY not in full_log
