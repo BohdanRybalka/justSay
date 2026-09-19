@@ -1052,6 +1052,20 @@ def fake_genai_modules(client_class) -> dict[str, ModuleType]:
     }
 
 
+def holding_no_frames(error: BaseException) -> BaseException:
+    """The same error with its frames dropped, so the failing call's locals die with it.
+
+    A traceback pins every frame of the call that raised, and a frame that
+    built a `google.genai` client pins that client until some later test's
+    `gc.collect()` reaches the cycle -- inside a running event loop, where
+    `AsyncClient.__del__` schedules `aclose()` and leaves that test a task.
+    """
+    error.__traceback__ = None
+    error.__context__ = None
+    error.__cause__ = None
+    return error
+
+
 @pytest.fixture
 def insert_history_rows():
     """Writes ``(id, ts, text)`` rows into the open history store exactly as given.

@@ -9,10 +9,12 @@ pass.
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import socket
 import sys
 import threading
+import weakref
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,6 +27,7 @@ from app.embeddings.cloud import CloudEmbeddingProvider
 from app.embeddings.config import EmbeddingSettings
 from app.embeddings.local import LocalEmbeddingProvider
 from app.stt.config import STTSettings
+from tests.conftest import holding_no_frames
 
 
 @pytest.fixture(autouse=True)
@@ -465,19 +468,21 @@ def test_an_embedding_request_that_is_never_answered_raises_a_timeout():
     port = listener.getsockname()[1]
 
     caught: list[BaseException] = []
+    client_ref: list = []
 
     def _call() -> None:
-        client = genai.Client(
+        with genai.Client(
             api_key="test-key",
             http_options=types.HttpOptions(
                 base_url=f"http://127.0.0.1:{port}",
                 timeout=_UNANSWERED_EMBED_TIMEOUT_MS,
             ),
-        )
-        try:
-            CloudEmbeddingProvider._call_embed(client, "text-embedding-004", "hello")
-        except BaseException as e:
-            caught.append(e)
+        ) as client:
+            client_ref.append(weakref.ref(client))
+            try:
+                CloudEmbeddingProvider._call_embed(client, "text-embedding-004", "hello")
+            except BaseException as e:
+                caught.append(holding_no_frames(e))
 
     worker = threading.Thread(target=_call, name="embed-timeout-probe", daemon=True)
     worker.start()
@@ -493,6 +498,13 @@ def test_an_embedding_request_that_is_never_answered_raises_a_timeout():
     assert isinstance(caught[0], httpx.ReadTimeout), (
         f"the call ended on {caught[0]!r} rather than a read timeout, so it proves "
         "nothing about the budget on a request that was accepted"
+    )
+    gc.collect()
+    assert client_ref and client_ref[0]() is None, (
+        "the timed-out client is still reachable after the probe returned -- the caught "
+        "error carries the traceback that pins the frame that built it, so the next test "
+        "to call gc.collect() inherits the aclose() task its finaliser schedules on "
+        "whatever event loop is running then"
     )
 
 
