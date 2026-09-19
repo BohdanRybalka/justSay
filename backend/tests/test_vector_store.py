@@ -208,6 +208,17 @@ def test_dim_guard_trigger_allows_matching_dim():
             "INSERT INTO entry_embeddings(entry_id, model, dim, created_ts) VALUES (?, ?, ?, ?)",
             (e.id, "text-embedding-004", 3, 1),
         )
+        stored = [
+            tuple(row)
+            for row in conn.execute(
+                "SELECT model, dim FROM entry_embeddings WHERE entry_id = ?", (e.id,)
+            )
+        ]
+
+    assert stored == [("text-embedding-004", 3)], (
+        "a row whose dim matches the vec table passes the guard trigger and is "
+        f"readable back at that dim: {stored}"
+    )
 
 
 
@@ -644,14 +655,33 @@ async def test_embed_entry_background_never_raises_on_provider_failure():
 
 
 @pytest.mark.asyncio
-async def test_embed_entry_background_skips_deleted_entry():
+async def test_embed_entry_background_skips_deleted_entry(caplog):
     """If the entry was deleted before the background task ran, insert is
     skipped instead of raising (rowid lookup returns None)."""
     fake = _FakeProvider("gemini/text-embedding-004")
-    with patch(
-        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+    with (
+        caplog.at_level(logging.WARNING, logger=vector_store.log.name),
+        patch(
+            "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+        ),
     ):
         await vector_store.embed_entry_background("does-not-exist", "text")
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        rows = conn.execute(
+            "SELECT entry_id FROM entry_embeddings WHERE entry_id = ?", ("does-not-exist",)
+        ).fetchall()
+
+    assert rows == [], (
+        "an entry deleted before its background embed ran must leave no row behind, "
+        f"rather than one pointing at an entry_id nothing resolves: {rows}"
+    )
+    assert not caplog.records, (
+        "the missing row must be skipped by the rowid guard, not swallowed by the "
+        "failure handler -- both leave the table empty, so only the absence of a "
+        f"warning tells them apart: {[record.getMessage() for record in caplog.records]}"
+    )
 
 
 

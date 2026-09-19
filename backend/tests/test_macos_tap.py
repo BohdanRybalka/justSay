@@ -433,7 +433,16 @@ async def test_a_helper_that_dies_mid_capture_leaves_a_wav_and_a_prompt_stop(tap
 
 
 def test_stop_is_safe_before_start(tap_settings):
-    MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap")).stop()
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+
+    with patch("app.audio.macos_tap.subprocess.Popen") as popen:
+        source.stop()
+        source.stop()
+
+    assert popen.call_args_list == [], (
+        "stopping a source that never started must not reach for a helper process "
+        f"to tear down: {popen.call_args_list}"
+    )
 
 
 def test_stop_terminates_the_helper(tap_settings):
