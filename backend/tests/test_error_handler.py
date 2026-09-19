@@ -5,7 +5,7 @@ hand-registered handler, so the registration itself is covered rather than
 assumed. The body is compared as a whole dict: a third key appearing later
 fails these tests instead of quietly reaching the frontend.
 
-Mutations actually run against `app/core/error_handler.py`, with the number of
+Mutations actually run against `app/api/error_handler.py`, with the number of
 tests in this file each one reddens:
 
 - `register_error_handlers` made a no-op -- six, every test but the
@@ -25,7 +25,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.core.error_handler import register_error_handlers
+from app.api.error_handler import register_error_handlers
 from app.core.errors import (
     ConfigurationError,
     JustSayError,
@@ -69,7 +69,7 @@ def test_the_diagnostic_reaches_the_log_and_never_the_wire(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     exc = ConfigurationError(_MESSAGE, diagnostic=_DIAGNOSTIC)
-    with caplog.at_level(logging.INFO, logger="app.core.error_handler"):
+    with caplog.at_level(logging.INFO, logger="app.api.error_handler"):
         with TestClient(_app_raising(exc)) as client:
             response = client.get("/boom")
     body = response.json()
