@@ -20,7 +20,7 @@ SPECS_DIR = REPO_ROOT / "specs"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 MULTIPLIER_RESTATEMENTS = (
     REPO_ROOT / ".claude" / "commands" / "fix.md",
-    REPO_ROOT / "specs" / "_templates" / "plan.md",
+    SPECS_DIR / "_templates" / "plan.md",
 )
 
 SCANNED_FROM = 188
@@ -34,6 +34,7 @@ TABLE_HEADER = ("Term", "Lines", "Source")
 REVIEW_ROUND_TERM = "Review rounds"
 LANDED_STATUSES = frozenset({"pr-open", "done"})
 SIZE_GATE_HEADING = "**The size gate — measured, not felt.**"
+RESTATEMENT_ANCHOR = "the same line names which row"
 
 _SPEC_DIR_RE = re.compile(r"^(\d{3})-")
 _SECTION_RE = re.compile(rf"^{re.escape(SECTION_HEADING)}\s*$", re.M)
@@ -42,7 +43,9 @@ _STATUS_RE = re.compile(r"^>?\s*\*\*Status:\*\*\s*([a-z-]+)", re.M)
 _LANDED_RE = re.compile(r"^Landed:.*?\d+.*?git diff --shortstat", re.M)
 _INT_RE = re.compile(r"\d+")
 _RESCORE_RE = re.compile(r"If the real diff lands more than (\d+(?:\.\d+)?)×")
-_RESTATED_RESCORE_RE = re.compile(r"(?:more than|over|past)\s+(\d+(?:\.\d+)?)×", re.I)
+_RESTATED_RESCORE_RE = re.compile(
+    rf"(?:more than|over|past)\s+(\d+(?:\.\d+)?)×[^\n]*?{RESTATEMENT_ANCHOR}", re.I
+)
 
 pytestmark = pytest.mark.skipif(
     not SPECS_DIR.is_dir(),
@@ -558,6 +561,31 @@ def test_claude_md_states_the_rescore_multiplier():
     )
 
 
+def test_the_restatement_pin_reads_its_own_sentence_and_no_other_multiplier():
+    """The restatement pin is anchored, so a second multiplier nearby is not its business.
+
+    Unanchored it read every `over N×` in the document, and a sentence quoting
+    ADR 080's measured ratios would fail the pin with nothing having drifted.
+    """
+    drifted_value = RESCORE_MULTIPLIER + 1
+    drifted = _restated_multipliers(
+        f"if the ratio is over {drifted_value:g}×, {RESTATEMENT_ANCHOR} was missing or wrong"
+    )
+    unrelated = _restated_multipliers(
+        "ADR 080 measures an underived estimate landing more than 2.54× the derived one, "
+        "and no multiplier separates the two ranges."
+    )
+
+    assert drifted == [drifted_value], (
+        f"the pin must read the multiplier out of the live wording; prose stating "
+        f"{drifted_value:g}× was read as {drifted}"
+    )
+    assert unrelated == [], (
+        f"a multiplier outside the re-score sentence is not the pin's business; this one "
+        f"was read as {unrelated} and would fail the pin with nothing having drifted"
+    )
+
+
 @pytest.mark.parametrize(
     "document",
     MULTIPLIER_RESTATEMENTS,
@@ -572,11 +600,7 @@ def test_a_restatement_of_the_rescore_multiplier_agrees_with_the_pin(document: P
     if not document.is_file():
         pytest.skip(f"{document.name} is gitignored and absent from clean checkouts")
 
-    drifted_value = RESCORE_MULTIPLIER + 1
     stated = _restated_multipliers(document.read_text(encoding="utf-8"))
-    drifted = _restated_multipliers(
-        f"if the ratio is over {drifted_value:g}× the estimate, the same line names the row"
-    )
 
     assert stated, (
         f"{document.name} restates the re-score multiplier and this pin found none there, "
@@ -585,8 +609,4 @@ def test_a_restatement_of_the_rescore_multiplier_agrees_with_the_pin(document: P
     assert set(stated) == {RESCORE_MULTIPLIER}, (
         f"{document.name} states {sorted(set(stated))} where RESCORE_MULTIPLIER is "
         f"{RESCORE_MULTIPLIER}; one of the two is stale and ADR 080 shows the arithmetic"
-    )
-    assert drifted == [drifted_value], (
-        f"the pin must read the multiplier out of the live wording; prose stating "
-        f"{drifted_value:g}× was read as {drifted}"
     )

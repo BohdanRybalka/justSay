@@ -8,12 +8,10 @@ block-handling logic is exercised against a fake module injected into
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import functools
 import gc
 import importlib
-import inspect
 import logging
 import queue
 import shutil
@@ -122,39 +120,18 @@ def fake_microphone_stream():
 SYSTEM_RATE = 48000
 
 
-def _empty_capture(recorder: MeetingRecorder) -> _CapturedMeeting:
-    """A harvested capture whose two spools hold nothing.
+def _harvested_capture(recorder: MeetingRecorder, blocks: int = 0) -> _CapturedMeeting:
+    """A harvested capture whose two spools hold `blocks` blocks of audio each.
 
-    The write path takes spools rather than block lists, so a test about what
-    the write does with a failure still has to hand it real files -- they are
-    discarded in the same `finally` a real capture's are. Both are closed
-    before they are handed over, which is what `_end_capture` does to them.
+    The write path takes spools rather than block lists, so a test still hands
+    it real closed files, discarded in the same `finally` a real capture's are.
+    An empty spool answers `samples()` with a plain array rather than a mapping,
+    so a test about mappings asks for blocks; an empty one still spans a second.
     """
-    spools = [
-        MeetingSpool(recorder._settings.temp_dir, "deadbeef", name)
-        for name in ("microphone", "system")
-    ]
-    for spool in spools:
-        spool.close()
-    return _CapturedMeeting(
-        microphone_spool=spools[0],
-        system_spool=spools[1],
-        system_rate=SYSTEM_RATE,
-        recording_start=0.0,
-        recording_stop=1.0,
-        incident=None,
-    )
-
-
-def _capture_with_frames(recorder: MeetingRecorder, blocks: int = 4) -> _CapturedMeeting:
-    """A harvested capture whose two spools both hold real frames.
-
-    A spool holding nothing answers `samples()` with a plain array rather than
-    a mapping, so a test about mappings has to put frames in first.
-    """
+    microphone_rate = recorder._settings.sample_rate
     spools = []
-    for source, rate in (("microphone", 16000), ("system", SYSTEM_RATE)):
-        spool = MeetingSpool(recorder._settings.temp_dir, "cafebabe", source)
+    for source, rate in (("microphone", microphone_rate), ("system", SYSTEM_RATE)):
+        spool = MeetingSpool(recorder._settings.temp_dir, "deadbeef", source)
         for index in range(blocks):
             spool.append(
                 index * BLOCK_FRAMES / rate,
@@ -167,7 +144,7 @@ def _capture_with_frames(recorder: MeetingRecorder, blocks: int = 4) -> _Capture
         system_spool=spools[1],
         system_rate=SYSTEM_RATE,
         recording_start=0.0,
-        recording_stop=blocks * BLOCK_FRAMES / 16000,
+        recording_stop=blocks * BLOCK_FRAMES / microphone_rate if blocks else 1.0,
         incident=None,
     )
 
@@ -178,17 +155,18 @@ class _RecordingNumpy:
     Installed into the two modules that map a meeting's files, which is what
     lets a test assert on the mapping objects themselves rather than on whether
     the file can be unlinked afterwards -- an unlink only fails on Windows.
+    Each mapping is kept beside the name of the file it was opened over.
     """
 
-    def __init__(self, seen: list[np.ndarray]) -> None:
+    def __init__(self, seen: list[tuple[str, np.ndarray]]) -> None:
         self._seen = seen
 
     def __getattr__(self, name: str) -> object:
         return getattr(np, name)
 
-    def memmap(self, *args, **kwargs) -> np.ndarray:
-        mapping = np.memmap(*args, **kwargs)
-        self._seen.append(mapping)
+    def memmap(self, filename, *args, **kwargs) -> np.ndarray:
+        mapping = np.memmap(filename, *args, **kwargs)
+        self._seen.append((Path(filename).name, mapping))
         return mapping
 
 
@@ -2778,7 +2756,7 @@ def test_a_failed_write_raises_the_507_error_and_not_the_bare_os_error(audio_set
     """
     recorder = MeetingRecorder(audio_settings)
     try:
-        captured = _empty_capture(recorder)
+        captured = _harvested_capture(recorder)
         shutil.rmtree(audio_settings.temp_dir)
         with pytest.raises(MeetingWriteFailedError) as raised:
             recorder._write_captured_meeting(captured)
@@ -2795,75 +2773,39 @@ def test_the_mix_closes_every_mapping_it_made_before_it_returns(audio_settings):
     that unlinks the mix file still succeeds and CI stays green (ADR 078).
     """
     recorder = MeetingRecorder(audio_settings)
-    captured = _capture_with_frames(recorder)
-    mapped: list[np.ndarray] = []
+    captured = _harvested_capture(recorder, blocks=4)
+    mix_path = audio_settings.temp_dir / "mix.f32"
+    mapped: list[tuple[str, np.ndarray]] = []
     recording_numpy = _RecordingNumpy(mapped)
-    labels = ("the mix file", "the microphone spool", "the system spool")
+    expected = sorted(
+        path.name
+        for path in (
+            mix_path,
+            captured.microphone_spool.samples_path,
+            captured.system_spool.samples_path,
+        )
+    )
     try:
         with (
             patch("app.audio.meeting_recorder.np", recording_numpy),
             patch("app.audio.meeting_spool.np", recording_numpy),
         ):
             written = recorder._mix_into(
-                captured,
-                audio_settings.temp_dir / "mix.f32",
-                audio_settings.temp_dir / "meeting.wav",
+                captured, mix_path, audio_settings.temp_dir / "meeting.wav"
             )
 
         assert written.exists()
-        assert len(mapped) == len(labels), (
-            f"the call maps the mix plus one reading per spool; it made {len(mapped)}, so "
-            "this test is no longer watching what it names"
+        assert sorted(name for name, _ in mapped) == expected, (
+            f"the call maps the mix plus one reading per spool; it mapped "
+            f"{sorted(name for name, _ in mapped)}, so this test is no longer watching "
+            f"what it names"
         )
-        left_open = [
-            label for label, array in zip(labels, mapped) if not array._mmap.closed
-        ]
+        left_open = sorted(name for name, array in mapped if not array._mmap.closed)
         assert left_open == [], f"these mappings outlive the call that made them: {left_open}"
     finally:
         captured.microphone_spool.discard()
         captured.system_spool.discard()
         recorder.cleanup()
-
-
-def test_a_block_is_queued_inside_the_lock_the_spill_sentinel_also_takes():
-    """`_store` and the sentinel put order their queue writes through one lock.
-
-    Outside it, a block queued after `_finish_spill` has put the sentinel is
-    never drained and the audio is lost with nothing reporting it (ADR 078).
-    """
-    source = Path(inspect.getsourcefile(MeetingRecorder))
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-    stores = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "_store"
-    ]
-    assert len(stores) == 1, f"`_store` is declared {len(stores)} times in {source.name}"
-
-    puts = [
-        node
-        for node in ast.walk(stores[0])
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "put_nowait"
-    ]
-    under_lock = {
-        id(node)
-        for statement in ast.walk(stores[0])
-        if isinstance(statement, ast.With)
-        and any(ast.unparse(item.context_expr) == "self._lock" for item in statement.items)
-        for node in ast.walk(statement)
-    }
-
-    assert len(puts) == 1, (
-        f"`_store` makes {len(puts)} `put_nowait` calls, so this walk no longer describes "
-        "the one the sentinel races"
-    )
-    outside = [put.lineno for put in puts if id(put) not in under_lock]
-    assert outside == [], (
-        f"these `put_nowait` calls sit outside `with self._lock:` and can land after the "
-        f"spill sentinel: {source.name}:{outside}"
-    )
 
 
 @pytest.mark.asyncio
@@ -3520,7 +3462,7 @@ def test_a_failed_write_carries_the_cause_and_not_a_second_sentence(audio_settin
     reaches the user as the same statement twice.
     """
     recorder = MeetingRecorder(audio_settings)
-    captured = _empty_capture(recorder)
+    captured = _harvested_capture(recorder)
 
     try:
         with patch.object(

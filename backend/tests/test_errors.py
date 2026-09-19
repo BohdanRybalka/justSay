@@ -1,13 +1,16 @@
 """The hierarchy's shape, pinned where prose cannot hold it.
 
-Seven properties live here: the base is `Exception` and not `RuntimeError`,
-the three subclasses are members of it, the base itself cannot be raised, no
-subclass answers the base's 500 sentinel, and no two subclasses share a `code`.
-The last two are what a step-2 migrator relies on when adding a fourth class —
-a forgotten `status_code` override and a copy-pasted `code` both turn red here
-rather than in a response nobody inspects. The third closes the shortcut those
-two leave open: a bare `JustSayError` would otherwise answer the sentinel and
-look like a refusal at 500.
+Seven properties live here. Five are module-scoped: the base is `Exception`
+and not `RuntimeError`, the three subclasses are members of it, the base itself
+cannot be raised, no subclass answers the base's 500 sentinel, and no two
+subclasses share a `code`. Two are repo-wide: no refusal declared anywhere in
+the app answers that sentinel, and none of them derives from `RuntimeError`.
+The sentinel and the `code` rules are what a step-2 migrator relies on when
+adding a fourth class — a forgotten `status_code` override and a copy-pasted
+`code` both turn red here rather than in a response nobody inspects. The base
+being unraisable closes the shortcut those two leave open: a bare
+`JustSayError` would otherwise answer the sentinel and look like a refusal
+at 500.
 
 Mutations actually run against `app/core/errors.py`, with the number of tests
 each one reddens across this file and `tests/test_error_handler.py` together:
@@ -23,14 +26,14 @@ each one reddens across this file and `tests/test_error_handler.py` together:
 - the `type(self) is JustSayError` guard dropped from `__init__` -- two tests,
   one here and one in `tests/test_error_handler.py`
 
-The sixth and seventh properties are the repo-wide ones, and they are the only
-thing holding a hierarchy whose classes are declared in the package that raises
-them rather than in `app/core/errors.py` (ADR 060). The walk imports the modules
-the source walk below found an exception class in and then reaches every
-subclass of `JustSayError`, so a package-local class is covered by exactly the
-three rules the module-scoped tests above apply to the three base ones, and the
-two halves describe the same set by construction rather than by whatever else
-the test process happened to import.
+The two repo-wide properties are the only thing holding a hierarchy whose
+classes are declared in the package that raises them rather than in
+`app/core/errors.py` (ADR 060). The walk imports the modules the source walk
+below found an exception class in and then reaches every subclass of
+`JustSayError`, so a package-local class is covered by exactly the three rules
+the module-scoped tests above apply to the three base ones, and the two halves
+describe the same set by construction rather than by whatever else the test
+process happened to import.
 Mutation run: `SessionMismatchError.code` set to `"not_ready"` -- one test.
 """
 
