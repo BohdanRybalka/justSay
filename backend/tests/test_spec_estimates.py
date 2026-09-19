@@ -33,6 +33,7 @@ SIZE_GATE_HEADING = "**The size gate — measured, not felt.**"
 
 _SPEC_DIR_RE = re.compile(r"^(\d{3})-")
 _SECTION_RE = re.compile(rf"^{re.escape(SECTION_HEADING)}\s*$", re.M)
+_NEAR_SECTION_RE = re.compile(r"^#{1,6}[ 	]*size estimate.*$", re.M | re.I)
 _STATUS_RE = re.compile(r"^>?\s*\*\*Status:\*\*\s*([a-z-]+)", re.M)
 _LANDED_RE = re.compile(r"^Landed:.*?\d+.*?git diff --shortstat", re.M)
 _INT_RE = re.compile(r"\d+")
@@ -132,12 +133,16 @@ def _first_int(cell: str) -> int | None:
 
 
 def _missing_section_offenders(label: str, text: str) -> list[str]:
-    if _size_estimate_block(text) is None:
-        return [
-            f"{label}: no `{SECTION_HEADING}` heading. An estimate is a table, not a number "
-            "(CLAUDE.md -> Workflow -> Routing)."
-        ]
-    return []
+    if _size_estimate_block(text) is not None:
+        return []
+    near = _NEAR_SECTION_RE.search(text)
+    reason = "An estimate is a table, not a number (CLAUDE.md -> Workflow -> Routing)."
+    if near is None:
+        return [f"{label}: no `{SECTION_HEADING}` heading. {reason}"]
+    return [
+        f"{label}: found `{near.group().strip()}`, but the heading must read exactly "
+        f"`{SECTION_HEADING}` -- two hashes, nothing after it. {reason}"
+    ]
 
 
 def _table_shape_offenders(label: str, text: str) -> list[str]:
@@ -148,9 +153,10 @@ def _table_shape_offenders(label: str, text: str) -> list[str]:
     offenders = []
     header = " | ".join(TABLE_HEADER)
     if not rows or rows[0] != TABLE_HEADER:
+        found = f"`| {' | '.join(rows[0])} |`" if rows else "no table at all"
         offenders.append(
             f"{label}: the `{SECTION_HEADING}` table must open with `| {header} |`, "
-            f"found {rows[0] if rows else 'no table at all'}."
+            f"found {found}."
         )
     body = _body_rows(block)
     if len(body) < MIN_TABLE_ROWS:
@@ -485,7 +491,38 @@ def test_a_wrong_table_header_fails_and_the_standard_header_passes(tmp_path, mon
     )
 
     assert failed and all("must open with" in message for message in failed)
+    assert all("`| Term | Lines | Where |`" in message for message in failed), (
+        "the header a spec actually wrote must be echoed as a markdown row, not as a repr"
+    )
     assert one_row and all("non-total rows" in message for message in one_row)
+    assert not passed
+
+
+def test_a_near_miss_heading_is_quoted_back_and_a_bare_absence_is_not(tmp_path, monkeypatch):
+    base = _sample(_SOURCED_ROW, _REVIEW_ROW)
+    decorated = _offenders_over(
+        tmp_path,
+        monkeypatch,
+        _missing_section_offenders,
+        base.replace(SECTION_HEADING, f"{SECTION_HEADING} (tracked lines only)", 1),
+    )
+    demoted = _offenders_over(
+        tmp_path,
+        monkeypatch,
+        _missing_section_offenders,
+        base.replace(SECTION_HEADING, "### Size estimate", 1),
+    )
+    absent = _offenders_over(
+        tmp_path,
+        monkeypatch,
+        _missing_section_offenders,
+        base.replace(SECTION_HEADING, "## Working notes", 1),
+    )
+    passed = _offenders_over(tmp_path, monkeypatch, _missing_section_offenders, base)
+
+    assert decorated and all("(tracked lines only)" in message for message in decorated)
+    assert demoted and all("`### Size estimate`" in message for message in demoted)
+    assert absent and all(f"no `{SECTION_HEADING}` heading" in message for message in absent)
     assert not passed
 
 
