@@ -2,10 +2,10 @@
 
 Fails a missing `## Size estimate` section, a sourceless or non-integer row, a missing
 `Review rounds` row, rows that do not sum, a landed file carrying no `Landed:` line in
-that section, and a CLAUDE.md size-gate section stating a multiplier other than
-RESCORE_MULTIPLIER (ADR 080).
+that section, and CLAUDE.md or a document restating its re-score multiplier stating a
+value other than RESCORE_MULTIPLIER (ADR 080).
 
-specs/ and CLAUDE.md are gitignored, so this gate runs locally only.
+specs/, .claude/ and CLAUDE.md are gitignored, so this gate runs locally only.
 """
 
 from __future__ import annotations
@@ -18,6 +18,10 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SPECS_DIR = REPO_ROOT / "specs"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
+MULTIPLIER_RESTATEMENTS = (
+    REPO_ROOT / ".claude" / "commands" / "fix.md",
+    REPO_ROOT / "specs" / "_templates" / "plan.md",
+)
 
 SCANNED_FROM = 188
 RESCORE_MULTIPLIER = 2.0
@@ -38,6 +42,7 @@ _STATUS_RE = re.compile(r"^>?\s*\*\*Status:\*\*\s*([a-z-]+)", re.M)
 _LANDED_RE = re.compile(r"^Landed:.*?\d+.*?git diff --shortstat", re.M)
 _INT_RE = re.compile(r"\d+")
 _RESCORE_RE = re.compile(r"If the real diff lands more than (\d+(?:\.\d+)?)×")
+_RESTATED_RESCORE_RE = re.compile(r"(?:more than|over|past)\s+(\d+(?:\.\d+)?)×", re.I)
 
 pytestmark = pytest.mark.skipif(
     not SPECS_DIR.is_dir(),
@@ -270,6 +275,11 @@ def _stated_multiplier(text: str) -> float | None:
     end = section.find("\n### ")
     match = _RESCORE_RE.search(section if end == -1 else section[:end])
     return float(match.group(1)) if match else None
+
+
+def _restated_multipliers(text: str) -> list[float]:
+    """Every re-score multiplier a document restates in prose, in reading order."""
+    return [float(value) for value in _RESTATED_RESCORE_RE.findall(text)]
 
 
 _SOURCED_ROW = "| `backend/app/foo.py` | 60 | `foo.py:12-31` rewritten, counted twice |"
@@ -544,5 +554,39 @@ def test_claude_md_states_the_rescore_multiplier():
     )
     assert drifted == drifted_value, (
         f"the pin must read the multiplier out of the live wording; a section stating "
+        f"{drifted_value:g}× was read as {drifted}"
+    )
+
+
+@pytest.mark.parametrize(
+    "document",
+    MULTIPLIER_RESTATEMENTS,
+    ids=("commands-fix", "templates-plan"),
+)
+def test_a_restatement_of_the_rescore_multiplier_agrees_with_the_pin(document: Path):
+    """The number lives in three documents, and the two copies are read rather than trusted.
+
+    A copy drifting from CLAUDE.md sends the same landed ratio to two verdicts
+    depending on which document the reader opened.
+    """
+    if not document.is_file():
+        pytest.skip(f"{document.name} is gitignored and absent from clean checkouts")
+
+    drifted_value = RESCORE_MULTIPLIER + 1
+    stated = _restated_multipliers(document.read_text(encoding="utf-8"))
+    drifted = _restated_multipliers(
+        f"if the ratio is over {drifted_value:g}× the estimate, the same line names the row"
+    )
+
+    assert stated, (
+        f"{document.name} restates the re-score multiplier and this pin found none there, "
+        "so the wording moved and the pin now watches nothing"
+    )
+    assert set(stated) == {RESCORE_MULTIPLIER}, (
+        f"{document.name} states {sorted(set(stated))} where RESCORE_MULTIPLIER is "
+        f"{RESCORE_MULTIPLIER}; one of the two is stale and ADR 080 shows the arithmetic"
+    )
+    assert drifted == [drifted_value], (
+        f"the pin must read the multiplier out of the live wording; prose stating "
         f"{drifted_value:g}× was read as {drifted}"
     )

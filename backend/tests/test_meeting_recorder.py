@@ -8,10 +8,12 @@ block-handling logic is exercised against a fake module injected into
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import functools
 import gc
 import importlib
+import inspect
 import logging
 import queue
 import shutil
@@ -142,6 +144,52 @@ def _empty_capture(recorder: MeetingRecorder) -> _CapturedMeeting:
         recording_stop=1.0,
         incident=None,
     )
+
+
+def _capture_with_frames(recorder: MeetingRecorder, blocks: int = 4) -> _CapturedMeeting:
+    """A harvested capture whose two spools both hold real frames.
+
+    A spool holding nothing answers `samples()` with a plain array rather than
+    a mapping, so a test about mappings has to put frames in first.
+    """
+    spools = []
+    for source, rate in (("microphone", 16000), ("system", SYSTEM_RATE)):
+        spool = MeetingSpool(recorder._settings.temp_dir, "cafebabe", source)
+        for index in range(blocks):
+            spool.append(
+                index * BLOCK_FRAMES / rate,
+                np.full(BLOCK_FRAMES, 0.2, dtype=np.float32),
+            )
+        spool.close()
+        spools.append(spool)
+    return _CapturedMeeting(
+        microphone_spool=spools[0],
+        system_spool=spools[1],
+        system_rate=SYSTEM_RATE,
+        recording_start=0.0,
+        recording_stop=blocks * BLOCK_FRAMES / 16000,
+        incident=None,
+    )
+
+
+class _RecordingNumpy:
+    """`numpy` with `memmap` wrapped so a caller keeps every mapping it made.
+
+    Installed into the two modules that map a meeting's files, which is what
+    lets a test assert on the mapping objects themselves rather than on whether
+    the file can be unlinked afterwards -- an unlink only fails on Windows.
+    """
+
+    def __init__(self, seen: list[np.ndarray]) -> None:
+        self._seen = seen
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(np, name)
+
+    def memmap(self, *args, **kwargs) -> np.ndarray:
+        mapping = np.memmap(*args, **kwargs)
+        self._seen.append(mapping)
+        return mapping
 
 
 def _deliver_over_a_real_span(
@@ -2738,6 +2786,84 @@ def test_a_failed_write_raises_the_507_error_and_not_the_bare_os_error(audio_set
         assert not isinstance(raised.value, MeetingCaptureAbortedError)
     finally:
         recorder.cleanup()
+
+
+def test_the_mix_closes_every_mapping_it_made_before_it_returns(audio_settings):
+    """The mix file and both spool readings are mappings, and all three are released.
+
+    Letting one outlive the call leaks the pages on macOS, where the `finally`
+    that unlinks the mix file still succeeds and CI stays green (ADR 078).
+    """
+    recorder = MeetingRecorder(audio_settings)
+    captured = _capture_with_frames(recorder)
+    mapped: list[np.ndarray] = []
+    recording_numpy = _RecordingNumpy(mapped)
+    labels = ("the mix file", "the microphone spool", "the system spool")
+    try:
+        with (
+            patch("app.audio.meeting_recorder.np", recording_numpy),
+            patch("app.audio.meeting_spool.np", recording_numpy),
+        ):
+            written = recorder._mix_into(
+                captured,
+                audio_settings.temp_dir / "mix.f32",
+                audio_settings.temp_dir / "meeting.wav",
+            )
+
+        assert written.exists()
+        assert len(mapped) == len(labels), (
+            f"the call maps the mix plus one reading per spool; it made {len(mapped)}, so "
+            "this test is no longer watching what it names"
+        )
+        left_open = [
+            label for label, array in zip(labels, mapped) if not array._mmap.closed
+        ]
+        assert left_open == [], f"these mappings outlive the call that made them: {left_open}"
+    finally:
+        captured.microphone_spool.discard()
+        captured.system_spool.discard()
+        recorder.cleanup()
+
+
+def test_a_block_is_queued_inside_the_lock_the_spill_sentinel_also_takes():
+    """`_store` and the sentinel put order their queue writes through one lock.
+
+    Outside it, a block queued after `_finish_spill` has put the sentinel is
+    never drained and the audio is lost with nothing reporting it (ADR 078).
+    """
+    source = Path(inspect.getsourcefile(MeetingRecorder))
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    stores = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_store"
+    ]
+    assert len(stores) == 1, f"`_store` is declared {len(stores)} times in {source.name}"
+
+    puts = [
+        node
+        for node in ast.walk(stores[0])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "put_nowait"
+    ]
+    under_lock = {
+        id(node)
+        for statement in ast.walk(stores[0])
+        if isinstance(statement, ast.With)
+        and any(ast.unparse(item.context_expr) == "self._lock" for item in statement.items)
+        for node in ast.walk(statement)
+    }
+
+    assert len(puts) == 1, (
+        f"`_store` makes {len(puts)} `put_nowait` calls, so this walk no longer describes "
+        "the one the sentinel races"
+    )
+    outside = [put.lineno for put in puts if id(put) not in under_lock]
+    assert outside == [], (
+        f"these `put_nowait` calls sit outside `with self._lock:` and can land after the "
+        f"spill sentinel: {source.name}:{outside}"
+    )
 
 
 @pytest.mark.asyncio
