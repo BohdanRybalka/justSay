@@ -18,6 +18,7 @@ from app.stt.base import (
     normalize_detected_language,
 )
 from app.stt.config import STTSettings
+from app.stt.glossary import glossary_summary, whisper_glossary
 
 log = logging.getLogger(__name__)
 
@@ -54,11 +55,11 @@ class GroqWhisperSTTProvider(STTProvider):
         """Send audio file to Groq Whisper API."""
         client = self._get_client()
         size_kb = audio_path.stat().st_size / 1024
-        prompt = self._settings.initial_prompt.strip() or None
+        prompt, dropped_terms = whisper_glossary(self._settings.initial_prompt)
         log.info(
             "Groq Whisper: POST transcriptions model=%s file=%s size=%.1fKB lang=%s glossary=%s",
             self._settings.groq_whisper_model, audio_path.name, size_kb, language,
-            f"{len(prompt)}chars" if prompt else "none",
+            glossary_summary(prompt, dropped_terms),
         )
 
         try:

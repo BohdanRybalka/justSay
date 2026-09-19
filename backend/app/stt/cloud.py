@@ -13,6 +13,7 @@ from app.core.constants import GEMINI_TIMEOUT_SECONDS
 from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.stt.base import STTProvider, TranscriptionResult, clean_transcript_text
 from app.stt.config import STTSettings
+from app.stt.glossary import glossary_text
 from app.stt.languages import LANGUAGE_NAMES
 
 log = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ class GeminiSTTProvider(STTProvider):
         client = self._get_client()
         audio_bytes = audio_path.read_bytes()
 
-        glossary = self._settings.initial_prompt.strip() or None
+        glossary = glossary_text(self._settings.initial_prompt)
         prompt = self._build_prompt(language, glossary)
         mime_type = mime_for_extension(audio_path.name)
         log.info(

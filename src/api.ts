@@ -545,9 +545,11 @@ export interface UserSettings {
   /** Audio duration (seconds) at or below which the pipeline picks Groq Whisper
    *  in CLOUD mode; longer clips route to Gemini. */
   cloud_routing_threshold: number;
-  /** Custom vocabulary / glossary. Plumbed into every STT provider — see the
-   *  Python `STTSettings.initial_prompt` docstring for per-provider semantics.
-   *  Backend enforces a 500-char ceiling. */
+  /** Custom vocabulary / glossary, plumbed into all four STT providers. Stored
+   *  whole under a backend-enforced 500-character ceiling and never truncated on
+   *  disk. Gemini receives the stored value whole; the Whisper-family engines
+   *  (faster-whisper, whisper.cpp, Groq) receive only whole comma-separated terms
+   *  fitting a smaller send-time budget, and the rest are dropped. */
   initial_prompt: string;
   /** Cloud API keys. Always returned as `MASKED_API_KEY` (set) or `""` (not set)
    *  by GET/PUT. Send the real key to set it; sending `MASKED_API_KEY` back is a

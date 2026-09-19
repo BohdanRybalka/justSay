@@ -29,6 +29,7 @@ from app.stt.base import (
     normalize_detected_language,
 )
 from app.stt.config import STTSettings
+from app.stt.glossary import glossary_summary, whisper_glossary
 from app.stt.local_whisper_cpp_cmd import (
     binary_not_found_message,
     build_server_argv,
@@ -406,16 +407,26 @@ class WhisperCppServerSTTProvider(STTProvider):
 
         `audio_duration` is accepted for parity and ignored; `response_format`
         escalates to ``verbose_json`` only when ``language == "auto"`` (ADR 016).
+        Every request carries `no_context`, so one dictation never conditions the
+        next, and the glossary rides as `prompt` when it survives its budget.
         """
         await asyncio.to_thread(self._get_model)
 
         url = f"http://{_HOST}:{_PORT}/inference"
         response_format = "verbose_json" if language == "auto" else "json"
-        data = {"language": language, "response_format": response_format}
+        glossary, dropped_terms = whisper_glossary(self._settings.initial_prompt)
+        data = {
+            "language": language,
+            "response_format": response_format,
+            "no_context": "true",
+        }
+        if glossary is not None:
+            data["prompt"] = glossary
 
         log.info(
-            "whisper-server: transcribe model=%s file=%s lang=%s format=%s",
+            "whisper-server: transcribe model=%s file=%s lang=%s format=%s glossary=%s",
             self._settings.whisper_model_size, audio_path.name, language, response_format,
+            glossary_summary(glossary, dropped_terms),
         )
 
         def _post() -> tuple[str, str | None, float | None]:
