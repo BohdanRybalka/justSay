@@ -41,24 +41,23 @@ _INSTALL_UNSUPPORTED_WHEN_FROZEN = (
 
 
 def _local_packages_cannot_be_installed() -> bool:
-    """Whether this build has an interpreter a pip install could run under.
+    """``True`` when this build has no interpreter a pip install could run under.
 
-    A PyInstaller bundle's ``sys.executable`` is the sidecar rather than
-    Python, so handing it ``-m pip`` reaches the sidecar's own argument parser.
+    ``True`` exactly in a PyInstaller bundle, whose ``sys.executable`` is the
+    sidecar rather than Python.
     """
     return bool(getattr(sys, "frozen", False))
 
 
-def _setup_failure_is_permanent(setup_error: str) -> bool:
-    """Whether no retry could ever clear this setup failure.
+def _install_refusal_still_applies(setup_error: str | None, installed: bool) -> bool:
+    """Whether ``setup_error`` is the refusal the install paths give right now.
 
-    A permanent one is the cause of the load failure that follows it, so it
-    outranks that load failure rather than being replaced by it.
+    ``False`` for any other latched sentence, and for every state where the
+    dependency is already present (ADR 083).
     """
-    return (
-        setup_error == _INSTALL_UNSUPPORTED_WHEN_FROZEN
-        and _local_packages_cannot_be_installed()
-    )
+    if setup_error is None or installed:
+        return False
+    return setup_error == _local_install_refusal()
 
 
 def _install_failure_sentence(exit_code: int) -> str:
@@ -137,9 +136,7 @@ def check_status(stt_settings: STTSettings) -> LocalSTTStatus:
 
     provider_error = routing.get_local_load_error(stt_settings)
     setup_error = _prewarm_error
-    if setup_error is not None and _setup_failure_is_permanent(setup_error):
-        last_error = load_error_sentence(setup_error, _SETUP_GAVE_NO_REASON)
-    elif provider_error is not None:
+    if provider_error is not None and not _install_refusal_still_applies(setup_error, installed):
         last_error = load_error_sentence(provider_error)
     elif setup_error is not None:
         last_error = load_error_sentence(setup_error, _SETUP_GAVE_NO_REASON)
@@ -388,6 +385,17 @@ def _local_install_refusal() -> str | None:
     return None
 
 
+def _clear_disproved_install_refusal() -> None:
+    """Drop a latched refusal whose dependency the caller has just found present.
+
+    Only a refusal is dropped; an install failure or a load failure latched by
+    another producer is left for that producer to clear.
+    """
+    global _prewarm_error
+    if _prewarm_error is not None and _prewarm_error == _local_install_refusal():
+        _prewarm_error = None
+
+
 async def install_local_packages() -> AsyncIterator[str]:
     """Install local STT dependencies via pip with SSE progress.
 
@@ -401,6 +409,7 @@ async def install_local_packages() -> AsyncIterator[str]:
         return
 
     if _check_package_installed():
+        _clear_disproved_install_refusal()
         yield sse_event("done", {"status": "already_installed"})
         return
 
@@ -430,10 +439,9 @@ async def install_local_packages() -> AsyncIterator[str]:
 def _run_pip_install() -> tuple[int, str]:
     """Run pip install .[local] synchronously. Returns (exit_code, output).
 
-    One extras name for every platform with a pip path; the accelerated ones
-    resolve a bundled binary and never reach here. Raises
-    ``ResourceUnavailableError`` on a build with no interpreter to install into,
-    rather than reporting the sidecar's own exit code as a pip failure.
+    One extras name for every platform with a pip path. Callers must have
+    cleared `_local_install_refusal()` first; raises ``ResourceUnavailableError``
+    when they have not.
     """
     if _local_packages_cannot_be_installed():
         raise ResourceUnavailableError(_INSTALL_UNSUPPORTED_WHEN_FROZEN)

@@ -577,6 +577,79 @@ def test_check_status_still_prefers_the_load_error_over_a_retryable_setup_failur
     assert check_status(STTSettings()).last_error == "CUDA out of memory"
 
 
+def test_check_status_prefers_the_missing_binary_refusal_over_the_stale_load_error(monkeypatch):
+    """The whisper.cpp refusal is the second arm of the same defect as the frozen one.
+
+    It returns before the provider is touched, so a load error latched by an
+    earlier attempt is the older fact and must not hide the actionable sentence.
+    """
+    _stub_whisper_cpp_server_kind(monkeypatch)
+    monkeypatch.delenv("JUSTSAY_WHISPER_CPP_BIN", raising=False)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    monkeypatch.setattr(local_setup, "_detect_gpu", lambda: (False, None, "none"))
+    monkeypatch.setattr(local_setup, "is_macos_arm64", lambda: False)
+    monkeypatch.setattr("app.stt.routing.get_local_load_error", lambda s: "Model download failed")
+    local_setup._prewarm_error = local_whisper_cpp_cmd.binary_not_found_message()
+
+    assert (
+        check_status(STTSettings()).last_error
+        == local_whisper_cpp_cmd.binary_not_found_message()
+    )
+
+
+@pytest.mark.asyncio
+async def test_install_endpoint_drops_the_refusal_a_built_binary_disproves(monkeypatch):
+    """A developer who builds the binary and retries must not keep the red badge.
+
+    `already_installed` proves the refusal wrong, and nothing else in the
+    process ever clears a latch the endpoint wrote.
+    """
+    _stub_whisper_cpp_server_kind(monkeypatch)
+    monkeypatch.delenv("JUSTSAY_WHISPER_CPP_BIN", raising=False)
+    monkeypatch.setattr(local_setup, "_detect_gpu", lambda: (False, None, "none"))
+    monkeypatch.setattr(local_setup, "is_macos_arm64", lambda: False)
+    monkeypatch.setattr("app.stt.routing.get_local_load_error", lambda s: None)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+
+    refused = [e async for e in install_local_packages()]
+    assert "event: error" in refused[0]
+
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+    events = [e async for e in install_local_packages()]
+
+    assert "already_installed" in events[0]
+    assert check_status(STTSettings()).last_error is None
+
+
+@pytest.mark.asyncio
+async def test_install_endpoint_keeps_a_latch_the_present_dependency_does_not_disprove(
+    monkeypatch,
+):
+    """Only the refusal is dropped: a load failure is a different producer's latch."""
+    _stub_whisper_cpp_server_kind(monkeypatch)
+    monkeypatch.delenv("JUSTSAY_WHISPER_CPP_BIN", raising=False)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+    local_setup._prewarm_error = "whisper-server exited early (code 3)"
+
+    events = [e async for e in install_local_packages()]
+
+    assert "already_installed" in events[0]
+    assert local_setup._prewarm_error == "whisper-server exited early (code 3)"
+
+
+def test_local_packages_cannot_be_installed_is_true_only_in_a_frozen_build(monkeypatch):
+    """Pins the predicate's direction, which its name alone cannot.
+
+    An inverted-but-self-consistent caller would hand the sidecar `-m pip`,
+    which is the failure this whole task exists to remove.
+    """
+    monkeypatch.setattr(local_setup.sys, "frozen", True, raising=False)
+    assert local_setup._local_packages_cannot_be_installed() is True
+
+    monkeypatch.delattr(local_setup.sys, "frozen", raising=False)
+    assert local_setup._local_packages_cannot_be_installed() is False
+
+
 def test_run_pip_install_refuses_a_build_with_no_interpreter_to_install_into(monkeypatch):
     """The root cause is refused at the source, not only at the two call sites.
 
@@ -920,6 +993,8 @@ async def test_ensure_local_ready_vulkan_kind_sets_actionable_error_when_binary_
     monkeypatch.setattr(local_setup, "_run_pip_install", _boom)
 
     settings = STTSettings(mode=ProviderMode.LOCAL)
+    monkeypatch.delenv("JUSTSAY_WHISPER_CPP_BIN", raising=False)
+
     await local_setup.ensure_local_ready(settings)
 
     assert provider.get_model_calls == 0
@@ -998,7 +1073,7 @@ async def test_ensure_local_ready_frozen_whisper_cpp_kind_keeps_the_binary_messa
     assert provider.get_model_calls == 0
     assert (
         local_setup._prewarm_error
-        == local_whisper_cpp_cmd.INSTALLED_BUILD_BINARY_MISSING
+        == local_whisper_cpp_cmd._INSTALLED_BUILD_BINARY_MISSING
     )
 
 
@@ -1065,6 +1140,7 @@ async def test_ensure_local_ready_replaces_a_stale_error_when_the_load_itself_fa
     monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
     monkeypatch.setattr("app.stt.routing.peek_local_provider", lambda: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    monkeypatch.delenv("JUSTSAY_WHISPER_CPP_BIN", raising=False)
     settings = STTSettings(mode=ProviderMode.LOCAL)
 
     await local_setup.ensure_local_ready(settings)

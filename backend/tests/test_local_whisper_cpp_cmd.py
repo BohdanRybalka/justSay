@@ -19,6 +19,7 @@ from app.core.app_paths import resolve_app_data_root
 from app.stt.local_whisper_cpp_cmd import (
     VENDOR_DIR_NAMES,
     _binary_name,
+    binary_not_found_message,
     build_server_argv,
     resolve_binary_path,
     resolve_model_path,
@@ -284,3 +285,36 @@ def test_model_cache_stays_shared_between_dev_and_production():
 def test_resolve_model_path_does_not_touch_filesystem():
     path = resolve_model_path("tiny")
     assert path.name == "ggml-tiny.bin"
+
+
+def test_binary_not_found_message_names_the_override_the_user_broke(tmp_path, monkeypatch):
+    """`resolve_binary_path` honours the override before its frozen branch.
+
+    A packaged user whose variable points at a moved file gets told to reinstall
+    otherwise, which does not touch the thing they actually broke.
+    """
+    monkeypatch.setenv("JUSTSAY_WHISPER_CPP_BIN", str(tmp_path / "moved-away"))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    message = binary_not_found_message()
+
+    assert "JUSTSAY_WHISPER_CPP_BIN" in message
+    assert "Reinstall" not in message
+
+
+def test_binary_not_found_message_tells_an_installed_build_to_reinstall(monkeypatch):
+    monkeypatch.delenv("JUSTSAY_WHISPER_CPP_BIN", raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    assert (
+        binary_not_found_message()
+        == local_whisper_cpp_cmd_module._INSTALLED_BUILD_BINARY_MISSING
+    )
+
+
+def test_binary_not_found_message_names_the_build_script_in_a_source_checkout(monkeypatch):
+    monkeypatch.delenv("JUSTSAY_WHISPER_CPP_BIN", raising=False)
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    _pin_platform(monkeypatch, "win32")
+
+    assert "build_whisper_cpp_vulkan.ps1" in binary_not_found_message()
