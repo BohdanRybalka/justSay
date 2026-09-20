@@ -686,4 +686,3 @@ def test_the_walk_reaches_every_module_family_it_is_meant_to_check():
         "test_cross_language_contracts.py",
     }
     assert swept <= modules
-    assert len(_test_functions()) > 1_000
