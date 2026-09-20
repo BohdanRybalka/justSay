@@ -904,7 +904,7 @@ async def test_gemini_receives_a_ceiling_length_glossary_whole(sample_wav):
 
     prompt = captured[0]
     open_idx = prompt.rindex("<glossary>") + len("<glossary>")
-    fenced = prompt[open_idx:prompt.index("</glossary>")]
+    fenced = prompt[open_idx : prompt.index("</glossary>", open_idx)]
 
     assert len(raw) == 500
     assert fenced == raw

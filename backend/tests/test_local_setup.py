@@ -396,7 +396,7 @@ async def test_ensure_local_ready_clears_a_stale_latch_after_a_successful_instal
 
     await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
 
-    assert local_setup._prewarm_error != "left behind by a task that finished mid-install"
+    assert local_setup._prewarm_error is None
 
 
 def test_check_status_loads_the_prewarm_latch_once():
