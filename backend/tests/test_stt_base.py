@@ -1,12 +1,14 @@
-"""`latched_load_error` and the latch every local provider writes through it.
+"""`latched_load_error` and the provider attribute every local provider latches.
 
 The frontend reads a falsy `last_error` as no error and a blank one as a toast
-with no text in it (ADR 078). Two halves: the helper is checked against failures
+with no text in it (ADR 083). Two halves: the helper is checked against failures
 whose message is missing or only whitespace, and an AST walk over `app/stt/`
-pins every store to the latch -- plain, annotated, augmented, unpacked, looped
-or through `setattr` -- to `None`, a call to the helper, or a name its own scope
-binds exactly once to such a call. A store it cannot resolve is reported, never
-skipped.
+pins every store to the provider attribute `_last_load_error` -- plain,
+annotated, augmented, unpacked, looped or through `setattr` -- to `None`, a call
+to the helper, or a name its own scope binds exactly once to such a call. A
+store it cannot resolve is reported, never skipped. A module-level latch outside
+that attribute is pinned at the published boundary instead, by
+`test_local_setup.py`.
 """
 
 from __future__ import annotations
@@ -144,7 +146,7 @@ def _bound_once_through_the_helper(nodes: list[ast.AST]) -> frozenset[str]:
 
 
 def _accepted(value: ast.AST | None, through_the_helper: frozenset[str]) -> bool:
-    """Whether a value written into the latch is `None` or a non-empty sentence."""
+    """Whether a value written into the latch is `None` or a sentence that is not blank."""
     if isinstance(value, ast.Constant) and value.value is None:
         return True
     if _is_helper_call(value):
@@ -223,15 +225,6 @@ def test_a_failure_with_no_message_latches_the_fallback_sentence() -> None:
     assert latched_load_error(_SilentLoadError()) == LOAD_FAILED_WITHOUT_A_MESSAGE
 
 
-def test_no_failure_shape_latches_an_error_the_widget_would_read_as_healthy() -> None:
-    silent = [_SilentLoadError(), _SilentLoadError(""), OSError(), ValueError("")]
-    falsy = [type(exc).__name__ for exc in silent if not latched_load_error(exc)]
-    assert falsy == [], (
-        f"these failures latch a falsy `last_error`, which the status widget reads as no "
-        f"error and draws a healthy indicator over a failed load: {falsy}"
-    )
-
-
 def test_a_failure_carrying_a_message_latches_that_message_rather_than_its_class() -> None:
     latched = latched_load_error(RuntimeError("The model file is missing."))
     assert latched == "The model file is missing."
@@ -242,8 +235,20 @@ def test_a_whitespace_only_failure_message_latches_the_fallback_sentence() -> No
 
 
 def test_no_failure_shape_latches_a_message_the_toast_would_render_empty() -> None:
-    blank = [_SilentLoadError(), _SilentLoadError(" "), OSError("\n"), ValueError("\t \r\n")]
-    empty = [type(exc).__name__ for exc in blank if not latched_load_error(exc).strip()]
+    blank = [
+        _SilentLoadError(),
+        _SilentLoadError(""),
+        _SilentLoadError(" "),
+        OSError(),
+        OSError("\n"),
+        ValueError(""),
+        ValueError("\t \r\n"),
+    ]
+    empty = [
+        f"{type(exc).__name__}{exc.args!r}"
+        for exc in blank
+        if not latched_load_error(exc).strip()
+    ]
     assert empty == [], (
         f"these failures latch a blank `last_error`, which the Settings tab hands to "
         f"`notifyError` verbatim and shows as a toast occupying the screen and saying "
@@ -263,7 +268,7 @@ def test_every_provider_writes_the_latch_through_the_helper_or_clears_it() -> No
         if not accepted
     ]
     assert offenders == [], (
-        f"a load-error latch is `None` or a non-empty string and nothing else (ADR 078); "
+        f"a load-error latch is `None` or a string that is not blank and nothing else (ADR 083); "
         f"route these through `{_LATCH_HELPER}`: {offenders}"
     )
 
@@ -302,7 +307,7 @@ def test_the_walk_accepts_every_shape_that_does_reach_the_helper() -> None:
     )
 
 
-def test_the_walk_rejects_every_shape_that_can_latch_an_empty_string() -> None:
+def test_the_walk_rejects_every_shape_that_can_latch_a_blank_string() -> None:
     escapes = {
         "a tuple target": f"        self.{_LATCH_ATTRIBUTE}, self.ready = str(e), False",
         "an unresolvable unpacking": f"        self.{_LATCH_ATTRIBUTE}, self.ready = pair(e)",
@@ -354,7 +359,7 @@ def test_the_walk_rejects_every_shape_that_can_latch_an_empty_string() -> None:
     )
     assert missed == [], (
         f"these writes reach `{_LATCH_ATTRIBUTE}` without passing `{_LATCH_HELPER}` and the "
-        f"walk waves them through, so a provider can latch an empty string unseen: {missed}"
+        f"walk waves them through, so a provider can latch a blank string unseen: {missed}"
     )
 
 
