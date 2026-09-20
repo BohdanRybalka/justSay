@@ -638,6 +638,16 @@ def _stub_whisper_cpp_server_kind(monkeypatch) -> None:
     )
 
 
+def _stub_faster_whisper_kind(monkeypatch) -> None:
+    from app.stt.local_factory import LocalProviderKind
+
+    monkeypatch.setattr(
+        local_setup,
+        "get_local_provider_kind",
+        lambda *args, **kwargs: LocalProviderKind.FASTER_WHISPER,
+    )
+
+
 def test_check_status_whisper_cpp_server_kind_reports_device_and_compute_type(monkeypatch):
     _stub_whisper_cpp_server_kind(monkeypatch)
     settings = STTSettings(whisper_model_size="large-v3-turbo")
@@ -810,6 +820,82 @@ async def test_ensure_local_ready_vulkan_kind_sets_actionable_error_when_binary_
     assert provider.get_model_calls == 0
     assert local_setup._prewarm_error is not None
     assert "whisper-server binary not found" in local_setup._prewarm_error
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_ready_refuses_pip_in_a_frozen_binary(monkeypatch):
+    """In a packaged build `sys.executable` is the sidecar, not a Python interpreter.
+
+    Handing it `-m pip install` makes the sidecar's own argparse exit 2, which is
+    not a pip failure. The guard latches the packaged-build sentence and the pip
+    call is never reached.
+    """
+    _stub_faster_whisper_kind(monkeypatch)
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    monkeypatch.setattr(local_setup.sys, "frozen", True, raising=False)
+
+    def _boom():
+        raise AssertionError("_run_pip_install must not be called in a frozen build")
+
+    monkeypatch.setattr(local_setup, "_run_pip_install", _boom)
+
+    await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+
+    assert provider.get_model_calls == 0
+    assert local_setup._prewarm_error == local_setup._INSTALL_UNSUPPORTED_WHEN_FROZEN
+    assert "pip exit code" not in local_setup._prewarm_error
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_ready_still_installs_when_the_build_is_not_frozen(monkeypatch):
+    """A source checkout keeps its pip path -- the guard reads `sys.frozen` alone."""
+    _stub_faster_whisper_kind(monkeypatch)
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.routing.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    monkeypatch.setattr(local_setup.sys, "frozen", False, raising=False)
+
+    install_calls: list[int] = []
+
+    def _install():
+        install_calls.append(1)
+        return 0, "ok"
+
+    monkeypatch.setattr(local_setup, "_run_pip_install", _install)
+
+    await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+
+    assert install_calls == [1]
+    assert provider.get_model_calls == 1
+    assert local_setup._prewarm_error is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_ready_frozen_whisper_cpp_kind_keeps_the_binary_message(monkeypatch):
+    """A packaged build whose bundled binary is missing hears about the binary.
+
+    That kind has no pip path at all, so telling its user to install from source
+    would send a working Local mode down the wrong road; its message wins.
+    """
+    _stub_whisper_cpp_server_kind(monkeypatch)
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    monkeypatch.setattr(local_setup.sys, "frozen", True, raising=False)
+
+    def _boom():
+        raise AssertionError("_run_pip_install must not be called for the Vulkan kind")
+
+    monkeypatch.setattr(local_setup, "_run_pip_install", _boom)
+
+    await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+
+    assert provider.get_model_calls == 0
+    assert "whisper-server binary not found" in local_setup._prewarm_error
+    assert local_setup._prewarm_error != local_setup._INSTALL_UNSUPPORTED_WHEN_FROZEN
 
 
 @pytest.mark.asyncio

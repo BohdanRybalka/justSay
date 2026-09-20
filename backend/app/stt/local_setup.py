@@ -33,6 +33,11 @@ _INSTALL_RAISED = (
     "Installing the local speech engine failed. See the JustSay log for the reason."
 )
 
+_INSTALL_UNSUPPORTED_WHEN_FROZEN = (
+    "Local STT install is not supported in the packaged build. "
+    "Install JustSay from source if you need Local mode on this OS."
+)
+
 
 def _install_failure_sentence(exit_code: int) -> str:
     """The sentence both install paths publish when pip exits non-zero."""
@@ -261,6 +266,9 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
             if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
                 _prewarm_error = local_whisper_cpp_cmd.binary_not_found_message()
                 return
+            if getattr(sys, "frozen", False):
+                _prewarm_error = _INSTALL_UNSUPPORTED_WHEN_FROZEN
+                return
             _prewarm_error = None
             try:
                 exit_code, _ = await asyncio.to_thread(_run_pip_install)
@@ -356,13 +364,10 @@ async def install_local_packages() -> AsyncIterator[str]:
         return
 
     if getattr(sys, "frozen", False):
-        yield sse_event("error", {
-            "status": "error",
-            "error": (
-                "Local STT install is not supported in the packaged build. "
-                "Install JustSay from source if you need Local mode on this OS."
-            ),
-        })
+        yield sse_event(
+            "error",
+            {"status": "error", "error": _INSTALL_UNSUPPORTED_WHEN_FROZEN},
+        )
         return
 
     if _check_package_installed():
