@@ -13,6 +13,7 @@ import ast
 import functools
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -31,6 +32,11 @@ _BASELINE_SHRINK_ALLOWANCE_LINES = 400
 _BASELINE_PATTERN = re.compile(
     r"^Baseline: functions (\d+) · lines (\d+) · master ([0-9a-f]{7,40}) "
     r"· closed (\d{4}-\d{2}-\d{2}) · round (\d+)$",
+    re.MULTILINE,
+)
+
+_ROUND_HEADING_PATTERN = re.compile(
+    r"^## Round (\d+) — (\d{4}-\d{2}-\d{2})$",
     re.MULTILINE,
 )
 
@@ -405,12 +411,37 @@ def _unpinned_walks(tree: ast.Module) -> list[tuple[int, str, tuple[str, ...]]]:
     ]
 
 
-def _parse_baseline(text: str) -> tuple[int, int] | None:
-    """The recorded function and line counts, or None when the line does not parse."""
+class _Baseline(NamedTuple):
+    """The five fields of the ledger's `Baseline:` line.
+
+    `sha` is the input range of the next round and is verified by a person:
+    this module uses no git, so nothing here can resolve a commit.
+    """
+
+    functions: int
+    lines: int
+    sha: str
+    closed: str
+    round_number: int
+
+
+def _parse_baseline(text: str) -> _Baseline | None:
+    """Every field of the recorded baseline, or None when the line does not parse."""
     match = _BASELINE_PATTERN.search(text)
     if match is None:
         return None
-    return int(match.group(1)), int(match.group(2))
+    return _Baseline(
+        int(match.group(1)),
+        int(match.group(2)),
+        match.group(3),
+        match.group(4),
+        int(match.group(5)),
+    )
+
+
+def _parse_round_headings(text: str) -> list[tuple[int, str]]:
+    """Every `## Round <N> — <date>` heading of the ledger as (number, date)."""
+    return [(int(number), date) for number, date in _ROUND_HEADING_PATTERN.findall(text)]
 
 
 def _live_line_count() -> int:
@@ -668,10 +699,42 @@ def test_the_audit_ledger_agrees_with_the_recorded_baseline():
         f"{_LEDGER.name} carries no parseable `Baseline:` line, so nothing mirrors the "
         "recorded baseline; restore the line rather than letting the mirror go quiet"
     )
-    assert baseline == (_BASELINE_FUNCTIONS, _BASELINE_LINES), (
-        f"{_LEDGER.name} records functions {baseline[0]} / lines {baseline[1]} against "
-        f"the module's {_BASELINE_FUNCTIONS} / {_BASELINE_LINES}; closing a round moves "
-        "both, and the constants are the half a GitHub reviewer can see"
+    assert (baseline.functions, baseline.lines) == (_BASELINE_FUNCTIONS, _BASELINE_LINES), (
+        f"{_LEDGER.name} records functions {baseline.functions} / lines {baseline.lines} "
+        f"against the module's {_BASELINE_FUNCTIONS} / {_BASELINE_LINES}; closing a round "
+        "moves both, and the constants are the half a GitHub reviewer can see"
+    )
+
+
+def test_the_ledger_baseline_line_names_the_latest_round_and_the_date_it_closed():
+    """The `Baseline:` line's round and date mirror the newest `## Round` heading.
+
+    Skips with the other ledger test when `docs/` is absent. The sha on that line
+    is checked by a person, and the failure here says so.
+    """
+    if not _LEDGER.is_file():
+        pytest.skip(f"{_LEDGER.name} is absent from this checkout (docs/ is gitignored)")
+    text = _LEDGER.read_text(encoding="utf-8")
+    baseline = _parse_baseline(text)
+    assert baseline is not None, (
+        f"{_LEDGER.name} carries no parseable `Baseline:` line, so the round it claims to "
+        "have closed cannot be read at all"
+    )
+    headings = _parse_round_headings(text)
+    assert headings, (
+        f"{_LEDGER.name} carries no `## Round <N> — <date>` heading, so the comparison "
+        "below would pass on an empty walk rather than on agreement"
+    )
+
+    latest_number, latest_date = max(headings)
+
+    assert (baseline.round_number, baseline.closed) == (latest_number, latest_date), (
+        f"{_LEDGER.name} says `round {baseline.round_number} · closed {baseline.closed}` "
+        f"while its newest block is `## Round {latest_number} — {latest_date}`; the line "
+        "is the next round's starting point, so a stale one misreports where it starts. "
+        f"Its third field, `master {baseline.sha}`, is the next round's whole input range "
+        "and nothing here can check it — verify by hand that it is the merge commit the "
+        "two counts were computed from"
     )
 
 
