@@ -33,6 +33,32 @@ _INSTALL_RAISED = (
     "Installing the local speech engine failed. See the JustSay log for the reason."
 )
 
+_INSTALL_UNSUPPORTED_WHEN_FROZEN = (
+    "This build of JustSay does not include the local speech engine your "
+    "hardware needs, and the installed app cannot add it. "
+    "Use Cloud mode, or run JustSay from source to get Local mode here."
+)
+
+
+def _local_packages_cannot_be_installed() -> bool:
+    """``True`` when this build has no interpreter a pip install could run under.
+
+    ``True`` exactly in a PyInstaller bundle, whose ``sys.executable`` is the
+    sidecar rather than Python.
+    """
+    return bool(getattr(sys, "frozen", False))
+
+
+def _install_refusal_still_applies(setup_error: str | None, installed: bool) -> bool:
+    """Whether ``setup_error`` is the refusal the install paths give right now.
+
+    ``False`` for any other latched sentence, and for every state where the
+    dependency is already present (ADR 083).
+    """
+    if setup_error is None or installed:
+        return False
+    return setup_error == _local_install_refusal()
+
 
 def _install_failure_sentence(exit_code: int) -> str:
     """The sentence both install paths publish when pip exits non-zero."""
@@ -110,7 +136,7 @@ def check_status(stt_settings: STTSettings) -> LocalSTTStatus:
 
     provider_error = routing.get_local_load_error(stt_settings)
     setup_error = _prewarm_error
-    if provider_error is not None:
+    if provider_error is not None and not _install_refusal_still_applies(setup_error, installed):
         last_error = load_error_sentence(provider_error)
     elif setup_error is not None:
         last_error = load_error_sentence(setup_error, _SETUP_GAVE_NO_REASON)
@@ -258,8 +284,9 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
             return
 
         if not _check_package_installed():
-            if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
-                _prewarm_error = local_whisper_cpp_cmd.binary_not_found_message()
+            refusal = _local_install_refusal()
+            if refusal is not None:
+                _prewarm_error = refusal
                 return
             _prewarm_error = None
             try:
@@ -345,28 +372,51 @@ def _check_package_installed() -> bool:
         return False
 
 
+def _local_install_refusal() -> str | None:
+    """The sentence refusing to install the missing local dependency, or ``None``.
+
+    Read by both install paths for a state where the dependency is absent, so
+    the prewarm and the install endpoint cannot give contradictory advice.
+    """
+    if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
+        return local_whisper_cpp_cmd.binary_not_found_message()
+    if _local_packages_cannot_be_installed():
+        return _INSTALL_UNSUPPORTED_WHEN_FROZEN
+    return None
+
+
+def _clear_disproved_install_refusal() -> None:
+    """Drop a latched refusal whose dependency the caller has just found present.
+
+    Only a refusal is dropped; an install failure or a load failure latched by
+    another producer is left for that producer to clear.
+    """
+    global _prewarm_error
+    if _prewarm_error is not None and _prewarm_error == _local_install_refusal():
+        _prewarm_error = None
+
+
 async def install_local_packages() -> AsyncIterator[str]:
     """Install local STT dependencies via pip with SSE progress.
 
     Runs: pip install .[local] from the backend directory.
+    A refused install latches the same sentence the status endpoint publishes.
     Yields SSE-formatted strings.
     """
+    global _prewarm_error
     if _install_lock.locked():
         yield sse_event("error", {"status": "error", "error": "Installation already in progress"})
         return
 
-    if getattr(sys, "frozen", False):
-        yield sse_event("error", {
-            "status": "error",
-            "error": (
-                "Local STT install is not supported in the packaged build. "
-                "Install JustSay from source if you need Local mode on this OS."
-            ),
-        })
+    if _check_package_installed():
+        _clear_disproved_install_refusal()
+        yield sse_event("done", {"status": "already_installed"})
         return
 
-    if _check_package_installed():
-        yield sse_event("done", {"status": "already_installed"})
+    refusal = _local_install_refusal()
+    if refusal is not None:
+        _prewarm_error = refusal
+        yield sse_event("error", {"status": "error", "error": refusal})
         return
 
     async with _install_lock:
@@ -389,9 +439,13 @@ async def install_local_packages() -> AsyncIterator[str]:
 def _run_pip_install() -> tuple[int, str]:
     """Run pip install .[local] synchronously. Returns (exit_code, output).
 
-    One extras name for every platform with a pip path; the accelerated ones
-    resolve a bundled binary and never reach here.
+    One extras name for every platform with a pip path. Callers must have
+    cleared `_local_install_refusal()` first; raises ``ResourceUnavailableError``
+    when they have not.
     """
+    if _local_packages_cannot_be_installed():
+        raise ResourceUnavailableError(_INSTALL_UNSUPPORTED_WHEN_FROZEN)
+
     backend_dir = _get_backend_dir()
 
     result = subprocess.run(
