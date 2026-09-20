@@ -1,9 +1,13 @@
+import ast
 import asyncio
 import inspect
 import logging
 import pathlib
+import subprocess
+import textwrap
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -346,6 +350,105 @@ async def test_install_emits_error_on_failure():
         events = [e async for e in install_local_packages()]
 
     assert any("event: error" in e for e in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raised",
+    [
+        RuntimeError(" "),
+        TimeoutError(),
+        subprocess.TimeoutExpired(cmd=["C:\\Python\\python.exe", "-m", "pip"], timeout=300),
+    ],
+)
+async def test_ensure_local_ready_reports_a_sentence_when_the_pip_call_raises(monkeypatch, raised):
+    """A pip call that raises latches a bounded sentence and still fails the caller."""
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+
+    def _raise():
+        raise raised
+
+    monkeypatch.setattr(local_setup, "_run_pip_install", _raise)
+
+    with pytest.raises(type(raised)):
+        await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+
+    assert provider.get_model_calls == 0
+    assert local_setup._prewarm_error == local_setup._INSTALL_RAISED
+    assert "python.exe" not in local_setup._prewarm_error
+    assert len(local_setup._prewarm_error) <= 200
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_ready_clears_a_stale_latch_after_a_successful_install(monkeypatch):
+    """A latch written while the install ran does not outlive a successful one."""
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+
+    def _install():
+        local_setup._prewarm_error = "left behind by a task that finished mid-install"
+        return 0, "ok"
+
+    monkeypatch.setattr(local_setup, "_run_pip_install", _install)
+
+    await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+
+    assert local_setup._prewarm_error != "left behind by a task that finished mid-install"
+
+
+def test_check_status_loads_the_prewarm_latch_once():
+    """Two loads of the latch across a thread boundary is a crash window; one is not."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(local_setup.check_status)))
+    loads = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+        and node.id == "_prewarm_error"
+        and isinstance(node.ctx, ast.Load)
+    ]
+
+    assert len(loads) == 1, (
+        "check_status must read _prewarm_error once — a second read can see a "
+        f"concurrent None and crash the status endpoint; found {len(loads)}"
+    )
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("output", ["", "\n", "   ", "pip resolver line\n" * 60])
+async def test_install_error_event_carries_the_same_sentence_the_other_producer_does(output):
+    """The SSE `error` field names the exit code, whatever pip printed."""
+    with patch.object(local_setup, "_check_package_installed", return_value=False), patch.object(
+        local_setup, "_run_pip_install", return_value=(1, output)
+    ):
+        events = [e async for e in install_local_packages()]
+
+    error_events = [e for e in events if "event: error" in e]
+    assert error_events
+    assert local_setup._install_failure_sentence(1) in error_events[0]
+    assert "pip resolver line" not in error_events[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raised",
+    [
+        RuntimeError(" "),
+        subprocess.TimeoutExpired(cmd=["C:\\Python\\python.exe", "-m", "pip"], timeout=300),
+    ],
+)
+async def test_install_error_event_carries_a_sentence_when_the_pip_call_raises(raised):
+    """A raised exception is published as a sentence, never as its own text."""
+    with patch.object(local_setup, "_check_package_installed", return_value=False), patch.object(
+        local_setup, "_run_pip_install", side_effect=raised
+    ):
+        events = [e async for e in install_local_packages()]
+
+    error_events = [e for e in events if "event: error" in e]
+    assert error_events
+    assert local_setup._INSTALL_RAISED in error_events[0]
+    assert "python.exe" not in error_events[0]
 
 
 @pytest.mark.asyncio
@@ -865,8 +968,8 @@ def test_check_status_merge_is_deterministic_when_package_missing_and_provider_e
     _check_package_installed() never flips True -> False mid-process, so an
     install failure (_prewarm_error) and a provider load failure never
     coexist. Force that "impossible" combined state anyway and pin the merge
-    outcome: get_local_load_error() or _prewarm_error -> the provider error
-    always wins, regardless of package_installed being False."""
+    outcome: the provider error always wins when it is present, regardless of
+    package_installed being False."""
     from app.stt.routing import _get_local
     from app.stt.routing import clear_cache as clear_stt_cache
 
@@ -884,6 +987,68 @@ def test_check_status_merge_is_deterministic_when_package_missing_and_provider_e
     finally:
         local_setup._prewarm_error = None
         clear_stt_cache()
+
+
+_THE_CHANNELS_OWN_FALLBACK = "the fallback sentence of whichever channel carried it"
+
+_BLANK_SHAPES_THE_BOUNDARY_NORMALIZES = [
+    (None, None),
+    ("", _THE_CHANNELS_OWN_FALLBACK),
+    (" ", _THE_CHANNELS_OWN_FALLBACK),
+    ("\n", _THE_CHANNELS_OWN_FALLBACK),
+    ("\t \r\n", _THE_CHANNELS_OWN_FALLBACK),
+    ("  whisper-server exited early (code 3)\n", "whisper-server exited early (code 3)"),
+]
+
+
+def _expected(published, fallback):
+    return fallback if published is _THE_CHANNELS_OWN_FALLBACK else published
+
+
+@pytest.mark.parametrize(("written", "published"), _BLANK_SHAPES_THE_BOUNDARY_NORMALIZES)
+def test_check_status_normalizes_whatever_the_install_step_wrote(written, published):
+    """`last_error` crosses the HTTP boundary as `None` or non-blank text (ADR 083).
+
+    The obligation sits here rather than at each producer, so an install-step
+    failure added later inherits it without being asked.
+    """
+    from app.stt.routing import clear_cache as clear_stt_cache
+
+    clear_stt_cache()
+    local_setup._prewarm_error = written
+    try:
+        with _apply(_patches(True, (False, None, "none"))):
+            status = check_status(STTSettings())
+    finally:
+        local_setup._prewarm_error = None
+        clear_stt_cache()
+
+    assert status.last_error == _expected(published, local_setup._SETUP_GAVE_NO_REASON)
+    assert status.last_error is None or status.last_error.strip()
+
+
+@pytest.mark.parametrize(("latched", "published"), _BLANK_SHAPES_THE_BOUNDARY_NORMALIZES)
+def test_check_status_normalizes_whatever_a_provider_latched(latched, published):
+    """The provider channel crosses the same boundary under the same rule (ADR 083).
+
+    The two channels are merged on absence rather than on falsiness, so a blank
+    string reaching the boundary is published identically whichever wrote it.
+    """
+    from app.stt.routing import _get_local
+    from app.stt.routing import clear_cache as clear_stt_cache
+
+    clear_stt_cache()
+    settings = STTSettings()
+    _get_local(settings)._last_load_error = latched
+    try:
+        with _apply(_patches(True, (False, None, "none"))):
+            status = check_status(settings)
+    finally:
+        local_setup._prewarm_error = None
+        clear_stt_cache()
+
+    assert status.last_error == _expected(published, LOAD_FAILED_WITHOUT_A_MESSAGE)
+    assert status.last_error is None or status.last_error.strip()
 
 
 class _FakePrewarmProvider:
@@ -1057,7 +1222,61 @@ async def test_ensure_local_ready_sets_prewarm_error_on_install_failure_and_skip
     await local_setup.ensure_local_ready(settings)
 
     assert provider.get_model_calls == 0
-    assert local_setup._prewarm_error == "pip: something went wrong"
+    assert local_setup._prewarm_error is not None
+    assert "pip exit code 1" in local_setup._prewarm_error
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_ready_reports_a_sentence_when_pip_fails_printing_only_a_newline(
+    monkeypatch,
+):
+    """A pip run printing only a newline still leaves a readable sentence in the field."""
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    monkeypatch.setattr(local_setup, "_run_pip_install", lambda: (1, "\n"))
+
+    await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+
+    assert provider.get_model_calls == 0
+    assert local_setup._prewarm_error is not None
+    assert local_setup._prewarm_error.strip()
+    assert len(local_setup._prewarm_error) <= 200
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_ready_keeps_the_pip_output_out_of_the_notification(monkeypatch):
+    """A resolver traceback is not a sentence, so the field names the log instead."""
+    lines = [f"pip resolver line {n}" for n in range(60)]
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    monkeypatch.setattr(local_setup, "_run_pip_install", lambda: (1, "\n".join(lines)))
+
+    await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+
+    assert local_setup._prewarm_error is not None
+    leaked = [line for line in lines if line in local_setup._prewarm_error]
+    assert leaked == [], (
+        f"the notification body carries raw pip output rather than a sentence: {leaked}"
+    )
+    assert "pip exit code 1" in local_setup._prewarm_error
+
+
+def test_run_pip_install_puts_a_failed_runs_output_in_the_log(monkeypatch, caplog):
+    """The pip output reaches the log from one place, and bounded."""
+    lines = [f"pip resolver line {n}" for n in range(60)]
+    completed = SimpleNamespace(returncode=1, stdout="\n".join(lines), stderr="")
+    monkeypatch.setattr(local_setup.subprocess, "run", lambda *a, **k: completed)
+    monkeypatch.setattr(local_setup, "_get_backend_dir", lambda: ".")
+
+    with caplog.at_level(logging.WARNING, logger="app.stt.local_setup"):
+        exit_code, output = local_setup._run_pip_install()
+
+    assert exit_code == 1
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert lines[-1] in logged
+    assert all(len(record.getMessage()) <= 1100 for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -1677,8 +1896,8 @@ async def test_timeout_then_retry_joins_in_flight_load_instead_of_starting_a_sec
 async def test_prewarm_latch_shows_the_reason_without_the_class_name(monkeypatch):
     """The Settings indicator's text for a classified failure, pinned exactly.
 
-    ``_prewarm_error`` is served verbatim as ``GET /stt/local/status``'s
-    ``last_error`` and rendered into the Local STT indicator's title, its
+    ``_prewarm_error`` reaches ``GET /stt/local/status``'s ``last_error``
+    through the boundary and is rendered into the indicator's title, its
     aria-label and an error toast. It is the provider's own sentence and
     nothing else: a person reading that indicator is deciding what to do next,
     and a Python class name tells them nothing they can act on while the class
@@ -1705,9 +1924,7 @@ async def test_prewarm_latch_is_never_empty_when_the_load_failed(monkeypatch):
 
     An empty latch is worse than a leaked class name. `src/status-indicator.ts`
     reads a falsy `error` as not-an-error, so a failed prewarm would be drawn
-    as a healthy Local STT indicator, and `local_setup.check_status`'s own read
-    is `get_local_load_error(...) or _prewarm_error`, so an empty latch also
-    falls through to an unrelated source.
+    as a healthy Local STT indicator.
     """
     _stub_whisper_cpp_server_kind(monkeypatch)
 

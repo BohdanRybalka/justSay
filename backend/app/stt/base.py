@@ -17,13 +17,22 @@ class TranscriptionResult:
 LOAD_FAILED_WITHOUT_A_MESSAGE = "The local engine failed to load and gave no reason."
 
 
-def latched_load_error(exc: BaseException) -> str:
-    """The sentence `GET /stt/local/status`'s `last_error` shows for a failed load.
+def load_error_sentence(message: str, fallback: str = LOAD_FAILED_WITHOUT_A_MESSAGE) -> str:
+    """The sentence `GET /stt/local/status`'s `last_error` publishes for a message.
 
-    Never empty and never a class name; an exception whose ``str()`` is empty
-    yields a fixed fallback sentence instead.
+    Never blank: a message that is empty or only whitespace yields ``fallback``,
+    which names the step that failed.
     """
-    return str(exc) or LOAD_FAILED_WITHOUT_A_MESSAGE
+    return message.strip() or fallback
+
+
+def latched_load_error(exc: BaseException) -> str:
+    """The sentence a provider latches when loading raises ``exc``.
+
+    Never blank and never a class name; an exception whose ``str()`` is empty or
+    only whitespace yields a fixed fallback sentence instead.
+    """
+    return load_error_sentence(str(exc))
 
 
 def normalize_detected_language(raw: str | None) -> str | None:

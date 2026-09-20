@@ -41,12 +41,27 @@ function ensureNotificationPermission(
   return permissionRequest;
 }
 
+export const ERROR_WITHOUT_READABLE_TEXT = "Something failed and reported no readable reason.";
+
+/**
+ * The text an error string renders as, or `null` when there is no error.
+ *
+ * `null` and `undefined` are both absence. Anything else is trimmed, and text
+ * carrying no letter and no digit becomes `ERROR_WITHOUT_READABLE_TEXT`
+ * (ADR 083).
+ */
+export function displayableError(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined) return null;
+  const text = raw.trim();
+  return /[\p{L}\p{N}]/u.test(text) ? text : ERROR_WITHOUT_READABLE_TEXT;
+}
+
 export async function notifyError(body: string, title = "JustSay"): Promise<void> {
   try {
     const { isPermissionGranted, requestPermission, sendNotification } =
       await import("@tauri-apps/plugin-notification");
     if (await ensureNotificationPermission(isPermissionGranted, requestPermission)) {
-      sendNotification({ title, body });
+      sendNotification({ title, body: displayableError(body) ?? ERROR_WITHOUT_READABLE_TEXT });
     }
   } catch (e) {
     console.warn("Toast notification failed:", e);

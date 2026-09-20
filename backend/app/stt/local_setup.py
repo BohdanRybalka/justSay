@@ -15,7 +15,7 @@ from app.core.errors import ResourceUnavailableError
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
 from app.stt import local_whisper_cpp_cmd, routing
-from app.stt.base import latched_load_error
+from app.stt.base import latched_load_error, load_error_sentence
 from app.stt.config import STTSettings
 from app.stt.local_factory import (
     LocalProviderKind,
@@ -26,6 +26,20 @@ from app.stt.local_factory import (
 )
 
 log = logging.getLogger(__name__)
+
+_SETUP_GAVE_NO_REASON = "Preparing the local engine failed and gave no reason."
+
+_INSTALL_RAISED = (
+    "Installing the local speech engine failed. See the JustSay log for the reason."
+)
+
+
+def _install_failure_sentence(exit_code: int) -> str:
+    """The sentence both install paths publish when pip exits non-zero."""
+    return (
+        f"Installing the local speech engine failed (pip exit code {exit_code}). "
+        "See the JustSay log for the pip output."
+    )
 
 _install_lock = asyncio.Lock()
 
@@ -72,6 +86,7 @@ def check_status(stt_settings: STTSettings) -> LocalSTTStatus:
 
     The provider cache is read for the loaded state exactly once, so
     ``model_loaded`` and ``model_ram_mb`` cannot contradict each other.
+    ``last_error`` is ``None`` or non-blank, whichever producer wrote it.
     """
     installed = _check_package_installed()
     cuda_probe_available, gpu_name, gpu_vendor = _detect_gpu()
@@ -93,7 +108,14 @@ def check_status(stt_settings: STTSettings) -> LocalSTTStatus:
     compute_type = compute_type_for_device(device, kind)
     gpu_available = is_accelerated_device(device, kind)
 
-    last_error = routing.get_local_load_error(stt_settings) or _prewarm_error
+    provider_error = routing.get_local_load_error(stt_settings)
+    setup_error = _prewarm_error
+    if provider_error is not None:
+        last_error = load_error_sentence(provider_error)
+    elif setup_error is not None:
+        last_error = load_error_sentence(setup_error, _SETUP_GAVE_NO_REASON)
+    else:
+        last_error = None
     model_is_loaded = routing.is_model_loaded() if installed else False
 
     return LocalSTTStatus(
@@ -240,9 +262,14 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
                 _prewarm_error = local_whisper_cpp_cmd.binary_not_found_message()
                 return
             _prewarm_error = None
-            exit_code, output = await asyncio.to_thread(_run_pip_install)
+            try:
+                exit_code, _ = await asyncio.to_thread(_run_pip_install)
+            except Exception:
+                log.warning("Installing the local engine raised", exc_info=True)
+                _prewarm_error = _INSTALL_RAISED
+                raise
             if exit_code != 0:
-                _prewarm_error = output[-500:] if output else "pip install failed"
+                _prewarm_error = _install_failure_sentence(exit_code)
                 return
             _prewarm_error = None
 
@@ -352,11 +379,11 @@ async def install_local_packages() -> AsyncIterator[str]:
             else:
                 yield sse_event(
                     "error",
-                    {"status": "error", "error": output[-500:] if output else "pip install failed"},
+                    {"status": "error", "error": _install_failure_sentence(exit_code)},
                 )
-        except Exception as e:
-            log.warning("pip install failed: %s", e)
-            yield sse_event("error", {"status": "error", "error": str(e)})
+        except Exception:
+            log.warning("Installing the local engine raised", exc_info=True)
+            yield sse_event("error", {"status": "error", "error": _INSTALL_RAISED})
 
 
 def _run_pip_install() -> tuple[int, str]:
