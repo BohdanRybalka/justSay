@@ -165,35 +165,43 @@ def bootstrap(target: Path) -> None:
 def adopt_store_locked(directory: Path, conn: sqlite3.Connection | None = None) -> None:
     """Point the store at ``directory``, adopting ``conn`` as its connection.
 
-    Caller MUST hold ``_lock`` and ``directory`` MUST already exist. ``conn`` MUST
-    be open on that directory's history file or ``ValueError`` is raised; ``None``
-    opens and migrates one there. The directory and the connection move together,
-    so a failure moves neither and leaves no connection open.
+    Caller MUST hold ``_lock`` and ``directory`` MUST exist. ``conn`` MUST be open
+    on that directory's history file; ``None`` opens and migrates one there.
+    Raises ``OSError``, ``sqlite3.Error`` or ``ValueError``, and such a failure
+    moves neither half and closes only a connection this call opened.
     """
-    global _output_dir, _conn
+    global _output_dir, _conn, _page_total_cache
     adopted = _connect(directory / HISTORY_FILENAME) if conn is None else conn
     try:
-        _require_store_file_locked(adopted, directory)
+        _require_store_file(adopted, directory)
         if conn is None:
             schema._init_schema(adopted)
     except Exception:
-        _close_quietly(adopted)
+        if conn is None:
+            _close_quietly(adopted)
         raise
-    _close_conn_locked()
+    previous = _conn
     _conn = adopted
+    if previous is not None and previous is not adopted:
+        _close_quietly(previous)
+    _page_total_cache = None
     invalidate_derived_caches_locked()
     _output_dir = directory
 
 
-def _require_store_file_locked(conn: sqlite3.Connection, directory: Path) -> None:
-    """Caller MUST hold ``_lock``. Raises ``ValueError`` on a mismatched pair.
+def _require_store_file(conn: sqlite3.Connection, directory: Path) -> None:
+    """Raises ``ValueError`` unless ``conn`` is attached to ``directory``'s store file.
 
     Compares the file ``conn``'s ``main`` database is attached to against
     ``directory``'s history file, both resolved and case-normalised the way the
-    running platform compares paths.
+    running platform compares paths. A connection carrying no ``main`` database
+    raises by name rather than escaping as ``StopIteration``.
     """
     rows = conn.execute("PRAGMA database_list").fetchall()
-    attached = Path(next(row[2] for row in rows if row[1] == "main"))
+    main = next((row[2] for row in rows if row[1] == "main"), None)
+    if main is None:
+        raise ValueError(f"connection {conn!r} has no main database")
+    attached = Path(main)
     expected = directory / HISTORY_FILENAME
     if os.path.normcase(str(attached.resolve())) != os.path.normcase(str(expected.resolve())):
         raise ValueError(f"connection is open on {attached}, not on {expected}")

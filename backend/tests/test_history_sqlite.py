@@ -1185,28 +1185,48 @@ def _saved_entry_lands_in(expected: Path, marker: str) -> str | None:
 
     `None` when it did. Read back through a second connection opened on that
     path by name, so a connection pointing somewhere else is reported as the
-    cause rather than answering for the file it happens to hold open.
+    cause rather than answering for the file it happens to hold open. The probe
+    entry is deleted again, so a caller that counts rows afterwards counts its
+    own.
     """
-    history.save_entry(text=marker, duration_ms=1)
-    if not expected.exists():
-        return f"no database file at {expected} after saving {marker!r}"
-    probe = sqlite3.connect(expected)
+    entry = history.save_entry(text=marker, duration_ms=1)
     try:
-        count = probe.execute(
-            "SELECT count(*) FROM entries WHERE raw_text = ?", (marker,)
-        ).fetchone()[0]
-    except sqlite3.Error as e:
-        return f"{expected} could not be read back after saving {marker!r}: {e}"
+        if not expected.exists():
+            return f"no database file at {expected} after saving {marker!r}"
+        probe = sqlite3.connect(expected)
+        try:
+            count = probe.execute(
+                "SELECT count(*) FROM entries WHERE raw_text = ?", (marker,)
+            ).fetchone()[0]
+        except sqlite3.Error as e:
+            return f"{expected} could not be read back after saving {marker!r}: {e}"
+        finally:
+            probe.close()
+        if count != 1:
+            return f"{expected} holds {count} rows matching {marker!r}, not 1"
+        return None
     finally:
-        probe.close()
-    if count != 1:
-        return f"{expected} holds {count} rows matching {marker!r}, not 1"
-    return None
+        history.delete_entry(entry.id)
 
 
 def _assert_one_store(marker: str) -> None:
     assert _open_connection_disagreement() is None
     assert _saved_entry_lands_in(history.history_path(), marker) is None
+
+
+def test_the_one_store_probe_leaves_the_row_count_it_found(isolated_storage, tmp_path):
+    """`_assert_one_store` reads the store back without adding a row to it.
+
+    Callers run it after driving a relocate and then count rows, so a probe
+    entry left behind would be counted as one of theirs.
+    """
+    history.bootstrap(tmp_path / "store")
+    history.save_entry(text="a row the probe must not disturb", duration_ms=1)
+    before = history.get_page(limit=50).total
+
+    _assert_one_store("the probe's own marker")
+
+    assert history.get_page(limit=50).total == before
 
 
 def _recorded_connect(monkeypatch, opened: list[sqlite3.Connection]):
@@ -1334,18 +1354,21 @@ def test_adopting_a_connection_open_on_another_directory_is_refused(
     _assert_one_store("after the refused pair")
 
 
-def test_a_relocate_that_fails_after_the_source_is_gone_keeps_the_only_copy(
+def test_a_relocate_whose_adoption_raises_leaves_every_row_readable(
     isolated_storage, tmp_path, monkeypatch
 ):
-    """Once the source file is unlinked the destination is never removed.
+    """A failed move leaves the transcripts where the user last saw them.
 
-    The adoption raises after the move has already deleted the old file, so the
-    copy in the new directory holds the only transcripts left and unlinking it
-    on the way out would destroy them.
+    The adoption raises after the copy has been verified, which is the only
+    window in which the store could end up naming a directory holding no rows.
+    What is checked is the rows the app reads back, not which files exist: an
+    empty history screen beside an intact file on disk is the defect (ADR 086).
     """
     target = tmp_path / "target"
     history.bootstrap(target)
-    history.save_entry(text="the only copy", duration_ms=1)
+    saved = ["the only copy", "and its neighbour"]
+    for text in saved:
+        history.save_entry(text=text, duration_ms=1)
     monkeypatch.setattr(
         history, "adopt_store_locked", MagicMock(side_effect=OSError("adoption failed"))
     )
@@ -1355,15 +1378,118 @@ def test_a_relocate_that_fails_after_the_source_is_gone_keeps_the_only_copy(
 
     assert outcome == relocation.RelocateOutcome.FAILED
     assert reason and "adoption failed" in reason
-    assert (new_dir / "history.db").exists()
-    probe = sqlite3.connect(new_dir / "history.db")
+    page = history.get_page(limit=50)
+    assert page.total == len(saved)
+    assert {entry.text for entry in page.entries} == set(saved)
+    assert history.history_path() == target / "history.db"
+    probe = sqlite3.connect(history.history_path())
     try:
-        surviving = probe.execute(
-            "SELECT count(*) FROM entries WHERE raw_text = ?", ("the only copy",)
-        ).fetchone()[0]
+        rows = {row[0] for row in probe.execute("SELECT raw_text FROM entries")}
     finally:
         probe.close()
-    assert surviving == 1
+    assert rows == set(saved)
+    assert not (new_dir / "history.db").exists()
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        OSError("the disk refused"),
+        sqlite3.DatabaseError("the database refused"),
+        ValueError("the pair refused"),
+    ],
+    ids=["OSError", "sqlite3.Error", "ValueError"],
+)
+@pytest.mark.parametrize(
+    "branch",
+    ["moved", "destination already has a file", "nothing to move"],
+)
+def test_every_adopting_branch_answers_failed_for_each_documented_raise(
+    isolated_storage, tmp_path, monkeypatch, branch, raised
+):
+    """`adopt_store_locked` documents three types and every caller catches all three.
+
+    `update_user_settings` understands the outcome and nothing else, so any of
+    them escaping from any of the three branches that adopt reaches the user as
+    a 500 on a settings save rather than as the reason the move did not happen.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    new_dir = tmp_path / "new"
+    new_dir.mkdir()
+    if branch == "moved":
+        history.save_entry(text="before the move", duration_ms=1)
+    elif branch == "destination already has a file":
+        history.bootstrap(new_dir)
+        history.save_entry(text="already there", duration_ms=1)
+        history.bootstrap(target)
+    else:
+        with history._lock:
+            history._close_conn_locked()
+        (target / "history.db").unlink(missing_ok=True)
+
+    monkeypatch.setattr(history, "adopt_store_locked", MagicMock(side_effect=raised))
+
+    outcome, reason = relocation.relocate(new_dir)
+
+    assert outcome == relocation.RelocateOutcome.FAILED
+    assert reason and str(raised) in reason
+
+
+def test_a_failed_adoption_leaves_no_store_file_where_there_was_none(
+    isolated_storage, tmp_path, monkeypatch
+):
+    """A destination that held no history file holds none after a failed move.
+
+    `history._connect` creates the file as a side effect, so one left behind
+    turns a transient failure into a permanent orphan: every retry then takes
+    the `NEW_ALREADY_HAS_FILE` branch and tells the user the previous history
+    was not migrated, which is untrue.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    new_dir = tmp_path / "new"
+    new_dir.mkdir()
+    with history._lock:
+        history._close_conn_locked()
+    (target / "history.db").unlink(missing_ok=True)
+
+    real_init_schema = schema._init_schema
+    monkeypatch.setattr(
+        schema, "_init_schema", MagicMock(side_effect=sqlite3.DatabaseError("cannot migrate"))
+    )
+
+    outcome, _ = relocation.relocate(new_dir)
+
+    monkeypatch.setattr(schema, "_init_schema", real_init_schema)
+
+    assert outcome == relocation.RelocateOutcome.FAILED
+    assert not (new_dir / "history.db").exists()
+
+    retried, _ = relocation.relocate(new_dir)
+
+    assert retried != relocation.RelocateOutcome.NEW_ALREADY_HAS_FILE
+    assert retried == relocation.RelocateOutcome.NO_OLD_FILE
+
+
+def test_adopting_the_connection_the_store_already_holds_leaves_it_usable(
+    isolated_storage, tmp_path
+):
+    """Handing the store back its own handle must not close that handle.
+
+    Both halves are already installed, so the call changes nothing; closing the
+    current connection on the way through would strand a closed handle that
+    `_ensure_conn_locked` never reopens, and every later save would raise.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+
+    with history._lock:
+        history.adopt_store_locked(target, history._conn)
+
+    assert history._output_dir == target
+    assert history._conn is not None
+    _assert_one_store("after adopting its own connection")
 
 
 def test_a_relocate_whose_verification_fails_names_one_store(

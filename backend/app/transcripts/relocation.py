@@ -33,19 +33,25 @@ class ConsolidateOutcome(str, Enum):
     FAILED = "failed"
 
 
+_ADOPTION_FAILURES = (OSError, sqlite3.Error, ValueError)
+
+
 def _adopt_existing_store(
-    new_dir: Path, outcome: RelocateOutcome
+    new_dir: Path, outcome: RelocateOutcome, destination_existed: bool
 ) -> tuple[RelocateOutcome, str | None]:
     """Caller MUST hold ``history._lock``. Adopt the store already in ``new_dir``.
 
     Answers ``outcome`` once both halves name ``new_dir``, or ``FAILED`` with a
-    reason when opening or migrating that database raises. Every failure of
-    ``relocate`` reaches the settings layer as ``FAILED``, never as an exception.
+    reason when opening or migrating that database raises. A failure removes the
+    store file the attempt created unless ``destination_existed`` says one was
+    already there, so a retry meets the directory as it found it.
     """
     try:
         history.adopt_store_locked(new_dir)
-    except (OSError, sqlite3.Error) as e:
+    except _ADOPTION_FAILURES as e:
         log.exception("Relocate could not adopt %s: %s", new_dir, e)
+        if not destination_existed:
+            (new_dir / history.HISTORY_FILENAME).unlink(missing_ok=True)
         return RelocateOutcome.FAILED, f"Move failed: {e}"
     return outcome, None
 
@@ -54,8 +60,9 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
     """Move history.db to ``new_dir``, reporting what it did and why.
 
     Holds ``history._lock`` throughout and moves the store only through
-    ``history.adopt_store_locked``. FTS5 is rebuilt before the source file is
-    unlinked, and once it is gone the destination is never removed.
+    ``history.adopt_store_locked``. The source is unlinked only after that
+    adoption succeeds, so a failure leaves the rows readable at the source
+    (ADR 086).
     """
     with history._lock:
         old_dir = history._resolve_output_dir()
@@ -77,15 +84,18 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
         except OSError as e:
             return RelocateOutcome.FAILED, f"Could not create target directory: {e}"
 
-        if new_path.exists():
-            return _adopt_existing_store(new_dir, RelocateOutcome.NEW_ALREADY_HAS_FILE)
+        destination_existed = new_path.exists()
+
+        if destination_existed:
+            return _adopt_existing_store(
+                new_dir, RelocateOutcome.NEW_ALREADY_HAS_FILE, destination_existed
+            )
 
         if not old_path.exists():
-            return _adopt_existing_store(new_dir, RelocateOutcome.NO_OLD_FILE)
+            return _adopt_existing_store(new_dir, RelocateOutcome.NO_OLD_FILE, destination_existed)
 
         history._close_conn_locked()
         new_conn: sqlite3.Connection | None = None
-        source_removed = False
         try:
             shutil.copy2(old_path, new_path)
             if not _verify_db_row_count(old_path, new_path):
@@ -97,17 +107,12 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             schema._init_schema(new_conn)
             new_conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
 
-            old_path.unlink()
-            source_removed = True
             history.adopt_store_locked(new_dir, new_conn)
             new_conn = None
-            log.info("Relocated history %s → %s", old_path, new_path)
-            return RelocateOutcome.MOVED, None
-        except (OSError, sqlite3.Error) as e:
+        except _ADOPTION_FAILURES as e:
             if new_conn is not None:
                 history._close_quietly(new_conn)
-            if not source_removed:
-                new_path.unlink(missing_ok=True)
+            new_path.unlink(missing_ok=True)
             try:
                 history._reopen_conn_locked(old_dir)
             except sqlite3.Error:
@@ -115,6 +120,13 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
                 history.invalidate_derived_caches_locked()
             log.exception("Relocate failed: %s", e)
             return RelocateOutcome.FAILED, f"Move failed: {e}"
+
+        try:
+            old_path.unlink()
+        except OSError as e:
+            log.warning("History moved but %s could not be removed: %s", old_path, e)
+        log.info("Relocated history %s → %s", old_path, new_path)
+        return RelocateOutcome.MOVED, None
 
 
 def _premigration_path(target_dir: Path) -> Path:
@@ -193,10 +205,7 @@ def consolidate_into(source_dir: Path, target_dir: Path) -> tuple[ConsolidateOut
         return ConsolidateOutcome.FAILED, f"Consolidation failed: {e}"
     finally:
         if conn is not None:
-            try:
-                conn.close()
-            except sqlite3.Error:
-                pass
+            history._close_quietly(conn)
 
     try:
         kept = _premigration_path(target_dir)
