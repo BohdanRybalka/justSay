@@ -97,8 +97,12 @@ def check_status(stt_settings: STTSettings) -> LocalSTTStatus:
     gpu_available = is_accelerated_device(device, kind)
 
     provider_error = routing.get_local_load_error(stt_settings)
-    raw_error = provider_error if provider_error is not None else _prewarm_error
-    last_error = load_error_sentence(raw_error) if raw_error is not None else None
+    if provider_error is not None:
+        last_error = load_error_sentence(provider_error)
+    elif _prewarm_error is not None:
+        last_error = load_error_sentence(_prewarm_error, _INSTALL_GAVE_NO_REASON)
+    else:
+        last_error = None
     model_is_loaded = routing.is_model_loaded() if installed else False
 
     return LocalSTTStatus(
@@ -245,14 +249,18 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
                 _prewarm_error = local_whisper_cpp_cmd.binary_not_found_message()
                 return
             _prewarm_error = None
-            exit_code, output = await asyncio.to_thread(_run_pip_install)
+            try:
+                exit_code, _ = await asyncio.to_thread(_run_pip_install)
+            except Exception as e:
+                log.warning("pip install raised: %s", e)
+                _prewarm_error = load_error_sentence(str(e), _INSTALL_GAVE_NO_REASON)
+                return
             if exit_code != 0:
                 _prewarm_error = (
                     f"Installing the local speech engine failed (pip exit code "
                     f"{exit_code}). See the JustSay log for the pip output."
                 )
                 return
-            _prewarm_error = None
 
         if routing.peek_local_provider() is not provider:
             return

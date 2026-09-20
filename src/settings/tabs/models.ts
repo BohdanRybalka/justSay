@@ -101,7 +101,8 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
     try {
       const s: LocalSTTStatus = await api.sttLocalStatus();
       if (isStaleStatusResponse(token, latestSttStatusToken) || currentSttMode !== "local") return;
-      applyLocalIndicator(s.last_error, s.model_loaded, `${s.model_name} · ${s.device}`);
+      const caption = [s.model_name, s.device].filter(Boolean).join(" · ") || "Local engine";
+      applyLocalIndicator(s.last_error, s.model_loaded, caption);
     } catch {
       if (isStaleStatusResponse(token, latestSttStatusToken) || currentSttMode !== "local") return;
       applyLocalIndicator("Backend not responding", false, "Backend not responding");
@@ -139,5 +140,6 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
 
   return () => {
     clearInterval(pollInterval);
+    prevLastError = null;
   };
 }

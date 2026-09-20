@@ -350,6 +350,25 @@ async def test_install_emits_error_on_failure():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("raised", [RuntimeError(" "), TimeoutError()])
+async def test_ensure_local_ready_reports_a_sentence_when_the_pip_call_raises(monkeypatch, raised):
+    """A pip call that raises publishes a reason rather than leaving the field absent."""
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+
+    def _raise():
+        raise raised
+
+    monkeypatch.setattr(local_setup, "_run_pip_install", _raise)
+
+    await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+
+    assert provider.get_model_calls == 0
+    assert local_setup._prewarm_error is not None
+    assert local_setup._prewarm_error.strip()
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("output", ["", "\n", "   "])
 async def test_install_error_event_carries_text_when_pip_printed_nothing_readable(output):
     """The SSE `error` field is published non-blank whatever pip printed."""
@@ -893,8 +912,8 @@ def test_check_status_merge_is_deterministic_when_package_missing_and_provider_e
     _check_package_installed() never flips True -> False mid-process, so an
     install failure (_prewarm_error) and a provider load failure never
     coexist. Force that "impossible" combined state anyway and pin the merge
-    outcome: get_local_load_error() or _prewarm_error -> the provider error
-    always wins, regardless of package_installed being False."""
+    outcome: the provider error always wins when it is present, regardless of
+    package_installed being False."""
     from app.stt.routing import _get_local
     from app.stt.routing import clear_cache as clear_stt_cache
 
@@ -914,14 +933,20 @@ def test_check_status_merge_is_deterministic_when_package_missing_and_provider_e
         clear_stt_cache()
 
 
+_THE_CHANNELS_OWN_FALLBACK = "the fallback sentence of whichever channel carried it"
+
 _BLANK_SHAPES_THE_BOUNDARY_NORMALIZES = [
     (None, None),
-    ("", LOAD_FAILED_WITHOUT_A_MESSAGE),
-    (" ", LOAD_FAILED_WITHOUT_A_MESSAGE),
-    ("\n", LOAD_FAILED_WITHOUT_A_MESSAGE),
-    ("\t \r\n", LOAD_FAILED_WITHOUT_A_MESSAGE),
+    ("", _THE_CHANNELS_OWN_FALLBACK),
+    (" ", _THE_CHANNELS_OWN_FALLBACK),
+    ("\n", _THE_CHANNELS_OWN_FALLBACK),
+    ("\t \r\n", _THE_CHANNELS_OWN_FALLBACK),
     ("  whisper-server exited early (code 3)\n", "whisper-server exited early (code 3)"),
 ]
+
+
+def _expected(published, fallback):
+    return fallback if published is _THE_CHANNELS_OWN_FALLBACK else published
 
 
 @pytest.mark.parametrize(("written", "published"), _BLANK_SHAPES_THE_BOUNDARY_NORMALIZES)
@@ -942,7 +967,7 @@ def test_check_status_normalizes_whatever_the_install_step_wrote(written, publis
         local_setup._prewarm_error = None
         clear_stt_cache()
 
-    assert status.last_error == published
+    assert status.last_error == _expected(published, local_setup._INSTALL_GAVE_NO_REASON)
     assert status.last_error is None or status.last_error.strip()
 
 
@@ -966,7 +991,7 @@ def test_check_status_normalizes_whatever_a_provider_latched(latched, published)
         local_setup._prewarm_error = None
         clear_stt_cache()
 
-    assert status.last_error == published
+    assert status.last_error == _expected(published, LOAD_FAILED_WITHOUT_A_MESSAGE)
     assert status.last_error is None or status.last_error.strip()
 
 
@@ -1164,9 +1189,7 @@ async def test_ensure_local_ready_reports_a_sentence_when_pip_fails_printing_onl
 
 
 @pytest.mark.asyncio
-async def test_ensure_local_ready_sends_the_pip_output_to_the_log_not_to_the_notification(
-    monkeypatch, caplog
-):
+async def test_ensure_local_ready_keeps_the_pip_output_out_of_the_notification(monkeypatch):
     """A resolver traceback is not a sentence, so the field names the log instead."""
     lines = [f"pip resolver line {n}" for n in range(60)]
     provider = _FakePrewarmProvider()
@@ -1817,8 +1840,8 @@ async def test_timeout_then_retry_joins_in_flight_load_instead_of_starting_a_sec
 async def test_prewarm_latch_shows_the_reason_without_the_class_name(monkeypatch):
     """The Settings indicator's text for a classified failure, pinned exactly.
 
-    ``_prewarm_error`` is served verbatim as ``GET /stt/local/status``'s
-    ``last_error`` and rendered into the Local STT indicator's title, its
+    ``_prewarm_error`` reaches ``GET /stt/local/status``'s ``last_error``
+    through the boundary and is rendered into the indicator's title, its
     aria-label and an error toast. It is the provider's own sentence and
     nothing else: a person reading that indicator is deciding what to do next,
     and a Python class name tells them nothing they can act on while the class
@@ -1845,9 +1868,7 @@ async def test_prewarm_latch_is_never_empty_when_the_load_failed(monkeypatch):
 
     An empty latch is worse than a leaked class name. `src/status-indicator.ts`
     reads a falsy `error` as not-an-error, so a failed prewarm would be drawn
-    as a healthy Local STT indicator, and `local_setup.check_status`'s own read
-    is `get_local_load_error(...) or _prewarm_error`, so an empty latch also
-    falls through to an unrelated source.
+    as a healthy Local STT indicator.
     """
     _stub_whisper_cpp_server_kind(monkeypatch)
 

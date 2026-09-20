@@ -189,6 +189,34 @@ describe("renderModels — a failed local load the user can read", () => {
     }
   });
 
+  it("raises the toast again when the tab is reopened while the failure is still there", async () => {
+    const container = await render(buildStatus({ last_error: "" }));
+
+    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledTimes(1));
+    expect(badgeClass(container)).toContain("status-indicator-badge--error");
+
+    for (const cleanup of cleanups) cleanup();
+    cleanups = [];
+
+    const { renderModels } = await import("./models");
+    const reopened = document.createElement("div");
+    cleanups.push(renderModels(reopened, buildSettings()));
+
+    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps the caption free of `undefined` when the response omits the model fields", async () => {
+    const status = buildStatus({ model_loaded: true });
+    delete (status as { model_name?: string }).model_name;
+    delete (status as { device?: string }).device;
+    const container = await render(status);
+
+    await vi.waitFor(() => expect(badgeClass(container)).toContain("status-indicator-badge--ready"));
+    const caption = container.querySelector<HTMLElement>("#stt-local-caption")!;
+    expect(caption.textContent).toBeTruthy();
+    expect(caption.textContent).not.toContain("undefined");
+  });
+
   it("draws no error and raises no toast when the field is absent from the response", async () => {
     const status = buildStatus({ model_loaded: true });
     delete (status as { last_error?: string | null }).last_error;
