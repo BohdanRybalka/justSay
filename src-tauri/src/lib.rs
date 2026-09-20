@@ -8,10 +8,14 @@ use tauri::{
 
 mod backend;
 
-/// The widget window's logical size. Read by both the builder that creates
-/// the window and the command that centres it, so the two cannot disagree.
+/// The widget window's logical width, as built and as placed.
 const WIDGET_WIDTH: f64 = 160.0;
+
+/// The widget window's logical height, as built and as placed.
 const WIDGET_HEIGHT: f64 = 40.0;
+
+/// Logical gap between the bottom of the monitor and the widget's bottom edge.
+const WIDGET_BOTTOM_GAP: f64 = 220.0;
 
 /// Kill the backend child process if one is running. Safe to call even if
 /// nothing is running (no-op). Exposed narrowly for `main.rs`'s panic hook —
@@ -82,15 +86,22 @@ fn show_settings_window(app: AppHandle) {
 #[tauri::command]
 fn widget_ready(app: AppHandle) {
     if let Some(widget) = app.get_webview_window("widget") {
-        if let Ok(Some(monitor)) = widget.current_monitor() {
-            let screen = monitor.size();
-            let scale = monitor.scale_factor();
-            let x = (screen.width as f64 / scale - WIDGET_WIDTH) / 2.0;
-            let y = screen.height as f64 / scale - WIDGET_HEIGHT - 220.0;
-            let _ = widget.set_position(tauri::PhysicalPosition::new(
-                (x * scale) as i32,
-                (y * scale) as i32,
-            ));
+        match widget.current_monitor() {
+            Ok(Some(monitor)) => {
+                let screen = monitor.size();
+                let origin = monitor.position();
+                let scale = monitor.scale_factor();
+                let x = origin.x as f64 + (screen.width as f64 - WIDGET_WIDTH * scale) / 2.0;
+                let y = origin.y as f64 + screen.height as f64
+                    - (WIDGET_HEIGHT + WIDGET_BOTTOM_GAP) * scale;
+                if let Err(e) = widget
+                    .set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32))
+                {
+                    log::warn!("Placing the widget failed, so it keeps where the OS put it: {}", e);
+                }
+            }
+            Ok(None) => log::warn!("The widget reports no monitor, so it keeps where the OS put it"),
+            Err(e) => log::warn!("Reading the widget's monitor failed: {}", e),
         }
 
         let _ = widget.show();

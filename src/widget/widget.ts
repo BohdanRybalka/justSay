@@ -34,7 +34,8 @@ import { createRecordingIntentQueue } from "./recording-intent";
 import { CONNECTION_POLL_MS, createSettingsRetry } from "./settings-retry";
 
 
-type WidgetState = "idle" | "recording" | "processing" | "done" | "error";
+const WIDGET_STATE_CLASSES = ["idle", "recording", "processing", "done", "error"] as const;
+type WidgetState = (typeof WIDGET_STATE_CLASSES)[number];
 type IconState = "idle" | "hover" | "recording" | "processing" | "done" | "error";
 
 let state: WidgetState = "idle";
@@ -68,7 +69,9 @@ function isInteractive(): boolean {
 
 function setState(newState: WidgetState, message?: string, durationLabel?: string) {
   state = newState;
-  widget.className = `widget ${state}${meetingActive ? ` ${MEETING_STATE_CLASS}` : ""}`;
+  widget.classList.remove(...WIDGET_STATE_CLASSES);
+  widget.classList.add(state);
+  widget.classList.toggle(MEETING_STATE_CLASS, meetingActive);
 
   if (durationInterval && state !== "recording") {
     clearInterval(durationInterval);

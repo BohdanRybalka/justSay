@@ -334,6 +334,45 @@ describe("a meeting that goes wrong while nobody is looking", () => {
     expect(root.classList.contains("meeting")).toBe(false);
   });
 
+  it("keeps the degraded marker when a dictation's auto-revert fires under it", async () => {
+    await loadWidget();
+    apiMock.audioStart.mockResolvedValue(recordingStatus());
+    apiMock.dictate.mockResolvedValue({ text: "one", duration_ms: 100, copied_to_clipboard: true });
+    const root = document.getElementById("widget")!;
+    const text = document.getElementById("widget-text")!;
+    root.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(text.textContent).toBe("Recording"));
+    root.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(text.textContent).toBe("Copied"));
+    await vi.waitFor(() => expect(listeners.get(EVENT_MEETING_TOGGLE)).toBeTypeOf("function"));
+    apiMock.startMeetingRecording.mockResolvedValue({
+      is_recording: true,
+      duration_seconds: 0,
+      level_db: -60,
+      system_endpoint: "Headset [Loopback]",
+      system_level_db: -60,
+      capture_incident: null,
+    });
+    await vi.advanceTimersByTimeAsync(250);
+    await listeners.get(EVENT_MEETING_TOGGLE)!({});
+    apiMock.getMeetingStatus.mockResolvedValue({
+      is_recording: true,
+      duration_seconds: 5,
+      level_db: -60,
+      system_endpoint: "Headset [Loopback]",
+      system_level_db: -60,
+      capture_incident: "system_audio_ended",
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(root.classList.contains("meeting-degraded")).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(750);
+
+    expect(text.textContent).toBe("JustSay");
+    expect(root.classList.contains("meeting")).toBe(true);
+    expect(root.classList.contains("meeting-degraded")).toBe(true);
+  });
+
   it("leaves the marker up when the status call itself fails", async () => {
     const root = await startAMeeting();
     apiMock.getMeetingStatus.mockRejectedValue(new TypeError("Failed to fetch"));
