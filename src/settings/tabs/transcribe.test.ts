@@ -198,22 +198,47 @@ describe("renderTranscribe — the drop zone", () => {
     expect(dropzone.classList.contains("active")).toBe(false);
   });
 
-  it("a drop it handles never reaches the window, which would swallow it", () => {
+  it("crossing onto the zone's own children keeps the mark lit", () => {
+    const { container } = render();
+    const dropzone = container.querySelector<HTMLElement>("#dropzone")!;
+    const title = container.querySelector<HTMLElement>(".dropzone-title")!;
+
+    dropzone.dispatchEvent(new Event("dragenter", { bubbles: true }));
+    const ontoAChild = new Event("dragleave", { bubbles: true });
+    Object.defineProperty(ontoAChild, "relatedTarget", { value: title });
+    dropzone.dispatchEvent(ontoAChild);
+
+    expect(
+      dropzone.classList.contains("active"),
+      "dragleave fires at every child boundary, so clearing the mark here strobes it",
+    ).toBe(true);
+  });
+
+  it("a drop it handles never reaches the window, which would swallow it", async () => {
+    apiMock.processFile.mockResolvedValue({
+      text: "hello there",
+      duration_ms: 1000,
+      copied_to_clipboard: false,
+    });
     const { container } = render();
     document.body.appendChild(container);
     const reachedTheWindow = vi.fn();
     window.addEventListener("drop", reachedTheWindow);
-    const event = new Event("drop", { bubbles: true, cancelable: true });
-    Object.defineProperty(event, "dataTransfer", { value: { files: [], getData: () => "" } });
 
-    container.querySelector("#dropzone")!.dispatchEvent(event);
+    dropFile(container, buildFile("note.wav", 2048));
+    await vi.waitFor(() => {
+      expect(apiMock.processFile).toHaveBeenCalledTimes(1);
+    });
     window.removeEventListener("drop", reachedTheWindow);
     container.remove();
 
-    expect(reachedTheWindow).not.toHaveBeenCalled();
+    expect(
+      reachedTheWindow,
+      "a file the zone took must not bubble on to the window guard, which cancels the drop",
+    ).not.toHaveBeenCalled();
   });
 
-  it("a drop carrying a path instead of a file says to use the picker", async () => {
+  it("a drop carrying text instead of a file says what it carried", async () => {
     const { container } = render();
     const event = new Event("drop", { bubbles: true });
     Object.defineProperty(event, "dataTransfer", {
@@ -223,12 +248,14 @@ describe("renderTranscribe — the drop zone", () => {
     container.querySelector("#dropzone")!.dispatchEvent(event);
 
     await vi.waitFor(() => {
-      expect(status(container).textContent).toContain("Use the picker instead");
+      expect(status(container).textContent).toBe(
+        "That drag carried text, not a file. Drop an audio file or use the picker.",
+      );
     });
     expect(apiMock.processFile).not.toHaveBeenCalled();
   });
 
-  it("the zone keeps the webview from navigating to the file it was handed", () => {
+  it("the zone keeps the webview from navigating to the file it was handed", async () => {
     apiMock.processFile.mockResolvedValue({
       text: "hello there",
       duration_ms: 1000,
@@ -238,6 +265,10 @@ describe("renderTranscribe — the drop zone", () => {
 
     const event = dropFile(container, buildFile("note.wav", 2048));
 
+    await vi.waitFor(() => {
+      expect(apiMock.processFile).toHaveBeenCalledTimes(1);
+    });
+    expect(apiMock.processFile.mock.calls[0][1]).toBe("note.wav");
     expect(
       event.defaultPrevented,
       "an unprevented drop is a browser navigation to the file, which replaces the UI",

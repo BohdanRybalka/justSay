@@ -793,8 +793,9 @@ describe("a file dropped where nothing in the page handles it", () => {
     await vi.waitFor(() => expect(document.getElementById("btn-test-mic")).not.toBeNull());
   }
 
-  function dispatchOnTheNav(type: string): Event {
+  function dispatchOnTheNav(type: string, carried: string[]): Event {
     const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", { value: { types: carried } });
     document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.dispatchEvent(event);
     return event;
   }
@@ -802,8 +803,8 @@ describe("a file dropped where nothing in the page handles it", () => {
   it("is swallowed, so the webview cannot navigate away from the Settings UI", async () => {
     await bootSettingsWindow();
 
-    const dragover = dispatchOnTheNav("dragover");
-    const drop = dispatchOnTheNav("drop");
+    const dragover = dispatchOnTheNav("dragover", ["Files"]);
+    const drop = dispatchOnTheNav("drop", ["Files"]);
 
     expect(
       dragover.defaultPrevented,
@@ -814,5 +815,22 @@ describe("a file dropped where nothing in the page handles it", () => {
       "an unprevented drop is a browser navigation to the dropped file, which replaces " +
         "the whole Settings UI (ADR 087)",
     ).toBe(true);
+  });
+
+  it("leaves a text drag alone, so a dragged folder path still lands in a field", async () => {
+    await bootSettingsWindow();
+
+    const dragover = dispatchOnTheNav("dragover", ["text/plain"]);
+    const drop = dispatchOnTheNav("drop", ["text/plain"]);
+
+    expect(
+      dragover.defaultPrevented,
+      "cancelling a text dragover shows a copy cursor over every tab that takes no file",
+    ).toBe(false);
+    expect(
+      drop.defaultPrevented,
+      "cancelling a text drop stops the browser inserting a folder path dragged from " +
+        "Explorer into the output-directory field, and nothing puts it there instead",
+    ).toBe(false);
   });
 });

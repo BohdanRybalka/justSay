@@ -89,6 +89,8 @@ export function renderTranscribe(container: HTMLElement): () => void {
     dropzone.addEventListener(evt, (e) => {
       e.preventDefault();
       e.stopPropagation();
+      const enteredNext = (e as DragEvent).relatedTarget as Node | null;
+      if (evt === "dragleave" && enteredNext && dropzone.contains(enteredNext)) return;
       dropzone.classList.remove("active");
     });
   });
@@ -98,8 +100,10 @@ export function renderTranscribe(container: HTMLElement): () => void {
     if (file) {
       await handleFile(file);
     } else {
-      const path = e.dataTransfer?.getData("text/plain");
-      if (path) renderError("Drag-drop received a path instead of a file. Use the picker instead.");
+      const dragged = e.dataTransfer?.getData("text/plain");
+      if (dragged) {
+        renderError("That drag carried text, not a file. Drop an audio file or use the picker.");
+      }
     }
   });
 

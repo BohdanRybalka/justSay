@@ -349,12 +349,13 @@ navButtons.forEach((btn) => {
 });
 
 
-/** Stop a file dropped outside a drop zone from replacing this window's UI.
+/** Cancel a drag carrying files that no element in the page handled (ADR 087).
  *
- *  The shell hands external drops to the page (ADR 087), so an unhandled drop
- *  is a browser navigation to the dropped file. The Transcribe zone's own
- *  handlers stop propagation, so a landed drop never reaches these. */
+ *  An unhandled file drop navigates the webview to the dropped file. A drag
+ *  carrying anything else is left to its browser default. */
 function swallowUnhandledFileDrop(event: Event) {
+  const dragged = (event as DragEvent).dataTransfer;
+  if (!dragged || !Array.from(dragged.types).includes("Files")) return;
   event.preventDefault();
 }
 
