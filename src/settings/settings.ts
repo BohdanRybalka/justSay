@@ -349,6 +349,20 @@ navButtons.forEach((btn) => {
 });
 
 
+/** Cancel a drag carrying files that no element in the page handled (ADR 087).
+ *
+ *  An unhandled file drop navigates the webview to the dropped file. A drag
+ *  carrying anything else is left to its browser default. */
+function swallowUnhandledFileDrop(event: Event) {
+  const dragged = (event as DragEvent).dataTransfer;
+  if (!dragged || !Array.from(dragged.types).includes("Files")) return;
+  event.preventDefault();
+}
+
+window.addEventListener("dragover", swallowUnhandledFileDrop);
+window.addEventListener("drop", swallowUnhandledFileDrop);
+
+
 /** Release whatever the active tab is holding when the window is dismissed.
  *
  *  The shell prevents the close and hides the window instead, so the webview

@@ -10,21 +10,6 @@ vi.mock("../../api", () => ({
   api: apiMock,
 }));
 
-type ShellDragDropListener = (event: { payload: { type: string; paths?: string[] } }) => void;
-
-const unlisten = vi.fn();
-const onDragDropEvent = vi.fn(async (listener: ShellDragDropListener) => unlisten);
-
-vi.mock("@tauri-apps/api/webview", () => ({
-  getCurrentWebview: () => ({ onDragDropEvent }),
-}));
-
-const readFile = vi.fn();
-
-vi.mock("@tauri-apps/plugin-fs", () => ({
-  readFile,
-}));
-
 const { renderTranscribe } = await import("./transcribe");
 
 const writeText = vi.fn();
@@ -41,12 +26,13 @@ function buildFile(name: string, size: number): File {
   return file;
 }
 
-function dropFile(container: HTMLElement, file: File): void {
-  const event = new Event("drop", { bubbles: true });
+function dropFile(container: HTMLElement, file: File): Event {
+  const event = new Event("drop", { bubbles: true, cancelable: true });
   Object.defineProperty(event, "dataTransfer", {
     value: { files: [file], getData: () => "" },
   });
   container.querySelector("#dropzone")!.dispatchEvent(event);
+  return event;
 }
 
 function status(container: HTMLElement): HTMLElement {
@@ -212,7 +198,47 @@ describe("renderTranscribe — the drop zone", () => {
     expect(dropzone.classList.contains("active")).toBe(false);
   });
 
-  it("a drop carrying a path instead of a file says to use the picker", async () => {
+  it("crossing onto the zone's own children keeps the mark lit", () => {
+    const { container } = render();
+    const dropzone = container.querySelector<HTMLElement>("#dropzone")!;
+    const title = container.querySelector<HTMLElement>(".dropzone-title")!;
+
+    dropzone.dispatchEvent(new Event("dragenter", { bubbles: true }));
+    const ontoAChild = new Event("dragleave", { bubbles: true });
+    Object.defineProperty(ontoAChild, "relatedTarget", { value: title });
+    dropzone.dispatchEvent(ontoAChild);
+
+    expect(
+      dropzone.classList.contains("active"),
+      "dragleave fires at every child boundary, so clearing the mark here strobes it",
+    ).toBe(true);
+  });
+
+  it("a drop it handles never reaches the window, which would swallow it", async () => {
+    apiMock.processFile.mockResolvedValue({
+      text: "hello there",
+      duration_ms: 1000,
+      copied_to_clipboard: false,
+    });
+    const { container } = render();
+    document.body.appendChild(container);
+    const reachedTheWindow = vi.fn();
+    window.addEventListener("drop", reachedTheWindow);
+
+    dropFile(container, buildFile("note.wav", 2048));
+    await vi.waitFor(() => {
+      expect(apiMock.processFile).toHaveBeenCalledTimes(1);
+    });
+    window.removeEventListener("drop", reachedTheWindow);
+    container.remove();
+
+    expect(
+      reachedTheWindow,
+      "a file the zone took must not bubble on to the window guard, which cancels the drop",
+    ).not.toHaveBeenCalled();
+  });
+
+  it("a drop carrying text instead of a file says what it carried", async () => {
     const { container } = render();
     const event = new Event("drop", { bubbles: true });
     Object.defineProperty(event, "dataTransfer", {
@@ -222,51 +248,39 @@ describe("renderTranscribe — the drop zone", () => {
     container.querySelector("#dropzone")!.dispatchEvent(event);
 
     await vi.waitFor(() => {
-      expect(status(container).textContent).toContain("Use the picker instead");
+      expect(status(container).textContent).toBe(
+        "That drag carried text, not a file. Drop an audio file or use the picker.",
+      );
     });
     expect(apiMock.processFile).not.toHaveBeenCalled();
   });
 
-  it("the teardown unsubscribes the shell's own drag-drop listener", async () => {
-    const { teardown } = render();
-    await vi.waitFor(() => {
-      expect(onDragDropEvent).toHaveBeenCalledTimes(1);
+  it("the zone keeps the webview from navigating to the file it was handed", async () => {
+    apiMock.processFile.mockResolvedValue({
+      text: "hello there",
+      duration_ms: 1000,
+      copied_to_clipboard: false,
     });
+    const { container } = render();
 
-    teardown();
-
-    expect(unlisten).toHaveBeenCalledTimes(1);
-  });
-
-  it("a teardown that beats the registration still unsubscribes it", async () => {
-    let arrive!: (off: typeof unlisten) => void;
-    onDragDropEvent.mockImplementationOnce(
-      () => new Promise<typeof unlisten>((resolve) => (arrive = resolve)),
-    );
-    const { teardown } = render();
-    await vi.waitFor(() => {
-      expect(onDragDropEvent).toHaveBeenCalledTimes(1);
-    });
-
-    teardown();
-    arrive(unlisten);
+    const event = dropFile(container, buildFile("note.wav", 2048));
 
     await vi.waitFor(() => {
-      expect(unlisten).toHaveBeenCalledTimes(1);
+      expect(apiMock.processFile).toHaveBeenCalledTimes(1);
     });
+    expect(apiMock.processFile.mock.calls[0][1]).toBe("note.wav");
+    expect(
+      event.defaultPrevented,
+      "an unprevented drop is a browser navigation to the file, which replaces the UI",
+    ).toBe(true);
   });
 
   it("a transcription already in flight at teardown writes nothing back", async () => {
-    readFile.mockResolvedValue(new Uint8Array([1, 2, 3, 4]));
     let finish!: (result: unknown) => void;
     apiMock.processFile.mockReturnValue(new Promise((resolve) => (finish = resolve)));
     const { container, teardown } = render();
-    await vi.waitFor(() => {
-      expect(onDragDropEvent).toHaveBeenCalledTimes(1);
-    });
-    const listener = onDragDropEvent.mock.calls[0][0];
 
-    listener({ payload: { type: "drop", paths: ["/home/me/inflight.wav"] } });
+    dropFile(container, buildFile("inflight.wav", 2048));
     await vi.waitFor(() => {
       expect(apiMock.processFile).toHaveBeenCalledTimes(1);
     });
@@ -279,81 +293,23 @@ describe("renderTranscribe — the drop zone", () => {
   });
 
   it("a drop delivered after teardown transcribes nothing", async () => {
-    readFile.mockResolvedValue(new Uint8Array([1, 2, 3, 4]));
     apiMock.processFile.mockResolvedValue({
       text: "before",
       duration_ms: 1000,
       copied_to_clipboard: true,
     });
-    const { teardown } = render();
-    await vi.waitFor(() => {
-      expect(onDragDropEvent).toHaveBeenCalledTimes(1);
-    });
-    const listener = onDragDropEvent.mock.calls[0][0];
+    const { container, teardown } = render();
 
-    listener({ payload: { type: "drop", paths: ["/home/me/before.wav"] } });
+    dropFile(container, buildFile("before.wav", 2048));
     await vi.waitFor(() => {
       expect(apiMock.processFile).toHaveBeenCalledTimes(1);
     });
 
     teardown();
-    listener({ payload: { type: "drop", paths: ["/home/me/after.wav"] } });
+    dropFile(container, buildFile("after.wav", 2048));
     await new Promise((resolve) => setTimeout(resolve, 25));
 
-    expect(readFile).toHaveBeenCalledTimes(1);
     expect(apiMock.processFile).toHaveBeenCalledTimes(1);
     expect(apiMock.processFile.mock.calls[0][1]).toBe("before.wav");
-  });
-});
-
-describe("renderTranscribe — a file dropped onto the shell rather than the page", () => {
-  async function dropPath(absolutePath: string): Promise<void> {
-    await vi.waitFor(() => {
-      expect(onDragDropEvent).toHaveBeenCalledTimes(1);
-    });
-    const listener = onDragDropEvent.mock.calls[0][0];
-    listener({ payload: { type: "drop", paths: [absolutePath] } });
-  }
-
-  it("the file is read from disk and sent under the name the path ends with", async () => {
-    readFile.mockResolvedValue(new Uint8Array([1, 2, 3, 4]));
-    apiMock.processFile.mockResolvedValue({
-      text: "from disk",
-      duration_ms: 2000,
-      copied_to_clipboard: false,
-    });
-    const { container } = render();
-
-    await dropPath("C:\\Users\\me\\Recordings\\meeting.wav");
-
-    await vi.waitFor(() => {
-      expect(resultText(container).textContent).toBe("from disk");
-    });
-    expect(apiMock.processFile).toHaveBeenCalledTimes(1);
-    expect(apiMock.processFile.mock.calls[0][1]).toBe("meeting.wav");
-  });
-
-  it("an extension the backend does not accept is refused without reading the disk", async () => {
-    const { container } = render();
-
-    await dropPath("/home/me/notes.txt");
-
-    await vi.waitFor(() => {
-      expect(status(container).textContent).toBe("Unsupported format: txt");
-    });
-    expect(readFile).not.toHaveBeenCalled();
-    expect(apiMock.processFile).not.toHaveBeenCalled();
-  });
-
-  it("a disk that refuses the read says so instead of failing silently", async () => {
-    readFile.mockRejectedValue(new Error("Access is denied"));
-    const { container } = render();
-
-    await dropPath("/home/me/locked.wav");
-
-    await vi.waitFor(() => {
-      expect(status(container).textContent).toBe("Cannot read file from disk: Access is denied");
-    });
-    expect(apiMock.processFile).not.toHaveBeenCalled();
   });
 });

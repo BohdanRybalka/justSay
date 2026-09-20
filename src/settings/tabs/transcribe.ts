@@ -89,6 +89,8 @@ export function renderTranscribe(container: HTMLElement): () => void {
     dropzone.addEventListener(evt, (e) => {
       e.preventDefault();
       e.stopPropagation();
+      const enteredNext = (e as DragEvent).relatedTarget as Node | null;
+      if (evt === "dragleave" && enteredNext && dropzone.contains(enteredNext)) return;
       dropzone.classList.remove("active");
     });
   });
@@ -98,28 +100,12 @@ export function renderTranscribe(container: HTMLElement): () => void {
     if (file) {
       await handleFile(file);
     } else {
-      const path = e.dataTransfer?.getData("text/plain");
-      if (path) renderError("Drag-drop received a path instead of a file. Use the picker instead.");
+      const dragged = e.dataTransfer?.getData("text/plain");
+      if (dragged) {
+        renderError("That drag carried text, not a file. Drop an audio file or use the picker.");
+      }
     }
   });
-
-  let unlistenDrop: (() => void) | null = null;
-  (async () => {
-    try {
-      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
-      const wv = getCurrentWebview();
-      const off = await wv.onDragDropEvent((event) => {
-        if (destroyed || busy) return;
-        if (event.payload.type === "drop" && event.payload.paths?.length) {
-          handlePath(event.payload.paths[0]);
-        }
-      });
-      const unlisten = () => { void off(); };
-      if (destroyed) unlisten();
-      else unlistenDrop = unlisten;
-    } catch {
-    }
-  })();
 
   copyBtn.addEventListener("click", async () => {
     try {
@@ -199,33 +185,6 @@ export function renderTranscribe(container: HTMLElement): () => void {
     await transcribe(buf, file.name);
   }
 
-  async function handlePath(absolutePath: string) {
-    const filename = absolutePath.split(/[\\/]/).pop() || "audio";
-    if (!validateExtension(filename)) {
-      renderError(`Unsupported format: ${filename.split(".").pop()}`);
-      return;
-    }
-    renderUiState("loading", `Reading ${filename}...`);
-
-    let bytes: Uint8Array;
-    try {
-      // @ts-ignore - optional Tauri plugin imported lazily
-      const fs: any = await import(/* @vite-ignore */ "@tauri-apps/plugin-fs");
-      bytes = await fs.readFile(absolutePath);
-    } catch (e) {
-      if (destroyed) return;
-      renderError(`Cannot read file from disk: ${(e as Error).message}`);
-      return;
-    }
-    if (destroyed) return;
-    if (bytes.byteLength > MAX_UPLOAD_BYTES) {
-      renderError(`File too large (${(bytes.byteLength / BYTES_PER_MB).toFixed(1)} MB > ${MAX_MB} MB limit)`);
-      return;
-    }
-    const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-    await transcribe(buf, filename);
-  }
-
   async function transcribe(bytes: ArrayBuffer, filename: string) {
     if (destroyed) return;
     renderUiState("transcribing", `Transcribing ${filename}...`);
@@ -245,10 +204,6 @@ export function renderTranscribe(container: HTMLElement): () => void {
 
   return () => {
     destroyed = true;
-    if (unlistenDrop) {
-      try { unlistenDrop(); } catch {}
-      unlistenDrop = null;
-    }
   };
 }
 

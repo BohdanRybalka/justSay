@@ -18,10 +18,16 @@ const EXACT_CONNECT_SRC = [
   `http://localhost:${BACKEND_PORT}`,
 ];
 
-function shippedCsp(): string {
+type ShippedWindow = { label?: string; dragDropEnabled?: boolean };
+type ShippedConfig = { app?: { security?: { csp?: string }; windows?: ShippedWindow[] } };
+
+function shippedConfig(): ShippedConfig {
   const configPath = fileURLToPath(new URL("../src-tauri/tauri.conf.json", import.meta.url));
-  const config = JSON.parse(readFileSync(configPath, "utf8"));
-  return config.app?.security?.csp ?? "";
+  return JSON.parse(readFileSync(configPath, "utf8")) as ShippedConfig;
+}
+
+function shippedCsp(): string {
+  return shippedConfig().app?.security?.csp ?? "";
 }
 
 function parseCsp(csp: string): Record<string, string[]> {
@@ -60,5 +66,24 @@ describe("shipped CSP (src-tauri/tauri.conf.json)", () => {
         "zero-leak regression, and both loopback origins are derived from BACKEND_PORT " +
         "so a port change cannot leave the CSP behind (ADR 028, ADR 045)",
     ).toEqual([...EXACT_CONNECT_SRC].sort());
+  });
+});
+
+describe("shipped settings window (src-tauri/tauri.conf.json)", () => {
+  const settingsWindow = (shippedConfig().app?.windows ?? []).find(
+    (shippedWindow) => shippedWindow.label === "settings",
+  );
+
+  it("exists under the label the rest of the shell addresses it by", () => {
+    expect(settingsWindow, 'no window labelled "settings" in tauri.conf.json').toBeDefined();
+  });
+
+  it("leaves drag-drop to the page instead of letting the shell intercept it", () => {
+    expect(
+      settingsWindow?.dragDropEnabled,
+      "dragDropEnabled must be false — at Tauri's default of true the shell installs its own " +
+        "drag-drop handler and the page never receives dragenter, dragover, dragleave or drop " +
+        "for an external file, which kills the Transcribe drop zone silently (ADR 087)",
+    ).toBe(false);
   });
 });
