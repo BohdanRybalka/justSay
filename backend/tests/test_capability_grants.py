@@ -31,7 +31,10 @@ def _capability_sources() -> tuple[tuple[str, str], ...]:
         if path.is_file() and path.suffix in CAPABILITY_SUFFIXES
     ]
     found.append(
-        (str(TAURI_SHARED_CONF.relative_to(REPO_ROOT)), TAURI_SHARED_CONF.read_text(encoding="utf-8"))
+        (
+            str(TAURI_SHARED_CONF.relative_to(REPO_ROOT)),
+            TAURI_SHARED_CONF.read_text(encoding="utf-8"),
+        )
     )
     assert found
     return tuple(found)
