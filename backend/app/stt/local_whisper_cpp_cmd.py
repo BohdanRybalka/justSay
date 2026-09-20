@@ -39,11 +39,21 @@ BUILD_SCRIPT_NAMES: dict[str, str] = {
 }
 
 
+INSTALLED_BUILD_BINARY_MISSING = (
+    "The local speech engine is missing from this installation of JustSay. "
+    "Reinstall the app, or use Cloud mode until it is back."
+)
+
+
 def binary_not_found_message() -> str:
-    """The one wording for "no whisper-server here", shared by the provider's
-    load failure and ``local_setup.ensure_local_ready()``'s prewarm error so
-    the two cannot name different build scripts on the same platform.
+    """The one wording for "no whisper-server here", shared by every reader.
+
+    An installed build names the reinstall it needs; a source checkout names
+    the build script for its platform, which an installed build has no copy of.
     """
+    if getattr(sys, "frozen", False):
+        return INSTALLED_BUILD_BINARY_MISSING
+
     script = BUILD_SCRIPT_NAMES.get(sys.platform, BUILD_SCRIPT_NAMES["win32"])
     return (
         "whisper-server binary not found. Set JUSTSAY_WHISPER_CPP_BIN, "

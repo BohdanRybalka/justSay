@@ -15,7 +15,7 @@ import pytest
 from app.core.errors import ResourceUnavailableError
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
-from app.stt import local_setup, routing
+from app.stt import local_setup, local_whisper_cpp_cmd, routing
 from app.stt.base import LOAD_FAILED_WITHOUT_A_MESSAGE
 from app.stt.config import STTSettings
 from app.stt.local_factory import get_local_provider_class as _real_get_local_provider_class
@@ -472,13 +472,128 @@ async def test_install_refused_in_frozen_binary(monkeypatch):
     The endpoint must surface a clear error SSE rather than running pip from
     the random `_MEIPASS` cwd that `Path(__file__).resolve()` produces.
     """
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
     monkeypatch.setattr(local_setup.sys, "frozen", True, raising=False)
 
     events = [e async for e in install_local_packages()]
 
     assert len(events) == 1
     assert "event: error" in events[0]
-    assert "not supported in the packaged build" in events[0]
+    assert local_setup._INSTALL_UNSUPPORTED_WHEN_FROZEN in events[0]
+
+
+@pytest.mark.asyncio
+async def test_install_reports_already_installed_in_a_frozen_build_that_resolves_its_engine(
+    monkeypatch,
+):
+    """A packaged build with a working bundled engine has nothing to refuse.
+
+    The refusal is read only once the dependency is known to be absent, so a
+    working Local mode is never told its own build does not support it.
+    """
+    _stub_whisper_cpp_server_kind(monkeypatch)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+    monkeypatch.setattr(local_setup.sys, "frozen", True, raising=False)
+
+    events = [e async for e in install_local_packages()]
+
+    assert len(events) == 1
+    assert "already_installed" in events[0]
+    assert local_setup._INSTALL_UNSUPPORTED_WHEN_FROZEN not in events[0]
+
+
+@pytest.mark.asyncio
+async def test_both_install_paths_refuse_a_frozen_build_with_identical_bytes(monkeypatch):
+    """The prewarm latch and the endpoint's SSE error carry the same sentence.
+
+    Byte-for-byte: a second, differently worded literal in either path is what
+    this fails on.
+    """
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    monkeypatch.setattr(local_setup.sys, "frozen", True, raising=False)
+
+    await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+    latched = local_setup._prewarm_error
+
+    events = [e async for e in install_local_packages()]
+
+    assert latched
+    assert events == [sse_event("error", {"status": "error", "error": latched})]
+
+
+@pytest.mark.asyncio
+async def test_install_refusal_latches_the_error_the_status_endpoint_reports(monkeypatch):
+    """A refused install is a failure the status endpoint must show, not swallow.
+
+    `GET /stt/local/status` reported `last_error: null` right after refusing the
+    install the user had just asked for.
+    """
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    monkeypatch.setattr(local_setup, "_detect_gpu", lambda: (False, None, "none"))
+    monkeypatch.setattr(local_setup, "is_macos_arm64", lambda: False)
+    monkeypatch.setattr("app.stt.routing.get_local_load_error", lambda s: None)
+    monkeypatch.setattr(local_setup.sys, "frozen", True, raising=False)
+
+    events = [e async for e in install_local_packages()]
+
+    assert "event: error" in events[0]
+    assert check_status(STTSettings()).last_error == local_setup._INSTALL_UNSUPPORTED_WHEN_FROZEN
+
+
+def test_check_status_prefers_a_permanent_setup_refusal_over_the_load_error_it_caused(
+    monkeypatch,
+):
+    """The first dictation drives the provider into its own import failure.
+
+    That load error is the refusal's consequence, so it must not outrank and
+    permanently hide the sentence that tells the user what to do about it.
+    """
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    monkeypatch.setattr(local_setup, "_detect_gpu", lambda: (False, None, "none"))
+    monkeypatch.setattr(local_setup, "is_macos_arm64", lambda: False)
+    monkeypatch.setattr(
+        "app.stt.routing.get_local_load_error", lambda s: "No module named 'faster_whisper'"
+    )
+    monkeypatch.setattr(local_setup.sys, "frozen", True, raising=False)
+    local_setup._prewarm_error = local_setup._INSTALL_UNSUPPORTED_WHEN_FROZEN
+
+    assert check_status(STTSettings()).last_error == local_setup._INSTALL_UNSUPPORTED_WHEN_FROZEN
+
+
+def test_check_status_still_prefers_the_load_error_over_a_retryable_setup_failure(monkeypatch):
+    """ADR 083's ordering is untouched for every failure a retry could clear.
+
+    Only a refusal no retry can clear is promoted; a pip failure keeps losing
+    to the provider's own, more specific load error.
+    """
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+    monkeypatch.setattr(local_setup, "_detect_gpu", lambda: (False, None, "none"))
+    monkeypatch.setattr(local_setup, "is_macos_arm64", lambda: False)
+    monkeypatch.setattr("app.stt.routing.get_local_load_error", lambda s: "CUDA out of memory")
+    local_setup._prewarm_error = local_setup._install_failure_sentence(1)
+
+    assert check_status(STTSettings()).last_error == "CUDA out of memory"
+
+
+def test_run_pip_install_refuses_a_build_with_no_interpreter_to_install_into(monkeypatch):
+    """The root cause is refused at the source, not only at the two call sites.
+
+    A third caller must not be able to hand the sidecar `-m pip` and publish its
+    argument parser's exit code as a pip failure.
+    """
+
+    def _must_not_run(cmd, **kwargs):
+        raise AssertionError("subprocess.run must not be reached in a frozen build")
+
+    monkeypatch.setattr(local_setup.subprocess, "run", _must_not_run)
+    monkeypatch.setattr(local_setup.sys, "frozen", True, raising=False)
+
+    with pytest.raises(ResourceUnavailableError) as excinfo:
+        local_setup._run_pip_install()
+
+    assert str(excinfo.value) == local_setup._INSTALL_UNSUPPORTED_WHEN_FROZEN
 
 
 def test_run_pip_install_uses_the_local_extras_on_every_platform(monkeypatch):
@@ -635,16 +750,6 @@ def _stub_whisper_cpp_server_kind(monkeypatch) -> None:
         local_setup,
         "get_local_provider_kind",
         lambda *args, **kwargs: LocalProviderKind.WHISPER_CPP_SERVER,
-    )
-
-
-def _stub_faster_whisper_kind(monkeypatch) -> None:
-    from app.stt.local_factory import LocalProviderKind
-
-    monkeypatch.setattr(
-        local_setup,
-        "get_local_provider_kind",
-        lambda *args, **kwargs: LocalProviderKind.FASTER_WHISPER,
     )
 
 
@@ -830,7 +935,6 @@ async def test_ensure_local_ready_refuses_pip_in_a_frozen_binary(monkeypatch):
     not a pip failure. The guard latches the packaged-build sentence and the pip
     call is never reached.
     """
-    _stub_faster_whisper_kind(monkeypatch)
     provider = _FakePrewarmProvider()
     monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
@@ -845,13 +949,11 @@ async def test_ensure_local_ready_refuses_pip_in_a_frozen_binary(monkeypatch):
 
     assert provider.get_model_calls == 0
     assert local_setup._prewarm_error == local_setup._INSTALL_UNSUPPORTED_WHEN_FROZEN
-    assert "pip exit code" not in local_setup._prewarm_error
 
 
 @pytest.mark.asyncio
 async def test_ensure_local_ready_still_installs_when_the_build_is_not_frozen(monkeypatch):
     """A source checkout keeps its pip path -- the guard reads `sys.frozen` alone."""
-    _stub_faster_whisper_kind(monkeypatch)
     provider = _FakePrewarmProvider()
     monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
     monkeypatch.setattr("app.stt.routing.peek_local_provider", lambda: provider)
@@ -894,8 +996,10 @@ async def test_ensure_local_ready_frozen_whisper_cpp_kind_keeps_the_binary_messa
     await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
 
     assert provider.get_model_calls == 0
-    assert "whisper-server binary not found" in local_setup._prewarm_error
-    assert local_setup._prewarm_error != local_setup._INSTALL_UNSUPPORTED_WHEN_FROZEN
+    assert (
+        local_setup._prewarm_error
+        == local_whisper_cpp_cmd.INSTALLED_BUILD_BINARY_MISSING
+    )
 
 
 @pytest.mark.asyncio
