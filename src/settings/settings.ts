@@ -41,20 +41,10 @@ const backendStatus = document.getElementById("backend-status")!;
 
 /** What a tab hands back so this window can let go of what it is holding.
  *
- *  Two different moments, and a tab that conflates them loses work. `destroy`
- *  runs when the tab is leaving the DOM — a switch, a re-render — and may tear
- *  everything down. `releaseResources` runs when the *window* is dismissed
- *  while the tab stays mounted: the shell prevents the close and hides the
- *  window (`src-tauri/src/lib.rs`), so the tab must give up a device it holds
- *  and still work when the window is shown again.
- *
- *  `resumeResources` runs when that window is shown again, and is where a tab
- *  picks its periodic reads back up so what is on screen is current within one
- *  request rather than one poll interval. The two are independent: a tab may
- *  implement neither, either or both, and the General tab deliberately releases
- *  a microphone it must never silently re-open.
- *
- *  A tab with nothing to release returns its destroy function as before. */
+ *  `destroy` runs when the tab leaves the DOM and may tear everything down.
+ *  `releaseResources` runs when the window is dismissed while the tab stays
+ *  mounted, and `resumeResources` when it is shown again; each is optional, and
+ *  a tab implementing one is not obliged to implement the other. */
 export interface TabLifecycle {
   destroy: () => void;
   releaseResources?: () => void;
@@ -236,6 +226,7 @@ function switchTab(tabName: string) {
   const renderFn = tabs[tabName];
   if (renderFn) {
     activeTab = asLifecycle(renderFn(tabContent, settings));
+    if (settingsWindowHidden) activeTab?.releaseResources?.();
   }
 }
 
@@ -374,25 +365,26 @@ window.addEventListener("dragover", swallowUnhandledFileDrop);
 window.addEventListener("drop", swallowUnhandledFileDrop);
 
 
+/** Start the `/health` interval, or leave the running one alone. */
 function startBackendProbe() {
+  if (backendProbeInterval !== null) return;
   backendProbeInterval = setInterval(probeBackend, BACKEND_PROBE_INTERVAL_MS);
 }
 
+/** Stop the `/health` interval and disown whatever probe is still in flight,
+ *  so no answer arriving afterwards repaints a badge nobody is looking at. */
 function stopBackendProbe() {
+  latestBackendProbeToken += 1;
   if (backendProbeInterval === null) return;
   clearInterval(backendProbeInterval);
   backendProbeInterval = null;
 }
 
-/** Hand the window's own periodic work, and the active tab's, to whichever of
- *  the two edges just arrived.
+/** Hand this window's periodic work, and the active tab's, to the edge that
+ *  just arrived (ADR 089).
  *
- *  The window is created hidden and the shell hides it again rather than
- *  closing it, so the webview stays mounted, no tab teardown runs, and nothing
- *  periodic runs until the first `settings-shown`. The resume probes once
- *  before restarting the interval, so a returning user reads a badge at most
- *  one request old. This is the only owner of "was it already hidden"
- *  (ADR 089). */
+ *  A resume probes once before restarting the interval, so a returning user
+ *  reads a badge one request old rather than one interval old. */
 function applyWindowVisibility(event: "hidden" | "shown") {
   const action = nextTabAction(event, settingsWindowHidden);
   if (action === "ignore") return;
@@ -407,22 +399,36 @@ function applyWindowVisibility(event: "hidden" | "shown") {
   activeTab?.resumeResources?.();
 }
 
+/** Ask the shell what this window currently is, and route the answer through
+ *  the same gate an announcement takes.
+ *
+ *  A show announced before the subscription attached is gone, and `isVisible()`
+ *  (`@tauri-apps/api` 2.10) is the reading that replaces the guess. Outside
+ *  Tauri there is no window to ask, and the caller's fallback stands. */
+async function readWindowVisibility() {
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  const visible = await getCurrentWindow().isVisible();
+  applyWindowVisibility(visible ? "shown" : "hidden");
+}
+
 /** Follow the Settings window between dismissed and shown again.
  *
- *  The show is subscribed before the hide, so a partial attach leaves the edge
- *  that resumes rather than the edge that releases. Only a page that attached
- *  neither believes the window is visible — the settings screen served by Vite
- *  outside Tauri, which hears nothing and would otherwise poll nothing. */
+ *  The show is subscribed before the dismissal, so a partial attach keeps the
+ *  edge that resumes. A page that attached neither and can ask no window either
+ *  is the settings screen served by Vite outside Tauri, which is visible. */
 async function trackTabWindowVisibility() {
-  let attached = 0;
+  let showEdgeAttached = false;
   try {
     const { listen } = await import("@tauri-apps/api/event");
     await listen(EVENT_SETTINGS_SHOWN, () => applyWindowVisibility("shown"));
-    attached += 1;
+    showEdgeAttached = true;
     await listen(EVENT_SETTINGS_HIDDEN, () => applyWindowVisibility("hidden"));
-    attached += 1;
   } catch {
-    if (attached === 0) applyWindowVisibility("shown");
+  }
+  try {
+    await readWindowVisibility();
+  } catch {
+    if (!showEdgeAttached) applyWindowVisibility("shown");
   }
 }
 

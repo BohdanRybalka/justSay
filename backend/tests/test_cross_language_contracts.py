@@ -675,6 +675,10 @@ def test_every_settings_show_site_announces_it() -> None:
     the function; the completeness assertion covers a ``.show()`` this reader
     could place in no function at all.
 
+    The helper's own ``show()`` result may not be discarded, because an
+    announcement a failed show still sends resumes the polling into a window
+    the user cannot see.
+
     Mutation-checked: restoring the window resolution and ``show()`` inline in
     the tray menu arm reports ``run`` in the enclosing set, and deleting the
     ``emit`` from the helper fails the last assertion with every other one
@@ -718,21 +722,25 @@ def test_every_settings_show_site_announces_it() -> None:
         "show_settings shows the window without announcing it, so settings.ts never "
         "learns the window came back and the tabs it released stay released"
     )
+    assert not re.search(r"let\s+_\s*=\s*window\.show\(", bodies["show_settings"]), (
+        "show_settings discards the result of show(), so a show that failed still emits "
+        "'settings-shown' and the page resumes polling a window nobody can see"
+    )
 
 
 def test_no_other_rust_function_shows_the_settings_window() -> None:
-    """Whichever file it is written in, a settings show sits in the announcing helper.
+    """A fn that names the settings window and shows it must be the announcing helper.
 
-    The pin above reads lib.rs alone and names the functions that show *some*
-    window, so it lets a settings show through any name already on its list:
-    ``widget_ready`` resolving the settings window and calling ``show()`` on it
-    passes there, and so does a show written in a submodule that pin never
-    reads. Both leave a returning user reading a badge frozen at whatever it
-    last polled, which is the defect ADR 089 exists to prevent, so this walk
-    covers every Rust file under src-tauri/src/ and keys on the window rather
-    than on the file. Each file's ``.show()`` calls are counted twice — in the
-    file and inside the fns this reader can name — so a call it cannot name
-    fails here instead of passing unseen.
+    What this establishes: across every top-level ``fn`` under src-tauri/src/,
+    the ones whose body holds both a literal ``get_webview_window("settings")``
+    and a ``.show()`` are exactly ``show_settings``. Each file's ``.show()``
+    calls are counted twice — in the file and inside the fns this reader can
+    name — so a call it cannot attribute fails here rather than passing unseen.
+
+    What it does not establish: nothing here analyses Rust, so a show whose
+    window arrived from a helper, from managed state or from a binding made in
+    another fn is invisible to the key. It narrows where a settings show can be
+    written; it does not prove the announcement complete (ADR 089).
     """
     showing_settings: dict[str, str] = {}
     functions_read = 0

@@ -134,7 +134,10 @@ export function renderModels(container: HTMLElement, settings: UserSettings): Ta
 
   let pollInterval: ReturnType<typeof setInterval> | null = null;
 
+  /** Start the 3 s status poll, or leave the running one alone — a second
+   *  interval over the same handle would be unstoppable. */
   function startSttPolling() {
+    if (pollInterval !== null) return;
     pollInterval = setInterval(() => {
       if (currentSttMode === "local") refreshSttStatus();
     }, 3000);

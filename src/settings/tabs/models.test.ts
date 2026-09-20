@@ -248,7 +248,7 @@ describe("renderModels — a failed local load the user can read", () => {
   });
 });
 
-describe("renderModels while the Settings window is hidden", () => {
+describe("renderModels after the Settings window is dismissed", () => {
   it("issues no further status read once the window is dismissed", async () => {
     vi.useFakeTimers();
     try {
@@ -291,6 +291,35 @@ describe("renderModels while the Settings window is hidden", () => {
         apiMock.sttLocalStatus.mock.calls.length,
         "a resume that started a second interval would read twice per tick",
       ).toBe(whileHidden + 3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts no second interval when a resume lands on a poll already running", async () => {
+    vi.useFakeTimers();
+    try {
+      await render(buildStatus());
+      await vi.advanceTimersByTimeAsync(0);
+      const [tab] = cleanups;
+
+      tab.resumeResources!();
+      const afterResume = apiMock.sttLocalStatus.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(
+        apiMock.sttLocalStatus.mock.calls.length,
+        "the tab can be mounted with the window already up, and a resume that overwrites " +
+          "the live handle reads twice per tick",
+      ).toBe(afterResume + 1);
+
+      tab.releaseResources!();
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        apiMock.sttLocalStatus.mock.calls.length,
+        "and leaves an interval the release can no longer reach",
+      ).toBe(afterResume + 1);
     } finally {
       vi.useRealTimers();
     }

@@ -1,14 +1,9 @@
 /**
- * The one answer to "the window's visibility moved — what does the tab do?".
+ * The one answer to "a visibility edge arrived — what does the tab do?".
  *
- * The shell states both edges rather than letting the page infer them (ADR
- * 089), and either can arrive when nothing actually changed: the tray's
- * Settings item shows a window that is already visible, so a second `shown` in
- * a row is ordinary traffic. Reducing the pair to an action in one pure
- * function gives that idempotence a single owner, which is why a tab's
- * `releaseResources` and `resumeResources` carry no guard of their own.
- *
- * It sits in its own file because importing `settings.ts` boots the window.
+ * The edges are the shell's dismissal and show announcements (ADR 089), either
+ * of which can repeat with nothing having changed, so the repeat is what this
+ * reduces away.
  */
 export type TabVisibilityAction = "release" | "resume" | "ignore";
 

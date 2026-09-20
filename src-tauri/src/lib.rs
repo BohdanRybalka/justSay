@@ -73,11 +73,17 @@ fn set_meeting_recording(app: AppHandle, active: bool) {
 }
 
 /// Show the settings window and announce it, so a tab that released what it
-/// held on the hide can take it back. Every path that shows that window calls
-/// this one, which is what makes the announcement complete (ADR 089).
+/// held on the dismissal can take it back. Every path that shows that window
+/// calls this one, which is what makes the announcement complete (ADR 089).
+///
+/// A failed `show()` announces nothing: the page would otherwise resume its
+/// polling into a window the user cannot see.
 fn show_settings(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("settings") {
-        let _ = window.show();
+        if let Err(e) = window.show() {
+            log::warn!("Showing the settings window failed, so nothing is announced: {}", e);
+            return;
+        }
         let _ = window.set_focus();
         let _ = app.emit("settings-shown", ());
     }

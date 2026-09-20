@@ -35,24 +35,49 @@ const modelsTab = {
 };
 
 vi.mock("./tabs/models", () => ({
-  renderModels: vi.fn(() => modelsTab),
+  renderModels: vi.fn((container: HTMLElement) => {
+    container.innerHTML = '<div id="models-tab-body"></div>';
+    return modelsTab;
+  }),
 }));
 
 const eventListeners = new Map<string, (event: unknown) => unknown>();
 
-let listenAttempts = 0;
-let subscriptionsBeforeTheBusRefuses = Number.POSITIVE_INFINITY;
+const listenAttemptsByEvent = new Map<string, number>();
+const refusedEvents = new Set<string>();
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (event: string, handler: (payload: unknown) => unknown) => {
-    listenAttempts += 1;
-    if (listenAttempts > subscriptionsBeforeTheBusRefuses) {
-      throw new Error("the event bus refused a subscription");
+    listenAttemptsByEvent.set(event, (listenAttemptsByEvent.get(event) ?? 0) + 1);
+    if (refusedEvents.has(event)) {
+      throw new Error(`the event bus refused a subscription to ${event}`);
     }
     eventListeners.set(event, handler);
     return () => {};
   }),
   emit: vi.fn(async () => {}),
+}));
+
+/** How often this page has asked the bus for one named subscription.
+ *
+ *  Keyed by name rather than totalled, because the General tab subscribes to
+ *  `shortcut-applied` once the settings load resolves and a total cannot tell
+ *  that attempt from the two this suite steers. */
+function listenAttempts(event: string): number {
+  return listenAttemptsByEvent.get(event) ?? 0;
+}
+
+let windowIsVisible: boolean | null = null;
+let visibilityReads = 0;
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    isVisible: async () => {
+      visibilityReads += 1;
+      if (windowIsVisible === null) throw new Error("no window to ask outside Tauri");
+      return windowIsVisible;
+    },
+  }),
 }));
 
 /** Delivers the first `settings-shown`, the way opening the hidden window does.
@@ -91,8 +116,10 @@ beforeEach(() => {
   lastBridgeDiagnosisMock.mockReturnValue({ kind: "ok" });
   vi.resetModules();
   eventListeners.clear();
-  listenAttempts = 0;
-  subscriptionsBeforeTheBusRefuses = Number.POSITIVE_INFINITY;
+  listenAttemptsByEvent.clear();
+  refusedEvents.clear();
+  windowIsVisible = null;
+  visibilityReads = 0;
   document.body.innerHTML = `
     <ul class="sidebar-nav">
       <li><button class="nav-btn active" data-tab="general">General</button></li>
@@ -933,6 +960,41 @@ describe("the Settings window coming back after a dismissal", () => {
     expect(modelsTab.releaseResources).not.toHaveBeenCalled();
   });
 
+  it("mounts a tab into a dismissed window without starting anything, then resumes it once", async () => {
+    let releaseSettings: (loaded: UserSettings) => void = () => {};
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
+    apiMock.getSettings.mockImplementation(
+      () => new Promise<UserSettings>((resolve) => (releaseSettings = resolve)),
+    );
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
+    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+
+    const { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } = await import("../contracts");
+    await import("./settings");
+    await openSettingsWindow();
+
+    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.click();
+    await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
+
+    releaseSettings(buildSettings());
+    await vi.waitFor(() => expect(document.getElementById("models-tab-body")).not.toBeNull());
+
+    expect(
+      modelsTab.releaseResources,
+      "a slow cold start lands the tab in a window the user has already closed, and a tab " +
+        "that keeps its interval there polls for the life of the app",
+    ).toHaveBeenCalledTimes(1);
+    expect(modelsTab.resumeResources).not.toHaveBeenCalled();
+
+    await eventListeners.get(EVENT_SETTINGS_SHOWN)!({});
+
+    expect(
+      modelsTab.resumeResources,
+      "and the show that follows must leave one live interval, not a second beside it",
+    ).toHaveBeenCalledTimes(1);
+    expect(modelsTab.releaseResources).toHaveBeenCalledTimes(1);
+  });
+
   it("resumes the tab once, however often the shell repeats either edge", async () => {
     const { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } = await import("../contracts");
     await bootOnTheModelsTab();
@@ -950,14 +1012,16 @@ describe("the Settings window coming back after a dismissal", () => {
   it("polls on its own when the event bus refuses every subscription", async () => {
     vi.useFakeTimers();
     try {
-      subscriptionsBeforeTheBusRefuses = 0;
+      const { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } = await import("../contracts");
+      refusedEvents.add(EVENT_SETTINGS_SHOWN);
+      refusedEvents.add(EVENT_SETTINGS_HIDDEN);
       apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
       apiMock.getSettings.mockResolvedValue(buildSettings());
       apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
       apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
       await import("./settings");
-      await vi.waitFor(() => expect(listenAttempts).toBe(1));
+      await vi.waitFor(() => expect(listenAttempts(EVENT_SETTINGS_SHOWN)).toBe(1));
 
       const before = apiMock.health.mock.calls.length;
       await vi.advanceTimersByTimeAsync(5000);
@@ -976,15 +1040,15 @@ describe("the Settings window coming back after a dismissal", () => {
   it("keeps the resume when the event bus accepts only one subscription", async () => {
     vi.useFakeTimers();
     try {
-      subscriptionsBeforeTheBusRefuses = 1;
+      const { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } = await import("../contracts");
+      refusedEvents.add(EVENT_SETTINGS_HIDDEN);
       apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
       apiMock.getSettings.mockResolvedValue(buildSettings());
       apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
       apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
-      const { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } = await import("../contracts");
       await import("./settings");
-      await vi.waitFor(() => expect(listenAttempts).toBe(2));
+      await vi.waitFor(() => expect(listenAttempts(EVENT_SETTINGS_HIDDEN)).toBe(1));
 
       expect(
         eventListeners.has(EVENT_SETTINGS_SHOWN),
@@ -1075,6 +1139,84 @@ describe("the Settings window's own health poll across a dismissal", () => {
 
       await vi.advanceTimersByTimeAsync(5000);
       expect(apiMock.health.mock.calls.length).toBe(afterResume + 2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets no probe that answers after the dismissal repaint the badge", async () => {
+    vi.useFakeTimers();
+    try {
+      const { hidden } = await bootUnderFakeTimers();
+      const badge = document.getElementById("backend-status")!;
+      await vi.waitFor(() => expect(badge.textContent).toBe("Backend"));
+
+      let failTheProbe: (reason: Error) => void = () => {};
+      apiMock.health.mockImplementationOnce(
+        () => new Promise((_resolve, reject) => (failTheProbe = reject)),
+      );
+      await vi.advanceTimersByTimeAsync(5000);
+
+      await hidden({});
+      failTheProbe(new Error("the backend went away"));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(
+        badge.textContent,
+        "a probe the dismissal did not disown lands on an invisible window and repaints it",
+      ).toBe("Backend");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("a show the Settings page was not yet listening for", () => {
+  function mockABackendThatAnswers(): void {
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
+    apiMock.getSettings.mockResolvedValue(buildSettings());
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
+    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+  }
+
+  it("picks the window up from its own visibility when the show arrived first", async () => {
+    vi.useFakeTimers();
+    try {
+      windowIsVisible = true;
+      mockABackendThatAnswers();
+
+      await import("./settings");
+      await vi.waitFor(() => expect(visibilityReads).toBe(1));
+
+      const before = apiMock.health.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(5000);
+
+      expect(
+        apiMock.health.mock.calls.length,
+        "the tray can show the window before this page subscribed, and a page that waits " +
+          "for the next announcement believes itself hidden for the whole first open",
+      ).toBeGreaterThan(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stays quiet when the window itself reports it is not up yet", async () => {
+    vi.useFakeTimers();
+    try {
+      windowIsVisible = false;
+      mockABackendThatAnswers();
+
+      await import("./settings");
+      await vi.waitFor(() => expect(visibilityReads).toBe(1));
+
+      const before = apiMock.health.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        apiMock.health.mock.calls.length,
+        "reading the window must not become a second way to start polling one nobody opened",
+      ).toBe(before);
     } finally {
       vi.useRealTimers();
     }

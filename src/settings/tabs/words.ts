@@ -185,20 +185,33 @@ export function renderWords(container: HTMLElement): TabLifecycle {
 
   let poll: ReturnType<typeof setInterval> | null = null;
 
+  /** Start the 5 s stats poll, or leave the running one alone — a second
+   *  interval over the same handle would be unstoppable. */
   function startStatsPolling() {
+    if (poll !== null) return;
     poll = setInterval(refreshStats, 5000);
   }
 
-  /** Stop reading while the window is gone. `cancelled` stays false, because it
-   *  is what an unmounted tab sets and a hidden one is still mounted — setting
-   *  it here would make every later read return early forever. */
+  /** Stop reading while the window is gone, and disown the tick still in
+   *  flight, which would otherwise chain into a whole-page read. `cancelled`
+   *  stays false: it is what an unmounted tab sets, and a dismissed window's
+   *  tab is still mounted. */
   function releaseResources() {
     if (poll !== null) clearInterval(poll);
     poll = null;
+    latestStatsToken += 1;
   }
 
+  /** Read once in this same tick and restart the poll. A first page read that
+   *  failed left `lastTotalEntries` negative, which every later tick returns
+   *  early on, so that case is repaired by reading the page rather than the
+   *  stats. */
   function resumeResources() {
     startStatsPolling();
+    if (lastTotalEntries < 0) {
+      void renderPage();
+      return;
+    }
     void refreshStats();
   }
 
