@@ -1,9 +1,10 @@
 import asyncio
 import logging
+import sys
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TypeVar
+from typing import NoReturn, TypeVar
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -174,6 +175,16 @@ app.include_router(audio_router, prefix="/audio", tags=["Audio"])
 app.include_router(pipeline_router, prefix="/pipeline", tags=["Pipeline"])
 
 
+def _report_selftest(check: Callable[[], tuple[bool, str]]) -> NoReturn:
+    """Print a selftest's verdict and exit 0 on pass, 1 on fail.
+
+    Never returns: the release step reads the exit code.
+    """
+    ok, message = check()
+    print("OK" if ok else f"FAIL: {message}")
+    sys.exit(0 if ok else 1)
+
+
 def _cli() -> None:
     """Entrypoint used by the PyInstaller-frozen sidecar.
 
@@ -181,7 +192,6 @@ def _cli() -> None:
     without depending on the dev-mode `python -m uvicorn` invocation.
     """
     import argparse
-    import sys
 
     import uvicorn
 
@@ -218,14 +228,9 @@ def _cli() -> None:
         "--selftest-psutil",
         action="store_true",
         help=(
-            "Verify psutil is live in this build — that it imports, that it "
-            "reads this process's resident set size, and that it came from "
-            "this bundle — against the actual frozen sidecar binary, then "
-            "exit. Its only runtime importer swallows every failure and runs "
-            "solely once a whisper model is loaded, so a bundle that lost "
-            "psutil costs the user the model-RAM figure and reports nothing; "
-            "this is what makes it loud. Used by release.yml as a permanent "
-            "CI gate on both platform legs — see ADR 088."
+            "Verify psutil is live in this build — that it imports, reads this "
+            "process's resident set size, and came from this bundle — then exit "
+            "(ADR 088)."
         ),
     )
     args = parser.parse_args()
@@ -233,32 +238,17 @@ def _cli() -> None:
     if args.selftest_ten_vad:
         from app.audio import vad
 
-        ok, msg = vad.selftest()
-        if ok:
-            print("OK")
-            sys.exit(0)
-        print(f"FAIL: {msg}")
-        sys.exit(1)
+        _report_selftest(vad.selftest)
 
     if args.selftest_sqlite_vec:
         from app.transcripts import vector_store
 
-        ok, msg = vector_store.selftest()
-        if ok:
-            print("OK")
-            sys.exit(0)
-        print(f"FAIL: {msg}")
-        sys.exit(1)
+        _report_selftest(vector_store.selftest)
 
     if args.selftest_psutil:
         from app.stt.local_setup import psutil_selftest
 
-        ok, msg = psutil_selftest()
-        if ok:
-            print("OK")
-            sys.exit(0)
-        print(f"FAIL: {msg}")
-        sys.exit(1)
+        _report_selftest(psutil_selftest)
 
     uvicorn.run(
         app,

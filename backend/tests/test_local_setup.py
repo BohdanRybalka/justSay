@@ -959,6 +959,14 @@ def test_estimate_model_ram_mb_returns_none_for_vulkan_kind(monkeypatch):
     assert local_setup._estimate_model_ram_mb() is None
 
 
+def test_the_model_ram_estimate_reads_the_size_the_selftest_proves(monkeypatch):
+    """One read behind both, so the release gate cannot pass while the figure
+    the user reads is produced by a second copy that broke."""
+    monkeypatch.setattr(local_setup, "_process_rss_bytes", lambda: 8 * 1024 * 1024)
+
+    assert local_setup._estimate_model_ram_mb() == 8
+
+
 @pytest.mark.asyncio
 async def test_ensure_local_ready_vulkan_kind_skips_pip_install_when_binary_present(monkeypatch):
     _stub_whisper_cpp_server_kind(monkeypatch)
@@ -2215,16 +2223,31 @@ def test_psutil_selftest_reports_ok_against_a_live_interpreter():
     assert local_setup.psutil_selftest() == (True, "ok")
 
 
-def test_psutil_selftest_names_psutil_when_the_import_fails(monkeypatch):
+def test_psutil_selftest_fails_when_psutil_is_unimportable(monkeypatch):
     """The exact shape a dropped hidden import produces inside the frozen
-    sidecar: the module is unimportable and the release must stop with the
-    dependency named, instead of the silent `None` the RAM estimate returns."""
+    sidecar: the module is unimportable and the release must stop, instead of
+    the silent `None` the RAM estimate returns."""
     monkeypatch.setitem(sys.modules, "psutil", None)
 
     ok, message = local_setup.psutil_selftest()
 
     assert ok is False
-    assert "psutil" in message
+    assert message.startswith("importing psutil and reading this process's RSS raised: ")
+
+
+def test_psutil_selftest_carries_the_failure_cause_into_its_message(monkeypatch):
+    """The release step prints this message and nothing else, so a message that
+    drops the cause turns a named failure into an unactionable one."""
+
+    def _explode() -> int:
+        raise ModuleNotFoundError("psutil is not in this bundle")
+
+    monkeypatch.setattr(local_setup, "_process_rss_bytes", _explode)
+
+    ok, message = local_setup.psutil_selftest()
+
+    assert ok is False
+    assert "psutil is not in this bundle" in message
 
 
 def test_psutil_selftest_rejects_a_resident_set_size_of_zero(monkeypatch):
@@ -2241,7 +2264,7 @@ def test_psutil_selftest_rejects_a_resident_set_size_of_zero(monkeypatch):
     ok, message = local_setup.psutil_selftest()
 
     assert ok is False
-    assert "0" in message
+    assert message.endswith("of 0")
 
 
 def test_psutil_selftest_fails_when_psutil_resolves_outside_the_bundle(
@@ -2304,4 +2327,4 @@ def test_psutil_selftest_rejects_a_boolean_resident_set_size(monkeypatch):
     ok, message = local_setup.psutil_selftest()
 
     assert ok is False
-    assert "True" in message
+    assert message.endswith("of True")

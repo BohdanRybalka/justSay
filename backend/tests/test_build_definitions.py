@@ -69,6 +69,8 @@ def _step_named(fragment: str) -> str:
 
 
 _SELFTEST_FLAG = re.compile(r"--selftest-[a-z0-9-]+")
+_SELFTEST_RUN = re.compile(r'"\$BIN"\s+(--selftest-[a-z0-9-]+)')
+_STEP_GATE = re.compile(r"^\s+if:", re.MULTILINE)
 
 _SELFTEST_FLAG_CHECKS = {
     "--selftest-sqlite-vec": "app.transcripts.vector_store.selftest",
@@ -78,7 +80,11 @@ _SELFTEST_FLAG_CHECKS = {
 
 
 def _release_selftest_flags() -> set[str]:
-    return set(_SELFTEST_FLAG.findall(_release_workflow_text()))
+    """The selftest flags the release actually runs, read off the `"$BIN"` lines.
+
+    Scanning the whole file would count a flag named in a comment as a step.
+    """
+    return set(_SELFTEST_RUN.findall(_release_workflow_text()))
 
 
 def _run_sidecar_cli(monkeypatch, argv: list[str]) -> None:
@@ -569,8 +575,20 @@ def test_the_frozen_sidecar_selftest_runs_the_psutil_flag():
     block = _step_named("Verify the frozen sidecar can read its own memory through psutil")
 
     assert _SELFTEST_FLAG.findall(block) == ["--selftest-psutil"]
-    assert "runner.os ==" not in block
+    assert _STEP_GATE.search(block) is None
     assert _failure_swallowing_constructs(block) == []
+
+
+def test_the_sidecar_spec_declares_psutil_as_a_hidden_import():
+    """psutil is reached from inside a function body, so PyInstaller's static
+    walk can lose it the moment that body changes shape. The declaration is
+    what makes the bundle's copy deliberate rather than incidental."""
+    hidden = re.search(
+        r"hiddenimports = \[(.*?)\]", BUILD_SIDECAR_SPEC.read_text(encoding="utf-8"), re.S
+    )
+
+    assert hidden, "build_sidecar.spec declares no hiddenimports list"
+    assert '"psutil"' in hidden.group(1)
 
 
 def test_every_selftest_flag_the_release_runs_is_parsed_by_the_sidecar_cli(
@@ -593,7 +611,7 @@ def test_every_selftest_flag_the_release_runs_is_parsed_by_the_sidecar_cli(
 
 
 @pytest.mark.parametrize("flag", sorted(_release_selftest_flags()))
-def test_each_selftest_flag_the_release_runs_reaches_its_own_check(flag, monkeypatch):
+def test_each_selftest_flag_the_release_runs_reaches_its_own_check(flag, monkeypatch, capsys):
     """Parsing the flag is half the contract. With its dispatch branch gone the
     flag still parses, falls through to `uvicorn.run`, and the release step
     hangs until the job times out instead of naming a broken bundle."""
@@ -615,6 +633,7 @@ def test_each_selftest_flag_the_release_runs_reaches_its_own_check(flag, monkeyp
 
     assert exit_info.value.code == 0
     assert reached == [flag]
+    assert capsys.readouterr().out.strip() == "OK"
 
 
 @pytest.mark.parametrize("flag", sorted(_release_selftest_flags()))
