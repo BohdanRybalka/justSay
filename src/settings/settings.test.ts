@@ -781,3 +781,38 @@ describe("the Settings window being dismissed", () => {
     expect(apiMock.audioDiscard).not.toHaveBeenCalled();
   });
 });
+
+describe("a file dropped where nothing in the page handles it", () => {
+  async function bootSettingsWindow(): Promise<void> {
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
+    apiMock.getSettings.mockResolvedValue(buildSettings());
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
+    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+
+    await import("./settings");
+    await vi.waitFor(() => expect(document.getElementById("btn-test-mic")).not.toBeNull());
+  }
+
+  function dispatchOnTheNav(type: string): Event {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.dispatchEvent(event);
+    return event;
+  }
+
+  it("is swallowed, so the webview cannot navigate away from the Settings UI", async () => {
+    await bootSettingsWindow();
+
+    const dragover = dispatchOnTheNav("dragover");
+    const drop = dispatchOnTheNav("drop");
+
+    expect(
+      dragover.defaultPrevented,
+      "without a prevented dragover the webview refuses the drag outright (ADR 087)",
+    ).toBe(true);
+    expect(
+      drop.defaultPrevented,
+      "an unprevented drop is a browser navigation to the dropped file, which replaces " +
+        "the whole Settings UI (ADR 087)",
+    ).toBe(true);
+  });
+});

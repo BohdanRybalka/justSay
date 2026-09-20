@@ -349,6 +349,19 @@ navButtons.forEach((btn) => {
 });
 
 
+/** Stop a file dropped outside a drop zone from replacing this window's UI.
+ *
+ *  The shell hands external drops to the page (ADR 087), so an unhandled drop
+ *  is a browser navigation to the dropped file. The Transcribe zone's own
+ *  handlers stop propagation, so a landed drop never reaches these. */
+function swallowUnhandledFileDrop(event: Event) {
+  event.preventDefault();
+}
+
+window.addEventListener("dragover", swallowUnhandledFileDrop);
+window.addEventListener("drop", swallowUnhandledFileDrop);
+
+
 /** Release whatever the active tab is holding when the window is dismissed.
  *
  *  The shell prevents the close and hides the window instead, so the webview
