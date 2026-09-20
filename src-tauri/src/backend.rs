@@ -12,8 +12,9 @@
 //! Dev mode (no frozen sidecar at the resolved `resource_dir()` path)
 //! falls back to `std::process::Command` spawning the system Python
 //! interpreter against `backend/app.main:app`. This branch is intentionally
-//! NOT routed through the shell plugin, whose `Command` builder exposes no
-//! `creation_flags` and so cannot give the child its own process group. It is
+//! NOT routed through the shell plugin, whose `Command` builder exposes
+//! neither `creation_flags` nor any stdio control, while this branch needs
+//! both. It is
 //! the debug default, but is also reached in a release build whenever
 //! `resolve_sidecar()` finds no frozen sidecar.
 //!
@@ -673,11 +674,10 @@ const SIDECAR_EXECUTABLE_NAME: &str = "justsay-backend";
 /// Resolve the production sidecar path inside the installed resource dir.
 /// Returns `None` if no frozen sidecar is present (developer setup).
 ///
-/// The resolved path is the same one the capability scope's `$RESOURCE`
-/// token expands to: on Windows NSIS it is `<install>/resources/`, on
-/// macOS bundles it is `Contents/Resources/`. Tauri's path resolver is the
-/// single source of truth for both production runtime and capability
-/// scope, so they agree by construction.
+/// This resolver is the only thing that fixes which binary the shell plugin
+/// is asked to spawn: on Windows NSIS the resource dir is
+/// `<install>/resources/`, on macOS bundles it is `Contents/Resources/`
+/// (ADR 085).
 fn resolve_sidecar(app: &AppHandle) -> Option<PathBuf> {
     let resource_dir = app.path().resource_dir().ok()?;
     let candidate = resource_dir

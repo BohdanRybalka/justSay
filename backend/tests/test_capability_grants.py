@@ -1,49 +1,58 @@
-"""A capability grant the webview cannot reach is a grant nobody asked for.
+"""Two pins on the shell plugin, one on the capability and one on the code.
 
-A capability constrains the webview's IPC calls and nothing else, so a plugin
-permission is live only while that plugin's JavaScript binding is installed
-(ADR 085). Everything here is read as text out of committed files, so it runs
-wherever the suite runs and needs no Tauri toolchain.
+A capability constrains the webview's IPC calls and never Rust, so the shell
+plugin's named-binary scope validated nothing and is gone (ADR 085). Deleting
+it also removed the last visible sign that the plugin registration is
+load-bearing, which is what the second pin holds. Everything is read as text
+out of committed files, so both run wherever the suite runs.
 """
 
-import json
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CAPABILITIES_DIR = REPO_ROOT / "src-tauri" / "capabilities"
-PACKAGE_JSON = REPO_ROOT / "package.json"
+TAURI_SHARED_CONF = REPO_ROOT / "src-tauri" / "tauri.conf.json"
+LIB_RS = REPO_ROOT / "src-tauri" / "src" / "lib.rs"
 
-CORE_BINDING = "@tauri-apps/api"
-
-
-def _granted_permissions() -> tuple[tuple[str, str], ...]:
-    """Every permission the capability files grant, as (file name, identifier)."""
-    granted: list[tuple[str, str]] = []
-    for path in sorted(CAPABILITIES_DIR.glob("*.json")):
-        for entry in json.loads(path.read_text(encoding="utf-8"))["permissions"]:
-            identifier = entry if isinstance(entry, str) else entry["identifier"]
-            granted.append((path.name, identifier))
-    assert granted
-    return tuple(granted)
+CAPABILITY_SUFFIXES = (".json", ".json5", ".toml")
+SHELL_PERMISSION_PREFIX = "shell:"
+SHELL_PLUGIN_REGISTRATION = "tauri_plugin_shell::init()"
 
 
-def _required_binding(identifier: str) -> str:
-    """The npm package that lets the webview issue the call this permission allows."""
-    plugin = identifier.split(":", 1)[0]
-    return CORE_BINDING if plugin == "core" else f"@tauri-apps/plugin-{plugin}"
+def _capability_sources() -> tuple[tuple[str, str], ...]:
+    """Every file Tauri reads capabilities from, as (label, text).
 
-
-def test_every_granted_permission_has_an_installed_javascript_binding():
-    dependencies = json.loads(PACKAGE_JSON.read_text(encoding="utf-8"))["dependencies"]
-    unreachable = sorted(
-        {
-            f"{identifier} in {file_name} needs {_required_binding(identifier)}"
-            for file_name, identifier in _granted_permissions()
-            if _required_binding(identifier) not in dependencies
-        }
+    Covers the whole `capabilities/**/*` tree in all three accepted formats,
+    plus the inline capabilities `tauri.conf.json` may carry.
+    """
+    found = [
+        (str(path.relative_to(REPO_ROOT)), path.read_text(encoding="utf-8"))
+        for path in sorted(CAPABILITIES_DIR.rglob("*"))
+        if path.is_file() and path.suffix in CAPABILITY_SUFFIXES
+    ]
+    found.append(
+        (str(TAURI_SHARED_CONF.relative_to(REPO_ROOT)), TAURI_SHARED_CONF.read_text(encoding="utf-8"))
     )
-    assert not unreachable, (
-        "These capability grants name a plugin whose JavaScript binding is not in "
-        f"package.json, so nothing in the webview can reach them: {unreachable}. "
-        "Install the binding deliberately or delete the grant."
+    assert found
+    return tuple(found)
+
+
+def test_no_capability_source_grants_a_shell_permission():
+    granting = sorted(
+        label for label, text in _capability_sources() if SHELL_PERMISSION_PREFIX in text
+    )
+
+    assert not granting, (
+        f"These files grant a shell permission again: {granting}. The shell plugin ships its "
+        "own webview binding, so a grant here is reachable with no npm package installed and "
+        "no call site in src/. Re-grant it only alongside the call site that needs it."
+    )
+
+
+def test_the_shell_plugin_stays_registered():
+    assert SHELL_PLUGIN_REGISTRATION in LIB_RS.read_text(encoding="utf-8"), (
+        f"{SHELL_PLUGIN_REGISTRATION} is gone from {LIB_RS.name}. It reads as dead registration "
+        "now that no capability grants a shell permission, but it is the only place `Shell` is "
+        "managed, so removing it panics every production launch at the sidecar spawn. No Rust "
+        "test builds an AppHandle, so nothing else catches this."
     )
