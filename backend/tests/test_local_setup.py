@@ -4,6 +4,7 @@ import inspect
 import logging
 import pathlib
 import subprocess
+import sys
 import textwrap
 import threading
 import time
@@ -2206,3 +2207,101 @@ async def test_prewarm_latch_is_never_empty_when_the_load_failed(monkeypatch):
 
     assert local_setup._prewarm_error == LOAD_FAILED_WITHOUT_A_MESSAGE
     assert local_setup._prewarm_error
+
+
+def test_psutil_selftest_reports_ok_against_a_live_interpreter():
+    """The success shape — `(True, "ok")`, mirroring `vector_store.selftest` —
+    pinned on every checkout and not only where a frozen binary exists."""
+    assert local_setup.psutil_selftest() == (True, "ok")
+
+
+def test_psutil_selftest_names_psutil_when_the_import_fails(monkeypatch):
+    """The exact shape a dropped hidden import produces inside the frozen
+    sidecar: the module is unimportable and the release must stop with the
+    dependency named, instead of the silent `None` the RAM estimate returns."""
+    monkeypatch.setitem(sys.modules, "psutil", None)
+
+    ok, message = local_setup.psutil_selftest()
+
+    assert ok is False
+    assert "psutil" in message
+
+
+def test_psutil_selftest_rejects_a_resident_set_size_of_zero(monkeypatch):
+    """A psutil that imports and then answers nonsense is not a working psutil:
+    the estimate would report 0 MB, which a user reads as a real measurement."""
+    import psutil
+
+    monkeypatch.setattr(
+        psutil,
+        "Process",
+        lambda pid: SimpleNamespace(memory_info=lambda: SimpleNamespace(rss=0)),
+    )
+
+    ok, message = local_setup.psutil_selftest()
+
+    assert ok is False
+    assert "0" in message
+
+
+def test_psutil_selftest_fails_when_psutil_resolves_outside_the_bundle(
+    tmp_path, monkeypatch
+):
+    """A frozen process that imported psutil from the machine's own site-packages
+    proves nothing about the shipped bundle, and would pass a check that stopped
+    at the import."""
+    import psutil
+
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    ok, message = local_setup.psutil_selftest()
+
+    assert ok is False
+    assert str(pathlib.Path(psutil.__file__).resolve()) in message
+    assert str(tmp_path.resolve()) in message
+
+
+def test_psutil_selftest_accepts_a_bundled_module_with_no_file(tmp_path, monkeypatch):
+    """A module served from PyInstaller's embedded archive can carry `__file__`
+    of `None`, and is by construction the bundled copy. Failing on that would
+    block a release on a value no run in this project can read for macOS."""
+    import psutil
+
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(psutil, "__file__", None)
+
+    assert local_setup.psutil_selftest() == (True, "ok")
+
+
+def test_psutil_selftest_accepts_a_psutil_resolving_inside_the_bundle(
+    tmp_path, monkeypatch
+):
+    """The branch every release run actually takes, and the one whose failure
+    is unrecoverable: an origin check that answers `False` for a correctly
+    bundled psutil blocks the tag push on both platform legs."""
+    import psutil
+
+    bundled = tmp_path / "_internal" / "psutil" / "__init__.py"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(psutil, "__file__", str(bundled))
+
+    assert local_setup.psutil_selftest() == (True, "ok")
+
+
+def test_psutil_selftest_rejects_a_boolean_resident_set_size(monkeypatch):
+    """`True` is an `int` in Python, so an `isinstance` check alone reads a
+    psutil answering a flag as a process holding one byte of memory."""
+    import psutil
+
+    monkeypatch.setattr(
+        psutil,
+        "Process",
+        lambda pid: SimpleNamespace(memory_info=lambda: SimpleNamespace(rss=True)),
+    )
+
+    ok, message = local_setup.psutil_selftest()
+
+    assert ok is False
+    assert "True" in message

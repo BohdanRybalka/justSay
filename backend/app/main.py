@@ -214,6 +214,20 @@ def _cli() -> None:
             "permanent CI gate on both platform legs — see ADR 070."
         ),
     )
+    parser.add_argument(
+        "--selftest-psutil",
+        action="store_true",
+        help=(
+            "Verify psutil is live in this build — that it imports, that it "
+            "reads this process's resident set size, and that it came from "
+            "this bundle — against the actual frozen sidecar binary, then "
+            "exit. Its only runtime importer swallows every failure and runs "
+            "solely once a whisper model is loaded, so a bundle that lost "
+            "psutil costs the user the model-RAM figure and reports nothing; "
+            "this is what makes it loud. Used by release.yml as a permanent "
+            "CI gate on both platform legs — see ADR 088."
+        ),
+    )
     args = parser.parse_args()
 
     if args.selftest_ten_vad:
@@ -230,6 +244,16 @@ def _cli() -> None:
         from app.transcripts import vector_store
 
         ok, msg = vector_store.selftest()
+        if ok:
+            print("OK")
+            sys.exit(0)
+        print(f"FAIL: {msg}")
+        sys.exit(1)
+
+    if args.selftest_psutil:
+        from app.stt.local_setup import psutil_selftest
+
+        ok, msg = psutil_selftest()
         if ok:
             print("OK")
             sys.exit(0)

@@ -3,7 +3,9 @@ ships must stay wired to the Python resolver that looks for it at runtime.
 
 Spec 068 exists because they were not: the macOS release installed no local
 STT engine at all, and nothing in the suite noticed. Every assertion here
-reads only committed repo files, so it runs on `ubuntu-latest` in CI
+reads a committed repo file, or runs the sidecar's own CLI in-process with
+the server start replaced and whatever check it reaches stubbed, so it runs
+on `ubuntu-latest` in CI
 (`.github/workflows/ci.yml`) exactly as it does on Windows or macOS — there
 is no Windows or macOS CI job, and `release.yml` only fires on a tag push.
 """
@@ -11,6 +13,7 @@ is no Windows or macOS CI job, and `release.yml` only fires on a tag push.
 import importlib.util
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -63,6 +66,33 @@ def _step_named(fragment: str) -> str:
     matches = [block for block in _step_blocks(_release_workflow_text()) if fragment in block]
     assert len(matches) == 1, f"expected exactly one release step containing {fragment!r}"
     return matches[0]
+
+
+_SELFTEST_FLAG = re.compile(r"--selftest-[a-z0-9-]+")
+
+_SELFTEST_FLAG_CHECKS = {
+    "--selftest-sqlite-vec": "app.transcripts.vector_store.selftest",
+    "--selftest-ten-vad": "app.audio.vad.selftest",
+    "--selftest-psutil": "app.stt.local_setup.psutil_selftest",
+}
+
+
+def _release_selftest_flags() -> set[str]:
+    return set(_SELFTEST_FLAG.findall(_release_workflow_text()))
+
+
+def _run_sidecar_cli(monkeypatch, argv: list[str]) -> None:
+    """Run the sidecar's real entry point in-process, with the server start
+    replaced by a failure — so a flag that parses but dispatches nowhere is a
+    red test here instead of a release step hanging to its job timeout."""
+    from app.main import _cli
+
+    monkeypatch.setattr(sys, "argv", ["justsay-backend", *argv])
+    monkeypatch.setattr(
+        "uvicorn.run",
+        lambda *args, **kwargs: pytest.fail("the CLI started the server instead of exiting"),
+    )
+    _cli()
 
 
 @pytest.mark.parametrize("platform,config_path", sorted(PLATFORM_CONFS.items()))
@@ -527,8 +557,81 @@ def test_the_frozen_sidecar_selftest_runs_the_ten_vad_flag():
     broke would ship green."""
     block = _step_named("Verify the frozen sidecar's neural silence gate loads and decides")
 
-    assert "--selftest-ten-vad" in block
+    assert _SELFTEST_FLAG.findall(block) == ["--selftest-ten-vad"]
     assert _failure_swallowing_constructs(block) == []
+
+
+def test_the_frozen_sidecar_selftest_runs_the_psutil_flag():
+    """psutil's only importer swallows every failure and is reached solely once
+    a whisper model is loaded, so nothing a release runner does imports it. A
+    bundle that lost it would ship green and cost the user the model-RAM
+    figure; this step is the only place that can say so (ADR 088)."""
+    block = _step_named("Verify the frozen sidecar can read its own memory through psutil")
+
+    assert _SELFTEST_FLAG.findall(block) == ["--selftest-psutil"]
+    assert "runner.os ==" not in block
+    assert _failure_swallowing_constructs(block) == []
+
+
+def test_every_selftest_flag_the_release_runs_is_parsed_by_the_sidecar_cli(
+    monkeypatch, capsys
+):
+    """A flag renamed on one side alone is a release step that argparse rejects
+    with exit 2 — or, worse, an `unrecognized arguments` failure read as the
+    dependency being broken. The CLI side of the equality is argparse's own
+    generated help, so a flag that `main.py` only mentions in prose is red."""
+    workflow_flags = _release_selftest_flags()
+
+    with pytest.raises(SystemExit) as exit_info:
+        _run_sidecar_cli(monkeypatch, ["--help"])
+
+    assert exit_info.value.code == 0
+    cli_flags = set(_SELFTEST_FLAG.findall(capsys.readouterr().out))
+
+    assert workflow_flags
+    assert workflow_flags == cli_flags
+
+
+@pytest.mark.parametrize("flag", sorted(_release_selftest_flags()))
+def test_each_selftest_flag_the_release_runs_reaches_its_own_check(flag, monkeypatch):
+    """Parsing the flag is half the contract. With its dispatch branch gone the
+    flag still parses, falls through to `uvicorn.run`, and the release step
+    hangs until the job times out instead of naming a broken bundle."""
+    assert flag in _SELFTEST_FLAG_CHECKS
+    reached = []
+
+    def _recording_check(name):
+        def _check(*args, **kwargs):
+            reached.append(name)
+            return True, "ok"
+
+        return _check
+
+    for candidate, target in _SELFTEST_FLAG_CHECKS.items():
+        monkeypatch.setattr(target, _recording_check(candidate))
+
+    with pytest.raises(SystemExit) as exit_info:
+        _run_sidecar_cli(monkeypatch, [flag])
+
+    assert exit_info.value.code == 0
+    assert reached == [flag]
+
+
+@pytest.mark.parametrize("flag", sorted(_release_selftest_flags()))
+def test_each_selftest_flag_the_release_runs_exits_non_zero_when_its_check_fails(
+    flag, monkeypatch, capsys
+):
+    """Reaching the check is half the contract and answering no is the other
+    half. A branch that prints FAIL and exits 0 leaves the release step green
+    on the bundle every one of these steps exists to stop."""
+    for target in _SELFTEST_FLAG_CHECKS.values():
+        monkeypatch.setattr(target, lambda *args, **kwargs: (False, "refused"))
+
+    with pytest.raises(SystemExit) as exit_info:
+        _run_sidecar_cli(monkeypatch, [flag])
+
+    assert exit_info.value.code == 1
+    assert "FAIL: refused" in capsys.readouterr().out
 
 
 def test_ci_fetches_the_ten_vad_library_before_running_the_backend_suite():

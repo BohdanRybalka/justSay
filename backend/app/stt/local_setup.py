@@ -355,6 +355,42 @@ def _estimate_model_ram_mb() -> int | None:
         return None
 
 
+def psutil_selftest() -> tuple[bool, str]:
+    """``--selftest-psutil`` backend. Never raises.
+
+    Imports psutil inside the running artifact and reads this process's
+    resident set size — the ingredient the model-RAM estimate reports. Fails
+    when the import raises, when the size is not a positive integer, or when
+    psutil resolves to a path outside a PyInstaller bundle root (ADR 088).
+    """
+    try:
+        import os
+
+        import psutil
+
+        rss = psutil.Process(os.getpid()).memory_info().rss
+    except Exception as e:
+        return False, f"importing psutil and reading this process's RSS raised: {e}"
+
+    if isinstance(rss, bool) or not isinstance(rss, int) or rss <= 0:
+        return False, f"psutil reported a resident set size of {rss!r}"
+
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    origin = getattr(psutil, "__file__", None)
+    if bundle_root is None or origin is None:
+        return True, "ok"
+
+    try:
+        resolved = Path(origin).resolve()
+        root = Path(bundle_root).resolve()
+    except OSError as e:
+        return False, f"resolving psutil's origin {origin!r} raised: {e}"
+
+    if not resolved.is_relative_to(root):
+        return False, f"psutil resolved to {resolved}, outside the bundle root {root}"
+    return True, "ok"
+
+
 def _check_package_installed() -> bool:
     """Check if the platform/kind-appropriate local STT dependency is present.
 
