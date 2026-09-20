@@ -238,15 +238,6 @@ html, body {
   .js-widget--error .js-mark .js-stroke { stroke: #e57373; }
 }
 
-.js-widget--xs .js-capsule,
-.js-widget--xs .js-stroke,
-.js-widget--xs .js-spinner,
-.js-widget--xs .js-spinner-track {
-  stroke-width: 4;
-}
-.js-widget--xs .js-stroke--soft { display: none; }
-.js-widget--xs .js-check { stroke-width: 5; }
-
 .widget-content {
   display: flex;
   align-items: center;

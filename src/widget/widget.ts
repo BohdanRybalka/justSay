@@ -34,17 +34,9 @@ import { createRecordingIntentQueue } from "./recording-intent";
 import { CONNECTION_POLL_MS, createSettingsRetry } from "./settings-retry";
 
 
-type WidgetState = "idle" | "recording" | "processing" | "done" | "error";
+const WIDGET_STATE_CLASSES = ["idle", "recording", "processing", "done", "error"] as const;
+type WidgetState = (typeof WIDGET_STATE_CLASSES)[number];
 type IconState = "idle" | "hover" | "recording" | "processing" | "done" | "error";
-
-const ICON_STATE_MODIFIERS: ReadonlySet<IconState> = new Set<IconState>([
-  "idle",
-  "hover",
-  "recording",
-  "processing",
-  "done",
-  "error",
-]);
 
 let state: WidgetState = "idle";
 let isHovered = false;
@@ -67,12 +59,7 @@ const durationEl = document.getElementById("widget-duration")!;
 
 
 function renderIcon(next: IconState) {
-  const keep = [...iconEl.classList].filter(
-    (c) =>
-      c.startsWith("js-widget--") &&
-      !ICON_STATE_MODIFIERS.has(c.slice("js-widget--".length) as IconState),
-  );
-  iconEl.className = ["widget-icon", "js-widget", ...keep, `js-widget--${next}`].join(" ");
+  iconEl.className = `widget-icon js-widget js-widget--${next}`;
 }
 
 function isInteractive(): boolean {
@@ -82,7 +69,9 @@ function isInteractive(): boolean {
 
 function setState(newState: WidgetState, message?: string, durationLabel?: string) {
   state = newState;
-  widget.className = `widget ${state}${meetingActive ? ` ${MEETING_STATE_CLASS}` : ""}`;
+  widget.classList.remove(...WIDGET_STATE_CLASSES);
+  widget.classList.add(state);
+  widget.classList.toggle(MEETING_STATE_CLASS, meetingActive);
 
   if (durationInterval && state !== "recording") {
     clearInterval(durationInterval);

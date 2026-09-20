@@ -1464,10 +1464,10 @@ async def test_transcribe_always_sends_no_context(monkeypatch, tmp_path, glossar
 @pytest.mark.asyncio
 async def test_transcribe_sends_the_glossary_to_localhost_and_nowhere_else(monkeypatch, tmp_path):
     """Local mode's zero-leak guarantee over the request that now carries the glossary."""
-    provider, _model_path = _make_provider(
-        tmp_path, monkeypatch, initial_prompt="Tauri, Pydantic"
-    )
+    glossary = "Tauri, Pydantic"
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, initial_prompt=glossary)
     seen: list[str] = []
+    posted: list[dict] = []
 
     def _get_impl(url):
         seen.append(url)
@@ -1475,6 +1475,7 @@ async def test_transcribe_sends_the_glossary_to_localhost_and_nowhere_else(monke
 
     def _post_impl(url, data, files):
         seen.append(url)
+        posted.append(data)
         return _FakeResponse(200, {"text": "ok"})
 
     _install_fake_httpx(monkeypatch, get_impl=_get_impl, post_impl=_post_impl)
@@ -1482,7 +1483,7 @@ async def test_transcribe_sends_the_glossary_to_localhost_and_nowhere_else(monke
 
     await provider.transcribe(_wav(tmp_path), language="uk")
 
-    assert seen
+    assert [body["prompt"] for body in posted] == [glossary]
     assert all(url.startswith("http://127.0.0.1:") for url in seen), seen
 
 

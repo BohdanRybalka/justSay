@@ -19,8 +19,8 @@ import pytest
 _TESTS_DIR = Path(__file__).resolve().parent
 _LEDGER = _TESTS_DIR.parent.parent / "docs" / "test-name-audit.md"
 
-_BASELINE_FUNCTIONS = 1309
-_BASELINE_LINES = 36536
+_BASELINE_FUNCTIONS = 1377
+_BASELINE_LINES = 38774
 
 _FUNCTION_INTERVAL = 80
 _LINE_INTERVAL = 4000
@@ -686,4 +686,3 @@ def test_the_walk_reaches_every_module_family_it_is_meant_to_check():
         "test_cross_language_contracts.py",
     }
     assert swept <= modules
-    assert len(_test_functions()) > 1_000
