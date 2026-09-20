@@ -72,7 +72,13 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
     }
   }
 
-  function applyLocalIndicator(error: string | null, ready: boolean, captionText: string) {
+  function applyLocalIndicator(
+    raw: string | null | undefined,
+    ready: boolean,
+    captionText: string,
+  ) {
+    const reported = raw ?? null;
+    const error = displayableError(reported);
     const state = computeIndicatorState({ active: currentSttMode === "local", ready, error });
     renderIndicator(sttLocalIndicator, state, {
       title: error ?? "",
@@ -83,10 +89,10 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
     });
     const caption = sttPanel.querySelector<HTMLElement>("#stt-local-caption");
     if (caption) caption.textContent = captionText;
-    if (onIndicatorStateChange(prevLastError, error)) {
+    if (onIndicatorStateChange(prevLastError, reported)) {
       notifyError(error!);
     }
-    prevLastError = error;
+    prevLastError = reported;
   }
 
   async function refreshSttStatus() {
@@ -95,11 +101,7 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
     try {
       const s: LocalSTTStatus = await api.sttLocalStatus();
       if (isStaleStatusResponse(token, latestSttStatusToken) || currentSttMode !== "local") return;
-      applyLocalIndicator(
-        displayableError(s.last_error),
-        s.model_loaded,
-        `${s.model_name} · ${s.device}`,
-      );
+      applyLocalIndicator(s.last_error, s.model_loaded, `${s.model_name} · ${s.device}`);
     } catch {
       if (isStaleStatusResponse(token, latestSttStatusToken) || currentSttMode !== "local") return;
       applyLocalIndicator("Backend not responding", false, "Backend not responding");

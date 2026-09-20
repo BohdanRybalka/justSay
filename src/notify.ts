@@ -46,11 +46,12 @@ export const ERROR_WITHOUT_READABLE_TEXT = "Something failed and reported no rea
 /**
  * The text an error string renders as, or `null` when there is no error.
  *
- * Trimmed; text carrying no letter and no digit becomes
- * `ERROR_WITHOUT_READABLE_TEXT` (ADR 083).
+ * `null` and `undefined` are both absence. Anything else is trimmed, and text
+ * carrying no letter and no digit becomes `ERROR_WITHOUT_READABLE_TEXT`
+ * (ADR 083).
  */
-export function displayableError(raw: string | null): string | null {
-  if (raw === null) return null;
+export function displayableError(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined) return null;
   const text = raw.trim();
   return /[\p{L}\p{N}]/u.test(text) ? text : ERROR_WITHOUT_READABLE_TEXT;
 }

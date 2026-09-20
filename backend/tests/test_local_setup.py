@@ -4,6 +4,7 @@ import logging
 import pathlib
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -346,6 +347,33 @@ async def test_install_emits_error_on_failure():
         events = [e async for e in install_local_packages()]
 
     assert any("event: error" in e for e in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("output", ["", "\n", "   "])
+async def test_install_error_event_carries_text_when_pip_printed_nothing_readable(output):
+    """The SSE `error` field is published non-blank whatever pip printed."""
+    with patch.object(local_setup, "_check_package_installed", return_value=False), patch.object(
+        local_setup, "_run_pip_install", return_value=(1, output)
+    ):
+        events = [e async for e in install_local_packages()]
+
+    error_events = [e for e in events if "event: error" in e]
+    assert error_events
+    assert local_setup._INSTALL_GAVE_NO_REASON in error_events[0]
+
+
+@pytest.mark.asyncio
+async def test_install_error_event_carries_text_when_pip_raised_a_blank_exception():
+    """A raised exception whose text is blank is published as a sentence too."""
+    with patch.object(local_setup, "_check_package_installed", return_value=False), patch.object(
+        local_setup, "_run_pip_install", side_effect=RuntimeError(" ")
+    ):
+        events = [e async for e in install_local_packages()]
+
+    error_events = [e for e in events if "event: error" in e]
+    assert error_events
+    assert local_setup._INSTALL_GAVE_NO_REASON in error_events[0]
 
 
 @pytest.mark.asyncio
@@ -887,6 +915,8 @@ def test_check_status_merge_is_deterministic_when_package_missing_and_provider_e
 
 
 _BLANK_SHAPES_THE_BOUNDARY_NORMALIZES = [
+    (None, None),
+    ("", LOAD_FAILED_WITHOUT_A_MESSAGE),
     (" ", LOAD_FAILED_WITHOUT_A_MESSAGE),
     ("\n", LOAD_FAILED_WITHOUT_A_MESSAGE),
     ("\t \r\n", LOAD_FAILED_WITHOUT_A_MESSAGE),
@@ -894,10 +924,7 @@ _BLANK_SHAPES_THE_BOUNDARY_NORMALIZES = [
 ]
 
 
-@pytest.mark.parametrize(
-    ("written", "published"),
-    [(None, None), ("", LOAD_FAILED_WITHOUT_A_MESSAGE), *_BLANK_SHAPES_THE_BOUNDARY_NORMALIZES],
-)
+@pytest.mark.parametrize(("written", "published"), _BLANK_SHAPES_THE_BOUNDARY_NORMALIZES)
 def test_check_status_normalizes_whatever_the_install_step_wrote(written, published):
     """`last_error` crosses the HTTP boundary as `None` or non-blank text (ADR 083).
 
@@ -919,16 +946,12 @@ def test_check_status_normalizes_whatever_the_install_step_wrote(written, publis
     assert status.last_error is None or status.last_error.strip()
 
 
-@pytest.mark.parametrize(
-    ("latched", "published"),
-    [(None, None), ("", None), *_BLANK_SHAPES_THE_BOUNDARY_NORMALIZES],
-)
+@pytest.mark.parametrize(("latched", "published"), _BLANK_SHAPES_THE_BOUNDARY_NORMALIZES)
 def test_check_status_normalizes_whatever_a_provider_latched(latched, published):
     """The provider channel crosses the same boundary under the same rule (ADR 083).
 
-    An empty latch is indistinguishable from an absent one where the two
-    channels merge, and it publishes nothing; `test_stt_base.py` is what pins
-    that no provider writes one.
+    The two channels are merged on absence rather than on falsiness, so a blank
+    string reaching the boundary is published identically whichever wrote it.
     """
     from app.stt.routing import _get_local
     from app.stt.routing import clear_cache as clear_stt_cache
@@ -1151,8 +1174,7 @@ async def test_ensure_local_ready_sends_the_pip_output_to_the_log_not_to_the_not
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
     monkeypatch.setattr(local_setup, "_run_pip_install", lambda: (1, "\n".join(lines)))
 
-    with caplog.at_level(logging.ERROR, logger="app.stt.local_setup"):
-        await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+    await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
 
     assert local_setup._prewarm_error is not None
     leaked = [line for line in lines if line in local_setup._prewarm_error]
@@ -1160,8 +1182,22 @@ async def test_ensure_local_ready_sends_the_pip_output_to_the_log_not_to_the_not
         f"the notification body carries raw pip output rather than a sentence: {leaked}"
     )
     assert "pip exit code 1" in local_setup._prewarm_error
+
+
+def test_run_pip_install_puts_a_failed_runs_output_in_the_log(monkeypatch, caplog):
+    """The pip output reaches the log from one place, and bounded."""
+    lines = [f"pip resolver line {n}" for n in range(60)]
+    completed = SimpleNamespace(returncode=1, stdout="\n".join(lines), stderr="")
+    monkeypatch.setattr(local_setup.subprocess, "run", lambda *a, **k: completed)
+    monkeypatch.setattr(local_setup, "_get_backend_dir", lambda: ".")
+
+    with caplog.at_level(logging.WARNING, logger="app.stt.local_setup"):
+        exit_code, output = local_setup._run_pip_install()
+
+    assert exit_code == 1
     logged = "\n".join(record.getMessage() for record in caplog.records)
-    assert lines[0] in logged and lines[-1] in logged
+    assert lines[-1] in logged
+    assert all(len(record.getMessage()) <= 1100 for record in caplog.records)
 
 
 @pytest.mark.asyncio

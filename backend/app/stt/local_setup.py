@@ -27,6 +27,8 @@ from app.stt.local_factory import (
 
 log = logging.getLogger(__name__)
 
+_INSTALL_GAVE_NO_REASON = "Installing the local engine failed and gave no reason."
+
 _install_lock = asyncio.Lock()
 
 _prewarm_lock = asyncio.Lock()
@@ -94,7 +96,8 @@ def check_status(stt_settings: STTSettings) -> LocalSTTStatus:
     compute_type = compute_type_for_device(device, kind)
     gpu_available = is_accelerated_device(device, kind)
 
-    raw_error = routing.get_local_load_error(stt_settings) or _prewarm_error
+    provider_error = routing.get_local_load_error(stt_settings)
+    raw_error = provider_error if provider_error is not None else _prewarm_error
     last_error = load_error_sentence(raw_error) if raw_error is not None else None
     model_is_loaded = routing.is_model_loaded() if installed else False
 
@@ -244,10 +247,9 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
             _prewarm_error = None
             exit_code, output = await asyncio.to_thread(_run_pip_install)
             if exit_code != 0:
-                log.error("Installing the local engine failed:\n%s", output)
                 _prewarm_error = (
                     f"Installing the local speech engine failed (pip exit code "
-                    f"{exit_code}). See the JustSay log for the full output."
+                    f"{exit_code}). See the JustSay log for the pip output."
                 )
                 return
             _prewarm_error = None
@@ -358,11 +360,14 @@ async def install_local_packages() -> AsyncIterator[str]:
             else:
                 yield sse_event(
                     "error",
-                    {"status": "error", "error": output[-500:] if output else "pip install failed"},
+                    {"status": "error", "error": output.strip()[-500:] or _INSTALL_GAVE_NO_REASON},
                 )
         except Exception as e:
             log.warning("pip install failed: %s", e)
-            yield sse_event("error", {"status": "error", "error": str(e)})
+            yield sse_event(
+                "error",
+                {"status": "error", "error": str(e).strip() or _INSTALL_GAVE_NO_REASON},
+            )
 
 
 def _run_pip_install() -> tuple[int, str]:

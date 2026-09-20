@@ -20,8 +20,8 @@ const UNREADABLE = [
   ["spaces alone", "   "],
   ["a newline alone", "\n"],
   ["a tab and a carriage return", "\t \r\n"],
-  ["a byte-order mark", "﻿"],
-  ["a zero-width space", "​"],
+  ["a byte-order mark", "\ufeff"],
+  ["a zero-width space", "\u200b"],
   ["what `str(KeyError(\"\"))` produces", "''"],
   ["punctuation alone", "-->"],
 ] as const;
@@ -99,8 +99,9 @@ describe("nextConnectionCheckState", () => {
 });
 
 describe("displayableError", () => {
-  it("returns null for null, and for nothing else", () => {
+  it("returns null for an absent value, and for nothing else", () => {
     expect(displayableError(null)).toBeNull();
+    expect(displayableError(undefined)).toBeNull();
     const nulled = [...UNREADABLE, ...READABLE]
       .map(([label, raw]) => [label, displayableError(raw)] as const)
       .filter(([, shown]) => shown === null)

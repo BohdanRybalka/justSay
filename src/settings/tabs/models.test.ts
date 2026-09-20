@@ -146,7 +146,7 @@ describe("renderModels — a failed local load the user can read", () => {
     expect(notifyErrorMock).not.toHaveBeenCalled();
   });
 
-  it("stops polling once the cleanup it returns is called", async () => {
+  it("polls while it is mounted and stops once the cleanup it returns is called", async () => {
     vi.useFakeTimers();
     try {
       await render(buildStatus());
@@ -154,13 +154,47 @@ describe("renderModels — a failed local load the user can read", () => {
       const afterFirstRender = apiMock.sttLocalStatus.mock.calls.length;
       expect(afterFirstRender).toBeGreaterThan(0);
 
+      await vi.advanceTimersByTimeAsync(3000);
+      const whilePolling = apiMock.sttLocalStatus.mock.calls.length;
+      expect(whilePolling).toBeGreaterThan(afterFirstRender);
+
       for (const cleanup of cleanups) cleanup();
       cleanups = [];
       await vi.advanceTimersByTimeAsync(9000);
 
-      expect(apiMock.sttLocalStatus.mock.calls.length).toBe(afterFirstRender);
+      expect(apiMock.sttLocalStatus.mock.calls.length).toBe(whilePolling);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("raises a second toast when a different failure normalizes to the same sentence", async () => {
+    vi.useFakeTimers();
+    try {
+      apiMock.sttLocalStatus
+        .mockResolvedValueOnce(buildStatus({ last_error: "" }))
+        .mockResolvedValue(buildStatus({ last_error: "\n" }));
+      const { renderModels } = await import("./models");
+      const container = document.createElement("div");
+      cleanups.push(renderModels(container, buildSettings()));
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(notifyErrorMock).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(notifyErrorMock).toHaveBeenCalledTimes(2);
+      expect(notifyErrorMock.mock.calls[1][0]).toBe(notifyErrorMock.mock.calls[0][0]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("draws no error and raises no toast when the field is absent from the response", async () => {
+    const status = buildStatus({ model_loaded: true });
+    delete (status as { last_error?: string | null }).last_error;
+    const container = await render(status);
+
+    await vi.waitFor(() => expect(badgeClass(container)).toContain("status-indicator-badge--ready"));
+    expect(notifyErrorMock).not.toHaveBeenCalled();
   });
 });
