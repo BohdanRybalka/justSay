@@ -1,14 +1,25 @@
-"""Core routes: health check and graceful shutdown."""
+"""Application-level routes: health check and graceful shutdown."""
 
 import signal
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from app import __version__
 from app.core.config import settings
-from app.core.schemas import HealthResponse, ShutdownResponse
+from app.core.types import ProviderMode
 
 router = APIRouter()
+
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    stt_mode: ProviderMode
+
+
+class ShutdownResponse(BaseModel):
+    status: str
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -30,4 +41,3 @@ async def request_shutdown() -> ShutdownResponse:
 
 def _raise_stop_signal() -> None:
     signal.raise_signal(signal.SIGTERM)
-
