@@ -39,11 +39,34 @@ BUILD_SCRIPT_NAMES: dict[str, str] = {
 }
 
 
+_INSTALLED_BUILD_BINARY_MISSING = (
+    "The local speech engine is missing from this installation of JustSay. "
+    "Reinstall the app, or use Cloud mode until it is back."
+)
+
+_BIN_OVERRIDE_POINTS_AT_NOTHING = (
+    f"{_WHISPER_CPP_BIN_ENV_VAR} is set, but there is no file at that path. "
+    "Point it at a whisper-server binary, or unset it to use the bundled one."
+)
+
+
+def _is_frozen_build() -> bool:
+    """Whether this process is a PyInstaller bundle rather than a source checkout."""
+    return bool(getattr(sys, "frozen", False))
+
+
 def binary_not_found_message() -> str:
-    """The one wording for "no whisper-server here", shared by the provider's
-    load failure and ``local_setup.ensure_local_ready()``'s prewarm error so
-    the two cannot name different build scripts on the same platform.
+    """The one wording for "no whisper-server here", shared by every reader.
+
+    Follows `resolve_binary_path`'s own resolution order, so the sentence names
+    the source that failed: the env override, the installed bundle, the checkout.
     """
+    if os.environ.get(_WHISPER_CPP_BIN_ENV_VAR):
+        return _BIN_OVERRIDE_POINTS_AT_NOTHING
+
+    if _is_frozen_build():
+        return _INSTALLED_BUILD_BINARY_MISSING
+
     script = BUILD_SCRIPT_NAMES.get(sys.platform, BUILD_SCRIPT_NAMES["win32"])
     return (
         "whisper-server binary not found. Set JUSTSAY_WHISPER_CPP_BIN, "
@@ -82,7 +105,7 @@ def resolve_binary_path() -> Path | None:
 
     binary_name = _binary_name()
 
-    if getattr(sys, "frozen", False):
+    if _is_frozen_build():
         resource_dir = Path(sys.executable).resolve().parent.parent
         candidate = resource_dir / vendor_dir / binary_name
         if candidate.is_file():

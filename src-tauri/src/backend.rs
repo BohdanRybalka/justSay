@@ -2,8 +2,9 @@
 //! crash-respawn watchdog.
 //!
 //! Production sidecar spawn flows through the Tauri shell plugin
-//! (`app.shell().command(...)`), which validates the path + args against
-//! the named-binary capability scope in `capabilities/default.json`. The
+//! (`app.shell().command(...)`), which validates nothing: a capability scope
+//! binds the webview's IPC calls, not Rust, so the single binary this can
+//! ever spawn is fixed by `resolve_sidecar()` instead (ADR 085). The
 //! shell plugin's `CommandChild` does not expose `try_wait()`, so liveness
 //! is tracked via a background task that drains `Receiver<CommandEvent>`
 //! and flips an `AtomicBool` on `Terminated` (see `BackendProcess`).
@@ -11,7 +12,9 @@
 //! Dev mode (no frozen sidecar at the resolved `resource_dir()` path)
 //! falls back to `std::process::Command` spawning the system Python
 //! interpreter against `backend/app.main:app`. This branch is intentionally
-//! NOT routed through the shell plugin — it has no fixed scope path. It is
+//! NOT routed through the shell plugin, whose `Command` builder exposes
+//! neither `creation_flags` nor any stdio control, while this branch needs
+//! both. It is
 //! the debug default, but is also reached in a release build whenever
 //! `resolve_sidecar()` finds no frozen sidecar.
 //!
@@ -439,7 +442,7 @@ fn append_sidecar_log(line: &[u8], log_dir: Option<&Path>) -> bool {
         Some(dir) => dir,
         None => return false,
     };
-    if std::fs::create_dir_all(&log_dir).is_err() {
+    if std::fs::create_dir_all(log_dir).is_err() {
         return false;
     }
     let mut record = Vec::with_capacity(line.len() + 1);
@@ -671,11 +674,10 @@ const SIDECAR_EXECUTABLE_NAME: &str = "justsay-backend";
 /// Resolve the production sidecar path inside the installed resource dir.
 /// Returns `None` if no frozen sidecar is present (developer setup).
 ///
-/// The resolved path is the same one the capability scope's `$RESOURCE`
-/// token expands to: on Windows NSIS it is `<install>/resources/`, on
-/// macOS bundles it is `Contents/Resources/`. Tauri's path resolver is the
-/// single source of truth for both production runtime and capability
-/// scope, so they agree by construction.
+/// This resolver is the only thing that fixes which binary the shell plugin
+/// is asked to spawn: on Windows NSIS the resource dir is
+/// `<install>/resources/`, on macOS bundles it is `Contents/Resources/`
+/// (ADR 085).
 fn resolve_sidecar(app: &AppHandle) -> Option<PathBuf> {
     let resource_dir = app.path().resource_dir().ok()?;
     let candidate = resource_dir
@@ -904,7 +906,7 @@ fn assign_pid_to_job(job: isize, pid: u32) -> bool {
 /// Spawn the Python FastAPI backend as a child process.
 ///
 /// Preference order:
-///   1. Production sidecar via shell plugin (capability-scoped).
+///   1. Production sidecar via shell plugin, on `resolve_sidecar()`'s path.
 ///   2. System Python + the backend source tree (developer setup).
 ///
 /// Debug builds (`tauri dev`) skip the frozen sidecar entirely so the

@@ -34,6 +34,12 @@ TABLE_HEADER = ("Term", "Lines", "Source")
 REVIEW_ROUND_TERM = "Review rounds"
 LANDED_STATUSES = frozenset({"pr-open", "done"})
 SIZE_GATE_HEADING = "**The size gate — measured, not felt.**"
+SIZE_GATE_EXCLUSIONS = (
+    "backend/tests",
+    "*.test.ts",
+    "*.test-helper.ts",
+    "vitest.config.ts",
+)
 RESTATEMENT_ANCHOR = "the same line names which row"
 
 _SPEC_DIR_RE = re.compile(r"^(\d{3})-")
@@ -43,6 +49,7 @@ _STATUS_RE = re.compile(r"^>?\s*\*\*Status:\*\*\s*([a-z-]+)", re.M)
 _LANDED_RE = re.compile(r"^Landed:.*?\d+.*?git diff --shortstat", re.M)
 _INT_RE = re.compile(r"\d+")
 _RESCORE_RE = re.compile(r"If the real diff lands more than (\d+(?:\.\d+)?)×")
+_EXCLUDE_RE = re.compile(r":\((?:top,)?exclude\)'?([^'\s]+)")
 _RESTATED_RESCORE_RE = re.compile(
     rf"(?:more than|over|past)\s+(\d+(?:\.\d+)?)×[^\n]*?{RESTATEMENT_ANCHOR}", re.I
 )
@@ -267,6 +274,16 @@ def _every_rule(label: str, text: str) -> list[str]:
     for rule in RULES:
         offenders.extend(rule(label, text))
     return offenders
+
+
+def _stated_exclusions(text: str) -> tuple[str, ...]:
+    """Every `:(exclude)` pathspec inside CLAUDE.md's size-gate section, in reading order."""
+    start = text.find(SIZE_GATE_HEADING)
+    if start == -1:
+        return ()
+    section = text[start:]
+    end = section.find("\n### ")
+    return tuple(sorted(_EXCLUDE_RE.findall(section if end == -1 else section[:end])))
 
 
 def _stated_multiplier(text: str) -> float | None:
@@ -537,6 +554,28 @@ def test_a_near_miss_heading_is_quoted_back_and_a_bare_absence_is_not(tmp_path, 
     assert demoted and all("`### Size estimate`" in message for message in demoted)
     assert absent and all(f"no `{SECTION_HEADING}` heading" in message for message in absent)
     assert not passed
+
+
+def test_the_size_gate_excludes_exactly_the_paths_this_module_names():
+    """CLAUDE.md's exclusion list is read out of the live command, not trusted (ADR 084)."""
+    if not CLAUDE_MD.is_file():
+        pytest.skip("CLAUDE.md is gitignored and absent from clean checkouts")
+
+    stated = _stated_exclusions(CLAUDE_MD.read_text(encoding="utf-8"))
+    expected = tuple(sorted(SIZE_GATE_EXCLUSIONS))
+    drifted = _stated_exclusions(
+        f"{SIZE_GATE_HEADING}\n\n```\ngit diff -- . ':(exclude)nowhere/at/all'\n```\n"
+    )
+
+    assert stated == expected, (
+        f"CLAUDE.md's size gate excludes {stated} where this module names "
+        f"{expected}. One of the two is stale, and the lane a change takes "
+        f"depends on which one the reader opened."
+    )
+    assert drifted == ("nowhere/at/all",), (
+        f"the pin must read the exclusions out of the live wording; a section naming "
+        f"one exclusion was read as {drifted}"
+    )
 
 
 def test_claude_md_states_the_rescore_multiplier():
