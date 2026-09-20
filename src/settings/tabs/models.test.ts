@@ -324,4 +324,61 @@ describe("renderModels after the Settings window is dismissed", () => {
       vi.useRealTimers();
     }
   });
+
+  it("reads nothing at all when it mounts into a dismissed window", async () => {
+    vi.useFakeTimers();
+    try {
+      apiMock.sttLocalStatus.mockResolvedValue(buildStatus());
+      const { renderModels } = await import("./models");
+      const container = document.createElement("div");
+      const tab = renderModels(container, buildSettings(), true);
+      cleanups.push(tab);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(
+        apiMock.sttLocalStatus,
+        "the mount's own read is away before any release can run, so a tab mounted into " +
+          "a window nobody can see still costs a request",
+      ).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(apiMock.sttLocalStatus).not.toHaveBeenCalled();
+
+      tab.resumeResources!();
+      expect(
+        apiMock.sttLocalStatus,
+        "and the show is what pays for it, once",
+      ).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("raises no second toast for a failure the user has already been shown", async () => {
+    vi.useFakeTimers();
+    try {
+      const container = await render(buildStatus({ last_error: "boom" }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(notifyErrorMock).toHaveBeenCalledTimes(1);
+      const [tab] = cleanups;
+
+      for (let reopen = 0; reopen < 3; reopen += 1) {
+        tab.releaseResources!();
+        tab.resumeResources!();
+        await vi.advanceTimersByTimeAsync(0);
+      }
+
+      expect(
+        notifyErrorMock,
+        "closing and re-opening Settings against a local engine that is still broken " +
+          "must not raise the same toast again on every re-open",
+      ).toHaveBeenCalledTimes(1);
+      expect(
+        badgeClass(container),
+        "while the badge still says the engine is broken",
+      ).toContain("status-indicator-badge--error");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -200,8 +200,6 @@ _RUST_TOP_LEVEL_FUNCTION_PATTERN = re.compile(
     r"^(?:pub\s+(?:\([^)]*\)\s*)?)?(?:async\s+)?fn\s+(\w+)", re.MULTILINE
 )
 
-_RUST_SHOW_CALL_PATTERN = re.compile(r"\.show\(")
-
 _RUST_SETTINGS_WINDOW_PATTERN = re.compile(r'get_webview_window\(\s*"settings"')
 
 _TYPESCRIPT_COMMENT_OR_STRING_PATTERN = re.compile(
@@ -656,6 +654,55 @@ def _rust_top_level_function_bodies(path: Path) -> dict[str, str]:
     return bodies
 
 
+def _assert_one_lib_helper_owns_the_settings_window(
+    verb: str, helper: str, event: str, also_allowed: tuple[str, ...]
+) -> None:
+    """Every ``.<verb>()`` in lib.rs sits in ``helper`` or in ``also_allowed``.
+
+    ``helper`` must resolve the settings window, must not discard what the call
+    returns, and must emit ``event``, so a call that failed announces nothing.
+    """
+    call = re.compile(rf"\.{verb}\(")
+    code = _rust_code(LIB_RS)
+    bodies = _rust_top_level_function_bodies(LIB_RS)
+    rel = LIB_RS.relative_to(REPO_ROOT).as_posix()
+    assert bodies, (
+        f"{rel} yielded no top-level fn at all; the reader has gone blind and every "
+        "assertion below would pass on nothing"
+    )
+
+    everywhere = len(call.findall(code))
+    assert everywhere, (
+        f"{rel} no longer calls .{verb}() on any window; the Rust half of this "
+        "contract has moved and the extractor must move with it"
+    )
+
+    enclosed = {
+        name: len(call.findall(body)) for name, body in bodies.items() if call.search(body)
+    }
+    assert sum(enclosed.values()) == everywhere, (
+        f"{rel} calls .{verb}() {everywhere} times but only {sum(enclosed.values())} of "
+        f"them sit inside a top-level fn this reader can name; it found {sorted(enclosed)}"
+    )
+    assert sorted(enclosed) == sorted([helper, *also_allowed]), (
+        f"every path that {verb}s the settings window must go through the one helper that "
+        f"emits '{event}', or the page and the window disagree about what is on screen "
+        f"with nothing to say why (ADR 089); .{verb}() is called from {sorted(enclosed)}"
+    )
+    assert _RUST_SETTINGS_WINDOW_PATTERN.search(bodies[helper]), (
+        f"{helper} no longer resolves the settings window, so the helper this pin routes "
+        f"every {verb} through is acting on something else"
+    )
+    assert re.search(rf'\.emit\(\s*"{event}"', bodies[helper]), (
+        f"{helper} {verb}s the window without announcing it, so settings.ts never learns "
+        "what happened to the window it is drawing"
+    )
+    assert not re.search(rf"let\s+_\s*=\s*window\.{verb}\(", bodies[helper]), (
+        f"{helper} discards the result of {verb}(), so a {verb} that failed still emits "
+        f"'{event}' and the page acts on a window state that never happened"
+    )
+
+
 def test_every_settings_show_site_announces_it() -> None:
     """Showing the settings window and announcing it are one indivisible step.
 
@@ -684,47 +731,60 @@ def test_every_settings_show_site_announces_it() -> None:
     ``emit`` from the helper fails the last assertion with every other one
     still passing.
     """
-    code = _rust_code(LIB_RS)
-    bodies = _rust_top_level_function_bodies(LIB_RS)
-    assert bodies, (
-        f"{LIB_RS.relative_to(REPO_ROOT).as_posix()} yielded no top-level fn at all; "
-        "the reader has gone blind and every assertion below would pass on nothing"
+    _assert_one_lib_helper_owns_the_settings_window(
+        "show", "show_settings", "settings-shown", ("widget_ready",)
     )
 
-    show_call = _RUST_SHOW_CALL_PATTERN
-    everywhere = len(show_call.findall(code))
-    assert everywhere, (
-        f"{LIB_RS.relative_to(REPO_ROOT).as_posix()} no longer calls .show() on any "
-        "window; the Rust half of this contract has moved and the extractor must "
-        "move with it"
+
+def test_every_settings_hide_site_announces_it() -> None:
+    """Hiding the settings window and announcing it are one indivisible step.
+
+    The mirror of the show pin, and the half a page can be hurt by in the other
+    direction: a ``settings-hidden`` sent for a hide that failed stops the
+    polling on a window the user is still looking at, and a second hide path
+    added later that forgets the emit leaves it polling for ever (ADR 089).
+    """
+    _assert_one_lib_helper_owns_the_settings_window(
+        "hide", "hide_settings", "settings-hidden", ()
     )
 
-    enclosed = {
-        name: len(show_call.findall(body))
-        for name, body in bodies.items()
-        if show_call.search(body)
-    }
-    assert sum(enclosed.values()) == everywhere, (
-        f"{LIB_RS.relative_to(REPO_ROOT).as_posix()} calls .show() {everywhere} times "
-        f"but only {sum(enclosed.values())} of them sit inside a top-level fn this "
-        f"reader can name; it found {sorted(enclosed)}"
+
+def _assert_only_one_fn_reaches_the_settings_window(verb: str, helper: str, event: str) -> None:
+    """Across src-tauri/src/, only ``helper`` names the settings window and ``.<verb>()``s it.
+
+    Each file's calls are counted twice — in the file and inside the fns this
+    reader can name — so one it cannot attribute fails here rather than passing
+    unseen.
+    """
+    call = re.compile(rf"\.{verb}\(")
+    reaching: dict[str, str] = {}
+    functions_read = 0
+    unreachable: dict[str, tuple[int, int]] = {}
+    for path in _rust_source_files():
+        bodies = _rust_top_level_function_bodies(path)
+        in_file = len(call.findall(_rust_code(path)))
+        attributed = sum(len(call.findall(body)) for body in bodies.values())
+        if attributed != in_file:
+            unreachable[path.relative_to(REPO_ROOT).as_posix()] = (in_file, attributed)
+        for name, body in bodies.items():
+            functions_read += 1
+            if _RUST_SETTINGS_WINDOW_PATTERN.search(body) and call.search(body):
+                reaching[name] = path.relative_to(REPO_ROOT).as_posix()
+
+    assert functions_read, (
+        f"no top-level fn was read under {RUST_SOURCE_DIR.relative_to(REPO_ROOT).as_posix()}; "
+        "the walk has gone blind and the assertion below would pass on nothing"
     )
-    assert sorted(enclosed) == ["show_settings", "widget_ready"], (
-        "every path that shows the settings window must go through the one helper "
-        "that emits 'settings-shown', or a returning user reads a frozen badge with "
-        f"nothing to say why (ADR 089); .show() is called from {sorted(enclosed)}"
+    assert unreachable == {}, (
+        f"this reader names top-level fns only, so a .{verb}() written inside an impl block or "
+        "a nested mod would be invisible to the assertion below rather than caught by it; these "
+        f"files call .{verb}() more often than it can attribute (in file, attributed): "
+        f"{unreachable}"
     )
-    assert re.search(r'get_webview_window\(\s*"settings"', bodies["show_settings"]), (
-        "show_settings no longer resolves the settings window, so the helper this "
-        "pin routes every show through is showing something else"
-    )
-    assert re.search(r'\.emit\(\s*"settings-shown"', bodies["show_settings"]), (
-        "show_settings shows the window without announcing it, so settings.ts never "
-        "learns the window came back and the tabs it released stay released"
-    )
-    assert not re.search(r"let\s+_\s*=\s*window\.show\(", bodies["show_settings"]), (
-        "show_settings discards the result of show(), so a show that failed still emits "
-        "'settings-shown' and the page resumes polling a window nobody can see"
+    assert sorted(reaching) == [helper], (
+        f"only the helper that emits '{event}' may {verb} the settings window, or the page "
+        "goes on drawing a window state that never happened (ADR 089); it is "
+        f"{verb}n from {sorted(reaching.items())}"
     )
 
 
@@ -742,34 +802,16 @@ def test_no_other_rust_function_shows_the_settings_window() -> None:
     another fn is invisible to the key. It narrows where a settings show can be
     written; it does not prove the announcement complete (ADR 089).
     """
-    showing_settings: dict[str, str] = {}
-    functions_read = 0
-    unreachable: dict[str, tuple[int, int]] = {}
-    for path in _rust_source_files():
-        bodies = _rust_top_level_function_bodies(path)
-        in_file = len(_RUST_SHOW_CALL_PATTERN.findall(_rust_code(path)))
-        attributed = sum(len(_RUST_SHOW_CALL_PATTERN.findall(body)) for body in bodies.values())
-        if attributed != in_file:
-            unreachable[path.relative_to(REPO_ROOT).as_posix()] = (in_file, attributed)
-        for name, body in bodies.items():
-            functions_read += 1
-            if _RUST_SETTINGS_WINDOW_PATTERN.search(body) and _RUST_SHOW_CALL_PATTERN.search(body):
-                showing_settings[name] = path.relative_to(REPO_ROOT).as_posix()
+    _assert_only_one_fn_reaches_the_settings_window("show", "show_settings", "settings-shown")
 
-    assert functions_read, (
-        f"no top-level fn was read under {RUST_SOURCE_DIR.relative_to(REPO_ROOT).as_posix()}; "
-        "the walk has gone blind and the assertion below would pass on nothing"
-    )
-    assert unreachable == {}, (
-        "this reader names top-level fns only, so a .show() written inside an impl block or a "
-        "nested mod would be invisible to the assertion below rather than caught by it; these "
-        f"files call .show() more often than it can attribute (in file, attributed): {unreachable}"
-    )
-    assert sorted(showing_settings) == ["show_settings"], (
-        "only the helper that emits 'settings-shown' may show the settings window, or "
-        "the tabs released on the hide stay released and the badge on them stays frozen "
-        f"(ADR 089); it is shown from {sorted(showing_settings.items())}"
-    )
+
+def test_no_other_rust_function_hides_the_settings_window() -> None:
+    """A fn that names the settings window and hides it must be the announcing helper.
+
+    The mirror of the walk above, under the same limits: it narrows where a
+    settings hide can be written and does not prove the announcement complete.
+    """
+    _assert_only_one_fn_reaches_the_settings_window("hide", "hide_settings", "settings-hidden")
 
 
 def test_the_rust_reader_does_not_take_prose_for_code(tmp_path: Path) -> None:

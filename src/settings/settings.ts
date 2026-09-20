@@ -29,6 +29,7 @@ let backendReachable = true;
 let settingsLoadInFlight = false;
 let settingsWindowHidden = true;
 let backendProbeInterval: ReturnType<typeof setInterval> | null = null;
+let handledVisibilityEdges = 0;
 
 const SETTINGS_LOAD_TIMEOUT_MS = 40_000;
 const BACKEND_PROBE_INTERVAL_MS = 5000;
@@ -58,13 +59,19 @@ function asLifecycle(teardown: TabTeardown): TabLifecycle | null {
   return typeof teardown === "function" ? { destroy: teardown } : teardown;
 }
 
-const tabs: Record<string, (container: HTMLElement, settings: UserSettings) => TabTeardown> = {
+type TabRenderer = (
+  container: HTMLElement,
+  settings: UserSettings,
+  windowHidden: boolean,
+) => TabTeardown;
+
+const tabs: Record<string, TabRenderer> = {
   general: renderGeneral,
   models: renderModels,
   transcribe: (container) => renderTranscribe(container),
   history: (container) => renderHistory(container),
   metrics: (container) => renderMetrics(container),
-  words: (container) => renderWords(container),
+  words: (container, _settings, windowHidden) => renderWords(container, windowHidden),
 };
 
 /** `bridge-missing` / `bridge-timeout` / `bridge-failed: <detail>` /
@@ -225,7 +232,7 @@ function switchTab(tabName: string) {
 
   const renderFn = tabs[tabName];
   if (renderFn) {
-    activeTab = asLifecycle(renderFn(tabContent, settings));
+    activeTab = asLifecycle(renderFn(tabContent, settings, settingsWindowHidden));
     if (settingsWindowHidden) activeTab?.releaseResources?.();
   }
 }
@@ -399,36 +406,49 @@ function applyWindowVisibility(event: "hidden" | "shown") {
   activeTab?.resumeResources?.();
 }
 
+/** Route one announcement from the shell through the gate, and count it, so a
+ *  visibility read in flight can tell its answer has been overtaken. */
+function handleVisibilityEdge(event: "hidden" | "shown") {
+  handledVisibilityEdges += 1;
+  applyWindowVisibility(event);
+}
+
 /** Ask the shell what this window currently is, and route the answer through
  *  the same gate an announcement takes.
  *
  *  A show announced before the subscription attached is gone, and `isVisible()`
- *  (`@tauri-apps/api` 2.10) is the reading that replaces the guess. Outside
- *  Tauri there is no window to ask, and the caller's fallback stands. */
+ *  (`@tauri-apps/api` 2.10) is the reading that replaces the guess. An
+ *  announcement handled while the read was away is newer, so it wins. */
 async function readWindowVisibility() {
+  const edgesBefore = handledVisibilityEdges;
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
   const visible = await getCurrentWindow().isVisible();
+  if (handledVisibilityEdges !== edgesBefore) return;
   applyWindowVisibility(visible ? "shown" : "hidden");
 }
 
 /** Follow the Settings window between dismissed and shown again.
  *
  *  The show is subscribed before the dismissal, so a partial attach keeps the
- *  edge that resumes. A page that attached neither and can ask no window either
- *  is the settings screen served by Vite outside Tauri, which is visible. */
+ *  edge that resumes. A page holding no show edge can never hear the window
+ *  arrive, whatever the window says it is, so it polls: that is the settings
+ *  screen served by Vite, and believing otherwise silences it for good. */
 async function trackTabWindowVisibility() {
   let showEdgeAttached = false;
   try {
     const { listen } = await import("@tauri-apps/api/event");
-    await listen(EVENT_SETTINGS_SHOWN, () => applyWindowVisibility("shown"));
+    await listen(EVENT_SETTINGS_SHOWN, () => handleVisibilityEdge("shown"));
     showEdgeAttached = true;
-    await listen(EVENT_SETTINGS_HIDDEN, () => applyWindowVisibility("hidden"));
+    await listen(EVENT_SETTINGS_HIDDEN, () => handleVisibilityEdge("hidden"));
   } catch {
+  }
+  if (!showEdgeAttached) {
+    applyWindowVisibility("shown");
+    return;
   }
   try {
     await readWindowVisibility();
   } catch {
-    if (!showEdgeAttached) applyWindowVisibility("shown");
   }
 }
 

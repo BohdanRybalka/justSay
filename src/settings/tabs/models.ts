@@ -15,7 +15,11 @@ import {
 
 let prevLastError: string | null = null;
 
-export function renderModels(container: HTMLElement, settings: UserSettings): TabLifecycle {
+export function renderModels(
+  container: HTMLElement,
+  settings: UserSettings,
+  windowHidden = false,
+): TabLifecycle {
   container.innerHTML = `
     <h2 class="tab-title">Models</h2>
 
@@ -62,14 +66,17 @@ export function renderModels(container: HTMLElement, settings: UserSettings): Ta
   let currentSttMode = settings.stt_mode;
   let latestSttStatusToken = 0;
 
-  function renderCurrentStt() {
+  /** Paint the panel the current mode calls for, and read the local engine's
+   *  status unless `read` is false — which is a window nobody can see, where
+   *  the answer would be fetched only to be thrown away. */
+  function renderCurrentStt(read = true) {
     if (currentSttMode === "cloud") {
       renderIndicator(sttLocalIndicator, "idle");
       sttPanel.innerHTML = "";
-    } else {
-      sttPanel.innerHTML = '<div class="setting-hint" id="stt-local-caption"></div>';
-      refreshSttStatus();
+      return;
     }
+    sttPanel.innerHTML = '<div class="setting-hint" id="stt-local-caption"></div>';
+    if (read) refreshSttStatus();
   }
 
   function applyLocalIndicator(
@@ -143,14 +150,13 @@ export function renderModels(container: HTMLElement, settings: UserSettings): Ta
     }, 3000);
   }
 
-  /** Stop reading the local engine while the window is gone, and forget the
-   *  failure the badge was last drawn from — a still-broken engine is worth
-   *  announcing once more to a user who has not seen this window since. */
+  /** Stop reading the local engine while the window is gone, and disown the
+   *  read still in flight. The failure the badge was last drawn from is kept,
+   *  so a still-broken engine raises no fresh toast on every re-open. */
   function releaseResources() {
     if (pollInterval !== null) clearInterval(pollInterval);
     pollInterval = null;
     latestSttStatusToken += 1;
-    prevLastError = null;
   }
 
   /** Restart the interval and read once in this same tick, so the badge a
@@ -162,11 +168,14 @@ export function renderModels(container: HTMLElement, settings: UserSettings): Ta
     void refreshSttStatus();
   }
 
-  renderCurrentStt();
-  startSttPolling();
+  renderCurrentStt(!windowHidden);
+  if (!windowHidden) startSttPolling();
 
   return {
-    destroy: releaseResources,
+    destroy: () => {
+      releaseResources();
+      prevLastError = null;
+    },
     releaseResources,
     resumeResources,
   } satisfies TabLifecycle;

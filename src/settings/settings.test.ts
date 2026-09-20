@@ -34,8 +34,11 @@ const modelsTab = {
   resumeResources: vi.fn(),
 };
 
+const modelsMountedHidden: boolean[] = [];
+
 vi.mock("./tabs/models", () => ({
-  renderModels: vi.fn((container: HTMLElement) => {
+  renderModels: vi.fn((container: HTMLElement, _settings: unknown, windowHidden: boolean) => {
+    modelsMountedHidden.push(windowHidden);
     container.innerHTML = '<div id="models-tab-body"></div>';
     return modelsTab;
   }),
@@ -69,11 +72,16 @@ function listenAttempts(event: string): number {
 
 let windowIsVisible: boolean | null = null;
 let visibilityReads = 0;
+let holdVisibilityRead = false;
+let releaseVisibilityRead: () => void = () => {};
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     isVisible: async () => {
       visibilityReads += 1;
+      if (holdVisibilityRead) {
+        await new Promise<void>((resolve) => (releaseVisibilityRead = resolve));
+      }
       if (windowIsVisible === null) throw new Error("no window to ask outside Tauri");
       return windowIsVisible;
     },
@@ -120,6 +128,9 @@ beforeEach(() => {
   refusedEvents.clear();
   windowIsVisible = null;
   visibilityReads = 0;
+  holdVisibilityRead = false;
+  releaseVisibilityRead = () => {};
+  modelsMountedHidden.length = 0;
   document.body.innerHTML = `
     <ul class="sidebar-nav">
       <li><button class="nav-btn active" data-tab="general">General</button></li>
@@ -995,6 +1006,41 @@ describe("the Settings window coming back after a dismissal", () => {
     expect(modelsTab.releaseResources).toHaveBeenCalledTimes(1);
   });
 
+  it("tells each tab whether the window it is mounting into is dismissed", async () => {
+    let releaseSettings: (loaded: UserSettings) => void = () => {};
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
+    apiMock.getSettings.mockImplementation(
+      () => new Promise<UserSettings>((resolve) => (releaseSettings = resolve)),
+    );
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
+    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+
+    const { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } = await import("../contracts");
+    await import("./settings");
+    await openSettingsWindow();
+
+    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.click();
+    await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
+
+    releaseSettings(buildSettings());
+    await vi.waitFor(() => expect(modelsMountedHidden).toHaveLength(1));
+
+    expect(
+      modelsMountedHidden[0],
+      "a release only runs once the tab has returned, by which point its mount-time " +
+        "reads are away; a tab that is told can skip them instead",
+    ).toBe(true);
+
+    await eventListeners.get(EVENT_SETTINGS_SHOWN)!({});
+    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="general"]')!.click();
+    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.click();
+
+    expect(
+      modelsMountedHidden[modelsMountedHidden.length - 1],
+      "and a tab mounted into a window the user is looking at must read at once",
+    ).toBe(false);
+  });
+
   it("resumes the tab once, however often the shell repeats either edge", async () => {
     const { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } = await import("../contracts");
     await bootOnTheModelsTab();
@@ -1217,6 +1263,59 @@ describe("a show the Settings page was not yet listening for", () => {
         apiMock.health.mock.calls.length,
         "reading the window must not become a second way to start polling one nobody opened",
       ).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops a reading the shell's own announcement overtook", async () => {
+    vi.useFakeTimers();
+    try {
+      holdVisibilityRead = true;
+      windowIsVisible = false;
+      mockABackendThatAnswers();
+
+      await import("./settings");
+      await vi.waitFor(() => expect(visibilityReads).toBe(1));
+      await openSettingsWindow();
+      const afterShow = apiMock.health.mock.calls.length;
+
+      releaseVisibilityRead();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(5000);
+
+      expect(
+        apiMock.health.mock.calls.length,
+        "the tray showed the window while the read was away, so the reading is older " +
+          "than the announcement; taking it for a dismissal stops the probe on a window " +
+          "the user is looking at, and the next hide dedupes so nothing recovers it",
+      ).toBeGreaterThan(afterShow);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("polls when it could attach no listener, whatever the window reports", async () => {
+    vi.useFakeTimers();
+    try {
+      const { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } = await import("../contracts");
+      refusedEvents.add(EVENT_SETTINGS_SHOWN);
+      refusedEvents.add(EVENT_SETTINGS_HIDDEN);
+      windowIsVisible = false;
+      mockABackendThatAnswers();
+
+      await import("./settings");
+      await vi.waitFor(() => expect(listenAttempts(EVENT_SETTINGS_SHOWN)).toBe(1));
+
+      const before = apiMock.health.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(5000);
+
+      expect(
+        apiMock.health.mock.calls.length,
+        "a page holding no show edge can never be told the window arrived, so believing " +
+          "the reading leaves it with no listener, no interval and no edge left to start " +
+          "one for the life of the app",
+      ).toBeGreaterThan(before);
     } finally {
       vi.useRealTimers();
     }

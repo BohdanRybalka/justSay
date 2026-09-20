@@ -225,4 +225,149 @@ describe("the Words tab after the Settings window is dismissed", () => {
     tab.destroy();
     container.remove();
   });
+
+  it("repairs a page whose chained read failed after the entry count had moved", async () => {
+    apiMock.historyStats.mockResolvedValueOnce(buildStats({ total_entries: 0 }));
+    apiMock.historyStats.mockResolvedValueOnce(buildStats({ total_entries: 7 }));
+    apiMock.historyStats.mockRejectedValueOnce(new Error("the backend went away"));
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(container.textContent).toContain("No transcriptions yet");
+
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(container.textContent).toContain("Failed to load");
+
+    apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 7, total_words: 4321 }));
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(
+      container.textContent,
+      "a read that threw with the entry count already positive leaves a state every " +
+        "later tick returns early on, so the poll cannot repair it however long it runs",
+    ).toContain("Failed to load");
+
+    tab.releaseResources!();
+    tab.resumeResources!();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      document.getElementById("words-stat-lifetime")?.textContent,
+      "and the re-open must repair that dead end as it repairs a first read that failed",
+    ).toBe((4321).toLocaleString("uk-UA"));
+
+    tab.destroy();
+    container.remove();
+  });
+
+  it("issues no follow-up request for a page read the dismissal caught in flight", async () => {
+    let settlePage: (stats: HistoryStats) => void = () => {};
+    apiMock.historyStats.mockImplementation(
+      () => new Promise<HistoryStats>((resolve) => (settlePage = resolve)),
+    );
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+
+    tab.releaseResources!();
+    settlePage(buildStats({ total_entries: 3 }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      apiMock.wordsTop,
+      "the whole-page read is the one that costs a second request and a full repaint, " +
+        "so the dismissal has to reach it and not only the tick",
+    ).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Loading...");
+
+    tab.destroy();
+    container.remove();
+  });
+
+  it("lets no page read the dismissal disowned repaint over the one that replaced it", async () => {
+    const settle: Array<(stats: HistoryStats) => void> = [];
+    apiMock.historyStats.mockImplementation(
+      () => new Promise<HistoryStats>((resolve) => settle.push(resolve)),
+    );
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settle).toHaveLength(1);
+
+    tab.releaseResources!();
+    tab.resumeResources!();
+    expect(settle).toHaveLength(2);
+
+    settle[1](buildStats({ total_words: 999 }));
+    await vi.advanceTimersByTimeAsync(0);
+    settle[0](buildStats({ total_words: 111 }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      document.getElementById("words-stat-lifetime")!.textContent,
+      "the read the returning user is waiting on is the newer one, and the answer the " +
+        "dismissal disowned must not paint the figures it read before the window closed",
+    ).toBe((999).toLocaleString("uk-UA"));
+
+    tab.destroy();
+    container.remove();
+  });
+
+  it("starts no second page read while the first can still paint", async () => {
+    const settle: Array<(stats: HistoryStats) => void> = [];
+    apiMock.historyStats.mockImplementation(
+      () => new Promise<HistoryStats>((resolve) => settle.push(resolve)),
+    );
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settle).toHaveLength(1);
+
+    tab.resumeResources!();
+
+    expect(
+      settle,
+      "a resume landing while the mount's own read can still paint has nothing to " +
+        "repair, and a second whole-page read there is two requests racing one screen",
+    ).toHaveLength(1);
+
+    tab.destroy();
+    container.remove();
+  });
+
+  it("reads nothing at all when it mounts into a dismissed window", async () => {
+    apiMock.historyStats.mockResolvedValue(buildStats());
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container, true);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      apiMock.historyStats,
+      "the mount's own requests are away before any release can run, so a tab mounted " +
+        "into a window nobody can see still costs them",
+    ).not.toHaveBeenCalled();
+    expect(apiMock.wordsTop).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(apiMock.historyStats).not.toHaveBeenCalled();
+
+    tab.resumeResources!();
+    expect(
+      apiMock.historyStats,
+      "and the show is what pays for them, once",
+    ).toHaveBeenCalledTimes(1);
+
+    tab.destroy();
+    container.remove();
+  });
 });

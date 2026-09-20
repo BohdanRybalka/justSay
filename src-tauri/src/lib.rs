@@ -89,6 +89,22 @@ fn show_settings(app: &AppHandle) {
     }
 }
 
+/// Hide the settings window and announce it, so the tab on it lets go of what
+/// it is holding. Every path that hides that window calls this one, which is
+/// what makes the announcement complete (ADR 089).
+///
+/// A failed `hide()` announces nothing: the page would otherwise stop polling
+/// a window that is still on screen.
+fn hide_settings(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("settings") {
+        if let Err(e) = window.hide() {
+            log::warn!("Hiding the settings window failed, so nothing is announced: {}", e);
+            return;
+        }
+        let _ = app.emit("settings-hidden", ());
+    }
+}
+
 /// Bring the settings window up on the meeting disclosure. Called when the
 /// backend refuses to start a recording because it has not been acknowledged
 /// (docs/adr/040-recording-other-people-is-not-covered-by-zero-leak.md).
@@ -210,10 +226,7 @@ pub fn run() {
                 settings.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
-                        if let Some(win) = settings_handle.get_webview_window("settings") {
-                            let _ = win.hide();
-                            let _ = settings_handle.emit("settings-hidden", ());
-                        }
+                        hide_settings(&settings_handle);
                     }
                 });
             }
