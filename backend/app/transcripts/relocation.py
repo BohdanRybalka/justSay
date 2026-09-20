@@ -1,10 +1,9 @@
 """Moving the history file — relocation on a settings change, one-off consolidation.
 
 Both state machines borrow ``history``'s lock, connection factory and cache
-invalidation, reached through the module object. ``relocate`` hands the store it
-has moved to ``history.adopt_store_locked`` rather than writing the output
-directory and the connection itself, so that pair has one owner. ``history``
-names nothing here, so the edge runs one way.
+invalidation, reached through the module object. ``relocate`` hands every store
+it has moved to ``history.adopt_store_locked``. ``history`` names nothing here,
+so the edge runs one way.
 """
 
 from __future__ import annotations
@@ -34,12 +33,29 @@ class ConsolidateOutcome(str, Enum):
     FAILED = "failed"
 
 
+def _adopt_existing_store(
+    new_dir: Path, outcome: RelocateOutcome
+) -> tuple[RelocateOutcome, str | None]:
+    """Caller MUST hold ``history._lock``. Adopt the store already in ``new_dir``.
+
+    Answers ``outcome`` once both halves name ``new_dir``, or ``FAILED`` with a
+    reason when opening or migrating that database raises. Every failure of
+    ``relocate`` reaches the settings layer as ``FAILED``, never as an exception.
+    """
+    try:
+        history.adopt_store_locked(new_dir)
+    except (OSError, sqlite3.Error) as e:
+        log.exception("Relocate could not adopt %s: %s", new_dir, e)
+        return RelocateOutcome.FAILED, f"Move failed: {e}"
+    return outcome, None
+
+
 def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
     """Move history.db to ``new_dir``, reporting what it did and why.
 
-    Every path that moves the store goes through ``history.adopt_store_locked``
-    inside ``history._lock``, so no torn intermediate is visible; FTS5 is rebuilt
-    before ``old_path.unlink``.
+    Holds ``history._lock`` throughout and moves the store only through
+    ``history.adopt_store_locked``. FTS5 is rebuilt before the source file is
+    unlinked, and once it is gone the destination is never removed.
     """
     with history._lock:
         old_dir = history._resolve_output_dir()
@@ -62,15 +78,14 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             return RelocateOutcome.FAILED, f"Could not create target directory: {e}"
 
         if new_path.exists():
-            history.adopt_store_locked(new_dir)
-            return RelocateOutcome.NEW_ALREADY_HAS_FILE, None
+            return _adopt_existing_store(new_dir, RelocateOutcome.NEW_ALREADY_HAS_FILE)
 
         if not old_path.exists():
-            history.adopt_store_locked(new_dir)
-            return RelocateOutcome.NO_OLD_FILE, None
+            return _adopt_existing_store(new_dir, RelocateOutcome.NO_OLD_FILE)
 
         history._close_conn_locked()
         new_conn: sqlite3.Connection | None = None
+        source_removed = False
         try:
             shutil.copy2(old_path, new_path)
             if not _verify_db_row_count(old_path, new_path):
@@ -83,17 +98,16 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             new_conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
 
             old_path.unlink()
+            source_removed = True
             history.adopt_store_locked(new_dir, new_conn)
             new_conn = None
             log.info("Relocated history %s → %s", old_path, new_path)
             return RelocateOutcome.MOVED, None
         except (OSError, sqlite3.Error) as e:
             if new_conn is not None:
-                try:
-                    new_conn.close()
-                except sqlite3.Error:
-                    pass
-            new_path.unlink(missing_ok=True)
+                history._close_quietly(new_conn)
+            if not source_removed:
+                new_path.unlink(missing_ok=True)
             try:
                 history._reopen_conn_locked(old_dir)
             except sqlite3.Error:

@@ -2527,11 +2527,12 @@ def _underscore_reach_ins(
     `(module, target module, attribute)`.
 
     Two spellings are walked and both are needed. An attribute access through a
-    name bound to an `app` module -- reads, calls and assignments alike, so a
-    write into another module's global is caught the day one is added -- and a
-    direct `from app.x.y import _name`. Covering only the first would leave the
-    rule one import line away from irrelevance, exactly as matching the literal
-    `fastapi` did for rule 3.
+    name bound to an `app` module -- reads, calls and assignments alike, the
+    assignment arm pinned by
+    `test_the_package_private_walk_sees_a_write_into_another_modules_global` --
+    and a direct `from app.x.y import _name`. Covering only the first would leave
+    the rule one import line away from irrelevance, exactly as matching the
+    literal `fastapi` did for rule 3.
     The attribute arm resolves a whole dotted chain, so the alias spelling
     `history._lock` and the plain-import spelling `app.transcripts.history._lock`
     are both seen.
@@ -2545,8 +2546,17 @@ def _underscore_reach_ins(
     is what makes `app/transcripts/schema.py`'s deferred `vector_store` import
     visible here. Dunders are skipped: `__name__` is not anyone's private state.
     """
-    tree = _tree(path)
-    package = _containing_package(path)
+    return _underscore_reach_ins_in(module, _tree(path), _containing_package(path), modules)
+
+
+def _underscore_reach_ins_in(
+    module: str, tree: ast.Module, package: str, modules: Mapping[str, Path]
+) -> list[tuple[str, str, str]]:
+    """The walk itself, over an already-parsed tree and the package it lives in.
+
+    Separated from the file so a source string can be walked directly: the
+    spellings this has to catch include ones no module under `app/` writes today.
+    """
     aliases = _module_aliases(tree, package, modules)
     found: list[tuple[str, str, str]] = []
     for node in ast.walk(tree):
@@ -2665,8 +2675,10 @@ def test_the_package_private_walk_finds_the_reach_ins_that_are_there():
     intra-package reach-in, which is the failure direction that gets a gate
     deleted rather than fixed. The three pinned here cover one read of a
     sibling's lock, one attribute reached through a function-body import, and
-    one call of a sibling's package-private helper. No assignment into another
-    module's global is pinned because the package holds none."""
+    one call of a sibling's package-private helper. The package writes no
+    assignment into another module's global, so that spelling is pinned by
+    `test_the_package_private_walk_sees_a_write_into_another_modules_global`
+    instead."""
     missing = sorted(_LIVE_PACKAGE_PRIVATE_REACH_INS - _all_underscore_reach_ins())
 
     assert not missing, (
@@ -2674,4 +2686,34 @@ def test_the_package_private_walk_finds_the_reach_ins_that_are_there():
         "moved -- repoint this set at reach-ins that are actually written -- or "
         "the walk stopped seeing a spelling it used to see, which makes the two "
         "tests above pass while checking nothing."
+    )
+
+
+_WRITE_REACH_IN_SOURCE = """
+from app.transcripts import history
+
+
+def point_the_store_somewhere(directory):
+    history._output_dir = directory
+"""
+
+
+def test_the_package_private_walk_sees_a_write_into_another_modules_global():
+    """The attribute arm has to catch an assignment, not only a read or a call.
+
+    Every reach-in `app/` writes today is one of those two, so the live set
+    above cannot tell this walk from one restricted to `ast.Load` -- both pass
+    it. This source carries the spelling the package has none of, which is the
+    one a module acquires on the day it starts writing a sibling's state."""
+    found = _underscore_reach_ins_in(
+        "app.transcripts.relocation",
+        ast.parse(_WRITE_REACH_IN_SOURCE),
+        "app.transcripts",
+        _modules(),
+    )
+
+    assert ("app.transcripts.relocation", "app.transcripts.history", "_output_dir") in found, (
+        f"The walk did not see an assignment into another module's global: {found}. "
+        "A walk that only sees reads lets a module take ownership of a sibling's "
+        "state without the gate above noticing (ADR 072)."
     )

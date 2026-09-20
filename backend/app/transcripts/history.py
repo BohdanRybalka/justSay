@@ -11,6 +11,7 @@ DDL, column lists and migrations live in ``schema.py``, moving the file in
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -164,18 +165,38 @@ def bootstrap(target: Path) -> None:
 def adopt_store_locked(directory: Path, conn: sqlite3.Connection | None = None) -> None:
     """Point the store at ``directory``, adopting ``conn`` as its connection.
 
-    Caller MUST hold ``_lock``. ``None`` opens one at ``directory`` instead. Either
-    way the connection being replaced is closed and the derived caches are dropped,
-    and ``_output_dir`` is moved only once a connection is open on that store.
+    Caller MUST hold ``_lock`` and ``directory`` MUST already exist. ``conn`` MUST
+    be open on that directory's history file or ``ValueError`` is raised; ``None``
+    opens and migrates one there. The directory and the connection move together,
+    so a failure moves neither and leaves no connection open.
     """
     global _output_dir, _conn
-    if conn is None:
-        _reopen_conn_locked(directory)
-    else:
-        _close_conn_locked()
-        _conn = conn
-        invalidate_derived_caches_locked()
+    adopted = _connect(directory / HISTORY_FILENAME) if conn is None else conn
+    try:
+        _require_store_file_locked(adopted, directory)
+        if conn is None:
+            schema._init_schema(adopted)
+    except Exception:
+        _close_quietly(adopted)
+        raise
+    _close_conn_locked()
+    _conn = adopted
+    invalidate_derived_caches_locked()
     _output_dir = directory
+
+
+def _require_store_file_locked(conn: sqlite3.Connection, directory: Path) -> None:
+    """Caller MUST hold ``_lock``. Raises ``ValueError`` on a mismatched pair.
+
+    Compares the file ``conn``'s ``main`` database is attached to against
+    ``directory``'s history file, both resolved and case-normalised the way the
+    running platform compares paths.
+    """
+    rows = conn.execute("PRAGMA database_list").fetchall()
+    attached = Path(next(row[2] for row in rows if row[1] == "main"))
+    expected = directory / HISTORY_FILENAME
+    if os.path.normcase(str(attached.resolve())) != os.path.normcase(str(expected.resolve())):
+        raise ValueError(f"connection is open on {attached}, not on {expected}")
 
 
 def _iso_to_epoch_ms(ts: str) -> int:
@@ -551,8 +572,13 @@ def _close_conn_locked() -> None:
     global _conn, _page_total_cache
     _page_total_cache = None
     if _conn is not None:
-        try:
-            _conn.close()
-        except sqlite3.Error:
-            pass
+        _close_quietly(_conn)
         _conn = None
+
+
+def _close_quietly(conn: sqlite3.Connection) -> None:
+    """Close ``conn``, swallowing the error a broken or already-closed handle raises."""
+    try:
+        conn.close()
+    except sqlite3.Error:
+        pass

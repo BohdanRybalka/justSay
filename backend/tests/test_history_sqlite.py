@@ -257,6 +257,8 @@ def test_relocate_moved_branch(isolated_storage, tmp_path):
     assert reason is None
     assert (new_dir / "history.db").exists()
     assert not (target / "history.db").exists()
+    assert history.history_path() == new_dir / "history.db"
+    _assert_one_store("after the move")
 
 
 def test_relocate_no_old_file_branch(isolated_storage, tmp_path):
@@ -269,6 +271,8 @@ def test_relocate_no_old_file_branch(isolated_storage, tmp_path):
     new_dir = tmp_path / "new"
     res, _ = relocation.relocate(new_dir)
     assert res == relocation.RelocateOutcome.NO_OLD_FILE
+    assert history.history_path() == new_dir / "history.db"
+    _assert_one_store("after the empty move")
 
 
 def test_relocate_new_already_has_file_branch(isolated_storage, tmp_path):
@@ -285,6 +289,8 @@ def test_relocate_new_already_has_file_branch(isolated_storage, tmp_path):
     res, _ = relocation.relocate(new_dir)
     assert res == relocation.RelocateOutcome.NEW_ALREADY_HAS_FILE
     assert (new_dir / "history.db").exists()
+    assert history.history_path() == new_dir / "history.db"
+    _assert_one_store("after the adoption")
 
 
 def test_relocate_failed_on_copy_oserror(isolated_storage, tmp_path, monkeypatch):
@@ -303,6 +309,8 @@ def test_relocate_failed_on_copy_oserror(isolated_storage, tmp_path, monkeypatch
     assert res == relocation.RelocateOutcome.FAILED
     assert reason and "simulated copy failure" in reason
     assert (target / "history.db").exists()
+    assert history.history_path() == target / "history.db"
+    _assert_one_store("after the failed copy")
 
 
 
@@ -1157,10 +1165,11 @@ def _open_connection_disagreement() -> str | None:
 
     `None` when they agree and when no connection is open at all: a store with
     none reopens at whatever `_resolve_output_dir` then answers, so it cannot
-    disagree with itself. `_saved_entry_lands_in` covers that second case.
+    disagree with itself. `_saved_entry_lands_in` covers that second case. Both
+    halves are read under `history._lock`, so a concurrent move cannot supply one.
     """
-    expected = history.history_path()
     with history._lock:
+        expected = history.history_path()
         conn = history._conn
         if conn is None:
             return None
@@ -1171,106 +1180,190 @@ def _open_connection_disagreement() -> str | None:
     return None
 
 
-def _saved_entry_lands_in(expected: Path, marker: str) -> bool:
-    """Whether a save through the store shows up in the database file at `expected`.
+def _saved_entry_lands_in(expected: Path, marker: str) -> str | None:
+    """Why a save through the store did not reach the database file at `expected`.
 
-    Read back through a second connection opened on that path by name, so a
-    connection pointing somewhere else answers False rather than answering for
-    the file it happens to hold open.
+    `None` when it did. Read back through a second connection opened on that
+    path by name, so a connection pointing somewhere else is reported as the
+    cause rather than answering for the file it happens to hold open.
     """
     history.save_entry(text=marker, duration_ms=1)
     if not expected.exists():
-        return False
+        return f"no database file at {expected} after saving {marker!r}"
     probe = sqlite3.connect(expected)
     try:
-        return (
-            probe.execute(
-                "SELECT count(*) FROM entries WHERE raw_text = ?", (marker,)
-            ).fetchone()[0]
-            == 1
-        )
-    except sqlite3.Error:
-        return False
+        count = probe.execute(
+            "SELECT count(*) FROM entries WHERE raw_text = ?", (marker,)
+        ).fetchone()[0]
+    except sqlite3.Error as e:
+        return f"{expected} could not be read back after saving {marker!r}: {e}"
     finally:
         probe.close()
+    if count != 1:
+        return f"{expected} holds {count} rows matching {marker!r}, not 1"
+    return None
 
 
 def _assert_one_store(marker: str) -> None:
     assert _open_connection_disagreement() is None
-    assert _saved_entry_lands_in(history.history_path(), marker)
+    assert _saved_entry_lands_in(history.history_path(), marker) is None
 
 
-def test_a_successful_relocate_leaves_one_store_named_by_both_owners(
-    isolated_storage, tmp_path
-):
-    """The invariant `relocate` and `history` used to hold one half each.
+def _recorded_connect(monkeypatch, opened: list[sqlite3.Connection]):
+    """Patch `history._connect` to keep every connection it hands out.
 
-    The output directory and the open connection name the same database file
-    after the move, so a write lands where the settings screen says it will.
+    Answers the real factory, so the caller can put it back once the window it
+    is interested in has closed.
     """
-    history.bootstrap(tmp_path / "target")
-    history.save_entry(text="before the move", duration_ms=1)
+    real_connect = history._connect
 
-    new_dir = tmp_path / "new"
-    outcome, _ = relocation.relocate(new_dir)
+    def _connect(path: Path) -> sqlite3.Connection:
+        opened.append(real_connect(path))
+        return opened[-1]
 
-    assert outcome == relocation.RelocateOutcome.MOVED
-    assert history.history_path() == new_dir / "history.db"
-    _assert_one_store("after the move")
-
-
-def test_a_relocate_into_a_directory_that_already_holds_a_store_names_one_store(
-    isolated_storage, tmp_path
-):
-    """Adopting a destination that already has a history file moves both halves."""
-    target = tmp_path / "target"
-    history.bootstrap(target)
-    history.save_entry(text="old", duration_ms=1)
-    new_dir = tmp_path / "new"
-    new_dir.mkdir()
-    history.bootstrap(new_dir)
-    history.save_entry(text="new", duration_ms=1)
-    history.bootstrap(target)
-
-    outcome, _ = relocation.relocate(new_dir)
-
-    assert outcome == relocation.RelocateOutcome.NEW_ALREADY_HAS_FILE
-    assert history.history_path() == new_dir / "history.db"
-    _assert_one_store("after the adoption")
+    monkeypatch.setattr(history, "_connect", _connect)
+    return real_connect
 
 
-def test_a_relocate_with_no_file_to_move_names_one_store(isolated_storage, tmp_path):
-    """An empty move still has to carry the connection to the new directory."""
-    target = tmp_path / "target"
-    history.bootstrap(target)
-    with history._lock:
-        history._close_conn_locked()
-    (target / "history.db").unlink(missing_ok=True)
-
-    new_dir = tmp_path / "new"
-    outcome, _ = relocation.relocate(new_dir)
-
-    assert outcome == relocation.RelocateOutcome.NO_OLD_FILE
-    assert history.history_path() == new_dir / "history.db"
-    _assert_one_store("after the empty move")
-
-
-def test_a_relocate_whose_copy_fails_names_one_store(
+def test_an_adoption_that_cannot_open_the_destination_moves_neither_half(
     isolated_storage, tmp_path, monkeypatch
 ):
-    """The rollback leaves both halves on the directory the move started from."""
+    """A failed adoption leaves both halves where they were and no handle open.
+
+    Migrating the destination raises once its connection is already open, which
+    is the window in which the output directory and the connection can come to
+    name different databases.
+    """
     target = tmp_path / "target"
     history.bootstrap(target)
-    history.save_entry(text="before the move", duration_ms=1)
+    new_dir = tmp_path / "new"
+    new_dir.mkdir()
+
+    opened: list[sqlite3.Connection] = []
+    real_connect = _recorded_connect(monkeypatch, opened)
+    real_init_schema = schema._init_schema
     monkeypatch.setattr(
-        relocation.shutil, "copy2", MagicMock(side_effect=OSError("disk full"))
+        schema, "_init_schema", MagicMock(side_effect=sqlite3.DatabaseError("cannot migrate"))
     )
 
-    outcome, _ = relocation.relocate(tmp_path / "new")
+    with history._lock, pytest.raises(sqlite3.DatabaseError):
+        history.adopt_store_locked(new_dir)
+
+    monkeypatch.setattr(history, "_connect", real_connect)
+    monkeypatch.setattr(schema, "_init_schema", real_init_schema)
+
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")
+    assert history._output_dir == target
+    _assert_one_store("after the failed adoption")
+
+
+@pytest.mark.parametrize(
+    "destination_holds_a_store",
+    [True, False],
+    ids=["destination already has a file", "nothing to move"],
+)
+def test_a_relocate_whose_adoption_raises_answers_failed(
+    isolated_storage, tmp_path, monkeypatch, destination_holds_a_store
+):
+    """Both adopting branches report a sqlite failure instead of raising it.
+
+    `update_user_settings` understands `FAILED` and nothing else, so an error
+    escaping here reaches the user as a 500 on a settings save rather than as
+    the reason the move did not happen.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    new_dir = tmp_path / "new"
+    new_dir.mkdir()
+    if destination_holds_a_store:
+        history.save_entry(text="old", duration_ms=1)
+        history.bootstrap(new_dir)
+        history.save_entry(text="new", duration_ms=1)
+        history.bootstrap(target)
+    else:
+        with history._lock:
+            history._close_conn_locked()
+        (target / "history.db").unlink(missing_ok=True)
+
+    opened: list[sqlite3.Connection] = []
+    real_connect = _recorded_connect(monkeypatch, opened)
+    real_init_schema = schema._init_schema
+    monkeypatch.setattr(
+        schema, "_init_schema", MagicMock(side_effect=sqlite3.DatabaseError("cannot migrate"))
+    )
+
+    outcome, reason = relocation.relocate(new_dir)
+
+    monkeypatch.setattr(history, "_connect", real_connect)
+    monkeypatch.setattr(schema, "_init_schema", real_init_schema)
 
     assert outcome == relocation.RelocateOutcome.FAILED
-    assert history.history_path() == target / "history.db"
-    _assert_one_store("after the failed copy")
+    assert reason and "cannot migrate" in reason
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")
+    assert history._output_dir == target
+    assert _open_connection_disagreement() is None
+
+
+def test_adopting_a_connection_open_on_another_directory_is_refused(
+    isolated_storage, tmp_path
+):
+    """A pair whose two halves name different databases is not installed.
+
+    The caller is the only thing that can pair a directory with a connection, so
+    the store reads the file that connection is actually attached to.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    new_dir = tmp_path / "new"
+    new_dir.mkdir()
+    stray = history._connect(elsewhere / history.HISTORY_FILENAME)
+
+    try:
+        with history._lock, pytest.raises(ValueError):
+            history.adopt_store_locked(new_dir, stray)
+    finally:
+        stray.close()
+
+    assert history._output_dir == target
+    _assert_one_store("after the refused pair")
+
+
+def test_a_relocate_that_fails_after_the_source_is_gone_keeps_the_only_copy(
+    isolated_storage, tmp_path, monkeypatch
+):
+    """Once the source file is unlinked the destination is never removed.
+
+    The adoption raises after the move has already deleted the old file, so the
+    copy in the new directory holds the only transcripts left and unlinking it
+    on the way out would destroy them.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    history.save_entry(text="the only copy", duration_ms=1)
+    monkeypatch.setattr(
+        history, "adopt_store_locked", MagicMock(side_effect=OSError("adoption failed"))
+    )
+    new_dir = tmp_path / "new"
+
+    outcome, reason = relocation.relocate(new_dir)
+
+    assert outcome == relocation.RelocateOutcome.FAILED
+    assert reason and "adoption failed" in reason
+    assert (new_dir / "history.db").exists()
+    probe = sqlite3.connect(new_dir / "history.db")
+    try:
+        surviving = probe.execute(
+            "SELECT count(*) FROM entries WHERE raw_text = ?", ("the only copy",)
+        ).fetchone()[0]
+    finally:
+        probe.close()
+    assert surviving == 1
 
 
 def test_a_relocate_whose_verification_fails_names_one_store(
