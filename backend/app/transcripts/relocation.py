@@ -37,20 +37,20 @@ _ADOPTION_FAILURES = (OSError, sqlite3.Error, ValueError)
 
 
 def _adopt_existing_store(
-    new_dir: Path, outcome: RelocateOutcome, destination_existed: bool
+    new_dir: Path, outcome: RelocateOutcome
 ) -> tuple[RelocateOutcome, str | None]:
     """Caller MUST hold ``history._lock``. Adopt the store already in ``new_dir``.
 
     Answers ``outcome`` once both halves name ``new_dir``, or ``FAILED`` with a
     reason when opening or migrating that database raises. A failure removes the
-    store file the attempt created unless ``destination_existed`` says one was
-    already there, so a retry meets the directory as it found it.
+    store file the attempt created, which is every ``outcome`` but
+    ``NEW_ALREADY_HAS_FILE``, so a retry meets the directory as it found it.
     """
     try:
         history.adopt_store_locked(new_dir)
     except _ADOPTION_FAILURES as e:
         log.exception("Relocate could not adopt %s: %s", new_dir, e)
-        if not destination_existed:
+        if outcome is not RelocateOutcome.NEW_ALREADY_HAS_FILE:
             (new_dir / history.HISTORY_FILENAME).unlink(missing_ok=True)
         return RelocateOutcome.FAILED, f"Move failed: {e}"
     return outcome, None
@@ -84,15 +84,11 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
         except OSError as e:
             return RelocateOutcome.FAILED, f"Could not create target directory: {e}"
 
-        destination_existed = new_path.exists()
-
-        if destination_existed:
-            return _adopt_existing_store(
-                new_dir, RelocateOutcome.NEW_ALREADY_HAS_FILE, destination_existed
-            )
+        if new_path.exists():
+            return _adopt_existing_store(new_dir, RelocateOutcome.NEW_ALREADY_HAS_FILE)
 
         if not old_path.exists():
-            return _adopt_existing_store(new_dir, RelocateOutcome.NO_OLD_FILE, destination_existed)
+            return _adopt_existing_store(new_dir, RelocateOutcome.NO_OLD_FILE)
 
         history._close_conn_locked()
         new_conn: sqlite3.Connection | None = None
@@ -115,7 +111,7 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             new_path.unlink(missing_ok=True)
             try:
                 history._reopen_conn_locked(old_dir)
-            except sqlite3.Error:
+            except _ADOPTION_FAILURES:
                 history._close_conn_locked()
                 history.invalidate_derived_caches_locked()
             log.exception("Relocate failed: %s", e)

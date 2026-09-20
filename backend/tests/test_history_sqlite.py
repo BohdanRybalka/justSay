@@ -1174,39 +1174,52 @@ def _open_connection_disagreement() -> str | None:
         if conn is None:
             return None
         rows = conn.execute("PRAGMA database_list").fetchall()
-    actual = Path(next(row["file"] for row in rows if row["name"] == "main"))
+    main = next((row["file"] for row in rows if row["name"] == "main"), None)
+    if main is None:
+        return f"the open connection carries no main database, so nothing names {expected}"
+    actual = Path(main)
     if actual.resolve() != expected.resolve():
         return f"the connection writes to {actual} while the store names {expected}"
+    return None
+
+
+def _marker_readable_at(expected: Path, marker: str) -> str | None:
+    """Why `marker` is not readable as one row of the database file at `expected`.
+
+    `None` when it is. Read through a second connection opened on that path by
+    name, so a store whose connection points elsewhere is reported as the cause
+    rather than answering for the file it happens to hold open.
+    """
+    if not expected.exists():
+        return f"no database file at {expected} after saving {marker!r}"
+    probe = sqlite3.connect(expected)
+    try:
+        count = probe.execute(
+            "SELECT count(*) FROM entries WHERE raw_text = ?", (marker,)
+        ).fetchone()[0]
+    except sqlite3.Error as e:
+        return f"{expected} could not be read back after saving {marker!r}: {e}"
+    finally:
+        probe.close()
+    if count != 1:
+        return f"{expected} holds {count} rows matching {marker!r}, not 1"
     return None
 
 
 def _saved_entry_lands_in(expected: Path, marker: str) -> str | None:
     """Why a save through the store did not reach the database file at `expected`.
 
-    `None` when it did. Read back through a second connection opened on that
-    path by name, so a connection pointing somewhere else is reported as the
-    cause rather than answering for the file it happens to hold open. The probe
-    entry is deleted again, so a caller that counts rows afterwards counts its
-    own.
+    `None` when it did. The probe entry is deleted again, so a caller that counts
+    rows afterwards counts its own; a delete that itself fails is reported only
+    when the save had nothing else to answer for, never in place of it.
     """
     entry = history.save_entry(text=marker, duration_ms=1)
+    reason = _marker_readable_at(expected, marker)
     try:
-        if not expected.exists():
-            return f"no database file at {expected} after saving {marker!r}"
-        probe = sqlite3.connect(expected)
-        try:
-            count = probe.execute(
-                "SELECT count(*) FROM entries WHERE raw_text = ?", (marker,)
-            ).fetchone()[0]
-        except sqlite3.Error as e:
-            return f"{expected} could not be read back after saving {marker!r}: {e}"
-        finally:
-            probe.close()
-        if count != 1:
-            return f"{expected} holds {count} rows matching {marker!r}, not 1"
-        return None
-    finally:
         history.delete_entry(entry.id)
+    except sqlite3.Error as e:
+        return reason or f"the probe entry {marker!r} could not be removed again: {e}"
+    return reason
 
 
 def _assert_one_store(marker: str) -> None:
@@ -1325,7 +1338,15 @@ def test_a_relocate_whose_adoption_raises_answers_failed(
     with pytest.raises(sqlite3.ProgrammingError):
         opened[0].execute("SELECT 1")
     assert history._output_dir == target
-    assert _open_connection_disagreement() is None
+    if destination_holds_a_store:
+        assert _open_connection_disagreement() is None
+        probe = sqlite3.connect(new_dir / "history.db")
+        try:
+            assert probe.execute("SELECT count(*) FROM entries").fetchone()[0] == 1
+        finally:
+            probe.close()
+    else:
+        assert history._conn is None
 
 
 def test_adopting_a_connection_open_on_another_directory_is_refused(
@@ -1389,6 +1410,109 @@ def test_a_relocate_whose_adoption_raises_leaves_every_row_readable(
         probe.close()
     assert rows == set(saved)
     assert not (new_dir / "history.db").exists()
+
+
+def test_a_move_whose_source_cannot_be_removed_still_reports_moved(
+    isolated_storage, tmp_path, monkeypatch
+):
+    """A source that will not delete leaves a completed move completed.
+
+    The store is already open on the destination by the time the source is
+    unlinked, so routing that failure into the rollback would delete the file
+    the user's history now lives in.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    history.save_entry(text="a row the move must carry", duration_ms=1)
+    old_path = target / "history.db"
+    new_dir = tmp_path / "new"
+    real_unlink = Path.unlink
+
+    def _refuse_the_source(self, *args, **kwargs):
+        if self == old_path:
+            raise OSError("the source is held open")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _refuse_the_source)
+
+    outcome, reason = relocation.relocate(new_dir)
+
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+
+    assert outcome == relocation.RelocateOutcome.MOVED
+    assert reason is None
+    assert history.history_path() == new_dir / "history.db"
+    assert history.get_page(limit=50).total == 1
+    assert old_path.exists()
+    _assert_one_store("after the source refused to go")
+
+
+def test_a_rollback_whose_reopen_raises_still_answers_failed(
+    isolated_storage, tmp_path, monkeypatch
+):
+    """A rollback that cannot reopen the source reports the move, not the rollback.
+
+    ``update_user_settings`` understands ``FAILED`` and nothing else, so a type
+    the handler's own ``except`` misses reaches the user as a 500 on a settings
+    save instead of as the reason the move did not happen.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    history.save_entry(text="a row the failed move keeps", duration_ms=1)
+    new_dir = tmp_path / "new"
+    monkeypatch.setattr(
+        history, "adopt_store_locked", MagicMock(side_effect=OSError("adoption failed"))
+    )
+    monkeypatch.setattr(
+        history, "_reopen_conn_locked", MagicMock(side_effect=ValueError("no main database"))
+    )
+
+    outcome, reason = relocation.relocate(new_dir)
+
+    assert outcome == relocation.RelocateOutcome.FAILED
+    assert reason and "adoption failed" in reason
+    assert not (new_dir / "history.db").exists()
+
+
+def test_a_relocate_whose_real_adoption_refuses_the_pair_answers_failed(
+    isolated_storage, tmp_path, monkeypatch
+):
+    """The real adoption's ``ValueError`` reaches the caller as ``FAILED``.
+
+    The branch-and-type matrix patches the adoption out, so this is what pins
+    the type ``history.adopt_store_locked`` raises against the tuple that
+    catches it.
+    """
+    target = tmp_path / "target"
+    history.bootstrap(target)
+    history.save_entry(text="a row no failed move may hide", duration_ms=1)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    new_dir = tmp_path / "new"
+    real_connect = history._connect
+    copy_path = new_dir / "history.db"
+    opens_of_the_copy: list[Path] = []
+
+    def _misdirect_the_adoption(path: Path) -> sqlite3.Connection:
+        if path != copy_path:
+            return real_connect(path)
+        opens_of_the_copy.append(path)
+        if len(opens_of_the_copy) == 1:
+            return real_connect(path)
+        return real_connect(elsewhere / "history.db")
+
+    monkeypatch.setattr(history, "_connect", _misdirect_the_adoption)
+
+    outcome, reason = relocation.relocate(new_dir)
+
+    monkeypatch.setattr(history, "_connect", real_connect)
+
+    assert outcome == relocation.RelocateOutcome.FAILED
+    assert reason and "is open on" in reason
+    assert len(opens_of_the_copy) == 2
+    assert history.history_path() == target / "history.db"
+    assert history.get_page(limit=50).total == 1
+    assert not copy_path.exists()
 
 
 @pytest.mark.parametrize(
