@@ -11,6 +11,7 @@ DDL, column lists and migrations live in ``schema.py``, moving the file in
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -159,6 +160,51 @@ def bootstrap(target: Path) -> None:
         except Exception:
             _close_conn_locked()
             raise
+
+
+def adopt_store_locked(directory: Path, conn: sqlite3.Connection | None = None) -> None:
+    """Point the store at ``directory``, adopting ``conn`` as its connection.
+
+    Caller MUST hold ``_lock`` and ``directory`` MUST exist. ``conn`` MUST be open
+    on that directory's history file; ``None`` opens and migrates one there.
+    Raises ``OSError``, ``sqlite3.Error`` or ``ValueError``, and such a failure
+    moves neither half and closes only a connection this call opened.
+    """
+    global _output_dir, _conn, _page_total_cache
+    adopted = _connect(directory / HISTORY_FILENAME) if conn is None else conn
+    try:
+        _require_store_file(adopted, directory)
+        if conn is None:
+            schema._init_schema(adopted)
+    except Exception:
+        if conn is None:
+            _close_quietly(adopted)
+        raise
+    previous = _conn
+    _conn = adopted
+    if previous is not None and previous is not adopted:
+        _close_quietly(previous)
+    _page_total_cache = None
+    invalidate_derived_caches_locked()
+    _output_dir = directory
+
+
+def _require_store_file(conn: sqlite3.Connection, directory: Path) -> None:
+    """Raises ``ValueError`` unless ``conn`` is attached to ``directory``'s store file.
+
+    Compares the file ``conn``'s ``main`` database is attached to against
+    ``directory``'s history file, both resolved and case-normalised the way the
+    running platform compares paths. A connection carrying no ``main`` database
+    raises by name rather than escaping as ``StopIteration``.
+    """
+    rows = conn.execute("PRAGMA database_list").fetchall()
+    main = next((row[2] for row in rows if row[1] == "main"), None)
+    if main is None:
+        raise ValueError(f"connection {conn!r} has no main database")
+    attached = Path(main)
+    expected = directory / HISTORY_FILENAME
+    if os.path.normcase(str(attached.resolve())) != os.path.normcase(str(expected.resolve())):
+        raise ValueError(f"connection is open on {attached}, not on {expected}")
 
 
 def _iso_to_epoch_ms(ts: str) -> int:
@@ -534,8 +580,13 @@ def _close_conn_locked() -> None:
     global _conn, _page_total_cache
     _page_total_cache = None
     if _conn is not None:
-        try:
-            _conn.close()
-        except sqlite3.Error:
-            pass
+        _close_quietly(_conn)
         _conn = None
+
+
+def _close_quietly(conn: sqlite3.Connection) -> None:
+    """Close ``conn``, swallowing the error a broken or already-closed handle raises."""
+    try:
+        conn.close()
+    except sqlite3.Error:
+        pass
