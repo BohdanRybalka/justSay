@@ -72,15 +72,23 @@ fn set_meeting_recording(app: AppHandle, active: bool) {
     }
 }
 
+/// Show the settings window and announce it, so a tab that released what it
+/// held on the hide can take it back. Every path that shows that window calls
+/// this one, which is what makes the announcement complete (ADR 089).
+fn show_settings(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.show();
+        let _ = window.set_focus();
+        let _ = app.emit("settings-shown", ());
+    }
+}
+
 /// Bring the settings window up on the meeting disclosure. Called when the
 /// backend refuses to start a recording because it has not been acknowledged
 /// (docs/adr/040-recording-other-people-is-not-covered-by-zero-leak.md).
 #[tauri::command]
 fn show_settings_window(app: AppHandle) {
-    if let Some(window) = app.get_webview_window("settings") {
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
+    show_settings(&app);
 }
 
 #[tauri::command]
@@ -182,10 +190,7 @@ pub fn run() {
                         app_handle.exit(0);
                     }
                     "settings" => {
-                        if let Some(window) = app_handle.get_webview_window("settings") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        show_settings(&app_handle);
                     }
                     "meeting" => {
                         let _ = app_handle.emit("meeting-toggle", ());

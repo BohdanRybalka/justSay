@@ -49,7 +49,7 @@ describe("the Words tab's 5 s poll", () => {
 
     const container = document.createElement("div");
     document.body.appendChild(container);
-    const destroy = renderWords(container);
+    const tab = renderWords(container);
     await vi.advanceTimersByTimeAsync(0);
 
     await vi.advanceTimersByTimeAsync(5000);
@@ -65,7 +65,7 @@ describe("the Words tab's 5 s poll", () => {
       (222).toLocaleString("uk-UA"),
     );
 
-    destroy();
+    tab.destroy();
     container.remove();
   });
 });
@@ -81,7 +81,7 @@ describe("the whole-page read the empty-to-non-empty transition triggers", () =>
 
     const container = document.createElement("div");
     document.body.appendChild(container);
-    const destroy = renderWords(container);
+    const tab = renderWords(container);
     await vi.advanceTimersByTimeAsync(0);
     expect(container.textContent).toContain("No transcriptions yet");
 
@@ -100,7 +100,51 @@ describe("the whole-page read the empty-to-non-empty transition triggers", () =>
       (55).toLocaleString("uk-UA"),
     );
 
-    destroy();
+    tab.destroy();
+    container.remove();
+  });
+});
+
+describe("the Words tab while the Settings window is hidden", () => {
+  async function mountOnStats() {
+    apiMock.historyStats.mockResolvedValue(buildStats());
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+    return { tab, container };
+  }
+
+  it("issues no further stats read once the window is dismissed", async () => {
+    const { tab, container } = await mountOnStats();
+
+    tab.releaseResources!();
+    const whileHidden = apiMock.historyStats.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(apiMock.historyStats.mock.calls.length).toBe(whileHidden);
+
+    tab.destroy();
+    container.remove();
+  });
+
+  it("reads once on the way back before any tick, then keeps the 5 s rhythm", async () => {
+    const { tab, container } = await mountOnStats();
+
+    tab.releaseResources!();
+    const whileHidden = apiMock.historyStats.mock.calls.length;
+
+    tab.resumeResources!();
+
+    expect(
+      apiMock.historyStats.mock.calls.length,
+      "a returning user reads figures one request old, not one interval old",
+    ).toBe(whileHidden + 1);
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(apiMock.historyStats.mock.calls.length).toBe(whileHidden + 2);
+
+    tab.destroy();
     container.remove();
   });
 });

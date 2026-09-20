@@ -3,7 +3,7 @@ import {
   type UserSettings,
   type LocalSTTStatus,
 } from "../../api";
-import { loadSettings } from "../settings";
+import { loadSettings, type TabLifecycle } from "../settings";
 import { displayableError, notifyError } from "../../notify";
 import { isStaleStatusResponse } from "../../stale-response";
 import {
@@ -15,7 +15,7 @@ import {
 
 let prevLastError: string | null = null;
 
-export function renderModels(container: HTMLElement, settings: UserSettings): () => void {
+export function renderModels(container: HTMLElement, settings: UserSettings): TabLifecycle {
   container.innerHTML = `
     <h2 class="tab-title">Models</h2>
 
@@ -132,15 +132,39 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
   sttCloud.addEventListener("click", () => switchStt("cloud"));
   sttLocal.addEventListener("click", () => switchStt("local"));
 
-  renderCurrentStt();
+  let pollInterval: ReturnType<typeof setInterval> | null = null;
 
-  const pollInterval = setInterval(() => {
-    if (currentSttMode === "local") refreshSttStatus();
-  }, 3000);
+  function startSttPolling() {
+    pollInterval = setInterval(() => {
+      if (currentSttMode === "local") refreshSttStatus();
+    }, 3000);
+  }
 
-  return () => {
-    clearInterval(pollInterval);
+  /** Stop reading the local engine while the window is gone, and forget the
+   *  failure the badge was last drawn from — a still-broken engine is worth
+   *  announcing once more to a user who has not seen this window since. */
+  function releaseResources() {
+    if (pollInterval !== null) clearInterval(pollInterval);
+    pollInterval = null;
     latestSttStatusToken += 1;
     prevLastError = null;
-  };
+  }
+
+  /** Restart the interval and read once in this same tick, so the badge a
+   *  returning user reads is one request old rather than one interval old.
+   *  `refreshSttStatus` mints its own token, and the release bumped the counter
+   *  past anything still in flight. */
+  function resumeResources() {
+    startSttPolling();
+    void refreshSttStatus();
+  }
+
+  renderCurrentStt();
+  startSttPolling();
+
+  return {
+    destroy: releaseResources,
+    releaseResources,
+    resumeResources,
+  } satisfies TabLifecycle;
 }

@@ -191,6 +191,19 @@ _NOT_A_NEWLINE = re.compile(r"[^\n]")
 
 _SWIFT_FUNCTION_PATTERN = re.compile(r"^[ \t]*(?:private\s+)?func (\w+)\b", re.MULTILINE)
 
+_RUST_COMMENT_OR_STRING_PATTERN = re.compile(
+    r'"(?:\\.|[^"\\\n])*"' r"|/\*.*?\*/" r"|//[^\n]*",
+    re.DOTALL,
+)
+
+_RUST_TOP_LEVEL_FUNCTION_PATTERN = re.compile(
+    r"^(?:pub\s+(?:\([^)]*\)\s*)?)?(?:async\s+)?fn\s+(\w+)", re.MULTILINE
+)
+
+_RUST_SHOW_CALL_PATTERN = re.compile(r"\.show\(")
+
+_RUST_SETTINGS_WINDOW_PATTERN = re.compile(r'get_webview_window\(\s*"settings"')
+
 _TYPESCRIPT_COMMENT_OR_STRING_PATTERN = re.compile(
     r'"(?:\\.|[^"\\\n])*"' r"|'(?:\\.|[^'\\\n])*'" r"|`(?:\\.|[^`\\])*`" r"|/\*.*?\*/" r"|//[^\n]*",
     re.DOTALL,
@@ -596,6 +609,198 @@ def test_every_tauri_event_name_is_declared_once() -> None:
         f"{CONTRACTS_TS.name} declares an event name that is not a two-party contract; every "
         "declared name needs at least one emitter and at least one listener, or it is a dead "
         "string and does not belong in this module: " + "; ".join(unpaired)
+    )
+
+
+@functools.cache
+def _rust_code(path: Path) -> str:
+    """One Rust file with every ``//`` and ``/* */`` comment body blanked out.
+
+    A doc comment sits above its ``fn`` and so inside no function body, so a
+    ``.show()`` named in Rust prose would count toward the file total and fail
+    the completeness assertion below on a file that is correct. Blanking to
+    spaces keeps every line and column. A string literal is matched first, so a
+    ``//`` inside one survives; a single-quoted span is not matched at all,
+    being a lifetime in Rust far more often than a character literal.
+    """
+
+    def blank(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if token.startswith("/"):
+            return _NOT_A_NEWLINE.sub(" ", token)
+        return token
+
+    return _RUST_COMMENT_OR_STRING_PATTERN.sub(blank, _read(path))
+
+
+def _rust_top_level_function_bodies(path: Path) -> dict[str, str]:
+    """Each top-level ``fn`` of one Rust file, from its signature to its close.
+
+    Bounded by the first ``}`` in column zero after the signature rather than
+    by counting braces, which is the shape the Swift reader in this module
+    already uses: nothing here parses Rust, and every brace nested inside a
+    top-level function closes further in. A closure body is therefore part of
+    the function that holds it, which is what "which function does this call
+    sit in" has to mean for the tray menu's handler.
+    """
+    code = _rust_code(path)
+    bodies: dict[str, str] = {}
+    for match in _RUST_TOP_LEVEL_FUNCTION_PATTERN.finditer(code):
+        rest = code[match.end() :]
+        closing = re.search(r"\n\}", rest)
+        assert closing, (
+            f"{path.relative_to(REPO_ROOT).as_posix()}'s fn {match.group(1)} has no "
+            "closing brace in column zero, so this reader cannot say where it ends"
+        )
+        bodies[match.group(1)] = rest[: closing.start()]
+    return bodies
+
+
+def test_every_settings_show_site_announces_it() -> None:
+    """Showing the settings window and announcing it are one indivisible step.
+
+    ``settings-shown`` is the only thing that tells the page the window came
+    back, and a tab that released its polling on the hide has no other way to
+    learn it may start again. A second show path that calls ``show()`` without
+    emitting therefore does not fail loudly: the window appears, and the badge
+    on it stays frozen at whatever it read before the dismissal. That is the
+    defect the single helper exists to prevent, and neither compiler can catch
+    it (ADR 089).
+
+    So this pin is structural rather than value-shaped, unlike the rest of the
+    module. Every ``.show()`` in ``lib.rs`` is mapped to the top-level function
+    holding it, and that set must be exactly the announcing helper plus
+    ``widget_ready``, which shows the other window. A show added to the tray
+    arm, to ``show_settings_window`` or to a new command fails this test naming
+    the function; the completeness assertion covers a ``.show()`` this reader
+    could place in no function at all.
+
+    Mutation-checked: restoring the window resolution and ``show()`` inline in
+    the tray menu arm reports ``run`` in the enclosing set, and deleting the
+    ``emit`` from the helper fails the last assertion with every other one
+    still passing.
+    """
+    code = _rust_code(LIB_RS)
+    bodies = _rust_top_level_function_bodies(LIB_RS)
+    assert bodies, (
+        f"{LIB_RS.relative_to(REPO_ROOT).as_posix()} yielded no top-level fn at all; "
+        "the reader has gone blind and every assertion below would pass on nothing"
+    )
+
+    show_call = _RUST_SHOW_CALL_PATTERN
+    everywhere = len(show_call.findall(code))
+    assert everywhere, (
+        f"{LIB_RS.relative_to(REPO_ROOT).as_posix()} no longer calls .show() on any "
+        "window; the Rust half of this contract has moved and the extractor must "
+        "move with it"
+    )
+
+    enclosed = {
+        name: len(show_call.findall(body))
+        for name, body in bodies.items()
+        if show_call.search(body)
+    }
+    assert sum(enclosed.values()) == everywhere, (
+        f"{LIB_RS.relative_to(REPO_ROOT).as_posix()} calls .show() {everywhere} times "
+        f"but only {sum(enclosed.values())} of them sit inside a top-level fn this "
+        f"reader can name; it found {sorted(enclosed)}"
+    )
+    assert sorted(enclosed) == ["show_settings", "widget_ready"], (
+        "every path that shows the settings window must go through the one helper "
+        "that emits 'settings-shown', or a returning user reads a frozen badge with "
+        f"nothing to say why (ADR 089); .show() is called from {sorted(enclosed)}"
+    )
+    assert re.search(r'get_webview_window\(\s*"settings"', bodies["show_settings"]), (
+        "show_settings no longer resolves the settings window, so the helper this "
+        "pin routes every show through is showing something else"
+    )
+    assert re.search(r'\.emit\(\s*"settings-shown"', bodies["show_settings"]), (
+        "show_settings shows the window without announcing it, so settings.ts never "
+        "learns the window came back and the tabs it released stay released"
+    )
+
+
+def test_no_other_rust_function_shows_the_settings_window() -> None:
+    """Whichever file it is written in, a settings show sits in the announcing helper.
+
+    The pin above reads lib.rs alone and names the functions that show *some*
+    window, so it lets a settings show through any name already on its list:
+    ``widget_ready`` resolving the settings window and calling ``show()`` on it
+    passes there, and so does a show written in a submodule that pin never
+    reads. Both leave a returning user reading a badge frozen at whatever it
+    last polled, which is the defect ADR 089 exists to prevent, so this walk
+    covers every Rust file under src-tauri/src/ and keys on the window rather
+    than on the file. Each file's ``.show()`` calls are counted twice — in the
+    file and inside the fns this reader can name — so a call it cannot name
+    fails here instead of passing unseen.
+    """
+    showing_settings: dict[str, str] = {}
+    functions_read = 0
+    unreachable: dict[str, tuple[int, int]] = {}
+    for path in _rust_source_files():
+        bodies = _rust_top_level_function_bodies(path)
+        in_file = len(_RUST_SHOW_CALL_PATTERN.findall(_rust_code(path)))
+        attributed = sum(len(_RUST_SHOW_CALL_PATTERN.findall(body)) for body in bodies.values())
+        if attributed != in_file:
+            unreachable[path.relative_to(REPO_ROOT).as_posix()] = (in_file, attributed)
+        for name, body in bodies.items():
+            functions_read += 1
+            if _RUST_SETTINGS_WINDOW_PATTERN.search(body) and _RUST_SHOW_CALL_PATTERN.search(body):
+                showing_settings[name] = path.relative_to(REPO_ROOT).as_posix()
+
+    assert functions_read, (
+        f"no top-level fn was read under {RUST_SOURCE_DIR.relative_to(REPO_ROOT).as_posix()}; "
+        "the walk has gone blind and the assertion below would pass on nothing"
+    )
+    assert unreachable == {}, (
+        "this reader names top-level fns only, so a .show() written inside an impl block or a "
+        "nested mod would be invisible to the assertion below rather than caught by it; these "
+        f"files call .show() more often than it can attribute (in file, attributed): {unreachable}"
+    )
+    assert sorted(showing_settings) == ["show_settings"], (
+        "only the helper that emits 'settings-shown' may show the settings window, or "
+        "the tabs released on the hide stay released and the badge on them stays frozen "
+        f"(ADR 089); it is shown from {sorted(showing_settings.items())}"
+    )
+
+
+def test_the_rust_reader_does_not_take_prose_for_code(tmp_path: Path) -> None:
+    """A call named in a Rust comment is not a call site; a ``//`` in a string is not a comment.
+
+    Both pins above map ``.show()`` calls to the function holding them, and a
+    doc comment sits above its ``fn`` and so inside none of them: prose naming
+    the call would be counted in the file and placed in no function, failing a
+    correct file. Blanking to spaces rather than to nothing is what keeps the
+    reported positions truthful.
+    """
+    source = tmp_path / "prose.rs"
+    source.write_text(
+        '/// Calls .show() and emits "settings-shown".\n'
+        "fn documented() {\n"
+        '    let endpoint = "http://127.0.0.1:9377/a//b";\n'
+        "    /* .show() again,\n"
+        '       and "settings-shown" again */\n'
+        "}\n",
+        encoding="utf-8",
+    )
+
+    code = _rust_code(source)
+
+    assert ".show(" not in code, (
+        "a .show() written in Rust prose is still read as a call site, so a doc "
+        f"comment naming the call fails the show pins on a correct file: {code!r}"
+    )
+    assert "settings-shown" not in code, (
+        "an event name written in Rust prose is still read as an emit, so the pin "
+        f"passes on a helper that has stopped emitting it: {code!r}"
+    )
+    assert '"http://127.0.0.1:9377/a//b"' in code, (
+        "the // inside a string literal was read as the start of a comment, which "
+        f"silently deletes the rest of a line of real code: {code!r}"
+    )
+    assert len(code.splitlines()) == 6, (
+        "blanking changed the line count, so every position this module reports "
+        f"about a Rust file is off by however many comment lines precede it: {code!r}"
     )
 
 

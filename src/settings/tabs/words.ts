@@ -6,6 +6,7 @@ import {
 import { formatCoarseDuration } from "../../format";
 import { escapeHtml } from "../html";
 import { isStaleStatusResponse } from "../../stale-response";
+import type { TabLifecycle } from "../settings";
 
 const LANGUAGE_LABELS: Record<string, string> = {
   uk: "Ukrainian",
@@ -22,7 +23,7 @@ const LANGUAGE_LABELS: Record<string, string> = {
 type Lang = "all" | "uk" | "en";
 const TOP_LIMIT = 10;
 
-export function renderWords(container: HTMLElement): () => void {
+export function renderWords(container: HTMLElement): TabLifecycle {
   container.innerHTML = `
     <h2 class="tab-title">Words</h2>
     <div id="words-body">
@@ -182,13 +183,36 @@ export function renderWords(container: HTMLElement): () => void {
     });
   }
 
-  renderPage();
-  const poll = setInterval(refreshStats, 5000);
+  let poll: ReturnType<typeof setInterval> | null = null;
 
-  return () => {
-    cancelled = true;
-    clearInterval(poll);
-  };
+  function startStatsPolling() {
+    poll = setInterval(refreshStats, 5000);
+  }
+
+  /** Stop reading while the window is gone. `cancelled` stays false, because it
+   *  is what an unmounted tab sets and a hidden one is still mounted — setting
+   *  it here would make every later read return early forever. */
+  function releaseResources() {
+    if (poll !== null) clearInterval(poll);
+    poll = null;
+  }
+
+  function resumeResources() {
+    startStatsPolling();
+    void refreshStats();
+  }
+
+  renderPage();
+  startStatsPolling();
+
+  return {
+    destroy: () => {
+      cancelled = true;
+      releaseResources();
+    },
+    releaseResources,
+    resumeResources,
+  } satisfies TabLifecycle;
 }
 
 function renderBody(
