@@ -2456,7 +2456,7 @@ _PACKAGE_PRIVATE_REACH_IN_ALLOWED: dict[tuple[str, str], set[str]] = {}
 _LIVE_PACKAGE_PRIVATE_REACH_INS = {
     ("app.transcripts.words", "app.transcripts.history", "_lock"),
     ("app.transcripts.schema", "app.transcripts.vector_store", "_DDL_V3"),
-    ("app.transcripts.relocation", "app.transcripts.history", "_conn"),
+    ("app.transcripts.relocation", "app.transcripts.history", "_close_conn_locked"),
 }
 
 
@@ -2527,10 +2527,11 @@ def _underscore_reach_ins(
     `(module, target module, attribute)`.
 
     Two spellings are walked and both are needed. An attribute access through a
-    name bound to an `app` module -- reads and assignments alike, since
-    `relocate` writes `history._output_dir` -- and a direct `from app.x.y import
-    _name`. Covering only the first would leave the rule one import line away
-    from irrelevance, exactly as matching the literal `fastapi` did for rule 3.
+    name bound to an `app` module -- reads, calls and assignments alike, so a
+    write into another module's global is caught the day one is added -- and a
+    direct `from app.x.y import _name`. Covering only the first would leave the
+    rule one import line away from irrelevance, exactly as matching the literal
+    `fastapi` did for rule 3.
     The attribute arm resolves a whole dotted chain, so the alias spelling
     `history._lock` and the plain-import spelling `app.transcripts.history._lock`
     are both seen.
@@ -2664,7 +2665,8 @@ def test_the_package_private_walk_finds_the_reach_ins_that_are_there():
     intra-package reach-in, which is the failure direction that gets a gate
     deleted rather than fixed. The three pinned here cover one read of a
     sibling's lock, one attribute reached through a function-body import, and
-    one *assignment* into another module's global."""
+    one call of a sibling's package-private helper. No assignment into another
+    module's global is pinned because the package holds none."""
     missing = sorted(_LIVE_PACKAGE_PRIVATE_REACH_INS - _all_underscore_reach_ins())
 
     assert not missing, (

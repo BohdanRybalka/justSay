@@ -161,6 +161,23 @@ def bootstrap(target: Path) -> None:
             raise
 
 
+def adopt_store_locked(directory: Path, conn: sqlite3.Connection | None = None) -> None:
+    """Point the store at ``directory``, adopting ``conn`` as its connection.
+
+    Caller MUST hold ``_lock``. ``None`` opens one at ``directory`` instead. Either
+    way the connection being replaced is closed and the derived caches are dropped,
+    and ``_output_dir`` is moved only once a connection is open on that store.
+    """
+    global _output_dir, _conn
+    if conn is None:
+        _reopen_conn_locked(directory)
+    else:
+        _close_conn_locked()
+        _conn = conn
+        invalidate_derived_caches_locked()
+    _output_dir = directory
+
+
 def _iso_to_epoch_ms(ts: str) -> int:
     """Parse ISO 8601 (Python 3.10-safe via Z→+00:00 shim) → unix epoch ms."""
     return int(round(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000))

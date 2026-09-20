@@ -1,10 +1,9 @@
 """Moving the history file — relocation on a settings change, one-off consolidation.
 
 Both state machines borrow ``history``'s lock, connection factory and cache
-invalidation, and ``relocate`` assigns ``history._output_dir`` and
-``history._conn`` through the module object. That import form is load-bearing:
-``from app.transcripts.history import _conn`` would bind a local name here and
-leave the live store on the connection it was told to stop using. ``history``
+invalidation, reached through the module object. ``relocate`` hands the store it
+has moved to ``history.adopt_store_locked`` rather than writing the output
+directory and the connection itself, so that pair has one owner. ``history``
 names nothing here, so the edge runs one way.
 """
 
@@ -38,8 +37,9 @@ class ConsolidateOutcome(str, Enum):
 def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
     """Move history.db to ``new_dir``, reporting what it did and why.
 
-    Mutates ``history._output_dir`` and reopens the connection inside the lock, so
-    no torn intermediate is visible; FTS5 is rebuilt before ``old_path.unlink``.
+    Every path that moves the store goes through ``history.adopt_store_locked``
+    inside ``history._lock``, so no torn intermediate is visible; FTS5 is rebuilt
+    before ``old_path.unlink``.
     """
     with history._lock:
         old_dir = history._resolve_output_dir()
@@ -62,13 +62,11 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             return RelocateOutcome.FAILED, f"Could not create target directory: {e}"
 
         if new_path.exists():
-            history._output_dir = new_dir
-            history._reopen_conn_locked(new_dir)
+            history.adopt_store_locked(new_dir)
             return RelocateOutcome.NEW_ALREADY_HAS_FILE, None
 
         if not old_path.exists():
-            history._output_dir = new_dir
-            history._reopen_conn_locked(new_dir)
+            history.adopt_store_locked(new_dir)
             return RelocateOutcome.NO_OLD_FILE, None
 
         history._close_conn_locked()
@@ -85,10 +83,8 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             new_conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
 
             old_path.unlink()
-            history._output_dir = new_dir
-            history._conn = new_conn
+            history.adopt_store_locked(new_dir, new_conn)
             new_conn = None
-            history.invalidate_derived_caches_locked()
             log.info("Relocated history %s → %s", old_path, new_path)
             return RelocateOutcome.MOVED, None
         except (OSError, sqlite3.Error) as e:
@@ -101,7 +97,7 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             try:
                 history._reopen_conn_locked(old_dir)
             except sqlite3.Error:
-                history._conn = None
+                history._close_conn_locked()
                 history.invalidate_derived_caches_locked()
             log.exception("Relocate failed: %s", e)
             return RelocateOutcome.FAILED, f"Move failed: {e}"
