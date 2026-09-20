@@ -37,15 +37,6 @@ import { CONNECTION_POLL_MS, createSettingsRetry } from "./settings-retry";
 type WidgetState = "idle" | "recording" | "processing" | "done" | "error";
 type IconState = "idle" | "hover" | "recording" | "processing" | "done" | "error";
 
-const ICON_STATE_MODIFIERS: ReadonlySet<IconState> = new Set<IconState>([
-  "idle",
-  "hover",
-  "recording",
-  "processing",
-  "done",
-  "error",
-]);
-
 let state: WidgetState = "idle";
 let isHovered = false;
 let durationInterval: ReturnType<typeof setInterval> | null = null;
@@ -67,12 +58,7 @@ const durationEl = document.getElementById("widget-duration")!;
 
 
 function renderIcon(next: IconState) {
-  const keep = [...iconEl.classList].filter(
-    (c) =>
-      c.startsWith("js-widget--") &&
-      !ICON_STATE_MODIFIERS.has(c.slice("js-widget--".length) as IconState),
-  );
-  iconEl.className = ["widget-icon", "js-widget", ...keep, `js-widget--${next}`].join(" ");
+  iconEl.className = `widget-icon js-widget js-widget--${next}`;
 }
 
 function isInteractive(): boolean {

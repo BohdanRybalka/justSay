@@ -8,6 +8,11 @@ use tauri::{
 
 mod backend;
 
+/// The widget window's logical size. Read by both the builder that creates
+/// the window and the command that centres it, so the two cannot disagree.
+const WIDGET_WIDTH: f64 = 160.0;
+const WIDGET_HEIGHT: f64 = 40.0;
+
 /// Kill the backend child process if one is running. Safe to call even if
 /// nothing is running (no-op). Exposed narrowly for `main.rs`'s panic hook —
 /// see docs/adr/002-backend-process-panic-safe-shutdown.md.
@@ -80,10 +85,8 @@ fn widget_ready(app: AppHandle) {
         if let Ok(Some(monitor)) = widget.current_monitor() {
             let screen = monitor.size();
             let scale = monitor.scale_factor();
-            let w = 240.0;
-            let h = 48.0;
-            let x = (screen.width as f64 / scale - w) / 2.0;
-            let y = screen.height as f64 / scale - h - 220.0;
+            let x = (screen.width as f64 / scale - WIDGET_WIDTH) / 2.0;
+            let y = screen.height as f64 / scale - WIDGET_HEIGHT - 220.0;
             let _ = widget.set_position(tauri::PhysicalPosition::new(
                 (x * scale) as i32,
                 (y * scale) as i32,
@@ -134,7 +137,7 @@ pub fn run() {
                 WebviewUrl::App("/widget.html".into()),
             )
             .title("")
-            .inner_size(160.0, 40.0)
+            .inner_size(WIDGET_WIDTH, WIDGET_HEIGHT)
             .resizable(false)
             .visible(false)
             .decorations(false)
