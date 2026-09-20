@@ -33,7 +33,10 @@ try:
     from app.transcripts.words_router import router as words_router
 except Exception as e:
     log.critical(
-        "HTTP boundary import failed — sidecar will exit: %s", e, exc_info=True
+        "Routes, middleware and exception handlers failed to import — sidecar "
+        "will exit: %s",
+        e,
+        exc_info=True,
     )
     raise
 
