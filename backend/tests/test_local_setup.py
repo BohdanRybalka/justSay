@@ -1,7 +1,10 @@
+import ast
 import asyncio
 import inspect
 import logging
 import pathlib
+import subprocess
+import textwrap
 import threading
 import time
 from types import SimpleNamespace
@@ -350,9 +353,16 @@ async def test_install_emits_error_on_failure():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("raised", [RuntimeError(" "), TimeoutError()])
+@pytest.mark.parametrize(
+    "raised",
+    [
+        RuntimeError(" "),
+        TimeoutError(),
+        subprocess.TimeoutExpired(cmd=["C:\\Python\\python.exe", "-m", "pip"], timeout=300),
+    ],
+)
 async def test_ensure_local_ready_reports_a_sentence_when_the_pip_call_raises(monkeypatch, raised):
-    """A pip call that raises publishes a reason rather than leaving the field absent."""
+    """A pip call that raises latches a bounded sentence and still fails the caller."""
     provider = _FakePrewarmProvider()
     monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
     monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
@@ -362,16 +372,53 @@ async def test_ensure_local_ready_reports_a_sentence_when_the_pip_call_raises(mo
 
     monkeypatch.setattr(local_setup, "_run_pip_install", _raise)
 
-    await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+    with pytest.raises(type(raised)):
+        await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
 
     assert provider.get_model_calls == 0
-    assert local_setup._prewarm_error is not None
-    assert local_setup._prewarm_error.strip()
+    assert local_setup._prewarm_error == local_setup._INSTALL_RAISED
+    assert "python.exe" not in local_setup._prewarm_error
+    assert len(local_setup._prewarm_error) <= 200
+
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("output", ["", "\n", "   "])
-async def test_install_error_event_carries_text_when_pip_printed_nothing_readable(output):
-    """The SSE `error` field is published non-blank whatever pip printed."""
+async def test_ensure_local_ready_clears_a_stale_latch_after_a_successful_install(monkeypatch):
+    """A latch written while the install ran does not outlive a successful one."""
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: False)
+
+    def _install():
+        local_setup._prewarm_error = "left behind by a task that finished mid-install"
+        return 0, "ok"
+
+    monkeypatch.setattr(local_setup, "_run_pip_install", _install)
+
+    await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+
+    assert local_setup._prewarm_error != "left behind by a task that finished mid-install"
+
+
+def test_check_status_loads_the_prewarm_latch_once():
+    """Two loads of the latch across a thread boundary is a crash window; one is not."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(local_setup.check_status)))
+    loads = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+        and node.id == "_prewarm_error"
+        and isinstance(node.ctx, ast.Load)
+    ]
+
+    assert len(loads) == 1, (
+        "check_status must read _prewarm_error once — a second read can see a "
+        f"concurrent None and crash the status endpoint; found {len(loads)}"
+    )
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("output", ["", "\n", "   ", "pip resolver line\n" * 60])
+async def test_install_error_event_carries_the_same_sentence_the_other_producer_does(output):
+    """The SSE `error` field names the exit code, whatever pip printed."""
     with patch.object(local_setup, "_check_package_installed", return_value=False), patch.object(
         local_setup, "_run_pip_install", return_value=(1, output)
     ):
@@ -379,20 +426,29 @@ async def test_install_error_event_carries_text_when_pip_printed_nothing_readabl
 
     error_events = [e for e in events if "event: error" in e]
     assert error_events
-    assert local_setup._INSTALL_GAVE_NO_REASON in error_events[0]
+    assert local_setup._install_failure_sentence(1) in error_events[0]
+    assert "pip resolver line" not in error_events[0]
 
 
 @pytest.mark.asyncio
-async def test_install_error_event_carries_text_when_pip_raised_a_blank_exception():
-    """A raised exception whose text is blank is published as a sentence too."""
+@pytest.mark.parametrize(
+    "raised",
+    [
+        RuntimeError(" "),
+        subprocess.TimeoutExpired(cmd=["C:\\Python\\python.exe", "-m", "pip"], timeout=300),
+    ],
+)
+async def test_install_error_event_carries_a_sentence_when_the_pip_call_raises(raised):
+    """A raised exception is published as a sentence, never as its own text."""
     with patch.object(local_setup, "_check_package_installed", return_value=False), patch.object(
-        local_setup, "_run_pip_install", side_effect=RuntimeError(" ")
+        local_setup, "_run_pip_install", side_effect=raised
     ):
         events = [e async for e in install_local_packages()]
 
     error_events = [e for e in events if "event: error" in e]
     assert error_events
-    assert local_setup._INSTALL_GAVE_NO_REASON in error_events[0]
+    assert local_setup._INSTALL_RAISED in error_events[0]
+    assert "python.exe" not in error_events[0]
 
 
 @pytest.mark.asyncio
@@ -967,7 +1023,7 @@ def test_check_status_normalizes_whatever_the_install_step_wrote(written, publis
         local_setup._prewarm_error = None
         clear_stt_cache()
 
-    assert status.last_error == _expected(published, local_setup._INSTALL_GAVE_NO_REASON)
+    assert status.last_error == _expected(published, local_setup._SETUP_GAVE_NO_REASON)
     assert status.last_error is None or status.last_error.strip()
 
 

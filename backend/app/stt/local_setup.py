@@ -27,7 +27,19 @@ from app.stt.local_factory import (
 
 log = logging.getLogger(__name__)
 
-_INSTALL_GAVE_NO_REASON = "Installing the local engine failed and gave no reason."
+_SETUP_GAVE_NO_REASON = "Preparing the local engine failed and gave no reason."
+
+_INSTALL_RAISED = (
+    "Installing the local speech engine failed. See the JustSay log for the reason."
+)
+
+
+def _install_failure_sentence(exit_code: int) -> str:
+    """The sentence both install paths publish when pip exits non-zero."""
+    return (
+        f"Installing the local speech engine failed (pip exit code {exit_code}). "
+        "See the JustSay log for the pip output."
+    )
 
 _install_lock = asyncio.Lock()
 
@@ -97,10 +109,11 @@ def check_status(stt_settings: STTSettings) -> LocalSTTStatus:
     gpu_available = is_accelerated_device(device, kind)
 
     provider_error = routing.get_local_load_error(stt_settings)
+    setup_error = _prewarm_error
     if provider_error is not None:
         last_error = load_error_sentence(provider_error)
-    elif _prewarm_error is not None:
-        last_error = load_error_sentence(_prewarm_error, _INSTALL_GAVE_NO_REASON)
+    elif setup_error is not None:
+        last_error = load_error_sentence(setup_error, _SETUP_GAVE_NO_REASON)
     else:
         last_error = None
     model_is_loaded = routing.is_model_loaded() if installed else False
@@ -251,16 +264,14 @@ async def ensure_local_ready(stt_settings: STTSettings) -> None:
             _prewarm_error = None
             try:
                 exit_code, _ = await asyncio.to_thread(_run_pip_install)
-            except Exception as e:
-                log.warning("pip install raised: %s", e)
-                _prewarm_error = load_error_sentence(str(e), _INSTALL_GAVE_NO_REASON)
-                return
+            except Exception:
+                log.warning("Installing the local engine raised", exc_info=True)
+                _prewarm_error = _INSTALL_RAISED
+                raise
             if exit_code != 0:
-                _prewarm_error = (
-                    f"Installing the local speech engine failed (pip exit code "
-                    f"{exit_code}). See the JustSay log for the pip output."
-                )
+                _prewarm_error = _install_failure_sentence(exit_code)
                 return
+            _prewarm_error = None
 
         if routing.peek_local_provider() is not provider:
             return
@@ -368,14 +379,11 @@ async def install_local_packages() -> AsyncIterator[str]:
             else:
                 yield sse_event(
                     "error",
-                    {"status": "error", "error": output.strip()[-500:] or _INSTALL_GAVE_NO_REASON},
+                    {"status": "error", "error": _install_failure_sentence(exit_code)},
                 )
-        except Exception as e:
-            log.warning("pip install failed: %s", e)
-            yield sse_event(
-                "error",
-                {"status": "error", "error": str(e).strip() or _INSTALL_GAVE_NO_REASON},
-            )
+        except Exception:
+            log.warning("Installing the local engine raised", exc_info=True)
+            yield sse_event("error", {"status": "error", "error": _INSTALL_RAISED})
 
 
 def _run_pip_install() -> tuple[int, str]:

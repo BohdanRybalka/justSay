@@ -205,6 +205,26 @@ describe("renderModels — a failed local load the user can read", () => {
     await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledTimes(2));
   });
 
+  it("ignores a status poll that was already in flight when the tab was torn down", async () => {
+    let resolveFirst: (s: LocalSTTStatus) => void = () => {};
+    apiMock.sttLocalStatus.mockImplementationOnce(
+      () => new Promise<LocalSTTStatus>((resolve) => (resolveFirst = resolve)),
+    );
+    const { renderModels } = await import("./models");
+    renderModels(document.createElement("div"), buildSettings())();
+
+    resolveFirst(buildStatus({ last_error: "boom" }));
+    await new Promise((done) => setTimeout(done, 0));
+
+    expect(notifyErrorMock).not.toHaveBeenCalled();
+
+    apiMock.sttLocalStatus.mockResolvedValue(buildStatus({ last_error: "boom" }));
+    const reopened = document.createElement("div");
+    cleanups.push(renderModels(reopened, buildSettings()));
+
+    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledTimes(1));
+  });
+
   it("keeps the caption free of `undefined` when the response omits the model fields", async () => {
     const status = buildStatus({ model_loaded: true });
     delete (status as { model_name?: string }).model_name;

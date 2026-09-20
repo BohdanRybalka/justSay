@@ -140,6 +140,7 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
 
   return () => {
     clearInterval(pollInterval);
+    latestSttStatusToken += 1;
     prevLastError = null;
   };
 }
