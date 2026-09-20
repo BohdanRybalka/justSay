@@ -22,6 +22,7 @@ _LEDGER = _TESTS_DIR.parent.parent / "docs" / "test-name-audit.md"
 
 _BASELINE_FUNCTIONS = 1377
 _BASELINE_LINES = 38774
+_BASELINE_SHA = "8dea1c6b074b1badee461010950ff6700aeadc93"
 
 _FUNCTION_INTERVAL = 80
 _LINE_INTERVAL = 4000
@@ -412,11 +413,7 @@ def _unpinned_walks(tree: ast.Module) -> list[tuple[int, str, tuple[str, ...]]]:
 
 
 class _Baseline(NamedTuple):
-    """The five fields of the ledger's `Baseline:` line.
-
-    `sha` is the input range of the next round and is verified by a person:
-    this module uses no git, so nothing here can resolve a commit.
-    """
+    """The five fields of the ledger's `Baseline:` line."""
 
     functions: int
     lines: int
@@ -425,23 +422,30 @@ class _Baseline(NamedTuple):
     round_number: int
 
 
-def _parse_baseline(text: str) -> _Baseline | None:
-    """Every field of the recorded baseline, or None when the line does not parse."""
-    match = _BASELINE_PATTERN.search(text)
-    if match is None:
-        return None
-    return _Baseline(
-        int(match.group(1)),
-        int(match.group(2)),
-        match.group(3),
-        match.group(4),
-        int(match.group(5)),
-    )
+def _parse_baselines(text: str) -> list[_Baseline]:
+    """Every `Baseline:` line the text carries, in the order they appear."""
+    return [
+        _Baseline(
+            functions=int(match.group(1)),
+            lines=int(match.group(2)),
+            sha=match.group(3),
+            closed=match.group(4),
+            round_number=int(match.group(5)),
+        )
+        for match in _BASELINE_PATTERN.finditer(text)
+    ]
 
 
 def _parse_round_headings(text: str) -> list[tuple[int, str]]:
-    """Every `## Round <N> — <date>` heading of the ledger as (number, date)."""
+    """Every `## Round <N> — <date>` heading as (number, date), in file order."""
     return [(int(number), date) for number, date in _ROUND_HEADING_PATTERN.findall(text)]
+
+
+def _ledger_text_or_skip() -> str:
+    """The ledger's text, skipping the calling test when `docs/` is absent."""
+    if not _LEDGER.is_file():
+        pytest.skip(f"{_LEDGER.name} is absent from this checkout (docs/ is gitignored)")
+    return _LEDGER.read_text(encoding="utf-8")
 
 
 def _live_line_count() -> int:
@@ -686,56 +690,87 @@ def test_a_deletion_inside_the_allowance_delays_the_round_and_a_larger_one_fails
     )
 
 
-def test_the_audit_ledger_agrees_with_the_recorded_baseline():
-    """The round log mirrors the two constants above.
-
-    The only test here permitted to skip, and only when `docs/` is absent: it is
-    the one whose subject is a gitignored file rather than the tracked suite.
-    """
-    if not _LEDGER.is_file():
-        pytest.skip(f"{_LEDGER.name} is absent from this checkout (docs/ is gitignored)")
-    baseline = _parse_baseline(_LEDGER.read_text(encoding="utf-8"))
-    assert baseline is not None, (
-        f"{_LEDGER.name} carries no parseable `Baseline:` line, so nothing mirrors the "
-        "recorded baseline; restore the line rather than letting the mirror go quiet"
+def _the_one_baseline_or_fail(text: str) -> _Baseline:
+    """The ledger's single `Baseline:` line, failing the calling test when it is not one."""
+    baselines = _parse_baselines(text)
+    assert len(baselines) == 1, (
+        f"{_LEDGER.name} carries {len(baselines)} parseable `Baseline:` lines where exactly "
+        "one is the mirror; a second one leaves every reader here comparing against "
+        "whichever came first, which is how a half-updated ledger stays green"
     )
+    return baselines[0]
+
+
+def test_the_audit_ledger_agrees_with_the_recorded_baseline():
+    """The round log mirrors the three constants above.
+
+    One of two tests here permitted to skip, and only when `docs/` is absent: its
+    subject is a gitignored file rather than the tracked suite.
+    """
+    baseline = _the_one_baseline_or_fail(_ledger_text_or_skip())
+
     assert (baseline.functions, baseline.lines) == (_BASELINE_FUNCTIONS, _BASELINE_LINES), (
         f"{_LEDGER.name} records functions {baseline.functions} / lines {baseline.lines} "
         f"against the module's {_BASELINE_FUNCTIONS} / {_BASELINE_LINES}; closing a round "
         "moves both, and the constants are the half a GitHub reviewer can see"
     )
-
-
-def test_the_ledger_baseline_line_names_the_latest_round_and_the_date_it_closed():
-    """The `Baseline:` line's round and date mirror the newest `## Round` heading.
-
-    Skips with the other ledger test when `docs/` is absent. The sha on that line
-    is checked by a person, and the failure here says so.
-    """
-    if not _LEDGER.is_file():
-        pytest.skip(f"{_LEDGER.name} is absent from this checkout (docs/ is gitignored)")
-    text = _LEDGER.read_text(encoding="utf-8")
-    baseline = _parse_baseline(text)
-    assert baseline is not None, (
-        f"{_LEDGER.name} carries no parseable `Baseline:` line, so the round it claims to "
-        "have closed cannot be read at all"
+    assert baseline.sha == _BASELINE_SHA, (
+        f"{_LEDGER.name} records master {baseline.sha} against the module's {_BASELINE_SHA}; "
+        "that sha is the next round's entire input range, so the two must move together "
+        "with the counts. Which commit is the right one is still read by a person: this "
+        "module resolves no commit, and the ledger says what the round-closer checks"
     )
+
+
+def test_the_ledger_baseline_line_names_the_newest_round_block_and_its_date():
+    """The `Baseline:` line's round and date mirror the ledger's newest `## Round` heading.
+
+    Skips with the other ledger test when `docs/` is absent.
+    """
+    text = _ledger_text_or_skip()
+    baseline = _the_one_baseline_or_fail(text)
     headings = _parse_round_headings(text)
     assert headings, (
-        f"{_LEDGER.name} carries no `## Round <N> — <date>` heading, so the comparison "
-        "below would pass on an empty walk rather than on agreement"
+        f"{_LEDGER.name} carries no `## Round <N> — <date>` heading, so the walk this test "
+        "reads is empty and there is nothing for the line below to be compared against"
+    )
+    assert [number for number, _ in headings] == sorted(number for number, _ in headings), (
+        f"the round blocks of {_LEDGER.name} run {[number for number, _ in headings]}, so "
+        "the newest block is no longer the last one and reading it by file order would "
+        "compare against the wrong round"
     )
 
-    latest_number, latest_date = max(headings)
+    newest_number, newest_date = headings[-1]
 
-    assert (baseline.round_number, baseline.closed) == (latest_number, latest_date), (
+    assert (baseline.round_number, baseline.closed) == (newest_number, newest_date), (
         f"{_LEDGER.name} says `round {baseline.round_number} · closed {baseline.closed}` "
-        f"while its newest block is `## Round {latest_number} — {latest_date}`; the line "
-        "is the next round's starting point, so a stale one misreports where it starts. "
-        f"Its third field, `master {baseline.sha}`, is the next round's whole input range "
-        "and nothing here can check it — verify by hand that it is the merge commit the "
-        "two counts were computed from"
+        f"while its newest block is `## Round {newest_number} — {newest_date}`; the line is "
+        "the next round's starting point, so a stale one misreports where that round starts"
     )
+
+
+def test_the_ledger_recognisers_read_a_well_formed_sample_and_reject_its_near_misses():
+    """Both ledger recognisers over synthetic text, so CI exercises them where `docs/` is absent."""
+    sample = (
+        "Baseline: functions 12 · lines 34 · master abc1234 · closed 2026-01-02 · round 7\n"
+        "\n## Round 6 — 2025-12-31\n"
+        "\n## Round 7 — 2026-01-02\n"
+    )
+
+    assert _parse_baselines(sample) == [
+        _Baseline(functions=12, lines=34, sha="abc1234", closed="2026-01-02", round_number=7)
+    ]
+    assert _parse_round_headings(sample) == [(6, "2025-12-31"), (7, "2026-01-02")]
+    assert _parse_baselines(sample.replace("·", "-")) == [], (
+        "the separator is part of the grammar the ledger calls fixed, so a line written "
+        "with hyphens must not be read as the mirror"
+    )
+    assert _parse_round_headings(sample.replace("## Round 7 —", "## Round 7 -")) == [
+        (6, "2025-12-31")
+    ], "an em dash replaced by a hyphen must drop that heading rather than match it loosely"
+    assert _parse_round_headings(sample.replace("## Round 6", "### Round 6")) == [
+        (7, "2026-01-02")
+    ], "a deeper heading is a sub-block of a round, not a round"
 
 
 def test_the_walk_reaches_every_module_family_it_is_meant_to_check():
