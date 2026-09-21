@@ -416,15 +416,22 @@ function handleVisibilityEdge(event: "hidden" | "shown") {
 /** Ask the shell what this window currently is, and route the answer through
  *  the same gate an announcement takes.
  *
- *  A show announced before the subscription attached is gone, and `isVisible()`
- *  (`@tauri-apps/api` 2.10) is the reading that replaces the guess. An
- *  announcement handled while the read was away is newer, so it wins. */
+ *  A show announced before the subscription attached is gone, and the window's
+ *  own state (`@tauri-apps/api` 2.10) is the reading that replaces the guess.
+ *  It takes both terms the shell's predicate takes, because Windows reports a
+ *  minimised window as visible and reading `isVisible()` alone would resume
+ *  polling on a window sitting in the taskbar. An announcement handled while
+ *  the read was away is newer, so it wins. */
 async function readWindowVisibility() {
   const edgesBefore = handledVisibilityEdges;
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
-  const visible = await getCurrentWindow().isVisible();
+  const settingsWindow = getCurrentWindow();
+  const [visible, minimized] = await Promise.all([
+    settingsWindow.isVisible(),
+    settingsWindow.isMinimized(),
+  ]);
   if (handledVisibilityEdges !== edgesBefore) return;
-  applyWindowVisibility(visible ? "shown" : "hidden");
+  applyWindowVisibility(visible && !minimized ? "shown" : "hidden");
 }
 
 /** Follow the Settings window between dismissed and shown again.

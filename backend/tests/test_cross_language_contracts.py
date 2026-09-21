@@ -61,6 +61,7 @@ TAURI_CONF_JSON = REPO_ROOT / "src-tauri" / "tauri.conf.json"
 TAURI_MACOS_CONF_JSON = REPO_ROOT / "src-tauri" / "tauri.macos.conf.json"
 
 RUST_SOURCE_DIR = REPO_ROOT / "src-tauri" / "src"
+WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
 _PORT_SITES: dict[Path, str] = {
     CONFIG_PY: r"^    port: int = (\d+)$",
@@ -211,9 +212,19 @@ _RUST_SETTINGS_ANNOUNCER = "announce_settings_visibility"
 
 _RUST_SETTINGS_PREDICATE = "settings_is_on_screen"
 
+_RUST_SETTINGS_EVENT_READER = "settings_on_screen_from_window_event"
+
 _RUST_SETTINGS_VISIBILITY_EVENTS = ("settings-shown", "settings-hidden")
 
 _RUST_SETTINGS_WINDOW_EVENTS = ("CloseRequested", "Resized", "Focused")
+
+_YAML_COMMENT_OR_STRING_PATTERN = re.compile(
+    r'"(?:\\.|[^"\\\n])*"' r"|'(?:''|[^'\n])*'" r"|#[^\n]*"
+)
+
+_PYINSTALLER_DIST_PATTERN = re.compile(r"backend/dist/([A-Za-z0-9._-]+)")
+
+_BUNDLE_RESOURCE_SOURCE_PATTERN = "src-tauri/{source}"
 
 _RUST_BUILD_PROFILE_TOKEN = "debug_assertions"
 
@@ -805,6 +816,36 @@ def _rust_call_argument_text(body: str, call: str) -> str:
     return body[start : cursor - 1]
 
 
+def _rust_match_arm_body(handler: str, pattern: str) -> str:
+    """The braced body of the ``match`` arm whose pattern list writes ``pattern``.
+
+    Splitting the handler on ``WindowEvent::`` is what this replaces, and it
+    could not see an arm at all: two events sharing one arm gave the first of
+    them a chunk ending at the second's name, so every assertion over that
+    chunk passed on a pattern with no body under it. Brace depth is counted
+    from the ``=>``, the way this module already reads a call's arguments.
+    """
+    start = handler.find(pattern)
+    assert start != -1, f"the handler writes no {pattern} pattern"
+    arrow = handler.find("=>", start)
+    assert arrow != -1, f"the arm matching {pattern} has no => and cannot compile"
+    rest = handler[arrow + 2 :]
+    opening = len(rest) - len(rest.lstrip())
+    assert rest[opening:].startswith("{"), (
+        f"the arm matching {pattern} is written without braces, so this reader cannot "
+        f"say where it ends: {rest[opening : opening + 60]!r}"
+    )
+    depth = 0
+    for index in range(opening, len(rest)):
+        if rest[index] == "{":
+            depth += 1
+        elif rest[index] == "}":
+            depth -= 1
+            if not depth:
+                return rest[opening : index + 1]
+    raise AssertionError(f"the arm matching {pattern} is never closed, so the file cannot compile")
+
+
 def _rust_function_bodies_everywhere() -> dict[str, tuple[str, str]]:
     """Every top-level ``fn`` under src-tauri/src/, keyed ``<file>::<name>``.
 
@@ -916,23 +957,27 @@ def test_the_on_screen_predicate_reads_visibility_and_minimisation_only() -> Non
 
 
 def test_the_settings_window_handler_re_reads_the_window_on_every_event() -> None:
-    """Resize and focus arms send the shell back to the window, never to a verdict.
+    """Resize and focus arms send the shell to the window or to the event reader.
 
     A Windows minimise and its restore arrive as the same ``Resized``, carrying
-    nothing that separates them, and a macOS miniaturise arrives only as the
-    focus loss that comes with it. The event therefore says nothing about where
-    the window ended up. An arm that treated a focus loss as "away" would stop
-    the page's work while the user is looking at the window; an arm that
-    skipped the re-read would leave that work running while the window sits in
-    the taskbar or the Dock.
+    nothing that separates them, so that arm reads the window. An arm that
+    treated a focus loss as "away" would stop the page's work while the user is
+    looking at the window; an arm that skipped the re-read would leave that
+    work running while the window sits in the taskbar or the Dock. Neither may
+    act on its event, which is what the two assertions per arm below say.
 
     Only ``CloseRequested`` acts on its event, because a close is the one thing
     the shell refuses rather than observes.
 
-    Mutation-checked twice, each applied alone: splitting the combined arm and
-    hiding the window from the ``Focused`` half fails this test reporting that
-    two arms hide it where only the close arm may; deleting the ``Resized``
-    half fails it naming that event as having no arm.
+    Each arm is read by brace depth rather than by splitting the handler on the
+    event name, which gave a shared arm's first event a body-less chunk that no
+    assertion could fail. Every arm must positively reach the announcer, so a
+    chunk carrying nothing fails here instead of passing unseen.
+
+    Mutation-checked three times, each applied alone: hiding the window from
+    the ``Focused`` half fails this test naming that arm; giving ``Resized`` an
+    arm of its own that announces nothing fails it naming that arm; and
+    deleting the ``Resized`` half fails it naming that event as having no arm.
     """
     run_body = _rust_top_level_function_bodies(LIB_RS)["run"]
     handler = _rust_call_argument_text(run_body, "on_window_event")
@@ -943,10 +988,6 @@ def test_the_settings_window_handler_re_reads_the_window_on_every_event() -> Non
             f"{rel}'s settings window handler has no {event} arm, so that way of putting "
             "the surface out of sight or bringing it back announces nothing (ADR 089)"
         )
-    assert f"{_RUST_SETTINGS_ANNOUNCER}(" in handler, (
-        f"{rel}'s settings window handler never reaches {_RUST_SETTINGS_ANNOUNCER}, so no "
-        "window event re-reads the state the page is drawing"
-    )
     assert handler.count("hide_settings(") == 1, (
         f"{rel}'s settings window handler hides the window from "
         f"{handler.count('hide_settings(')} arms; only the close arm may act on its event, "
@@ -957,15 +998,80 @@ def test_the_settings_window_handler_re_reads_the_window_on_every_event() -> Non
         "being taken for an instruction rather than for a reason to look"
     )
 
-    arms = handler.split("WindowEvent::")
     for event in ("Resized", "Focused"):
-        arm = next(chunk for chunk in arms if chunk.startswith(event))
+        arm = _rust_match_arm_body(handler, f"WindowEvent::{event}")
         verdicts = [name for name in ("hide_settings(", "show_settings(") if name in arm]
         assert not verdicts, (
             f"{rel}'s {event} arm calls {verdicts}, so the event is the criterion rather "
             f"than a reason to re-read the window; a window that only lost focus would "
             "stop the page's work while the user is looking at it (ADR 089)"
         )
+        assert f"{_RUST_SETTINGS_ANNOUNCER}(" in arm, (
+            f"{rel}'s {event} arm never reaches {_RUST_SETTINGS_ANNOUNCER}, so that way of "
+            f"putting the surface out of sight or bringing it back leaves the page drawing "
+            f"the state it read before; the arm is {arm!r}"
+        )
+
+
+def test_a_restored_window_is_announced_from_the_event_rather_than_a_second_read() -> None:
+    """The focus arm hands the announcer the answer its event already carries.
+
+    macOS registers no miniaturise or deminiaturise selector -- ``tao 0.34.8``
+    installs ``windowDidResize:``, ``windowDidMove:``, ``windowDidBecomeKey:``,
+    ``windowDidResignKey:``, the fullscreen and drag selectors, and nothing
+    else -- so a restore from the Dock arrives as a gained focus and as no
+    other event at all. An arm that answered it by reading the window would,
+    on any ordering where ``isMiniaturized`` has not yet flipped, compute the
+    value already announced, emit nothing under the dedupe, and then wait for a
+    second event that never comes: the page stays frozen on a window the user
+    just restored. That is worse than the unconditional re-emit it replaced.
+
+    Gaining focus is sound as an answer on both shipping platforms because
+    ``tao`` will not move focus onto a window that is not on screen: its macOS
+    ``set_focus`` acts only ``if !is_minimized && is_visible``, and its Windows
+    one only ``if is_visible && !is_minimized && !is_foreground``. A focus
+    *loss* answers nothing and still reads the window, which is what keeps a
+    visible window the user clicked away from polling.
+
+    Mutation-checked twice, each applied alone: making the reader answer
+    ``None`` for a gained focus fails this test and the Rust unit test over the
+    same fn; passing ``None`` from the arm instead of the reader's answer fails
+    this test naming the argument the arm hands over.
+    """
+    bodies = _rust_top_level_function_bodies(LIB_RS)
+    rel = LIB_RS.relative_to(REPO_ROOT).as_posix()
+    assert _RUST_SETTINGS_EVENT_READER in bodies, (
+        f"{rel} no longer defines fn {_RUST_SETTINGS_EVENT_READER}, so no event can answer "
+        "the on-screen question and a macOS restore announces nothing (ADR 089)"
+    )
+
+    reader = bodies[_RUST_SETTINGS_EVENT_READER]
+    assert re.search(r"WindowEvent::Focused\(true\)\s*=>\s*Some\(true\)", reader), (
+        f"{_RUST_SETTINGS_EVENT_READER} no longer answers a gained focus with Some(true), "
+        f"so a macOS restore is answered by a window read that may not have flipped yet "
+        f"and the dedupe swallows it: {reader!r}"
+    )
+    answered = re.findall(r"=>\s*Some\(", reader)
+    assert len(answered) == 1, (
+        f"{_RUST_SETTINGS_EVENT_READER} answers {len(answered)} events by itself; every "
+        "event other than a gained focus must return None and send the shell to the "
+        f"window, or an event becomes the criterion again (ADR 089): {reader!r}"
+    )
+
+    run_body = bodies["run"]
+    handler = _rust_call_argument_text(run_body, "on_window_event")
+    arm = _rust_match_arm_body(handler, "WindowEvent::Focused")
+    assert re.search(rf"\b{_RUST_SETTINGS_EVENT_READER}\(\s*event\s*\)", arm), (
+        f"{rel}'s Focused arm does not hand {_RUST_SETTINGS_ANNOUNCER} what "
+        f"{_RUST_SETTINGS_EVENT_READER} makes of the event, so the restore direction is "
+        f"back to a read that can be one step behind AppKit: {arm!r}"
+    )
+
+    announcer = bodies[_RUST_SETTINGS_ANNOUNCER]
+    assert re.search(r"known_on_screen\s*\{\s*Some\(\w+\)\s*=>\s*\w+", announcer), (
+        f"{_RUST_SETTINGS_ANNOUNCER} no longer trusts the answer its caller's event "
+        f"carries, so the arm computes one and the announcer discards it: {announcer!r}"
+    )
 
 
 def _assert_only_one_fn_reaches_the_settings_window(verb: str, helper: str, event: str) -> None:
@@ -1570,8 +1676,35 @@ def test_the_shell_reads_every_data_directory_variable_the_backend_reads() -> No
     )
 
 
+def _yaml_code(path: Path) -> str:
+    """One workflow file with every ``#`` comment body blanked out.
+
+    The same shape ``_rust_code`` uses, and needed for the same reason:
+    ``.github/workflows/**`` is a tree ``CLAUDE.md`` exempts from the comment
+    ban, and several of its comments quote the very paths scanned below. A
+    scan reading raw lines would redden this suite over prose, which whoever
+    wrote that prose has no way to see is spurious. Quoted spans are matched
+    first, so a ``#`` inside a shell string survives. Blanking to spaces keeps
+    every line and column.
+    """
+
+    def blank(match: re.Match[str]) -> str:
+        token = match.group(0)
+        return _NOT_A_NEWLINE.sub(" ", token) if token.startswith("#") else token
+
+    return _YAML_COMMENT_OR_STRING_PATTERN.sub(blank, _read(path))
+
+
+@functools.cache
+def _workflow_files() -> tuple[Path, ...]:
+    """Every workflow definition, as the release and CI jobs are read here."""
+    found = tuple(sorted(WORKFLOWS_DIR.glob("*.yml")))
+    assert found, f"no workflow was found under {WORKFLOWS_DIR.relative_to(REPO_ROOT).as_posix()}"
+    return found
+
+
 def test_the_packaged_sidecar_directory_name_agrees_with_what_the_build_produces() -> None:
-    """The directory the frozen sidecar is packaged under, in all five places.
+    """One directory name, everywhere a build step writes it down.
 
     ``resolve_audio_tap_path`` answers "is this a packaged build?" by asking
     whether the running executable sits in a directory of this name, and it is
@@ -1583,14 +1716,26 @@ def test_the_packaged_sidecar_directory_name_agrees_with_what_the_build_produces
     with nothing said anywhere. The shell reads the same name to find the
     executable at all, so it is pinned here too.
 
+    The workflows write the same name a third way, and are the half a table of
+    declaring files cannot hold: the release job addresses PyInstaller's output
+    by path in every verification step and in the copy that fills the bundle,
+    and the CI job creates a placeholder for every resource ``tauri-build``
+    resolves at compile time. Both are therefore walked rather than listed, and
+    their two anchors are derived -- ``backend/dist/<name>`` is what
+    ``COLLECT`` produces, and the placeholder set comes from the bundle maps
+    below rather than from any name written here.
+
     The two Tauri maps are checked as a source-to-target pair rather than by
     value, because the target name is what the installer creates and the source
     path is what the release workflow copies into; a map that carries neither
     is a bundle with no sidecar in it.
 
-    Mutation-checked: renaming the ``COLLECT`` output in build_sidecar.spec
-    fails this test printing every declaration; renaming the resource target in
-    tauri.macos.conf.json fails it naming that file.
+    Mutation-checked four times, each applied alone: renaming the ``COLLECT``
+    output in build_sidecar.spec fails this test printing every declaration;
+    renaming the resource target in tauri.macos.conf.json fails it naming that
+    file; renaming one ``backend/dist/`` path in release.yml fails it naming
+    that file and the stray name; and renaming the sidecar's ``mkdir`` target
+    in ci.yml fails it naming the resource no workflow creates.
     """
     canonical = _extract(MACOS_TAP_PY, r'^SIDECAR_DIRECTORY_NAME = "([^"]*)"$')[0]
     declared = {
@@ -1607,14 +1752,49 @@ def test_the_packaged_sidecar_directory_name_agrees_with_what_the_build_produces
         "while the tap helper resolved to a path that is not in the bundle"
     )
 
+    bundle_sources: set[str] = set()
     for conf in (TAURI_CONF_JSON, TAURI_MACOS_CONF_JSON):
         resources = json.loads(_read(conf))["bundle"]["resources"]
         assert resources, f"{conf.name} declares no bundle resources at all"
+        bundle_sources.update(resources)
         assert resources.get(f"resources/{canonical}") == canonical, (
             f"{conf.name} maps no 'resources/{canonical}' to '{canonical}', so the "
             f"installer creates no {canonical!r} directory beside the app; it declares "
             f"{resources}"
         )
+
+    dist_names: dict[str, set[str]] = {}
+    for path in _workflow_files():
+        found = set(_PYINSTALLER_DIST_PATTERN.findall(_yaml_code(path)))
+        if found:
+            dist_names[path.name] = found
+    assert dist_names, (
+        "no workflow addresses PyInstaller's output directory at all; the walk has gone "
+        "blind and the comparison below would pass on nothing"
+    )
+    stray_dist = {
+        name: sorted(found - {canonical})
+        for name, found in dist_names.items()
+        if found != {canonical}
+    }
+    assert not stray_dist, (
+        f"every 'backend/dist/<name>' a workflow addresses is the directory COLLECT "
+        f"produces, which is {canonical!r}; these name it differently: {stray_dist}. A "
+        "release job that verifies or copies a path the build never wrote fails one "
+        "platform's leg at tag time, with nothing said before then"
+    )
+
+    workflow_text = "\n".join(_yaml_code(path) for path in _workflow_files())
+    uncreated = sorted(
+        source
+        for source in bundle_sources
+        if _BUNDLE_RESOURCE_SOURCE_PATTERN.format(source=source) not in workflow_text
+    )
+    assert not uncreated, (
+        f"tauri-build resolves every bundle resource path at compile time, and no workflow "
+        f"creates a placeholder for {uncreated}; the compile leg of CI fails with "
+        '"resource path ... doesn\'t exist" on a checkout that carries none of them'
+    )
 
 
 def test_every_shell_answer_to_the_packaged_build_question_is_written_down() -> None:
