@@ -8,9 +8,10 @@ import {
   type CloudKeyStatus,
   type UserSettings,
 } from "../api";
-import { EVENT_SETTINGS_HIDDEN } from "../contracts";
+import { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } from "../contracts";
 import { TimedOutError, withTimeout } from "../timeout";
 import { isStaleStatusResponse } from "../stale-response";
+import { nextTabAction } from "./tab-visibility";
 import { renderGeneral } from "./tabs/general";
 import { renderModels } from "./tabs/models";
 import { renderHistory } from "./tabs/history";
@@ -26,8 +27,12 @@ let activeTab: TabLifecycle | null = null;
 let settingsError: string | null = null;
 let backendReachable = true;
 let settingsLoadInFlight = false;
+let settingsWindowHidden = true;
+let backendProbeInterval: ReturnType<typeof setInterval> | null = null;
+let handledVisibilityEdges = 0;
 
 const SETTINGS_LOAD_TIMEOUT_MS = 40_000;
+const BACKEND_PROBE_INTERVAL_MS = 5000;
 
 
 const tabContent = document.getElementById("tab-content")!;
@@ -37,17 +42,14 @@ const backendStatus = document.getElementById("backend-status")!;
 
 /** What a tab hands back so this window can let go of what it is holding.
  *
- *  Two different moments, and a tab that conflates them loses work. `destroy`
- *  runs when the tab is leaving the DOM — a switch, a re-render — and may tear
- *  everything down. `releaseResources` runs when the *window* is dismissed
- *  while the tab stays mounted: the shell prevents the close and hides the
- *  window (`src-tauri/src/lib.rs`), so the tab must give up a device it holds
- *  and still work when the window is shown again.
- *
- *  A tab with nothing to release returns its destroy function as before. */
+ *  `destroy` runs when the tab leaves the DOM and may tear everything down.
+ *  `releaseResources` runs when the window is dismissed while the tab stays
+ *  mounted, and `resumeResources` when it is shown again; each is optional, and
+ *  a tab implementing one is not obliged to implement the other. */
 export interface TabLifecycle {
   destroy: () => void;
   releaseResources?: () => void;
+  resumeResources?: () => void;
 }
 
 type TabTeardown = (() => void) | TabLifecycle | void;
@@ -57,13 +59,19 @@ function asLifecycle(teardown: TabTeardown): TabLifecycle | null {
   return typeof teardown === "function" ? { destroy: teardown } : teardown;
 }
 
-const tabs: Record<string, (container: HTMLElement, settings: UserSettings) => TabTeardown> = {
+type TabRenderer = (
+  container: HTMLElement,
+  settings: UserSettings,
+  windowHidden: boolean,
+) => TabTeardown;
+
+const tabs: Record<string, TabRenderer> = {
   general: renderGeneral,
   models: renderModels,
   transcribe: (container) => renderTranscribe(container),
   history: (container) => renderHistory(container),
   metrics: (container) => renderMetrics(container),
-  words: (container) => renderWords(container),
+  words: (container, _settings, windowHidden) => renderWords(container, windowHidden),
 };
 
 /** `bridge-missing` / `bridge-timeout` / `bridge-failed: <detail>` /
@@ -224,7 +232,8 @@ function switchTab(tabName: string) {
 
   const renderFn = tabs[tabName];
   if (renderFn) {
-    activeTab = asLifecycle(renderFn(tabContent, settings));
+    activeTab = asLifecycle(renderFn(tabContent, settings, settingsWindowHidden));
+    if (settingsWindowHidden) activeTab?.releaseResources?.();
   }
 }
 
@@ -363,36 +372,91 @@ window.addEventListener("dragover", swallowUnhandledFileDrop);
 window.addEventListener("drop", swallowUnhandledFileDrop);
 
 
-/** Release whatever the active tab is holding when the window is dismissed.
+/** Start the `/health` interval, or leave the running one alone. */
+function startBackendProbe() {
+  if (backendProbeInterval !== null) return;
+  backendProbeInterval = setInterval(probeBackend, BACKEND_PROBE_INTERVAL_MS);
+}
+
+/** Stop the `/health` interval and disown whatever probe is still in flight,
+ *  so no answer arriving afterwards repaints a badge nobody is looking at. */
+function stopBackendProbe() {
+  latestBackendProbeToken += 1;
+  if (backendProbeInterval === null) return;
+  clearInterval(backendProbeInterval);
+  backendProbeInterval = null;
+}
+
+/** Hand this window's periodic work, and the active tab's, to the edge that
+ *  just arrived (ADR 089).
  *
- *  The shell prevents the close and hides the window instead, so the webview
- *  stays mounted and no tab's teardown runs — the General tab's microphone test
- *  outlived the window and was reachable only by opening Settings again
- *  ([JS-121]). Only the release runs: re-mounting the tab, which is what the
- *  first version of this did, throws away everything the mounted tab was
- *  holding that is not a resource — a debounced save the user had just typed, a
- *  downloaded update waiting to be installed — and re-runs the tab's whole
- *  network fan-out while the window is invisible.
+ *  A resume probes once before restarting the interval, so a returning user
+ *  reads a badge one request old rather than one interval old. */
+function applyWindowVisibility(event: "hidden" | "shown") {
+  const action = nextTabAction(event, settingsWindowHidden);
+  if (action === "ignore") return;
+  settingsWindowHidden = action === "release";
+  if (action === "release") {
+    stopBackendProbe();
+    activeTab?.releaseResources?.();
+    return;
+  }
+  void probeBackend();
+  startBackendProbe();
+  activeTab?.resumeResources?.();
+}
+
+/** Route one announcement from the shell through the gate, and count it, so a
+ *  visibility read in flight can tell its answer has been overtaken. */
+function handleVisibilityEdge(event: "hidden" | "shown") {
+  handledVisibilityEdges += 1;
+  applyWindowVisibility(event);
+}
+
+/** Ask the shell what this window currently is, and route the answer through
+ *  the same gate an announcement takes.
  *
- *  A failed listener attach is swallowed for the same reason every other one
- *  here is: outside Tauri there is no event bus, and a settings screen that
- *  refuses to load because it could not subscribe to a hide is worse than one
- *  that never hears it. */
-async function releaseTabOnWindowHide() {
+ *  A show announced before the subscription attached is gone, and `isVisible()`
+ *  (`@tauri-apps/api` 2.10) is the reading that replaces the guess. An
+ *  announcement handled while the read was away is newer, so it wins. */
+async function readWindowVisibility() {
+  const edgesBefore = handledVisibilityEdges;
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  const visible = await getCurrentWindow().isVisible();
+  if (handledVisibilityEdges !== edgesBefore) return;
+  applyWindowVisibility(visible ? "shown" : "hidden");
+}
+
+/** Follow the Settings window between dismissed and shown again.
+ *
+ *  The show is subscribed before the dismissal, so a partial attach keeps the
+ *  edge that resumes. A page holding no show edge can never hear the window
+ *  arrive, whatever the window says it is, so it polls: that is the settings
+ *  screen served by Vite, and believing otherwise silences it for good. */
+async function trackTabWindowVisibility() {
+  let showEdgeAttached = false;
   try {
     const { listen } = await import("@tauri-apps/api/event");
-    await listen(EVENT_SETTINGS_HIDDEN, () => {
-      activeTab?.releaseResources?.();
-    });
-  } catch {}
+    await listen(EVENT_SETTINGS_SHOWN, () => handleVisibilityEdge("shown"));
+    showEdgeAttached = true;
+    await listen(EVENT_SETTINGS_HIDDEN, () => handleVisibilityEdge("hidden"));
+  } catch {
+  }
+  if (!showEdgeAttached) {
+    applyWindowVisibility("shown");
+    return;
+  }
+  try {
+    await readWindowVisibility();
+  } catch {
+  }
 }
 
 
 async function init() {
   void initAppVersion();
-  void releaseTabOnWindowHide();
+  void trackTabWindowVisibility();
   renderSettingsUnavailable(tabContent);
-  setInterval(probeBackend, 5000);
   await loadSettingsIntoUi();
 }
 

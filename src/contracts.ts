@@ -41,11 +41,17 @@ export const EVENT_MEETING_TOGGLE = "meeting-toggle";
  *  prevents it and hides the window, so the webview stays mounted and no tab's
  *  teardown ever runs — a microphone the General tab holds outlives the window
  *  that opened it. The Rust side emits this after `hide()` and `settings.ts`
- *  re-mounts the active tab on it, which releases whatever that tab held
- *  ([JS-121]). An event we emit ourselves rather than `visibilitychange`,
- *  which WebView2 and WKWebView are not verifiably agreed on for a native
- *  hide. */
+ *  calls the active tab's `releaseResources` on it, leaving the tab mounted.
+ *  An event we emit ourselves rather than `visibilitychange`, which WebView2
+ *  and WKWebView are not verifiably agreed on for a native hide. */
 export const EVENT_SETTINGS_HIDDEN = "settings-hidden";
+
+/** The Settings window came back. The shell emits it from the single helper
+ *  every show path calls, so a tab that gave something up on the hide can take
+ *  it back (ADR 089). It arrives on every show, including one where the window
+ *  was already visible, and `settings.ts` is the one place that decides what a
+ *  repeat means. */
+export const EVENT_SETTINGS_SHOWN = "settings-shown";
 
 /** What a `session_id` may look like on the wire, spelled the same way as
  *  `SESSION_ID_PATTERN` in `backend/app/audio/session.py` and pinned against

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LocalSTTStatus, UserSettings } from "../../api";
+import type { TabLifecycle } from "../settings";
 
 const apiMock = {
   sttLocalStatus: vi.fn(),
@@ -66,7 +67,7 @@ function buildStatus(overrides: Partial<LocalSTTStatus> = {}): LocalSTTStatus {
   };
 }
 
-let cleanups: Array<() => void> = [];
+let cleanups: TabLifecycle[] = [];
 
 async function render(status: LocalSTTStatus): Promise<HTMLElement> {
   apiMock.sttLocalStatus.mockResolvedValue(status);
@@ -90,7 +91,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  for (const cleanup of cleanups) cleanup();
+  for (const cleanup of cleanups) cleanup.destroy();
   cleanups = [];
 });
 
@@ -158,7 +159,7 @@ describe("renderModels — a failed local load the user can read", () => {
       const whilePolling = apiMock.sttLocalStatus.mock.calls.length;
       expect(whilePolling).toBeGreaterThan(afterFirstRender);
 
-      for (const cleanup of cleanups) cleanup();
+      for (const cleanup of cleanups) cleanup.destroy();
       cleanups = [];
       await vi.advanceTimersByTimeAsync(9000);
 
@@ -195,7 +196,7 @@ describe("renderModels — a failed local load the user can read", () => {
     await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledTimes(1));
     expect(badgeClass(container)).toContain("status-indicator-badge--error");
 
-    for (const cleanup of cleanups) cleanup();
+    for (const cleanup of cleanups) cleanup.destroy();
     cleanups = [];
 
     const { renderModels } = await import("./models");
@@ -211,7 +212,7 @@ describe("renderModels — a failed local load the user can read", () => {
       () => new Promise<LocalSTTStatus>((resolve) => (resolveFirst = resolve)),
     );
     const { renderModels } = await import("./models");
-    renderModels(document.createElement("div"), buildSettings())();
+    renderModels(document.createElement("div"), buildSettings()).destroy();
 
     resolveFirst(buildStatus({ last_error: "boom" }));
     await new Promise((done) => setTimeout(done, 0));
@@ -244,5 +245,140 @@ describe("renderModels — a failed local load the user can read", () => {
 
     await vi.waitFor(() => expect(badgeClass(container)).toContain("status-indicator-badge--ready"));
     expect(notifyErrorMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("renderModels after the Settings window is dismissed", () => {
+  it("issues no further status read once the window is dismissed", async () => {
+    vi.useFakeTimers();
+    try {
+      await render(buildStatus());
+      await vi.advanceTimersByTimeAsync(0);
+      const [tab] = cleanups;
+      tab.releaseResources!();
+      const whileHidden = apiMock.sttLocalStatus.mock.calls.length;
+      expect(whileHidden).toBeGreaterThan(0);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(apiMock.sttLocalStatus.mock.calls.length).toBe(whileHidden);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads once on the way back before any tick, then keeps the 3 s rhythm", async () => {
+    vi.useFakeTimers();
+    try {
+      await render(buildStatus());
+      await vi.advanceTimersByTimeAsync(0);
+      const [tab] = cleanups;
+      tab.releaseResources!();
+      const whileHidden = apiMock.sttLocalStatus.mock.calls.length;
+
+      tab.resumeResources!();
+
+      expect(
+        apiMock.sttLocalStatus.mock.calls.length,
+        "a returning user reads a badge one request old, not one interval old",
+      ).toBe(whileHidden + 1);
+
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(apiMock.sttLocalStatus.mock.calls.length).toBe(whileHidden + 2);
+
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(
+        apiMock.sttLocalStatus.mock.calls.length,
+        "a resume that started a second interval would read twice per tick",
+      ).toBe(whileHidden + 3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts no second interval when a resume lands on a poll already running", async () => {
+    vi.useFakeTimers();
+    try {
+      await render(buildStatus());
+      await vi.advanceTimersByTimeAsync(0);
+      const [tab] = cleanups;
+
+      tab.resumeResources!();
+      const afterResume = apiMock.sttLocalStatus.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(
+        apiMock.sttLocalStatus.mock.calls.length,
+        "the tab can be mounted with the window already up, and a resume that overwrites " +
+          "the live handle reads twice per tick",
+      ).toBe(afterResume + 1);
+
+      tab.releaseResources!();
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        apiMock.sttLocalStatus.mock.calls.length,
+        "and leaves an interval the release can no longer reach",
+      ).toBe(afterResume + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads nothing at all when it mounts into a dismissed window", async () => {
+    vi.useFakeTimers();
+    try {
+      apiMock.sttLocalStatus.mockResolvedValue(buildStatus());
+      const { renderModels } = await import("./models");
+      const container = document.createElement("div");
+      const tab = renderModels(container, buildSettings(), true);
+      cleanups.push(tab);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(
+        apiMock.sttLocalStatus,
+        "the mount's own read is away before any release can run, so a tab mounted into " +
+          "a window nobody can see still costs a request",
+      ).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(apiMock.sttLocalStatus).not.toHaveBeenCalled();
+
+      tab.resumeResources!();
+      expect(
+        apiMock.sttLocalStatus,
+        "and the show is what pays for it, once",
+      ).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("raises no second toast for a failure the user has already been shown", async () => {
+    vi.useFakeTimers();
+    try {
+      const container = await render(buildStatus({ last_error: "boom" }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(notifyErrorMock).toHaveBeenCalledTimes(1);
+      const [tab] = cleanups;
+
+      for (let reopen = 0; reopen < 3; reopen += 1) {
+        tab.releaseResources!();
+        tab.resumeResources!();
+        await vi.advanceTimersByTimeAsync(0);
+      }
+
+      expect(
+        notifyErrorMock,
+        "closing and re-opening Settings against a local engine that is still broken " +
+          "must not raise the same toast again on every re-open",
+      ).toHaveBeenCalledTimes(1);
+      expect(
+        badgeClass(container),
+        "while the badge still says the engine is broken",
+      ).toContain("status-indicator-badge--error");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

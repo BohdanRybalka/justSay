@@ -6,6 +6,7 @@ import {
 import { formatCoarseDuration } from "../../format";
 import { escapeHtml } from "../html";
 import { isStaleStatusResponse } from "../../stale-response";
+import type { TabLifecycle } from "../settings";
 
 const LANGUAGE_LABELS: Record<string, string> = {
   uk: "Ukrainian",
@@ -20,9 +21,15 @@ const LANGUAGE_LABELS: Record<string, string> = {
 };
 
 type Lang = "all" | "uk" | "en";
+
+/** What `body` currently holds. `placeholder` is the mount's "Loading...",
+ *  `failure` the error line a read that threw leaves behind; the other two are
+ *  the two shapes `renderBody` returns. */
+type PageBody = "placeholder" | "failure" | "empty" | "entries";
+
 const TOP_LIMIT = 10;
 
-export function renderWords(container: HTMLElement): () => void {
+export function renderWords(container: HTMLElement, windowHidden = false): TabLifecycle {
   container.innerHTML = `
     <h2 class="tab-title">Words</h2>
     <div id="words-body">
@@ -35,8 +42,7 @@ export function renderWords(container: HTMLElement): () => void {
   let cancelled = false;
   let topLang: Lang = "all";
   let topUnsupported = false;
-  let pageRendered = false;
-  let lastTotalEntries = -1;
+  let pageBody: PageBody = "placeholder";
 
   function isNotFound(e: unknown): boolean {
     const msg = (e as Error).message?.toLowerCase() ?? "";
@@ -63,68 +69,71 @@ export function renderWords(container: HTMLElement): () => void {
   }
 
   let latestStatsToken = 0;
-  let pageReadInFlight = false;
+  let latestPageToken = 0;
+  let inFlightPageToken: number | null = null;
 
-  /** The whole-page read, and the only writer of `body.innerHTML`,
-   *  `lastTotalEntries` and `pageRendered`. It re-reads both endpoints and then
-   *  writes all three, which the poll's generation counter does not cover: the
-   *  counter arbitrates the poll's own incremental repaints, and a tick that
-   *  started after this read could finish before it and then be overwritten by
-   *  the older answer.
-   *
-   *  It is closed by holding the ticks off instead of by giving this read a
-   *  token, because a superseded whole-page read cannot simply be discarded.
-   *  Dropping its write leaves `pageRendered` false while `lastTotalEntries` is
-   *  positive, which is the one combination `refreshStats` returns early on
-   *  forever — the empty-state text would stay on screen for the life of the
-   *  tab. A tick skipped while this runs loses nothing, because this read is
-   *  about to write everything that tick would have. */
+  /** Whether a whole-page read is running that may still paint. A read a
+   *  release or a newer read superseded is not one: its answer is dropped, so
+   *  the page is still waiting for somebody to write it. */
+  function pageReadIsLive(): boolean {
+    return inFlightPageToken !== null && inFlightPageToken === latestPageToken;
+  }
+
+  /** Whether the body shows no render of the data: the mount's placeholder, or
+   *  the error line a read that threw painted. The empty-history screen is a
+   *  render of the data and is not one of these. */
+  function pageIsStuck(): boolean {
+    return pageBody === "placeholder" || pageBody === "failure";
+  }
+
+  /** The whole-page read, and the only writer of `body.innerHTML` and
+   *  `pageBody`. It re-reads both endpoints, so only the newest read may write
+   *  either: a release or a later read disowns whatever an older one was about
+   *  to paint. */
   async function renderPage() {
-    pageReadInFlight = true;
+    const token = ++latestPageToken;
+    inFlightPageToken = token;
     try {
       const stats = await api.historyStats();
-      if (cancelled) return;
+      if (cancelled || isStaleStatusResponse(token, latestPageToken)) return;
       const top = await fetchTop();
-      if (cancelled) return;
-      lastTotalEntries = stats.total_entries;
+      if (cancelled || isStaleStatusResponse(token, latestPageToken)) return;
 
       body.innerHTML = renderBody(stats, top, topLang);
-      pageRendered = stats.total_entries > 0;
+      pageBody = stats.total_entries > 0 ? "entries" : "empty";
 
-      if (pageRendered) {
-        if (top) wireLangToggle();
-      }
+      if (pageBody === "entries" && top) wireLangToggle();
     } catch (e) {
-      if (cancelled) return;
+      if (cancelled || isStaleStatusResponse(token, latestPageToken)) return;
       body.innerHTML = `<div class="value" style="color:var(--red)">Failed to load: ${escapeHtml((e as Error).message)}</div>`;
-      pageRendered = false;
+      pageBody = "failure";
     } finally {
-      pageReadInFlight = false;
+      if (inFlightPageToken === token) inFlightPageToken = null;
     }
   }
 
   /** Same guard as the Models tab and both connection polls: this runs on a
-   *  5 s interval nothing awaits, and `historyStats` is bounded at 15 s rather
-   *  than unbounded now, so several probes overlap against a backend that has
-   *  gone quiet and the later-starting one can finish first. Only the newest
-   *  answer may write `lastTotalEntries` or repaint. */
+   *  5 s interval nothing awaits, and `historyStats` is bounded at 15 s, so
+   *  several probes overlap against a backend gone quiet and the later-starting
+   *  one can finish first. Only the newest answer may repaint, and a body that
+   *  is no render of the data is read whole rather than patched. */
   async function refreshStats() {
-    if (pageReadInFlight) return;
+    if (pageReadIsLive()) return;
+    if (pageIsStuck()) {
+      await renderPage();
+      return;
+    }
     const token = ++latestStatsToken;
     try {
       const stats = await api.historyStats();
       if (cancelled || isStaleStatusResponse(token, latestStatsToken)) return;
 
-      if (lastTotalEntries < 0) return;
-
-      const wasEmpty = lastTotalEntries === 0;
       const isEmpty = stats.total_entries === 0;
-      lastTotalEntries = stats.total_entries;
-      if (wasEmpty !== isEmpty) {
+      if (isEmpty !== (pageBody === "empty")) {
         await renderPage();
         return;
       }
-      if (isEmpty || !pageRendered) return;
+      if (isEmpty) return;
 
       const top = await fetchTop();
       if (cancelled || isStaleStatusResponse(token, latestStatsToken)) return;
@@ -182,13 +191,48 @@ export function renderWords(container: HTMLElement): () => void {
     });
   }
 
-  renderPage();
-  const poll = setInterval(refreshStats, 5000);
+  let poll: ReturnType<typeof setInterval> | null = null;
 
-  return () => {
-    cancelled = true;
-    clearInterval(poll);
-  };
+  /** Start the 5 s stats poll, or leave the running one alone — a second
+   *  interval over the same handle would be unstoppable. */
+  function startStatsPolling() {
+    if (poll !== null) return;
+    poll = setInterval(refreshStats, 5000);
+  }
+
+  /** Stop reading while the window is gone, and disown every read in flight —
+   *  the tick, which would otherwise chain into a whole-page read, and the page
+   *  read, which would otherwise fetch again and repaint. `cancelled` stays
+   *  false: it is what an unmounted tab sets, and a dismissed window's tab is
+   *  still mounted. */
+  function releaseResources() {
+    if (poll !== null) clearInterval(poll);
+    poll = null;
+    latestStatsToken += 1;
+    latestPageToken += 1;
+  }
+
+  /** Restart the poll and read once in this same tick, so a returning user
+   *  waits for neither. Which read that is — the figure patch or the whole
+   *  page — is the same decision every tick makes. */
+  function resumeResources() {
+    startStatsPolling();
+    void refreshStats();
+  }
+
+  if (!windowHidden) {
+    void renderPage();
+    startStatsPolling();
+  }
+
+  return {
+    destroy: () => {
+      cancelled = true;
+      releaseResources();
+    },
+    releaseResources,
+    resumeResources,
+  } satisfies TabLifecycle;
 }
 
 function renderBody(

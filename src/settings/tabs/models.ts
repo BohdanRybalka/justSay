@@ -3,7 +3,7 @@ import {
   type UserSettings,
   type LocalSTTStatus,
 } from "../../api";
-import { loadSettings } from "../settings";
+import { loadSettings, type TabLifecycle } from "../settings";
 import { displayableError, notifyError } from "../../notify";
 import { isStaleStatusResponse } from "../../stale-response";
 import {
@@ -15,7 +15,11 @@ import {
 
 let prevLastError: string | null = null;
 
-export function renderModels(container: HTMLElement, settings: UserSettings): () => void {
+export function renderModels(
+  container: HTMLElement,
+  settings: UserSettings,
+  windowHidden = false,
+): TabLifecycle {
   container.innerHTML = `
     <h2 class="tab-title">Models</h2>
 
@@ -62,14 +66,17 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
   let currentSttMode = settings.stt_mode;
   let latestSttStatusToken = 0;
 
-  function renderCurrentStt() {
+  /** Paint the panel the current mode calls for, and read the local engine's
+   *  status unless `read` is false — which is a window nobody can see, where
+   *  the answer would be fetched only to be thrown away. */
+  function renderCurrentStt(read = true) {
     if (currentSttMode === "cloud") {
       renderIndicator(sttLocalIndicator, "idle");
       sttPanel.innerHTML = "";
-    } else {
-      sttPanel.innerHTML = '<div class="setting-hint" id="stt-local-caption"></div>';
-      refreshSttStatus();
+      return;
     }
+    sttPanel.innerHTML = '<div class="setting-hint" id="stt-local-caption"></div>';
+    if (read) refreshSttStatus();
   }
 
   function applyLocalIndicator(
@@ -132,15 +139,44 @@ export function renderModels(container: HTMLElement, settings: UserSettings): ()
   sttCloud.addEventListener("click", () => switchStt("cloud"));
   sttLocal.addEventListener("click", () => switchStt("local"));
 
-  renderCurrentStt();
+  let pollInterval: ReturnType<typeof setInterval> | null = null;
 
-  const pollInterval = setInterval(() => {
-    if (currentSttMode === "local") refreshSttStatus();
-  }, 3000);
+  /** Start the 3 s status poll, or leave the running one alone — a second
+   *  interval over the same handle would be unstoppable. */
+  function startSttPolling() {
+    if (pollInterval !== null) return;
+    pollInterval = setInterval(() => {
+      if (currentSttMode === "local") refreshSttStatus();
+    }, 3000);
+  }
 
-  return () => {
-    clearInterval(pollInterval);
+  /** Stop reading the local engine while the window is gone, and disown the
+   *  read still in flight. The failure the badge was last drawn from is kept,
+   *  so a still-broken engine raises no fresh toast on every re-open. */
+  function releaseResources() {
+    if (pollInterval !== null) clearInterval(pollInterval);
+    pollInterval = null;
     latestSttStatusToken += 1;
-    prevLastError = null;
-  };
+  }
+
+  /** Restart the interval and read once in this same tick, so the badge a
+   *  returning user reads is one request old rather than one interval old.
+   *  `refreshSttStatus` mints its own token, and the release bumped the counter
+   *  past anything still in flight. */
+  function resumeResources() {
+    startSttPolling();
+    void refreshSttStatus();
+  }
+
+  renderCurrentStt(!windowHidden);
+  if (!windowHidden) startSttPolling();
+
+  return {
+    destroy: () => {
+      releaseResources();
+      prevLastError = null;
+    },
+    releaseResources,
+    resumeResources,
+  } satisfies TabLifecycle;
 }

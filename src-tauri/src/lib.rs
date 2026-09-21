@@ -72,15 +72,45 @@ fn set_meeting_recording(app: AppHandle, active: bool) {
     }
 }
 
+/// Show the settings window and announce it, so a tab that released what it
+/// held on the dismissal can take it back. Every path that shows that window
+/// calls this one, which is what makes the announcement complete (ADR 089).
+///
+/// A failed `show()` announces nothing: the page would otherwise resume its
+/// polling into a window the user cannot see.
+fn show_settings(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("settings") {
+        if let Err(e) = window.show() {
+            log::warn!("Showing the settings window failed, so nothing is announced: {}", e);
+            return;
+        }
+        let _ = window.set_focus();
+        let _ = app.emit("settings-shown", ());
+    }
+}
+
+/// Hide the settings window and announce it, so the tab on it lets go of what
+/// it is holding. Every path that hides that window calls this one, which is
+/// what makes the announcement complete (ADR 089).
+///
+/// A failed `hide()` announces nothing: the page would otherwise stop polling
+/// a window that is still on screen.
+fn hide_settings(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("settings") {
+        if let Err(e) = window.hide() {
+            log::warn!("Hiding the settings window failed, so nothing is announced: {}", e);
+            return;
+        }
+        let _ = app.emit("settings-hidden", ());
+    }
+}
+
 /// Bring the settings window up on the meeting disclosure. Called when the
 /// backend refuses to start a recording because it has not been acknowledged
 /// (docs/adr/040-recording-other-people-is-not-covered-by-zero-leak.md).
 #[tauri::command]
 fn show_settings_window(app: AppHandle) {
-    if let Some(window) = app.get_webview_window("settings") {
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
+    show_settings(&app);
 }
 
 #[tauri::command]
@@ -182,10 +212,7 @@ pub fn run() {
                         app_handle.exit(0);
                     }
                     "settings" => {
-                        if let Some(window) = app_handle.get_webview_window("settings") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        show_settings(&app_handle);
                     }
                     "meeting" => {
                         let _ = app_handle.emit("meeting-toggle", ());
@@ -199,10 +226,7 @@ pub fn run() {
                 settings.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
-                        if let Some(win) = settings_handle.get_webview_window("settings") {
-                            let _ = win.hide();
-                            let _ = settings_handle.emit("settings-hidden", ());
-                        }
+                        hide_settings(&settings_handle);
                     }
                 });
             }
