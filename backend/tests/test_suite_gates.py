@@ -20,9 +20,9 @@ import pytest
 _TESTS_DIR = Path(__file__).resolve().parent
 _LEDGER = _TESTS_DIR.parent.parent / "docs" / "test-name-audit.md"
 
-_BASELINE_FUNCTIONS = 1377
-_BASELINE_LINES = 38774
-_BASELINE_SHA = "8dea1c6b074b1badee461010950ff6700aeadc93"
+_BASELINE_FUNCTIONS = 1465
+_BASELINE_LINES = 41262
+_BASELINE_SHA = "e4e2f849cc1ac62faa4a13eb475e4f3a28a14afd"
 
 _FUNCTION_INTERVAL = 80
 _LINE_INTERVAL = 4000

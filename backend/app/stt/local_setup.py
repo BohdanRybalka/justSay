@@ -7,6 +7,7 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import NamedTuple
 
 from pydantic import BaseModel
 
@@ -71,6 +72,11 @@ _install_lock = asyncio.Lock()
 _prewarm_lock = asyncio.Lock()
 _prewarm_error: str | None = None
 
+_model_ram_mb: int | None = None
+
+_loads_in_flight = 0
+_loads_begun = 0
+
 _active_load: tuple[object, asyncio.Task] | None = None
 
 _READY_TIMEOUT = 300.0
@@ -109,8 +115,8 @@ class LocalSTTStatus(BaseModel):
 def check_status(stt_settings: STTSettings) -> LocalSTTStatus:
     """Check local STT readiness: package installed + load state + GPU + last error.
 
-    The provider cache is read for the loaded state exactly once, so
-    ``model_loaded`` and ``model_ram_mb`` cannot contradict each other.
+    ``model_ram_mb`` and ``last_error`` describe the provider ``model_loaded``
+    answers for, because only a load the cache still holds may write either.
     ``last_error`` is ``None`` or non-blank, whichever producer wrote it.
     """
     installed = _check_package_installed()
@@ -249,17 +255,22 @@ async def _run_get_model(provider) -> None:
     """Run one ``_get_model()`` attempt, swallowing and latching its failure.
 
     Runs as its own Task so it completes, and writes ``_prewarm_error``, even
-    when every watcher is cancelled; releases the provider the cache moved past.
+    when every watcher is cancelled; releases the provider the cache moved
+    past, whose outcome is dropped rather than published. Clears the model-RAM
+    figure for the load's duration and records what the load added.
     """
-    global _prewarm_error
+    _clear_model_ram_mb(provider)
+    census = _begin_load()
+    baseline_rss = _baseline_rss_bytes()
     try:
         await asyncio.to_thread(provider._get_model)
     except Exception as e:
-        _prewarm_error = latched_load_error(e)
+        _record_load_outcome(provider, latched_load_error(e), None)
     else:
-        _prewarm_error = None
+        _record_load_outcome(provider, None, _load_delta_mb(baseline_rss, census))
     finally:
-        if routing.peek_local_provider() is not provider:
+        _finish_load()
+        if not _load_speaks_for_the_cache(provider):
             try:
                 provider.cleanup()
             except Exception:
@@ -347,18 +358,126 @@ def _process_rss_bytes() -> int:
     return psutil.Process(os.getpid()).memory_info().rss
 
 
-def _estimate_model_ram_mb() -> int | None:
-    """Approximate the backend RSS-delta consumed by the loaded whisper model.
+def _read_rss_bytes_or_none() -> int | None:
+    """This process's resident set size in bytes, or ``None`` when it raises.
 
-    The current process RSS in MB, or `None` for the whisper.cpp-server kind,
-    whose model memory lives in a separate process's address space.
+    Logs the reason when it does. Only a load reads it, and a failed reading
+    ends that load's measurement, so a machine whose psutil is refused writes
+    one line per load attempt rather than one per status poll.
+    """
+    try:
+        return _process_rss_bytes()
+    except Exception:
+        log.warning("Could not read this process's RSS for the model-RAM figure", exc_info=True)
+        return None
+
+
+class _LoadCensus(NamedTuple):
+    """How many loads were running, and how many had ever begun, at one instant."""
+
+    in_flight: int
+    begun: int
+
+
+def _begin_load() -> _LoadCensus:
+    """Count a starting load in, and hand back the census its delta is judged against."""
+    global _loads_in_flight, _loads_begun
+    _loads_in_flight += 1
+    _loads_begun += 1
+    return _LoadCensus(_loads_in_flight, _loads_begun)
+
+
+def _finish_load() -> None:
+    """Count a finished load out, whatever its outcome."""
+    global _loads_in_flight
+    _loads_in_flight -= 1
+
+
+def _load_ran_alone(census: _LoadCensus) -> bool:
+    """Whether one load — this one — held the process across both its readings.
+
+    ``False`` when another load was already running when the baseline was
+    taken, and when one began before the second reading: that load's
+    allocations land inside this delta, which then describes neither model.
+    """
+    return census.in_flight == 1 and _loads_begun == census.begun
+
+
+def _baseline_rss_bytes() -> int | None:
+    """The reading a finished load's delta is measured against, or ``None``.
+
+    ``None`` without touching psutil for the whisper.cpp-server kind, whose
+    model memory lives in another process and whose figure is never published.
     """
     if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
         return None
-    try:
-        return _process_rss_bytes() // (1024 * 1024)
-    except Exception:
+    return _read_rss_bytes_or_none()
+
+
+def _load_delta_mb(baseline_rss: int | None, census: _LoadCensus) -> int | None:
+    """Whole megabytes of RSS the just-finished load added, or ``None``.
+
+    ``None`` when a reading failed, when another load shared the window so the
+    growth belongs to no single one of them, and when the delta does not reach
+    a whole megabyte: memory the allocator took back can make it so, and 0 MB
+    for a loaded model states something false where an absent figure does not.
+    """
+    if baseline_rss is None or not _load_ran_alone(census):
         return None
+    loaded_rss = _read_rss_bytes_or_none()
+    if loaded_rss is None:
+        return None
+    megabytes = (loaded_rss - baseline_rss) // (1024 * 1024)
+    if megabytes <= 0:
+        log.debug("The model load added no whole megabyte of RSS; publishing no figure")
+        return None
+    return megabytes
+
+
+def _load_speaks_for_the_cache(provider) -> bool:
+    """Whether a load may still write the state ``check_status`` publishes.
+
+    ``False`` once the cache has moved past ``provider``. The latched error and
+    the RAM figure both describe the provider ``is_model_loaded()`` answers
+    for, so one rule decides whether a load may write either.
+    """
+    return routing.peek_local_provider() is provider
+
+
+def _record_load_outcome(provider, error: str | None, megabytes: int | None) -> None:
+    """Publish a finished load's latched error and RAM figure together.
+
+    Writes neither once the cache has moved past ``provider``: such a load may
+    neither raise its own failure against the current provider nor un-write
+    the failure that provider latched for itself.
+    """
+    global _model_ram_mb, _prewarm_error
+    if not _load_speaks_for_the_cache(provider):
+        return
+    _prewarm_error = error
+    _model_ram_mb = megabytes
+
+
+def _clear_model_ram_mb(provider) -> None:
+    """Drop the figure a starting load is about to replace, error latch aside.
+
+    Drops nothing once the cache has moved past ``provider``.
+    """
+    global _model_ram_mb
+    if _load_speaks_for_the_cache(provider):
+        _model_ram_mb = None
+
+
+def _estimate_model_ram_mb() -> int | None:
+    """The RSS in MB that the last successful model load added, or ``None``.
+
+    ``None`` for the whisper.cpp-server kind, whose model memory lives in a
+    separate process's address space, and ``None`` whenever no load has a
+    number of its own to publish. Reads stored state only.
+    """
+    if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
+        return None
+    return _model_ram_mb
 
 
 def psutil_selftest() -> tuple[bool, str]:
