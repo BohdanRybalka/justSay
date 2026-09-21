@@ -54,9 +54,9 @@ from app.core.errors import (
     NotReadyError,
     ResourceUnavailableError,
 )
+from tests.app_modules import APP_DIR, app_modules
 
 _ERRORS_SOURCE = Path(errors.__file__)
-_APP_DIR = Path(__file__).resolve().parents[1] / "app"
 _DELIBERATELY_OUTSIDE_THE_HIERARCHY = frozenset(
     {"app.audio.analysis.MalformedCaptureBlockError"}
 )
@@ -272,7 +272,7 @@ def _module_and_package(path: Path) -> tuple[str, str]:
     The package is what a relative import counts back from, and for a package
     `__init__` that is the package itself.
     """
-    parts = path.relative_to(_APP_DIR.parent).with_suffix("").parts
+    parts = path.relative_to(APP_DIR.parent).with_suffix("").parts
     if parts[-1] == "__init__":
         return ".".join(parts[:-1]), ".".join(parts[:-1])
     return ".".join(parts), ".".join(parts[:-1])
@@ -349,12 +349,12 @@ def _declared_classes_in(source: str, module: str, package: str) -> dict[str, li
 def _module_level_classes() -> dict[str, list[str]]:
     """Every class `backend/app/` declares at module level, by its bases.
 
-    Cached because `backend/app/` is rglob'd and parsed in full to build it,
-    and four tests in this module ask for it. Every caller reads and none
-    writes, which is what makes one shared answer safe to hand out.
+    Cached because every module under `backend/app/` is parsed in full to
+    build it, and four tests in this module ask for it. Every caller reads and
+    none writes, which is what makes one shared answer safe to hand out.
     """
     declarations: dict[str, list[str]] = {}
-    for path in sorted(_APP_DIR.rglob("*.py")):
+    for _, path in app_modules():
         module, package = _module_and_package(path)
         declarations.update(
             _declared_classes_in(path.read_text(encoding="utf-8"), module, package)
@@ -466,11 +466,11 @@ def test_a_class_in_a_package_init_is_named_the_way_the_runtime_names_it() -> No
     the hierarchy as a permanent stray -- and one that did leave it as
     accounted for.
     """
-    assert _module_and_package(_APP_DIR / "audio" / "__init__.py") == (
+    assert _module_and_package(APP_DIR / "audio" / "__init__.py") == (
         "app.audio",
         "app.audio",
     )
-    assert _module_and_package(_APP_DIR / "audio" / "analysis.py") == (
+    assert _module_and_package(APP_DIR / "audio" / "analysis.py") == (
         "app.audio.analysis",
         "app.audio",
     )

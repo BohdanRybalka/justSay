@@ -34,9 +34,8 @@ reset that works by attribute name, so it fails rather than passing silently.
 import ast
 from pathlib import Path
 
+from tests.app_modules import APP_DIR, app_modules
 from tests.conftest import EVENT_LOOP_BOUND_LOCKS
-
-_APP_DIR = Path(__file__).parent.parent / "app"
 
 _LOOP_BOUND_TYPES = frozenset(
     {
@@ -57,7 +56,7 @@ _NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambd
 
 
 def _module_path(path: Path) -> str:
-    relative = path.relative_to(_APP_DIR.parent).with_suffix("")
+    relative = path.relative_to(APP_DIR.parent).with_suffix("")
     parts = list(relative.parts)
     if parts[-1] == "__init__":
         parts.pop()
@@ -170,7 +169,7 @@ def _module_level_primitives(tree: ast.Module) -> tuple[dict[str, str], list[int
 def _scan_app() -> tuple[dict[tuple[str, str], str], dict[str, list[int]]]:
     found: dict[tuple[str, str], str] = {}
     unresettable: dict[str, list[int]] = {}
-    for path in sorted(_APP_DIR.rglob("*.py")):
+    for _, path in app_modules():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         module = _module_path(path)
         bound, loose = _module_level_primitives(tree)

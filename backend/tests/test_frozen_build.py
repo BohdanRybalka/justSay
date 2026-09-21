@@ -4,13 +4,11 @@ when a second module derives the PyInstaller bootloader flag (ADR 090).
 
 import ast
 import sys
-from pathlib import Path
 
 import pytest
 
 from app.core.frozen_build import is_frozen_build
-
-_APP_DIR = Path(__file__).resolve().parent.parent / "app"
+from tests.app_modules import APP_DIR, app_modules
 
 _PRIMITIVE_MODULE = "core/frozen_build.py"
 _FORCE_DEV_MODULE = "core/app_paths.py"
@@ -54,8 +52,8 @@ def test_forcing_the_dev_data_dir_does_not_make_a_packaged_build_a_checkout(monk
 def _app_module_trees() -> tuple[tuple[str, ast.Module], ...]:
     """Every module under `backend/app` as (relative posix path, parsed tree)."""
     return tuple(
-        (path.relative_to(_APP_DIR).as_posix(), ast.parse(path.read_text(encoding="utf-8")))
-        for path in sorted(_APP_DIR.rglob("*.py"))
+        (relative, ast.parse(path.read_text(encoding="utf-8")))
+        for relative, path in app_modules()
     )
 
 
@@ -119,7 +117,7 @@ def test_one_module_alone_derives_the_bootloader_flag():
     derivations = sorted(module for module, tree in trees if _derives_the_bootloader_flag(tree))
     offenders = [module for module in derivations if module != _PRIMITIVE_MODULE]
 
-    assert trees, f"the walk found no module under {_APP_DIR} to read"
+    assert trees, f"the walk found no module under {APP_DIR} to read"
     assert derivations == [_PRIMITIVE_MODULE], (
         "the packaged-build question has one answer; call "
         f"app.core.frozen_build.is_frozen_build() instead of deriving it in: {offenders}"
@@ -134,7 +132,7 @@ def test_one_module_alone_names_the_force_dev_flag():
     trees = _app_module_trees()
     readers = sorted(module for module, tree in trees if _names_the_force_dev_flag(tree))
 
-    assert trees, f"the walk found no module under {_APP_DIR} to read"
+    assert trees, f"the walk found no module under {APP_DIR} to read"
     assert readers == [_FORCE_DEV_MODULE], (
         f"{_FORCE_DEV_FLAG} belongs to the one reader that pairs it with frozen-ness: {readers}"
     )
