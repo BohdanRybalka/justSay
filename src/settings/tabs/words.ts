@@ -21,6 +21,12 @@ const LANGUAGE_LABELS: Record<string, string> = {
 };
 
 type Lang = "all" | "uk" | "en";
+
+/** What `body` currently holds. `placeholder` is the mount's "Loading...",
+ *  `failure` the error line a read that threw leaves behind; the other two are
+ *  the two shapes `renderBody` returns. */
+type PageBody = "placeholder" | "failure" | "empty" | "entries";
+
 const TOP_LIMIT = 10;
 
 export function renderWords(container: HTMLElement, windowHidden = false): TabLifecycle {
@@ -36,8 +42,7 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
   let cancelled = false;
   let topLang: Lang = "all";
   let topUnsupported = false;
-  let pageRendered = false;
-  let lastTotalEntries = -1;
+  let pageBody: PageBody = "placeholder";
 
   function isNotFound(e: unknown): boolean {
     const msg = (e as Error).message?.toLowerCase() ?? "";
@@ -74,17 +79,17 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
     return inFlightPageToken !== null && inFlightPageToken === latestPageToken;
   }
 
-  /** Whether the page sits on a state no later tick can leave: a read that
-   *  never landed, or one that threw after the entry count had moved off zero.
-   *  `refreshStats` returns early on both for the life of the mount. */
+  /** Whether the body holds a screen no later tick can leave: the mount's
+   *  placeholder, or the error line a read that threw painted. `refreshStats`
+   *  patches figures into an existing render, so it repairs neither. */
   function pageIsStuck(): boolean {
-    return lastTotalEntries < 0 || (lastTotalEntries > 0 && !pageRendered);
+    return pageBody === "placeholder" || pageBody === "failure";
   }
 
-  /** The whole-page read, and the only writer of `body.innerHTML`,
-   *  `lastTotalEntries` and `pageRendered`. It re-reads both endpoints, so only
-   *  the newest read may write all three: a release or a later read disowns
-   *  whatever an older one was about to paint. */
+  /** The whole-page read, and the only writer of `body.innerHTML` and
+   *  `pageBody`. It re-reads both endpoints, so only the newest read may write
+   *  either: a release or a later read disowns whatever an older one was about
+   *  to paint. */
   async function renderPage() {
     const token = ++latestPageToken;
     inFlightPageToken = token;
@@ -93,18 +98,15 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
       if (cancelled || isStaleStatusResponse(token, latestPageToken)) return;
       const top = await fetchTop();
       if (cancelled || isStaleStatusResponse(token, latestPageToken)) return;
-      lastTotalEntries = stats.total_entries;
 
       body.innerHTML = renderBody(stats, top, topLang);
-      pageRendered = stats.total_entries > 0;
+      pageBody = stats.total_entries > 0 ? "entries" : "empty";
 
-      if (pageRendered) {
-        if (top) wireLangToggle();
-      }
+      if (pageBody === "entries" && top) wireLangToggle();
     } catch (e) {
       if (cancelled || isStaleStatusResponse(token, latestPageToken)) return;
       body.innerHTML = `<div class="value" style="color:var(--red)">Failed to load: ${escapeHtml((e as Error).message)}</div>`;
-      pageRendered = false;
+      pageBody = "failure";
     } finally {
       if (inFlightPageToken === token) inFlightPageToken = null;
     }
@@ -114,24 +116,20 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
    *  5 s interval nothing awaits, and `historyStats` is bounded at 15 s rather
    *  than unbounded now, so several probes overlap against a backend that has
    *  gone quiet and the later-starting one can finish first. Only the newest
-   *  answer may write `lastTotalEntries` or repaint. */
+   *  answer may repaint, and a stuck body is the whole-page read's to repair. */
   async function refreshStats() {
-    if (pageReadIsLive()) return;
+    if (pageReadIsLive() || pageIsStuck()) return;
     const token = ++latestStatsToken;
     try {
       const stats = await api.historyStats();
       if (cancelled || isStaleStatusResponse(token, latestStatsToken)) return;
 
-      if (lastTotalEntries < 0) return;
-
-      const wasEmpty = lastTotalEntries === 0;
       const isEmpty = stats.total_entries === 0;
-      lastTotalEntries = stats.total_entries;
-      if (wasEmpty !== isEmpty) {
+      if (isEmpty !== (pageBody === "empty")) {
         await renderPage();
         return;
       }
-      if (isEmpty || !pageRendered) return;
+      if (isEmpty) return;
 
       const top = await fetchTop();
       if (cancelled || isStaleStatusResponse(token, latestStatsToken)) return;

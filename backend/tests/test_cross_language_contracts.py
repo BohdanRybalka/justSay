@@ -728,8 +728,8 @@ def test_every_settings_show_site_announces_it() -> None:
 
     Mutation-checked: restoring the window resolution and ``show()`` inline in
     the tray menu arm reports ``run`` in the enclosing set, and deleting the
-    ``emit`` from the helper fails the last assertion with every other one
-    still passing.
+    ``emit`` from the helper reddens two tests — the emit assertion here and
+    the event-name pin in this module — with every other assertion passing.
     """
     _assert_one_lib_helper_owns_the_settings_window(
         "show", "show_settings", "settings-shown", ("widget_ready",)
@@ -783,8 +783,8 @@ def _assert_only_one_fn_reaches_the_settings_window(verb: str, helper: str, even
     )
     assert sorted(reaching) == [helper], (
         f"only the helper that emits '{event}' may {verb} the settings window, or the page "
-        "goes on drawing a window state that never happened (ADR 089); it is "
-        f"{verb}n from {sorted(reaching.items())}"
+        "goes on drawing a window state that never happened (ADR 089); "
+        f".{verb}() is called from {sorted(reaching.items())}"
     )
 
 

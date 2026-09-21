@@ -262,6 +262,44 @@ describe("the Words tab after the Settings window is dismissed", () => {
     container.remove();
   });
 
+  it("repairs a page whose chained read failed after the entries went away", async () => {
+    apiMock.historyStats.mockResolvedValueOnce(buildStats({ total_entries: 5 }));
+    apiMock.historyStats.mockResolvedValueOnce(buildStats({ total_entries: 0 }));
+    apiMock.historyStats.mockRejectedValueOnce(new Error("the backend went away"));
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.getElementById("words-stat-entries")).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(container.textContent).toContain("Failed to load");
+
+    const spentByTheFailure = apiMock.historyStats.mock.calls.length;
+    apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 9, total_words: 4321 }));
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(
+      apiMock.historyStats.mock.calls.length,
+      "a tick cannot repaint a body holding an error line, so spending a request on one " +
+        "buys the user nothing and costs a backend that is already struggling",
+    ).toBe(spentByTheFailure);
+
+    tab.releaseResources!();
+    tab.resumeResources!();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      document.getElementById("words-stat-lifetime")?.textContent,
+      "a read that threw with the entry count back at zero is indistinguishable from the " +
+        "empty screen unless the page records which of the two it painted",
+    ).toBe((4321).toLocaleString("uk-UA"));
+
+    tab.destroy();
+    container.remove();
+  });
+
   it("issues no follow-up request for a page read the dismissal caught in flight", async () => {
     let settlePage: (stats: HistoryStats) => void = () => {};
     apiMock.historyStats.mockImplementation(
