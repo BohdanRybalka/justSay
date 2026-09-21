@@ -361,7 +361,7 @@ def _snapshot_real_roots(real_roots) -> dict:
 
 
 class RealAppDataRootChangedError(AssertionError):
-    """Raised by the session backstop, never from a test body."""
+    """A real app-data root changed while the test session was running."""
 
 
 def _real_root_change_report(before: dict, after: dict) -> str | None:
@@ -383,18 +383,11 @@ def _real_root_change_report(before: dict, after: dict) -> str | None:
 
 @pytest.fixture(scope="session", autouse=True)
 def _snapshot_real_roots_backstop(_real_app_data_roots):
-    """Session-scoped: records both real roots' state before the first test
-    and fails if anything changed after the last one -- the net under AC 5a/5b's
-    net, catching a leak through a mechanism nobody enumerated.
+    """Snapshots both real app-data roots before the first test and fails if
+    either changed after the last one.
 
-    It is reported against whichever test ran last, which is not the cause;
-    `RealAppDataRootChangedError` carries that in the exception type, which a
-    truncated summary line still shows.
-
-    It observes the filesystem rather than this process, so anything else
-    writing to a real root during the session reads the same as a leak: two
-    pytest sessions on one machine both initialise logging into the shared dev
-    root, and a dev backend appends to its `backend.log` under it.
+    Reported against whichever test ran last, which is not the cause;
+    `RealAppDataRootChangedError` carries that in the exception type.
     """
     before = _snapshot_real_roots(_real_app_data_roots)
     yield

@@ -288,7 +288,12 @@ def test_the_backstop_raises_its_own_type_rather_than_a_bare_assertion(tmp_path)
     is cut at the terminal width."""
     fake_real_root = tmp_path / "fake-real-root-12"
     fake_real_root.mkdir()
-    backstop = _snapshot_real_roots_backstop.__wrapped__([fake_real_root])
+    undecorated = getattr(_snapshot_real_roots_backstop, "__wrapped__", None)
+    assert undecorated is not None, (
+        "pytest stopped exposing a fixture's undecorated function as __wrapped__; "
+        "this test drives the backstop through it and has to be rewritten"
+    )
+    backstop = undecorated([fake_real_root])
     next(backstop)
     (fake_real_root / "leaked.json").write_bytes(b"{}")
 
