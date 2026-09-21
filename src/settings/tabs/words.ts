@@ -79,9 +79,9 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
     return inFlightPageToken !== null && inFlightPageToken === latestPageToken;
   }
 
-  /** Whether the body holds nothing a tick could patch: the mount's
-   *  placeholder, or the error line a read that threw painted. Both are
-   *  replaced by reading the whole page, never by patching figures into it. */
+  /** Whether the body shows no render of the data: the mount's placeholder, or
+   *  the error line a read that threw painted. The empty-history screen is a
+   *  render of the data and is not one of these. */
   function pageIsStuck(): boolean {
     return pageBody === "placeholder" || pageBody === "failure";
   }
@@ -113,11 +113,10 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
   }
 
   /** Same guard as the Models tab and both connection polls: this runs on a
-   *  5 s interval nothing awaits, and `historyStats` is bounded at 15 s rather
-   *  than unbounded now, so several probes overlap against a backend that has
-   *  gone quiet and the later-starting one can finish first. Only the newest
-   *  answer may repaint. A body with nothing to patch is read whole instead,
-   *  so a backend that comes back repairs the screen without the user acting. */
+   *  5 s interval nothing awaits, and `historyStats` is bounded at 15 s, so
+   *  several probes overlap against a backend gone quiet and the later-starting
+   *  one can finish first. Only the newest answer may repaint, and a body that
+   *  is no render of the data is read whole rather than patched. */
   async function refreshStats() {
     if (pageReadIsLive()) return;
     if (pageIsStuck()) {
