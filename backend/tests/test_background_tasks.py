@@ -8,11 +8,11 @@ import ast
 import asyncio
 import logging
 import threading
-from pathlib import Path
 
 import pytest
 
 from app.core import tasks
+from tests.app_modules import APP_DIR, app_modules
 
 
 @pytest.mark.asyncio
@@ -521,7 +521,6 @@ async def test_lifespan_cancels_the_active_load_with_no_registered_task(teardown
 
 
 
-_APP_DIR = Path(__file__).resolve().parent.parent / "app"
 _DEFINER = "core/tasks.py"
 _MARKER = "# background-task-ok:"
 
@@ -555,8 +554,7 @@ def _find_unmarked_create_task_calls(source: str, label: str) -> list[str]:
 
 def _scan_app_dir() -> list[str]:
     findings: list[str] = []
-    for path in _APP_DIR.rglob("*.py"):
-        label = str(path.relative_to(_APP_DIR)).replace("\\", "/")
+    for label, path in app_modules():
         if label == _DEFINER:
             continue
         source = path.read_text(encoding="utf-8")
@@ -628,7 +626,7 @@ def test_scanner_ignores_docstring_mention_in_vector_store():
     """AC 11: `transcripts/vector_store.py`'s docstring mentions
     `asyncio.create_task` in prose -- an AST walk must not treat that as a
     call."""
-    path = _APP_DIR / "transcripts" / "vector_store.py"
+    path = APP_DIR / "transcripts" / "vector_store.py"
     source = path.read_text(encoding="utf-8")
     findings = _find_unmarked_create_task_calls(source, "transcripts/vector_store.py")
     assert findings == []
