@@ -42,10 +42,8 @@ _INSTALL_UNSUPPORTED_WHEN_FROZEN = (
 
 
 def _local_packages_cannot_be_installed() -> bool:
-    """``True`` when this build has no interpreter a pip install could run under.
-
-    ``True`` exactly in a PyInstaller bundle, whose ``sys.executable`` is the
-    sidecar rather than Python.
+    """``True`` when this build has no interpreter a pip install could run under,
+    which is exactly a PyInstaller bundle.
     """
     return is_frozen_build()
 

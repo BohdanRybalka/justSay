@@ -1,10 +1,5 @@
-"""Tests for `app.core.frozen_build.is_frozen_build` -- the one derivation of the
-PyInstaller bootloader flag, and the walk that reddens when a second one appears
-(docs/adr/090-one-answer-to-whether-this-is-a-packaged-build.md).
-
-Mirrors test_app_paths.py's monkeypatch.setattr(sys, "frozen", ...) /
-monkeypatch.delattr(sys, "frozen", raising=False) conventions for simulating the
-bootloader flag, which no test in this repository can set for real.
+"""Tests for `app.core.frozen_build.is_frozen_build` and for the walk that reddens
+when a second module derives the PyInstaller bootloader flag (ADR 090).
 """
 
 import ast
@@ -18,13 +13,13 @@ from app.core.frozen_build import is_frozen_build
 _APP_DIR = Path(__file__).resolve().parent.parent / "app"
 
 _PRIMITIVE_MODULE = "core/frozen_build.py"
+_FORCE_DEV_MODULE = "core/app_paths.py"
+_FORCE_DEV_FLAG = "JUSTSAY_FORCE_DEV_DATA_DIR"
 
 
 @pytest.fixture(autouse=True)
 def _no_bootloader_flag(monkeypatch):
     monkeypatch.delattr(sys, "frozen", raising=False)
-
-
 
 
 def test_frozen_attribute_set_reports_a_packaged_build(monkeypatch):
@@ -33,12 +28,8 @@ def test_frozen_attribute_set_reports_a_packaged_build(monkeypatch):
     assert is_frozen_build() is True
 
 
-
-
 def test_absent_frozen_attribute_reports_a_source_checkout():
     assert is_frozen_build() is False
-
-
 
 
 def test_falsy_frozen_attribute_reports_a_source_checkout(monkeypatch):
@@ -47,23 +38,17 @@ def test_falsy_frozen_attribute_reports_a_source_checkout(monkeypatch):
     assert is_frozen_build() is False
 
 
-
-
 def test_truthy_non_boolean_frozen_attribute_is_narrowed_to_a_bool(monkeypatch):
     monkeypatch.setattr(sys, "frozen", "console_exe", raising=False)
 
     assert is_frozen_build() is True
 
 
-
-
 def test_forcing_the_dev_data_dir_does_not_make_a_packaged_build_a_checkout(monkeypatch):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setenv("JUSTSAY_FORCE_DEV_DATA_DIR", "1")
+    monkeypatch.setenv(_FORCE_DEV_FLAG, "1")
 
     assert is_frozen_build() is True
-
-
 
 
 def _app_module_trees() -> tuple[tuple[str, ast.Module], ...]:
@@ -71,15 +56,15 @@ def _app_module_trees() -> tuple[tuple[str, ast.Module], ...]:
     return tuple(
         (path.relative_to(_APP_DIR).as_posix(), ast.parse(path.read_text(encoding="utf-8")))
         for path in sorted(_APP_DIR.rglob("*.py"))
-        if "__pycache__" not in path.parts
     )
 
 
 def _derives_the_bootloader_flag(tree: ast.Module) -> bool:
-    """Whether a module reads `sys.frozen` itself, by getattr or by attribute access.
+    """Whether a module reads `sys.frozen` itself, by attribute, `getattr` or `hasattr`.
 
     Walks the syntax tree rather than the text, so a docstring naming the flag in
-    prose is not a derivation.
+    prose is not a derivation. An aliased import or a computed attribute name
+    passes unseen.
     """
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "frozen":
@@ -87,7 +72,7 @@ def _derives_the_bootloader_flag(tree: ast.Module) -> bool:
                 return True
         if not isinstance(node, ast.Call):
             continue
-        if not (isinstance(node.func, ast.Name) and node.func.id == "getattr"):
+        if not (isinstance(node.func, ast.Name) and node.func.id in ("getattr", "hasattr")):
             continue
         if len(node.args) < 2:
             continue
@@ -99,12 +84,57 @@ def _derives_the_bootloader_flag(tree: ast.Module) -> bool:
     return False
 
 
+def _names_the_force_dev_flag(tree: ast.Module) -> bool:
+    """Whether a module spells the force-dev environment variable anywhere at all."""
+    return any(
+        isinstance(node, ast.Constant) and node.value == _FORCE_DEV_FLAG
+        for node in ast.walk(tree)
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "if sys.frozen: pass",
+        'x = getattr(sys, "frozen", False)',
+        'x = hasattr(sys, "frozen")',
+    ],
+)
+def test_every_spelling_the_walk_claims_to_see_is_seen(source):
+    """Each branch of the detector, exercised on its own spelling.
+
+    No module under `backend/app` writes the bare-attribute or `hasattr` forms, so
+    the real-tree walk below leaves both branches unrun."""
+    assert _derives_the_bootloader_flag(ast.parse(source)) is True
+
+
+def test_naming_the_flag_in_prose_is_not_a_derivation():
+    source = '"""Reads sys.frozen and the frozen attribute of sys."""'
+
+    assert _derives_the_bootloader_flag(ast.parse(source)) is False
+
+
 def test_one_module_alone_derives_the_bootloader_flag():
     trees = _app_module_trees()
     derivations = sorted(module for module, tree in trees if _derives_the_bootloader_flag(tree))
+    offenders = [module for module in derivations if module != _PRIMITIVE_MODULE]
 
-    assert trees
+    assert trees, f"the walk found no module under {_APP_DIR} to read"
     assert derivations == [_PRIMITIVE_MODULE], (
         "the packaged-build question has one answer; call "
-        f"app.core.frozen_build.is_frozen_build() instead: {derivations}"
+        f"app.core.frozen_build.is_frozen_build() instead of deriving it in: {offenders}"
+    )
+
+
+def test_one_module_alone_names_the_force_dev_flag():
+    """The flag pairs with frozen-ness in one reader; the primitive must stay free of it.
+
+    Folding it into `is_frozen_build()` would make a packaged build with the flag set
+    claim it has an interpreter to pip into."""
+    trees = _app_module_trees()
+    readers = sorted(module for module, tree in trees if _names_the_force_dev_flag(tree))
+
+    assert trees, f"the walk found no module under {_APP_DIR} to read"
+    assert readers == [_FORCE_DEV_MODULE], (
+        f"{_FORCE_DEV_FLAG} belongs to the one reader that pairs it with frozen-ness: {readers}"
     )

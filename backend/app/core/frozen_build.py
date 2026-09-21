@@ -1,7 +1,6 @@
 """Whether this process is a PyInstaller bundle rather than a source checkout.
 
-The flag is read at call time, so a test that sets or deletes it on `sys` is
-seen by every caller (ADR 090).
+The flag is read at call time, never captured at import (ADR 090).
 """
 
 import sys
