@@ -27,6 +27,7 @@ function buildStats(overrides: Partial<HistoryStats> = {}): HistoryStats {
 }
 
 const noTopWords: TopWordsResponse = { items: [], scanned: 0 };
+const oneTopWord: TopWordsResponse = { items: [{ word: "widget", count: 2 }], scanned: 4 };
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -482,6 +483,175 @@ describe("the Words tab while the Settings window stays open", () => {
       "the whole-page read is the tick's answer in full, so a stats read behind it is a " +
         "second round trip for a page already painted",
     ).toBe(spentByTheFailedMount + 1);
+
+    tab.destroy();
+    container.remove();
+  });
+
+  it("keeps the top-words panel on screen when its own read failed, and fills it next tick", async () => {
+    apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 4 }));
+    apiMock.wordsTop.mockRejectedValueOnce(new Error("HTTP 503 Service Unavailable"));
+    apiMock.wordsTop.mockResolvedValue(oneTopWord);
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      document.getElementById("words-top"),
+      "one read that timed out is not the endpoint being gone, and a panel taken off the " +
+        "screen for it never comes back: every later tick writes into a container that " +
+        "is no longer there",
+    ).not.toBeNull();
+    expect(
+      document.getElementById("words-top")!.textContent,
+      "an empty list and a list that could not be read are different statements",
+    ).not.toContain("No words yet");
+    expect(document.getElementById("words-top")!.textContent).toContain("could not be read");
+
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(document.getElementById("words-top")!.textContent).toContain("widget");
+
+    tab.destroy();
+    container.remove();
+  });
+
+  it("omits the top-words panel when the endpoint answers 404, and asks no second time", async () => {
+    apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 4 }));
+    apiMock.wordsTop.mockRejectedValue(new Error("HTTP 404 Not Found"));
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      document.getElementById("words-top"),
+      "a backend with no such endpoint has no list to show and never will, so the panel " +
+        "is the one thing a 404 does remove",
+    ).toBeNull();
+    expect(container.textContent).not.toContain("Top words");
+    expect(document.getElementById("words-stat-entries")).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(apiMock.wordsTop).toHaveBeenCalledTimes(1);
+    expect(document.getElementById("words-top")).toBeNull();
+
+    tab.destroy();
+    container.remove();
+  });
+
+  it("takes the top-words panel away when the endpoint starts answering 404", async () => {
+    apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 4 }));
+    apiMock.wordsTop.mockResolvedValueOnce(oneTopWord);
+    apiMock.wordsTop.mockRejectedValue(new Error("HTTP 404 Not Found"));
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.getElementById("words-top")!.textContent).toContain("widget");
+
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      document.getElementById("words-top"),
+      "the endpoint answering 404 mid-session is the same backend as one that answered it " +
+        "at the mount, and leaving the list up says it is still being read",
+    ).toBeNull();
+    expect(container.textContent).not.toContain("widget");
+
+    tab.destroy();
+    container.remove();
+  });
+
+  it("switches language from a top-words panel that mounted with no data in it", async () => {
+    apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 4 }));
+    apiMock.wordsTop.mockRejectedValueOnce(new Error("HTTP 503 Service Unavailable"));
+    apiMock.wordsTop.mockResolvedValue(oneTopWord);
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const toggle = document.getElementById("words-lang-toggle");
+    expect(
+      toggle,
+      "the panel is on screen, so the control that re-reads it has to be live — a filter " +
+        "nothing listens to is the one thing a user reaches for when a list is missing",
+    ).not.toBeNull();
+
+    const uk = toggle!.querySelector<HTMLButtonElement>('button[data-lang="uk"]')!;
+    uk.click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(apiMock.wordsTop).toHaveBeenLastCalledWith("uk", 10);
+    expect(document.getElementById("words-top")!.textContent).toContain("widget");
+    expect(uk.classList.contains("active")).toBe(true);
+
+    tab.destroy();
+    container.remove();
+  });
+
+  it("drops a language read the user's next click already replaced", async () => {
+    apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 4 }));
+    const settle: Array<(top: TopWordsResponse) => void> = [];
+    apiMock.wordsTop.mockResolvedValueOnce(noTopWords);
+    apiMock.wordsTop.mockImplementation(
+      () => new Promise<TopWordsResponse>((resolve) => settle.push(resolve)),
+    );
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const toggle = document.getElementById("words-lang-toggle")!;
+    toggle.querySelector<HTMLButtonElement>('button[data-lang="uk"]')!.click();
+    toggle.querySelector<HTMLButtonElement>('button[data-lang="en"]')!.click();
+    expect(settle).toHaveLength(2);
+
+    settle[1]({ items: [{ word: "english", count: 9 }], scanned: 4 });
+    await vi.advanceTimersByTimeAsync(0);
+    settle[0]({ items: [{ word: "ukrainian", count: 1 }], scanned: 4 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      document.getElementById("words-top")!.textContent,
+      "the filter the user last pressed is the one lit up, so an earlier read landing " +
+        "after it puts a list on screen under the name of another language",
+    ).not.toContain("ukrainian");
+    expect(document.getElementById("words-top")!.textContent).toContain("english");
+
+    tab.destroy();
+    container.remove();
+  });
+
+  it("re-reads the page once for a missing panel, not once for every failed read", async () => {
+    apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 4 }));
+    apiMock.wordsTop.mockRejectedValue(new Error("HTTP 503 Service Unavailable"));
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+    const afterMount = apiMock.historyStats.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(
+      apiMock.historyStats.mock.calls.length,
+      "a read that keeps failing must cost one request per tick: a panel repaired by " +
+        "re-reading the whole page turns a flaky endpoint into a render on every tick",
+    ).toBe(afterMount + 12);
+    expect(document.getElementById("words-top")!.textContent).toContain("could not be read");
 
     tab.destroy();
     container.remove();
