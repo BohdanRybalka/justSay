@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryStats, TopWordsResponse } from "../../api";
+import { ApiRequestError, type HistoryStats, type TopWordsResponse } from "../../api";
 
 const { apiMock } = vi.hoisted(() => ({
   apiMock: { historyStats: vi.fn(), wordsTop: vi.fn() },
@@ -634,7 +634,7 @@ describe("the Words tab while the Settings window stays open", () => {
     container.remove();
   });
 
-  it("re-reads the page once for a missing panel, not once for every failed read", async () => {
+  it("keeps the panel on screen through a failing read without re-reading the page", async () => {
     apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 4 }));
     apiMock.wordsTop.mockRejectedValue(new Error("HTTP 503 Service Unavailable"));
 
@@ -673,6 +673,70 @@ describe("the Words tab while the Settings window stays open", () => {
       "an empty screen carries no figures to patch and no top-words list to fill, so a " +
         "request for one costs a round trip every five seconds and changes nothing",
     ).toHaveBeenCalledTimes(1);
+
+    tab.destroy();
+    container.remove();
+  });
+  it("drops a poll's language read the user's click already replaced", async () => {
+    apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 4 }));
+    const settle: Array<(top: TopWordsResponse) => void> = [];
+    apiMock.wordsTop.mockResolvedValueOnce(oneTopWord);
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+
+    apiMock.wordsTop.mockImplementation(
+      () => new Promise<TopWordsResponse>((resolve) => settle.push(resolve)),
+    );
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(settle).toHaveLength(1);
+
+    const toggle = document.getElementById("words-lang-toggle")!;
+    toggle.querySelector<HTMLButtonElement>('button[data-lang="uk"]')!.click();
+    expect(settle).toHaveLength(2);
+
+    settle[1]({ items: [{ word: "ukrainian", count: 9 }], scanned: 4 });
+    await vi.advanceTimersByTimeAsync(0);
+    settle[0]({ items: [{ word: "everything", count: 1 }], scanned: 4 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      document.getElementById("words-top")!.textContent,
+      "the poll asked before the click and answers after it, so painting its list puts " +
+        "every language's words under the filter the user just chose",
+    ).not.toContain("everything");
+    expect(document.getElementById("words-top")!.textContent).toContain("ukrainian");
+
+    tab.destroy();
+    container.remove();
+  });
+
+  it("keeps the panel when a 5xx merely says the words were not found", async () => {
+    apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 4 }));
+    apiMock.wordsTop.mockResolvedValueOnce(oneTopWord);
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.getElementById("words-top")!.textContent).toContain("widget");
+
+    apiMock.wordsTop.mockRejectedValueOnce(
+      new ApiRequestError("Transcript store not found on disk", 500),
+    );
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(
+      document.getElementById("words-top"),
+      "the endpoint is gone only when it says 404 or 405; deciding that from the words " +
+        "of a message lets any backend detail take the panel away for the session",
+    ).not.toBeNull();
+
+    apiMock.wordsTop.mockResolvedValueOnce(oneTopWord);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(document.getElementById("words-top")!.textContent).toContain("widget");
 
     tab.destroy();
     container.remove();

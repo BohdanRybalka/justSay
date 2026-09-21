@@ -1,5 +1,6 @@
 import {
   api,
+  ApiRequestError,
   type HistoryStats,
   type TopWordsResponse,
 } from "../../api";
@@ -55,6 +56,7 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
   let pageBody: PageBody = "placeholder";
 
   function isNotFound(e: unknown): boolean {
+    if (e instanceof ApiRequestError) return e.status === 404 || e.status === 405;
     const msg = (e as Error).message?.toLowerCase() ?? "";
     return (
       msg.includes("not found") ||
@@ -145,6 +147,7 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
       }
       if (isEmpty) return;
 
+      const requestedLang = topLang;
       const top = await fetchTop();
       if (cancelled || isStaleStatusResponse(token, latestStatsToken)) return;
 
@@ -161,7 +164,9 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
       renderText("words-stat-audio", formatCoarseDuration(stats.total_audio_seconds));
       renderText("words-stat-entries", stats.total_entries.toLocaleString("uk-UA"));
 
-      if (topBelongsOnScreen) topEl!.innerHTML = renderTopWordsBody(top);
+      if (topBelongsOnScreen && topLang === requestedLang) {
+        topEl!.innerHTML = renderTopWordsBody(top);
+      }
 
       const langEl = document.getElementById("words-by-lang");
       if (langEl) {
