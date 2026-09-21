@@ -360,31 +360,40 @@ def _snapshot_real_roots(real_roots) -> dict:
     return snapshot
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _snapshot_real_roots_backstop(_real_app_data_roots):
-    """Session-scoped: records both real roots' state before the first test
-    and asserts nothing changed after the last one. Attribution to a
-    specific test is poor by design -- this is the net under AC 5a/5b's net,
-    catching a leak through a mechanism nobody enumerated.
+class RealAppDataRootChangedError(AssertionError):
+    """A real app-data root changed while the test session was running."""
 
-    It observes the filesystem rather than this process, so anything else
-    writing to a real root during the session reads the same as a leak. That
-    is not hypothetical: two pytest sessions on one machine both initialise
-    logging into the shared dev root, and the resulting failure has twice
-    been read as a defect in the suite. The message says so.
-    """
-    before = _snapshot_real_roots(_real_app_data_roots)
-    yield
-    after = _snapshot_real_roots(_real_app_data_roots)
-    assert after == before, (
-        "A real app-data root changed during the test session. Either the "
-        "suite wrote somewhere real, or another process on this machine did "
-        "-- a second pytest session, a running backend, the packaged app. "
-        "Re-run this suite alone before treating it as a leak.\n"
+
+def _real_root_change_report(before: dict, after: dict) -> str | None:
+    """What changed between two real-root snapshots, or `None` when they agree."""
+    if after == before:
+        return None
+    return (
+        "A real app-data root changed during the test session. This check is "
+        "session-scoped and is reported against whichever test ran last, so the "
+        "test named above is not the cause. Either the suite wrote somewhere "
+        "real, or another process on this machine did -- a second pytest "
+        "session, a running backend, the packaged app. Re-run this suite alone "
+        "before treating it as a leak.\n"
         f"before-only: {sorted(str(p) for p in before.keys() - after.keys())}\n"
         f"after-only (NEW): {sorted(str(p) for p in after.keys() - before.keys())}\n"
         f"changed: {sorted(str(p) for p in before.keys() & after.keys() if before[p] != after[p])}"
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _snapshot_real_roots_backstop(_real_app_data_roots):
+    """Snapshots both real app-data roots before the first test and fails if
+    either changed after the last one.
+
+    Reported against whichever test ran last, which is not the cause;
+    `RealAppDataRootChangedError` carries that in the exception type.
+    """
+    before = _snapshot_real_roots(_real_app_data_roots)
+    yield
+    report = _real_root_change_report(before, _snapshot_real_roots(_real_app_data_roots))
+    if report is not None:
+        raise RealAppDataRootChangedError(report)
 
 
 RUNTIME_SETTINGS_FIELDS_WRITTEN_BY_SYNC: dict[str, tuple[str, ...]] = {

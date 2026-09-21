@@ -10,6 +10,7 @@ exercises the conftest.py guard fixture's own detection logic directly, and
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 from pathlib import Path
 
@@ -19,7 +20,14 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.preferences import user_settings
 from app.transcripts import history
-from tests.conftest import _cleanup_data_dir, _paths_under_real_root, _snapshot_real_roots
+from tests.conftest import (
+    RealAppDataRootChangedError,
+    _cleanup_data_dir,
+    _paths_under_real_root,
+    _real_root_change_report,
+    _snapshot_real_roots,
+    _snapshot_real_roots_backstop,
+)
 
 
 def test_testclient_lifespan_keeps_history_under_tmp_path(tmp_path):
@@ -183,6 +191,114 @@ def test_snapshot_survives_a_file_vanishing_between_listing_and_stat(tmp_path, m
 
     assert ghost not in snapshot
 
+
+def test_the_real_root_report_is_silent_when_nothing_under_the_root_changed(tmp_path):
+    """Two snapshots of an untouched root must produce no report at all.
+
+    The backstop raises on anything but `None`, so a report built from two
+    genuinely separate reads is what every green run depends on."""
+    fake_real_root = tmp_path / "fake-real-root-8"
+    (fake_real_root / "logs").mkdir(parents=True)
+    (fake_real_root / "logs" / "backend.log").write_bytes(b"untouched")
+
+    before = _snapshot_real_roots([fake_real_root])
+    after = _snapshot_real_roots([fake_real_root])
+
+    assert _real_root_change_report(before, after) is None
+
+
+def test_the_real_root_report_disowns_the_test_it_is_reported_against(tmp_path):
+    """The report must say the named test is not the cause, and must not name one.
+
+    A session-scoped teardown is reported against whichever test ran last. Saying
+    the cause is the environment would be a guess: a genuine suite leak reaches
+    this same line."""
+    fake_real_root = tmp_path / "fake-real-root-9"
+    logs = fake_real_root / "logs"
+    logs.mkdir(parents=True)
+    appended_log = logs / "backend.log"
+    appended_log.write_bytes(b"first line")
+
+    before = _snapshot_real_roots([fake_real_root])
+    with appended_log.open("ab") as handle:
+        handle.write(b" and a second one")
+    after = _snapshot_real_roots([fake_real_root])
+
+    report = _real_root_change_report(before, after)
+
+    assert report is not None
+    assert report.startswith("A real app-data root changed during the test session.")
+    assert "the test named above is not the cause" in report
+    assert "Either the suite wrote somewhere real" in report
+    changed_line = next(
+        (line for line in report.splitlines() if line.startswith("changed:")), ""
+    )
+    assert repr(str(appended_log)) in changed_line
+
+
+def test_the_real_root_report_sees_a_rewrite_that_keeps_the_same_size(tmp_path):
+    """Size alone is not the signal -- a log rotated in place keeps its length.
+
+    Without this, dropping `st_mtime` from the snapshot tuple leaves every other
+    test in this file green."""
+    fake_real_root = tmp_path / "fake-real-root-10"
+    fake_real_root.mkdir()
+    rewritten = fake_real_root / "settings.json"
+    rewritten.write_bytes(b'{"a": 1}')
+
+    before = _snapshot_real_roots([fake_real_root])
+    rewritten.write_bytes(b'{"a": 2}')
+    os.utime(rewritten, (0, 0))
+    after = _snapshot_real_roots([fake_real_root])
+
+    assert before[rewritten][0] == after[rewritten][0]
+    assert _real_root_change_report(before, after) is not None
+
+
+def test_the_real_root_report_files_an_appeared_file_under_after_only(tmp_path):
+    """A file that appeared must be reported as new, not as gone.
+
+    The two set differences are each other's mirror image, so a swap reads as a
+    file vanishing and sends the investigator the wrong way."""
+    fake_real_root = tmp_path / "fake-real-root-11"
+    fake_real_root.mkdir()
+
+    before = _snapshot_real_roots([fake_real_root])
+    leaked = fake_real_root / "history.db"
+    leaked.write_bytes(b"leaked rows")
+    after = _snapshot_real_roots([fake_real_root])
+
+    report = _real_root_change_report(before, after)
+
+    assert report is not None
+    appeared = next(
+        (line for line in report.splitlines() if line.startswith("after-only")), ""
+    )
+    vanished = next(
+        (line for line in report.splitlines() if line.startswith("before-only")), ""
+    )
+    assert repr(str(leaked)) in appeared
+    assert repr(str(leaked)) not in vanished
+
+
+def test_the_backstop_raises_its_own_type_rather_than_a_bare_assertion(tmp_path):
+    """The exception type is the half of the diagnosis a truncated summary keeps.
+
+    pytest prints the type beside the test name; the message it prints after it
+    is cut at the terminal width."""
+    fake_real_root = tmp_path / "fake-real-root-12"
+    fake_real_root.mkdir()
+    undecorated = getattr(_snapshot_real_roots_backstop, "__wrapped__", None)
+    assert undecorated is not None, (
+        "pytest stopped exposing a fixture's undecorated function as __wrapped__; "
+        "this test drives the backstop through it and has to be rewritten"
+    )
+    backstop = undecorated([fake_real_root])
+    next(backstop)
+    (fake_real_root / "leaked.json").write_bytes(b"{}")
+
+    with pytest.raises(RealAppDataRootChangedError):
+        next(backstop, None)
 
 
 _APP_DIR = Path(__file__).resolve().parent.parent / "app"
