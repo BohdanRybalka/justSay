@@ -226,7 +226,7 @@ describe("the Words tab after the Settings window is dismissed", () => {
     container.remove();
   });
 
-  it("repairs a page whose chained read failed after the entry count had moved", async () => {
+  it("puts the page back on the next tick when a chained read failed as entries appeared", async () => {
     apiMock.historyStats.mockResolvedValueOnce(buildStats({ total_entries: 0 }));
     apiMock.historyStats.mockResolvedValueOnce(buildStats({ total_entries: 7 }));
     apiMock.historyStats.mockRejectedValueOnce(new Error("the backend went away"));
@@ -242,27 +242,20 @@ describe("the Words tab after the Settings window is dismissed", () => {
     expect(container.textContent).toContain("Failed to load");
 
     apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 7, total_words: 4321 }));
-    await vi.advanceTimersByTimeAsync(15_000);
-    expect(
-      container.textContent,
-      "a read that threw with the entry count already positive leaves a state every " +
-        "later tick returns early on, so the poll cannot repair it however long it runs",
-    ).toContain("Failed to load");
-
-    tab.releaseResources!();
-    tab.resumeResources!();
+    await vi.advanceTimersByTimeAsync(5000);
     await vi.advanceTimersByTimeAsync(0);
 
     expect(
       document.getElementById("words-stat-lifetime")?.textContent,
-      "and the re-open must repair that dead end as it repairs a first read that failed",
+      "the window is open and the backend has answered again, so the screen has to come " +
+        "back on its own rather than wait for the user to close and reopen it",
     ).toBe((4321).toLocaleString("uk-UA"));
 
     tab.destroy();
     container.remove();
   });
 
-  it("repairs a page whose chained read failed after the entries went away", async () => {
+  it("puts the page back on the next tick when a chained read failed as entries went away", async () => {
     apiMock.historyStats.mockResolvedValueOnce(buildStats({ total_entries: 5 }));
     apiMock.historyStats.mockResolvedValueOnce(buildStats({ total_entries: 0 }));
     apiMock.historyStats.mockRejectedValueOnce(new Error("the backend went away"));
@@ -277,24 +270,68 @@ describe("the Words tab after the Settings window is dismissed", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(container.textContent).toContain("Failed to load");
 
-    const spentByTheFailure = apiMock.historyStats.mock.calls.length;
     apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 9, total_words: 4321 }));
-    await vi.advanceTimersByTimeAsync(15_000);
-    expect(
-      apiMock.historyStats.mock.calls.length,
-      "a tick cannot repaint a body holding an error line, so spending a request on one " +
-        "buys the user nothing and costs a backend that is already struggling",
-    ).toBe(spentByTheFailure);
-
-    tab.releaseResources!();
-    tab.resumeResources!();
+    await vi.advanceTimersByTimeAsync(5000);
     await vi.advanceTimersByTimeAsync(0);
 
     expect(
       document.getElementById("words-stat-lifetime")?.textContent,
-      "a read that threw with the entry count back at zero is indistinguishable from the " +
-        "empty screen unless the page records which of the two it painted",
+      "a read that threw with the entry count back at zero paints the same error line as " +
+        "any other, and the tick that follows has to replace it like any other",
     ).toBe((4321).toLocaleString("uk-UA"));
+
+    tab.releaseResources!();
+    tab.resumeResources!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(
+      document.getElementById("words-stat-lifetime")?.textContent,
+      "and the same read is what a returning user gets, without waiting for a tick",
+    ).toBe((4321).toLocaleString("uk-UA"));
+
+    tab.destroy();
+    container.remove();
+  });
+
+  it("replaces the error line with the empty screen when the recovered history is empty", async () => {
+    apiMock.historyStats.mockRejectedValueOnce(new Error("the backend went away"));
+    apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 0 }));
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(container.textContent).toContain("Failed to load");
+
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      container.textContent,
+      "a read that failed and a history with nothing in it are two different screens, and " +
+        "a page that records them as one leaves the error up on a backend that is answering",
+    ).toContain("No transcriptions yet");
+
+    tab.destroy();
+    container.remove();
+  });
+
+  it("asks for top words once while the history stays empty, not once every tick", async () => {
+    apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 0 }));
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(container.textContent).toContain("No transcriptions yet");
+
+    const afterMount = apiMock.wordsTop.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(
+      apiMock.wordsTop.mock.calls.length,
+      "an empty screen carries no figures to patch and no top-words list to fill, so a " +
+        "request for one costs a round trip every five seconds and changes nothing",
+    ).toBe(afterMount);
 
     tab.destroy();
     container.remove();

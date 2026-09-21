@@ -79,9 +79,9 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
     return inFlightPageToken !== null && inFlightPageToken === latestPageToken;
   }
 
-  /** Whether the body holds a screen no later tick can leave: the mount's
-   *  placeholder, or the error line a read that threw painted. `refreshStats`
-   *  patches figures into an existing render, so it repairs neither. */
+  /** Whether the body holds nothing a tick could patch: the mount's
+   *  placeholder, or the error line a read that threw painted. Both are
+   *  replaced by reading the whole page, never by patching figures into it. */
   function pageIsStuck(): boolean {
     return pageBody === "placeholder" || pageBody === "failure";
   }
@@ -116,9 +116,14 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
    *  5 s interval nothing awaits, and `historyStats` is bounded at 15 s rather
    *  than unbounded now, so several probes overlap against a backend that has
    *  gone quiet and the later-starting one can finish first. Only the newest
-   *  answer may repaint, and a stuck body is the whole-page read's to repair. */
+   *  answer may repaint. A body with nothing to patch is read whole instead,
+   *  so a backend that comes back repairs the screen without the user acting. */
   async function refreshStats() {
-    if (pageReadIsLive() || pageIsStuck()) return;
+    if (pageReadIsLive()) return;
+    if (pageIsStuck()) {
+      await renderPage();
+      return;
+    }
     const token = ++latestStatsToken;
     try {
       const stats = await api.historyStats();
@@ -208,15 +213,11 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
     latestPageToken += 1;
   }
 
-  /** Read once in this same tick and restart the poll. A page the reads left
-   *  stuck is repaired by reading the page rather than the stats, and never by
-   *  a second read over one that can still paint. */
+  /** Restart the poll and read once in this same tick, so a returning user
+   *  waits for neither. Which read that is — the figure patch or the whole
+   *  page — is the same decision every tick makes. */
   function resumeResources() {
     startStatsPolling();
-    if (pageIsStuck()) {
-      if (!pageReadIsLive()) void renderPage();
-      return;
-    }
     void refreshStats();
   }
 
