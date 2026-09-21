@@ -19,7 +19,12 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.preferences import user_settings
 from app.transcripts import history
-from tests.conftest import _cleanup_data_dir, _paths_under_real_root, _snapshot_real_roots
+from tests.conftest import (
+    _cleanup_data_dir,
+    _paths_under_real_root,
+    _real_root_change_report,
+    _snapshot_real_roots,
+)
 
 
 def test_testclient_lifespan_keeps_history_under_tmp_path(tmp_path):
@@ -182,6 +187,46 @@ def test_snapshot_survives_a_file_vanishing_between_listing_and_stat(tmp_path, m
     snapshot = _snapshot_real_roots([fake_real_root])
 
     assert ghost not in snapshot
+
+
+def test_the_real_root_report_is_silent_when_the_two_snapshots_agree(tmp_path):
+    """A session that touched nothing real must produce no report at all.
+
+    The backstop asserts on this function returning `None`, so a report
+    built unconditionally would fail every green run."""
+    fake_real_root = tmp_path / "fake-real-root-8"
+    (fake_real_root / "logs").mkdir(parents=True)
+    (fake_real_root / "logs" / "backend.log").write_bytes(b"unchanged")
+
+    snapshot = _snapshot_real_roots([fake_real_root])
+
+    assert _real_root_change_report(snapshot, snapshot) is None
+
+
+def test_the_real_root_report_opens_by_disowning_the_test_it_is_reported_against(tmp_path):
+    """The words that survive a truncated summary line carry the diagnosis.
+
+    This teardown is reported against the session's last test, which never
+    caused it, and the tracker entry filed on 2026-09-21 was written against
+    that test and its fixture rather than against this check."""
+    fake_real_root = tmp_path / "fake-real-root-9"
+    logs = fake_real_root / "logs"
+    logs.mkdir(parents=True)
+    appended_to = logs / "backend.log"
+    appended_to.write_bytes(b"first line")
+
+    before = _snapshot_real_roots([fake_real_root])
+    appended_to.write_bytes(b"first line, and a second one")
+    after = _snapshot_real_roots([fake_real_root])
+
+    report = _real_root_change_report(before, after)
+
+    assert report is not None
+    assert report.startswith("ENVIRONMENT, not the test this is reported against")
+    assert "whichever test ran last" in report
+    changed_line = next(line for line in report.splitlines() if line.startswith("changed:"))
+    assert appended_to.name in changed_line
+    assert fake_real_root.name in changed_line
 
 
 

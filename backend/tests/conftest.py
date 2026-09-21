@@ -360,31 +360,50 @@ def _snapshot_real_roots(real_roots) -> dict:
     return snapshot
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _snapshot_real_roots_backstop(_real_app_data_roots):
-    """Session-scoped: records both real roots' state before the first test
-    and asserts nothing changed after the last one. Attribution to a
-    specific test is poor by design -- this is the net under AC 5a/5b's net,
-    catching a leak through a mechanism nobody enumerated.
+def _real_root_change_report(before: dict, after: dict) -> str | None:
+    """The environmental explanation for a real-root change, or `None` when the
+    two snapshots agree.
 
-    It observes the filesystem rather than this process, so anything else
-    writing to a real root during the session reads the same as a leak. That
-    is not hypothetical: two pytest sessions on one machine both initialise
-    logging into the shared dev root, and the resulting failure has twice
-    been read as a defect in the suite. The message says so.
+    Leads with the misattribution, because the report's opening words are what
+    a truncated summary line shows.
     """
-    before = _snapshot_real_roots(_real_app_data_roots)
-    yield
-    after = _snapshot_real_roots(_real_app_data_roots)
-    assert after == before, (
-        "A real app-data root changed during the test session. Either the "
-        "suite wrote somewhere real, or another process on this machine did "
-        "-- a second pytest session, a running backend, the packaged app. "
+    if after == before:
+        return None
+    return (
+        "ENVIRONMENT, not the test this is reported against: a real app-data "
+        "root changed during the test session. A session-scoped teardown "
+        "failure is reported against whichever test ran last, so the test "
+        "named above is the suite's last one rather than the cause. Either "
+        "the suite wrote somewhere real, or another process on this machine "
+        "did -- a second pytest session, a running backend, the packaged app. "
         "Re-run this suite alone before treating it as a leak.\n"
         f"before-only: {sorted(str(p) for p in before.keys() - after.keys())}\n"
         f"after-only (NEW): {sorted(str(p) for p in after.keys() - before.keys())}\n"
         f"changed: {sorted(str(p) for p in before.keys() & after.keys() if before[p] != after[p])}"
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _snapshot_real_roots_backstop(_real_app_data_roots):
+    """Session-scoped: records both real roots' state before the first test
+    and asserts nothing changed after the last one -- the net under AC 5a/5b's
+    net, catching a leak through a mechanism nobody enumerated.
+
+    Attribution is not merely poor, it is fixed and wrong: this teardown is
+    reported against the session's last test, which under `-p no:randomly` is
+    always the last test of the alphabetically last file.
+
+    It observes the filesystem rather than this process, so anything else
+    writing to a real root during the session reads the same as a leak. That
+    is not hypothetical: two pytest sessions on one machine both initialise
+    logging into the shared dev root, and a dev backend appends to its
+    `backend.log` under that root. The resulting failure has three times been
+    read as a defect in the suite.
+    """
+    before = _snapshot_real_roots(_real_app_data_roots)
+    yield
+    report = _real_root_change_report(before, _snapshot_real_roots(_real_app_data_roots))
+    assert report is None, report
 
 
 RUNTIME_SETTINGS_FIELDS_WRITTEN_BY_SYNC: dict[str, tuple[str, ...]] = {
