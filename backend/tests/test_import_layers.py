@@ -514,9 +514,8 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from types import MappingProxyType
 
+from tests.app_modules import APP_DIR, app_modules
 from tests.conftest import assert_import_loads_no_module
-
-_APP_DIR = Path(__file__).resolve().parent.parent / "app"
 
 _COMPOSITION_ROOT = "app.config"
 
@@ -630,8 +629,8 @@ def _modules() -> Mapping[str, Path]:
     than as a wrong line.
     """
     found = {}
-    for path in sorted(_APP_DIR.rglob("*.py")):
-        parts = list(path.relative_to(_APP_DIR.parent).with_suffix("").parts)
+    for relative, path in app_modules():
+        parts = ["app", *Path(relative).with_suffix("").parts]
         if parts[-1] == "__init__":
             parts = parts[:-1]
         found[".".join(parts)] = path
@@ -653,7 +652,7 @@ def _tree(path: Path) -> ast.Module:
 
 
 def _containing_package(path: Path) -> str:
-    parts = list(path.relative_to(_APP_DIR.parent).with_suffix("").parts)
+    parts = list(path.relative_to(APP_DIR.parent).with_suffix("").parts)
     return ".".join(parts[:-1])
 
 
@@ -735,13 +734,14 @@ def _package_modules(package: str) -> dict[str, Path]:
     """Every `.py` file under `app/<package>/`, keyed by its package-relative path.
 
     Two rules match a module against that package's exempt set and both must
-    spell the key the same way; a `glob` where the other has `rglob` makes a
-    module in a sub-directory required by one and invisible to the other.
+    spell the key the same way, so the key is cut from the shared walk's own
+    spelling rather than derived a second time from a sub-root of it.
     """
-    package_dir = _APP_DIR / package
+    prefix = f"{package}/"
     return {
-        path.relative_to(package_dir).as_posix(): path
-        for path in sorted(package_dir.rglob("*.py"))
+        relative[len(prefix) :]: path
+        for relative, path in app_modules()
+        if relative.startswith(prefix)
     }
 
 
@@ -817,7 +817,7 @@ def test_only_the_module_that_builds_the_application_imports_the_http_boundary()
     second (ADR 082)."""
     reaching_in = []
     for module, path in _modules().items():
-        if path.relative_to(_APP_DIR).as_posix() in _MAY_IMPORT_THE_HTTP_BOUNDARY:
+        if path.relative_to(APP_DIR).as_posix() in _MAY_IMPORT_THE_HTTP_BOUNDARY:
             continue
         if _reaches_the_http_boundary(_package_of(module)):
             continue
@@ -882,7 +882,7 @@ def test_every_http_boundary_module_is_reached_from_the_boundary():
     pending = [
         name
         for path in modules.values()
-        if path.relative_to(_APP_DIR).as_posix() in _MAY_IMPORT_THE_HTTP_BOUNDARY
+        if path.relative_to(APP_DIR).as_posix() in _MAY_IMPORT_THE_HTTP_BOUNDARY
         for name in _imported_names(path)
         if _reaches_the_http_boundary(name)
     ]
@@ -937,7 +937,7 @@ def test_only_one_module_imports_the_composition_root_directly():
     (ADR 076)."""
     reaching_up = []
     for module, path in _modules().items():
-        relative = path.relative_to(_APP_DIR).as_posix()
+        relative = path.relative_to(APP_DIR).as_posix()
         if relative in _MAY_IMPORT_THE_COMPOSITION_ROOT:
             continue
         for imported in _imported_names(path):
@@ -964,7 +964,7 @@ def test_the_composition_root_gate_still_matches_something():
     if _COMPOSITION_ROOT not in _modules():
         stale.append(f"{_COMPOSITION_ROOT}: no such module")
     for relative in sorted(_MAY_IMPORT_THE_COMPOSITION_ROOT):
-        path = _APP_DIR / relative
+        path = APP_DIR / relative
         if not path.exists():
             stale.append(f"{relative}: no such module")
         elif not any(
@@ -989,10 +989,10 @@ def test_the_http_boundary_gate_still_matches_something():
     of the import it covers, leaves those rules green with nothing matched."""
     stale = []
     for package in sorted(_HTTP_BOUNDARY_PACKAGES):
-        if not (_APP_DIR / package).is_dir():
+        if not (APP_DIR / package).is_dir():
             stale.append(f"{package}: no such package")
     for relative in sorted(_MAY_IMPORT_THE_HTTP_BOUNDARY):
-        path = _APP_DIR / relative
+        path = APP_DIR / relative
         if not path.exists():
             stale.append(f"{relative}: no such module")
         elif not any(
@@ -1021,7 +1021,7 @@ def test_the_base_dsp_module_imports_nothing_the_sidecar_lacks():
     reveal it."""
     offenders = []
     for relative, forbidden in _SIDECAR_ABSENT_LIBRARIES.items():
-        path = _APP_DIR / relative
+        path = APP_DIR / relative
         assert path.exists(), f"{relative} no longer exists — update this test"
         for imported in _imported_names(path):
             root = imported.split(".")[0]
@@ -1042,7 +1042,7 @@ def test_the_base_dsp_module_is_imported_from_rather_than_importing():
     does (fix 084)."""
     offenders = []
     for relative, forbidden in _MUST_NOT_IMPORT_APP_MODULE.items():
-        path = _APP_DIR / relative
+        path = APP_DIR / relative
         for imported in _imported_names(path):
             if imported in forbidden:
                 offenders.append(f"{relative} imports {imported}")
@@ -1063,14 +1063,14 @@ def _capture_source_modules() -> list[str]:
     up.
     """
     found = []
-    for path in sorted((_APP_DIR / "audio").glob("*.py")):
+    for path in sorted((APP_DIR / "audio").glob("*.py")):
         tree = _tree(path)
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef) and any(
                 isinstance(base, ast.Name) and base.id == "SystemAudioSource"
                 for base in node.bases
             ):
-                found.append(path.relative_to(_APP_DIR).as_posix())
+                found.append(path.relative_to(APP_DIR).as_posix())
                 break
     return found
 
@@ -1096,7 +1096,7 @@ def test_a_capture_source_never_reaches_the_resampling_stack():
 
     offenders = []
     for relative in modules:
-        for imported in _imported_names(_APP_DIR / relative):
+        for imported in _imported_names(APP_DIR / relative):
             if imported in _RESAMPLING_STACK:
                 offenders.append(f"{relative} imports {imported}")
 
@@ -1120,7 +1120,7 @@ def _package_directories() -> list[str]:
     """
     return sorted(
         path.name
-        for path in _APP_DIR.iterdir()
+        for path in APP_DIR.iterdir()
         if path.is_dir() and any(path.rglob("*.py"))
     )
 
@@ -1153,9 +1153,9 @@ def test_providers_do_not_acquire_a_web_framework():
             if relative in exempt:
                 continue
             if _imports_a_web_framework(path):
-                offenders.append(path.relative_to(_APP_DIR).as_posix())
+                offenders.append(path.relative_to(APP_DIR).as_posix())
 
-    for path in sorted(_APP_DIR.glob("*.py")):
+    for path in sorted(APP_DIR.glob("*.py")):
         if path.name in _WEB_FRAMEWORK_FREE_APP_ROOT_EXCEPT:
             continue
         if _imports_a_web_framework(path):
@@ -1241,7 +1241,7 @@ def test_no_web_framework_exemption_outlives_the_import_it_covers():
     exempt set has no other check on it at all."""
     stale = []
     for package, exempt in sorted(_WEB_FRAMEWORK_FREE_PACKAGES.items()):
-        if not (_APP_DIR / package).is_dir():
+        if not (APP_DIR / package).is_dir():
             stale.append(f"{package}: no such package")
             continue
         modules = _package_modules(package)
@@ -1252,7 +1252,7 @@ def test_no_web_framework_exemption_outlives_the_import_it_covers():
                 stale.append(f"{package}/{relative}: imports no web framework")
 
     for name in sorted(_WEB_FRAMEWORK_FREE_APP_ROOT_EXCEPT):
-        path = _APP_DIR / name
+        path = APP_DIR / name
         if not path.exists():
             stale.append(f"{name}: no such module")
         elif not _imports_a_web_framework(path):
@@ -1299,7 +1299,7 @@ def test_a_docstring_only_package_surface_holds_nothing_else():
     see it either, since importing a submodule never invokes it."""
     offenders = []
     for package in sorted(_IMPORT_FREE_PACKAGE_INITS):
-        path = _APP_DIR / package / "__init__.py"
+        path = APP_DIR / package / "__init__.py"
         assert path.exists(), (
             f"{package}/__init__.py no longer exists — deleting it turns "
             f"{package} into a namespace package, which changes the pinned "
@@ -1395,7 +1395,7 @@ def _all_declarations(package: str) -> list[ast.stmt]:
     this file reporting 22 passed."""
     return [
         node
-        for node in _tree(_APP_DIR / package / "__init__.py").body
+        for node in _tree(APP_DIR / package / "__init__.py").body
         if _module_level_assigned_names(node) == ["__all__"]
     ]
 
@@ -1453,7 +1453,7 @@ def _package_init_imported_names(package: str) -> dict[str, str]:
     get_provider` satisfied it while making `app.stt.get_provider` a different
     function from `app.stt.routing.get_provider` -- 22 passed, and
     `tests/test_factories.py:5` takes `get_provider` off the package."""
-    path = _APP_DIR / package / "__init__.py"
+    path = APP_DIR / package / "__init__.py"
     dotted = f"app.{package}"
     bound: dict[str, str] = {}
     for node in ast.walk(_tree(path)):
@@ -1565,7 +1565,7 @@ def test_a_re_export_only_package_init_declares_names_rather_than_defining_them(
     property 12."""
     offenders = []
     for package, allowed in sorted(_RE_EXPORT_ONLY_PACKAGE_INITS.items()):
-        path = _APP_DIR / package / "__init__.py"
+        path = APP_DIR / package / "__init__.py"
         assert path.exists(), (
             f"{package}/__init__.py no longer exists — deleting it turns "
             f"{package} into a namespace package, which drops the re-export "
@@ -1787,7 +1787,7 @@ def _stt_routing_re_exports() -> frozenset[str]:
     app.stt.shim import is_model_loaded` -- leaves the block while staying on
     the package, which is why the set is checked against what
     `app/stt/routing.py` actually defines rather than trusted on its own."""
-    path = _APP_DIR / "stt" / "__init__.py"
+    path = APP_DIR / "stt" / "__init__.py"
     package = _containing_package(path)
     statements = [
         node
@@ -1935,7 +1935,7 @@ def test_every_function_body_import_of_the_stt_package_is_a_recorded_one():
     gate hides from those too."""
     measured = {}
     for path in sorted(_modules().values()):
-        relative = path.relative_to(_APP_DIR.parent).as_posix()
+        relative = path.relative_to(APP_DIR.parent).as_posix()
         deferred = _deferred_stt_imports(path, _containing_package(path))
         if deferred:
             measured[relative] = deferred
@@ -2021,7 +2021,7 @@ def test_no_module_under_app_takes_a_routing_name_off_the_stt_package():
 
     measured = {}
     for path in sorted(_modules().values()):
-        relative = path.relative_to(_APP_DIR.parent).as_posix()
+        relative = path.relative_to(APP_DIR.parent).as_posix()
         package = _containing_package(path)
         tree = _tree(path)
         sites = [
@@ -2210,7 +2210,7 @@ def test_the_routing_names_gain_no_third_address_under_app():
     for module, path in sorted(_modules().items()):
         if module in (_STT_PACKAGE, _STT_ROUTING_MODULE):
             continue
-        relative = path.relative_to(_APP_DIR.parent).as_posix()
+        relative = path.relative_to(APP_DIR.parent).as_posix()
         shapes = _unreadable_attribute_shapes(path)
         if shapes:
             unreadable[relative] = shapes
@@ -2410,7 +2410,7 @@ def test_shared_ground_is_pinned_and_the_three_classifications_do_not_overlap():
     unreal = [
         package
         for package in sorted(_NON_FEATURE_PACKAGES)
-        if not (_APP_DIR / package).is_dir()
+        if not (APP_DIR / package).is_dir()
     ]
     assert not unreal, (
         f"These packages are filed as shared ground but are no directory "

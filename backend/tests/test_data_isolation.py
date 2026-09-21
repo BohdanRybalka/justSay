@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.preferences import user_settings
 from app.transcripts import history
+from tests.app_modules import app_modules
 from tests.conftest import (
     RealAppDataRootChangedError,
     _cleanup_data_dir,
@@ -301,8 +302,6 @@ def test_the_backstop_raises_its_own_type_rather_than_a_bare_assertion(tmp_path)
         next(backstop, None)
 
 
-_APP_DIR = Path(__file__).resolve().parent.parent / "app"
-
 _EXPECTED_APP_DATA_CONSUMERS: dict[str, str] = {
     "audio/config.py": "frozen-at-import",
     "core/logging_config.py": "lazy",
@@ -325,12 +324,12 @@ def _scan_app_data_consumers() -> set[str]:
     `audio/config.py` passes it as a `default_factory` rather than calling it
     (ADR 033); requiring `(` there would silently drop a real consumer."""
     found: set[str] = set()
-    for path in _APP_DIR.rglob("*.py"):
+    for relative, path in app_modules():
         if path.name == "app_paths.py":
             continue
         text = path.read_text(encoding="utf-8")
         if _RESOLVE_CALL_RE.search(text) or _PATH_HOME_RE.search(text):
-            found.add(str(path.relative_to(_APP_DIR)).replace("\\", "/"))
+            found.add(relative)
     return found
 
 

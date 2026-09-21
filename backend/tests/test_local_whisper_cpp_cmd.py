@@ -310,6 +310,7 @@ def test_binary_not_found_message_tells_an_installed_build_to_reinstall(monkeypa
         binary_not_found_message()
         == local_whisper_cpp_cmd_module._INSTALLED_BUILD_BINARY_MISSING
     )
+    assert "Reinstall" in binary_not_found_message()
 
 
 def test_binary_not_found_message_names_the_build_script_in_a_source_checkout(monkeypatch):

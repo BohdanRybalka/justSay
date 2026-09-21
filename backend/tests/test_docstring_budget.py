@@ -10,9 +10,8 @@ new entry, not a defect in this file. Neither half checks that a docstring is tr
 import ast
 import functools
 import re
-from pathlib import Path
 
-_APP_DIR = Path(__file__).resolve().parent.parent / "app"
+from tests.app_modules import app_modules
 
 _LINE_BUDGET = {"module": 8, "def": 5}
 
@@ -61,8 +60,7 @@ def _measured_lines(text: str) -> int:
 def _docstrings() -> tuple[tuple[str, str, str, str], ...]:
     """Every docstring under `app` as (module, symbol, kind, text)."""
     found: list[tuple[str, str, str, str]] = []
-    for path in sorted(_APP_DIR.rglob("*.py")):
-        module = path.relative_to(_APP_DIR).as_posix()
+    for module, path in app_modules():
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if not isinstance(node, _DOCUMENTED):
                 continue

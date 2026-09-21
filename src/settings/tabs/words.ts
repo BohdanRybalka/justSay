@@ -1,5 +1,6 @@
 import {
   api,
+  ApiRequestError,
   type HistoryStats,
   type TopWordsResponse,
 } from "../../api";
@@ -27,6 +28,16 @@ type Lang = "all" | "uk" | "en";
  *  the two shapes `renderBody` returns. */
 type PageBody = "placeholder" | "failure" | "empty" | "entries";
 
+/** A Top words block that belongs on screen, and what goes inside it:
+ *  the list a read returned, or the line a read that failed leaves behind. */
+type TopPresent =
+  | { kind: "unreadable" }
+  | { kind: "loaded"; words: TopWordsResponse };
+
+/** Whether the Top words block belongs on screen at all. `unsupported` is the
+ *  endpoint answering 404 or 405, which is the one answer that removes it. */
+type TopState = { kind: "unsupported" } | TopPresent;
+
 const TOP_LIMIT = 10;
 
 export function renderWords(container: HTMLElement, windowHidden = false): TabLifecycle {
@@ -45,6 +56,7 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
   let pageBody: PageBody = "placeholder";
 
   function isNotFound(e: unknown): boolean {
+    if (e instanceof ApiRequestError) return e.status === 404 || e.status === 405;
     const msg = (e as Error).message?.toLowerCase() ?? "";
     return (
       msg.includes("not found") ||
@@ -54,17 +66,17 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
     );
   }
 
-  async function fetchTop(): Promise<TopWordsResponse | null> {
-    if (topUnsupported) return null;
+  async function fetchTop(): Promise<TopState> {
+    if (topUnsupported) return { kind: "unsupported" };
     try {
-      return await api.wordsTop(topLang, TOP_LIMIT);
+      return { kind: "loaded", words: await api.wordsTop(topLang, TOP_LIMIT) };
     } catch (e) {
       if (isNotFound(e)) {
         topUnsupported = true;
-      } else {
-        console.error("wordsTop failed:", e);
+        return { kind: "unsupported" };
       }
-      return null;
+      console.error("wordsTop failed:", e);
+      return { kind: "unreadable" };
     }
   }
 
@@ -102,7 +114,7 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
       body.innerHTML = renderBody(stats, top, topLang);
       pageBody = stats.total_entries > 0 ? "entries" : "empty";
 
-      if (pageBody === "entries" && top) wireLangToggle();
+      if (pageBody === "entries" && top.kind !== "unsupported") wireLangToggle();
     } catch (e) {
       if (cancelled || isStaleStatusResponse(token, latestPageToken)) return;
       body.innerHTML = `<div class="value" style="color:var(--red)">Failed to load: ${escapeHtml((e as Error).message)}</div>`;
@@ -116,7 +128,7 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
    *  5 s interval nothing awaits, and `historyStats` is bounded at 15 s, so
    *  several probes overlap against a backend gone quiet and the later-starting
    *  one can finish first. Only the newest answer may repaint, and a body that
-   *  is no render of the data is read whole rather than patched. */
+   *  disagrees with what the page knows is read whole rather than patched. */
   async function refreshStats() {
     if (pageReadIsLive()) return;
     if (pageIsStuck()) {
@@ -135,8 +147,16 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
       }
       if (isEmpty) return;
 
+      const requestedLang = topLang;
       const top = await fetchTop();
       if (cancelled || isStaleStatusResponse(token, latestStatsToken)) return;
+
+      const topEl = document.getElementById("words-top");
+      const topBelongsOnScreen = top.kind !== "unsupported";
+      if (topBelongsOnScreen !== (topEl !== null)) {
+        await renderPage();
+        return;
+      }
 
       renderText("words-stat-today", stats.today_words.toLocaleString("uk-UA"));
       renderText("words-stat-week", stats.week_words.toLocaleString("uk-UA"));
@@ -144,9 +164,8 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
       renderText("words-stat-audio", formatCoarseDuration(stats.total_audio_seconds));
       renderText("words-stat-entries", stats.total_entries.toLocaleString("uk-UA"));
 
-      if (top) {
-        const topEl = document.getElementById("words-top");
-        if (topEl) topEl.innerHTML = renderTopWords(top);
+      if (topBelongsOnScreen && topLang === requestedLang) {
+        topEl!.innerHTML = renderTopWordsBody(top);
       }
 
       const langEl = document.getElementById("words-by-lang");
@@ -176,17 +195,17 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
         const next = btn.dataset.lang as Lang | undefined;
         if (!next || next === topLang) return;
         topLang = next;
-        try {
-          const top = await api.wordsTop(topLang, TOP_LIMIT);
-          if (cancelled) return;
-          const topContainer = body.querySelector<HTMLElement>("#words-top");
-          if (topContainer) topContainer.innerHTML = renderTopWords(top);
-          toggle.querySelectorAll<HTMLButtonElement>("button").forEach((b) => {
-            b.classList.toggle("active", b.dataset.lang === topLang);
-          });
-        } catch (e) {
-          console.error(e);
+        toggle.querySelectorAll<HTMLButtonElement>("button").forEach((b) => {
+          b.classList.toggle("active", b.dataset.lang === topLang);
+        });
+        const top = await fetchTop();
+        if (cancelled || topLang !== next) return;
+        if (top.kind === "unsupported") {
+          await renderPage();
+          return;
         }
+        const topContainer = body.querySelector<HTMLElement>("#words-top");
+        if (topContainer) topContainer.innerHTML = renderTopWordsBody(top);
       });
     });
   }
@@ -237,7 +256,7 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
 
 function renderBody(
   stats: HistoryStats,
-  top: TopWordsResponse | null,
+  top: TopState,
   lang: Lang,
 ): string {
   if (stats.total_entries === 0) {
@@ -250,7 +269,7 @@ function renderBody(
 
   return `
     ${renderStatsCards(stats)}
-    ${top ? renderTopWordsBlock(top, lang) : ""}
+    ${top.kind === "unsupported" ? "" : renderTopWordsBlock(top, lang)}
     ${renderBucket("By language", "words-by-lang", stats.by_language, (code) => LANGUAGE_LABELS[code] || code)}
     ${renderBucket("By model", "words-by-model", stats.by_model, (m) => m)}
   `;
@@ -279,7 +298,7 @@ function renderStatsCards(s: HistoryStats): string {
   return cards + audioBlock;
 }
 
-function renderTopWordsBlock(top: TopWordsResponse, lang: Lang): string {
+function renderTopWordsBlock(top: TopPresent, lang: Lang): string {
   const langButtons = (["all", "uk", "en"] as Lang[])
     .map(
       (k) => `
@@ -295,9 +314,16 @@ function renderTopWordsBlock(top: TopWordsResponse, lang: Lang): string {
         <span>Top words</span>
         <span id="words-lang-toggle" style="display:flex; gap:6px;">${langButtons}</span>
       </div>
-      <div id="words-top">${renderTopWords(top)}</div>
+      <div id="words-top">${renderTopWordsBody(top)}</div>
     </div>
   `;
+}
+
+/** What fills the block: the list, or an explicit line when the read failed —
+ *  never the empty-list wording, which is a different and untrue statement. */
+function renderTopWordsBody(top: TopPresent): string {
+  if (top.kind === "loaded") return renderTopWords(top.words);
+  return `<div class="value" style="color:var(--red); padding:16px 0;">Top words could not be read. The next refresh tries again.</div>`;
 }
 
 function renderTopWords(top: TopWordsResponse): string {
