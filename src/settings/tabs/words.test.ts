@@ -252,6 +252,32 @@ describe("the Words tab after the Settings window is dismissed", () => {
     container.remove();
   });
 
+  it("issues no repaint for a page read the dismissal caught between its two calls", async () => {
+    apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 3 }));
+    let settleTop: (top: TopWordsResponse) => void = () => {};
+    apiMock.wordsTop.mockImplementation(
+      () => new Promise<TopWordsResponse>((resolve) => (settleTop = resolve)),
+    );
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const tab = renderWords(container);
+    await vi.advanceTimersByTimeAsync(0);
+
+    tab.releaseResources!();
+    settleTop(noTopWords);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      container.textContent,
+      "the whole-page read reads twice, so a dismissal landing between its two calls has " +
+        "to reach it as surely as one landing before the first",
+    ).toContain("Loading...");
+
+    tab.destroy();
+    container.remove();
+  });
+
   it("lets no page read the dismissal disowned repaint over the one that replaced it", async () => {
     const settle: Array<(stats: HistoryStats) => void> = [];
     apiMock.historyStats.mockImplementation(
@@ -432,7 +458,7 @@ describe("the Words tab while the Settings window stays open", () => {
     container.remove();
   });
 
-  it("replaces the error line with the empty screen when the recovered history is empty", async () => {
+  it("replaces the error line with the empty screen, on one read rather than two", async () => {
     apiMock.historyStats.mockRejectedValueOnce(new Error("the backend went away"));
     apiMock.historyStats.mockResolvedValue(buildStats({ total_entries: 0 }));
 
