@@ -336,6 +336,18 @@ async def await_local_ready(
     return provider is not None and provider.is_loaded
 
 
+def _process_rss_bytes() -> int:
+    """This process's resident set size in bytes, read through psutil.
+
+    Raises whatever the import or the read raises.
+    """
+    import os
+
+    import psutil
+
+    return psutil.Process(os.getpid()).memory_info().rss
+
+
 def _estimate_model_ram_mb() -> int | None:
     """Approximate the backend RSS-delta consumed by the loaded whisper model.
 
@@ -345,14 +357,40 @@ def _estimate_model_ram_mb() -> int | None:
     if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
         return None
     try:
-        import os
-
-        import psutil
-
-        rss = psutil.Process(os.getpid()).memory_info().rss
-        return rss // (1024 * 1024)
+        return _process_rss_bytes() // (1024 * 1024)
     except Exception:
         return None
+
+
+def psutil_selftest() -> tuple[bool, str]:
+    """``--selftest-psutil`` backend. Never raises.
+
+    Runs the read the model-RAM estimate runs, through the same helper. Fails
+    when it raises, when the size is not a positive integer, or when psutil
+    resolves to a path outside a PyInstaller bundle root (ADR 088).
+    """
+    try:
+        rss = _process_rss_bytes()
+    except Exception as e:
+        return False, f"importing psutil and reading this process's RSS raised: {e}"
+
+    if isinstance(rss, bool) or not isinstance(rss, int) or rss <= 0:
+        return False, f"psutil reported a resident set size of {rss!r}"
+
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    origin = getattr(sys.modules.get("psutil"), "__file__", None)
+    if bundle_root is None or origin is None:
+        return True, "ok"
+
+    try:
+        resolved = Path(origin).resolve()
+        root = Path(bundle_root).resolve()
+    except Exception as e:
+        return False, f"resolving psutil's origin {origin!r} raised: {e}"
+
+    if not resolved.is_relative_to(root):
+        return False, f"psutil resolved to {resolved}, outside the bundle root {root}"
+    return True, "ok"
 
 
 def _check_package_installed() -> bool:

@@ -184,7 +184,7 @@ jobs:
       # /audio/status. The first of those replaced /resources when spec 105
       # deleted it, and is the route that still reaches probe_gpu(); the
       # script's own docstring says which subsystem each path proves and
-      # which one (psutil) is now proved by none. Stdlib-only — runs before
+      # where psutil is proved instead. Stdlib-only — runs before
       # any test extra is installed.
       - name: Smoke test sidecar
         run: python backend/scripts/smoke_sidecar.py --host 127.0.0.1 --port 9377
@@ -205,6 +205,26 @@ jobs:
             BIN="backend/dist/justsay-backend/justsay-backend"
           fi
           "$BIN" --selftest-sqlite-vec
+
+      # psutil produces the model-RAM figure and nothing else, its only
+      # importer swallows every failure and needs a loaded whisper model no
+      # runner has, and since /resources was deleted no release check imports
+      # it at all — so a hidden-import or hook change that drops it ships
+      # green and the user silently loses the number. Running the import
+      # inside the shipped artifact proves both halves at once: the
+      # pure-Python part PyInstaller keeps in the embedded PYZ, and the
+      # platform C extension psutil's __init__ loads at module scope, which is
+      # why this is a run and not a file-presence check. Ungated by runner.os
+      # — both legs bundle it. See ADR 088.
+      - name: Verify the frozen sidecar can read its own memory through psutil
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN="backend/dist/justsay-backend/justsay-backend.exe"
+          else
+            BIN="backend/dist/justsay-backend/justsay-backend"
+          fi
+          "$BIN" --selftest-psutil
 
       - name: Copy onedir bundle to Tauri resources
         shell: bash

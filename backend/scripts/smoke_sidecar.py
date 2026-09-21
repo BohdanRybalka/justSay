@@ -17,11 +17,9 @@ can boot without a system Python install:
      settings I/O, ``/settings/cloud-status`` the cloud-key store, and
      ``/audio/status`` sounddevice.
 
-     ``psutil`` is deliberately not covered. Its only importer is
-     ``local_setup._estimate_model_ram_mb()``, reached solely when a whisper
-     model is already loaded — which needs a model on disk that no release
-     runner has. ``/resources``, deleted in spec 105, was the last route
-     that imported it unconditionally.
+     ``psutil`` is proved by no route here — its only importer needs a
+     loaded whisper model no release runner has. ``--selftest-psutil``
+     covers it, run against the same frozen binary from ``release.yml``.
   5. Terminate the child (SIGTERM on POSIX, ``taskkill /T /F /PID`` on
      Windows) and wait briefly for exit.
 
