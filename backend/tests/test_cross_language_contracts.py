@@ -1,4 +1,4 @@
-"""Nine values exist in two or three languages at once; the copies must agree.
+"""Ten values exist in two or three languages at once; the copies must agree.
 
 Each value has exactly one nominated declaration per language, and this module
 reads every declaration as **text** so it needs no TypeScript compiler, no Rust
@@ -19,11 +19,12 @@ because ``backend/build/`` is gitignored and holds a stale copy of the
 backend tree: an unbounded walk would fail on any machine that has run
 ``pip install -e`` and pass in CI.
 
-The nine are the backend port, the masked-key sentinel, the upload allowlist
+The ten are the backend port, the masked-key sentinel, the upload allowlist
 and its cap, the Tauri event names, the session-id alphabet, the Tauri command
 names, the two application data directory names, the capture-incident tokens a
-meeting recording can report, and the stdout contract between the macOS audio
-tap helper and the Python that reads it.
+meeting recording can report, the stdout contract between the macOS audio tap
+helper and the Python that reads it, and the directory name the frozen sidecar
+is packaged under.
 
 ADR 045 records why these values are pinned rather than generated. Its
 amendment nominates Rust as the canonical declaration for the Tauri command
@@ -51,9 +52,13 @@ SYSTEM_SOURCE_PY = REPO_ROOT / "backend" / "app" / "audio" / "system_source.py"
 AUDIO_TAP_SWIFT = (
     REPO_ROOT / "macos" / "JustSayAudioTap" / "Sources" / "JustSayAudioTap" / "main.swift"
 )
+FROZEN_BUILD_PY = REPO_ROOT / "backend" / "app" / "core" / "frozen_build.py"
 CONTRACTS_TS = REPO_ROOT / "src" / "contracts.ts"
 LIB_RS = REPO_ROOT / "src-tauri" / "src" / "lib.rs"
 BACKEND_RS = REPO_ROOT / "src-tauri" / "src" / "backend.rs"
+BUILD_SIDECAR_SPEC = REPO_ROOT / "backend" / "build_sidecar.spec"
+TAURI_CONF_JSON = REPO_ROOT / "src-tauri" / "tauri.conf.json"
+TAURI_MACOS_CONF_JSON = REPO_ROOT / "src-tauri" / "tauri.macos.conf.json"
 
 RUST_SOURCE_DIR = REPO_ROOT / "src-tauri" / "src"
 
@@ -201,6 +206,29 @@ _RUST_TOP_LEVEL_FUNCTION_PATTERN = re.compile(
 )
 
 _RUST_SETTINGS_WINDOW_PATTERN = re.compile(r'get_webview_window\(\s*"settings"')
+
+_RUST_SETTINGS_ANNOUNCER = "announce_settings_visibility"
+
+_RUST_SETTINGS_PREDICATE = "settings_is_on_screen"
+
+_RUST_SETTINGS_VISIBILITY_EVENTS = ("settings-shown", "settings-hidden")
+
+_RUST_SETTINGS_WINDOW_EVENTS = ("CloseRequested", "Resized", "Focused")
+
+_RUST_BUILD_PROFILE_TOKEN = "debug_assertions"
+
+_RUST_BUILD_PROFILE_SITES: dict[str, tuple[int, str]] = {
+    "data_dir_choice": (1, "names the data directory the sidecar log is written under"),
+    "spawn": (
+        2,
+        "starts the frozen sidecar rather than the source tree, and hides the child's console",
+    ),
+    "run": (1, "picks the log level"),
+}
+
+_RUST_BUILD_PROFILE_ATTRIBUTES: dict[str, tuple[int, str]] = {
+    "src-tauri/src/main.rs": (1, "drops the console subsystem from a release binary"),
+}
 
 _TYPESCRIPT_COMMENT_OR_STRING_PATTERN = re.compile(
     r'"(?:\\.|[^"\\\n])*"' r"|'(?:\\.|[^'\\\n])*'" r"|`(?:\\.|[^`\\])*`" r"|/\*.*?\*/" r"|//[^\n]*",
@@ -660,7 +688,10 @@ def _assert_one_lib_helper_owns_the_settings_window(
     """Every ``.<verb>()`` in lib.rs sits in ``helper`` or in ``also_allowed``.
 
     ``helper`` must resolve the settings window, must not discard what the call
-    returns, and must emit ``event``, so a call that failed announces nothing.
+    returns, and must hand the outcome to the one announcer, so a call that
+    failed announces nothing. Which name that announcer then emits is the
+    sibling pin's question, because showing and hiding are no longer the only
+    two ways the surface leaves the screen.
     """
     call = re.compile(rf"\.{verb}\(")
     code = _rust_code(LIB_RS)
@@ -693,9 +724,9 @@ def _assert_one_lib_helper_owns_the_settings_window(
         f"{helper} no longer resolves the settings window, so the helper this pin routes "
         f"every {verb} through is acting on something else"
     )
-    assert re.search(rf'\.emit\(\s*"{event}"', bodies[helper]), (
-        f"{helper} {verb}s the window without announcing it, so settings.ts never learns "
-        "what happened to the window it is drawing"
+    assert re.search(rf"\b{_RUST_SETTINGS_ANNOUNCER}\(", bodies[helper]), (
+        f"{helper} {verb}s the window without reaching {_RUST_SETTINGS_ANNOUNCER}, so "
+        f"settings.ts never learns that '{event}' happened to the window it is drawing"
     )
     assert not re.search(rf"let\s+_\s*=\s*window\.{verb}\(", bodies[helper]), (
         f"{helper} discards the result of {verb}(), so a {verb} that failed still emits "
@@ -727,9 +758,9 @@ def test_every_settings_show_site_announces_it() -> None:
     the user cannot see.
 
     Mutation-checked: restoring the window resolution and ``show()`` inline in
-    the tray menu arm reports ``run`` in the enclosing set, and deleting the
-    ``emit`` from the helper reddens two tests — the emit assertion here and
-    the event-name pin in this module — with every other assertion passing.
+    the tray menu arm reports ``run`` in the enclosing set; deleting the
+    announcer call from the helper fails this test alone, naming the helper,
+    with every other assertion in the module passing.
     """
     _assert_one_lib_helper_owns_the_settings_window(
         "show", "show_settings", "settings-shown", ("widget_ready",)
@@ -742,11 +773,199 @@ def test_every_settings_hide_site_announces_it() -> None:
     The mirror of the show pin, and the half a page can be hurt by in the other
     direction: a ``settings-hidden`` sent for a hide that failed stops the
     polling on a window the user is still looking at, and a second hide path
-    added later that forgets the emit leaves it polling for ever (ADR 089).
+    added later that never reaches the announcer leaves it polling for ever
+    (ADR 089).
     """
     _assert_one_lib_helper_owns_the_settings_window(
         "hide", "hide_settings", "settings-hidden", ()
     )
+
+
+def _rust_call_argument_text(body: str, call: str) -> str:
+    """The text between the parentheses of one ``call(...)`` written in ``body``.
+
+    Parenthesis depth is counted rather than matched with a regex, the way this
+    module already reads a ``generate_handler!`` body: the closure handed to
+    ``on_window_event`` carries parentheses of its own, so a non-greedy group
+    would stop at the first of them and hand back an arm-less handler that
+    every assertion over it would pass on.
+    """
+    opening = f"{call}("
+    assert opening in body, f"the text handed in writes no {opening} call"
+    start = body.index(opening) + len(opening)
+    depth = 1
+    cursor = start
+    while cursor < len(body) and depth:
+        if body[cursor] == "(":
+            depth += 1
+        elif body[cursor] == ")":
+            depth -= 1
+        cursor += 1
+    assert not depth, f"the {opening} call is never closed, so the file cannot compile"
+    return body[start : cursor - 1]
+
+
+def _rust_function_bodies_everywhere() -> dict[str, tuple[str, str]]:
+    """Every top-level ``fn`` under src-tauri/src/, keyed ``<file>::<name>``.
+
+    Keyed by file as well as by name because two modules may each define a fn
+    of one name, and a pin that reported only the name would send a reader to
+    whichever file sorted later.
+    """
+    bodies: dict[str, tuple[str, str]] = {}
+    for path in _rust_source_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        for name, body in _rust_top_level_function_bodies(path).items():
+            bodies[f"{rel}::{name}"] = (name, body)
+    assert bodies, (
+        f"no top-level fn was read under {RUST_SOURCE_DIR.relative_to(REPO_ROOT).as_posix()}; "
+        "the walk has gone blind and every assertion over it would pass on nothing"
+    )
+    return bodies
+
+
+def test_one_announcer_owns_both_settings_visibility_events() -> None:
+    """One fn emits ``settings-shown``, the same fn emits ``settings-hidden``.
+
+    Showing, hiding, minimising and restoring are four ways for the settings
+    surface to leave the screen or come back to it, and the page has no other
+    way to learn which happened. Spreading the two emits across the fns that
+    handle each of the four is how a fifth way arrives announcing nothing: the
+    window goes and the tab on it stays frozen at whatever it read before.
+    Neither compiler can catch that (ADR 089).
+
+    So both names are owned by one announcer, every other path reaches it, and
+    the announcer reads the window rather than the event that woke it -- the
+    two assertions below, plus the ``.show()``/``.hide()`` pins above, which
+    require each helper to reach this same fn.
+
+    Mutation-checked twice, each applied alone. Emitting ``settings-hidden``
+    from the handler's ``Focused`` arm instead of calling the announcer fails
+    this test naming ``lib.rs::run`` as a second emitter, and the handler pin
+    below as well. Deleting the ``settings-shown`` emit from the announcer
+    fails this test naming that event as emitted from nothing, and the
+    event-name pin in this module as declared with no emitter.
+    """
+    bodies = _rust_function_bodies_everywhere()
+    for event in _RUST_SETTINGS_VISIBILITY_EVENTS:
+        emitters = sorted(
+            key for key, (_, body) in bodies.items() if re.search(rf'\.emit\(\s*"{event}"', body)
+        )
+        assert [key.rsplit("::", 1)[1] for key in emitters] == [_RUST_SETTINGS_ANNOUNCER], (
+            f"only {_RUST_SETTINGS_ANNOUNCER} may emit '{event}', or the page goes on "
+            f"drawing a window state that never happened (ADR 089); it is emitted from "
+            f"{emitters}"
+        )
+
+    announcer = next(
+        body for _, (name, body) in bodies.items() if name == _RUST_SETTINGS_ANNOUNCER
+    )
+    assert _RUST_SETTINGS_WINDOW_PATTERN.search(announcer), (
+        f"{_RUST_SETTINGS_ANNOUNCER} no longer resolves the settings window, so the two "
+        "names this pin routes through it describe some other window's state"
+    )
+
+
+def test_the_on_screen_predicate_reads_visibility_and_minimisation_only() -> None:
+    """The shell answers "is the settings surface on screen" from two window reads.
+
+    A minimised window and a hidden one are equally away from the user, and a
+    window the user has merely clicked away from is not away at all. Answering
+    from the focus flag instead is the classic form of this bug, and the one a
+    reviewer has to catch by eye: the page stops its work while its window sits
+    in front of the user.
+
+    The predicate is therefore handed those two states and nothing else, and
+    the announcer is the only place that reads them off the window. What this
+    cannot establish is what either read returns on a given platform: nothing
+    here runs a window manager. The predicate's own truth table is covered by
+    ``lib.rs``'s ``#[cfg(test)]`` tests, which ``npm run test:rust`` runs on
+    both shipping platforms in CI.
+
+    Mutation-checked: adding a ``focused`` term to the predicate fails this
+    test naming the parameters it found; dropping the ``is_minimized()`` read
+    from the announcer fails it naming that read.
+    """
+    bodies = _rust_top_level_function_bodies(LIB_RS)
+    rel = LIB_RS.relative_to(REPO_ROOT).as_posix()
+    for name in (_RUST_SETTINGS_PREDICATE, _RUST_SETTINGS_ANNOUNCER):
+        assert name in bodies, f"{rel} no longer defines fn {name}"
+
+    predicate = bodies[_RUST_SETTINGS_PREDICATE]
+    parameters = re.findall(r"(\w+): bool", predicate.split("{", 1)[0])
+    assert parameters == ["visible", "minimized"], (
+        f"{_RUST_SETTINGS_PREDICATE} takes {parameters}, not the window's visibility and "
+        "its minimisation alone; a third term is a third thing that can stop the page's "
+        "work on a window the user is looking at (ADR 089)"
+    )
+    assert "focus" not in predicate.lower(), (
+        f"{_RUST_SETTINGS_PREDICATE} consults focus, so a window the user clicked away "
+        f"from reads as off screen: {predicate.split('{', 1)[0]!r}"
+    )
+
+    announcer = bodies[_RUST_SETTINGS_ANNOUNCER]
+    for read in (".is_visible()", ".is_minimized()"):
+        assert read in announcer, (
+            f"{_RUST_SETTINGS_ANNOUNCER} no longer reads {read} off the settings window, "
+            f"so {_RUST_SETTINGS_PREDICATE} is answering on a state nobody looked up"
+        )
+    assert re.search(rf"\b{_RUST_SETTINGS_PREDICATE}\(", announcer), (
+        f"{_RUST_SETTINGS_ANNOUNCER} decides what to emit without {_RUST_SETTINGS_PREDICATE}, "
+        "so the one predicate the Rust unit tests cover is no longer the one that runs"
+    )
+
+
+def test_the_settings_window_handler_re_reads_the_window_on_every_event() -> None:
+    """Resize and focus arms send the shell back to the window, never to a verdict.
+
+    A Windows minimise and its restore arrive as the same ``Resized``, carrying
+    nothing that separates them, and a macOS miniaturise arrives only as the
+    focus loss that comes with it. The event therefore says nothing about where
+    the window ended up. An arm that treated a focus loss as "away" would stop
+    the page's work while the user is looking at the window; an arm that
+    skipped the re-read would leave that work running while the window sits in
+    the taskbar or the Dock.
+
+    Only ``CloseRequested`` acts on its event, because a close is the one thing
+    the shell refuses rather than observes.
+
+    Mutation-checked twice, each applied alone: splitting the combined arm and
+    hiding the window from the ``Focused`` half fails this test reporting that
+    two arms hide it where only the close arm may; deleting the ``Resized``
+    half fails it naming that event as having no arm.
+    """
+    run_body = _rust_top_level_function_bodies(LIB_RS)["run"]
+    handler = _rust_call_argument_text(run_body, "on_window_event")
+    rel = LIB_RS.relative_to(REPO_ROOT).as_posix()
+
+    for event in _RUST_SETTINGS_WINDOW_EVENTS:
+        assert f"WindowEvent::{event}" in handler, (
+            f"{rel}'s settings window handler has no {event} arm, so that way of putting "
+            "the surface out of sight or bringing it back announces nothing (ADR 089)"
+        )
+    assert f"{_RUST_SETTINGS_ANNOUNCER}(" in handler, (
+        f"{rel}'s settings window handler never reaches {_RUST_SETTINGS_ANNOUNCER}, so no "
+        "window event re-reads the state the page is drawing"
+    )
+    assert handler.count("hide_settings(") == 1, (
+        f"{rel}'s settings window handler hides the window from "
+        f"{handler.count('hide_settings(')} arms; only the close arm may act on its event, "
+        "and every other arm must re-read the window instead"
+    )
+    assert "show_settings(" not in handler, (
+        f"{rel}'s settings window handler shows the window from an arm, so an event is "
+        "being taken for an instruction rather than for a reason to look"
+    )
+
+    arms = handler.split("WindowEvent::")
+    for event in ("Resized", "Focused"):
+        arm = next(chunk for chunk in arms if chunk.startswith(event))
+        verdicts = [name for name in ("hide_settings(", "show_settings(") if name in arm]
+        assert not verdicts, (
+            f"{rel}'s {event} arm calls {verdicts}, so the event is the criterion rather "
+            f"than a reason to re-read the window; a window that only lost focus would "
+            "stop the page's work while the user is looking at it (ADR 089)"
+        )
 
 
 def _assert_only_one_fn_reaches_the_settings_window(verb: str, helper: str, event: str) -> None:
@@ -1166,12 +1385,14 @@ def test_the_app_data_directory_names_agree_across_languages() -> None:
     sidecar log landing in a
     different directory from the sidecar's own history and settings files.
 
-    **Two ways the two sides can still land in different directories at
-    runtime, neither visible to any text pin:** that ``cfg!(debug_assertions)``
-    and ``sys.frozen`` agree on a given launch is a runtime property; and on a
-    Unix host with no ``HOME``, ``posixpath.expanduser`` falls back to
-    ``pwd.getpwuid()`` while ``backend.rs``'s ``home_dir`` has no equivalent in
-    ``std`` and writes no log at all rather than guessing.
+    **One way the two sides can still land in different directories at
+    runtime, invisible to any text pin:** on a Unix host with no ``HOME``,
+    ``posixpath.expanduser`` falls back to ``pwd.getpwuid()`` while
+    ``backend.rs``'s ``home_dir`` has no equivalent in ``std`` and writes no log
+    at all rather than guessing. The other one this paragraph used to list --
+    that ``cfg!(debug_assertions)`` and ``sys.frozen`` agree on a given launch
+    -- is pinned as far as text can reach it by
+    ``test_every_shell_answer_to_the_packaged_build_question_is_written_down``.
 
     The other two this docstring used to list were closed by JS-131 --
     ``JUSTSAY_DATA_DIR`` ignored by the shell, and an externally set
@@ -1293,8 +1514,9 @@ def test_the_shell_reads_every_data_directory_variable_the_backend_reads() -> No
 
     What this cannot see is whether the Rust side *honours* what it reads.
     ``backend.rs``'s ``#[cfg(test)]`` tests cover each branch of the order, and
-    they run under ``npm run test:rust``, which no CI job invokes yet (open
-    question B2) -- which is why the reads are pinned here, in a job that does.
+    they run under ``npm run test:rust`` on both shipping platforms; the reads
+    are pinned here as well because a text pin fails on a source edit that
+    still compiles and still passes those tests.
 
     The Rust patterns tolerate arbitrary whitespace, following the sibling
     test: ``cargo fmt`` runs in no CI job here, so an indentation change must
@@ -1345,6 +1567,141 @@ def test_the_shell_reads_every_data_directory_variable_the_backend_reads() -> No
         f"{backend_rel} picks its name from the build profile alone, so a release build that "
         "inherits that variable writes the log under the production name while the backend "
         "resolves the development one"
+    )
+
+
+def test_the_packaged_sidecar_directory_name_agrees_with_what_the_build_produces() -> None:
+    """The directory the frozen sidecar is packaged under, in all five places.
+
+    ``resolve_audio_tap_path`` answers "is this a packaged build?" by asking
+    whether the running executable sits in a directory of this name, and it is
+    the only site in the backend that answers that question by any means other
+    than the bootloader flag. Rename the directory in the PyInstaller spec or
+    in either Tauri bundle map and a packaged macOS build still reports itself
+    frozen while the tap helper resolves to the SwiftPM build output, which is
+    not in the bundle: system audio fails on one platform, in release only,
+    with nothing said anywhere. The shell reads the same name to find the
+    executable at all, so it is pinned here too.
+
+    The two Tauri maps are checked as a source-to-target pair rather than by
+    value, because the target name is what the installer creates and the source
+    path is what the release workflow copies into; a map that carries neither
+    is a bundle with no sidecar in it.
+
+    Mutation-checked: renaming the ``COLLECT`` output in build_sidecar.spec
+    fails this test printing every declaration; renaming the resource target in
+    tauri.macos.conf.json fails it naming that file.
+    """
+    canonical = _extract(MACOS_TAP_PY, r'^SIDECAR_DIRECTORY_NAME = "([^"]*)"$')[0]
+    declared = {
+        BUILD_SIDECAR_SPEC.name: _extract(
+            BUILD_SIDECAR_SPEC, r'coll = COLLECT\([\s\S]*?name="([^"]*)"'
+        )[0],
+        BACKEND_RS.name: _extract(BACKEND_RS, r'resource_dir\s*\.join\(\s*"([^"]*)"')[0],
+    }
+    disagreeing = {name: value for name, value in declared.items() if value != canonical}
+    assert not disagreeing, (
+        f"{MACOS_TAP_PY.name} resolves the bundled audio tap by looking for a parent "
+        f"directory named {canonical!r}, but these name the packaged sidecar directory "
+        f"differently: {disagreeing}. A packaged macOS build would report itself frozen "
+        "while the tap helper resolved to a path that is not in the bundle"
+    )
+
+    for conf in (TAURI_CONF_JSON, TAURI_MACOS_CONF_JSON):
+        resources = json.loads(_read(conf))["bundle"]["resources"]
+        assert resources, f"{conf.name} declares no bundle resources at all"
+        assert resources.get(f"resources/{canonical}") == canonical, (
+            f"{conf.name} maps no 'resources/{canonical}' to '{canonical}', so the "
+            f"installer creates no {canonical!r} directory beside the app; it declares "
+            f"{resources}"
+        )
+
+
+def test_every_shell_answer_to_the_packaged_build_question_is_written_down() -> None:
+    """Every ``debug_assertions`` read under src-tauri/src/ is a site on a table.
+
+    The backend derives "am I a packaged build?" in exactly one place --
+    ``is_frozen_build()``, from the bootloader flag -- and the shell cannot read
+    that flag at all, so it answers the same question from its own build
+    profile. That the two agree on a given launch is a runtime property no text
+    pin can check; it holds because a release-profile shell starts the frozen
+    sidecar and a debug-profile one starts the source tree, which is the one
+    tie this test can read as text.
+
+    What is otherwise checkable is that the shell's answer stays where someone
+    wrote it down. A fourth read in a fn nobody listed is a second, unreviewed
+    definition of "packaged", and that is how a shell and the child it spawned
+    come to disagree with nothing said anywhere.
+
+    Counting per fn rather than merely naming the fns is deliberate: a second
+    read added inside ``spawn`` is as unreviewed as one in a new fn. Reads that
+    sit in no fn at all -- a crate attribute -- are counted per file against
+    their own table, so the walk is complete rather than shaped to miss them.
+
+    Mutation-checked: replacing the ``prefer_python_source`` read in backend.rs
+    with a constant fails this test naming ``spawn`` as carrying one read, not
+    two; adding a read to a new fn fails it naming that fn; and deleting the
+    crate attribute in main.rs fails it naming that file.
+    """
+    in_functions: dict[str, int] = {}
+    outside: dict[str, int] = {}
+    for path in _rust_source_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        attributed = 0
+        for name, body in _rust_top_level_function_bodies(path).items():
+            count = body.count(_RUST_BUILD_PROFILE_TOKEN)
+            attributed += count
+            if count:
+                in_functions[name] = in_functions.get(name, 0) + count
+        loose = _rust_code(path).count(_RUST_BUILD_PROFILE_TOKEN) - attributed
+        if loose:
+            outside[rel] = loose
+
+    assert in_functions, (
+        f"no {_RUST_BUILD_PROFILE_TOKEN} read was found in any fn under "
+        f"{RUST_SOURCE_DIR.relative_to(REPO_ROOT).as_posix()}; the walk has gone blind and "
+        "the comparisons below would pass on nothing"
+    )
+    expected_in_functions = {name: count for name, (count, _) in _RUST_BUILD_PROFILE_SITES.items()}
+    assert in_functions == expected_in_functions, (
+        f"the shell reads {_RUST_BUILD_PROFILE_TOKEN} in {in_functions}, which is not the "
+        "table of sites this project has reviewed: "
+        + "; ".join(
+            f"{name} x{count} -- {why}" for name, (count, why) in _RUST_BUILD_PROFILE_SITES.items()
+        )
+        + ". A site nobody wrote down is a second definition of 'packaged build', which "
+        f"{FROZEN_BUILD_PY.name} answers once from the bootloader flag"
+    )
+    expected_outside = {rel: count for rel, (count, _) in _RUST_BUILD_PROFILE_ATTRIBUTES.items()}
+    assert outside == expected_outside, (
+        f"{_RUST_BUILD_PROFILE_TOKEN} is read outside every top-level fn at {outside}, not "
+        "at the reviewed attribute sites: "
+        + "; ".join(
+            f"{rel} x{count} -- {why}"
+            for rel, (count, why) in _RUST_BUILD_PROFILE_ATTRIBUTES.items()
+        )
+    )
+
+    assert re.search(r'getattr\(\s*sys\s*,\s*"frozen"', _read(FROZEN_BUILD_PY)), (
+        f"{FROZEN_BUILD_PY.name} no longer reads the bootloader flag, so the backend half "
+        "of the agreement this test describes is derived from something else"
+    )
+
+    spawn = _rust_top_level_function_bodies(BACKEND_RS)["spawn"]
+    binding = re.search(r"let prefer_python_source\s*=[\s\S]*?;", spawn)
+    assert binding, f"{BACKEND_RS.name} no longer binds prefer_python_source"
+    for term in (f"cfg!({_RUST_BUILD_PROFILE_TOKEN})", "JUSTSAY_USE_FROZEN_SIDECAR"):
+        assert term in binding.group(0), (
+            f"{BACKEND_RS.name} chooses between the frozen sidecar and the source tree "
+            f"without {term}, so the build profile no longer decides which child runs and "
+            f"{FROZEN_BUILD_PY.name} can answer the opposite question on the same launch"
+        )
+    assert re.search(
+        r"if prefer_python_source\s*\{\s*None\s*\}\s*else\s*\{\s*resolve_sidecar\(", spawn
+    ), (
+        f"{BACKEND_RS.name} no longer gates resolve_sidecar on prefer_python_source, so the "
+        "build profile and the child's own frozen flag are wired together by something this "
+        "reader cannot see"
     )
 
 
