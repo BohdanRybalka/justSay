@@ -5,22 +5,46 @@ every gate instead of once per copy, so the root is pinned as a fact about the
 path rather than by whether the walk happens to find files today.
 """
 
+import inspect
+
+from tests import app_modules as app_modules_module
 from tests.app_modules import APP_DIR, app_modules
 
+_PACKAGES = {
+    "api",
+    "audio",
+    "core",
+    "embeddings",
+    "pipeline",
+    "preferences",
+    "stt",
+    "transcripts",
+}
 
-def test_the_walk_finds_the_packages_every_gate_reads_it_for():
+
+def test_the_walk_finds_the_packages_it_is_meant_to_check():
     relatives = {relative for relative, _ in app_modules()}
     packages = {relative.split("/")[0] for relative in relatives if "/" in relative}
 
     assert {"main.py", "config.py", "core/errors.py"} <= relatives
-    assert {"api", "audio", "core", "embeddings", "pipeline", "preferences", "stt"} <= packages
+    assert packages == _PACKAGES, (
+        "a package that appears or disappears changes what every gate sharing this walk "
+        f"covers, and nothing else would say so: {sorted(packages ^ _PACKAGES)}"
+    )
 
 
 def test_the_root_is_the_resolved_package_directory():
+    source = inspect.getsource(app_modules_module)
+
     assert APP_DIR.is_absolute()
     assert ".." not in APP_DIR.parts
     assert APP_DIR == APP_DIR.resolve()
     assert (APP_DIR.parent.name, APP_DIR.name) == ("backend", "app")
+    assert "Path(__file__).resolve()" in source, (
+        "the assertions above hold on any checkout reached without a symlink, so the "
+        "resolve() is pinned as source text too: one of the seven copies this walk "
+        "replaced had none, and a junction is where that difference shows"
+    )
 
 
 def test_the_order_is_sorted_and_repeats_across_calls():
@@ -28,9 +52,12 @@ def test_the_order_is_sorted_and_repeats_across_calls():
     unsorted_order = [path.relative_to(APP_DIR).as_posix() for path in APP_DIR.rglob("*.py")]
 
     assert relatives == sorted(relatives)
-    assert relatives == [relative for relative, _ in app_modules()]
     assert sorted(unsorted_order) == relatives, (
         "the walk must find exactly what an unordered rglob does, only in a fixed order"
+    )
+    assert app_modules() is app_modules(), (
+        "every gate calls this, most of them more than once; without the cache the "
+        "package is re-walked each time and a fresh tuple is handed back"
     )
 
 
