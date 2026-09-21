@@ -11,6 +11,8 @@ import os
 import sys
 from pathlib import Path
 
+from app.core.frozen_build import is_frozen_build
+
 _WHISPER_CPP_BIN_ENV_VAR = "JUSTSAY_WHISPER_CPP_BIN"
 
 VENDOR_DIR_NAMES: dict[str, str] = {
@@ -50,11 +52,6 @@ _BIN_OVERRIDE_POINTS_AT_NOTHING = (
 )
 
 
-def _is_frozen_build() -> bool:
-    """Whether this process is a PyInstaller bundle rather than a source checkout."""
-    return bool(getattr(sys, "frozen", False))
-
-
 def binary_not_found_message() -> str:
     """The one wording for "no whisper-server here", shared by every reader.
 
@@ -64,7 +61,7 @@ def binary_not_found_message() -> str:
     if os.environ.get(_WHISPER_CPP_BIN_ENV_VAR):
         return _BIN_OVERRIDE_POINTS_AT_NOTHING
 
-    if _is_frozen_build():
+    if is_frozen_build():
         return _INSTALLED_BUILD_BINARY_MISSING
 
     script = BUILD_SCRIPT_NAMES.get(sys.platform, BUILD_SCRIPT_NAMES["win32"])
@@ -105,7 +102,7 @@ def resolve_binary_path() -> Path | None:
 
     binary_name = _binary_name()
 
-    if _is_frozen_build():
+    if is_frozen_build():
         resource_dir = Path(sys.executable).resolve().parent.parent
         candidate = resource_dir / vendor_dir / binary_name
         if candidate.is_file():

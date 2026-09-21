@@ -8,8 +8,9 @@ so a from-source run shares its downloads with the installed app.
 """
 
 import os
-import sys
 from pathlib import Path
+
+from app.core.frozen_build import is_frozen_build
 
 _DATA_DIR_ENV_VAR = "JUSTSAY_DATA_DIR"
 _FORCE_DEV_ENV_VAR = "JUSTSAY_FORCE_DEV_DATA_DIR"
@@ -22,13 +23,13 @@ TEMP_DIR_NAME = "tmp"
 def resolve_app_data_root() -> Path:
     """The data directory root: ``settings.json``, ``history.db`` and ``backend.log``.
 
-    First match wins: ``JUSTSAY_DATA_DIR``; else ``~/.justsay`` when ``sys.frozen`` is set and
-    ``JUSTSAY_FORCE_DEV_DATA_DIR`` is not; else ``~/.justsay-dev``, never the user's real history.
+    First match wins: ``JUSTSAY_DATA_DIR``; else ``~/.justsay`` in a packaged build with
+    ``JUSTSAY_FORCE_DEV_DATA_DIR`` unset; else ``~/.justsay-dev``, never the user's real history.
     """
     override = os.environ.get(_DATA_DIR_ENV_VAR)
     if override:
         return Path(override).expanduser()
-    is_frozen = getattr(sys, "frozen", False)
+    is_frozen = is_frozen_build()
     forced_dev = os.environ.get(_FORCE_DEV_ENV_VAR) == "1"
     if is_frozen and not forced_dev:
         return Path.home() / PROD_DIR_NAME
