@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
@@ -72,9 +74,86 @@ fn set_meeting_recording(app: AppHandle, active: bool) {
     }
 }
 
-/// Show the settings window and announce it, so a tab that released what it
-/// held on the dismissal can take it back. Every path that shows that window
-/// calls this one, which is what makes the announcement complete (ADR 089).
+/// The on-screen answer most recently announced for the settings window, so a
+/// run of window events does not send the page one event per tick. `None`
+/// until the first announcement.
+static ANNOUNCED_SETTINGS_ON_SCREEN: Mutex<Option<bool>> = Mutex::new(None);
+
+/// Whether the settings surface is on screen: the window is visible and is not
+/// minimised. Nothing else takes part — a visible, unminimised window the user
+/// has clicked away from is still on screen, so a lost focus is a reason to
+/// read this again and never an answer to it (ADR 089).
+fn settings_is_on_screen(visible: bool, minimized: bool) -> bool {
+    visible && !minimized
+}
+
+/// The on-screen value that must be announced, or `None` when it is the value
+/// already announced. Remembering the last one is what keeps a stream of
+/// window events from spraying the page with news it has already acted on.
+fn settings_visibility_to_announce(announced: Option<bool>, on_screen: bool) -> Option<bool> {
+    if announced == Some(on_screen) {
+        None
+    } else {
+        Some(on_screen)
+    }
+}
+
+/// The on-screen answer a window event carries by itself, or `None` when the
+/// event is only a reason to read the window again. Gaining the keyboard focus
+/// answers it, because that is what each OS hands to a window on screen, and a
+/// macOS restore from the Dock arrives as that focus gain and as nothing else
+/// (ADR 089).
+fn settings_on_screen_from_window_event(event: &WindowEvent) -> Option<bool> {
+    match event {
+        WindowEvent::Focused(true) => Some(true),
+        _ => None,
+    }
+}
+
+/// Announce a change in the settings window's on-screen state, so the tab on
+/// it takes back or lets go of what it holds. Every path that shows it, hides
+/// it or is told it moved calls this one, which is what makes both
+/// announcements complete (ADR 089). `known_on_screen` is the answer the
+/// caller's event already carries; `None` reads the window, and a state that
+/// cannot be read announces nothing.
+fn announce_settings_visibility(app: &AppHandle, known_on_screen: Option<bool>) {
+    let Some(window) = app.get_webview_window("settings") else {
+        return;
+    };
+    let on_screen = match known_on_screen {
+        Some(answer) => answer,
+        None => {
+            let (Ok(visible), Ok(minimized)) = (window.is_visible(), window.is_minimized()) else {
+                log::warn!("Reading the settings window's state failed, so nothing is announced");
+                return;
+            };
+            settings_is_on_screen(visible, minimized)
+        }
+    };
+
+    let announced = {
+        let mut last = ANNOUNCED_SETTINGS_ON_SCREEN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match settings_visibility_to_announce(*last, on_screen) {
+            None => return,
+            Some(value) => {
+                *last = Some(value);
+                value
+            }
+        }
+    };
+
+    let _ = if announced {
+        app.emit("settings-shown", ())
+    } else {
+        app.emit("settings-hidden", ())
+    };
+}
+
+/// Show the settings window and hand the outcome to the announcer, so a tab
+/// that released what it held on the dismissal can take it back. Every path
+/// that shows that window calls this one (ADR 089).
 ///
 /// A failed `show()` announces nothing: the page would otherwise resume its
 /// polling into a window the user cannot see.
@@ -84,14 +163,17 @@ fn show_settings(app: &AppHandle) {
             log::warn!("Showing the settings window failed, so nothing is announced: {}", e);
             return;
         }
+        if let Err(e) = window.unminimize() {
+            log::warn!("Restoring the minimised settings window failed: {}", e);
+        }
         let _ = window.set_focus();
-        let _ = app.emit("settings-shown", ());
+        announce_settings_visibility(app, None);
     }
 }
 
-/// Hide the settings window and announce it, so the tab on it lets go of what
-/// it is holding. Every path that hides that window calls this one, which is
-/// what makes the announcement complete (ADR 089).
+/// Hide the settings window and hand the outcome to the announcer, so the tab
+/// on it lets go of what it is holding. Every path that hides that window
+/// calls this one (ADR 089).
 ///
 /// A failed `hide()` announces nothing: the page would otherwise stop polling
 /// a window that is still on screen.
@@ -101,7 +183,7 @@ fn hide_settings(app: &AppHandle) {
             log::warn!("Hiding the settings window failed, so nothing is announced: {}", e);
             return;
         }
-        let _ = app.emit("settings-hidden", ());
+        announce_settings_visibility(app, None);
     }
 }
 
@@ -223,11 +305,18 @@ pub fn run() {
 
             let settings_handle = app.handle().clone();
             if let Some(settings) = app.get_webview_window("settings") {
-                settings.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
+                settings.on_window_event(move |event| match event {
+                    WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
                         hide_settings(&settings_handle);
                     }
+                    WindowEvent::Resized(_) | WindowEvent::Focused(_) => {
+                        announce_settings_visibility(
+                            &settings_handle,
+                            settings_on_screen_from_window_event(event),
+                        );
+                    }
+                    _ => {}
                 });
             }
 
@@ -247,4 +336,64 @@ pub fn run() {
             backend::shutdown();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        settings_is_on_screen, settings_on_screen_from_window_event,
+        settings_visibility_to_announce,
+    };
+    use tauri::{PhysicalSize, WindowEvent};
+
+    #[test]
+    fn the_settings_surface_is_on_screen_only_while_visible_and_not_minimised() {
+        assert!(settings_is_on_screen(true, false));
+        assert!(!settings_is_on_screen(true, true));
+        assert!(!settings_is_on_screen(false, false));
+        assert!(!settings_is_on_screen(false, true));
+    }
+
+    #[test]
+    fn an_unchanged_on_screen_value_is_announced_once() {
+        assert_eq!(settings_visibility_to_announce(None, true), Some(true));
+        assert_eq!(settings_visibility_to_announce(Some(true), true), None);
+        assert_eq!(settings_visibility_to_announce(Some(true), false), Some(false));
+        assert_eq!(settings_visibility_to_announce(Some(false), false), None);
+        assert_eq!(settings_visibility_to_announce(None, false), Some(false));
+    }
+
+    #[test]
+    fn only_a_gained_focus_answers_the_on_screen_question_by_itself() {
+        assert_eq!(
+            settings_on_screen_from_window_event(&WindowEvent::Focused(true)),
+            Some(true)
+        );
+        assert_eq!(
+            settings_on_screen_from_window_event(&WindowEvent::Focused(false)),
+            None
+        );
+        assert_eq!(
+            settings_on_screen_from_window_event(&WindowEvent::Resized(PhysicalSize::new(900, 700))),
+            None
+        );
+    }
+
+    #[test]
+    fn the_event_answer_announces_a_restore_a_stale_window_read_would_swallow() {
+        let announced = Some(false);
+        let stale_read = settings_is_on_screen(true, true);
+        assert_eq!(
+            settings_visibility_to_announce(announced, stale_read),
+            None,
+            "the read alone announces nothing, and no further event follows a restore"
+        );
+
+        let from_event = settings_on_screen_from_window_event(&WindowEvent::Focused(true))
+            .expect("a restore arrives as a gained focus and must answer by itself");
+        assert_eq!(
+            settings_visibility_to_announce(announced, from_event),
+            Some(true)
+        );
+    }
 }

@@ -71,7 +71,9 @@ function listenAttempts(event: string): number {
 }
 
 let windowIsVisible: boolean | null = null;
+let windowIsMinimized = false;
 let visibilityReads = 0;
+let minimisationReads = 0;
 let holdVisibilityRead = false;
 let releaseVisibilityRead: () => void = () => {};
 
@@ -84,6 +86,10 @@ vi.mock("@tauri-apps/api/window", () => ({
       }
       if (windowIsVisible === null) throw new Error("no window to ask outside Tauri");
       return windowIsVisible;
+    },
+    isMinimized: async () => {
+      minimisationReads += 1;
+      return windowIsMinimized;
     },
   }),
 }));
@@ -127,7 +133,9 @@ beforeEach(() => {
   listenAttemptsByEvent.clear();
   refusedEvents.clear();
   windowIsVisible = null;
+  windowIsMinimized = false;
   visibilityReads = 0;
+  minimisationReads = 0;
   holdVisibilityRead = false;
   releaseVisibilityRead = () => {};
   modelsMountedHidden.length = 0;
@@ -1242,6 +1250,35 @@ describe("a show the Settings page was not yet listening for", () => {
         "the tray can show the window before this page subscribed, and a page that waits " +
           "for the next announcement believes itself hidden for the whole first open",
       ).toBeGreaterThan(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stays quiet when the window is minimised, which Windows still calls visible", async () => {
+    vi.useFakeTimers();
+    try {
+      windowIsVisible = true;
+      windowIsMinimized = true;
+      mockABackendThatAnswers();
+
+      await import("./settings");
+      await vi.waitFor(() => expect(visibilityReads).toBe(1));
+      expect(
+        minimisationReads,
+        "the page answers 'on screen' with the two terms the shell answers it with, or " +
+          "it disagrees with the shell about the window they are both looking at",
+      ).toBe(1);
+
+      const before = apiMock.health.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        apiMock.health.mock.calls.length,
+        "IsWindowVisible is TRUE for a minimised window, so a page that reads visibility " +
+          "alone resumes polling on a window sitting in the taskbar -- the state the shell " +
+          "has just announced as away",
+      ).toBe(before);
     } finally {
       vi.useRealTimers();
     }
