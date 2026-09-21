@@ -360,23 +360,21 @@ def _snapshot_real_roots(real_roots) -> dict:
     return snapshot
 
 
-def _real_root_change_report(before: dict, after: dict) -> str | None:
-    """The environmental explanation for a real-root change, or `None` when the
-    two snapshots agree.
+class RealAppDataRootChangedError(AssertionError):
+    """Raised by the session backstop, never from a test body."""
 
-    Leads with the misattribution, because the report's opening words are what
-    a truncated summary line shows.
-    """
+
+def _real_root_change_report(before: dict, after: dict) -> str | None:
+    """What changed between two real-root snapshots, or `None` when they agree."""
     if after == before:
         return None
     return (
-        "ENVIRONMENT, not the test this is reported against: a real app-data "
-        "root changed during the test session. A session-scoped teardown "
-        "failure is reported against whichever test ran last, so the test "
-        "named above is the suite's last one rather than the cause. Either "
-        "the suite wrote somewhere real, or another process on this machine "
-        "did -- a second pytest session, a running backend, the packaged app. "
-        "Re-run this suite alone before treating it as a leak.\n"
+        "A real app-data root changed during the test session. This check is "
+        "session-scoped and is reported against whichever test ran last, so the "
+        "test named above is not the cause. Either the suite wrote somewhere "
+        "real, or another process on this machine did -- a second pytest "
+        "session, a running backend, the packaged app. Re-run this suite alone "
+        "before treating it as a leak.\n"
         f"before-only: {sorted(str(p) for p in before.keys() - after.keys())}\n"
         f"after-only (NEW): {sorted(str(p) for p in after.keys() - before.keys())}\n"
         f"changed: {sorted(str(p) for p in before.keys() & after.keys() if before[p] != after[p])}"
@@ -386,24 +384,23 @@ def _real_root_change_report(before: dict, after: dict) -> str | None:
 @pytest.fixture(scope="session", autouse=True)
 def _snapshot_real_roots_backstop(_real_app_data_roots):
     """Session-scoped: records both real roots' state before the first test
-    and asserts nothing changed after the last one -- the net under AC 5a/5b's
+    and fails if anything changed after the last one -- the net under AC 5a/5b's
     net, catching a leak through a mechanism nobody enumerated.
 
-    Attribution is not merely poor, it is fixed and wrong: this teardown is
-    reported against the session's last test, which under `-p no:randomly` is
-    always the last test of the alphabetically last file.
+    It is reported against whichever test ran last, which is not the cause;
+    `RealAppDataRootChangedError` carries that in the exception type, which a
+    truncated summary line still shows.
 
     It observes the filesystem rather than this process, so anything else
-    writing to a real root during the session reads the same as a leak. That
-    is not hypothetical: two pytest sessions on one machine both initialise
-    logging into the shared dev root, and a dev backend appends to its
-    `backend.log` under that root. The resulting failure has three times been
-    read as a defect in the suite.
+    writing to a real root during the session reads the same as a leak: two
+    pytest sessions on one machine both initialise logging into the shared dev
+    root, and a dev backend appends to its `backend.log` under it.
     """
     before = _snapshot_real_roots(_real_app_data_roots)
     yield
     report = _real_root_change_report(before, _snapshot_real_roots(_real_app_data_roots))
-    assert report is None, report
+    if report is not None:
+        raise RealAppDataRootChangedError(report)
 
 
 RUNTIME_SETTINGS_FIELDS_WRITTEN_BY_SYNC: dict[str, tuple[str, ...]] = {
