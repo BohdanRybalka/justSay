@@ -21,6 +21,7 @@ import numpy as np
 
 from app.audio import analysis
 from app.audio.config import AudioSettings
+from app.core.frozen_build import is_frozen_build
 
 log = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ def resolve_ten_vad_lib() -> Path | None:
             _ENV_OVERRIDE, candidate,
         )
 
-    if getattr(sys, "frozen", False):
+    if is_frozen_build():
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
             candidate = Path(meipass) / "ten_vad" / lib_name

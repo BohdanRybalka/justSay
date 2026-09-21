@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from app.core import tasks
 from app.core.errors import ResourceUnavailableError
+from app.core.frozen_build import is_frozen_build
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
 from app.stt import local_whisper_cpp_cmd, routing
@@ -46,7 +47,7 @@ def _local_packages_cannot_be_installed() -> bool:
     ``True`` exactly in a PyInstaller bundle, whose ``sys.executable`` is the
     sidecar rather than Python.
     """
-    return bool(getattr(sys, "frozen", False))
+    return is_frozen_build()
 
 
 def _install_refusal_still_applies(setup_error: str | None, installed: bool) -> bool:
