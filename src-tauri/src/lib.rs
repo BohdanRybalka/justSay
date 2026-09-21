@@ -99,10 +99,10 @@ fn settings_visibility_to_announce(announced: Option<bool>, on_screen: bool) -> 
 }
 
 /// The on-screen answer a window event carries by itself, or `None` when the
-/// event is only a reason to read the window again. Taking focus answers it:
-/// `tao` moves focus onto a window only while it is visible and not minimised,
-/// on both shipping platforms, and a macOS restore from the Dock arrives as
-/// that focus gain and as nothing else (ADR 089).
+/// event is only a reason to read the window again. Gaining the keyboard focus
+/// answers it, because that is what each OS hands to a window on screen, and a
+/// macOS restore from the Dock arrives as that focus gain and as nothing else
+/// (ADR 089).
 fn settings_on_screen_from_window_event(event: &WindowEvent) -> Option<bool> {
     match event {
         WindowEvent::Focused(true) => Some(true),
@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn a_restore_is_announced_even_while_the_window_still_reads_minimised() {
+    fn the_event_answer_announces_a_restore_a_stale_window_read_would_swallow() {
         let announced = Some(false);
         let stale_read = settings_is_on_screen(true, true);
         assert_eq!(

@@ -197,6 +197,8 @@ _NOT_A_NEWLINE = re.compile(r"[^\n]")
 
 _SWIFT_FUNCTION_PATTERN = re.compile(r"^[ \t]*(?:private\s+)?func (\w+)\b", re.MULTILINE)
 
+_RUST_STRING_LITERAL_PATTERN = re.compile(r'"(?:\\.|[^"\\\n])*"')
+
 _RUST_COMMENT_OR_STRING_PATTERN = re.compile(
     r'"(?:\\.|[^"\\\n])*"' r"|/\*.*?\*/" r"|//[^\n]*",
     re.DOTALL,
@@ -222,7 +224,7 @@ _YAML_COMMENT_OR_STRING_PATTERN = re.compile(
     r'"(?:\\.|[^"\\\n])*"' r"|'(?:''|[^'\n])*'" r"|#[^\n]*"
 )
 
-_PYINSTALLER_DIST_PATTERN = re.compile(r"backend/dist/([A-Za-z0-9._-]+)")
+_PYINSTALLER_DIST_PATTERN = re.compile(r"(?<![\w.-])(?:[\w.-]+/)*dist/([A-Za-z0-9._-]+)")
 
 _BUNDLE_RESOURCE_SOURCE_PATTERN = "src-tauri/{source}"
 
@@ -670,6 +672,22 @@ def _rust_code(path: Path) -> str:
     return _RUST_COMMENT_OR_STRING_PATTERN.sub(blank, _read(path))
 
 
+def _rust_without_string_literals(code: str) -> str:
+    """``code`` with every string literal's contents blanked, index for index.
+
+    The quotes stay so the span is still recognisable, and every other
+    character is replaced by a space, so an offset found in the returned text
+    addresses the same character in the text handed in. Callers that count
+    brackets use it; callers that read names use the original.
+    """
+
+    def blank(match: re.Match[str]) -> str:
+        token = match.group(0)
+        return f'"{_NOT_A_NEWLINE.sub(" ", token[1:-1])}"'
+
+    return _RUST_STRING_LITERAL_PATTERN.sub(blank, code)
+
+
 def _rust_top_level_function_bodies(path: Path) -> dict[str, str]:
     """Each top-level ``fn`` of one Rust file, from its signature to its close.
 
@@ -824,22 +842,28 @@ def _rust_match_arm_body(handler: str, pattern: str) -> str:
     them a chunk ending at the second's name, so every assertion over that
     chunk passed on a pattern with no body under it. Brace depth is counted
     from the ``=>``, the way this module already reads a call's arguments.
+
+    The depth is counted over a copy with every string literal blanked, and the
+    slice is taken from the original: a lone ``{`` inside a literal would
+    otherwise carry the reader past the arm's ``}`` and into the arms after it,
+    where a call in a *different* arm satisfies a per-arm assertion.
     """
-    start = handler.find(pattern)
+    scan = _rust_without_string_literals(handler)
+    start = scan.find(pattern)
     assert start != -1, f"the handler writes no {pattern} pattern"
-    arrow = handler.find("=>", start)
+    arrow = scan.find("=>", start)
     assert arrow != -1, f"the arm matching {pattern} has no => and cannot compile"
-    rest = handler[arrow + 2 :]
+    rest, scanned = handler[arrow + 2 :], scan[arrow + 2 :]
     opening = len(rest) - len(rest.lstrip())
     assert rest[opening:].startswith("{"), (
         f"the arm matching {pattern} is written without braces, so this reader cannot "
         f"say where it ends: {rest[opening : opening + 60]!r}"
     )
     depth = 0
-    for index in range(opening, len(rest)):
-        if rest[index] == "{":
+    for index in range(opening, len(scanned)):
+        if scanned[index] == "{":
             depth += 1
-        elif rest[index] == "}":
+        elif scanned[index] == "}":
             depth -= 1
             if not depth:
                 return rest[opening : index + 1]
@@ -1026,12 +1050,27 @@ def test_a_restored_window_is_announced_from_the_event_rather_than_a_second_read
     second event that never comes: the page stays frozen on a window the user
     just restored. That is worse than the unconditional re-emit it replaced.
 
-    Gaining focus is sound as an answer on both shipping platforms because
-    ``tao`` will not move focus onto a window that is not on screen: its macOS
-    ``set_focus`` acts only ``if !is_minimized && is_visible``, and its Windows
-    one only ``if is_visible && !is_minimized && !is_foreground``. A focus
-    *loss* answers nothing and still reads the window, which is what keeps a
-    visible window the user clicked away from polling.
+    Gaining focus is sound as an answer because the ``Focused(true)`` that
+    reaches this handler is each OS reporting that the window now takes
+    keyboard input, not the shell asking for it; ``set_focus()``'s own guards
+    describe the outgoing request and govern neither delivery. On macOS the
+    event is ``windowDidBecomeKey:``, which AppKit posts from ``becomeKey()``,
+    and AppKit defines the key window as "the window that currently receives
+    keyboard events": the one documented act that grants that status,
+    ``makeKeyAndOrderFront(_:)``, "[m]oves the window to the front of the
+    screen list ... and makes it the key window", while both ways of putting a
+    window out of sight take it off that list -- ``miniaturize(_:)`` "[r]emoves
+    the window from the screen list and displays the minimized window in the
+    Dock", and ``orderOut(_:)`` documents that key status passes to the window
+    behind. On Windows tao's ``Focused`` never arrives at all:
+    ``tauri-runtime-wry`` discards it for a single-webview window and
+    synthesises the event from WebView2's ``GotFocus``, which ``wry`` raises by
+    forwarding the parent window's ``WM_SETFOCUS`` and ``WM_ENTERSIZEMOVE`` to
+    the controller -- the messages a window is sent after it has gained the
+    keyboard focus and while the user is dragging or sizing it.
+
+    A focus *loss* answers nothing and still reads the window, which is what
+    keeps a visible window the user clicked away from polling.
 
     Mutation-checked twice, each applied alone: making the reader answer
     ``None`` for a gained focus fails this test and the Rust unit test over the
@@ -1697,9 +1736,36 @@ def _yaml_code(path: Path) -> str:
 
 @functools.cache
 def _workflow_files() -> tuple[Path, ...]:
-    """Every workflow definition, as the release and CI jobs are read here."""
-    found = tuple(sorted(WORKFLOWS_DIR.glob("*.yml")))
+    """Every workflow definition, as the release and CI jobs are read here.
+
+    Both spellings GitHub accepts, because a walk that globs one of them would
+    let the other carry an unpinned spelling of everything read below.
+    """
+    found = tuple(sorted(set(WORKFLOWS_DIR.glob("*.yml")) | set(WORKFLOWS_DIR.glob("*.yaml"))))
     assert found, f"no workflow was found under {WORKFLOWS_DIR.relative_to(REPO_ROOT).as_posix()}"
+    return found
+
+
+@functools.cache
+def _workflows_that_compile_the_shell_without_bundling_it() -> tuple[Path, ...]:
+    """Workflows that build the Tauri crate but never run a bundling build.
+
+    A job that compiles the crate outside the release pipeline has nothing to
+    produce the bundle resources with, so it has to fabricate them; a release
+    job builds each one for real and names none of them the same way. Which
+    workflow that is, is read off the text rather than written down here, so a
+    second compile-only workflow is held to the rule the day it lands.
+    """
+    found = tuple(
+        path
+        for path in _workflow_files()
+        if any(token in _yaml_code(path) for token in ("cargo", "test:rust"))
+        and not any(token in _yaml_code(path) for token in ("tauri-action", "tauri build"))
+    )
+    assert found, (
+        "no workflow compiles the Tauri crate without also bundling it, so the walk "
+        "below has gone blind and would pass on nothing"
+    )
     return found
 
 
@@ -1719,23 +1785,31 @@ def test_the_packaged_sidecar_directory_name_agrees_with_what_the_build_produces
     The workflows write the same name a third way, and are the half a table of
     declaring files cannot hold: the release job addresses PyInstaller's output
     by path in every verification step and in the copy that fills the bundle,
-    and the CI job creates a placeholder for every resource ``tauri-build``
-    resolves at compile time. Both are therefore walked rather than listed, and
-    their two anchors are derived -- ``backend/dist/<name>`` is what
-    ``COLLECT`` produces, and the placeholder set comes from the bundle maps
-    below rather than from any name written here.
+    and a job that compiles the crate without bundling it creates a placeholder
+    for every resource ``tauri-build`` resolves at compile time. Both are
+    therefore walked rather than listed, and neither walk is anchored on a
+    spelling written here. ``dist/<name>`` is what ``COLLECT`` produces
+    whichever directory a step runs from, so the leading path is matched rather
+    than required; the placeholder set comes from the bundle maps below; and
+    which workflow owes the placeholders is read off the workflow text. Asking
+    only whether *some* workflow creates a placeholder was the same defect one
+    level up -- the release job copies the built resource to a path that spells
+    the same substring, so it answered for the compile job and the compile leg
+    could go red with this test green.
 
     The two Tauri maps are checked as a source-to-target pair rather than by
     value, because the target name is what the installer creates and the source
     path is what the release workflow copies into; a map that carries neither
     is a bundle with no sidecar in it.
 
-    Mutation-checked four times, each applied alone: renaming the ``COLLECT``
+    Mutation-checked five times, each applied alone: renaming the ``COLLECT``
     output in build_sidecar.spec fails this test printing every declaration;
     renaming the resource target in tauri.macos.conf.json fails it naming that
     file; renaming one ``backend/dist/`` path in release.yml fails it naming
-    that file and the stray name; and renaming the sidecar's ``mkdir`` target
-    in ci.yml fails it naming the resource no workflow creates.
+    that file and the stray name; rewriting that copy step to ``cd backend`` and
+    an unprefixed ``dist/<other name>`` fails it the same way; and deleting the
+    sidecar's ``mkdir`` or the tap's ``touch`` from ci.yml fails it naming that
+    workflow and the resource it no longer creates.
     """
     canonical = _extract(MACOS_TAP_PY, r'^SIDECAR_DIRECTORY_NAME = "([^"]*)"$')[0]
     declared = {
@@ -1778,23 +1852,26 @@ def test_the_packaged_sidecar_directory_name_agrees_with_what_the_build_produces
         if found != {canonical}
     }
     assert not stray_dist, (
-        f"every 'backend/dist/<name>' a workflow addresses is the directory COLLECT "
+        f"every 'dist/<name>' a workflow addresses, from whichever directory the step "
+        f"runs in, is the directory COLLECT "
         f"produces, which is {canonical!r}; these name it differently: {stray_dist}. A "
         "release job that verifies or copies a path the build never wrote fails one "
         "platform's leg at tag time, with nothing said before then"
     )
 
-    workflow_text = "\n".join(_yaml_code(path) for path in _workflow_files())
-    uncreated = sorted(
-        source
-        for source in bundle_sources
-        if _BUNDLE_RESOURCE_SOURCE_PATTERN.format(source=source) not in workflow_text
-    )
-    assert not uncreated, (
-        f"tauri-build resolves every bundle resource path at compile time, and no workflow "
-        f"creates a placeholder for {uncreated}; the compile leg of CI fails with "
-        '"resource path ... doesn\'t exist" on a checkout that carries none of them'
-    )
+    for path in _workflows_that_compile_the_shell_without_bundling_it():
+        code = _yaml_code(path)
+        uncreated = sorted(
+            source
+            for source in bundle_sources
+            if _BUNDLE_RESOURCE_SOURCE_PATTERN.format(source=source) not in code
+        )
+        assert not uncreated, (
+            f"tauri-build resolves every bundle resource path at compile time, and "
+            f"{path.name} compiles the crate without creating a placeholder for "
+            f"{uncreated}; its compile leg fails with \"resource path ... doesn't exist\" "
+            "on a checkout that carries none of them"
+        )
 
 
 def test_every_shell_answer_to_the_packaged_build_question_is_written_down() -> None:
