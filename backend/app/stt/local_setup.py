@@ -7,6 +7,7 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import NamedTuple
 
 from pydantic import BaseModel
 
@@ -73,6 +74,9 @@ _prewarm_error: str | None = None
 
 _model_ram_mb: int | None = None
 
+_loads_in_flight = 0
+_loads_begun = 0
+
 _active_load: tuple[object, asyncio.Task] | None = None
 
 _READY_TIMEOUT = 300.0
@@ -111,8 +115,8 @@ class LocalSTTStatus(BaseModel):
 def check_status(stt_settings: STTSettings) -> LocalSTTStatus:
     """Check local STT readiness: package installed + load state + GPU + last error.
 
-    The provider cache is read for the loaded state exactly once, so
-    ``model_loaded`` and ``model_ram_mb`` cannot contradict each other.
+    ``model_ram_mb`` and ``last_error`` describe the provider ``model_loaded``
+    answers for, because only a load the cache still holds may write either.
     ``last_error`` is ``None`` or non-blank, whichever producer wrote it.
     """
     installed = _check_package_installed()
@@ -256,14 +260,16 @@ async def _run_get_model(provider) -> None:
     figure for the load's duration and records what the load added.
     """
     _clear_model_ram_mb(provider)
-    baseline_rss = _read_rss_bytes_or_none()
+    census = _begin_load()
+    baseline_rss = _baseline_rss_bytes()
     try:
         await asyncio.to_thread(provider._get_model)
     except Exception as e:
         _record_load_outcome(provider, latched_load_error(e), None)
     else:
-        _record_load_outcome(provider, None, _load_delta_mb(baseline_rss))
+        _record_load_outcome(provider, None, _load_delta_mb(baseline_rss, census))
     finally:
+        _finish_load()
         if not _load_speaks_for_the_cache(provider):
             try:
                 provider.cleanup()
@@ -355,9 +361,9 @@ def _process_rss_bytes() -> int:
 def _read_rss_bytes_or_none() -> int | None:
     """This process's resident set size in bytes, or ``None`` when it raises.
 
-    Logs the reason when it does. A caller reads it at most once per model
-    load, so a machine whose psutil is refused writes one line per attempt
-    rather than one per status poll.
+    Logs the reason when it does. Only a load reads it, and a failed reading
+    ends that load's measurement, so a machine whose psutil is refused writes
+    one line per load attempt rather than one per status poll.
     """
     try:
         return _process_rss_bytes()
@@ -366,14 +372,57 @@ def _read_rss_bytes_or_none() -> int | None:
         return None
 
 
-def _load_delta_mb(baseline_rss: int | None) -> int | None:
+class _LoadCensus(NamedTuple):
+    """How many loads were running, and how many had ever begun, at one instant."""
+
+    in_flight: int
+    begun: int
+
+
+def _begin_load() -> _LoadCensus:
+    """Count a starting load in, and hand back the census its delta is judged against."""
+    global _loads_in_flight, _loads_begun
+    _loads_in_flight += 1
+    _loads_begun += 1
+    return _LoadCensus(_loads_in_flight, _loads_begun)
+
+
+def _finish_load() -> None:
+    """Count a finished load out, whatever its outcome."""
+    global _loads_in_flight
+    _loads_in_flight -= 1
+
+
+def _load_ran_alone(census: _LoadCensus) -> bool:
+    """Whether one load — this one — held the process across both its readings.
+
+    ``False`` when another load was already running when the baseline was
+    taken, and when one began before the second reading: that load's
+    allocations land inside this delta, which then describes neither model.
+    """
+    return census.in_flight == 1 and _loads_begun == census.begun
+
+
+def _baseline_rss_bytes() -> int | None:
+    """The reading a finished load's delta is measured against, or ``None``.
+
+    ``None`` without touching psutil for the whisper.cpp-server kind, whose
+    model memory lives in another process and whose figure is never published.
+    """
+    if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
+        return None
+    return _read_rss_bytes_or_none()
+
+
+def _load_delta_mb(baseline_rss: int | None, census: _LoadCensus) -> int | None:
     """Whole megabytes of RSS the just-finished load added, or ``None``.
 
-    ``None`` when either reading failed, and when the delta does not reach a
-    whole megabyte: memory the allocator took back can make it so, and 0 MB
+    ``None`` when a reading failed, when another load shared the window so the
+    growth belongs to no single one of them, and when the delta does not reach
+    a whole megabyte: memory the allocator took back can make it so, and 0 MB
     for a loaded model states something false where an absent figure does not.
     """
-    if baseline_rss is None:
+    if baseline_rss is None or not _load_ran_alone(census):
         return None
     loaded_rss = _read_rss_bytes_or_none()
     if loaded_rss is None:
@@ -423,8 +472,8 @@ def _estimate_model_ram_mb() -> int | None:
     """The RSS in MB that the last successful model load added, or ``None``.
 
     ``None`` for the whisper.cpp-server kind, whose model memory lives in a
-    separate process's address space, and ``None`` when no load has measured
-    a figure. Reads stored state only.
+    separate process's address space, and ``None`` whenever no load has a
+    number of its own to publish. Reads stored state only.
     """
     if get_local_provider_kind() == LocalProviderKind.WHISPER_CPP_SERVER:
         return None

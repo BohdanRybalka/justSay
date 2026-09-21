@@ -954,13 +954,23 @@ def test_check_package_installed_vulkan_kind_false_when_binary_missing(monkeypat
 _MB = 1024 * 1024
 
 
+class _UnallowedRssRead(BaseException):
+    """A read of `_process_rss_bytes` the calling test did not allow.
+
+    Deliberately not an `Exception`: `_read_rss_bytes_or_none` swallows every
+    `Exception` into `None` plus a WARNING, which would hide the overrun in
+    the one place the readings are actually counted.
+    """
+
+
 def _stub_rss_bytes(monkeypatch, *readings) -> list:
     """Answer `_process_rss_bytes` with `readings`, in order.
 
     An `Exception` instance among them is raised instead of returned. The
     returned list holds the readings not yet taken, so a test can assert the
     read happened exactly as many times as it allows; one read past the end
-    fails rather than silently repeating the last answer.
+    raises `_UnallowedRssRead` through the production caller too, rather than
+    silently repeating the last answer.
 
     At least one reading is required, because every `remaining == []` in this
     module would otherwise be true before the stub was ever called (ADR 079).
@@ -970,7 +980,9 @@ def _stub_rss_bytes(monkeypatch, *readings) -> list:
 
     def _next_reading():
         if not remaining:
-            raise AssertionError("_process_rss_bytes was read more times than this test allows")
+            raise _UnallowedRssRead(
+                "_process_rss_bytes was read more times than this test allows"
+            )
         reading = remaining.pop(0)
         if isinstance(reading, Exception):
             raise reading
@@ -986,8 +998,10 @@ def test_the_rss_stub_hands_back_its_readings_in_order(monkeypatch):
     Those assertions mean "read exactly as often as this test allows" only
     while the list demonstrably starts non-empty and shortens by one per read.
     Asserted once here instead of assumed at six call sites: a read past the
-    end fails rather than repeating the last answer, and a stub handed no
-    readings at all — the blind walk this pin exists to exclude — is refused.
+    end fails through `_read_rss_bytes_or_none`, which every production read
+    goes through and which swallows every `Exception` into a `None` the
+    counting would never see, and a stub handed no readings at all — the
+    blind walk this pin exists to exclude — is refused.
     """
     remaining = _stub_rss_bytes(monkeypatch, 400 * _MB, 475 * _MB)
 
@@ -996,8 +1010,10 @@ def test_the_rss_stub_hands_back_its_readings_in_order(monkeypatch):
     assert remaining == [475 * _MB]
     assert local_setup._process_rss_bytes() == 475 * _MB
     assert remaining == []
-    with pytest.raises(AssertionError, match="more times than this test allows"):
+    with pytest.raises(_UnallowedRssRead, match="more times than this test allows"):
         local_setup._process_rss_bytes()
+    with pytest.raises(_UnallowedRssRead, match="more times than this test allows"):
+        local_setup._read_rss_bytes_or_none()
     with pytest.raises(AssertionError, match="vacuous"):
         _stub_rss_bytes(monkeypatch)
 
@@ -1027,15 +1043,42 @@ def test_estimate_model_ram_mb_returns_none_for_vulkan_kind(monkeypatch):
 @pytest.mark.asyncio
 async def test_the_model_ram_measurement_reads_the_size_the_selftest_proves(monkeypatch):
     """One read behind both, so the release gate cannot pass while the figure
-    the user reads is produced by a second copy that broke."""
+    the status endpoint publishes is produced by a second copy that broke.
+
+    The third reading is the selftest's own: it answers `ok` off the same
+    stubbed helper, and a selftest reading psutil directly would leave it
+    unconsumed."""
     provider = _FakePrewarmProvider()
     monkeypatch.setattr("app.stt.routing.peek_local_provider", lambda: provider)
-    remaining = _stub_rss_bytes(monkeypatch, 0, 8 * _MB)
+    remaining = _stub_rss_bytes(monkeypatch, 0, 8 * _MB, 8 * _MB)
 
     await local_setup._run_get_model(provider)
 
     assert local_setup._estimate_model_ram_mb() == 8
+    assert local_setup.psutil_selftest() == (True, "ok")
     assert remaining == []
+
+
+@pytest.mark.asyncio
+async def test_a_whisper_cpp_server_load_never_reads_this_process_rss(monkeypatch):
+    """This kind publishes no figure at all, so both readings are pure cost.
+
+    On a machine whose psutil is refused they also wrote a WARNING naming a
+    number that kind never shows.
+    """
+    _stub_whisper_cpp_server_kind(monkeypatch)
+    provider = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.routing.peek_local_provider", lambda: provider)
+
+    def _refuse():
+        raise _UnallowedRssRead("a whisper.cpp-server load must not read this process's RSS")
+
+    monkeypatch.setattr(local_setup, "_process_rss_bytes", _refuse)
+
+    await local_setup._run_get_model(provider)
+
+    assert provider.is_loaded is True
+    assert local_setup._estimate_model_ram_mb() is None
 
 
 @pytest.mark.asyncio
@@ -1069,21 +1112,26 @@ async def test_the_published_model_ram_is_the_load_delta_not_the_whole_process_r
 async def test_a_refused_rss_read_publishes_no_figure_and_logs_once_per_load(monkeypatch, caplog):
     """A psutil that imports in CI and is refused on the user's machine.
 
-    The field stays empty, and the one line carrying the reason is written
-    per load attempt — the second reading is not even tried.
+    The field stays empty and the second reading is not even tried. Two
+    refused loads write two lines: a warn-once latch would leave every
+    attempt after the first with no reason recorded anywhere.
     """
     provider = _FakePrewarmProvider()
     monkeypatch.setattr("app.stt.routing.peek_local_provider", lambda: provider)
-    remaining = _stub_rss_bytes(monkeypatch, PermissionError("psutil refused by the OS"))
+    first = _stub_rss_bytes(monkeypatch, PermissionError("psutil refused by the OS"))
 
     with caplog.at_level(logging.WARNING, logger="app.stt.local_setup"):
         await local_setup._run_get_model(provider)
+        assert first == []
+        second = _stub_rss_bytes(monkeypatch, PermissionError("psutil refused again"))
+        await local_setup._run_get_model(provider)
 
     assert local_setup._estimate_model_ram_mb() is None
-    assert remaining == []
+    assert second == []
     refusals = [r for r in caplog.records if "model-RAM figure" in r.getMessage()]
-    assert len(refusals) == 1
+    assert len(refusals) == 2
     assert "psutil refused by the OS" in caplog.text
+    assert "psutil refused again" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1231,6 +1279,81 @@ async def test_a_load_the_cache_moved_past_does_not_clear_the_current_error(monk
     assert superseded.is_loaded is True
     assert local_setup._prewarm_error == "whisper-server exited early (code 3)"
     assert superseded.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_load_overlapping_an_older_one_publishes_no_figure(monkeypatch):
+    """Two loads run at once and the newer one is the cached provider.
+
+    A cancelled caller unwinds out of `_prewarm_lock` while its shielded task
+    keeps loading, so the older model's allocation lands between the newer
+    load's two readings. The cache-identity rule lets that newer load write —
+    it is the provider `model_loaded` answers for — and a 75 MB model would be
+    published as 3075.
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    def _block_until_released(p):
+        started.set()
+        release.wait(timeout=5)
+        p.is_loaded = True
+
+    superseded = _FakePrewarmProvider(get_model=_block_until_released)
+    cached = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.routing.peek_local_provider", lambda: cached)
+    remaining = _stub_rss_bytes(monkeypatch, 400 * _MB, 400 * _MB, 3475 * _MB)
+
+    older = asyncio.create_task(local_setup._run_get_model(superseded))
+    assert await asyncio.to_thread(started.wait, 2), "the older load never started"
+
+    await local_setup._run_get_model(cached)
+
+    assert cached.is_loaded is True
+    assert local_setup._estimate_model_ram_mb() is None
+    assert remaining == [3475 * _MB]
+
+    release.set()
+    await older
+
+    assert local_setup._estimate_model_ram_mb() is None
+    assert superseded.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_load_another_began_inside_publishes_no_figure(monkeypatch):
+    """The second load begins and ends while the cached one is still loading.
+
+    The cached load is alone again by the time it takes its second reading,
+    so how many loads are running cannot tell it anything; only how many have
+    ever begun says that the growth in between was not all its own.
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    def _block_until_released(p):
+        started.set()
+        release.wait(timeout=5)
+        p.is_loaded = True
+
+    cached = _FakePrewarmProvider(get_model=_block_until_released)
+    interloper = _FakePrewarmProvider()
+    monkeypatch.setattr("app.stt.routing.peek_local_provider", lambda: cached)
+    remaining = _stub_rss_bytes(
+        monkeypatch, 400 * _MB, 400 * _MB, 3400 * _MB, 3475 * _MB
+    )
+
+    outer = asyncio.create_task(local_setup._run_get_model(cached))
+    assert await asyncio.to_thread(started.wait, 2), "the cached load never started"
+
+    await local_setup._run_get_model(interloper)
+    release.set()
+    await outer
+
+    assert cached.is_loaded is True
+    assert local_setup._estimate_model_ram_mb() is None
+    assert remaining == [3400 * _MB, 3475 * _MB]
+    assert interloper.cleanup_calls == 1
 
 
 def test_a_status_poll_never_reads_this_process_rss(monkeypatch):
@@ -1652,13 +1775,17 @@ def _reset_prewarm_state():
     `_model_ram_mb` is reset on both sides for the plainer reason: it is
     module-level state a load writes, backend/tests/conftest.py does not
     clear it, and a figure left behind reaches `check_status` everywhere.
+    `_loads_in_flight` is reset with it: a test abandoning a load leaves the
+    count above zero, and the next test's measurement then reads as shared.
     """
     local_setup._prewarm_error = None
     local_setup._active_load = None
     local_setup._model_ram_mb = None
+    local_setup._loads_in_flight = 0
     yield
     local_setup._prewarm_error = None
     local_setup._model_ram_mb = None
+    local_setup._loads_in_flight = 0
 
 
 @pytest.mark.prewarm
@@ -2552,7 +2679,8 @@ def test_psutil_selftest_carries_the_failure_cause_into_its_message(monkeypatch)
 
 def test_psutil_selftest_rejects_a_resident_set_size_of_zero(monkeypatch):
     """A psutil that imports and then answers nonsense is not a working psutil:
-    the estimate would report 0 MB, which a user reads as a real measurement."""
+    every reading a load took would be that same zero, so the figure would be
+    absent on a machine that can measure it and nothing would say why."""
     import psutil
 
     monkeypatch.setattr(
