@@ -6,6 +6,7 @@ import {
   shouldReapplyShortcut,
 } from "../accelerator";
 import { api, REQUEST_TIMEOUT_MS } from "../api";
+import { hasOutlastedStartupBudget } from "../backend-startup";
 import {
   EVENT_MEETING_TOGGLE,
   EVENT_SETTINGS_CHANGED,
@@ -44,12 +45,16 @@ let durationInterval: ReturnType<typeof setInterval> | null = null;
 let iconFlashTimer: ReturnType<typeof setTimeout> | null = null;
 let autoRevertTimer: ReturnType<typeof setTimeout> | null = null;
 let connectionState: ConnectionCheckState = { offline: false, firstCheckDone: false };
+let firstHealthCheckAt: number | null = null;
 
 let currentShortcut = DEFAULT_SHORTCUT;
 let currentLanguage = "uk";
 const shortcutPlatform = detectShortcutPlatform(navigator);
 
 const AUTO_REVERT_MS = 3000;
+
+const BACKEND_STARTING_LABEL = "Starting…";
+const BACKEND_OFFLINE_LABEL = "Offline";
 
 
 const widget = document.getElementById("widget")!;
@@ -672,6 +677,16 @@ async function listenForSettingsChanges() {
 
 let latestConnectionProbeToken = 0;
 
+/** `Starting…` while the backend may still be coming up, `Offline` once the
+ *  wait has outlasted the budget a window gives it (ADR 092). */
+function backendWaitLabel(msWaiting: number): string {
+  return hasOutlastedStartupBudget(msWaiting) ? BACKEND_OFFLINE_LABEL : BACKEND_STARTING_LABEL;
+}
+
+function isBackendWaitLabel(label: string | null): boolean {
+  return label === BACKEND_STARTING_LABEL || label === BACKEND_OFFLINE_LABEL;
+}
+
 /** `setInterval` does not await this function, so against a backend that
  *  accepts and abandons, a probe outlives the 5 s interval and several are in
  *  flight at once — each then writing `connectionState` from whatever it read
@@ -686,6 +701,9 @@ let latestConnectionProbeToken = 0;
 async function checkConnection() {
   void abandoned.settle(Date.now());
 
+  const waitingSince = firstHealthCheckAt ?? performance.now();
+  firstHealthCheckAt = waitingSince;
+
   const token = ++latestConnectionProbeToken;
   let healthOk = true;
   try {
@@ -698,10 +716,10 @@ async function checkConnection() {
   connectionState = { offline: result.offline, firstCheckDone: result.firstCheckDone };
 
   if (healthOk) {
-    if (state === "idle" && text.textContent === "Offline") text.textContent = "JustSay";
+    if (state === "idle" && isBackendWaitLabel(text.textContent)) text.textContent = "JustSay";
     await settingsRetry.retryIfDue();
   } else {
-    if (state === "idle") text.textContent = "Offline";
+    if (state === "idle") text.textContent = backendWaitLabel(performance.now() - waitingSince);
     if (result.shouldNotify) notifyError("JustSay backend is unreachable.");
   }
 }
