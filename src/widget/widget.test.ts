@@ -201,6 +201,23 @@ describe("the label the widget shows while its backend is still coming up", () =
     expect(widgetText()).toBe("Offline");
   });
 
+  it("still reads Starting… after the system clock jumps a whole budget forward", async () => {
+    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await loadWidget();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(widgetText()).toBe("Starting…");
+
+    vi.setSystemTime(new Date(Date.now() + BACKEND_WAIT_BUDGET_MS * 2));
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS);
+
+    expect(
+      widgetText(),
+      "the app launches at login, which is when Windows re-syncs the clock, so a wait " +
+        "measured on the wall clock ends on a step rather than on elapsed time",
+    ).toBe("Starting…");
+  });
+
   it("goes back to JustSay on the first successful check after either label", async () => {
     apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BACKEND_WAIT_BUDGET_MS,
+  hasOutlastedStartupBudget,
   nextBackendStartup,
   type BackendStartupState,
 } from "./backend-startup";
@@ -46,6 +47,24 @@ describe("the screen a window waiting for its backend shows", () => {
 
     expect(decision.screen).toBe("failed");
     expect(decision.load).toBe(false);
+  });
+});
+
+describe("the budget every waiting surface shares", () => {
+  it("has not run out one millisecond before it does", () => {
+    expect(hasOutlastedStartupBudget(BACKEND_WAIT_BUDGET_MS - 1)).toBe(false);
+  });
+
+  it("has run out on the millisecond it does", () => {
+    expect(hasOutlastedStartupBudget(BACKEND_WAIT_BUDGET_MS)).toBe(true);
+  });
+
+  it("is the same fact the screen decision turns on, on both sides of the boundary", () => {
+    for (const msWaiting of [BACKEND_WAIT_BUDGET_MS - 1, BACKEND_WAIT_BUDGET_MS]) {
+      expect(nextBackendStartup(coldStart({ msWaiting })).screen === "failed").toBe(
+        hasOutlastedStartupBudget(msWaiting),
+      );
+    }
   });
 });
 

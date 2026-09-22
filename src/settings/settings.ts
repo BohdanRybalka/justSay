@@ -2,6 +2,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import {
   api,
   ApiAuthError,
+  ApiRequestError,
   lastBridgeDiagnosis,
   sawAuthFailure,
   type BridgeDiagnosis,
@@ -11,6 +12,7 @@ import {
 import {
   BACKEND_WAIT_BUDGET_MS,
   nextBackendStartup,
+  type BackendStartupDecision,
   type BackendStartupScreen,
 } from "../backend-startup";
 import { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } from "../contracts";
@@ -30,16 +32,17 @@ let settings: UserSettings | null = null;
 let cloudStatus: CloudKeyStatus | null = null;
 let activeTab: TabLifecycle | null = null;
 let settingsError: string | null = null;
-let backendReachable = true;
+let backendReachable = false;
 let settingsLoadInFlight = false;
 let settingsWindowHidden = true;
 let backendProbeInterval: ReturnType<typeof setInterval> | null = null;
 let handledVisibilityEdges = 0;
 let answeredLoadFailures = 0;
-let renderedScreen: BackendStartupScreen | null = null;
+let renderedUnavailable: { screen: BackendStartupScreen; retryDisabled: boolean } | null = null;
 
-const startupWaitStartedAt = Date.now();
+const startupWaitStartedAt = performance.now();
 const BACKEND_PROBE_INTERVAL_MS = 5000;
+const BACKEND_STILL_STARTING_MESSAGE = `The backend has not finished starting in ${BACKEND_WAIT_BUDGET_MS / 1000} seconds. It may still be coming up — try again, or restart JustSay.`;
 
 
 const tabContent = document.getElementById("tab-content")!;
@@ -122,18 +125,19 @@ function settingsUnavailableMessage(error: unknown, reachable: boolean): string 
   return `The backend answered, but loading settings failed: ${error instanceof Error ? error.message : String(error)}.`;
 }
 
-/** The waiting screen and the failure screen, with the way out of the second
+/** The waiting screen and the failure screen, with the way out of both
  *  (ADR 092).
  *
- *  `starting` says the backend has not answered yet and renders the retry
- *  button disabled; `failed` names what went wrong and leaves it live. */
+ *  `starting` says the backend has not answered yet; `failed` names what went
+ *  wrong. **Try again** is live unless a load is already in flight, so a press
+ *  always issues a request. */
 function renderSettingsUnavailable(container: HTMLElement, screen: BackendStartupScreen) {
   if (activeTab) {
     activeTab.destroy();
     activeTab = null;
   }
   container.innerHTML = "";
-  renderedScreen = screen;
+  renderedUnavailable = { screen, retryDisabled: settingsLoadInFlight };
 
   const starting = screen === "starting";
 
@@ -145,7 +149,7 @@ function renderSettingsUnavailable(container: HTMLElement, screen: BackendStartu
   explanation.style.color = "var(--text-dim)";
   explanation.textContent = starting
     ? "Waiting for the backend to start."
-    : settingsError ?? settingsUnavailableMessage(null, false);
+    : settingsError ?? BACKEND_STILL_STARTING_MESSAGE;
 
   container.append(title, explanation);
 
@@ -153,7 +157,7 @@ function renderSettingsUnavailable(container: HTMLElement, screen: BackendStartu
   retry.className = "btn btn-secondary";
   retry.id = "btn-retry-settings";
   retry.textContent = "Try again";
-  retry.disabled = starting || settingsLoadInFlight;
+  retry.disabled = settingsLoadInFlight;
   retry.addEventListener("click", () => {
     retry.disabled = true;
     retry.textContent = "Retrying…";
@@ -162,13 +166,19 @@ function renderSettingsUnavailable(container: HTMLElement, screen: BackendStartu
   container.append(retry);
 }
 
+/** Whether the backend answered this request and refused it — a 401, or any
+ *  other status it sent. A dropped socket, an abort and an expired budget are
+ *  not answers, so they leave the window free to try again (ADR 092). */
+function backendAnsweredAndFailed(error: unknown): boolean {
+  return error instanceof ApiAuthError || error instanceof ApiRequestError;
+}
+
 /** Load the settings into the window, or paint the screen that says why not.
  *
  *  Serialized on `settingsLoadInFlight`, so two overlapping loads cannot finish
  *  out of order and have the loser's repaint erase the winner's tab.
- *  `observedReachable` is the caller's own fresh `/health` reading; a caller
- *  without one makes this probe, because a retry must ask rather than decide on
- *  a reading up to a budget old. */
+ *  `observedReachable` is the caller's own `/health` reading, or null to take
+ *  one here (ADR 092). */
 async function loadSettingsIntoUi(observedReachable: boolean | null = null): Promise<void> {
   if (settingsLoadInFlight) return;
   settingsLoadInFlight = true;
@@ -181,8 +191,9 @@ async function loadSettingsIntoUi(observedReachable: boolean | null = null): Pro
     switchTab(currentTab);
     applyProbeSchedule(currentStartupScreen());
   } catch (e) {
-    if (reachable) answeredLoadFailures += 1;
-    settingsError = settingsUnavailableMessage(e, reachable);
+    const answered = backendAnsweredAndFailed(e);
+    if (answered) answeredLoadFailures += 1;
+    settingsError = settingsUnavailableMessage(e, reachable || answered);
     settingsLoadInFlight = false;
     const screen = currentStartupScreen();
     renderSettingsUnavailable(tabContent, screen);
@@ -192,15 +203,44 @@ async function loadSettingsIntoUi(observedReachable: boolean | null = null): Pro
   }
 }
 
-/** The screen this window should be showing right now (ADR 092). */
-function currentStartupScreen(): BackendStartupScreen {
+/** The screen this window should be showing right now, and whether it should
+ *  start a load (ADR 092). */
+function currentStartupDecision(): BackendStartupDecision {
   return nextBackendStartup({
     loaded: settings !== null,
     loadInFlight: settingsLoadInFlight,
     backendAnswering: backendReachable,
     answeredFailures: answeredLoadFailures,
-    msWaiting: Date.now() - startupWaitStartedAt,
-  }).screen;
+    msWaiting: performance.now() - startupWaitStartedAt,
+  });
+}
+
+function currentStartupScreen(): BackendStartupScreen {
+  return currentStartupDecision().screen;
+}
+
+/** Act on that decision: start the load it calls for, put the window on the
+ *  screen it names, and schedule the poll accordingly.
+ *
+ *  The load starts before the repaint, so **Try again** is never painted live
+ *  in front of a request that is already in flight. */
+function applyStartupDecision() {
+  const decision = currentStartupDecision();
+  if (decision.load) void loadSettingsIntoUi(backendReachable);
+  if (decision.screen !== "ready") refreshUnavailableScreen(decision.screen);
+  applyProbeSchedule(decision.screen);
+}
+
+/** Repaint the waiting or failure screen only when what it would show has
+ *  changed, so a poll does not rebuild a screen that already says this. */
+function refreshUnavailableScreen(screen: BackendStartupScreen) {
+  if (
+    renderedUnavailable?.screen === screen &&
+    renderedUnavailable.retryDisabled === settingsLoadInFlight
+  ) {
+    return;
+  }
+  renderSettingsUnavailable(tabContent, screen);
 }
 
 function switchTab(tabName: string) {
@@ -326,23 +366,7 @@ async function probeBackend(): Promise<boolean> {
   if (isStaleStatusResponse(token, latestBackendProbeToken)) return reachable;
   backendReachable = reachable;
   renderBackendStatus(backendReachable);
-
-  const decision = nextBackendStartup({
-    loaded: settings !== null,
-    loadInFlight: settingsLoadInFlight,
-    backendAnswering: reachable,
-    answeredFailures: answeredLoadFailures,
-    msWaiting: Date.now() - startupWaitStartedAt,
-  });
-  if (
-    !settingsLoadInFlight &&
-    decision.screen !== "ready" &&
-    decision.screen !== renderedScreen
-  ) {
-    renderSettingsUnavailable(tabContent, decision.screen);
-  }
-  if (decision.load) void loadSettingsIntoUi(reachable);
-  else applyProbeSchedule(decision.screen);
+  applyStartupDecision();
   return reachable;
 }
 
@@ -414,12 +438,12 @@ function applyWindowVisibility(event: "hidden" | "shown") {
   if (action === "ignore") return;
   settingsWindowHidden = action === "release";
   if (action === "release") {
-    applyProbeSchedule(currentStartupScreen());
+    applyStartupDecision();
     activeTab?.releaseResources?.();
     return;
   }
   void probeBackend();
-  applyProbeSchedule(currentStartupScreen());
+  applyStartupDecision();
   activeTab?.resumeResources?.();
 }
 
@@ -482,7 +506,7 @@ function init() {
   void trackTabWindowVisibility();
   renderSettingsUnavailable(tabContent, currentStartupScreen());
   void probeBackend();
-  applyProbeSchedule(currentStartupScreen());
+  applyStartupDecision();
 }
 
 init();

@@ -6,7 +6,7 @@ import {
   shouldReapplyShortcut,
 } from "../accelerator";
 import { api, REQUEST_TIMEOUT_MS } from "../api";
-import { nextBackendStartup } from "../backend-startup";
+import { hasOutlastedStartupBudget } from "../backend-startup";
 import {
   EVENT_MEETING_TOGGLE,
   EVENT_SETTINGS_CHANGED,
@@ -677,6 +677,16 @@ async function listenForSettingsChanges() {
 
 let latestConnectionProbeToken = 0;
 
+/** `Starting…` while the backend may still be coming up, `Offline` once the
+ *  wait has outlasted the budget a window gives it (ADR 092). */
+function backendWaitLabel(msWaiting: number): string {
+  return hasOutlastedStartupBudget(msWaiting) ? BACKEND_OFFLINE_LABEL : BACKEND_STARTING_LABEL;
+}
+
+function isBackendWaitLabel(label: string | null): boolean {
+  return label === BACKEND_STARTING_LABEL || label === BACKEND_OFFLINE_LABEL;
+}
+
 /** `setInterval` does not await this function, so against a backend that
  *  accepts and abandons, a probe outlives the 5 s interval and several are in
  *  flight at once — each then writing `connectionState` from whatever it read
@@ -688,27 +698,10 @@ let latestConnectionProbeToken = 0;
  *  so with a 15 s budget on a 5 s poll the widget can sit a whole budget past a
  *  tick before it notices the backend came back. Same guard, same shape, as the
  *  Settings window's badge and the Models tab's status read. */
-/** `Starting…` while the backend may still be coming up, `Offline` once the
- *  wait has outlasted the budget a window gives it (ADR 092). */
-function backendWaitLabel(msWaiting: number): string {
-  const { screen } = nextBackendStartup({
-    loaded: false,
-    loadInFlight: false,
-    backendAnswering: false,
-    answeredFailures: 0,
-    msWaiting,
-  });
-  return screen === "starting" ? BACKEND_STARTING_LABEL : BACKEND_OFFLINE_LABEL;
-}
-
-function isBackendWaitLabel(label: string | null): boolean {
-  return label === BACKEND_STARTING_LABEL || label === BACKEND_OFFLINE_LABEL;
-}
-
 async function checkConnection() {
   void abandoned.settle(Date.now());
 
-  const waitingSince = firstHealthCheckAt ?? Date.now();
+  const waitingSince = firstHealthCheckAt ?? performance.now();
   firstHealthCheckAt = waitingSince;
 
   const token = ++latestConnectionProbeToken;
@@ -726,7 +719,7 @@ async function checkConnection() {
     if (state === "idle" && isBackendWaitLabel(text.textContent)) text.textContent = "JustSay";
     await settingsRetry.retryIfDue();
   } else {
-    if (state === "idle") text.textContent = backendWaitLabel(Date.now() - waitingSince);
+    if (state === "idle") text.textContent = backendWaitLabel(performance.now() - waitingSince);
     if (result.shouldNotify) notifyError("JustSay backend is unreachable.");
   }
 }
