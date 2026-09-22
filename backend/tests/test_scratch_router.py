@@ -6,8 +6,12 @@ the app did not write is counted by neither and survives both.
 
 from __future__ import annotations
 
+import asyncio
+import threading
+
 import pytest
 
+from app.audio import scratch_router
 from app.audio.config import audio_settings
 
 
@@ -97,3 +101,53 @@ async def test_reported_size_equals_bytes_cleanup_frees(client, isolated_temp_di
     freed = (await client.post("/settings/cleanup")).json()["freed_bytes"]
 
     assert reported == freed == 1234
+
+
+@pytest.mark.anyio
+async def test_both_endpoints_walk_the_directory_off_the_event_loop_thread(
+    client, isolated_temp_dir, monkeypatch
+):
+    """A scratch directory is walked on a worker thread, not the loop's own.
+
+    Each helper records the thread it ran on. The recorded id differing from the
+    loop's is what fails when a handler stops awaiting `asyncio.to_thread` and
+    calls straight through, which would stall every other request for the walk.
+    """
+    (isolated_temp_dir / "rec_abc123.wav").write_bytes(b"x" * 16)
+    ran_on: dict[str, int] = {}
+
+    for name in ("_scratch_size", "_reap_scratch_files"):
+        original = getattr(scratch_router, name)
+
+        def _record(tmp_dir, _name=name, _original=original):
+            ran_on[_name] = threading.get_ident()
+            return _original(tmp_dir)
+
+        monkeypatch.setattr(scratch_router, name, _record)
+
+    loop_thread = threading.get_ident()
+    assert (await client.get("/settings/storage")).status_code == 200
+    assert (await client.post("/settings/cleanup")).status_code == 200
+
+    assert set(ran_on) == {"_scratch_size", "_reap_scratch_files"}, (
+        f"a handler never reached its helper: {sorted(ran_on)}"
+    )
+    assert threading.get_ident() == loop_thread
+    for name, thread_id in ran_on.items():
+        assert thread_id != loop_thread, (
+            f"{name} ran on the event loop's own thread, so the directory walk "
+            "blocks every other request for its duration"
+        )
+
+
+@pytest.mark.anyio
+async def test_asyncio_is_what_moves_the_walk_rather_than_the_helpers_themselves():
+    """The handlers own the thread hop; the helpers stay plain and synchronous.
+
+    Pins the seam so a later edit cannot satisfy the test above by making a
+    helper spawn its own thread while the handler still blocks.
+    """
+    assert not asyncio.iscoroutinefunction(scratch_router._scratch_size)
+    assert not asyncio.iscoroutinefunction(scratch_router._reap_scratch_files)
+    assert asyncio.iscoroutinefunction(scratch_router.get_storage_info)
+    assert asyncio.iscoroutinefunction(scratch_router.cleanup_temp)

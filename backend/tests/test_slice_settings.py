@@ -12,6 +12,7 @@ import ast
 import pytest
 
 from app.audio.config import AudioSettings
+from app.core.package_settings import PackageSettings
 from app.embeddings.config import EmbeddingSettings
 from app.stt.config import STTSettings
 from tests.app_modules import app_modules
@@ -114,3 +115,17 @@ def test_no_module_both_imports_a_slice_global_and_names_a_parameter_after_it():
         f"it, so inside those functions the global is unreachable: {shadowing}. Rename "
         "the parameter or read the global through its module."
     )
+
+
+def test_a_subclass_without_a_prefix_reads_no_bare_underscore_variable(monkeypatch):
+    """Doubling an empty prefix would make ``_FIELD`` a live environment name.
+
+    A subclass that declares no ``env_prefix`` must keep the declared sources
+    alone, so an unrelated ``_MODE`` in the environment cannot reach it.
+    """
+
+    class Prefixless(PackageSettings):
+        mode: str = "cloud"
+
+    monkeypatch.setenv("_MODE", "local")
+    assert Prefixless().mode == "cloud"

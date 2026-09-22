@@ -24,8 +24,20 @@ class PackageSettings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Each declared env source followed by its doubled-prefix twin."""
-        doubled_prefix = f"{settings_cls.model_config.get('env_prefix', '')}_"
+        """Each declared env source followed by its doubled-prefix twin.
+
+        A subclass declaring no ``env_prefix`` gets the declared sources alone,
+        since doubling an empty prefix would read bare ``_FIELD`` variables.
+        """
+        declared_prefix = settings_cls.model_config.get("env_prefix", "")
+        if not declared_prefix:
+            return (
+                init_settings,
+                env_settings,
+                dotenv_settings,
+                file_secret_settings,
+            )
+        doubled_prefix = f"{declared_prefix}_"
         return (
             init_settings,
             env_settings,

@@ -65,25 +65,34 @@ def _sync_to_runtime_ast() -> ast.FunctionDef:
     )
 
 
-def _settings_globals_written_by_sync_to_runtime() -> set[str]:
-    """Every module global `sync_to_runtime` assigns a field on, by name.
+def _slices_written_by_sync_to_runtime() -> set[str]:
+    """Every settings slice `sync_to_runtime` assigns a field on, by slice name.
 
-    A name counts when `user_settings` binds it to a `BaseSettings` instance, so
-    a slice added under any spelling is measured rather than matched against a
-    table. Asserts its own result non-empty: an empty walk would make the gate
-    below agree with anything.
+    Both spellings the sibling walk accepts are read here too -- a module global
+    bound to a `BaseSettings`, and an attribute of the composition root -- so
+    neither can reach a field while this one looks away. A global missing from
+    the table reports under its own name, which no slice name matches. Asserts
+    its own result non-empty, since an empty walk would agree with anything.
     """
     written = set()
     for node in ast.walk(_sync_to_runtime_ast()):
         if not isinstance(node, ast.Assign):
             continue
         for target in node.targets:
-            if not (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)):
+            if not isinstance(target, ast.Attribute):
                 continue
-            held = getattr(user_settings_module, target.value.id, None)
-            if isinstance(held, BaseSettings):
-                written.add(target.value.id)
-    assert written, "no settings global found written by sync_to_runtime"
+            holder = target.value
+            if isinstance(holder, ast.Name):
+                held = getattr(user_settings_module, holder.id, None)
+                if isinstance(held, BaseSettings):
+                    written.add(_SLICE_VARIABLE_HOLDS.get(holder.id, holder.id))
+            elif isinstance(holder, ast.Attribute) and isinstance(holder.value, ast.Name):
+                root = getattr(user_settings_module, holder.value.id, None)
+                if isinstance(root, BaseSettings) and isinstance(
+                    getattr(root, holder.attr, None), BaseSettings
+                ):
+                    written.add(holder.attr)
+    assert written, "no settings slice found written by sync_to_runtime"
     return written
 
 
@@ -116,17 +125,18 @@ def _fields_assigned_by_sync_to_runtime() -> dict[str, set[str]]:
     return assigned
 
 
-def test_the_slice_variable_table_names_every_settings_global_sync_to_runtime_writes():
+def test_the_slice_variable_table_names_every_settings_slice_sync_to_runtime_writes():
     """The walk above keys on variable names, and this is what keeps that list
     honest.
 
     `_fields_assigned_by_sync_to_runtime` recognises a write only through a name
     it already knows, so a fourth slice written under a name missing from the
     table would be walked past in silence -- and its fields would leak between
-    tests exactly as ten of them did before the restore list existed.
+    tests exactly as ten of them did before the restore list existed. Both
+    spellings that reach a slice fire this, because the walk above reads both.
     """
-    written = _settings_globals_written_by_sync_to_runtime()
-    unmapped = written - set(_SLICE_VARIABLE_HOLDS)
+    written = _slices_written_by_sync_to_runtime()
+    unmapped = written - set(_SLICE_VARIABLE_HOLDS.values())
     assert not unmapped, (
         f"sync_to_runtime writes onto {sorted(unmapped)}, which _SLICE_VARIABLE_HOLDS does "
         "not name, so neither the field walk nor the conftest restore list can see those "
