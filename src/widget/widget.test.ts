@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BACKEND_WAIT_BUDGET_MS } from "../backend-startup";
 import { EVENT_MEETING_TOGGLE } from "../contracts";
 import { CONNECTION_POLL_MS } from "./settings-retry";
 
@@ -173,6 +174,52 @@ describe("the widget's own timers", () => {
 
     expect(document.getElementById("widget-text")!.textContent).toBe("JustSay");
     expect(notifyErrorMock).not.toHaveBeenCalledWith("JustSay backend is unreachable.");
+  });
+});
+
+describe("the label the widget shows while its backend is still coming up", () => {
+  const widgetText = () => document.getElementById("widget-text")!.textContent;
+
+  it("reads Starting… on the first failed check, not Offline", async () => {
+    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await loadWidget();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(widgetText()).toBe("Starting…");
+  });
+
+  it("reads Offline on a failed check made once the wait budget has run out", async () => {
+    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await loadWidget();
+    await vi.advanceTimersByTimeAsync(BACKEND_WAIT_BUDGET_MS - CONNECTION_POLL_MS);
+    expect(widgetText()).toBe("Starting…");
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS);
+
+    expect(widgetText()).toBe("Offline");
+  });
+
+  it("goes back to JustSay on the first successful check after either label", async () => {
+    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await loadWidget();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(widgetText()).toBe("Starting…");
+
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0", stt_mode: "cloud" });
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS);
+    expect(widgetText()).toBe("JustSay");
+
+    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+    await vi.advanceTimersByTimeAsync(BACKEND_WAIT_BUDGET_MS);
+    expect(widgetText()).toBe("Offline");
+
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0", stt_mode: "cloud" });
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS);
+
+    expect(widgetText()).toBe("JustSay");
   });
 });
 

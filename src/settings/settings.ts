@@ -8,6 +8,11 @@ import {
   type CloudKeyStatus,
   type UserSettings,
 } from "../api";
+import {
+  BACKEND_WAIT_BUDGET_MS,
+  nextBackendStartup,
+  type BackendStartupScreen,
+} from "../backend-startup";
 import { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } from "../contracts";
 import { TimedOutError, withTimeout } from "../timeout";
 import { isStaleStatusResponse } from "../stale-response";
@@ -30,8 +35,10 @@ let settingsLoadInFlight = false;
 let settingsWindowHidden = true;
 let backendProbeInterval: ReturnType<typeof setInterval> | null = null;
 let handledVisibilityEdges = 0;
+let answeredLoadFailures = 0;
+let renderedScreen: BackendStartupScreen | null = null;
 
-const SETTINGS_LOAD_TIMEOUT_MS = 40_000;
+const startupWaitStartedAt = Date.now();
 const BACKEND_PROBE_INTERVAL_MS = 5000;
 
 
@@ -110,40 +117,35 @@ function settingsUnavailableMessage(error: unknown, reachable: boolean): string 
       : `The backend did not answer this window's request in time (${error.subject}, ${error.budgetMs / 1000} s). It may still be starting up — try again.`;
   }
   if (!reachable) {
-    return "The backend was not responding when this window loaded its settings. Make sure it is running, then try again.";
+    return "The backend was not responding. Make sure it is running, then try again.";
   }
   return `The backend answered, but loading settings failed: ${error instanceof Error ? error.message : String(error)}.`;
 }
 
-/**
- * The failure screen, with the way out of it.
+/** The waiting screen and the failure screen, with the way out of the second
+ *  (ADR 092).
  *
- * `init()` races the sidecar, whose readiness poll the Rust side runs for a
- * hundred attempts 300 ms apart (`src-tauri/src/backend.rs`), so it can take
- * well over thirty seconds and this screen is reached on an ordinary cold
- * start. Closing the window does
- * not reload the webview -- `src-tauri/src/lib.rs` intercepts CloseRequested
- * and hides it instead -- so without a retry the only recovery is restarting
- * the whole app.
- */
-function renderSettingsUnavailable(container: HTMLElement) {
+ *  `starting` says the backend has not answered yet and renders the retry
+ *  button disabled; `failed` names what went wrong and leaves it live. */
+function renderSettingsUnavailable(container: HTMLElement, screen: BackendStartupScreen) {
   if (activeTab) {
     activeTab.destroy();
     activeTab = null;
   }
   container.innerHTML = "";
+  renderedScreen = screen;
 
-  const loading = settingsError === null;
+  const starting = screen === "starting";
 
   const title = document.createElement("div");
   title.className = "tab-title";
-  title.textContent = loading ? "Loading settings..." : "Cannot load settings";
+  title.textContent = starting ? "Starting JustSay…" : "Cannot load settings";
 
   const explanation = document.createElement("p");
   explanation.style.color = "var(--text-dim)";
-  explanation.textContent = loading
-    ? "Waiting for the backend to answer."
-    : settingsError;
+  explanation.textContent = starting
+    ? "Waiting for the backend to start."
+    : settingsError ?? settingsUnavailableMessage(null, false);
 
   container.append(title, explanation);
 
@@ -151,7 +153,7 @@ function renderSettingsUnavailable(container: HTMLElement) {
   retry.className = "btn btn-secondary";
   retry.id = "btn-retry-settings";
   retry.textContent = "Try again";
-  retry.disabled = loading || settingsLoadInFlight;
+  retry.disabled = starting || settingsLoadInFlight;
   retry.addEventListener("click", () => {
     retry.disabled = true;
     retry.textContent = "Retrying…";
@@ -160,55 +162,45 @@ function renderSettingsUnavailable(container: HTMLElement) {
   container.append(retry);
 }
 
-/**
- * The one place settings are loaded into the window, and the only way back out
- * of the failure screen.
+/** Load the settings into the window, or paint the screen that says why not.
  *
- * Serialized on `settingsLoadInFlight` because the retry button is reachable
- * from the loading screen too: two overlapping loads could otherwise finish out
- * of order, and the loser's failure repaint would erase a tab the winner had
- * already rendered.
- *
- * The outer race is no longer what bounds an unanswered *request*. Every call
- * either half of this function makes carries its own budget, and that budget
- * now starts before the token is asked for rather than after it, so the one
- * unbounded step that used to sit in front of it — the dynamic
- * `import("@tauri-apps/api/core")` — is inside a budget too. `probeBackend()`
- * is awaited outside `loadSettings()` and therefore outside the race; it is
- * bounded because the request underneath it is, not because of anything here.
- *
- * The race is kept for what it still covers: this function grows more awaits
- * over time, and it is the only thing that bounds a step nobody remembered to
- * give a budget of its own. Its 40 s sits above the 15 s worst case of the two
- * bounded reads it wraps, which run in parallel under `Promise.all` and so cost
- * one budget between them, not two — it fires only on something new.
- *
- * The number a user waits is larger than either, and it is worth stating
- * because it is what this screen is about: `probeBackend()` carries its own
- * `REQUEST_TIMEOUT_MS` and is awaited before the race rather than inside it, so
- * a backend that accepts and never answers spends 15 s there and 15 s here
- * before any failure text appears. That probe runs on every call, retry
- * included: the poll's guard discards superseded answers rather than skipping
- * probes, so pressing "Try again" asks the backend rather than returning on a
- * reading up to a budget old.
- */
-async function loadSettingsIntoUi(): Promise<void> {
+ *  Serialized on `settingsLoadInFlight`, so two overlapping loads cannot finish
+ *  out of order and have the loser's repaint erase the winner's tab.
+ *  `observedReachable` is the caller's own fresh `/health` reading; a caller
+ *  without one makes this probe, because a retry must ask rather than decide on
+ *  a reading up to a budget old. */
+async function loadSettingsIntoUi(observedReachable: boolean | null = null): Promise<void> {
   if (settingsLoadInFlight) return;
   settingsLoadInFlight = true;
   let reachable = false;
   try {
-    reachable = await probeBackend();
-    await withTimeout(loadSettings(), SETTINGS_LOAD_TIMEOUT_MS);
+    reachable = observedReachable ?? (await probeBackend());
+    await withTimeout(loadSettings(), BACKEND_WAIT_BUDGET_MS);
     settingsError = null;
     settingsLoadInFlight = false;
     switchTab(currentTab);
+    applyProbeSchedule(currentStartupScreen());
   } catch (e) {
+    if (reachable) answeredLoadFailures += 1;
     settingsError = settingsUnavailableMessage(e, reachable);
     settingsLoadInFlight = false;
-    renderSettingsUnavailable(tabContent);
+    const screen = currentStartupScreen();
+    renderSettingsUnavailable(tabContent, screen);
     renderBackendStatus(backendReachable);
+    applyProbeSchedule(screen);
     console.error("Failed to load settings:", e);
   }
+}
+
+/** The screen this window should be showing right now (ADR 092). */
+function currentStartupScreen(): BackendStartupScreen {
+  return nextBackendStartup({
+    loaded: settings !== null,
+    loadInFlight: settingsLoadInFlight,
+    backendAnswering: backendReachable,
+    answeredFailures: answeredLoadFailures,
+    msWaiting: Date.now() - startupWaitStartedAt,
+  }).screen;
 }
 
 function switchTab(tabName: string) {
@@ -226,7 +218,7 @@ function switchTab(tabName: string) {
   tabContent.innerHTML = "";
 
   if (!settings) {
-    renderSettingsUnavailable(tabContent);
+    renderSettingsUnavailable(tabContent, currentStartupScreen());
     return;
   }
 
@@ -334,6 +326,23 @@ async function probeBackend(): Promise<boolean> {
   if (isStaleStatusResponse(token, latestBackendProbeToken)) return reachable;
   backendReachable = reachable;
   renderBackendStatus(backendReachable);
+
+  const decision = nextBackendStartup({
+    loaded: settings !== null,
+    loadInFlight: settingsLoadInFlight,
+    backendAnswering: reachable,
+    answeredFailures: answeredLoadFailures,
+    msWaiting: Date.now() - startupWaitStartedAt,
+  });
+  if (
+    !settingsLoadInFlight &&
+    decision.screen !== "ready" &&
+    decision.screen !== renderedScreen
+  ) {
+    renderSettingsUnavailable(tabContent, decision.screen);
+  }
+  if (decision.load) void loadSettingsIntoUi(reachable);
+  else applyProbeSchedule(decision.screen);
   return reachable;
 }
 
@@ -387,22 +396,30 @@ function stopBackendProbe() {
   backendProbeInterval = null;
 }
 
+/** Poll `/health` while this window is on screen or still waiting for its first
+ *  answer, and stop otherwise (ADR 092). */
+function applyProbeSchedule(screen: BackendStartupScreen) {
+  if (!settingsWindowHidden || screen === "starting") startBackendProbe();
+  else stopBackendProbe();
+}
+
 /** Hand this window's periodic work, and the active tab's, to the edge that
  *  just arrived (ADR 089).
  *
  *  A resume probes once before restarting the interval, so a returning user
- *  reads a badge one request old rather than one interval old. */
+ *  reads a badge one request old rather than one interval old. A dismissal
+ *  leaves the poll running while the window is still starting. */
 function applyWindowVisibility(event: "hidden" | "shown") {
   const action = nextTabAction(event, settingsWindowHidden);
   if (action === "ignore") return;
   settingsWindowHidden = action === "release";
   if (action === "release") {
-    stopBackendProbe();
+    applyProbeSchedule(currentStartupScreen());
     activeTab?.releaseResources?.();
     return;
   }
   void probeBackend();
-  startBackendProbe();
+  applyProbeSchedule(currentStartupScreen());
   activeTab?.resumeResources?.();
 }
 
@@ -460,11 +477,12 @@ async function trackTabWindowVisibility() {
 }
 
 
-async function init() {
+function init() {
   void initAppVersion();
   void trackTabWindowVisibility();
-  renderSettingsUnavailable(tabContent);
-  await loadSettingsIntoUi();
+  renderSettingsUnavailable(tabContent, currentStartupScreen());
+  void probeBackend();
+  applyProbeSchedule(currentStartupScreen());
 }
 
 init();

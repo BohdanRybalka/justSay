@@ -250,7 +250,7 @@ describe("a shortcut the widget stored while this window was open", () => {
 const backendStatusEl = () => document.getElementById("backend-status")!;
 
 /** Boots settings.ts with /health healthy and /settings rejecting, and waits
- *  for init()'s failure path to have painted. */
+ *  for the failure screen to have painted. */
 async function bootWithFailedSettingsLoad(error: unknown) {
   apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
   apiMock.getSettings.mockRejectedValue(error);
@@ -402,63 +402,101 @@ describe("backend badge — health 200, then the first settings request 401s", (
 });
 
 describe("backend unreachable from the first poll", () => {
-  it("states the failure instead of leaving the content pane empty", async () => {
+  it("says the app is starting until the wait budget runs out, then names the failure", async () => {
     vi.useFakeTimers();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
     apiMock.getSettings.mockRejectedValue(new TypeError("Failed to fetch"));
     apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
 
+    const { BACKEND_WAIT_BUDGET_MS } = await import("../backend-startup");
     await import("./settings");
     const tabContent = document.getElementById("tab-content")!;
 
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(tabContent.textContent!.trim()).not.toBe("");
-    expect(tabContent.textContent).toContain("Cannot load settings");
-    expect(tabContent.textContent).toContain("was not responding");
-    expect(tabContent.querySelector("#btn-retry-settings")).not.toBeNull();
+    expect(tabContent.textContent).toContain("Starting JustSay");
+    expect(tabContent.textContent).not.toContain("Cannot load settings");
+    expect(tabContent.textContent).not.toContain("not responding");
+    expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(true);
     expect(backendStatusEl().textContent).toBe("Backend offline");
     expect(backendStatusEl().className).toBe("status-indicator offline");
-    expect(apiMock.getSettings).toHaveBeenCalledTimes(1);
 
     const painted = tabContent.firstElementChild;
-    await vi.advanceTimersByTimeAsync(15000);
+    await vi.advanceTimersByTimeAsync(BACKEND_WAIT_BUDGET_MS - 5000);
     expect(tabContent.firstElementChild).toBe(painted);
+    expect(tabContent.textContent).not.toContain("Cannot load settings");
+    expect(tabContent.textContent).not.toContain("not responding");
+    expect(
+      apiMock.getSettings,
+      "a backend that has not answered /health cannot answer /settings either, so " +
+        "asking it is a refused request per poll tick",
+    ).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(tabContent.textContent).toContain("Cannot load settings");
     expect(tabContent.textContent).toContain("was not responding");
-    expect(apiMock.getSettings).toHaveBeenCalledTimes(1);
+    expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(
+      false,
+    );
+    expect(apiMock.getSettings).not.toHaveBeenCalled();
 
     document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.click();
-    expect(tabContent.textContent).not.toContain("Loading settings");
+    expect(tabContent.textContent).not.toContain("Starting JustSay");
     expect(tabContent.textContent).toContain("was not responding");
 
     vi.useRealTimers();
     consoleError.mockRestore();
   });
 
+  it("mounts the tab by itself on the poll after /health answers, with nothing clicked", async () => {
+    vi.useFakeTimers();
+    apiMock.health.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
+    apiMock.getSettings.mockResolvedValue(buildSettings());
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: true, groq_key_set: true });
+    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+
+    await import("./settings");
+    const tabContent = document.getElementById("tab-content")!;
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tabContent.textContent).toContain("Starting JustSay");
+    expect(apiMock.getSettings).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(
+      document.getElementById("lang-select"),
+      "the poll already learns the backend came up, so a window that still waits for a " +
+        "click is waiting for something it does not need",
+    ).not.toBeNull();
+    expect(tabContent.querySelector("#btn-retry-settings")).toBeNull();
+    expect(tabContent.textContent).not.toContain("Starting JustSay");
+    expect(backendStatusEl().className).toBe("status-indicator online");
+
+    vi.useRealTimers();
+  });
+
   it("the retry button loads the settings without restarting the app", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    apiMock.health.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.getSettings.mockRejectedValueOnce(new TypeError("Failed to fetch"));
-    apiMock.cloudKeyStatus.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: true, groq_key_set: true });
+    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
     await import("./settings");
     const tabContent = document.getElementById("tab-content")!;
 
     await vi.waitFor(() => {
-      expect(tabContent.querySelector("#btn-retry-settings")).not.toBeNull();
+      expect(tabContent.textContent).toContain("Cannot load settings");
     });
+    const retry = tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!;
+    expect(retry.disabled).toBe(false);
 
-    apiMock.health.mockResolvedValue({
-      status: "ok",
-      version: "0.0.0",
-      stt_mode: "cloud",
-    });
     apiMock.getSettings.mockResolvedValue(buildSettings());
-    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: true, groq_key_set: true });
-    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
-
-    tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
+    retry.click();
 
     await vi.waitFor(() => {
       expect(tabContent.textContent).not.toContain("Cannot load settings");
@@ -471,9 +509,9 @@ describe("backend unreachable from the first poll", () => {
 
   it("a second retry while one is in flight does not start a second load", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    apiMock.health.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.getSettings.mockRejectedValueOnce(new TypeError("Failed to fetch"));
-    apiMock.cloudKeyStatus.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: true, groq_key_set: true });
 
     await import("./settings");
     const tabContent = document.getElementById("tab-content")!;
@@ -484,16 +522,10 @@ describe("backend unreachable from the first poll", () => {
       );
     });
 
-    apiMock.health.mockResolvedValue({
-      status: "ok",
-      version: "0.0.0",
-      stt_mode: "cloud",
-    });
     let release!: (settings: UserSettings) => void;
     apiMock.getSettings.mockReturnValue(
       new Promise<UserSettings>((resolve) => (release = resolve)),
     );
-    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: true, groq_key_set: true });
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
     tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
@@ -530,7 +562,7 @@ describe("backend unreachable from the first poll", () => {
     const tabContent = document.getElementById("tab-content")!;
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(tabContent.textContent).toContain("Loading settings");
+    expect(tabContent.textContent).toContain("Starting JustSay");
     expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(true);
 
     await vi.advanceTimersByTimeAsync(41_000);
@@ -569,7 +601,7 @@ describe("backend unreachable from the first poll", () => {
 
   it("a retry that fails again leaves the button usable rather than stuck", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.getSettings.mockRejectedValue(new TypeError("Failed to fetch"));
     apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
 
@@ -577,7 +609,9 @@ describe("backend unreachable from the first poll", () => {
     const tabContent = document.getElementById("tab-content")!;
 
     await vi.waitFor(() => {
-      expect(tabContent.querySelector("#btn-retry-settings")).not.toBeNull();
+      expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(
+        false,
+      );
     });
     tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
 
@@ -624,7 +658,7 @@ describe("a 401 observed after settings have loaded", () => {
     expect(backendStatusEl().className).toBe("status-indicator error");
     expect(backendStatusEl().getAttribute("title")).toContain("invoke-failed: boom");
     expect(tabContent.textContent).not.toContain("Cannot load settings");
-    expect(tabContent.textContent).not.toContain("Loading settings");
+    expect(tabContent.textContent).not.toContain("Starting JustSay");
     expect(document.getElementById("gemini-key-input")).toBe(keyInput);
     expect(keyInput.value).toBe("typing-in-progress");
 
@@ -635,7 +669,7 @@ describe("a 401 observed after settings have loaded", () => {
     expect(backendStatusEl().className).toBe("status-indicator online");
     expect(backendStatusEl().hasAttribute("title")).toBe(false);
     expect(tabContent.textContent).not.toContain("Cannot load settings");
-    expect(tabContent.textContent).not.toContain("Loading settings");
+    expect(tabContent.textContent).not.toContain("Starting JustSay");
     expect(document.getElementById("gemini-key-input")).toBe(keyInput);
     expect(keyInput.value).toBe("typing-in-progress");
     expect(apiMock.getSettings).toHaveBeenCalledTimes(1);
@@ -655,8 +689,8 @@ describe("a settings load that has not settled", () => {
     const tabContent = document.getElementById("tab-content")!;
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(tabContent.textContent).toContain("Loading settings");
-    expect(tabContent.textContent).toContain("Waiting for the backend to answer");
+    expect(tabContent.textContent).toContain("Starting JustSay");
+    expect(tabContent.textContent).toContain("Waiting for the backend to start");
     expect(backendStatusEl().textContent).toBe("Backend");
     expect(backendStatusEl().className).toBe("status-indicator online");
     await openSettingsWindow();
@@ -664,11 +698,11 @@ describe("a settings load that has not settled", () => {
     apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
     await vi.advanceTimersByTimeAsync(5000);
     expect(backendStatusEl().textContent).toBe("Backend offline");
-    expect(tabContent.textContent).toContain("Loading settings");
+    expect(tabContent.textContent).toContain("Starting JustSay");
 
     await vi.advanceTimersByTimeAsync(15000);
     expect(settingsModule.getSettings()).toBeNull();
-    expect(tabContent.textContent).toContain("Loading settings");
+    expect(tabContent.textContent).toContain("Starting JustSay");
     expect(apiMock.getSettings).toHaveBeenCalledTimes(1);
 
     vi.useRealTimers();
@@ -695,20 +729,34 @@ describe("a settings load that fails after the backend has gone away", () => {
 
     await import("./settings");
     const tabContent = document.getElementById("tab-content")!;
+
+    pending[0](true);
     await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => {
+      expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(
+        false,
+      );
+    });
     await openSettingsWindow();
+    pending[1](true);
+    await vi.advanceTimersByTimeAsync(0);
 
+    tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
     await vi.advanceTimersByTimeAsync(5000);
-    expect(pending.length).toBe(3);
+    expect(pending.length).toBe(4);
 
-    pending[2](true);
+    pending[3](true);
     await vi.advanceTimersByTimeAsync(0);
     expect(backendStatusEl().textContent).toBe("Backend");
 
-    pending[0](false);
+    pending[2](false);
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(tabContent.textContent).toContain("was not responding");
+    expect(
+      tabContent.textContent,
+      "the retry's own probe saw the backend gone, and taking the shared reading instead " +
+        "would name a state some other probe observed",
+    ).toContain("was not responding");
     expect(tabContent.textContent).not.toContain("The backend answered");
     expect(backendStatusEl().textContent).toBe("Backend");
 
@@ -758,7 +806,7 @@ describe("the Settings window's own health poll", () => {
   it("the retry button probes rather than joining a probe already in flight", async () => {
     vi.useFakeTimers();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.getSettings.mockRejectedValue(new TypeError("Failed to fetch"));
     apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
 
@@ -766,7 +814,9 @@ describe("the Settings window's own health poll", () => {
     const tabContent = document.getElementById("tab-content")!;
     await vi.advanceTimersByTimeAsync(0);
     await vi.waitFor(() => {
-      expect(tabContent.querySelector("#btn-retry-settings")).not.toBeNull();
+      expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(
+        false,
+      );
     });
     await openSettingsWindow();
 
@@ -882,19 +932,26 @@ describe("the Settings window being dismissed", () => {
   });
 
   it("asks for nothing at all when no tab was ever mounted, because no settings loaded", async () => {
-    const { EVENT_SETTINGS_HIDDEN } = await import("../contracts");
-    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
-    apiMock.getSettings.mockRejectedValue(new TypeError("Failed to fetch"));
-    apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
+    vi.useFakeTimers();
+    try {
+      const { EVENT_SETTINGS_HIDDEN } = await import("../contracts");
+      apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+      apiMock.getSettings.mockRejectedValue(new TypeError("Failed to fetch"));
+      apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
 
-    await import("./settings");
-    await vi.waitFor(() => expect(eventListeners.get(EVENT_SETTINGS_HIDDEN)).toBeTypeOf("function"));
-    await openSettingsWindow();
+      await import("./settings");
+      await vi.waitFor(() =>
+        expect(eventListeners.get(EVENT_SETTINGS_HIDDEN)).toBeTypeOf("function"),
+      );
+      await openSettingsWindow();
 
-    await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
+      await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
 
-    expect(apiMock.getStorageInfo).not.toHaveBeenCalled();
-    expect(apiMock.audioDiscard).not.toHaveBeenCalled();
+      expect(apiMock.getStorageInfo).not.toHaveBeenCalled();
+      expect(apiMock.audioDiscard).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1195,6 +1252,66 @@ describe("the Settings window's own health poll across a dismissal", () => {
       expect(apiMock.health.mock.calls.length).toBe(afterResume + 2);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("keeps probing through a dismissal while the backend has still not answered", async () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { EVENT_SETTINGS_HIDDEN } = await import("../contracts");
+      apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+      apiMock.getSettings.mockRejectedValue(new TypeError("Failed to fetch"));
+      apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
+
+      await import("./settings");
+      await openSettingsWindow();
+      await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
+      const whileHidden = apiMock.health.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      expect(
+        apiMock.health.mock.calls.length,
+        "the window is hidden for the whole of a cold start, so a poll that stops on the " +
+          "dismissal is a window that never learns the backend came up",
+      ).toBeGreaterThan(whileHidden);
+    } finally {
+      vi.useRealTimers();
+      consoleError.mockRestore();
+    }
+  });
+
+  it("stops on a dismissal once the wait budget has run the screen out of starting", async () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { EVENT_SETTINGS_HIDDEN } = await import("../contracts");
+      const { BACKEND_WAIT_BUDGET_MS } = await import("../backend-startup");
+      apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+      apiMock.getSettings.mockRejectedValue(new TypeError("Failed to fetch"));
+      apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
+
+      await import("./settings");
+      await openSettingsWindow();
+      await vi.advanceTimersByTimeAsync(BACKEND_WAIT_BUDGET_MS);
+      expect(document.getElementById("tab-content")!.textContent).toContain(
+        "Cannot load settings",
+      );
+
+      await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
+      const whileHidden = apiMock.health.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        apiMock.health.mock.calls.length,
+        "once the window has stopped saying it is starting, a dismissal takes the poll " +
+          "down exactly as it did before the grace existed",
+      ).toBe(whileHidden);
+    } finally {
+      vi.useRealTimers();
+      consoleError.mockRestore();
     }
   });
 
