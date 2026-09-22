@@ -4,10 +4,10 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.core.config import settings
 from app.core.errors import JustSayError
 from app.core.types import ProviderMode
 from app.preferences.user_settings import update_user_settings
+from app.stt.config import stt_settings
 from app.stt.local_setup import (
     LocalSTTStatus,
     install_local_packages,
@@ -29,30 +29,30 @@ class _ModeBody(BaseModel):
 
 @router.put("/mode")
 async def set_stt_mode(body: _ModeBody):
-    settings.stt.mode = body.mode
+    stt_settings.mode = body.mode
     clear_cache()
     update_user_settings({"stt_mode": body.mode.value})
-    provider = get_provider(settings.stt.mode, settings.stt)
+    provider = get_provider(stt_settings.mode, stt_settings)
     from app.stt.local_setup import maybe_prewarm_local
 
-    maybe_prewarm_local(settings.stt)
-    return {"stt_mode": settings.stt.mode, "model": provider.model_name}
+    maybe_prewarm_local(stt_settings)
+    return {"stt_mode": stt_settings.mode, "model": provider.model_name}
 
 
 @router.get("/local/status", response_model=LocalSTTStatus)
 async def stt_local_status():
     """Check local STT readiness: package, model loaded, GPU."""
-    return await asyncio.to_thread(check_local_status, settings.stt)
+    return await asyncio.to_thread(check_local_status, stt_settings)
 
 
 @router.post("/local/load")
 async def stt_local_load():
     """Load whisper model into memory. May take minutes on first run (model download)."""
-    if settings.stt.mode != ProviderMode.LOCAL:
+    if stt_settings.mode != ProviderMode.LOCAL:
         raise HTTPException(status_code=400, detail="STT mode is not local")
 
     try:
-        provider = get_provider(settings.stt.mode, settings.stt)
+        provider = get_provider(stt_settings.mode, stt_settings)
         await asyncio.to_thread(provider._get_model)
         return {"loaded": True, "model": provider.model_name}
     except JustSayError:
@@ -75,11 +75,11 @@ async def stt_local_prewarm():
     Fire-and-forget, same as the automatic pre-warm triggers — returns
     immediately, does not await the install/load itself.
     """
-    if settings.stt.mode != ProviderMode.LOCAL:
+    if stt_settings.mode != ProviderMode.LOCAL:
         raise HTTPException(status_code=400, detail="STT mode is not local")
     from app.stt.local_setup import maybe_prewarm_local
 
-    maybe_prewarm_local(settings.stt)
+    maybe_prewarm_local(stt_settings)
     return {"started": True}
 
 

@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.core.config import settings
+from app.config import settings
 from app.core.types import ProviderMode
 from app.transcripts import history, relocation, schema, search, vector_store
 

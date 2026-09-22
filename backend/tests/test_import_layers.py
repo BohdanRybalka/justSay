@@ -13,16 +13,19 @@ Fifteen properties are pinned here:
    refiled as shared ground is measured against the rule instead of leaving it.
    `app.api` is classified as neither a feature package nor shared ground,
    because shared ground is what `core` may import and a router is not.
-   Separately, exactly one module in the whole of `app/` imports the
-   composition root `app.config` directly —
-   `core/config.py`, which re-exports it so every call site keeps spelling the
-   singleton `app.core.config.settings`. That half is scoped to all of `app/`
-   rather than to `core`, because the second spelling is plantable in any
+   Separately, only the modules `_MAY_IMPORT_THE_COMPOSITION_ROOT` names
+   import the composition root `app.config` directly — `main.py`,
+   `api/router.py` and `api/auth_middleware.py`, application assembly and the
+   HTTP boundary, which sit outside the group of mutually dependent packages,
+   so reading the aggregate from one of them closes no cycle back into the
+   group. That is the criterion a fourth name has to meet, and reading only
+   application-level fields is not it: `api/router.py` reads
+   `settings.stt.mode`, a field `app.stt` owns. That half is scoped to all of
+   `app/` rather than to `core`, because the spelling is plantable in any
    package, and it prefix-matches so `app.config.runtime` could not walk past
-   if `app/config.py` ever became `app/config/`. Neither half makes `core` a
-   leaf, and nothing here claims one: `app.core.config` re-exports a settings
-   object assembled from every feature package, so importing it still loads
-   all of them (ADR 076).
+   if `app/config.py` ever became `app/config/`. A feature package reads the
+   settings instance its own package holds instead of the aggregate, which is
+   what leaves `core` importing no feature package at all (ADR 091).
 2. `app.audio.analysis` imports nothing the frozen PyInstaller sidecar lacks,
    and is imported *from* rather than importing — its own docstring names the
    libraries that would break the packaged build, and ADR 015 depends on it.
@@ -43,7 +46,7 @@ Fifteen properties are pinned here:
 4. The set of *two-node* package cycles does not grow and does not outlive the
    pairs it lists, and — separately — the set of packages that all reach each
    other does not change in either direction. The first instrument sees one
-   pair today; nineteen of this graph's twenty elementary cycles run longer
+   pair today; three of this graph's four elementary cycles run longer
    than two nodes and are invisible to it, which is why the second exists and
    why the tolerance list is named for the scope it actually has. Neither
    number measures progress on the other, and a falling two-node count is not
@@ -205,42 +208,50 @@ with the number of tests each one reddens:
 
 - a core module made to import a feature package, in the absolute
   (`from app.audio import analysis`) and the relative (`from ..audio import
-  analysis`) spelling alike -- one test each
+  analysis`) spelling alike -- **three** tests each, measured in
+  `app/core/utils.py`: the feature-package rule, the two-node cycle test and
+  the component pin, because `app.core` sits outside the component now and an
+  edge into `app.audio` builds a fresh one out of the two of them
 - `from app.audio.config import AudioSettings` planted in `app/core/utils.py`
-  -- **two** tests, not one: the feature-package rule, and the two-node cycle
-  test below, because `app.core <-> app.audio` left
-  `_KNOWN_TWO_NODE_PACKAGE_CYCLES` in the same change and so is a new pair
-  again. Both halves of the `99e05e4` counter-claim were re-measured against a
+  -- **three** tests: the feature-package rule, the two-node cycle test below,
+  because `app.core <-> app.audio` left `_KNOWN_TWO_NODE_PACKAGE_CYCLES` in the
+  same change and so is a new pair again, and the component pin, which reports
+  that pair as a group of its own. Both halves of the `99e05e4` counter-claim
+  were re-measured against a
   `git archive` of that commit. Planted in the module its exemption covered,
   the one this gate has since dropped, the same line reddened **zero** there.
   Planted in `utils.py`, which that exemption never covered, it reddened
   **one**
-- `from app.config import settings` planted in `app/transcripts/search.py` in
-  place of its function-local `app.core.config` import, so the module still
-  works and only the spelling reaches past the one doorway -- **one** test.
-  It is planted outside `core` on purpose: the gate walked `app.core` alone
-  when it shipped, so this exact line was green in seven packages out of eight
+- `from app.config import settings` planted in `app/transcripts/search.py`
+  beside the slice import it already holds, so the module still works and only
+  the spelling reaches the aggregate -- **two** tests, the composition-root
+  rule and the component pin, the second because that edge pulls `app.config`
+  and everything it imports back inside the group. It is planted outside
+  `core` on purpose: the gate walked `app.core` alone when it shipped, so this
+  exact line was green in seven packages out of eight
 - `from app.config.runtime import settings` planted in `app/core/utils.py`'s
-  `sse_event` body -- **one** test. The submodule does not exist and is not
-  meant to; what it pins is that the upward check prefix-matches rather than
-  comparing for equality, which is how it shipped
+  `sse_event` body -- **two** tests, the composition-root rule and the
+  component pin. The submodule does not exist and is not meant to; what it
+  pins is that the upward check prefix-matches rather than comparing for
+  equality, which is how it shipped
 - both of the above in one diff -- `from app.audio.config import AudioSettings`
   and `from app.config import settings` added to `app/core/utils.py` together
-  -- **three** tests, and the point of the mutation is that the feature-package
+  -- **four** tests, and the point of the mutation is that the feature-package
   rule and the composition-root rule report *both* messages. They were one test
   function with two asserts until Stage 5, where the first `assert` firing hid
   the second
-- `app/config.py` renamed to `app/composition.py` with the re-export repointed
-  -- **two** tests of this file, the existence mirror and the component pin.
-  Measured against this file alone: the full suite stops at collection, because
-  `tests/test_settings_isolation.py` imports the composition root by name.
-  Before the mirror existed the same rename left all fourteen tests here green,
-  with the gate matching nothing at all
+- `app/config.py` renamed to `app/composition.py` with its three importers
+  repointed -- **no** test of this file reports, because the file no longer
+  collects: `tests/conftest.py` imports the composition root by name and the
+  run stops at `ModuleNotFoundError: No module named 'app.config'`. The mirror
+  is what catches a rename that does collect; before it existed the same rename
+  left all fourteen tests here green, with the gate matching nothing at all
 - a function-local `from app.pipeline import service` added to
-  `app/stt/base.py` -- **two** tests, the component pin (seven names to eight)
-  and the two-node list, since `app.pipeline <-> app.stt` is also a new pair.
-  The same edge takes the elementary-cycle enumeration from 20 to 44, which is
-  why membership is pinned and the enumeration is not
+  `app/stt/base.py` -- **two** tests, the component pin (four names to six,
+  `app.audio` arriving alongside `app.pipeline`) and the two-node list, since
+  `app.pipeline <-> app.stt` is also a new pair. The same edge takes the
+  elementary-cycle enumeration from 4 to 11, which is why membership is pinned
+  and the enumeration is not
 - `import fastapi` planted in `app/audio/analysis.py`, the base DSP module --
   three tests, because that module is a non-exempt file of a
   web-framework-free package, is the module property 2 guards, and sits on
@@ -249,8 +260,9 @@ with the number of tests each one reddens:
   tests, the same first two
 - `app/audio/analysis.py` made to import `app.audio.timeline`, absolutely and
   relatively (`from .timeline import ...`) -- one test each
-- a fresh `transcripts <-> pipeline` cycle, and a fictional entry added to the
-  known-cycle list -- one test each
+- a fresh `transcripts <-> pipeline` cycle -- **two** tests, the two-node list
+  and the component pin, which reports `app.pipeline` joining the group; a
+  fictional entry added to the known-cycle list -- **one**, the staleness half
 - a provider given `HTTPException` -- one test
 - a `fastapi` importer added as `app/handlers.py`, directly under `app/`, and
   as `app/newpkg/thing.py` in a directory with no `__init__.py` -- one test
@@ -305,7 +317,7 @@ with the number of tests each one reddens:
   the boundary, and **zero** before that rule existed
 - `_MAY_IMPORT_THE_HTTP_BOUNDARY` emptied, so `app/main.py` itself offends --
   **three** tests: that rule, the reachability rule, and the allowlist's own
-  mirror reporting that it walked nothing. `core/config.py` and
+  mirror reporting that it walked nothing. `core/utils.py` and
   `pipeline/nonexistent.py` added to it beside `main.py` -- one real module
   that does not import the boundary and one path that does not exist --
   **one** test, that same mirror, and **zero** before the mirror existed
@@ -519,7 +531,11 @@ from tests.conftest import assert_import_loads_no_module
 
 _COMPOSITION_ROOT = "app.config"
 
-_MAY_IMPORT_THE_COMPOSITION_ROOT = {"core/config.py"}
+_MAY_IMPORT_THE_COMPOSITION_ROOT = {
+    "api/auth_middleware.py",
+    "api/router.py",
+    "main.py",
+}
 
 _MAY_IMPORT_THE_HTTP_BOUNDARY = {"main.py"}
 
@@ -545,7 +561,7 @@ _WEB_FRAMEWORK_ROOTS = frozenset({"fastapi", "starlette"})
 
 _WEB_FRAMEWORK_FREE_PACKAGES = {
     "api": {"auth_middleware.py", "error_handler.py", "router.py"},
-    "audio": {"router.py", "dependencies.py"},
+    "audio": {"router.py", "dependencies.py", "scratch_router.py"},
     "core": set(),
     "embeddings": set(),
     "pipeline": {"router.py", "service.py", "upload_validation.py"},
@@ -593,9 +609,6 @@ _MUTUALLY_DEPENDENT_PACKAGES = frozenset(
     {
         frozenset(
             {
-                "app.audio",
-                "app.config",
-                "app.core",
                 "app.embeddings",
                 "app.preferences",
                 "app.stt",
@@ -922,9 +935,9 @@ def test_every_http_boundary_module_is_reached_from_the_boundary():
     )
 
 
-def test_only_one_module_imports_the_composition_root_directly():
-    """The singleton has two working spellings and both are policed, with one
-    module allowed the upper one.
+def test_only_the_recorded_modules_import_the_composition_root_directly():
+    """The aggregate is for application assembly and the HTTP boundary, and
+    `_MAY_IMPORT_THE_COMPOSITION_ROOT` is the whole of who may reach it.
 
     Its own function rather than a second assertion inside the rule above,
     because the first `assert` to fire hides the second: a diff that both plants
@@ -934,7 +947,7 @@ def test_only_one_module_imports_the_composition_root_directly():
     Scoped to every module under `app/`, not to `core` alone. `from app.config
     import settings` is plantable in any package, and scoping the walk to `core`
     left it green everywhere else — which is what it did when this gate shipped
-    (ADR 076)."""
+    (ADR 091)."""
     reaching_up = []
     for module, path in _modules().items():
         relative = path.relative_to(APP_DIR).as_posix()
@@ -946,9 +959,10 @@ def test_only_one_module_imports_the_composition_root_directly():
 
     assert not reaching_up, (
         f"These modules import {_COMPOSITION_ROOT} directly: {reaching_up}. "
-        "Import `app.core.config`, the one doorway, which re-exports the same "
-        "objects. Adding a second doorway to _MAY_IMPORT_THE_COMPOSITION_ROOT "
-        "is a decision, not a formality — see ADR 076."
+        "Read the settings instance the package owns — `stt_settings`, "
+        "`audio_settings`, `embedding_settings` — not the aggregate. Adding a "
+        "name to _MAY_IMPORT_THE_COMPOSITION_ROOT is a decision, not a "
+        "formality — see ADR 091."
     )
 
 
@@ -959,7 +973,7 @@ def test_the_composition_root_gate_still_matches_something():
     tree, so renaming or moving either end leaves it matching nothing at all —
     green, with every assertion in it vacuous. That is not hypothetical: before
     this test existed, renaming `app/config.py` to `app/composition.py` and
-    repointing the re-export left all fourteen tests in this file passing."""
+    repointing its importers left all fourteen tests in this file passing."""
     stale = []
     if _COMPOSITION_ROOT not in _modules():
         stale.append(f"{_COMPOSITION_ROOT}: no such module")
@@ -976,8 +990,8 @@ def test_the_composition_root_gate_still_matches_something():
     assert not stale, (
         f"The composition-root gate describes nothing: {stale}. Repoint "
         "_COMPOSITION_ROOT and _MAY_IMPORT_THE_COMPOSITION_ROOT at where the "
-        "singleton is now defined and re-exported — until then the test above "
-        "passes without checking anything."
+        "singleton is now defined and at who still reads it — until then the "
+        "test above passes without checking anything."
     )
 
 
@@ -2266,8 +2280,8 @@ def _two_node_package_cycles() -> set[tuple[str, str]]:
 
     Two nodes and no more, which is the whole field of view of the two tests
     below: a loop running `app.core -> app.config -> app.audio -> app.core` is
-    a cycle this returns nothing for. Nineteen of the twenty elementary cycles
-    in this graph are of that kind. `app.main` is excluded because building the
+    a cycle this returns nothing for. Three of this graph's four elementary
+    cycles are of that kind. `app.main` is excluded because building the
     application means importing every router.
     """
     edges = _package_edges()
@@ -2283,9 +2297,9 @@ def _mutually_dependent_packages() -> frozenset[frozenset[str]]:
 
     The transitive closure of the package graph, grouped by mutual
     reachability. Computed rather than enumerated: a list of elementary cycles
-    holds 20 entries here and 44 after one added function-local import, so it
-    records a snapshot rather than a rule, while this membership moves by one
-    readable name on that same edge.
+    holds 4 entries here and 11 after one added function-local import, so it
+    records a snapshot rather than a rule, while this membership moves by two
+    readable names on that same edge.
 
     `app.main` is excluded, as `_two_node_package_cycles` excludes it.
     """
@@ -2421,13 +2435,13 @@ def test_shared_ground_is_pinned_and_the_three_classifications_do_not_overlap():
 
 
 def test_the_mutually_dependent_package_set_has_not_changed():
-    """Seven packages all reach each other, so none can be read, moved or
-    tested without the other six. This pins which seven.
+    """Four packages all reach each other, so none can be read, moved or
+    tested without the other three. This pins which four.
 
     Every such group is pinned, not the largest one. Returning only the biggest
     left a second tangle invisible and made the answer depend on dictionary
     order when two tied on size, so a three-package loop sharing no edge with
-    the seven passed unseen and the test could change verdict between runs on
+    the largest passed unseen and the test could change verdict between runs on
     interpreter start-up alone.
 
     The instrument the two-node tests are not. Compared as an exact set, so it

@@ -1,19 +1,17 @@
 """Application-level config — composition root.
 
-Assembles the child-module configs (stt, audio, embeddings) into a single
-AppSettings object. Each child Settings reads its own env scope via its own
-``env_prefix`` (``JUSTSAY_STT_GEMINI_API_KEY`` → ``settings.stt.gemini_api_key``),
-with ``env_nested_delimiter="__"`` configured here as a fallback for the
-double-underscore form. Callers keep spelling this module ``app.core.config``,
-which re-exports what is defined here (ADR 076).
+Owns the application-level fields and exposes each feature package's own live
+settings instance as a read-only property, so ``settings.stt`` is the very
+object ``app.stt.config`` defines rather than a second construction of it
+(ADR 091).
 """
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.audio.config import AudioSettings
-from app.embeddings.config import EmbeddingSettings
-from app.stt.config import STTSettings
+from app.audio.config import AudioSettings, audio_settings
+from app.embeddings.config import EmbeddingSettings, embedding_settings
+from app.stt.config import STTSettings, stt_settings
 
 
 class AppSettings(BaseSettings):
@@ -27,17 +25,27 @@ class AppSettings(BaseSettings):
         default_factory=lambda: ["127.0.0.1", "localhost"]
     )
 
-    stt: STTSettings = Field(default_factory=STTSettings)
-    audio: AudioSettings = Field(default_factory=AudioSettings)
-    embeddings: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
-
     model_config = SettingsConfigDict(
         env_prefix="JUSTSAY_",
-        env_nested_delimiter="__",
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @property
+    def stt(self) -> STTSettings:
+        """The live instance ``app.stt`` reads and writes."""
+        return stt_settings
+
+    @property
+    def audio(self) -> AudioSettings:
+        """The live instance ``app.audio`` reads and writes."""
+        return audio_settings
+
+    @property
+    def embeddings(self) -> EmbeddingSettings:
+        """The live instance ``app.embeddings`` reads and writes."""
+        return embedding_settings
 
 
 settings = AppSettings()

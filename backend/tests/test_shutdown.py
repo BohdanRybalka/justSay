@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 
 from app.api import router as api_router
+from app.config import settings
 from app.core import tasks
-from app.core.config import settings
 from app.main import SHUTDOWN_CONNECTION_DRAIN_SECONDS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

@@ -12,7 +12,7 @@ import secrets
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.core.config import settings
+from app.config import settings
 
 _TOKEN_HEADER = b"x-justsay-token"
 

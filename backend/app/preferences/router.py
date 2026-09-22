@@ -1,12 +1,8 @@
 """Settings endpoints — CRUD for user preferences."""
 
-import logging
-from pathlib import Path
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.core.config import settings as runtime_settings
 from app.core.constants import MASKED_API_KEY
 from app.preferences.user_settings import (
     UserSettings,
@@ -14,8 +10,7 @@ from app.preferences.user_settings import (
     sync_to_runtime,
     update_user_settings,
 )
-
-log = logging.getLogger(__name__)
+from app.stt.config import stt_settings
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
@@ -28,14 +23,6 @@ def _mask_keys(s: UserSettings) -> UserSettings:
         f: (MASKED_API_KEY if getattr(s, f) else "")
         for f in _KEY_FIELDS
     })
-
-
-class StorageInfo(BaseModel):
-    temp_size_bytes: int
-
-
-class CleanupResult(BaseModel):
-    freed_bytes: int
 
 
 class SettingsUpdateResponse(BaseModel):
@@ -71,7 +58,7 @@ async def put_settings(updates: dict):
     if changed_stt:
         from app.stt.local_setup import maybe_prewarm_local
 
-        maybe_prewarm_local(runtime_settings.stt)
+        maybe_prewarm_local(stt_settings)
     return SettingsUpdateResponse(settings=_mask_keys(outcome.settings), warning=outcome.warning)
 
 
@@ -84,58 +71,11 @@ class CloudKeyStatus(BaseModel):
 async def cloud_key_status():
     """Whether each Cloud API key is currently active in the runtime config.
 
-    Checks the runtime AppSettings (not UserSettings) so that keys provided
+    Checks the runtime STT settings (not UserSettings) so that keys provided
     via .env are correctly reflected even if the user has never opened Settings → Keys.
     """
     return CloudKeyStatus(
-        gemini_key_set=bool(runtime_settings.stt.gemini_api_key),
-        groq_key_set=bool(runtime_settings.stt.groq_api_key),
+        gemini_key_set=bool(stt_settings.gemini_api_key),
+        groq_key_set=bool(stt_settings.groq_api_key),
     )
 
-
-_SCRATCH_PREFIXES = ("rec_", "pipeline_", "meeting_")
-
-
-def _scratch_files(tmp_dir: Path) -> list[Path]:
-    """Files in the scratch directory that this app wrote (ADR 033).
-
-    ``rec_*`` from the microphone recorder, ``pipeline_*`` from the upload path, ``meeting_*`` from
-    the meeting recorder. Deletion is scoped by ownership, so anything else found there survives.
-    """
-    if not tmp_dir.is_dir():
-        return []
-    return [
-        entry
-        for entry in tmp_dir.iterdir()
-        if entry.is_file() and entry.name.startswith(_SCRATCH_PREFIXES)
-    ]
-
-
-def _scratch_size(tmp_dir: Path) -> int:
-    total = 0
-    for entry in _scratch_files(tmp_dir):
-        try:
-            total += entry.stat().st_size
-        except OSError:
-            continue
-    return total
-
-
-@router.get("/storage", response_model=StorageInfo)
-async def get_storage_info():
-    return StorageInfo(temp_size_bytes=_scratch_size(runtime_settings.audio.temp_dir))
-
-
-@router.post("/cleanup", response_model=CleanupResult)
-async def cleanup_temp():
-    tmp_dir = runtime_settings.audio.temp_dir
-    freed = 0
-    for entry in _scratch_files(tmp_dir):
-        try:
-            size = entry.stat().st_size
-            entry.unlink()
-        except OSError:
-            log.warning("Could not remove scratch file %s", entry, exc_info=True)
-            continue
-        freed += size
-    return CleanupResult(freed_bytes=freed)

@@ -14,9 +14,10 @@ import pyperclip
 from fastapi import BackgroundTasks
 
 from app.audio.analysis import analyze_silence
+from app.audio.config import audio_settings
 from app.audio.vad import analyze_vad
-from app.core.config import settings
 from app.pipeline.utils import detect_duration
+from app.stt.config import stt_settings
 from app.stt.routing import get_routed_provider, is_local_provider
 from app.transcripts.history import save_entry
 
@@ -54,12 +55,12 @@ async def process_audio(
         duration = detect_duration(audio_path)
 
     vad = None
-    if settings.audio.silence_vad_enabled:
-        vad = await asyncio.to_thread(analyze_vad, audio_path, settings.audio)
+    if audio_settings.silence_vad_enabled:
+        vad = await asyncio.to_thread(analyze_vad, audio_path, audio_settings)
 
     analysis = None
     if vad is None:
-        analysis = await asyncio.to_thread(analyze_silence, audio_path, settings.audio)
+        analysis = await asyncio.to_thread(analyze_silence, audio_path, audio_settings)
 
     discard_log: tuple[str, tuple] | None = None
     if vad is not None and vad.is_silent:
@@ -84,7 +85,7 @@ async def process_audio(
 
     file_ext = audio_path.suffix.lower() if audio_path.suffix else None
     stt, fallback_reason = get_routed_provider(
-        settings.stt,
+        stt_settings,
         audio_duration=duration,
         file_extension=file_ext,
     )
@@ -100,7 +101,7 @@ async def process_audio(
     if is_local_provider(stt):
         from app.stt.local_setup import await_local_ready
 
-        await await_local_ready(settings.stt)
+        await await_local_ready(stt_settings)
 
     try:
         result = await stt.transcribe(
@@ -114,12 +115,12 @@ async def process_audio(
 
     if (
         result.no_speech_prob is not None
-        and result.no_speech_prob > settings.stt.no_speech_prob_threshold
+        and result.no_speech_prob > stt_settings.no_speech_prob_threshold
     ):
         log.warning(
             "Discarding transcription (layer=provider-metadata): no_speech_prob=%.3f > %.3f "
             "(%s, %d chars discarded)",
-            result.no_speech_prob, settings.stt.no_speech_prob_threshold,
+            result.no_speech_prob, stt_settings.no_speech_prob_threshold,
             stt.model_name,
             len(result.text),
         )

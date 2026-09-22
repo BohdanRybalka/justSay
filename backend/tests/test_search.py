@@ -344,7 +344,7 @@ async def test_local_dictation_mode_gets_rows_rather_than_a_refusal():
     the rule under test. Only Ollama is stood in for: the tag probe reports the
     model pulled and the provider returns a fixed vector.
     """
-    from app.core.config import settings as runtime_settings
+    from app.config import settings as runtime_settings
     from app.core.types import ProviderMode
     from app.embeddings import clear_cache as clear_embeddings_cache
 

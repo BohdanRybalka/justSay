@@ -18,6 +18,7 @@ import sqlite_vec
 from pydantic import BaseModel
 
 from app.core.errors import ResourceUnavailableError
+from app.stt.config import stt_settings
 from app.transcripts import history
 
 log = logging.getLogger(__name__)
@@ -167,17 +168,15 @@ async def embed_entry_background(entry_id: str, text: str) -> None:
         return
 
     try:
-        from app.core.config import settings
         from app.embeddings import resolve_embedding_provider
+        from app.embeddings.config import embedding_settings
 
-        provider, _reason = await resolve_embedding_provider(
-            settings.stt, settings.embeddings
-        )
+        provider, _reason = await resolve_embedding_provider(stt_settings, embedding_settings)
         if provider is None:
             log.debug("Embeddings disabled — skipping background embed for %s", entry_id)
             return
 
-        provider_id = settings.stt.mode.value
+        provider_id = stt_settings.mode.value
         vector = await provider.embed(text)
         with history._lock:
             conn = history._ensure_conn_locked()
@@ -209,14 +208,12 @@ async def backfill_batch(batch_size: int) -> BackfillResult:
 
     processed = 0
     if rows and history._vec_available:
-        from app.core.config import settings
         from app.embeddings import resolve_embedding_provider
+        from app.embeddings.config import embedding_settings
 
-        provider, _reason = await resolve_embedding_provider(
-            settings.stt, settings.embeddings
-        )
+        provider, _reason = await resolve_embedding_provider(stt_settings, embedding_settings)
         if provider is not None:
-            provider_id = settings.stt.mode.value
+            provider_id = stt_settings.mode.value
             for row in rows:
                 try:
                     vector = await provider.embed(row["cleaned_text"])

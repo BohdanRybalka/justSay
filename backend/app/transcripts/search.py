@@ -16,6 +16,7 @@ import logging
 import re
 import sqlite3
 
+from app.stt.config import stt_settings
 from app.transcripts import history, schema
 
 log = logging.getLogger(__name__)
@@ -220,8 +221,8 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
     Empty or whitespace ``q`` returns ``[]`` without an embedding call; every
     unready state raises ``SemanticSearchUnavailableError``. No ``<mark>`` spans.
     """
-    from app.core.config import settings
     from app.embeddings import resolve_embedding_provider
+    from app.embeddings.config import embedding_settings
     from app.transcripts import vector_store
 
     clamped_limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
@@ -234,9 +235,7 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
             vector_store.VEC_EXTENSION_UNAVAILABLE_DETAIL
         )
 
-    provider, reason = await resolve_embedding_provider(
-        settings.stt, settings.embeddings
-    )
+    provider, reason = await resolve_embedding_provider(stt_settings, embedding_settings)
     if provider is None:
         raise vector_store.SemanticSearchUnavailableError(reason or "Semantic search is disabled")
 

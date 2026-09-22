@@ -63,7 +63,7 @@ def restored_runtime_settings():
     which file that is changes whenever a test filename changes the collection
     order.
     """
-    from app.core.config import settings as runtime_settings
+    from app.config import settings as runtime_settings
 
     holders = {_STT: runtime_settings.stt, _EMBEDDINGS: runtime_settings.embeddings}
     saved = {

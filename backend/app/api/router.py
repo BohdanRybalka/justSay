@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app import __version__
-from app.core.config import settings
+from app.config import settings
 from app.core.types import ProviderMode
 
 router = APIRouter()

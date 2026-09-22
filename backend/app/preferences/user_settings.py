@@ -19,7 +19,9 @@ from app import embeddings
 from app.core.app_paths import resolve_app_data_root, resolve_temp_dir
 from app.core.errors import ConfigurationError
 from app.core.types import ProviderMode
+from app.embeddings.config import embedding_settings
 from app.stt import routing as stt_routing
+from app.stt.config import stt_settings
 from app.transcripts import relocation
 
 
@@ -337,38 +339,36 @@ def _load_without_rejected_fields(data: dict, failure: ValidationError) -> UserS
 
 
 def sync_to_runtime(us: UserSettings) -> bool:
-    """Push user settings into the runtime ``AppSettings`` objects.
+    """Push user settings onto the runtime settings each package owns.
 
     Returns whether an STT-relevant field changed — the same check that gates this function's own
     cache invalidation — so a caller gating a prewarm does not have to re-derive it.
     """
-    from app.core.config import settings
-
     stt_mode = ProviderMode(us.stt_mode)
 
     changed_stt = (
-        settings.stt.mode != stt_mode
-        or settings.stt.whisper_model_size != us.whisper_model_size
-        or settings.stt.whisper_device != us.whisper_device
-        or settings.stt.engine != us.stt_engine
-        or settings.stt.initial_prompt != us.initial_prompt
-        or (us.gemini_api_key and settings.stt.gemini_api_key != us.gemini_api_key)
-        or (us.groq_api_key and settings.stt.groq_api_key != us.groq_api_key)
+        stt_settings.mode != stt_mode
+        or stt_settings.whisper_model_size != us.whisper_model_size
+        or stt_settings.whisper_device != us.whisper_device
+        or stt_settings.engine != us.stt_engine
+        or stt_settings.initial_prompt != us.initial_prompt
+        or (us.gemini_api_key and stt_settings.gemini_api_key != us.gemini_api_key)
+        or (us.groq_api_key and stt_settings.groq_api_key != us.groq_api_key)
     )
-    changed_embeddings = settings.embeddings.ollama_host != us.ollama_host
+    changed_embeddings = embedding_settings.ollama_host != us.ollama_host
 
-    settings.stt.mode = stt_mode
-    settings.stt.whisper_model_size = us.whisper_model_size
-    settings.stt.whisper_device = us.whisper_device
-    settings.stt.cloud_routing_threshold = us.cloud_routing_threshold
-    settings.stt.engine = us.stt_engine
-    settings.stt.initial_prompt = us.initial_prompt
+    stt_settings.mode = stt_mode
+    stt_settings.whisper_model_size = us.whisper_model_size
+    stt_settings.whisper_device = us.whisper_device
+    stt_settings.cloud_routing_threshold = us.cloud_routing_threshold
+    stt_settings.engine = us.stt_engine
+    stt_settings.initial_prompt = us.initial_prompt
     if us.gemini_api_key:
-        settings.stt.gemini_api_key = us.gemini_api_key
+        stt_settings.gemini_api_key = us.gemini_api_key
     if us.groq_api_key:
-        settings.stt.groq_api_key = us.groq_api_key
+        stt_settings.groq_api_key = us.groq_api_key
 
-    settings.embeddings.ollama_host = us.ollama_host
+    embedding_settings.ollama_host = us.ollama_host
 
     if changed_stt:
         stt_routing.clear_cache()

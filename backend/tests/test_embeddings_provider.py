@@ -109,7 +109,7 @@ async def test_local_mode_never_constructs_the_cloud_provider(tmp_path, monkeypa
     """
     import json
 
-    from app.core.config import settings as runtime_settings
+    from app.config import settings as runtime_settings
     from app.preferences import user_settings
 
     settings_dir = tmp_path / ".justsay"

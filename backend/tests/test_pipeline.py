@@ -10,7 +10,7 @@ import pytest
 import soundfile as sf
 from fastapi import BackgroundTasks
 
-from app.core.config import settings
+from app.config import settings
 from app.core.types import ProviderMode
 from app.pipeline.service import process_audio
 from app.stt.base import TranscriptionResult

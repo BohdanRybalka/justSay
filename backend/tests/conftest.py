@@ -28,8 +28,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.audio.meeting_recorder import MeetingRecorder
+from app.config import settings
 from app.core.app_paths import DEV_DIR_NAME, PROD_DIR_NAME
-from app.core.config import settings
 from app.core.gpu_probe import clear_cache as clear_gpu_probe_cache
 from app.main import app
 from app.preferences import user_settings

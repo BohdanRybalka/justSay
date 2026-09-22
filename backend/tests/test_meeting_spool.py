@@ -68,7 +68,7 @@ def test_a_spool_nothing_was_appended_to_reads_back_as_nothing(spool: MeetingSpo
 
 
 def test_the_files_carry_the_prefix_the_scratch_cleanup_already_reaps(spool: MeetingSpool):
-    """`_SCRATCH_PREFIXES` in `app/preferences/router.py` covers `meeting_`.
+    """`_SCRATCH_PREFIXES` in `app/audio/scratch_router.py` covers `meeting_`.
 
     A spool orphaned by a hard crash is reachable by the existing cleanup
     only while its name starts that way, so the name is a contract rather

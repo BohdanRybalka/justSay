@@ -1466,7 +1466,7 @@ async def test_local_load_answers_503_for_a_refusal_instead_of_the_class_name_50
         def _get_model(self) -> None:
             raise ResourceUnavailableError("whisper-server exited early (code 1)")
 
-    monkeypatch.setattr(stt_router.settings.stt, "mode", ProviderMode.LOCAL)
+    monkeypatch.setattr(stt_router.stt_settings, "mode", ProviderMode.LOCAL)
     monkeypatch.setattr(stt_router, "get_provider", lambda *a, **k: _RefusingProvider())
 
     resp = await client.post("/stt/local/load")
@@ -1494,7 +1494,7 @@ async def test_local_load_still_answers_500_for_an_unclassified_failure(client, 
         def _get_model(self) -> None:
             raise RuntimeError("invariant broke")
 
-    monkeypatch.setattr(stt_router.settings.stt, "mode", ProviderMode.LOCAL)
+    monkeypatch.setattr(stt_router.stt_settings, "mode", ProviderMode.LOCAL)
     monkeypatch.setattr(stt_router, "get_provider", lambda *a, **k: _CrashingProvider())
 
     resp = await client.post("/stt/local/load")
