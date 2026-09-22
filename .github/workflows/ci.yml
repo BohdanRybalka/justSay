@@ -310,6 +310,18 @@ jobs:
           node-version: "24"
           cache: "npm"
 
+      # The Swift helper used to be compiled by release.yml alone, so it was
+      # only ever type-checked on a tag push. It shipped uncompiled for two
+      # months and failed the first release that tried to build it, on an
+      # argument type the SDK imports differently than the source assumed. This
+      # step is the same script release.yml runs, on the same runner family, so
+      # the error now lands on the pull request that causes it. It builds the
+      # helper and bundles nothing.
+      - name: Build the macOS system-audio tap helper
+        if: matrix.platform == 'macos-14'
+        shell: bash
+        run: bash backend/scripts/build_macos_audio_tap.sh
+
       # `tauri-build` resolves every bundle resource path at compile time and
       # fails the build script with "resource path ... doesn't exist" when one
       # is missing. All of them are produced by a release build (the PyInstaller
