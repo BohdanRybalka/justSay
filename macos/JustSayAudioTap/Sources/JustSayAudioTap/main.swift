@@ -167,7 +167,7 @@ final class SystemAudioTap {
         let outputUID = outputDevice.uid
 
         let description = CATapDescription(
-            stereoGlobalTapButExcludeProcesses: [NSNumber]()
+            stereoGlobalTapButExcludeProcesses: [AudioObjectID]()
         )
         description.name = "JustSay System Audio Tap"
         description.isPrivate = true
