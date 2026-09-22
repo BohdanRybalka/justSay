@@ -7,10 +7,10 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from app.audio.config import audio_settings
 from app.audio.dependencies import get_recorder
 from app.audio.recorder import MicrophoneRecorder
 from app.audio.session import SessionRef
-from app.core.config import settings
 from app.core.constants import MAX_UPLOAD_SIZE
 from app.core.errors import JustSayError
 from app.pipeline.service import process_audio
@@ -102,10 +102,10 @@ async def process_file(
     content = await read_upload_with_limit(file, MAX_UPLOAD_SIZE)
     validate_audio_upload(content, file.filename)
 
-    temp_path = settings.audio.temp_dir / f"pipeline_{uuid.uuid4().hex}{ext}"
+    temp_path = audio_settings.temp_dir / f"pipeline_{uuid.uuid4().hex}{ext}"
 
     try:
-        settings.audio.temp_dir.mkdir(parents=True, exist_ok=True)
+        audio_settings.temp_dir.mkdir(parents=True, exist_ok=True)
         temp_path.write_bytes(content)
 
         result = await process_audio(

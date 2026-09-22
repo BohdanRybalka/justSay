@@ -56,3 +56,6 @@ class STTSettings(BaseSettings):
     no_speech_prob_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
 
     model_config = SettingsConfigDict(env_prefix="JUSTSAY_STT_", env_file=".env", extra="ignore")
+
+
+stt_settings = STTSettings()

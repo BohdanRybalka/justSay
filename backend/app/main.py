@@ -11,8 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from app import __version__
+from app.config import settings
 from app.core import tasks
-from app.core.config import settings
 from app.core.logging_config import setup_logging
 
 setup_logging()
@@ -27,6 +27,7 @@ try:
     from app.api.error_handler import register_error_handlers
     from app.api.router import router as api_router
     from app.audio.router import router as audio_router
+    from app.audio.scratch_router import router as scratch_router
     from app.pipeline.router import router as pipeline_router
     from app.preferences.router import router as settings_router
     from app.stt.router import router as stt_router
@@ -168,6 +169,7 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
 
 app.include_router(api_router)
 app.include_router(settings_router)
+app.include_router(scratch_router)
 app.include_router(history_router)
 app.include_router(words_router)
 app.include_router(stt_router, prefix="/stt", tags=["STT"])

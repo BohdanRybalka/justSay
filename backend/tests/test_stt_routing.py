@@ -5,7 +5,7 @@ import pytest
 from app.core.audio_formats import ALLOWED_AUDIO_EXTENSIONS
 from app.core.types import ProviderMode
 from app.stt.cloud import GeminiSTTProvider
-from app.stt.config import STTSettings
+from app.stt.config import STTSettings, stt_settings
 from app.stt.groq_whisper import GroqWhisperSTTProvider
 from app.stt.local import LocalSTTProvider
 from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
@@ -90,6 +90,61 @@ def test_local_mode_reaches_no_cloud_provider_on_any_input():
                     f"{cloud_cached} in Local mode"
                 )
     assert combinations == 168
+
+
+@pytest.mark.asyncio
+async def test_the_mode_endpoint_routes_to_local_and_the_switch_back_reaches_cloud(
+    client, monkeypatch
+):
+    """`PUT /stt/mode` and the routing entry point read the same object, in
+    both directions.
+
+    Switched to ``local``, the provider the pipeline is handed declares
+    ``is_local`` and neither cloud class was constructed during the exchange.
+    Switched back to ``cloud``, the routed provider is a cloud one — so a mode
+    stuck on the value written last fails here as surely as a leaked one. What
+    this rules out is the endpoint writing onto one settings object while the
+    pipeline reads another, which shows up as Local in the UI and a cloud call
+    on the wire.
+    """
+    constructed: list[str] = []
+    for cls in (GeminiSTTProvider, GroqWhisperSTTProvider):
+        original = cls.__init__
+
+        def _record(self, *args, _original=original, **kwargs):
+            constructed.append(type(self).__name__)
+            _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(cls, "__init__", _record)
+
+    switched_local = await client.put("/stt/mode", json={"mode": "local"})
+    assert switched_local.status_code == 200
+    assert switched_local.json()["stt_mode"] == ProviderMode.LOCAL.value
+
+    local_provider, fallback = get_routed_provider(
+        stt_settings, audio_duration=5.0, file_extension=".wav"
+    )
+    assert local_provider.is_local is True, (
+        f"the mode endpoint wrote local but routing returned {type(local_provider).__name__}"
+    )
+    assert fallback is None
+    assert constructed == [], f"Local mode constructed {constructed}"
+    assert not [
+        cls.__name__
+        for cls in _providers
+        if cls in (GeminiSTTProvider, GroqWhisperSTTProvider)
+    ]
+
+    switched_cloud = await client.put("/stt/mode", json={"mode": "cloud"})
+    assert switched_cloud.status_code == 200
+    assert switched_cloud.json()["stt_mode"] == ProviderMode.CLOUD.value
+
+    cloud_provider, _reason = get_routed_provider(
+        stt_settings, audio_duration=5.0, file_extension=".wav"
+    )
+    assert cloud_provider.is_local is False, (
+        "the mode endpoint wrote cloud but routing still answered with a local provider"
+    )
 
 
 def test_local_mode_ignores_duration():

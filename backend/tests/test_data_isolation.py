@@ -98,7 +98,7 @@ def test_guard_helper_detects_audio_temp_dir_pointing_at_real_root(tmp_path, mon
     """RED 1's exact bug: `settings.audio.temp_dir` is a third,
     frozen-at-import consumer AC 5's original guard never watched. Prove the
     widened guard now catches it."""
-    from app.core.config import settings as runtime_settings
+    from app.config import settings as runtime_settings
 
     fake_real_root = tmp_path / "fake-real-root-3"
     fake_real_root.mkdir()

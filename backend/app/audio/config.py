@@ -34,3 +34,6 @@ class AudioSettings(BaseSettings):
     meeting_macos_tap_path: Path | None = Field(default=None)
 
     model_config = SettingsConfigDict(env_prefix="JUSTSAY_AUDIO_", env_file=".env", extra="ignore")
+
+
+audio_settings = AudioSettings()

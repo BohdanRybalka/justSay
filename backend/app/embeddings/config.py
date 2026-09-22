@@ -19,3 +19,6 @@ class EmbeddingSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="JUSTSAY_EMBEDDINGS_", env_file=".env", extra="ignore"
     )
+
+
+embedding_settings = EmbeddingSettings()

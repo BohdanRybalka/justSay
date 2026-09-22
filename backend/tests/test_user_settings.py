@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from app.core.config import AppSettings
 from app.core.errors import ConfigurationError
 from app.preferences import user_settings
+from app.stt.config import STTSettings
 from app.transcripts import history, relocation
 
 
@@ -147,7 +147,7 @@ def test_update_output_dir_triggers_history_relocate(tmp_path, monkeypatch):
 
 
 def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
-    from app.core.config import settings as runtime_settings
+    from app.config import settings as runtime_settings
     from app.core.types import ProviderMode
 
     runtime_settings.stt.mode = ProviderMode.CLOUD
@@ -180,7 +180,7 @@ def test_sync_to_runtime_ollama_host_change_invalidates_embeddings_cache(monkeyp
     cache — a different host is a different Ollama, so a provider pinned to the
     old one must not survive. STT is untouched, so the STT cache must NOT be
     cleared."""
-    from app.core.config import settings as runtime_settings
+    from app.config import settings as runtime_settings
     from app.core.types import ProviderMode
 
     runtime_settings.stt.mode = ProviderMode.CLOUD
@@ -210,7 +210,7 @@ def test_sync_to_runtime_propagates_initial_prompt_and_invalidates_cache(monkeyp
     """Changing the glossary mid-session must drop cached providers so the next
     transcribe call picks up the new value (cached providers freeze settings
     at construction time)."""
-    from app.core.config import settings as runtime_settings
+    from app.config import settings as runtime_settings
     from app.core.types import ProviderMode
 
     runtime_settings.stt.mode = ProviderMode.CLOUD
@@ -247,15 +247,14 @@ def test_initial_prompt_max_length_validation():
 
 
 
-def test_env_nested_stt_key_override(monkeypatch):
-    """ENV override flows through STTSettings's own ``env_prefix="JUSTSAY_STT_"``
-    on every fresh ``AppSettings()`` construction. ``Field(default_factory=...)``
-    in ``app/config.py`` is what makes this true: the factory re-runs on each
-    instance, picking up env mutations after module import.
+def test_a_freshly_built_stt_slice_reads_an_env_var_set_after_import(monkeypatch):
+    """``env_prefix="JUSTSAY_STT_"`` is declared on ``STTSettings`` itself, so
+    constructing the class directly reads whatever the environment holds at
+    that moment rather than what it held when the module was first imported.
     """
     monkeypatch.setenv("JUSTSAY_STT_GEMINI_API_KEY", "env-injected-key")
-    fresh = AppSettings()
-    assert fresh.stt.gemini_api_key == "env-injected-key"
+    fresh = STTSettings()
+    assert fresh.gemini_api_key == "env-injected-key"
 
 
 
@@ -364,7 +363,7 @@ def test_the_meeting_acknowledgement_defaults_to_not_given():
 
 def test_sync_to_runtime_propagates_keys(monkeypatch):
     """sync_to_runtime pushes non-empty keys into the runtime STT config."""
-    from app.core.config import settings as runtime_settings
+    from app.config import settings as runtime_settings
 
     runtime_settings.stt.gemini_api_key = ""
     runtime_settings.stt.groq_api_key = ""
@@ -388,7 +387,7 @@ def test_sync_to_runtime_propagates_keys(monkeypatch):
 
 def test_sync_to_runtime_preserves_env_key_when_user_key_empty(monkeypatch):
     """Empty UserSettings key must NOT overwrite a key already in the runtime (from .env)."""
-    from app.core.config import settings as runtime_settings
+    from app.config import settings as runtime_settings
 
     runtime_settings.stt.gemini_api_key = "env-key"
     runtime_settings.stt.groq_api_key = "env-groq"
