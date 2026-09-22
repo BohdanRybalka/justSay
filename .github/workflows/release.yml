@@ -411,6 +411,12 @@ jobs:
           # Windows: Azure Trusted Signing wires in as a separate step
           # (Plan 008 Phase B, $10/mo onboarding).
         with:
+          # `--verbose` is load-bearing, not noise. The bundler runs
+          # bundle_dmg.sh itself with stdout and stderr piped, and discards both
+          # unless verbose is on, so a DMG failure reports only "error running
+          # bundle_dmg.sh" with no cause. That cost two blind release attempts
+          # on 2026-09-22.
+          args: --verbose
           tagName: ${{ github.ref_name }}
           releaseName: "JustSay ${{ github.ref_name }}"
           releaseBody: "See `docs/release-notes/` for what changed."
