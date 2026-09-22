@@ -22,6 +22,31 @@ async def test_health(client):
 
 
 @pytest.mark.asyncio
+async def test_health_reports_the_mode_the_mode_endpoint_last_wrote(client):
+    """`/health` and `PUT /stt/mode` reach one object, in both directions.
+
+    The health route reads the mode off the composition root and the mode route
+    writes it onto the STT package's own instance. A property handing back a
+    second instance, or a slice rebuilt from the environment, would leave the
+    indicator reporting the value the process started with while the pipeline
+    transcribed against the other one.
+    """
+    await client.put("/stt/mode", json={"mode": "local"})
+    after_local = await client.get("/health")
+    assert after_local.json()["stt_mode"] == "local", (
+        "the mode endpoint wrote local and /health still reports "
+        f"{after_local.json()['stt_mode']}"
+    )
+
+    await client.put("/stt/mode", json={"mode": "cloud"})
+    after_cloud = await client.get("/health")
+    assert after_cloud.json()["stt_mode"] == "cloud", (
+        "the mode endpoint wrote cloud and /health still reports "
+        f"{after_cloud.json()['stt_mode']}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_set_stt_mode_accepts_json_object(client):
     """Wire format ``{"mode": "..."}`` must keep working after ProviderModeUpdate removal."""
     resp = await client.put("/stt/mode", json={"mode": "local"})

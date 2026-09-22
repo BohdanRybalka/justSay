@@ -7,15 +7,19 @@ itself. Until 2026-08-25 `_reset_settings` restored two of the twelve fields it
 writes, so ten -- including `initial_prompt`, `whisper_model_size` and both cloud
 API keys -- leaked into whatever test ran next.
 
-Three things are pinned here. That the restore round-trips; that its field list
-still matches `sync_to_runtime`'s own source; and that `settings.stt`,
-`settings.audio` and `settings.embeddings` are the very objects the packages
-read, which is what both the restore and every `monkeypatch` writing through
-`settings.audio` rest on. ADR 091 records why the slices live where they do.
+Four things are pinned here. That the restore round-trips; that its field list
+still matches `sync_to_runtime`'s own source; that the table of variable names
+the walk keys on covers every settings global that function writes, so a fourth
+slice cannot be added past it; and that `settings.stt`, `settings.audio` and
+`settings.embeddings` are the very objects the packages read, which is what both
+the restore and every `monkeypatch` writing through `settings.audio` rest on.
+ADR 091 records why the slices live where they do.
 """
 
 import ast
 from pathlib import Path
+
+from pydantic_settings import BaseSettings
 
 import app.preferences.user_settings as user_settings_module
 from app.audio.config import audio_settings
@@ -47,24 +51,51 @@ _SLICE_VARIABLE_HOLDS = {
 }
 
 
+def _sync_to_runtime_ast() -> ast.FunctionDef:
+    """`sync_to_runtime` parsed from its own source.
+
+    Read with `ast` rather than by calling the function: the point is to catch a
+    write someone adds there later, not to observe the writes made today.
+    """
+    source = Path(user_settings_module.__file__).read_text(encoding="utf-8")
+    return next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "sync_to_runtime"
+    )
+
+
+def _settings_globals_written_by_sync_to_runtime() -> set[str]:
+    """Every module global `sync_to_runtime` assigns a field on, by name.
+
+    A name counts when `user_settings` binds it to a `BaseSettings` instance, so
+    a slice added under any spelling is measured rather than matched against a
+    table. Asserts its own result non-empty: an empty walk would make the gate
+    below agree with anything.
+    """
+    written = set()
+    for node in ast.walk(_sync_to_runtime_ast()):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)):
+                continue
+            held = getattr(user_settings_module, target.value.id, None)
+            if isinstance(held, BaseSettings):
+                written.add(target.value.id)
+    assert written, "no settings global found written by sync_to_runtime"
+    return written
+
+
 def _fields_assigned_by_sync_to_runtime() -> dict[str, set[str]]:
     """Every settings field `sync_to_runtime` assigns, keyed by slice name.
 
     Both spellings that reach a slice are read -- `stt_settings.field` and
     `settings.stt.field` -- so moving a write from one to the other cannot drop
-    it from this walk. Read from the source with `ast` rather than by calling
-    the function: the point is to catch a field someone adds there later.
+    it from this walk.
     """
-    source = Path(user_settings_module.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    function = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "sync_to_runtime"
-    )
-
     assigned: dict[str, set[str]] = {}
-    for node in ast.walk(function):
+    for node in ast.walk(_sync_to_runtime_ast()):
         if not isinstance(node, ast.Assign):
             continue
         for target in node.targets:
@@ -83,6 +114,24 @@ def _fields_assigned_by_sync_to_runtime() -> dict[str, set[str]]:
             ):
                 assigned.setdefault(holder.attr, set()).add(target.attr)
     return assigned
+
+
+def test_the_slice_variable_table_names_every_settings_global_sync_to_runtime_writes():
+    """The walk above keys on variable names, and this is what keeps that list
+    honest.
+
+    `_fields_assigned_by_sync_to_runtime` recognises a write only through a name
+    it already knows, so a fourth slice written under a name missing from the
+    table would be walked past in silence -- and its fields would leak between
+    tests exactly as ten of them did before the restore list existed.
+    """
+    written = _settings_globals_written_by_sync_to_runtime()
+    unmapped = written - set(_SLICE_VARIABLE_HOLDS)
+    assert not unmapped, (
+        f"sync_to_runtime writes onto {sorted(unmapped)}, which _SLICE_VARIABLE_HOLDS does "
+        "not name, so neither the field walk nor the conftest restore list can see those "
+        "writes. Add the variable and its slice name to the table."
+    )
 
 
 def test_restore_list_covers_every_field_sync_to_runtime_writes():

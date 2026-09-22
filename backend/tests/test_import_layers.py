@@ -16,11 +16,14 @@ Fifteen properties are pinned here:
    Separately, only the modules `_MAY_IMPORT_THE_COMPOSITION_ROOT` names
    import the composition root `app.config` directly — `main.py`,
    `api/router.py` and `api/auth_middleware.py`, application assembly and the
-   HTTP boundary, which are the readers of the application-level fields no
-   feature package owns. That half is scoped to all of `app/` rather than to
-   `core`, because the spelling is plantable in any package, and it
-   prefix-matches so `app.config.runtime` could not walk past if
-   `app/config.py` ever became `app/config/`. A feature package reads the
+   HTTP boundary, which sit outside the group of mutually dependent packages,
+   so reading the aggregate from one of them closes no cycle back into the
+   group. That is the criterion a fourth name has to meet, and reading only
+   application-level fields is not it: `api/router.py` reads
+   `settings.stt.mode`, a field `app.stt` owns. That half is scoped to all of
+   `app/` rather than to `core`, because the spelling is plantable in any
+   package, and it prefix-matches so `app.config.runtime` could not walk past
+   if `app/config.py` ever became `app/config/`. A feature package reads the
    settings instance its own package holds instead of the aggregate, which is
    what leaves `core` importing no feature package at all (ADR 091).
 2. `app.audio.analysis` imports nothing the frozen PyInstaller sidecar lacks,

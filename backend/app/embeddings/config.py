@@ -7,10 +7,12 @@ cloud STT. ``ollama_host`` lives here because the local embedding provider is
 the only code that reads it. See ADR 071 and ADR 001.
 """
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
+
+from app.core.package_settings import PackageSettings
 
 
-class EmbeddingSettings(BaseSettings):
+class EmbeddingSettings(PackageSettings):
     cloud_model: str = "gemini-embedding-001"
     local_model: str = "nomic-embed-text"
 

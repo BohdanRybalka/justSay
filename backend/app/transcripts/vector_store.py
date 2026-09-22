@@ -171,9 +171,7 @@ async def embed_entry_background(entry_id: str, text: str) -> None:
         from app.embeddings import resolve_embedding_provider
         from app.embeddings.config import embedding_settings
 
-        provider, _reason = await resolve_embedding_provider(
-            stt_settings, embedding_settings
-        )
+        provider, _reason = await resolve_embedding_provider(stt_settings, embedding_settings)
         if provider is None:
             log.debug("Embeddings disabled — skipping background embed for %s", entry_id)
             return
@@ -213,9 +211,7 @@ async def backfill_batch(batch_size: int) -> BackfillResult:
         from app.embeddings import resolve_embedding_provider
         from app.embeddings.config import embedding_settings
 
-        provider, _reason = await resolve_embedding_provider(
-            stt_settings, embedding_settings
-        )
+        provider, _reason = await resolve_embedding_provider(stt_settings, embedding_settings)
         if provider is not None:
             provider_id = stt_settings.mode.value
             for row in rows:

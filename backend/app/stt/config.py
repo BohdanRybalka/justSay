@@ -1,14 +1,15 @@
 from typing import Literal
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
 
+from app.core.package_settings import PackageSettings
 from app.core.types import ProviderMode
 
 STTEngine = Literal["auto", "groq", "gemini"]
 
 
-class STTSettings(BaseSettings):
+class STTSettings(PackageSettings):
     """Runtime STT configuration -- what the pipeline reads on every request.
     `app.preferences.user_settings.sync_to_runtime` copies the user-editable half
     here on every save, and `cloud_routing_threshold` decides the

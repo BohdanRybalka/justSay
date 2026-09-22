@@ -4,8 +4,9 @@ import pytest
 
 from app.core.audio_formats import ALLOWED_AUDIO_EXTENSIONS
 from app.core.types import ProviderMode
+from app.pipeline import service
 from app.stt.cloud import GeminiSTTProvider
-from app.stt.config import STTSettings, stt_settings
+from app.stt.config import STTSettings
 from app.stt.groq_whisper import GroqWhisperSTTProvider
 from app.stt.local import LocalSTTProvider
 from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
@@ -96,8 +97,13 @@ def test_local_mode_reaches_no_cloud_provider_on_any_input():
 async def test_the_mode_endpoint_routes_to_local_and_the_switch_back_reaches_cloud(
     client, monkeypatch
 ):
-    """`PUT /stt/mode` and the routing entry point read the same object, in
+    """`PUT /stt/mode` and the binding the pipeline holds read one object, in
     both directions.
+
+    Routing is asked through ``service.stt_settings`` — the module attribute
+    ``process_audio`` itself passes — rather than through a settings object this
+    test imports, so rebinding that name in the pipeline module reddens this
+    test instead of leaving it true by construction.
 
     Switched to ``local``, the provider the pipeline is handed declares
     ``is_local`` and neither cloud class was constructed during the exchange.
@@ -122,25 +128,29 @@ async def test_the_mode_endpoint_routes_to_local_and_the_switch_back_reaches_clo
     assert switched_local.json()["stt_mode"] == ProviderMode.LOCAL.value
 
     local_provider, fallback = get_routed_provider(
-        stt_settings, audio_duration=5.0, file_extension=".wav"
+        service.stt_settings, audio_duration=5.0, file_extension=".wav"
     )
     assert local_provider.is_local is True, (
         f"the mode endpoint wrote local but routing returned {type(local_provider).__name__}"
     )
     assert fallback is None
     assert constructed == [], f"Local mode constructed {constructed}"
-    assert not [
+    cloud_cached = [
         cls.__name__
         for cls in _providers
         if cls in (GeminiSTTProvider, GroqWhisperSTTProvider)
     ]
+    assert not cloud_cached, (
+        f"Local mode left {cloud_cached} in the provider cache, so a cloud client "
+        "was built for a mode that must never reach one"
+    )
 
     switched_cloud = await client.put("/stt/mode", json={"mode": "cloud"})
     assert switched_cloud.status_code == 200
     assert switched_cloud.json()["stt_mode"] == ProviderMode.CLOUD.value
 
     cloud_provider, _reason = get_routed_provider(
-        stt_settings, audio_duration=5.0, file_extension=".wav"
+        service.stt_settings, audio_duration=5.0, file_extension=".wav"
     )
     assert cloud_provider.is_local is False, (
         "the mode endpoint wrote cloud but routing still answered with a local provider"

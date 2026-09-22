@@ -19,6 +19,7 @@ from app import embeddings
 from app.core.app_paths import resolve_app_data_root, resolve_temp_dir
 from app.core.errors import ConfigurationError
 from app.core.types import ProviderMode
+from app.embeddings.config import embedding_settings
 from app.stt import routing as stt_routing
 from app.stt.config import stt_settings
 from app.transcripts import relocation
@@ -343,8 +344,6 @@ def sync_to_runtime(us: UserSettings) -> bool:
     Returns whether an STT-relevant field changed — the same check that gates this function's own
     cache invalidation — so a caller gating a prewarm does not have to re-derive it.
     """
-    from app.embeddings.config import embedding_settings
-
     stt_mode = ProviderMode(us.stt_mode)
 
     changed_stt = (

@@ -1,13 +1,14 @@
 from pathlib import Path
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
 
 from app.audio.endpoint_selection import EndpointRole
 from app.core.app_paths import resolve_temp_dir
+from app.core.package_settings import PackageSettings
 
 
-class AudioSettings(BaseSettings):
+class AudioSettings(PackageSettings):
     sample_rate: int = Field(default=16000, gt=0)
     channels: int = Field(default=1, gt=0)
     temp_dir: Path = Field(default_factory=resolve_temp_dir)

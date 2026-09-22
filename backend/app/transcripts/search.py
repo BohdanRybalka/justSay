@@ -235,9 +235,7 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
             vector_store.VEC_EXTENSION_UNAVAILABLE_DETAIL
         )
 
-    provider, reason = await resolve_embedding_provider(
-        stt_settings, embedding_settings
-    )
+    provider, reason = await resolve_embedding_provider(stt_settings, embedding_settings)
     if provider is None:
         raise vector_store.SemanticSearchUnavailableError(reason or "Semantic search is disabled")
 

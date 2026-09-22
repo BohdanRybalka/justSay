@@ -2,9 +2,8 @@
 
 Owns the application-level fields and exposes each feature package's own live
 settings instance as a read-only property, so ``settings.stt`` is the very
-object ``app.stt.config`` defines rather than a second construction of it. A
-property is not a pydantic field, so nothing can rebuild it and the identity
-holds without an environment-reading option having to stay just so (ADR 091).
+object ``app.stt.config`` defines rather than a second construction of it
+(ADR 091).
 """
 
 from pydantic import Field

@@ -1,12 +1,13 @@
 """Scratch-directory endpoints — how much the app left there, and reaping it.
 
 Mounted at the same ``/settings`` prefix the preferences router uses, so the
-two paths are one surface on the wire. It lives in ``app.audio`` because that
-is the package owning ``temp_dir`` and every producer writing into it; reading
-the directory from ``app.preferences`` instead would put a package cycle back
-(ADR 091).
+two paths are one surface on the wire. It lives in ``app.audio``, the package
+owning ``temp_dir`` and every producer writing into it (ADR 091). The walk and
+the deletions run off the event loop, so a large scratch directory cannot stall
+the audio-level stream.
 """
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -55,14 +56,12 @@ def _scratch_size(tmp_dir: Path) -> int:
     return total
 
 
-@router.get("/storage", response_model=StorageInfo)
-async def get_storage_info():
-    return StorageInfo(temp_size_bytes=_scratch_size(audio_settings.temp_dir))
+def _reap_scratch_files(tmp_dir: Path) -> int:
+    """Delete every scratch file in ``tmp_dir`` and answer the bytes freed.
 
-
-@router.post("/cleanup", response_model=CleanupResult)
-async def cleanup_temp():
-    tmp_dir = audio_settings.temp_dir
+    A file that cannot be removed is logged and skipped, so one locked entry
+    does not abandon the rest.
+    """
     freed = 0
     for entry in _scratch_files(tmp_dir):
         try:
@@ -72,4 +71,16 @@ async def cleanup_temp():
             log.warning("Could not remove scratch file %s", entry, exc_info=True)
             continue
         freed += size
+    return freed
+
+
+@router.get("/storage", response_model=StorageInfo)
+async def get_storage_info():
+    size = await asyncio.to_thread(_scratch_size, audio_settings.temp_dir)
+    return StorageInfo(temp_size_bytes=size)
+
+
+@router.post("/cleanup", response_model=CleanupResult)
+async def cleanup_temp():
+    freed = await asyncio.to_thread(_reap_scratch_files, audio_settings.temp_dir)
     return CleanupResult(freed_bytes=freed)
