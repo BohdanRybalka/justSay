@@ -56,3 +56,5 @@ CLAUDE.md
 train-audio-data/
 /.playwright-mcp
 src-tauri/Cargo.toml
+# Playwright CLI output (may contain credentials)
+.playwright-cli/
