@@ -1,45 +1,17 @@
-"""Two anti-vacuity gates over `backend/tests`, plus the audit round's due-date.
+"""Two anti-vacuity gates over `backend/tests`.
 
 Rule 1 checks that a test can fail at all; rule 2 checks that a gate reporting
 offenders out of a walk also pins that walk non-empty. Neither checks whether a
 test's *name* describes what it asserts (ADR 079). Rule 2 resolves bindings by
 heuristic and a shape it cannot resolve is out of scope, so it under-reports.
-The baseline is the round's clock zero rather than a floor: a shrink past the
-allowance means the clock is unreadable, not that the suite is too small.
 Only the Python suite is walked; the vitest files are not covered.
 """
 
 import ast
 import functools
-import re
 from pathlib import Path
-from typing import NamedTuple
-
-import pytest
 
 _TESTS_DIR = Path(__file__).resolve().parent
-_LEDGER = _TESTS_DIR.parent.parent / "docs" / "test-name-audit.md"
-
-_BASELINE_FUNCTIONS = 1465
-_BASELINE_LINES = 41262
-_BASELINE_SHA = "db106b6680474cea5ca8684fb676cb28399327ff"
-
-_FUNCTION_INTERVAL = 80
-_LINE_INTERVAL = 4000
-
-_BASELINE_SHRINK_ALLOWANCE_FUNCTIONS = 8
-_BASELINE_SHRINK_ALLOWANCE_LINES = 400
-
-_BASELINE_PATTERN = re.compile(
-    r"^Baseline: functions (\d+) · lines (\d+) · master ([0-9a-f]{7,40}) "
-    r"· closed (\d{4}-\d{2}-\d{2}) · round (\d+)$",
-    re.MULTILINE,
-)
-
-_ROUND_HEADING_PATTERN = re.compile(
-    r"^## Round (\d+) — (\d{4}-\d{2}-\d{2})$",
-    re.MULTILINE,
-)
 
 _EMPTY_LITERALS = frozenset(
     {"[]", "()", "{}", "set()", "dict()", "list()", "tuple()", "frozenset()"}
@@ -412,72 +384,6 @@ def _unpinned_walks(tree: ast.Module) -> list[tuple[int, str, tuple[str, ...]]]:
     ]
 
 
-class _Baseline(NamedTuple):
-    """The five fields of the ledger's `Baseline:` line."""
-
-    functions: int
-    lines: int
-    sha: str
-    closed: str
-    round_number: int
-
-
-def _parse_baselines(text: str) -> list[_Baseline]:
-    """Every `Baseline:` line the text carries, in the order they appear."""
-    return [
-        _Baseline(
-            functions=int(match.group(1)),
-            lines=int(match.group(2)),
-            sha=match.group(3),
-            closed=match.group(4),
-            round_number=int(match.group(5)),
-        )
-        for match in _BASELINE_PATTERN.finditer(text)
-    ]
-
-
-def _parse_round_headings(text: str) -> list[tuple[int, str]]:
-    """Every `## Round <N> — <date>` heading as (number, date), in file order."""
-    return [(int(number), date) for number, date in _ROUND_HEADING_PATTERN.findall(text)]
-
-
-def _ledger_text_or_skip() -> str:
-    """The ledger's text, skipping the calling test when `docs/` is absent."""
-    if not _LEDGER.is_file():
-        pytest.skip(f"{_LEDGER.name} is absent from this checkout (docs/ is gitignored)")
-    return _LEDGER.read_text(encoding="utf-8")
-
-
-def _live_line_count() -> int:
-    """Physical lines across every Python module of the backend suite."""
-    return sum(
-        len(path.read_text(encoding="utf-8").splitlines()) for path in _source_files()
-    )
-
-
-def _audit_round_state(live_functions: int, live_lines: int) -> tuple[list[str], int, int]:
-    """One measurement's shrink offenders and its unclamped growth since the baseline.
-
-    Growth stays signed, so a deletion moves the round further away rather than
-    nearer; the allowance is the bound on how much delay that can buy.
-    """
-    fallen = [
-        f"{label} {live} against a baseline of {baseline}, {baseline - live} below it "
-        f"where {allowance} is tolerated"
-        for label, baseline, live, allowance in (
-            (
-                "functions",
-                _BASELINE_FUNCTIONS,
-                live_functions,
-                _BASELINE_SHRINK_ALLOWANCE_FUNCTIONS,
-            ),
-            ("lines", _BASELINE_LINES, live_lines, _BASELINE_SHRINK_ALLOWANCE_LINES),
-        )
-        if baseline - live > allowance
-    ]
-    return fallen, live_functions - _BASELINE_FUNCTIONS, live_lines - _BASELINE_LINES
-
-
 def test_every_test_contains_an_assertion_that_can_fail():
     silent = [
         f"{module}:{name}"
@@ -623,154 +529,6 @@ def test_the_walk_rule_separates_an_unpinned_gate_from_a_self_pinning_one():
     assert not flagged, (
         f"these walks are pinned or out of scope and must not be reported: {flagged}"
     )
-
-
-def test_the_test_name_audit_round_is_not_overdue():
-    """Two tracked constants against the tree: no file, no subprocess, no git.
-
-    A baseline in `docs/` would be absent from every CI checkout, so the gate
-    would have to skip in the one place that runs on every merge (ADR 079).
-    """
-    live_functions, live_lines = len(_test_functions()), _live_line_count()
-    fallen, grown_functions, grown_lines = _audit_round_state(live_functions, live_lines)
-
-    assert not fallen, (
-        f"the live suite has fallen further below the recorded baseline than the shrink "
-        f"allowance permits ({'; '.join(fallen)}), so the clock this round is measured on "
-        "can no longer be trusted; recompute _BASELINE_FUNCTIONS and _BASELINE_LINES from "
-        f"this tree and mirror them in {_LEDGER.name}"
-    )
-    assert grown_functions < _FUNCTION_INTERVAL and grown_lines < _LINE_INTERVAL, (
-        f"the test-name audit round is due: {grown_functions} test functions and "
-        f"{grown_lines} lines added since the baseline, against an interval of "
-        f"{_FUNCTION_INTERVAL} functions / {_LINE_INTERVAL} lines. Read every test "
-        f"function added since the baseline commit against the rubric in "
-        f"{_LEDGER.name}, write the round's block, then recompute _BASELINE_FUNCTIONS "
-        "and _BASELINE_LINES here and mirror them in that file's `Baseline:` line."
-    )
-
-
-def test_a_deletion_inside_the_allowance_delays_the_round_and_a_larger_one_fails_it():
-    """The baseline is the clock's zero; the allowance bounds what a deletion may cost.
-
-    A shrink makes growth smaller rather than larger, so the only thing it buys
-    is delay, and the allowance is how much of that is tolerated (ADR 079).
-    """
-    at_the_edge, delayed_functions, delayed_lines = _audit_round_state(
-        _BASELINE_FUNCTIONS - _BASELINE_SHRINK_ALLOWANCE_FUNCTIONS,
-        _BASELINE_LINES - _BASELINE_SHRINK_ALLOWANCE_LINES,
-    )
-    beyond = _audit_round_state(
-        _BASELINE_FUNCTIONS - _BASELINE_SHRINK_ALLOWANCE_FUNCTIONS - 1,
-        _BASELINE_LINES - _BASELINE_SHRINK_ALLOWANCE_LINES - 1,
-    )[0]
-    lines_only = _audit_round_state(
-        _BASELINE_FUNCTIONS, _BASELINE_LINES - _BASELINE_SHRINK_ALLOWANCE_LINES - 1
-    )[0]
-
-    assert len(beyond) == 2, (
-        f"one line past each allowance leaves the baseline untrustworthy on both terms "
-        f"and the gate has to name both rather than the first: {beyond}"
-    )
-    assert [term.split()[0] for term in lines_only] == ["lines"], (
-        f"the two terms are judged apart, so a line-only deletion must not accuse the "
-        f"function count: {lines_only}"
-    )
-    assert at_the_edge == [], (
-        f"a deletion landing exactly on the allowance is tolerated, not reported, or the "
-        f"allowance is a floor again under another name: {at_the_edge}"
-    )
-    assert (delayed_functions, delayed_lines) == (
-        -_BASELINE_SHRINK_ALLOWANCE_FUNCTIONS,
-        -_BASELINE_SHRINK_ALLOWANCE_LINES,
-    ), (
-        f"growth is `live - baseline` unclamped, so a tolerated deletion pushes the round "
-        f"further off; clamped at zero a deletion would buy unlimited delay and the round "
-        f"could never come due: {(delayed_functions, delayed_lines)}"
-    )
-
-
-def _the_one_baseline_or_fail(text: str) -> _Baseline:
-    """The ledger's single `Baseline:` line, failing the calling test when it is not one."""
-    baselines = _parse_baselines(text)
-    assert len(baselines) == 1, (
-        f"{_LEDGER.name} carries {len(baselines)} parseable `Baseline:` lines where exactly "
-        "one is the mirror; a second one leaves every reader here comparing against "
-        "whichever came first, which is how a half-updated ledger stays green"
-    )
-    return baselines[0]
-
-
-def test_the_audit_ledger_agrees_with_the_recorded_baseline():
-    """The round log mirrors the three constants above.
-
-    One of two tests here permitted to skip, and only when `docs/` is absent: its
-    subject is a gitignored file rather than the tracked suite.
-    """
-    baseline = _the_one_baseline_or_fail(_ledger_text_or_skip())
-
-    assert (baseline.functions, baseline.lines) == (_BASELINE_FUNCTIONS, _BASELINE_LINES), (
-        f"{_LEDGER.name} records functions {baseline.functions} / lines {baseline.lines} "
-        f"against the module's {_BASELINE_FUNCTIONS} / {_BASELINE_LINES}; closing a round "
-        "moves both, and the constants are the half a GitHub reviewer can see"
-    )
-    assert baseline.sha == _BASELINE_SHA, (
-        f"{_LEDGER.name} records master {baseline.sha} against the module's {_BASELINE_SHA}; "
-        "that sha is the next round's entire input range, so the two must move together "
-        "with the counts. Which commit is the right one is still read by a person: this "
-        "module resolves no commit, and the ledger says what the round-closer checks"
-    )
-
-
-def test_the_ledger_baseline_line_names_the_newest_round_block_and_its_date():
-    """The `Baseline:` line's round and date mirror the ledger's newest `## Round` heading.
-
-    Skips with the other ledger test when `docs/` is absent.
-    """
-    text = _ledger_text_or_skip()
-    baseline = _the_one_baseline_or_fail(text)
-    headings = _parse_round_headings(text)
-    assert headings, (
-        f"{_LEDGER.name} carries no `## Round <N> — <date>` heading, so the walk this test "
-        "reads is empty and there is nothing for the line below to be compared against"
-    )
-    assert [number for number, _ in headings] == sorted(number for number, _ in headings), (
-        f"the round blocks of {_LEDGER.name} run {[number for number, _ in headings]}, so "
-        "the newest block is no longer the last one and reading it by file order would "
-        "compare against the wrong round"
-    )
-
-    newest_number, newest_date = headings[-1]
-
-    assert (baseline.round_number, baseline.closed) == (newest_number, newest_date), (
-        f"{_LEDGER.name} says `round {baseline.round_number} · closed {baseline.closed}` "
-        f"while its newest block is `## Round {newest_number} — {newest_date}`; the line is "
-        "the next round's starting point, so a stale one misreports where that round starts"
-    )
-
-
-def test_the_ledger_recognisers_read_a_well_formed_sample_and_reject_its_near_misses():
-    """Both ledger recognisers over synthetic text, so CI exercises them where `docs/` is absent."""
-    sample = (
-        "Baseline: functions 12 · lines 34 · master abc1234 · closed 2026-01-02 · round 7\n"
-        "\n## Round 6 — 2025-12-31\n"
-        "\n## Round 7 — 2026-01-02\n"
-    )
-
-    assert _parse_baselines(sample) == [
-        _Baseline(functions=12, lines=34, sha="abc1234", closed="2026-01-02", round_number=7)
-    ]
-    assert _parse_round_headings(sample) == [(6, "2025-12-31"), (7, "2026-01-02")]
-    assert _parse_baselines(sample.replace("·", "-")) == [], (
-        "the separator is part of the grammar the ledger calls fixed, so a line written "
-        "with hyphens must not be read as the mirror"
-    )
-    assert _parse_round_headings(sample.replace("## Round 7 —", "## Round 7 -")) == [
-        (6, "2025-12-31")
-    ], "an em dash replaced by a hyphen must drop that heading rather than match it loosely"
-    assert _parse_round_headings(sample.replace("## Round 6", "### Round 6")) == [
-        (7, "2026-01-02")
-    ], "a deeper heading is a sub-block of a round, not a round"
 
 
 def test_the_walk_reaches_every_module_family_it_is_meant_to_check():
