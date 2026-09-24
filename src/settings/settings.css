@@ -1,18 +1,3 @@
-@font-face {
-  font-family: "Geist";
-  src: url("/fonts/Geist-Variable.woff2") format("woff2-variations");
-  font-weight: 100 900;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "Geist Mono";
-  src: url("/fonts/GeistMono-Variable.woff2") format("woff2-variations");
-  font-weight: 100 900;
-  font-style: normal;
-  font-display: swap;
-}
-
 * {
   margin: 0;
   padding: 0;
@@ -20,33 +5,25 @@
 }
 
 :root {
-  --bg-base: #1a1a2e;
-  --bg-sidebar: #151525;
-  --bg-card: #222240;
-  --bg-input: #2a2a4a;
-  --border: rgba(255, 255, 255, 0.08);
-  --text: rgba(255, 255, 255, 0.87);
-  --text-dim: rgba(255, 255, 255, 0.5);
-  --text-muted: rgba(255, 255, 255, 0.3);
-  --accent: #6c63ff;
-  --accent-hover: #7b73ff;
-  --green: #4caf50;
-  --red: #f44336;
-  --orange: #ff9800;
+  --bg-base: var(--canvas);
+  --bg-sidebar: var(--surface);
+  --bg-card: var(--surface);
+  --bg-input: var(--inset);
+  --text-dim: var(--text-2);
+  --text-muted: var(--muted);
+  --accent: var(--blue);
+  --accent-hover: var(--blue-hi);
+  --green: var(--blue);
+  --red: var(--orange);
   --radius: 8px;
   --radius-sm: 4px;
 }
 
 html, body {
   height: 100%;
-  background: var(--bg-base);
-  color: var(--text);
-  font-family: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  font-size: 14px;
-  line-height: 1.5;
+  background: var(--canvas);
   user-select: none;
   overflow: hidden;
-  -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
@@ -77,7 +54,6 @@ html, body {
 
 .brand-logo {
   flex-shrink: 0;
-  filter: drop-shadow(0 0 6px rgba(123, 115, 255, 0.35));
 }
 
 .sidebar-nav {
@@ -105,7 +81,7 @@ html, body {
 }
 
 .nav-btn:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--inset);
   color: var(--text);
 }
 
@@ -135,37 +111,31 @@ html, body {
   flex: 1;
   overflow-y: auto;
   padding: 24px;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(108, 99, 255, 0.5) transparent;
 }
 
-#tab-content::-webkit-scrollbar,
 .history-text::-webkit-scrollbar,
 #metrics-table-wrap::-webkit-scrollbar,
 .result-text::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
-#tab-content::-webkit-scrollbar-track,
 .history-text::-webkit-scrollbar-track,
 #metrics-table-wrap::-webkit-scrollbar-track,
 .result-text::-webkit-scrollbar-track {
   background: transparent;
 }
-#tab-content::-webkit-scrollbar-thumb,
 .history-text::-webkit-scrollbar-thumb,
 #metrics-table-wrap::-webkit-scrollbar-thumb,
 .result-text::-webkit-scrollbar-thumb {
-  background: rgba(108, 99, 255, 0.35);
+  background: var(--border-2);
   border-radius: 5px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
-#tab-content::-webkit-scrollbar-thumb:hover,
 .history-text::-webkit-scrollbar-thumb:hover,
 #metrics-table-wrap::-webkit-scrollbar-thumb:hover,
 .result-text::-webkit-scrollbar-thumb:hover {
-  background: rgba(108, 99, 255, 0.7);
+  background: var(--muted);
   background-clip: content-box;
 }
 
@@ -367,13 +337,13 @@ select {
 }
 
 .btn-danger {
-  background: rgba(244, 67, 54, 0.15);
-  color: var(--red);
-  border: 1px solid rgba(244, 67, 54, 0.2);
+  background: var(--orange-soft);
+  color: var(--orange);
+  border: 1px solid var(--orange-mute);
 }
 
 .btn-danger:hover {
-  background: rgba(244, 67, 54, 0.25);
+  border-color: var(--orange);
 }
 
 .btn:disabled,
@@ -407,18 +377,18 @@ select {
 }
 
 .status-badge.ok {
-  background: rgba(76, 175, 80, 0.15);
-  color: var(--green);
+  background: var(--blue-soft);
+  color: var(--blue);
 }
 
 .status-badge.error {
-  background: rgba(244, 67, 54, 0.15);
-  color: var(--red);
+  background: var(--orange-soft);
+  color: var(--orange);
 }
 
 .status-badge.pending {
-  background: rgba(255, 152, 0, 0.15);
-  color: var(--orange);
+  background: var(--inset);
+  color: var(--text-2);
 }
 
 .history-entry {
@@ -458,8 +428,6 @@ select {
 .history-stamp-time {
   font-size: 12px;
   color: var(--text-dim);
-  font-family: "Geist Mono", "SF Mono", "Cascadia Code", "Consolas", monospace;
-  font-variant-numeric: tabular-nums;
 }
 
 .history-badges {
@@ -489,11 +457,11 @@ select {
   word-break: break-word;
   user-select: text;
   scrollbar-width: thin;
-  scrollbar-color: rgba(108, 99, 255, 0.4) transparent;
+  scrollbar-color: var(--border-2) transparent;
 }
 
 .history-text mark {
-  background: rgba(240, 192, 64, 0.35);
+  background: var(--orange-mute);
   color: inherit;
   border-radius: 2px;
   padding: 0 1px;
@@ -522,8 +490,8 @@ select {
 
 .status-indicator-badge--loading {
   display: inline-block;
-  border: 2px solid rgba(255, 255, 255, 0.25);
-  border-top-color: #fff;
+  border: 2px solid var(--border-2);
+  border-top-color: var(--blue);
   animation: status-indicator-spin 0.7s linear infinite;
 }
 
@@ -590,7 +558,6 @@ select {
   font-weight: 600;
   color: var(--accent);
   margin: 6px 0 2px;
-  font-variant-numeric: tabular-nums;
 }
 
 .word-card-sub {
@@ -639,10 +606,8 @@ select {
 }
 
 .bucket-value {
-  font-family: "Geist Mono", "SF Mono", "Cascadia Code", "Consolas", monospace;
   font-size: 12px;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
   min-width: 60px;
   text-align: right;
 }
@@ -667,7 +632,7 @@ select {
 
 .dropzone.active {
   border-color: var(--accent);
-  background: rgba(108, 99, 255, 0.12);
+  background: var(--blue-soft);
   transform: scale(1.01);
 }
 

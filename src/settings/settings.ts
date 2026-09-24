@@ -25,6 +25,7 @@ import { renderHistory } from "./tabs/history";
 import { renderMetrics } from "./tabs/metrics";
 import { renderWords } from "./tabs/words";
 import { renderTranscribe } from "./tabs/transcribe";
+import { applyThemePreference } from "../ui/theme";
 
 
 let currentTab = "general";
@@ -502,6 +503,7 @@ async function trackTabWindowVisibility() {
 
 
 function init() {
+  applyThemePreference("system");
   void initAppVersion();
   void trackTabWindowVisibility();
   renderSettingsUnavailable(tabContent, currentStartupScreen());

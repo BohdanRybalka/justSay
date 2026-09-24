@@ -287,11 +287,11 @@ function renderStatsCards(s: HistoryStats): string {
   const audioBlock = `
     <div class="setting-row" style="margin-top:16px;">
       <span class="label">Total audio time</span>
-      <span class="value" id="words-stat-audio">${formatCoarseDuration(s.total_audio_seconds)}</span>
+      <span class="value num" id="words-stat-audio">${formatCoarseDuration(s.total_audio_seconds)}</span>
     </div>
     <div class="setting-row">
       <span class="label">Transcriptions</span>
-      <span class="value" id="words-stat-entries">${s.total_entries.toLocaleString("uk-UA")}</span>
+      <span class="value num" id="words-stat-entries">${s.total_entries.toLocaleString("uk-UA")}</span>
     </div>
   `;
 
@@ -338,7 +338,7 @@ function renderTopWords(top: TopWordsResponse): string {
         <div class="bucket-row">
           <span class="bucket-label">${escapeHtml(item.word)}</span>
           <div class="bucket-bar"><div class="bucket-bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
-          <span class="bucket-value">${item.count.toLocaleString("uk-UA")}</span>
+          <span class="bucket-value num">${item.count.toLocaleString("uk-UA")}</span>
         </div>
       `;
     })
@@ -356,7 +356,7 @@ function bigCard(label: string, valueId: string, count: number): string {
   return `
     <div class="word-card">
       <div class="word-card-label">${label}</div>
-      <div class="word-card-value" id="${valueId}">${count.toLocaleString("uk-UA")}</div>
+      <div class="word-card-value num" id="${valueId}">${count.toLocaleString("uk-UA")}</div>
       <div class="word-card-sub">words</div>
     </div>
   `;
@@ -376,7 +376,7 @@ function renderBucketRows(
         <div class="bucket-row">
           <span class="bucket-label">${escapeHtml(labelFn(key))}</span>
           <div class="bucket-bar"><div class="bucket-bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
-          <span class="bucket-value">${value.toLocaleString("uk-UA")}</span>
+          <span class="bucket-value num">${value.toLocaleString("uk-UA")}</span>
         </div>
       `;
     })

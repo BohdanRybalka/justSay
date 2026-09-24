@@ -22,7 +22,7 @@ export function renderMetrics(container: HTMLElement): () => void {
             <th style="text-align: right; padding: 6px 10px; color: var(--text-dim); font-weight: 500; border-bottom: 1px solid var(--border);">Words</th>
           </tr>
         </thead>
-        <tbody id="metrics-body"></tbody>
+        <tbody id="metrics-body" class="num"></tbody>
       </table>
     </div>
     <div id="metrics-empty" style="display: none; color: var(--text-muted); padding: 24px; text-align: center;">No metrics yet</div>
@@ -76,7 +76,7 @@ export function renderMetrics(container: HTMLElement): () => void {
 
     const cells: [string, string][] = [
       [timeStr, "padding: 7px 10px; color: var(--text-dim); white-space: nowrap;"],
-      [entry.model_name ?? "—", "padding: 7px 10px; font-family: monospace; font-size: 12px; color: var(--text);"],
+      [entry.model_name ?? "—", "padding: 7px 10px; font-size: 12px; color: var(--text);"],
       [entry.tokens_used != null ? entry.tokens_used.toLocaleString("uk-UA") : "—", "padding: 7px 10px; text-align: right; color: var(--text);"],
       [`${(entry.duration_ms / 1000).toFixed(2)}s`, "padding: 7px 10px; text-align: right; color: var(--text);"],
       [entry.audio_duration_seconds != null ? `${entry.audio_duration_seconds.toFixed(1)}s` : "—", "padding: 7px 10px; text-align: right; color: var(--text);"],

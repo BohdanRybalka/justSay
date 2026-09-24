@@ -1,10 +1,13 @@
 <!DOCTYPE html>
-<html lang="uk">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>JustSay Settings</title>
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <link rel="stylesheet" href="/src/ui/tokens.css" />
+  <link rel="stylesheet" href="/src/ui/fonts.css" />
+  <link rel="stylesheet" href="/src/ui/base.css" />
   <link rel="stylesheet" href="/src/settings/settings.css" />
 </head>
 <body>
@@ -23,12 +26,12 @@
         <li><button class="nav-btn" data-tab="metrics">Metrics</button></li>
       </ul>
       <div class="sidebar-footer">
-        <span class="version" id="sidebar-version">v…</span>
+        <span class="version num" id="sidebar-version">v…</span>
       </div>
     </nav>
 
     <main class="content">
-      <div id="tab-content"></div>
+      <div id="tab-content" class="pane"></div>
       <footer class="status-bar">
         <span id="backend-status" class="status-indicator offline">Backend offline</span>
       </footer>
