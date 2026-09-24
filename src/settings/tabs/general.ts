@@ -152,7 +152,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
       <div class="setting-row">
         <div>
           <span class="label">Size</span>
-          <span class="value" id="temp-size" style="margin-left: 8px;">...</span>
+          <span class="value num" id="temp-size" style="margin-left: 8px;">...</span>
         </div>
         <button class="btn btn-danger" id="btn-cleanup">Clear Temp Files</button>
       </div>
@@ -162,7 +162,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
       <div class="setting-label">About</div>
       <div class="setting-row">
         <span class="label">Version</span>
-        <span class="value" id="app-version">…</span>
+        <span class="value num" id="app-version">…</span>
       </div>
       <div class="setting-row">
         <span class="label">Updates</span>

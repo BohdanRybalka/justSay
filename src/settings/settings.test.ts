@@ -94,6 +94,10 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 
+const applyThemePreferenceMock = vi.fn();
+
+vi.mock("../ui/theme", () => ({ applyThemePreference: applyThemePreferenceMock }));
+
 /** Delivers the first `settings-shown`, the way opening the hidden window does.
  *
  *  The shell creates the Settings window invisible, so a page that has just
@@ -147,6 +151,20 @@ beforeEach(() => {
     <div id="tab-content"></div>
     <span id="backend-status"></span>
   `;
+});
+
+describe("theme", () => {
+  it("follows the system colour scheme from the moment the window loads", async () => {
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
+    apiMock.getSettings.mockResolvedValue(buildSettings());
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
+    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+
+    const settingsModule = await import("./settings");
+
+    expect(applyThemePreferenceMock).toHaveBeenCalledWith("system");
+    await vi.waitFor(() => expect(settingsModule.getSettings()).not.toBeNull());
+  });
 });
 
 describe("saveSettings — cloud-status refetch failure retains, does not null (Stage 3 fix)", () => {

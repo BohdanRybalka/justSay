@@ -190,7 +190,7 @@ export function renderHistory(container: HTMLElement): () => void {
       <div class="history-entry-header">
         <div class="history-stamp">
           <span class="history-stamp-date">${date === null ? "—" : DATE_FORMATTER.format(date)}</span>
-          <span class="history-stamp-time">${date === null ? "" : TIME_FORMATTER.format(date)}</span>
+          <span class="history-stamp-time num">${date === null ? "" : TIME_FORMATTER.format(date)}</span>
         </div>
         <div class="history-badges">${badges.join("")}</div>
       </div>
