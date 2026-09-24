@@ -688,7 +688,7 @@ select {
   letter-spacing: 0.4px;
 }
 
-.result-status.pending { color: var(--orange); }
+.result-status.pending { color: var(--text-2); }
 .result-status.ok { color: var(--green); }
 .result-status.error { color: var(--red); }
 

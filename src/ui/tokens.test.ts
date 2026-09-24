@@ -28,13 +28,23 @@ function stylesheetsUnderSrc(dir = join(REPO_ROOT, "src")): string[] {
   });
 }
 
-const COLOUR_LITERAL = /#[0-9a-f]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\([^)]*\)/gi;
-const WHITE = /^(?:#fff|#ffffff|rgba?\(\s*255\s*,\s*255\s*,\s*255\s*(?:,\s*[\d.]+\s*)?\))$/i;
+const BASIC_COLOUR_KEYWORD =
+  /(?<![\w-])(?:black|silver|gr[ae]y|white|maroon|red|purple|fuchsia|green|lime|olive|yellow|navy|blue|teal|aqua|orange)(?![\w-])/;
+const COLOUR_LITERAL = new RegExp(
+  String.raw`#[0-9a-f]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\([^)]*\)|` +
+    BASIC_COLOUR_KEYWORD.source,
+  "gi",
+);
+const WHITE = /^(?:white|#fff|#ffffff|rgba?\(\s*255\s*,\s*255\s*,\s*255\s*(?:,\s*[\d.]+\s*)?\))$/i;
 
 function colourDeclarations(path: string): string[] {
   const css = readRepoFile(path).replace(/\/\*[\s\S]*?\*\//g, "");
   return [...css.matchAll(/([\w-]+)\s*:\s*([^;{}]+)[;}]/g)]
-    .filter(([, , value]) => (value.match(COLOUR_LITERAL) ?? []).some((colour) => !WHITE.test(colour)))
+    .filter(([, , value]) =>
+      (value.replace(/var\(--[\w-]+\)/g, "").match(COLOUR_LITERAL) ?? []).some(
+        (colour) => !WHITE.test(colour),
+      ),
+    )
     .map(([, property, value]) => `${path}: ${property}: ${value.trim()}`);
 }
 
