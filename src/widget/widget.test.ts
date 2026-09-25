@@ -106,9 +106,30 @@ const levelStreamMock = vi.fn((onLevel: LevelListener) => {
   return controller;
 });
 
+type MeetingLevelListener = (data: { mic_db: number | null; system_db: number | null }) => void;
+
+const meetingLevelStreams: {
+  onLevel: MeetingLevelListener;
+  onError: (error: string) => void;
+  controller: AbortController;
+}[] = [];
+
+const meetingLevelStreamMock = vi.fn(
+  (onLevel: MeetingLevelListener, _onDone: () => void, onError: (error: string) => void) => {
+    const controller = new AbortController();
+    meetingLevelStreams.push({ onLevel, onError, controller });
+    return controller;
+  },
+);
+
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
-  return { ...actual, api: apiMock, levelStream: levelStreamMock };
+  return {
+    ...actual,
+    api: apiMock,
+    levelStream: levelStreamMock,
+    meetingLevelStream: meetingLevelStreamMock,
+  };
 });
 
 vi.mock("../notify", async (importOriginal) => {
@@ -150,6 +171,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   listeners.clear();
   levelStreams.length = 0;
+  meetingLevelStreams.length = 0;
   apiMock.health.mockResolvedValue({
     status: "ok",
     version: "0",
@@ -441,6 +463,16 @@ describe("a Tauri bridge that stops answering", () => {
   });
 });
 
+function meterHeights(root: HTMLElement, side: "mic" | "system"): string[] {
+  return [...root.querySelectorAll<HTMLElement>(`[data-side="${side}"] .pill-meter-bars i`)].map(
+    (bar) => bar.style.height,
+  );
+}
+
+function systemMeterLost(root: HTMLElement): boolean {
+  return root.querySelector('[data-side="system"]')?.classList.contains("pill-lost") ?? false;
+}
+
 describe("a meeting that goes wrong while nobody is looking", () => {
   async function startAMeeting() {
     await loadWidget();
@@ -481,7 +513,7 @@ describe("a meeting that goes wrong while nobody is looking", () => {
     await vi.advanceTimersByTimeAsync(2_000);
 
     expect(root.classList.contains("meeting")).toBe(true);
-    expect(root.classList.contains("meeting-degraded")).toBe(true);
+    expect(systemMeterLost(root)).toBe(true);
   });
 
   it("takes the marker down when the backend says the capture has ended", async () => {
@@ -532,13 +564,13 @@ describe("a meeting that goes wrong while nobody is looking", () => {
       capture_incident: "system_audio_ended",
     });
     await vi.advanceTimersByTimeAsync(2_000);
-    expect(root.classList.contains("meeting-degraded")).toBe(true);
+    expect(systemMeterLost(root)).toBe(true);
 
     await vi.advanceTimersByTimeAsync(750);
 
     expect(pillLabel()).toBe(REST_HINT);
     expect(root.classList.contains("meeting")).toBe(true);
-    expect(root.classList.contains("meeting-degraded")).toBe(true);
+    expect(systemMeterLost(root)).toBe(true);
   });
 
   it("leaves the marker up when the status call itself fails", async () => {
@@ -548,7 +580,71 @@ describe("a meeting that goes wrong while nobody is looking", () => {
     await vi.advanceTimersByTimeAsync(4_000);
 
     expect(root.classList.contains("meeting")).toBe(true);
-    expect(root.classList.contains("meeting-degraded")).toBe(false);
+    expect(systemMeterLost(root)).toBe(false);
+  });
+
+  it("moves the two meters with the meeting's level stream", async () => {
+    const root = await startAMeeting();
+    expect(meetingLevelStreamMock).toHaveBeenCalledOnce();
+
+    meetingLevelStreams[0].onLevel({ mic_db: 0, system_db: null });
+
+    expect(meterHeights(root, "mic")).toEqual(["4px", "8px", "5px"]);
+    expect(meterHeights(root, "system")).toEqual(["2px", "2px", "2px"]);
+  });
+
+  it("flattens both meters when the level stream fails mid-meeting", async () => {
+    const root = await startAMeeting();
+    meetingLevelStreams[0].onLevel({ mic_db: 0, system_db: 0 });
+
+    meetingLevelStreams[0].onError("HTTP 503");
+
+    expect(meterHeights(root, "mic")).toEqual(["2px", "2px", "2px"]);
+    expect(meterHeights(root, "system")).toEqual(["2px", "2px", "2px"]);
+  });
+
+  it("ignores levels from a previous meeting's stream", async () => {
+    const root = await startAMeeting();
+    apiMock.stopMeetingRecording.mockResolvedValue({
+      filename: "meeting.wav",
+      duration_seconds: 3,
+      capture_incident: null,
+    });
+    await listeners.get(EVENT_MEETING_TOGGLE)!({});
+    await listeners.get(EVENT_MEETING_TOGGLE)!({});
+    expect(meetingLevelStreams).toHaveLength(2);
+
+    meetingLevelStreams[0].onLevel({ mic_db: 0, system_db: 0 });
+
+    expect(root.classList.contains("meeting")).toBe(true);
+    expect(meterHeights(root, "mic")).toEqual(["2px", "2px", "2px"]);
+  });
+
+  it("stops the meeting from the pill's stop button and closes the level stream", async () => {
+    const root = await startAMeeting();
+    apiMock.stopMeetingRecording.mockResolvedValue({
+      filename: "meeting.wav",
+      duration_seconds: 3,
+      capture_incident: null,
+    });
+
+    root.querySelector<HTMLElement>(".pill-stop")!.click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(apiMock.stopMeetingRecording).toHaveBeenCalledOnce();
+    expect(apiMock.audioStart).not.toHaveBeenCalled();
+    expect(root.classList.contains("meeting")).toBe(false);
+    expect(meetingLevelStreams[0].controller.signal.aborted).toBe(true);
+  });
+
+  it("ignores a click elsewhere on the pill during a meeting", async () => {
+    const root = await startAMeeting();
+
+    root.dispatchEvent(new MouseEvent("click"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(apiMock.stopMeetingRecording).not.toHaveBeenCalled();
+    expect(apiMock.audioStart).not.toHaveBeenCalled();
   });
 });
 

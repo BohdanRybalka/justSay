@@ -488,7 +488,7 @@ export interface HealthResponse {
 export interface RecordingStatus {
   is_recording: boolean;
   duration_seconds: number;
-  level_db: number;
+  level_db: number | null;
   /** The client-minted id of the live capture, or `null` when nothing is
    *  recording. A window compares it against what it minted; anything else is
    *  somebody else's recording and not this window's to end. */
@@ -508,9 +508,9 @@ export interface DiscardResponse {
 export interface MeetingStatus {
   is_recording: boolean;
   duration_seconds: number;
-  level_db: number;
+  level_db: number | null;
   system_endpoint: string | null;
-  system_level_db: number;
+  system_level_db: number | null;
   capture_incident: string | null;
 }
 
@@ -970,14 +970,20 @@ export const api = {
 };
 
 
+/** `level_db` is `null` while the microphone has no level to report. */
 export interface LevelStreamEvent {
-  level_db: number;
+  level_db: number | null;
   is_recording: boolean;
 }
 
-const LEVEL_STREAM_PATH = "/audio/level-stream";
+/** Each side is `null` while it has no level to report — before its first
+ *  block of sound, or in digital silence. */
+export interface MeetingLevelStreamEvent {
+  mic_db: number | null;
+  system_db: number | null;
+}
 
-/** The level meter's stream, opened under a budget that covers the handshake
+/** A level meter's stream, opened under a budget that covers the handshake
  *  only.
  *
  *  The stream itself must stay unbounded — it is long-lived by design and a
@@ -999,8 +1005,9 @@ const LEVEL_STREAM_PATH = "/audio/level-stream";
  *  `timedOut` is what lets the terminal `catch` tell our own abort from the
  *  caller's: `stopLevelStream()` aborts the same controller on every normal stop
  *  and must stay silent, while the handshake expiring must reach `onError`. */
-export function levelStream(
-  onLevel: (data: LevelStreamEvent) => void,
+function openLevelStream<T>(
+  path: string,
+  onLevel: (data: T) => void,
   onDone: () => void,
   onError: (error: string) => void,
 ): AbortController {
@@ -1013,7 +1020,7 @@ export function levelStream(
 
   until(getToken(), controller.signal, () =>
     timedOut
-      ? new TimedOutError(REQUEST_TIMEOUT_MS, LEVEL_STREAM_PATH)
+      ? new TimedOutError(REQUEST_TIMEOUT_MS, path)
       : new DOMException("The level stream was closed by its caller.", "AbortError"),
   )
     .then((token) => {
@@ -1021,14 +1028,14 @@ export function levelStream(
       if (token) {
         headers["X-JustSay-Token"] = token;
       }
-      return fetch(`${BACKEND_BASE_URL}${LEVEL_STREAM_PATH}`, {
+      return fetch(`${BACKEND_BASE_URL}${path}`, {
         method: "GET",
         signal: controller.signal,
         headers,
       });
     })
     .then(async (resp) => {
-      recordAuthOutcome(LEVEL_STREAM_PATH, resp);
+      recordAuthOutcome(path, resp);
       if (!resp.ok || !resp.body) {
         clearTimeout(handshakeTimer);
         controller.abort();
@@ -1058,7 +1065,7 @@ export function levelStream(
             currentEvent = line.slice(7).trim();
           } else if (line.startsWith("data: ")) {
             try {
-              const data: LevelStreamEvent = JSON.parse(line.slice(6));
+              const data: T = JSON.parse(line.slice(6));
               if (currentEvent === "done") {
                 onDone();
               } else {
@@ -1077,7 +1084,7 @@ export function levelStream(
         return;
       }
       if (timedOut) {
-        onError(new TimedOutError(REQUEST_TIMEOUT_MS, LEVEL_STREAM_PATH).message);
+        onError(new TimedOutError(REQUEST_TIMEOUT_MS, path).message);
         return;
       }
       if (err.name !== "AbortError") {
@@ -1086,4 +1093,22 @@ export function levelStream(
     });
 
   return controller;
+}
+
+export function levelStream(
+  onLevel: (data: LevelStreamEvent) => void,
+  onDone: () => void,
+  onError: (error: string) => void,
+): AbortController {
+  return openLevelStream("/audio/level-stream", onLevel, onDone, onError);
+}
+
+/** Both sides of a running meeting at about 10 Hz, under the same handshake
+ *  budget as `levelStream`; it ends with the recording. */
+export function meetingLevelStream(
+  onLevel: (data: MeetingLevelStreamEvent) => void,
+  onDone: () => void,
+  onError: (error: string) => void,
+): AbortController {
+  return openLevelStream("/audio/meeting/level-stream", onLevel, onDone, onError);
 }

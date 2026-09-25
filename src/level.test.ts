@@ -11,4 +11,8 @@ describe("levelFromDb", () => {
   ])("reads %d dB as %d of the meter", (db, level) => {
     expect(levelFromDb(db)).toBeCloseTo(level);
   });
+
+  it("reads no level as an empty meter", () => {
+    expect(levelFromDb(null)).toBe(0);
+  });
 });

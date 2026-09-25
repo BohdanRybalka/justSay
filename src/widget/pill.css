@@ -169,6 +169,18 @@ body {
   display: none;
 }
 
+.pill-meeting {
+  display: none;
+}
+
+.pill.meeting > .pill-content {
+  display: none;
+}
+
+.pill.meeting > .pill-meeting {
+  display: contents;
+}
+
 .pill.meeting {
   padding: 6px 11px;
   gap: 7px;
@@ -180,10 +192,81 @@ body {
   opacity: 1;
 }
 
-.pill.meeting .pill-hint {
+.pill-meeting-mark {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  color: var(--orange);
+}
+
+.pill-divider {
+  width: 1px;
+  height: 13px;
+  background: var(--glass-edge);
+  flex: none;
+}
+
+.pill-meter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+
+.pill-meter .icon,
+.pill-meeting-mark .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.pill-meter .icon + .icon,
+.pill-meeting-mark .icon,
+.pill-meter.pill-lost .icon:first-child,
+.pill-meeting-mark.pill-lost .pill-dot {
   display: none;
 }
 
-.pill.meeting-degraded .pill-readout {
+.pill-meter.pill-lost .icon + .icon,
+.pill-meeting-mark.pill-lost .icon {
+  display: block;
   color: var(--orange);
+}
+
+.pill-meter-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 11px;
+}
+
+.pill-meter-bars i {
+  display: block;
+  width: 2.2px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--orange);
+  transition: height .1s linear;
+}
+
+.pill-meter[data-side="system"] .pill-meter-bars i {
+  background: var(--blue);
+}
+
+.pill-stop {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: var(--orange);
+  color: #fff;
+  cursor: pointer;
+}
+
+.pill-stop .icon {
+  width: 9px;
+  height: 9px;
 }
