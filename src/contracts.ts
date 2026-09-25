@@ -37,6 +37,11 @@ export const EVENT_SHORTCUT_REQUESTED = "shortcut-requested";
 export const EVENT_SHORTCUT_APPLIED = "shortcut-applied";
 export const EVENT_MEETING_TOGGLE = "meeting-toggle";
 
+/** The pointer entered or left the zone around the widget's pill. The shell
+ *  reads the cursor itself: the zone reaches past the pill, and the page gets
+ *  no mouse events where its window lets clicks through. */
+export const EVENT_WIDGET_HOVER = "widget-hover";
+
 /** The Settings window was dismissed. The shell intercepts `CloseRequested`,
  *  prevents it and hides the window, so the webview stays mounted and no tab's
  *  teardown ever runs — a microphone the General tab holds outlives the window
@@ -79,6 +84,11 @@ export type CaptureIncident = (typeof CAPTURE_INCIDENTS)[number];
  *  owns the global-shortcut registration, to take a new accelerator. */
 export interface ShortcutRequested {
   shortcut: string;
+}
+
+/** Payload of `EVENT_WIDGET_HOVER`. */
+export interface WidgetHover {
+  inside: boolean;
 }
 
 /** Payload of `EVENT_SHORTCUT_APPLIED` — the widget's answer, carrying both

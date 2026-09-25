@@ -4,20 +4,11 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    webview::WebviewWindowBuilder,
-    AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WindowEvent, Wry,
+    AppHandle, Emitter, Manager, RunEvent, WindowEvent, Wry,
 };
 
 mod backend;
-
-/// The widget window's logical width, as built and as placed.
-const WIDGET_WIDTH: f64 = 160.0;
-
-/// The widget window's logical height, as built and as placed.
-const WIDGET_HEIGHT: f64 = 40.0;
-
-/// Logical gap between the bottom of the monitor and the widget's bottom edge.
-const WIDGET_BOTTOM_GAP: f64 = 220.0;
+mod widget_window;
 
 /// Kill the backend child process if one is running. Safe to call even if
 /// nothing is running (no-op). Exposed narrowly for `main.rs`'s panic hook —
@@ -195,40 +186,19 @@ fn show_settings_window(app: AppHandle) {
     show_settings(&app);
 }
 
-#[tauri::command]
-fn widget_ready(app: AppHandle) {
-    if let Some(widget) = app.get_webview_window("widget") {
-        match widget.current_monitor() {
-            Ok(Some(monitor)) => {
-                let screen = monitor.size();
-                let origin = monitor.position();
-                let scale = monitor.scale_factor();
-                let x = origin.x as f64 + (screen.width as f64 - WIDGET_WIDTH * scale) / 2.0;
-                let y = origin.y as f64 + screen.height as f64
-                    - (WIDGET_HEIGHT + WIDGET_BOTTOM_GAP) * scale;
-                if let Err(e) = widget
-                    .set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32))
-                {
-                    log::warn!("Placing the widget failed, so it keeps where the OS put it: {}", e);
-                }
-            }
-            Ok(None) => log::warn!("The widget reports no monitor, so it keeps where the OS put it"),
-            Err(e) => log::warn!("Reading the widget's monitor failed: {}", e),
-        }
-
-        let _ = widget.show();
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build());
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+
+    let app = builder
         .setup(|app| {
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
@@ -253,21 +223,7 @@ pub fn run() {
 
             backend::spawn_watchdog(app.handle().clone());
 
-            let _widget = WebviewWindowBuilder::new(
-                app,
-                "widget",
-                WebviewUrl::App("/widget.html".into()),
-            )
-            .title("")
-            .inner_size(WIDGET_WIDTH, WIDGET_HEIGHT)
-            .resizable(false)
-            .visible(false)
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .shadow(false)
-            .build()?;
+            widget_window::build(app)?;
 
             let meeting_item = MenuItem::with_id(
                 app,
@@ -323,7 +279,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            widget_ready,
+            widget_window::widget_ready,
+            widget_window::set_widget_pill_rect,
             get_backend_token,
             set_meeting_recording,
             show_settings_window

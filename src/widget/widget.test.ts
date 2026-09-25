@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BACKEND_WAIT_BUDGET_MS } from "../backend-startup";
-import { EVENT_MEETING_TOGGLE } from "../contracts";
+import { EVENT_MEETING_TOGGLE, EVENT_WIDGET_HOVER } from "../contracts";
 import { CONNECTION_POLL_MS } from "./settings-retry";
 
 const apiMock = {
@@ -132,10 +132,51 @@ beforeEach(() => {
   invokeMock.mockResolvedValue(undefined);
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(private readonly onResize: () => void) {}
+      observe() {
+        this.onResize();
+      }
+    },
+  );
+  vi.stubGlobal("matchMedia", () => ({ addEventListener: () => {} }));
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+describe("the widget window's shape", () => {
+  it("tells the shell where the pill is drawn, so only the pill takes clicks", async () => {
+    await loadWidget();
+
+    expect(invokeMock).toHaveBeenCalledWith("set_widget_pill_rect", {
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+    });
+  });
+
+  it("shows the hover look while the shell says the pointer is near the pill", async () => {
+    await loadWidget();
+    await vi.waitFor(() => expect(listeners.get(EVENT_WIDGET_HOVER)).toBeTypeOf("function"));
+    const icon = document.getElementById("widget-icon")!;
+
+    const pill = document.getElementById("widget")!;
+
+    listeners.get(EVENT_WIDGET_HOVER)!({ payload: { inside: true } });
+    expect(icon.classList.contains("js-widget--hover")).toBe(true);
+    expect(pill.classList.contains("hovered")).toBe(true);
+
+    listeners.get(EVENT_WIDGET_HOVER)!({ payload: { inside: false } });
+    expect(icon.classList.contains("js-widget--hover")).toBe(false);
+    expect(icon.classList.contains("js-widget--idle")).toBe(true);
+    expect(pill.classList.contains("hovered")).toBe(false);
+  });
 });
 
 describe("the widget's own timers", () => {
