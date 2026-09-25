@@ -1,0 +1,115 @@
+html, body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pill {
+  --pill-glass: color-mix(in srgb, var(--glass) 45%, var(--surface));
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 29px;
+  padding: 6px 11px;
+  border-radius: 999px;
+  background: var(--pill-glass);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  border: 1px solid var(--glass-edge);
+  box-shadow: var(--sh-glass);
+  white-space: nowrap;
+  opacity: .82;
+  cursor: pointer;
+  transition: opacity .24s, padding .24s, background .24s, box-shadow .24s, border-color .2s;
+}
+
+.pill--hover {
+  opacity: 1;
+}
+
+.pill--rest {
+  padding: 6px;
+  gap: 0;
+  opacity: .4;
+}
+
+.pill--rest.pill--hover {
+  opacity: 1;
+  padding: 6px 12px 6px 9px;
+}
+
+.pill--live {
+  border-color: color-mix(in srgb, var(--orange) 50%, transparent);
+}
+
+.pill--alert {
+  border-color: color-mix(in srgb, var(--orange) 56%, transparent);
+}
+
+.pill-content {
+  display: contents;
+}
+
+.pill .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.pill-label {
+  font-size: 11px;
+  font-weight: 540;
+  line-height: 1;
+}
+
+.pill-hint {
+  color: var(--text-2);
+}
+
+.pill--rest .pill-hint {
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: max-width .28s cubic-bezier(.3,.9,.3,1), opacity .18s, margin .28s;
+}
+
+.pill--rest.pill--hover .pill-hint {
+  max-width: 120px;
+  opacity: 1;
+  margin-left: 7px;
+}
+
+.pill--alert .pill-label {
+  color: var(--orange);
+}
+
+.pill-readout:empty {
+  display: none;
+}
+
+.pill.meeting {
+  padding: 6px 11px;
+  gap: 7px;
+  opacity: .82;
+  border-color: color-mix(in srgb, var(--orange) 50%, transparent);
+}
+
+.pill.meeting.pill--hover {
+  opacity: 1;
+}
+
+.pill.meeting .pill-hint {
+  display: none;
+}
+
+.pill.meeting-degraded .pill-readout {
+  color: var(--orange);
+}
