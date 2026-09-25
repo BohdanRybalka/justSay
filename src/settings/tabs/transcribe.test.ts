@@ -335,6 +335,28 @@ describe("renderTranscribe — the drop zone", () => {
     expect(copyToClipboardMock).not.toHaveBeenCalled();
   });
 
+  it("a transcript whose copy finishes after teardown writes nothing", async () => {
+    apiMock.processFile.mockResolvedValue({
+      text: "copied after teardown",
+      duration_ms: 1000,
+      copied_to_clipboard: false,
+    });
+    let finishCopy: (copied: boolean) => void = () => {};
+    copyToClipboardMock.mockReturnValue(new Promise((resolve) => (finishCopy = resolve)));
+    const { container, teardown } = render();
+
+    dropFile(container, buildFile("slowcopy.wav", 2048));
+    await vi.waitFor(() => {
+      expect(copyToClipboardMock).toHaveBeenCalledTimes(1);
+    });
+
+    teardown();
+    finishCopy(true);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(resultText(container).textContent).not.toBe("copied after teardown");
+  });
+
   it("a drop delivered after teardown transcribes nothing", async () => {
     apiMock.processFile.mockResolvedValue({
       text: "before",

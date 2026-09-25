@@ -25,20 +25,24 @@ mod platform {
     const OPEN_ATTEMPTS: usize = 5;
     const OPEN_RETRY_DELAY: Duration = Duration::from_millis(5);
 
-    /// The two operations a write makes on an open clipboard.
+    /// The operations a write makes on an open clipboard.
     pub(super) trait Board {
         fn set_text(&mut self, text: &str) -> Result<(), String>;
         fn set_format(&mut self, name: &str, data: &[u8]) -> Result<(), String>;
+        fn empty(&mut self);
     }
 
     /// Replace the clipboard with `text` and mark it out of Cloud Clipboard
-    /// while the clipboard is still open, so no reader sees it unmarked.
+    /// while the clipboard is still open, so no reader sees it unmarked. Text
+    /// that cannot be marked is taken off again rather than left to sync.
     pub(super) fn write_kept_on_this_device(
         board: &mut impl Board,
         text: &str,
     ) -> Result<(), String> {
         board.set_text(text)?;
-        board.set_format(CLOUD_UPLOAD_FORMAT, &0u32.to_ne_bytes())
+        board
+            .set_format(CLOUD_UPLOAD_FORMAT, &0u32.to_ne_bytes())
+            .inspect_err(|_| board.empty())
     }
 
     /// The system clipboard, open for as long as this value lives.
@@ -75,6 +79,12 @@ mod platform {
                 .ok_or_else(|| format!("registering {} failed", name))?;
             clipboard_win::raw::set_without_clear(format.get(), data)
                 .map_err(|e| format!("writing {} failed — {}", name, e))
+        }
+
+        fn empty(&mut self) {
+            if let Err(e) = clipboard_win::raw::empty() {
+                log::warn!("Emptying the clipboard after a failed write failed — {}", e);
+            }
         }
     }
 
@@ -135,12 +145,14 @@ mod tests {
     enum Call {
         Text(String),
         Format(String, Vec<u8>),
+        Empty,
     }
 
     #[derive(Default)]
     struct RecordingBoard {
         calls: Vec<Call>,
         refuse_text: bool,
+        refuse_format: bool,
     }
 
     impl Board for RecordingBoard {
@@ -153,8 +165,15 @@ mod tests {
         }
 
         fn set_format(&mut self, name: &str, data: &[u8]) -> Result<(), String> {
+            if self.refuse_format {
+                return Err("refused".into());
+            }
             self.calls.push(Call::Format(name.into(), data.into()));
             Ok(())
+        }
+
+        fn empty(&mut self) {
+            self.calls.push(Call::Empty);
         }
     }
 
@@ -179,6 +198,16 @@ mod tests {
         };
         assert!(write_kept_on_this_device(&mut board, "text").is_err());
         assert!(board.calls.is_empty());
+    }
+
+    #[test]
+    fn text_that_cannot_be_marked_is_taken_off_the_clipboard() {
+        let mut board = RecordingBoard {
+            refuse_format: true,
+            ..Default::default()
+        };
+        assert!(write_kept_on_this_device(&mut board, "text").is_err());
+        assert_eq!(board.calls, vec![Call::Text("text".into()), Call::Empty]);
     }
 }
 
