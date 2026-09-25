@@ -1,105 +1,95 @@
 import { describe, expect, it } from "vitest";
 import { ApiAuthError, ApiRequestError, CONFIGURATION_ERROR_CODE } from "../api";
+import { TimedOutError } from "../timeout";
 import { dictationErrorLabel, startErrorLabel } from "./error-label";
 
+const PILL_LABELS = [
+  "No connection",
+  "Add an API key",
+  "Mic is busy",
+  "Didn't work",
+];
+
+const authFailure = () =>
+  new ApiAuthError("Missing or invalid API token", { kind: "bridge-missing" });
+
 describe("dictationErrorLabel", () => {
-  it("an ApiAuthError never renders the API-key label, even though its message contains 'missing'", () => {
-    const error = new ApiAuthError("Missing or invalid API token", { kind: "bridge-missing" });
-
-    const { label, toast } = dictationErrorLabel(error);
-
-    expect(label).not.toBe("Add key in Settings");
-    expect(toast).not.toContain("API key");
-    expect(label).toBe("Auth failed");
+  it.each([
+    ["a 401 from the app's own backend", authFailure(), "No connection"],
+    ["a refused connection", new TypeError("Failed to fetch"), "No connection"],
+    ["a request that ran out of its budget", new TimedOutError(15_000, "/pipeline/dictate"), "No connection"],
+    ["a missing cloud key", new ApiRequestError("any text", 400, CONFIGURATION_ERROR_CODE), "Add an API key"],
+    ["another window holding the microphone", new ApiRequestError("owned elsewhere", 403), "Mic is busy"],
+    ["a crash", new ApiRequestError("boom", 500), "Didn't work"],
+    ["a 409", new ApiRequestError("Not recording", 409), "Didn't work"],
+    ["a plain error", new Error("connection reset"), "Didn't work"],
+    ["a thrown string", "missing something", "Didn't work"],
+    ["nothing at all", undefined, "Didn't work"],
+  ])("labels %s as %s", (_name, error, expected) => {
+    expect(dictationErrorLabel(error).label).toBe(expected);
   });
 
-  it("a genuinely missing cloud key still routes the user to Settings", () => {
-    const { label, toast } = dictationErrorLabel(
-      new ApiRequestError("any text at all", 400, CONFIGURATION_ERROR_CODE),
+  it("chooses the key label by the refusal's code, never by what the body says", () => {
+    const crashAboutKeys = new ApiRequestError(
+      "Gemini API key is missing. Go to Settings → Keys and add your key.",
+      500,
+      null,
     );
+    const authMentioningMissing = authFailure();
 
-    expect(label).toBe("Add key in Settings");
-    expect(toast).toBe("No API key set — add one in Settings.");
+    expect(dictationErrorLabel(crashAboutKeys).label).toBe("Didn't work");
+    expect(dictationErrorLabel(authMentioningMissing).label).not.toBe("Add an API key");
+    expect(dictationErrorLabel(authMentioningMissing).toast).not.toContain("API key");
   });
 
-  it("chooses that label by the refusal's code and by nothing the body says", () => {
-    const { label } = dictationErrorLabel(
-      new ApiRequestError("nothing about keys here", 400, "configuration_error"),
+  it("keeps the full sentence for the notification", () => {
+    expect(dictationErrorLabel(new ApiRequestError("x", 400, CONFIGURATION_ERROR_CODE)).toast).toBe(
+      "No API key set — add one in Settings.",
     );
-
-    expect(label).toBe("Add key in Settings");
-  });
-
-  it("a crash whose text says a key is missing is still a crash", () => {
-    const { label } = dictationErrorLabel(
-      new ApiRequestError(
-        "Gemini API key is missing. Go to Settings → Keys and add your key.",
-        500,
-        null,
-      ),
+    expect(dictationErrorLabel(new ApiRequestError("x", 403)).toast).toBe(
+      "Another window is using the microphone — stop it there and try again.",
     );
-
-    expect(label).toBe("Failed");
+    expect(dictationErrorLabel(new Error("x")).toast).toBe("Dictation failed — try again.");
   });
-
-  it("any other failure falls through to the generic label", () => {
-    const { label, toast } = dictationErrorLabel(new Error("connection reset"));
-
-    expect(label).toBe("Failed");
-    expect(toast).toBe("Dictation failed — try again.");
-  });
-
-  it("names the 403 as somebody else's recording instead of inviting a retry", () => {
-    const { label, toast } = dictationErrorLabel(new ApiRequestError("Recording is owned by another session", 403));
-
-    expect(label).toBe("Recording is busy");
-    expect(toast).toBe("Another window is using the microphone — stop it there and try again.");
-  });
-
-  it("reads the 403 by its status, not by what its body happens to say", () => {
-    const { label } = dictationErrorLabel(
-      new ApiRequestError("Recording is missing an owning session", 403),
-    );
-
-    expect(label).toBe("Recording is busy");
-    expect(label).not.toBe("Add key in Settings");
-  });
-
-  it("leaves a refusal that is not a 403 on the generic label", () => {
-    expect(dictationErrorLabel(new ApiRequestError("Not recording", 409)).label).toBe("Failed");
-  });
-
-  it("a rejection that is not one of the known refusals falls through without crashing", () => {
-    expect(dictationErrorLabel("missing something").label).toBe("Failed");
-    expect(dictationErrorLabel(undefined).label).toBe("Failed");
-  });
-
 });
 
 describe("startErrorLabel", () => {
-  it("keeps a refused start off the dictation wording, whatever the refusal says", () => {
-    for (const failure of [
-      new Error("Already recording"),
-      new Error("Missing or invalid API token"),
-      new Error("connection reset"),
-    ]) {
-      const { label, toast } = startErrorLabel(failure);
-
-      expect(label).toBe("Start failed");
-      expect(toast).toBe("Couldn't start recording — try again.");
-    }
+  it.each([
+    ["a 401 from the app's own backend", authFailure(), "No connection"],
+    ["a refused connection", new TypeError("Failed to fetch"), "No connection"],
+    ["a recorder already held", new ApiRequestError("Already recording", 409), "Mic is busy"],
+    ["a refusal whose text says missing", new Error("Missing or invalid API token"), "Didn't work"],
+    ["a missing key, which a start never needs", new ApiRequestError("x", 400, CONFIGURATION_ERROR_CODE), "Didn't work"],
+  ])("labels %s as %s", (_name, error, expected) => {
+    expect(startErrorLabel(error).label).toBe(expected);
   });
 
   it("tells a 401 to restart the app instead of offering a retry that cannot work", () => {
-    const { label, toast } = startErrorLabel(
-      new ApiAuthError("Missing or invalid API token", { kind: "bridge-missing" }),
-    );
+    const { toast } = startErrorLabel(authFailure());
 
-    expect(label).toBe("Auth failed");
-    expect(label).not.toBe("Start failed");
     expect(toast).toBe("JustSay could not authenticate to its own backend — restart the app.");
-    expect(toast).not.toContain("try again");
-    expect(toast).not.toContain("API key");
   });
 
+  it("says the recording never began for anything else", () => {
+    expect(startErrorLabel(new Error("x")).toast).toBe("Couldn't start recording — try again.");
+  });
+});
+
+describe("the pill's failure labels", () => {
+  it("come only from the short list the user approved", () => {
+    const failures = [
+      authFailure(),
+      new TypeError("Failed to fetch"),
+      new ApiRequestError("x", 400, CONFIGURATION_ERROR_CODE),
+      new ApiRequestError("x", 403),
+      new ApiRequestError("x", 409),
+      new ApiRequestError("x", 500),
+      new Error("x"),
+    ];
+
+    for (const failure of failures) {
+      expect(PILL_LABELS).toContain(dictationErrorLabel(failure).label);
+      expect(PILL_LABELS).toContain(startErrorLabel(failure).label);
+    }
+  });
 });

@@ -528,8 +528,8 @@ export interface DictateResponse {
   fallback_reason?: string | null;
   /** Set (currently only to "silence") when the backend's silence guard
    *  short-circuited before any provider ran — no STT call, no clipboard
-   *  write, no History row. Not an error: computeDoneStatus renders it via
-   *  the normal "done" state. */
+   *  write, no History row. Not an error: dictationResultView renders it as
+   *  "No speech". */
   discarded_reason?: string | null;
 }
 

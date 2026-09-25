@@ -91,6 +91,80 @@ body {
   color: var(--orange);
 }
 
+.pill-note {
+  color: var(--text-2);
+}
+
+.pill-mark {
+  display: inline-flex;
+  flex: none;
+}
+
+.pill-mark--done {
+  color: var(--blue);
+}
+
+.pill-mark--alert {
+  color: var(--orange);
+}
+
+.pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--orange);
+  flex: none;
+  animation: pill-blink 1.4s ease-in-out infinite;
+}
+
+@keyframes pill-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .3; }
+}
+
+.pill-wave {
+  display: flex;
+  align-items: center;
+  gap: 2.5px;
+  height: 14px;
+}
+
+.pill-wave i {
+  display: block;
+  width: 2.2px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--orange);
+  transition: height .1s linear;
+}
+
+.pill-dots {
+  display: flex;
+  gap: 3.5px;
+}
+
+.pill-dots i {
+  display: block;
+  width: 4.5px;
+  height: 4.5px;
+  border-radius: 50%;
+  background: var(--blue);
+  animation: pill-pulse 1.1s ease-in-out infinite;
+}
+
+.pill-dots i:nth-child(2) {
+  animation-delay: .18s;
+}
+
+.pill-dots i:nth-child(3) {
+  animation-delay: .36s;
+}
+
+@keyframes pill-pulse {
+  0%, 100% { opacity: .25; }
+  50% { opacity: 1; }
+}
+
 .pill-readout:empty {
   display: none;
 }

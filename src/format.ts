@@ -8,16 +8,7 @@
  * change of format.
  */
 
-/** `m:ss.d` while counting, `s.ds` under a minute — the dictation stopwatch. */
-export function formatStopwatch(seconds: number): string {
-  const minutes = Math.floor(seconds / 60);
-  const remainder = Math.floor(seconds % 60);
-  const tenths = Math.floor((seconds % 1) * 10);
-  if (minutes > 0) return `${minutes}:${remainder.toString().padStart(2, "0")}.${tenths}`;
-  return `${remainder}.${tenths}s`;
-}
-
-/** `m:ss`, counting up for as long as a meeting recording runs. */
+/** `m:ss`, counting up for as long as a dictation or a meeting recording runs. */
 export function formatElapsedClock(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds));
   const minutes = Math.floor(total / 60);
