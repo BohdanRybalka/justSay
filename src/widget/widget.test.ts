@@ -108,13 +108,19 @@ const levelStreamMock = vi.fn((onLevel: LevelListener) => {
 
 type MeetingLevelListener = (data: { mic_db: number | null; system_db: number | null }) => void;
 
-const meetingLevelStreams: { onLevel: MeetingLevelListener; controller: AbortController }[] = [];
+const meetingLevelStreams: {
+  onLevel: MeetingLevelListener;
+  onError: (error: string) => void;
+  controller: AbortController;
+}[] = [];
 
-const meetingLevelStreamMock = vi.fn((onLevel: MeetingLevelListener) => {
-  const controller = new AbortController();
-  meetingLevelStreams.push({ onLevel, controller });
-  return controller;
-});
+const meetingLevelStreamMock = vi.fn(
+  (onLevel: MeetingLevelListener, _onDone: () => void, onError: (error: string) => void) => {
+    const controller = new AbortController();
+    meetingLevelStreams.push({ onLevel, onError, controller });
+    return controller;
+  },
+);
 
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
@@ -457,6 +463,12 @@ describe("a Tauri bridge that stops answering", () => {
   });
 });
 
+function meterHeights(root: HTMLElement, side: "mic" | "system"): string[] {
+  return [...root.querySelectorAll<HTMLElement>(`[data-side="${side}"] .pill-meter-bars i`)].map(
+    (bar) => bar.style.height,
+  );
+}
+
 function systemMeterLost(root: HTMLElement): boolean {
   return root.querySelector('[data-side="system"]')?.classList.contains("pill-lost") ?? false;
 }
@@ -577,12 +589,35 @@ describe("a meeting that goes wrong while nobody is looking", () => {
 
     meetingLevelStreams[0].onLevel({ mic_db: 0, system_db: null });
 
-    const micBars = [...root.querySelectorAll<HTMLElement>('[data-side="mic"] .pill-meter-bars i')];
-    const systemBars = [
-      ...root.querySelectorAll<HTMLElement>('[data-side="system"] .pill-meter-bars i'),
-    ];
-    expect(micBars.map((bar) => bar.style.height)).toEqual(["4px", "8px", "5px"]);
-    expect(systemBars.map((bar) => bar.style.height)).toEqual(["2px", "2px", "2px"]);
+    expect(meterHeights(root, "mic")).toEqual(["4px", "8px", "5px"]);
+    expect(meterHeights(root, "system")).toEqual(["2px", "2px", "2px"]);
+  });
+
+  it("flattens both meters when the level stream fails mid-meeting", async () => {
+    const root = await startAMeeting();
+    meetingLevelStreams[0].onLevel({ mic_db: 0, system_db: 0 });
+
+    meetingLevelStreams[0].onError("HTTP 503");
+
+    expect(meterHeights(root, "mic")).toEqual(["2px", "2px", "2px"]);
+    expect(meterHeights(root, "system")).toEqual(["2px", "2px", "2px"]);
+  });
+
+  it("ignores levels from a previous meeting's stream", async () => {
+    const root = await startAMeeting();
+    apiMock.stopMeetingRecording.mockResolvedValue({
+      filename: "meeting.wav",
+      duration_seconds: 3,
+      capture_incident: null,
+    });
+    await listeners.get(EVENT_MEETING_TOGGLE)!({});
+    await listeners.get(EVENT_MEETING_TOGGLE)!({});
+    expect(meetingLevelStreams).toHaveLength(2);
+
+    meetingLevelStreams[0].onLevel({ mic_db: 0, system_db: 0 });
+
+    expect(root.classList.contains("meeting")).toBe(true);
+    expect(meterHeights(root, "mic")).toEqual(["2px", "2px", "2px"]);
   });
 
   it("stops the meeting from the pill's stop button and closes the level stream", async () => {

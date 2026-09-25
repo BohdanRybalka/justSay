@@ -357,16 +357,21 @@ function renderMeetingIndicatorFromState() {
 function openMeetingLevelStream() {
   meetingLevelAbort?.abort();
   const stream: AbortController = meetingLevelStream(
-    (data) => {
-      if (meetingLevelAbort !== stream) return;
-      meetingMicLevel = levelFromDb(data.mic_db);
-      meetingSystemLevel = levelFromDb(data.system_db);
-      renderMeetingIndicatorFromState();
+    (data) => showMeetingLevels(stream, levelFromDb(data.mic_db), levelFromDb(data.system_db)),
+    () => showMeetingLevels(stream, 0, 0),
+    (error) => {
+      console.warn("The meeting level stream stopped:", error);
+      showMeetingLevels(stream, 0, 0);
     },
-    () => {},
-    (error) => console.warn("The meeting level stream stopped:", error),
   );
   meetingLevelAbort = stream;
+}
+
+function showMeetingLevels(stream: AbortController, mic: number, system: number) {
+  if (meetingLevelAbort !== stream) return;
+  meetingMicLevel = mic;
+  meetingSystemLevel = system;
+  renderMeetingIndicatorFromState();
 }
 
 function closeMeetingLevelStream() {
