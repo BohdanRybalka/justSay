@@ -9,6 +9,12 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   confirm: confirmMock,
 }));
 
+const copyToClipboardMock = vi.fn();
+
+vi.mock("../../clipboard", () => ({
+  copyToClipboard: copyToClipboardMock,
+}));
+
 const apiMock = {
   getHistory: vi.fn(),
   searchHistory: vi.fn(),
@@ -103,6 +109,31 @@ describe("renderHistory — paging over the history endpoint", () => {
     expect(apiMock.getHistory.mock.calls[1][0]).toBe(30);
     expect(apiMock.getHistory.mock.calls[1][1]).toEqual({ ts: 30, id: "30" });
     expect(container.querySelector<HTMLElement>("#history-load-more")!.style.display).toBe("none");
+  });
+});
+
+describe("renderHistory — Copy", () => {
+  it("hands the transcript to the clipboard command and says it was copied", async () => {
+    copyToClipboardMock.mockResolvedValue(true);
+    const container = await renderWith(1);
+
+    container.querySelector<HTMLButtonElement>('[data-action="copy"]')!.click();
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-action="copy"]')!.textContent).toBe("Copied!");
+    });
+    expect(copyToClipboardMock).toHaveBeenCalledExactlyOnceWith(buildEntry("1").text);
+  });
+
+  it("says Copy failed when the clipboard command fails", async () => {
+    copyToClipboardMock.mockResolvedValue(false);
+    const container = await renderWith(1);
+
+    container.querySelector<HTMLButtonElement>('[data-action="copy"]')!.click();
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-action="copy"]')!.textContent).toBe("Copy failed");
+    });
   });
 });
 

@@ -116,7 +116,9 @@ vi.mock("../notify", async (importOriginal) => {
   return { ...actual, notifyError: notifyErrorMock };
 });
 
-const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn(async () => {}) }));
+const { invokeMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn<(command: string, args?: unknown) => Promise<void>>(async () => {}),
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (event: string, handler: (payload: unknown) => unknown) => {
@@ -380,7 +382,7 @@ describe("two dictations finishing within two seconds of each other", () => {
     apiMock.dictate.mockResolvedValue({
       text: "one",
       duration_ms: 100,
-      copied_to_clipboard: true,
+      copied_to_clipboard: false,
     });
     const widget = document.getElementById("widget")!;
 
@@ -502,6 +504,9 @@ describe("a meeting that goes wrong while nobody is looking", () => {
     await loadWidget();
     apiMock.audioStart.mockResolvedValue(recordingStatus());
     apiMock.dictate.mockResolvedValue({ text: "one", duration_ms: 100, copied_to_clipboard: false });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "write_clipboard_text") throw new Error("the clipboard stayed busy");
+    });
     const root = document.getElementById("widget")!;
     root.dispatchEvent(new MouseEvent("click"));
     await vi.waitFor(() => expect(pillView()).toBe("listening"));
@@ -725,7 +730,7 @@ describe("a dictation the backend accepts and never answers", () => {
     apiMock.dictate.mockResolvedValue({
       text: "one",
       duration_ms: 100,
-      copied_to_clipboard: true,
+      copied_to_clipboard: false,
     });
     const widget = document.getElementById("widget")!;
 
@@ -799,11 +804,12 @@ describe("what a dictation looks like from start to finish", () => {
     apiMock.dictate.mockResolvedValue({
       text: "one two three",
       duration_ms: 100,
-      copied_to_clipboard: true,
+      copied_to_clipboard: false,
     });
 
     widget.dispatchEvent(new MouseEvent("click"));
     await vi.waitFor(() => expect(pillView()).toBe("done"));
+    expect(invokeMock).toHaveBeenCalledWith("write_clipboard_text", { text: "one two three" });
     expect(document.querySelector("#widget .pill-content .pill-label")?.textContent).toBe(
       "3 words · copied",
     );
@@ -827,6 +833,20 @@ describe("what a dictation looks like from start to finish", () => {
     widget.dispatchEvent(new MouseEvent("click"));
 
     await vi.waitFor(() => expect(pillView()).toBe("noSpeech"));
+    expect(invokeMock).not.toHaveBeenCalledWith("write_clipboard_text", expect.anything());
+  });
+
+  it("says Copy failed when the shell cannot put the text on the clipboard", async () => {
+    const widget = await startListening();
+    apiMock.dictate.mockResolvedValue({ text: "one two", duration_ms: 100, copied_to_clipboard: false });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "write_clipboard_text") throw new Error("the clipboard stayed busy");
+    });
+
+    widget.dispatchEvent(new MouseEvent("click"));
+
+    await vi.waitFor(() => expect(pillView()).toBe("alert"));
+    expect(pillLabel()).toBe("Copy failed");
   });
 });
 

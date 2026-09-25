@@ -1,4 +1,5 @@
 import { api, MalformedResponseError, SidecarTooOldError, type HistoryEntry } from "../../api";
+import { copyToClipboard } from "../../clipboard";
 import { createHistoryList, sidecarTooOldText, type HistoryRowsClaim } from "../history-list";
 import { escapeHtml } from "../html";
 
@@ -207,8 +208,8 @@ export function renderHistory(container: HTMLElement): () => void {
       if (!action) return;
 
       if (action === "copy") {
-        await navigator.clipboard.writeText(entry.text);
-        target.textContent = "Copied!";
+        const copied = await copyToClipboard(entry.text);
+        target.textContent = copied ? "Copied!" : "Copy failed";
         setTimeout(() => (target.textContent = "Copy"), 1500);
       } else if (action === "delete") {
         try {

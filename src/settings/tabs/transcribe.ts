@@ -1,4 +1,5 @@
 import { api, type DictateResponse } from "../../api";
+import { copyToClipboard } from "../../clipboard";
 import { ACCEPTED_AUDIO_EXTENSIONS, MAX_UPLOAD_BYTES } from "../../contracts";
 
 const ACCEPT_ATTR = ACCEPTED_AUDIO_EXTENSIONS.join(",");
@@ -108,13 +109,9 @@ export function renderTranscribe(container: HTMLElement): () => void {
   });
 
   copyBtn.addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(resultText.textContent || "");
-      copyBtn.textContent = "Copied!";
-      setTimeout(() => (copyBtn.textContent = "Copy"), 1200);
-    } catch (err) {
-      console.error(err);
-    }
+    const copied = await copyToClipboard(resultText.textContent || "");
+    copyBtn.textContent = copied ? "Copied!" : "Copy failed";
+    setTimeout(() => (copyBtn.textContent = "Copy"), 1200);
   });
   resetBtn.addEventListener("click", () => {
     renderUiState("idle");
@@ -192,10 +189,12 @@ export function renderTranscribe(container: HTMLElement): () => void {
       const result: DictateResponse = await api.processFile(bytes, filename);
       if (destroyed) return;
       const text = result.text || "";
+      const copied = text.trim() !== "" && (await copyToClipboard(text));
+      if (destroyed) return;
       resultText.textContent = text || "(empty result)";
       const seconds = (result.duration_ms / 1000).toFixed(2);
-      const copied = result.copied_to_clipboard ? " · copied to clipboard" : "";
-      renderUiState("done", `Done in ${seconds}s${copied}`);
+      const copiedNote = copied ? " · copied to clipboard" : "";
+      renderUiState("done", `Done in ${seconds}s${copiedNote}`);
     } catch (e) {
       if (destroyed) return;
       renderError((e as Error).message);
