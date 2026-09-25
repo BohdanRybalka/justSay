@@ -17,6 +17,7 @@ import { escapeHtml, meetingDisclosureHtml } from "../html";
 import { isDecisiveRefusal, newSessionId } from "../../session";
 import { renderKeys } from "./keys";
 import { notifyError } from "../../notify";
+import { levelFromDb } from "../../level";
 import { TimedOutError } from "../../timeout";
 
 const UPDATES_CHECK_LABEL = "Check for updates";
@@ -209,8 +210,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
     const stream: AbortController = levelStream(
       (data) => {
         if (levelStreamAbort !== stream) return;
-        const pct = Math.max(0, Math.min(100, ((data.level_db + 60) / 60) * 100));
-        fill.style.width = `${pct}%`;
+        fill.style.width = `${levelFromDb(data.level_db) * 100}%`;
       },
       () => {},
       (error) => {

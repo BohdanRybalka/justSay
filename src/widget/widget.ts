@@ -5,7 +5,7 @@ import {
   shortcutFailureMessage,
   shouldReapplyShortcut,
 } from "../accelerator";
-import { api, REQUEST_TIMEOUT_MS } from "../api";
+import { api, levelStream, REQUEST_TIMEOUT_MS } from "../api";
 import { hasOutlastedStartupBudget } from "../backend-startup";
 import {
   EVENT_MEETING_TOGGLE,
@@ -17,13 +17,13 @@ import {
   type ShortcutRequested,
   type WidgetHover,
 } from "../contracts";
-import { formatStopwatch } from "../format";
+import { levelFromDb } from "../level";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
 import { newSessionId } from "../session";
 import { isStaleStatusResponse } from "../stale-response";
 import { TimedOutError, withTimeout } from "../timeout";
 import { createAbandonedSessions } from "./abandoned-request";
-import { computeDoneStatus } from "./done-status";
+import { dictationResultView } from "./done-status";
 import {
   DICTATION_NEVER_PROCESSED,
   dictationErrorLabel,
@@ -41,10 +41,13 @@ import { createRecordingIntentQueue } from "./recording-intent";
 import { CONNECTION_POLL_MS, createSettingsRetry } from "./settings-retry";
 
 
-type WidgetState = "idle" | "recording" | "processing" | "done" | "error";
+type WidgetState = "idle" | "recording" | "processing" | "result";
 
 let state: WidgetState = "idle";
-let durationInterval: ReturnType<typeof setInterval> | null = null;
+let clockInterval: ReturnType<typeof setInterval> | null = null;
+let levelStreamAbort: AbortController | null = null;
+let listeningSince = 0;
+let listeningLevel = 0;
 let autoRevertTimer: ReturnType<typeof setTimeout> | null = null;
 let connectionState: ConnectionCheckState = { offline: false, firstCheckDone: false };
 let firstHealthCheckAt: number | null = null;
@@ -53,10 +56,16 @@ let currentShortcut = DEFAULT_SHORTCUT;
 let currentLanguage = "uk";
 const shortcutPlatform = detectShortcutPlatform(navigator);
 
-const AUTO_REVERT_MS = 3000;
+/** A finished dictation reads for about two seconds (spec §3.1); a one-off
+ *  failure stays a little longer, since its label is the only thing that says
+ *  what went wrong without opening the notification. */
+const DONE_SHOWN_MS = 2000;
+const ALERT_SHOWN_MS = 3000;
+
+const CLOCK_TICK_MS = 250;
 
 const BACKEND_STARTING_LABEL = "Starting…";
-const BACKEND_OFFLINE_LABEL = "Offline";
+const BACKEND_OFFLINE_LABEL = "No connection";
 
 /** What the backend's silence reads as, or `null` once it has answered. */
 let backendWait: string | null = null;
@@ -83,63 +92,79 @@ function renderIdlePill() {
 }
 
 
-function setState(newState: WidgetState, message?: string, durationLabel?: string) {
-  state = newState;
-
-  if (durationInterval && state !== "recording") {
-    clearInterval(durationInterval);
-    durationInterval = null;
+function stopListening() {
+  if (clockInterval) {
+    clearInterval(clockInterval);
+    clockInterval = null;
   }
+  levelStreamAbort?.abort();
+  levelStreamAbort = null;
+}
 
+function enterState(newState: WidgetState) {
+  state = newState;
+  if (state !== "recording") stopListening();
   if (autoRevertTimer) {
     clearTimeout(autoRevertTimer);
     autoRevertTimer = null;
   }
+}
 
-  switch (state) {
-    case "idle":
-      renderIdlePill();
-      break;
-    case "recording":
-      startDurationTimer();
-      break;
-    case "processing":
-      renderPill(widget, { kind: "working", label: "Processing", readout: "" });
-      break;
-    case "done":
-      renderPill(widget, { kind: "done", label: message || "Done", readout: durationLabel || "" });
-      autoRevertTimer = setTimeout(() => {
-        autoRevertTimer = null;
-        if (state === "done") setState("idle");
-      }, AUTO_REVERT_MS);
-      break;
-    case "error":
-      renderPill(widget, { kind: "alert", label: message || "Error" });
-      autoRevertTimer = setTimeout(() => {
-        autoRevertTimer = null;
-        if (state === "error") setState("idle");
-      }, AUTO_REVERT_MS);
-      break;
-  }
+function setState(newState: Exclude<WidgetState, "result">) {
+  enterState(newState);
+  if (state === "idle") renderIdlePill();
+  else if (state === "recording") startListening();
+  else renderPill(widget, { kind: "working" });
+}
+
+/** A done, a "No speech" or a one-off alert, each going back to rest on its
+ *  own timer. */
+function showResult(view: PillView) {
+  enterState("result");
+  renderPill(widget, view);
+  autoRevertTimer = setTimeout(
+    () => {
+      autoRevertTimer = null;
+      if (state === "result") setState("idle");
+    },
+    view.kind === "alert" ? ALERT_SHOWN_MS : DONE_SHOWN_MS,
+  );
 }
 
 /** `start` exists so an adopted recording shows the backend's elapsed time
- *  rather than restarting the stopwatch at zero: when a start times out and the
+ *  rather than restarting the clock at zero: when a start times out and the
  *  backend turns out to be holding this window's own session, the capture began
- *  before the budget ran out.
- *
- *  It clears the interval it is about to replace, so the one function that
- *  creates the stopwatch is also the one that owns there being only one of it:
- *  the adoption path calls this while `setState("recording")` has already armed
- *  an interval, and two of them would paint the same pill. */
-function startDurationTimer(start = Date.now()) {
-  if (durationInterval) clearInterval(durationInterval);
-  const update = () => {
-    const elapsed = (Date.now() - start) / 1000;
-    renderPill(widget, { kind: "listening", label: "Recording", readout: formatStopwatch(elapsed) });
-  };
-  update();
-  durationInterval = setInterval(update, 100);
+ *  before the budget ran out. Replacing the running clock keeps there being
+ *  only one of it. */
+function startListening(start = Date.now()) {
+  if (clockInterval) clearInterval(clockInterval);
+  listeningSince = start;
+  listeningLevel = 0;
+  paintListening();
+  clockInterval = setInterval(paintListening, CLOCK_TICK_MS);
+}
+
+function paintListening() {
+  const elapsedSeconds = (Date.now() - listeningSince) / 1000;
+  renderPill(widget, { kind: "listening", elapsedSeconds, level: listeningLevel });
+}
+
+/** Opened once the backend holds the capture — before that the stream would
+ *  end at once on an idle recorder — and aborted on leaving `recording`. A
+ *  failed stream only leaves the wave flat: the recording itself goes on. */
+function openLevelStream() {
+  if (state !== "recording") return;
+  levelStreamAbort?.abort();
+  const stream: AbortController = levelStream(
+    (data) => {
+      if (levelStreamAbort !== stream) return;
+      listeningLevel = levelFromDb(data.level_db);
+      paintListening();
+    },
+    () => {},
+    (error) => console.warn("The dictation level stream stopped:", error),
+  );
+  levelStreamAbort = stream;
 }
 
 
@@ -166,6 +191,7 @@ async function startRecording() {
   const startIssuedAt = Date.now();
   try {
     await api.audioStart(session);
+    openLevelStream();
   } catch (e) {
     if (e instanceof TimedOutError && (await adoptTimedOutStart(session, startIssuedAt))) {
       console.warn("Start recording timed out but the backend holds this session; adopted it", e);
@@ -207,7 +233,8 @@ async function adoptTimedOutStart(session: string, startIssuedAt: number): Promi
   const status = await api.audioStatus().catch(() => null);
 
   if (status?.is_recording && status.session_id === session) {
-    startDurationTimer(Date.now() - status.duration_seconds * 1000);
+    startListening(Date.now() - status.duration_seconds * 1000);
+    openLevelStream();
     return true;
   }
 
@@ -220,7 +247,7 @@ async function adoptTimedOutStart(session: string, startIssuedAt: number): Promi
  *  keep doing so — and the pill and the toast are raised together here so a
  *  caller cannot raise one without the other. */
 function reportTransitionFailure({ label, toast }: DictationErrorLabel) {
-  setState("error", label);
+  showResult({ kind: "alert", label });
   notifyError(toast);
 }
 
@@ -280,12 +307,9 @@ async function stopAndProcess() {
     return;
   }
 
-  const status = computeDoneStatus(outcome.result);
-  if (!status) {
-    setState("idle");
-    return;
-  }
-  setState("done", status.label, formatStopwatch(status.elapsedSeconds));
+  const view = dictationResultView(outcome.result);
+  if (view) showResult(view);
+  else setState("idle");
 }
 
 const recordingIntent = createRecordingIntentQueue({

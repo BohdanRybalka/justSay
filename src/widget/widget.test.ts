@@ -22,6 +22,12 @@ function pillReadout(): string | null | undefined {
   return document.querySelector("#widget .pill-content .pill-readout")?.textContent;
 }
 
+/** Which of the pill's views is on screen: rest, listening, working, done,
+ *  noSpeech or alert. */
+function pillView(): string | undefined {
+  return document.querySelector<HTMLElement>("#widget .pill-content")?.dataset.view;
+}
+
 const apiMock = {
   health: vi.fn(async () => ({ status: "ok", version: "0", stt_mode: "cloud" })),
   getSettings: vi.fn(async () => {
@@ -90,9 +96,19 @@ const listeners = new Map<string, (event: unknown) => unknown>();
 
 const notifyErrorMock = vi.fn();
 
+type LevelListener = (data: { level_db: number; is_recording: boolean }) => void;
+
+const levelStreams: { onLevel: LevelListener; controller: AbortController }[] = [];
+
+const levelStreamMock = vi.fn((onLevel: LevelListener) => {
+  const controller = new AbortController();
+  levelStreams.push({ onLevel, controller });
+  return controller;
+});
+
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
-  return { ...actual, api: apiMock };
+  return { ...actual, api: apiMock, levelStream: levelStreamMock };
 });
 
 vi.mock("../notify", async (importOriginal) => {
@@ -131,6 +147,7 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   listeners.clear();
+  levelStreams.length = 0;
   apiMock.health.mockResolvedValue({
     status: "ok",
     version: "0",
@@ -260,7 +277,7 @@ describe("the widget's own timers", () => {
 describe("the label the widget shows while its backend is still coming up", () => {
   const widgetText = pillLabel;
 
-  it("reads Starting… on the first failed check, not Offline", async () => {
+  it("reads Starting… on the first failed check, not No connection", async () => {
     apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
 
     await loadWidget();
@@ -269,7 +286,7 @@ describe("the label the widget shows while its backend is still coming up", () =
     expect(widgetText()).toBe("Starting…");
   });
 
-  it("reads Offline on a failed check made once the wait budget has run out", async () => {
+  it("reads No connection on a failed check made once the wait budget has run out", async () => {
     apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
 
     await loadWidget();
@@ -278,7 +295,7 @@ describe("the label the widget shows while its backend is still coming up", () =
 
     await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS);
 
-    expect(widgetText()).toBe("Offline");
+    expect(widgetText()).toBe("No connection");
     expect(
       document.getElementById("widget")!.classList.contains("pill--alert"),
       "a hint shows only under the pointer, and an unreachable backend must show without one",
@@ -315,7 +332,7 @@ describe("the label the widget shows while its backend is still coming up", () =
 
     apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
     await vi.advanceTimersByTimeAsync(BACKEND_WAIT_BUDGET_MS);
-    expect(widgetText()).toBe("Offline");
+    expect(widgetText()).toBe("No connection");
 
     apiMock.health.mockResolvedValue({ status: "ok", version: "0", stt_mode: "cloud" });
     await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS);
@@ -337,7 +354,7 @@ describe("a start the backend refuses", () => {
       expect(apiMock.audioStart).toHaveBeenCalledOnce();
     });
 
-    expect(pillLabel()).toBe("Start failed");
+    expect(pillLabel()).toBe("Didn't work");
     expect(notifyErrorMock).toHaveBeenCalledWith("Couldn't start recording — try again.");
   });
 
@@ -347,7 +364,7 @@ describe("a start the backend refuses", () => {
 
     document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
     await vi.waitFor(() => {
-      expect(pillLabel()).toBe("Start failed");
+      expect(pillLabel()).toBe("Didn't work");
     });
 
     await vi.advanceTimersByTimeAsync(3000);
@@ -356,7 +373,7 @@ describe("a start the backend refuses", () => {
   });
 });
 
-describe("two dictations finishing within three seconds of each other", () => {
+describe("two dictations finishing within two seconds of each other", () => {
   it("does not let the first one's auto-revert cut the second one's result short", async () => {
     await loadWidget();
     apiMock.audioStart.mockResolvedValue(recordingStatus());
@@ -368,21 +385,21 @@ describe("two dictations finishing within three seconds of each other", () => {
     const widget = document.getElementById("widget")!;
 
     widget.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => expect(pillLabel()).toBe("Recording"));
+    await vi.waitFor(() => expect(pillView()).toBe("listening"));
     widget.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => expect(pillLabel()).toBe("Copied"));
+    await vi.waitFor(() => expect(pillView()).toBe("done"));
 
     await vi.advanceTimersByTimeAsync(1500);
     widget.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => expect(pillLabel()).toBe("Recording"));
+    await vi.waitFor(() => expect(pillView()).toBe("listening"));
     widget.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => expect(pillLabel()).toBe("Copied"));
+    await vi.waitFor(() => expect(pillView()).toBe("done"));
 
-    await vi.advanceTimersByTimeAsync(1600);
+    await vi.advanceTimersByTimeAsync(1000);
 
-    expect(pillLabel()).toBe("Copied");
+    expect(pillView()).toBe("done");
 
-    await vi.advanceTimersByTimeAsync(1500);
+    await vi.advanceTimersByTimeAsync(1100);
 
     expect(pillLabel()).toBe(REST_HINT);
   });
@@ -484,12 +501,12 @@ describe("a meeting that goes wrong while nobody is looking", () => {
   it("keeps the degraded marker when a dictation's auto-revert fires under it", async () => {
     await loadWidget();
     apiMock.audioStart.mockResolvedValue(recordingStatus());
-    apiMock.dictate.mockResolvedValue({ text: "one", duration_ms: 100, copied_to_clipboard: true });
+    apiMock.dictate.mockResolvedValue({ text: "one", duration_ms: 100, copied_to_clipboard: false });
     const root = document.getElementById("widget")!;
     root.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => expect(pillLabel()).toBe("Recording"));
+    await vi.waitFor(() => expect(pillView()).toBe("listening"));
     root.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => expect(pillLabel()).toBe("Copied"));
+    await vi.waitFor(() => expect(pillView()).toBe("alert"));
     await vi.waitFor(() => expect(listeners.get(EVENT_MEETING_TOGGLE)).toBeTypeOf("function"));
     apiMock.startMeetingRecording.mockResolvedValue({
       is_recording: true,
@@ -542,8 +559,9 @@ describe("a start that runs out of its budget", () => {
     await vi.waitFor(() => expect(apiMock.audioStatus).toHaveBeenCalled());
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(pillLabel()).toBe("Recording");
-    expect(pillReadout()).toBe("12.0s");
+    expect(pillView()).toBe("listening");
+    expect(pillReadout()).toBe("0:12");
+    expect(levelStreamMock).toHaveBeenCalledOnce();
     expect(apiMock.audioDiscard).not.toHaveBeenCalled();
   });
 
@@ -568,7 +586,7 @@ describe("a start that runs out of its budget", () => {
 
     document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
     await vi.waitFor(() =>
-      expect(pillLabel()).toBe("Start failed"),
+      expect(pillLabel()).toBe("No connection"),
     );
 
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + CONNECTION_POLL_MS * 2);
@@ -587,7 +605,7 @@ describe("a start that runs out of its budget", () => {
 
     document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
     await vi.waitFor(() =>
-      expect(pillLabel()).toBe("Start failed"),
+      expect(pillLabel()).toBe("No connection"),
     );
 
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + CONNECTION_POLL_MS * 2);
@@ -611,7 +629,7 @@ describe("a start that runs out of its budget", () => {
 
     document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
     await vi.waitFor(() =>
-      expect(pillLabel()).toBe("Start failed"),
+      expect(pillLabel()).toBe("No connection"),
     );
 
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + CONNECTION_POLL_MS * 2);
@@ -651,7 +669,7 @@ describe("a start that runs out of its budget", () => {
 
     document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
     await vi.waitFor(() =>
-      expect(pillLabel()).toBe("Start failed"),
+      expect(pillLabel()).toBe("No connection"),
     );
 
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + CONNECTION_POLL_MS * 2);
@@ -670,12 +688,12 @@ describe("a dictation the backend accepts and never answers", () => {
     const widget = document.getElementById("widget")!;
 
     widget.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => expect(pillLabel()).toBe("Recording"));
+    await vi.waitFor(() => expect(pillView()).toBe("listening"));
     widget.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => expect(pillLabel()).toBe("Processing"));
+    await vi.waitFor(() => expect(pillView()).toBe("working"));
 
     const elapsed = await advanceUntil(
-      () => pillLabel() === "No answer",
+      () => pillLabel() === "No connection",
       PROCESSING_CEILING_MS,
     );
 
@@ -691,14 +709,14 @@ describe("a dictation the backend accepts and never answers", () => {
     const widget = document.getElementById("widget")!;
 
     widget.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => expect(pillLabel()).toBe("Recording"));
+    await vi.waitFor(() => expect(pillView()).toBe("listening"));
     widget.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => expect(pillLabel()).toBe("Processing"));
+    await vi.waitFor(() => expect(pillView()).toBe("working"));
 
     await vi.advanceTimersByTimeAsync(14_000);
 
     expect(apiMock.audioDiscard).not.toHaveBeenCalled();
-    expect(pillLabel()).toBe("Processing");
+    expect(pillView()).toBe("working");
   });
 
   it("owes nothing once the dictation answers", async () => {
@@ -712,12 +730,132 @@ describe("a dictation the backend accepts and never answers", () => {
     const widget = document.getElementById("widget")!;
 
     widget.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => expect(pillLabel()).toBe("Recording"));
+    await vi.waitFor(() => expect(pillView()).toBe("listening"));
     widget.dispatchEvent(new MouseEvent("click"));
-    await vi.waitFor(() => expect(pillLabel()).toBe("Copied"));
+    await vi.waitFor(() => expect(pillView()).toBe("done"));
 
     await vi.advanceTimersByTimeAsync(40_000);
 
     expect(apiMock.audioDiscard).not.toHaveBeenCalled();
+  });
+});
+
+describe("what a dictation looks like from start to finish", () => {
+  function barHeights(): string[] {
+    return [...document.querySelectorAll<HTMLElement>("#widget .pill-wave i")].map(
+      (bar) => bar.style.height,
+    );
+  }
+
+  async function startListening() {
+    await loadWidget();
+    apiMock.audioStart.mockResolvedValue(recordingStatus());
+    const widget = document.getElementById("widget")!;
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(levelStreams).toHaveLength(1));
+    return widget;
+  }
+
+  it("opens the level stream only once the backend holds the capture", async () => {
+    await loadWidget();
+    let answerStart: (value: unknown) => void = () => {};
+    apiMock.audioStart.mockImplementation(() => new Promise((resolve) => (answerStart = resolve)));
+
+    document.getElementById("widget")!.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(pillView()).toBe("listening"));
+    expect(levelStreamMock).not.toHaveBeenCalled();
+
+    answerStart(recordingStatus());
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(levelStreamMock).toHaveBeenCalledOnce();
+  });
+
+  it("moves the wave with the voice and counts the clock up in minutes and seconds", async () => {
+    await startListening();
+    const flat = barHeights();
+
+    levelStreams[0].onLevel({ level_db: -6, is_recording: true });
+    await vi.advanceTimersByTimeAsync(7_000);
+
+    expect(barHeights()).not.toEqual(flat);
+    expect(pillReadout()).toBe("0:07");
+  });
+
+  it("closes the level stream when you let go, and ignores a level that arrives late", async () => {
+    const widget = await startListening();
+    apiMock.dictate.mockImplementation(() => new Promise(() => {}));
+
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(pillView()).toBe("working"));
+    levelStreams[0].onLevel({ level_db: 0, is_recording: true });
+
+    expect(levelStreams[0].controller.signal.aborted).toBe(true);
+    expect(pillView()).toBe("working");
+  });
+
+  it("shows how many words were written, then goes back to rest after about two seconds", async () => {
+    const widget = await startListening();
+    apiMock.dictate.mockResolvedValue({
+      text: "one two three",
+      duration_ms: 100,
+      copied_to_clipboard: true,
+    });
+
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(pillView()).toBe("done"));
+    expect(document.querySelector("#widget .pill-content .pill-label")?.textContent).toBe(
+      "3 words · copied",
+    );
+
+    await vi.advanceTimersByTimeAsync(1_900);
+    expect(pillView()).toBe("done");
+
+    await vi.advanceTimersByTimeAsync(200);
+    expect(pillLabel()).toBe(REST_HINT);
+  });
+
+  it("says No speech when the backend heard only silence", async () => {
+    const widget = await startListening();
+    apiMock.dictate.mockResolvedValue({
+      text: "",
+      duration_ms: 100,
+      copied_to_clipboard: false,
+      discarded_reason: "silence",
+    });
+
+    widget.dispatchEvent(new MouseEvent("click"));
+
+    await vi.waitFor(() => expect(pillView()).toBe("noSpeech"));
+  });
+});
+
+describe("a failure that passes and one that stays", () => {
+  it("lets a failed dictation's label go after a few seconds while the backend answers", async () => {
+    await loadWidget();
+    apiMock.audioStart.mockResolvedValue(recordingStatus());
+    apiMock.dictate.mockRejectedValue(new TypeError("Failed to fetch"));
+    const widget = document.getElementById("widget")!;
+
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(pillView()).toBe("listening"));
+    widget.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => expect(pillLabel()).toBe("No connection"));
+
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(pillLabel()).toBe(REST_HINT);
+  });
+
+  it("keeps No connection for as long as the backend stays silent", async () => {
+    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+    await loadWidget();
+    await vi.advanceTimersByTimeAsync(BACKEND_WAIT_BUDGET_MS);
+    expect(pillLabel()).toBe("No connection");
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_POLL_MS * 6);
+
+    expect(pillLabel()).toBe("No connection");
+    expect(pillView()).toBe("alert");
   });
 });
