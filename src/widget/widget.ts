@@ -30,22 +30,21 @@ import {
   startErrorLabel,
   type DictationErrorLabel,
 } from "./error-label";
+import { mountIconSprite } from "../ui/icons";
+import { applyThemePreference } from "../ui/theme";
 import { decideMeetingHealth } from "./meeting-health";
-import { MEETING_STATE_CLASS, renderMeetingIndicator } from "./meeting-indicator";
+import { renderMeetingIndicator } from "./meeting-indicator";
 import { type MeetingToggleActions, runMeetingToggle } from "./meeting-toggle";
+import { PILL_HOVER_CLASS, renderPill, type PillView } from "./pill";
 import { watchPillRect } from "./pill-rect";
 import { createRecordingIntentQueue } from "./recording-intent";
 import { CONNECTION_POLL_MS, createSettingsRetry } from "./settings-retry";
 
 
-const WIDGET_STATE_CLASSES = ["idle", "recording", "processing", "done", "error"] as const;
-type WidgetState = (typeof WIDGET_STATE_CLASSES)[number];
-type IconState = "idle" | "hover" | "recording" | "processing" | "done" | "error";
+type WidgetState = "idle" | "recording" | "processing" | "done" | "error";
 
 let state: WidgetState = "idle";
-let isHovered = false;
 let durationInterval: ReturnType<typeof setInterval> | null = null;
-let iconFlashTimer: ReturnType<typeof setTimeout> | null = null;
 let autoRevertTimer: ReturnType<typeof setTimeout> | null = null;
 let connectionState: ConnectionCheckState = { offline: false, firstCheckDone: false };
 let firstHealthCheckAt: number | null = null;
@@ -59,36 +58,37 @@ const AUTO_REVERT_MS = 3000;
 const BACKEND_STARTING_LABEL = "Starting…";
 const BACKEND_OFFLINE_LABEL = "Offline";
 
+/** What the backend's silence reads as, or `null` once it has answered. */
+let backendWait: string | null = null;
+
 
 const widget = document.getElementById("widget")!;
-const iconEl = document.getElementById("widget-icon")!;
-const text = document.getElementById("widget-text")!;
-const durationEl = document.getElementById("widget-duration")!;
+
+mountIconSprite(document);
+applyThemePreference("system");
 
 
-function renderIcon(next: IconState) {
-  iconEl.className = `widget-icon js-widget js-widget--${next}`;
+/** At rest the pill offers the shortcut; while the backend is coming up it
+ *  says so instead, and once the wait has outlasted its budget it stops being
+ *  a hint and becomes the pill's alert. */
+function restView(): PillView {
+  if (backendWait === BACKEND_OFFLINE_LABEL) return { kind: "alert", label: backendWait };
+  return { kind: "rest", hint: backendWait ?? formatAccelerator(currentShortcut, shortcutPlatform) };
 }
 
-function isInteractive(): boolean {
-  return state === "idle" || (state === "done" && iconFlashTimer === null);
+function renderIdlePill() {
+  if (state === "idle") renderPill(widget, restView());
 }
+
+renderIdlePill();
 
 
 function setState(newState: WidgetState, message?: string, durationLabel?: string) {
   state = newState;
-  widget.classList.remove(...WIDGET_STATE_CLASSES);
-  widget.classList.add(state);
-  widget.classList.toggle(MEETING_STATE_CLASS, meetingActive);
 
   if (durationInterval && state !== "recording") {
     clearInterval(durationInterval);
     durationInterval = null;
-  }
-
-  if (iconFlashTimer) {
-    clearTimeout(iconFlashTimer);
-    iconFlashTimer = null;
   }
 
   if (autoRevertTimer) {
@@ -98,37 +98,23 @@ function setState(newState: WidgetState, message?: string, durationLabel?: strin
 
   switch (state) {
     case "idle":
-      text.textContent = "JustSay";
-      durationEl.textContent = "";
-      renderIcon(isHovered ? "hover" : "idle");
+      renderIdlePill();
       break;
     case "recording":
-      text.textContent = "Recording";
       startDurationTimer();
-      renderIcon("recording");
       break;
     case "processing":
-      text.textContent = "Processing";
-      durationEl.textContent = "";
-      renderIcon("processing");
+      renderPill(widget, { kind: "working", label: "Processing", readout: "" });
       break;
     case "done":
-      text.textContent = message || "Done";
-      durationEl.textContent = durationLabel || "";
-      renderIcon("done");
-      iconFlashTimer = setTimeout(() => {
-        iconFlashTimer = null;
-        if (state === "done") renderIcon(isHovered ? "hover" : "idle");
-      }, 700);
+      renderPill(widget, { kind: "done", label: message || "Done", readout: durationLabel || "" });
       autoRevertTimer = setTimeout(() => {
         autoRevertTimer = null;
         if (state === "done") setState("idle");
       }, AUTO_REVERT_MS);
       break;
     case "error":
-      text.textContent = message || "Error";
-      durationEl.textContent = "";
-      renderIcon("error");
+      renderPill(widget, { kind: "alert", label: message || "Error" });
       autoRevertTimer = setTimeout(() => {
         autoRevertTimer = null;
         if (state === "error") setState("idle");
@@ -145,12 +131,12 @@ function setState(newState: WidgetState, message?: string, durationLabel?: strin
  *  It clears the interval it is about to replace, so the one function that
  *  creates the stopwatch is also the one that owns there being only one of it:
  *  the adoption path calls this while `setState("recording")` has already armed
- *  an interval, and two of them would write to the same node. */
+ *  an interval, and two of them would paint the same pill. */
 function startDurationTimer(start = Date.now()) {
   if (durationInterval) clearInterval(durationInterval);
   const update = () => {
     const elapsed = (Date.now() - start) / 1000;
-    durationEl.textContent = formatStopwatch(elapsed);
+    renderPill(widget, { kind: "listening", label: "Recording", readout: formatStopwatch(elapsed) });
   };
   update();
   durationInterval = setInterval(update, 100);
@@ -300,9 +286,6 @@ async function stopAndProcess() {
     return;
   }
   setState("done", status.label, formatStopwatch(status.elapsedSeconds));
-  if (outcome.result.discarded_reason !== "silence") {
-    renderRouteBadge(outcome.result);
-  }
 }
 
 const recordingIntent = createRecordingIntentQueue({
@@ -312,23 +295,6 @@ const recordingIntent = createRecordingIntentQueue({
   stopRecording: stopAndProcess,
   reportError: (e) => console.error("Recording transition failed:", e),
 });
-
-function renderRouteBadge(result: { model_name?: string; duration_ms: number; fallback_reason?: string | null }) {
-  const badge = document.getElementById("widget-route");
-  if (!badge) return;
-
-  const model = (result.model_name || "").split("/").pop() || "stt";
-  const seconds = (result.duration_ms / 1000).toFixed(2);
-  const fallback = result.fallback_reason ? " · fallback" : "";
-  badge.textContent = `${model} · ${seconds} s${fallback}`;
-  badge.classList.add("visible");
-  if (result.fallback_reason) {
-    badge.title = result.fallback_reason;
-  } else {
-    badge.removeAttribute("title");
-  }
-  setTimeout(() => badge.classList.remove("visible"), 4000);
-}
 
 let meetingActive = false;
 let meetingStartedAt = 0;
@@ -482,9 +448,7 @@ widget.addEventListener("click", () => {
 watchPillRect(widget, (rect) => void invokeShell("set_widget_pill_rect", { ...rect }));
 
 function setHovered(inside: boolean) {
-  isHovered = inside;
-  widget.classList.toggle("hovered", inside);
-  if (isInteractive()) renderIcon(inside ? "hover" : "idle");
+  widget.classList.toggle(PILL_HOVER_CLASS, inside);
 }
 
 
@@ -623,6 +587,7 @@ async function runRequestedShortcut(shortcut: string): Promise<RequestedShortcut
   try {
     await api.updateSettings({ shortcut });
     currentShortcut = shortcut;
+    renderIdlePill();
     return { outcome, persisted: true, writeError: null };
   } catch (e) {
     console.error("Failed to store the registered shortcut:", e);
@@ -646,6 +611,7 @@ const settingsRetry = createSettingsRetry({
   applySettings: async (settings) => {
     currentLanguage = settings.language;
     currentShortcut = settings.shortcut;
+    renderIdlePill();
     await applyAndReportShortcut(currentShortcut);
   },
   applyFallbackShortcut: () => applyAndReportShortcut(currentShortcut),
@@ -687,10 +653,6 @@ function backendWaitLabel(msWaiting: number): string {
   return hasOutlastedStartupBudget(msWaiting) ? BACKEND_OFFLINE_LABEL : BACKEND_STARTING_LABEL;
 }
 
-function isBackendWaitLabel(label: string | null): boolean {
-  return label === BACKEND_STARTING_LABEL || label === BACKEND_OFFLINE_LABEL;
-}
-
 /** `setInterval` does not await this function, so against a backend that
  *  accepts and abandons, a probe outlives the 5 s interval and several are in
  *  flight at once — each then writing `connectionState` from whatever it read
@@ -719,11 +681,11 @@ async function checkConnection() {
   const result = nextConnectionCheckState(connectionState, healthOk);
   connectionState = { offline: result.offline, firstCheckDone: result.firstCheckDone };
 
+  backendWait = healthOk ? null : backendWaitLabel(performance.now() - waitingSince);
+  renderIdlePill();
   if (healthOk) {
-    if (state === "idle" && isBackendWaitLabel(text.textContent)) text.textContent = "JustSay";
     await settingsRetry.retryIfDue();
   } else {
-    if (state === "idle") text.textContent = backendWaitLabel(performance.now() - waitingSince);
     if (result.shouldNotify) notifyError("JustSay backend is unreachable.");
   }
 }

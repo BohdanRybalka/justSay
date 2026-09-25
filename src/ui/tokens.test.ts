@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = resolve(__dirname, "../..");
 const TOKENS_PATH = "src/ui/tokens.css";
-const STYLESHEET_WITH_OWN_COLOURS = "src/widget/widget.css";
 
 function readRepoFile(path: string): string {
   return readFileSync(join(REPO_ROOT, path), "utf-8");
@@ -61,20 +60,15 @@ describe("design tokens", () => {
 });
 
 describe("colours outside the tokens", () => {
-  const checked = stylesheetsUnderSrc().filter(
-    (path) => path !== TOKENS_PATH && path !== STYLESHEET_WITH_OWN_COLOURS,
-  );
+  const checked = stylesheetsUnderSrc().filter((path) => path !== TOKENS_PATH);
 
   it("walks the app's stylesheets", () => {
     expect(checked).toContain("src/settings/settings.css");
     expect(checked).toContain("src/ui/base.css");
+    expect(checked).toContain("src/widget/pill.css");
   });
 
   it("appear in no stylesheet except as white ink on colour", () => {
     expect(checked.flatMap(colourDeclarations)).toEqual([]);
-  });
-
-  it("are still exempt only in the widget stylesheet that keeps its own palette", () => {
-    expect(colourDeclarations(STYLESHEET_WITH_OWN_COLOURS)).not.toEqual([]);
   });
 });
