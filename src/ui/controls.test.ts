@@ -83,6 +83,18 @@ describe("renderSegmented", () => {
     expect(onChange.mock.calls).toEqual([["7d"], ["90d"]]);
   });
 
+  it("keeps the focus on the chosen option when the change redraws the control", () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const redraw = (value: Range): void => renderSegmented<Range>(root, RANGES, value, redraw);
+    redraw("7d");
+
+    pressKey(root.querySelectorAll("button")[0], "ArrowRight");
+
+    expect(pressedLabels(root)).toEqual(["30 days"]);
+    expect(document.activeElement).toBe(root.querySelector('button[aria-pressed="true"]'));
+  });
+
   it("ignores keys other than the arrows", () => {
     const onChange = vi.fn();
     const { root, buttons } = mountSegmented("30d", onChange);

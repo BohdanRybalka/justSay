@@ -52,7 +52,7 @@ export function renderSegmented<T extends string>(
       event.preventDefault();
       const next = (index + step + buttons.length) % buttons.length;
       choose(next);
-      buttons[next].focus();
+      root.querySelectorAll<HTMLButtonElement>(":scope > button")[next]?.focus();
     });
   });
   root.classList.add("segmented");
