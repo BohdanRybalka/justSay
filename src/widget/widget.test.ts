@@ -561,6 +561,7 @@ describe("a start that runs out of its budget", () => {
 
     expect(pillView()).toBe("listening");
     expect(pillReadout()).toBe("0:12");
+    expect(levelStreamMock).toHaveBeenCalledOnce();
     expect(apiMock.audioDiscard).not.toHaveBeenCalled();
   });
 
