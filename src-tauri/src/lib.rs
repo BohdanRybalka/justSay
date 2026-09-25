@@ -58,9 +58,9 @@ struct MeetingMenuItem(MenuItem<Wry>);
 fn set_meeting_recording(app: AppHandle, active: bool) {
     if let Some(item) = app.try_state::<MeetingMenuItem>() {
         let label = if active {
-            "Stop meeting recording"
+            "Stop recording the meeting"
         } else {
-            "Start meeting recording"
+            "Record a meeting"
         };
         let _ = item.0.set_text(label);
     }
@@ -226,17 +226,12 @@ pub fn run() {
 
             widget_window::build(app)?;
 
-            let meeting_item = MenuItem::with_id(
-                app,
-                "meeting",
-                "Start meeting recording",
-                true,
-                None::<&str>,
-            )?;
             let settings_item =
-                MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+                MenuItem::with_id(app, "settings", "Open JustSay", true, None::<&str>)?;
+            let meeting_item =
+                MenuItem::with_id(app, "meeting", "Record a meeting", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit JustSay", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&meeting_item, &settings_item, &quit])?;
+            let menu = Menu::with_items(app, &[&settings_item, &meeting_item, &quit])?;
             app.manage(MeetingMenuItem(meeting_item));
 
             let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;

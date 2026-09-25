@@ -104,10 +104,11 @@ async def test_wrong_token_returns_401(client, token):
         ("post", "/audio/meeting/start"),
         ("post", "/audio/meeting/stop"),
         ("get", "/audio/meeting/status"),
+        ("get", "/audio/meeting/level-stream"),
     ],
 )
 async def test_meeting_endpoints_are_not_auth_exempt(client, token, method, path):
-    """Spec 066 AC: the three meeting endpoints require the token.
+    """Spec 066 AC: every meeting endpoint requires the token.
 
     Meeting recording captures people who never installed JustSay
     (docs/adr/040-recording-other-people-is-not-covered-by-zero-leak.md), so
@@ -124,7 +125,12 @@ async def test_meeting_endpoints_are_not_auth_exempt(client, token, method, path
 def test_meeting_endpoints_are_absent_from_the_exempt_set():
     """The mechanism behind the test above, asserted directly against
     `_EXEMPT_PATHS` rather than only through a response code."""
-    for path in ("/audio/meeting/start", "/audio/meeting/stop", "/audio/meeting/status"):
+    for path in (
+        "/audio/meeting/start",
+        "/audio/meeting/stop",
+        "/audio/meeting/status",
+        "/audio/meeting/level-stream",
+    ):
         assert path not in _EXEMPT_PATHS
 
 

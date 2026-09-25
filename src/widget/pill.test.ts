@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { MEETING_DURATION_ID } from "./meeting-indicator";
+import { renderMeetingIndicator } from "./meeting-indicator";
 import { PILL_HOVER_CLASS, WAVE_BASE_HEIGHTS, renderPill, waveHeights, type PillView } from "./pill";
 
 const STATE_MODIFIERS = ["pill--rest", "pill--live", "pill--alert"];
@@ -159,12 +159,12 @@ describe("what a repaint leaves alone", () => {
 
   it("keeps the meeting clock's own readout, so a running meeting never blanks", () => {
     const pill = pillFromWidgetMarkup();
-    const meetingClock = document.getElementById(MEETING_DURATION_ID)!;
-    meetingClock.textContent = "12:04";
+    renderMeetingIndicator(pill, { active: true, elapsedSeconds: 724, incident: null, mic: 0, system: 0 });
+    const meetingClock = pill.querySelector(".pill-meeting .pill-readout")!;
 
     for (const view of EVERY_VIEW) {
       renderPill(pill, view);
-      expect(document.getElementById(MEETING_DURATION_ID)).toBe(meetingClock);
+      expect(pill.querySelector(".pill-meeting .pill-readout")).toBe(meetingClock);
       expect(meetingClock.textContent).toBe("12:04");
     }
   });

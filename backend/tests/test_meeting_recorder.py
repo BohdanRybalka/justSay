@@ -12,6 +12,7 @@ import asyncio
 import functools
 import gc
 import importlib
+import json
 import logging
 import queue
 import shutil
@@ -1292,6 +1293,71 @@ async def test_meeting_status_reports_idle(client):
 
     assert resp.status_code == 200
     assert resp.json()["is_recording"] is False
+
+
+class _StreamingMeeting(_FakeRecorder):
+    """Recording for `frames` snapshots, then idle, so the stream's end is the fake's."""
+
+    def __init__(self, frames: int, level_db: float, system_level_db: float):
+        super().__init__(is_recording=True)
+        self._frames = frames
+        self.level_db = level_db
+        self.system_level_db = system_level_db
+
+    def status_snapshot(self):
+        self.is_recording = self._frames > 0
+        self._frames -= 1
+        return super().status_snapshot()
+
+
+async def _meeting_stream_events(client) -> list[tuple[str, dict]]:
+    async with client.stream("GET", "/audio/meeting/level-stream") as resp:
+        assert resp.status_code == 200
+        body = "".join([chunk async for chunk in resp.aiter_text()])
+    events = []
+    for block in body.strip().split("\n\n"):
+        name_line, data_line = block.split("\n")
+        events.append(
+            (name_line.removeprefix("event: "), json.loads(data_line.removeprefix("data: ")))
+        )
+    return events
+
+
+@pytest.mark.anyio
+async def test_meeting_level_stream_sends_both_levels_then_done(client):
+    app.dependency_overrides[get_meeting_recorder] = lambda: _StreamingMeeting(
+        frames=2, level_db=-20.5, system_level_db=-33.0
+    )
+
+    events = await _meeting_stream_events(client)
+
+    assert events == [
+        ("level", {"mic_db": -20.5, "system_db": -33.0}),
+        ("level", {"mic_db": -20.5, "system_db": -33.0}),
+        ("done", {"is_recording": False}),
+    ]
+
+
+@pytest.mark.anyio
+async def test_meeting_level_stream_sends_null_for_a_side_with_no_level(client):
+    app.dependency_overrides[get_meeting_recorder] = lambda: _StreamingMeeting(
+        frames=1, level_db=-18.0, system_level_db=float("-inf")
+    )
+
+    events = await _meeting_stream_events(client)
+
+    assert events[0] == ("level", {"mic_db": -18.0, "system_db": None})
+
+
+@pytest.mark.anyio
+async def test_meeting_level_stream_ends_at_once_when_nothing_is_recording(client):
+    app.dependency_overrides[get_meeting_recorder] = lambda: _StreamingMeeting(
+        frames=0, level_db=-18.0, system_level_db=-18.0
+    )
+
+    events = await _meeting_stream_events(client)
+
+    assert events == [("done", {"is_recording": False})]
 
 
 @pytest.mark.anyio

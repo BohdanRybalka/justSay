@@ -239,6 +239,18 @@ async def test_level_stream_emits_level_frames_then_done(client):
 
 
 @pytest.mark.asyncio
+async def test_level_stream_sends_null_for_silence_rather_than_infinity(client):
+    app.dependency_overrides[get_recorder] = lambda: _FakeStreamingRecorder(
+        recording_reads=1, level_db=float("-inf")
+    )
+    async with client.stream("GET", "/audio/level-stream") as resp:
+        body = b"".join([chunk async for chunk in resp.aiter_bytes()])
+
+    assert b'data: {"level_db": null, "is_recording": true}' in body
+    assert b"Infinity" not in body
+
+
+@pytest.mark.asyncio
 async def test_level_stream_not_recording_emits_only_done(client):
     app.dependency_overrides[get_recorder] = lambda: _FakeStreamingRecorder(
         recording_reads=0

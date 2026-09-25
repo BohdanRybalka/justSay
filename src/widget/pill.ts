@@ -55,12 +55,16 @@ const SKELETON: Record<PillView["kind"], string> = {
     '<span class="pill-label"></span>',
 };
 
-/** The wave's bar heights in px for a level in 0..1: flat at silence, the
- *  design's shape at full voice, and the same seven bars either way so the
- *  pill's width never moves. */
-export function waveHeights(level: number): number[] {
+/** Bar heights in px for a level in 0..1: flat at silence, the design's
+ *  `bases` at full voice, and the same bars either way so the pill's width
+ *  never moves. */
+export function scaledBars(bases: readonly number[], level: number): number[] {
   const clamped = Math.min(1, Math.max(0, level));
-  return WAVE_BASE_HEIGHTS.map((base) => WAVE_FLOOR_PX + (base - WAVE_FLOOR_PX) * clamped);
+  return bases.map((base) => WAVE_FLOOR_PX + (base - WAVE_FLOOR_PX) * clamped);
+}
+
+export function waveHeights(level: number): number[] {
+  return scaledBars(WAVE_BASE_HEIGHTS, level);
 }
 
 function part(slot: HTMLElement, selector: string): HTMLElement {

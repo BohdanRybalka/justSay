@@ -5,7 +5,7 @@ import {
   shortcutFailureMessage,
   shouldReapplyShortcut,
 } from "../accelerator";
-import { api, levelStream, REQUEST_TIMEOUT_MS } from "../api";
+import { api, levelStream, meetingLevelStream, REQUEST_TIMEOUT_MS } from "../api";
 import { hasOutlastedStartupBudget } from "../backend-startup";
 import { copyToClipboard } from "../clipboard";
 import {
@@ -34,7 +34,7 @@ import {
 import { mountIconSprite } from "../ui/icons";
 import { applyThemePreference } from "../ui/theme";
 import { decideMeetingHealth } from "./meeting-health";
-import { renderMeetingIndicator } from "./meeting-indicator";
+import { MEETING_STOP_SELECTOR, renderMeetingIndicator } from "./meeting-indicator";
 import { type MeetingToggleActions, runMeetingToggle } from "./meeting-toggle";
 import { PILL_HOVER_CLASS, renderPill, type PillView } from "./pill";
 import { watchPillRect } from "./pill-rect";
@@ -329,6 +329,9 @@ let meetingTimer: ReturnType<typeof setInterval> | null = null;
 let meetingBusy = false;
 let meetingIncident: string | null = null;
 let meetingTicks = 0;
+let meetingMicLevel = 0;
+let meetingSystemLevel = 0;
+let meetingLevelAbort: AbortController | null = null;
 
 const MEETING_TICK_MS = 500;
 
@@ -344,7 +347,33 @@ function renderMeetingIndicatorFromState() {
     active: meetingActive,
     elapsedSeconds: (Date.now() - meetingStartedAt) / 1000,
     incident: meetingIncident,
+    mic: meetingMicLevel,
+    system: meetingSystemLevel,
   });
+}
+
+/** Like the dictation wave's stream: a failed or ended stream only leaves the
+ *  meters flat, and the health poll decides whether the recording is over. */
+function openMeetingLevelStream() {
+  meetingLevelAbort?.abort();
+  const stream: AbortController = meetingLevelStream(
+    (data) => {
+      if (meetingLevelAbort !== stream) return;
+      meetingMicLevel = levelFromDb(data.mic_db);
+      meetingSystemLevel = levelFromDb(data.system_db);
+      renderMeetingIndicatorFromState();
+    },
+    () => {},
+    (error) => console.warn("The meeting level stream stopped:", error),
+  );
+  meetingLevelAbort = stream;
+}
+
+function closeMeetingLevelStream() {
+  meetingLevelAbort?.abort();
+  meetingLevelAbort = null;
+  meetingMicLevel = 0;
+  meetingSystemLevel = 0;
 }
 
 function onMeetingTick() {
@@ -360,6 +389,7 @@ function beginMeetingIndicator(startedAt = Date.now()) {
   meetingTicks = 0;
   renderMeetingIndicatorFromState();
   meetingTimer = setInterval(onMeetingTick, MEETING_TICK_MS);
+  openMeetingLevelStream();
 }
 
 function endMeetingIndicator() {
@@ -369,6 +399,7 @@ function endMeetingIndicator() {
     clearInterval(meetingTimer);
     meetingTimer = null;
   }
+  closeMeetingLevelStream();
   renderMeetingIndicatorFromState();
 }
 
@@ -466,8 +497,11 @@ async function syncMeetingIndicator() {
   }
 }
 
-widget.addEventListener("click", () => {
-  if (meetingActive) return;
+widget.addEventListener("click", (event) => {
+  if (meetingActive) {
+    if ((event.target as Element).closest(MEETING_STOP_SELECTOR)) void toggleMeetingRecording();
+    return;
+  }
   void recordingIntent.request("toggle");
 });
 

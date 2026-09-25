@@ -972,6 +972,28 @@ describe("the level stream's handshake, which is bounded while the stream is not
     release();
   });
 
+  it("reads both sides of a meeting from the meeting stream, null included", async () => {
+    const { meetingLevelStream } = await import("./api");
+    fetchMock.mockResolvedValue(
+      streamOf(
+        [
+          'event: level\ndata: {"mic_db": -20.5, "system_db": null}\n\n',
+          'event: done\ndata: {"is_recording": false}\n\n',
+        ],
+        Promise.resolve(),
+      ),
+    );
+    const onLevel = vi.fn();
+    const onDone = vi.fn();
+
+    meetingLevelStream(onLevel, onDone, () => {});
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/audio\/meeting\/level-stream$/);
+    expect(onLevel).toHaveBeenCalledExactlyOnceWith({ mic_db: -20.5, system_db: null });
+    expect(onDone).toHaveBeenCalledOnce();
+  });
+
   it("stays silent when the caller aborts while the token is still being fetched", async () => {
     invokeMock.mockImplementation(() => new Promise<string>(() => {}));
     const { levelStream } = await import("./api");

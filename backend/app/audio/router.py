@@ -8,6 +8,8 @@ the error handler, so those statuses are documented where they are raised.
 """
 
 import asyncio
+import math
+from collections.abc import AsyncIterator, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -27,6 +29,17 @@ from app.preferences.user_settings import get_user_settings
 
 router = APIRouter()
 
+LEVEL_STREAM_INTERVAL_SECONDS = 0.1
+
+
+def finite_db(level_db: float) -> float | None:
+    """A level as the wire carries it: `None` for the silence `-inf` stands for.
+
+    `json.dumps` writes `-Infinity`, which is not JSON, and a client parsing it
+    drops the whole event.
+    """
+    return level_db if math.isfinite(level_db) else None
+
 
 class RecordingStatus(BaseModel):
     """`session_id` is the live capture's owner, or `null` when idle.
@@ -38,7 +51,7 @@ class RecordingStatus(BaseModel):
 
     is_recording: bool
     duration_seconds: float
-    level_db: float
+    level_db: float | None
     session_id: str | None = None
 
 
@@ -78,9 +91,9 @@ class MeetingStatus(BaseModel):
 
     is_recording: bool
     duration_seconds: float
-    level_db: float
+    level_db: float | None
     system_endpoint: str | None
-    system_level_db: float
+    system_level_db: float | None
     capture_incident: str | None
 
 
@@ -97,7 +110,7 @@ def _recording_status(recorder: MicrophoneRecorder) -> RecordingStatus:
     return RecordingStatus(
         is_recording=recorder.is_recording,
         duration_seconds=recorder.duration_seconds,
-        level_db=recorder.level_db,
+        level_db=finite_db(recorder.level_db),
         session_id=recorder.session_id,
     )
 
@@ -113,9 +126,9 @@ def _meeting_status(recorder: MeetingRecorder) -> MeetingStatus:
     return MeetingStatus(
         is_recording=snapshot.is_recording,
         duration_seconds=snapshot.duration_seconds,
-        level_db=snapshot.level_db,
+        level_db=finite_db(snapshot.level_db),
         system_endpoint=snapshot.system_endpoint,
-        system_level_db=snapshot.system_level_db,
+        system_level_db=finite_db(snapshot.system_level_db),
         capture_incident=(
             None if snapshot.capture_incident is None else snapshot.capture_incident.value
         ),
@@ -228,21 +241,54 @@ async def meeting_recording_status(recorder: MeetingRecorder = Depends(get_meeti
     return _meeting_status(recorder)
 
 
-async def _level_stream(request: Request, recorder: MicrophoneRecorder):
+async def _level_frames(
+    request: Request, read_levels: Callable[[], dict | None]
+) -> AsyncIterator[str]:
+    """One `level` event per interval until `read_levels` answers `None`, then `done`."""
     while True:
         if await request.is_disconnected():
             return
-        if not recorder.is_recording:
+        levels = read_levels()
+        if levels is None:
             yield sse_event("done", {"is_recording": False})
             return
-        yield sse_event("level", {"level_db": recorder.level_db, "is_recording": True})
-        await asyncio.sleep(0.1)
+        yield sse_event("level", levels)
+        await asyncio.sleep(LEVEL_STREAM_INTERVAL_SECONDS)
+
+
+def _level_stream_response(frames: AsyncIterator[str]) -> StreamingResponse:
+    return StreamingResponse(
+        frames,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/level-stream")
 async def level_stream(request: Request, recorder: MicrophoneRecorder = Depends(get_recorder)):
-    return StreamingResponse(
-        _level_stream(request, recorder),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    def read_levels() -> dict | None:
+        if not recorder.is_recording:
+            return None
+        return {"level_db": finite_db(recorder.level_db), "is_recording": True}
+
+    return _level_stream_response(_level_frames(request, read_levels))
+
+
+@router.get("/meeting/level-stream")
+async def meeting_level_stream(
+    request: Request, recorder: MeetingRecorder = Depends(get_meeting_recorder)
+):
+    """Both halves of a running meeting, each `null` while it has no level to report.
+
+    Read from one snapshot per frame, so the two levels describe one moment.
+    """
+    def read_levels() -> dict | None:
+        snapshot = recorder.status_snapshot()
+        if not snapshot.is_recording:
+            return None
+        return {
+            "mic_db": finite_db(snapshot.level_db),
+            "system_db": finite_db(snapshot.system_level_db),
+        }
+
+    return _level_stream_response(_level_frames(request, read_levels))
