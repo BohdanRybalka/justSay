@@ -776,11 +776,11 @@ def test_every_settings_show_site_announces_it() -> None:
 
     So this pin is structural rather than value-shaped, unlike the rest of the
     module. Every ``.show()`` in ``lib.rs`` is mapped to the top-level function
-    holding it, and that set must be exactly the announcing helper plus
-    ``widget_ready``, which shows the other window. A show added to the tray
-    arm, to ``show_settings_window`` or to a new command fails this test naming
-    the function; the completeness assertion covers a ``.show()`` this reader
-    could place in no function at all.
+    holding it, and that set must be exactly the announcing helper; the widget
+    is shown from its own module. A show added to the tray arm, to
+    ``show_settings_window`` or to a new command fails this test naming the
+    function; the completeness assertion covers a ``.show()`` this reader could
+    place in no function at all.
 
     The helper's own ``show()`` result may not be discarded, because an
     announcement a failed show still sends resumes the polling into a window
@@ -792,7 +792,7 @@ def test_every_settings_show_site_announces_it() -> None:
     with every other assertion in the module passing.
     """
     _assert_one_lib_helper_owns_the_settings_window(
-        "show", "show_settings", "settings-shown", ("widget_ready",)
+        "show", "show_settings", "settings-shown", ()
     )
 
 

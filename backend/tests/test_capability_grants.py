@@ -16,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CAPABILITIES_DIR = REPO_ROOT / "src-tauri" / "capabilities"
 TAURI_SHARED_CONF = REPO_ROOT / "src-tauri" / "tauri.conf.json"
 LIB_RS = REPO_ROOT / "src-tauri" / "src" / "lib.rs"
+WIDGET_WINDOW_RS = REPO_ROOT / "src-tauri" / "src" / "widget_window.rs"
 
 CAPABILITY_SUFFIXES = (".json", ".json5", ".toml")
 PARSEABLE_SUFFIX = ".json"
@@ -79,11 +80,11 @@ def _granted_permissions() -> tuple[tuple[str, str], ...]:
 
 
 def _widget_builder_chain() -> str:
-    """The widget window's `WebviewWindowBuilder` chain, as written in `lib.rs`."""
-    match = WIDGET_BUILDER_PATTERN.search(LIB_RS.read_text(encoding="utf-8"))
+    """The widget window's `WebviewWindowBuilder` chain, as written in its module."""
+    match = WIDGET_BUILDER_PATTERN.search(WIDGET_WINDOW_RS.read_text(encoding="utf-8"))
     assert match, (
-        f"no widget WebviewWindowBuilder chain found in {LIB_RS.name}. The window moved or was "
-        "renamed, and this gate now reads nothing."
+        f"no widget WebviewWindowBuilder chain found in {WIDGET_WINDOW_RS.name}. The window "
+        "moved or was renamed, and this gate now reads nothing."
     )
     return match.group(0)
 

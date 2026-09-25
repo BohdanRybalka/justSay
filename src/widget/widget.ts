@@ -12,8 +12,10 @@ import {
   EVENT_SETTINGS_CHANGED,
   EVENT_SHORTCUT_APPLIED,
   EVENT_SHORTCUT_REQUESTED,
+  EVENT_WIDGET_HOVER,
   type ShortcutApplied,
   type ShortcutRequested,
+  type WidgetHover,
 } from "../contracts";
 import { formatStopwatch } from "../format";
 import { notifyError, nextConnectionCheckState, type ConnectionCheckState } from "../notify";
@@ -31,6 +33,7 @@ import {
 import { decideMeetingHealth } from "./meeting-health";
 import { MEETING_STATE_CLASS, renderMeetingIndicator } from "./meeting-indicator";
 import { type MeetingToggleActions, runMeetingToggle } from "./meeting-toggle";
+import { watchPillRect } from "./pill-rect";
 import { createRecordingIntentQueue } from "./recording-intent";
 import { CONNECTION_POLL_MS, createSettingsRetry } from "./settings-retry";
 
@@ -476,15 +479,12 @@ widget.addEventListener("click", () => {
 });
 
 
-widget.addEventListener("mouseenter", () => {
-  isHovered = true;
-  if (isInteractive()) renderIcon("hover");
-});
+watchPillRect(widget, (rect) => void invokeShell("set_widget_pill_rect", { ...rect }));
 
-widget.addEventListener("mouseleave", () => {
-  isHovered = false;
-  if (isInteractive()) renderIcon("idle");
-});
+function setHovered(inside: boolean) {
+  isHovered = inside;
+  if (isInteractive()) renderIcon(inside ? "hover" : "idle");
+}
 
 
 type GlobalShortcutPlugin = typeof import("@tauri-apps/plugin-global-shortcut");
@@ -669,6 +669,9 @@ async function listenForSettingsChanges() {
     });
     await listen(EVENT_MEETING_TOGGLE, async () => {
       await toggleMeetingRecording();
+    });
+    await listen<WidgetHover>(EVENT_WIDGET_HOVER, ({ payload }) => {
+      setHovered(payload.inside);
     });
   } catch {
   }
