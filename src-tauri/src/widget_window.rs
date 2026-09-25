@@ -188,6 +188,12 @@ fn follow_the_cursor(app: &AppHandle) {
             ) else {
                 continue;
             };
+            let cursor_scale = if cfg!(target_os = "macos") {
+                app.primary_monitor().ok().flatten().map_or(scale, |primary| primary.scale_factor())
+            } else {
+                scale
+            };
+            let cursor = cursor_in_window_pixels(cursor, cursor_scale, scale);
             let pill = *app
                 .state::<WidgetPill>()
                 .0
@@ -221,6 +227,19 @@ fn window_origin(work_area: &PhysicalRect<i32, u32>, scale: f64) -> PhysicalPosi
         (centre_x - WINDOW_WIDTH * scale / 2.0).round() as i32,
         (centre_y - WINDOW_HEIGHT * scale / 2.0).round() as i32,
     )
+}
+
+/// The cursor rescaled from `cursor_scale` into the window's own pixels. tao on
+/// macOS converts the cursor with the primary display's factor and the window
+/// with its display's, so on mixed displays the two disagree; Windows reports
+/// both in true pixels, and there the two factors are the same.
+fn cursor_in_window_pixels(
+    cursor: PhysicalPosition<f64>,
+    cursor_scale: f64,
+    window_scale: f64,
+) -> PhysicalPosition<f64> {
+    let ratio = window_scale / cursor_scale;
+    PhysicalPosition::new(cursor.x * ratio, cursor.y * ratio)
 }
 
 /// Where the pointer stands relative to the pill. Positions are physical;
@@ -261,8 +280,8 @@ fn pointer_changes(applied: &Applied, over: PointerOver) -> PointerChanges {
 #[cfg(test)]
 mod tests {
     use super::{
-        pointer_changes, pointer_over, window_origin, Applied, PillRect, PointerChanges,
-        PointerOver,
+        cursor_in_window_pixels, pointer_changes, pointer_over, window_origin, Applied, PillRect,
+        PointerChanges, PointerOver,
     };
     use tauri::{PhysicalPosition, PhysicalRect, PhysicalSize};
 
@@ -325,6 +344,25 @@ mod tests {
         assert_eq!(
             pointer_changes(&applied, near_pill),
             PointerChanges { ignore: Some(true), hover: None }
+        );
+    }
+
+    #[test]
+    fn a_cursor_scaled_by_another_display_lands_on_the_pill_it_is_over() {
+        let cursor_from_a_retina_primary = PhysicalPosition::new(4200.0, 1100.0);
+        let cursor = cursor_in_window_pixels(cursor_from_a_retina_primary, 2.0, 1.0);
+        assert_eq!(cursor, PhysicalPosition::new(2100.0, 550.0));
+
+        let on_a_plain_second_display = pointer_over(
+            cursor,
+            PhysicalPosition::new(2000, 500),
+            Some(PillRect { x: 40.0, y: 12.0, width: 160.0, height: 40.0 }),
+            1.0,
+        );
+        assert!(on_a_plain_second_display.on_pill);
+        assert_eq!(
+            cursor_in_window_pixels(PhysicalPosition::new(1024.0, 912.0), 1.5, 1.5),
+            PhysicalPosition::new(1024.0, 912.0)
         );
     }
 

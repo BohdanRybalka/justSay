@@ -483,6 +483,7 @@ watchPillRect(widget, (rect) => void invokeShell("set_widget_pill_rect", { ...re
 
 function setHovered(inside: boolean) {
   isHovered = inside;
+  widget.classList.toggle("hovered", inside);
   if (isInteractive()) renderIcon(inside ? "hover" : "idle");
 }
 

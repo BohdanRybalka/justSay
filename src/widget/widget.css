@@ -34,7 +34,7 @@ body {
   transition: background 0.3s ease, filter 0.3s ease;
 }
 
-.widget:hover {
+.widget.hovered {
   filter: brightness(1.1);
 }
 

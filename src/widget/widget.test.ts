@@ -166,12 +166,16 @@ describe("the widget window's shape", () => {
     await vi.waitFor(() => expect(listeners.get(EVENT_WIDGET_HOVER)).toBeTypeOf("function"));
     const icon = document.getElementById("widget-icon")!;
 
+    const pill = document.getElementById("widget")!;
+
     listeners.get(EVENT_WIDGET_HOVER)!({ payload: { inside: true } });
     expect(icon.classList.contains("js-widget--hover")).toBe(true);
+    expect(pill.classList.contains("hovered")).toBe(true);
 
     listeners.get(EVENT_WIDGET_HOVER)!({ payload: { inside: false } });
     expect(icon.classList.contains("js-widget--hover")).toBe(false);
     expect(icon.classList.contains("js-widget--idle")).toBe(true);
+    expect(pill.classList.contains("hovered")).toBe(false);
   });
 });
 
