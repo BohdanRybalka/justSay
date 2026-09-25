@@ -23,15 +23,15 @@
     "lint:dead-code": "npm run lint:dead-code:ts && npm run lint:dead-code:py"
   },
   "dependencies": {
-    "@tauri-apps/api": "~2.10.0",
-    "@tauri-apps/plugin-dialog": "^2.7.0",
-    "@tauri-apps/plugin-global-shortcut": "^2.0.0",
-    "@tauri-apps/plugin-notification": "^2.0.0",
+    "@tauri-apps/api": "~2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
+    "@tauri-apps/plugin-global-shortcut": "^2.3.2",
+    "@tauri-apps/plugin-notification": "^2.4.0",
     "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.10.0"
+    "@tauri-apps/plugin-updater": "^2.12.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0",
+    "@tauri-apps/cli": "^2.11.5",
     "@types/node": "^26.1.1",
     "cross-env": "^7.0.3",
     "jsdom": "^29.1.1",
