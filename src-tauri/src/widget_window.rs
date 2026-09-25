@@ -189,7 +189,11 @@ fn follow_the_cursor(app: &AppHandle) {
                 continue;
             };
             let cursor_scale = if cfg!(target_os = "macos") {
-                app.primary_monitor().ok().flatten().map_or(scale, |primary| primary.scale_factor())
+                widget
+                    .primary_monitor()
+                    .ok()
+                    .flatten()
+                    .map_or(scale, |primary| primary.scale_factor())
             } else {
                 scale
             };
