@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SHORTCUT, detectShortcutPlatform, formatAccelerator } from "../accelerator";
 import { BACKEND_WAIT_BUDGET_MS } from "../backend-startup";
-import { EVENT_MEETING_TOGGLE, EVENT_WIDGET_HOVER } from "../contracts";
+import { EVENT_MEETING_TOGGLE, EVENT_SHORTCUT_REQUESTED, EVENT_WIDGET_HOVER } from "../contracts";
 import { PILL_HOVER_CLASS } from "./pill";
 import { CONNECTION_POLL_MS } from "./settings-retry";
 
@@ -205,6 +205,16 @@ describe("the widget window's shape", () => {
 
     const expected = formatAccelerator("Ctrl+Shift+KeyD", detectShortcutPlatform(navigator));
     await vi.waitFor(() => expect(pillLabel()).toBe(expected));
+  });
+
+  it("offers the shortcut that works, even when saving it to the settings failed", async () => {
+    apiMock.updateSettings.mockRejectedValue(new TypeError("Failed to fetch"));
+    await loadWidget();
+    await vi.waitFor(() => expect(listeners.get(EVENT_SHORTCUT_REQUESTED)).toBeTypeOf("function"));
+
+    await listeners.get(EVENT_SHORTCUT_REQUESTED)!({ payload: { shortcut: "Ctrl+Shift+KeyD" } });
+
+    expect(pillLabel()).toBe(formatAccelerator("Ctrl+Shift+KeyD", detectShortcutPlatform(navigator)));
   });
 });
 

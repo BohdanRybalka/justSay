@@ -8,12 +8,11 @@
  * that "the indicator is showing" is assertable against a DOM without booting
  * the whole widget.
  *
- * It reads its own readout out of the root rather than accepting one, because
- * accepting one is what let it share dictation's `#widget-duration`: every
- * branch of the widget's `setState` writes that node, so any state change
- * blanked a running meeting timer until the next tick. A marker that blinks is
- * weaker evidence than one that does not, and this marker is what the consent
- * story rests on.
+ * It reads its own readout out of the root rather than accepting one, and that
+ * readout sits outside the pill's repainted slot: every dictation state change
+ * repaints the slot, so a readout inside it would blank a running meeting timer
+ * until the next tick. A marker that blinks is weaker evidence than one that
+ * does not, and this marker is what the consent story rests on.
  */
 
 import { formatElapsedClock } from "../format";

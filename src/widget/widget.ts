@@ -68,19 +68,19 @@ mountIconSprite(document);
 applyThemePreference("system");
 
 
-/** At rest the pill offers the shortcut; while the backend is coming up it
- *  says so instead, and once the wait has outlasted its budget it stops being
- *  a hint and becomes the pill's alert. */
+/** At rest the pill offers the shortcut that is registered right now, and the
+ *  configured one only while none is; while the backend is coming up it says
+ *  so instead, and once the wait has outlasted its budget it stops being a hint
+ *  and becomes the pill's alert. */
 function restView(): PillView {
   if (backendWait === BACKEND_OFFLINE_LABEL) return { kind: "alert", label: backendWait };
-  return { kind: "rest", hint: backendWait ?? formatAccelerator(currentShortcut, shortcutPlatform) };
+  const shortcut = activeShortcut ?? currentShortcut;
+  return { kind: "rest", hint: backendWait ?? formatAccelerator(shortcut, shortcutPlatform) };
 }
 
 function renderIdlePill() {
   if (state === "idle") renderPill(widget, restView());
 }
-
-renderIdlePill();
 
 
 function setState(newState: WidgetState, message?: string, durationLabel?: string) {
@@ -536,6 +536,7 @@ function applyShortcut(next: string, options: { force: boolean }): Promise<Short
 }
 
 function reportShortcutOutcome(shortcut: string, outcome: ShortcutOutcome) {
+  renderIdlePill();
   if (outcome.ok) {
     shortcutFailureNotified = null;
     widget.removeAttribute("title");
@@ -587,7 +588,6 @@ async function runRequestedShortcut(shortcut: string): Promise<RequestedShortcut
   try {
     await api.updateSettings({ shortcut });
     currentShortcut = shortcut;
-    renderIdlePill();
     return { outcome, persisted: true, writeError: null };
   } catch (e) {
     console.error("Failed to store the registered shortcut:", e);
@@ -611,7 +611,6 @@ const settingsRetry = createSettingsRetry({
   applySettings: async (settings) => {
     currentLanguage = settings.language;
     currentShortcut = settings.shortcut;
-    renderIdlePill();
     await applyAndReportShortcut(currentShortcut);
   },
   applyFallbackShortcut: () => applyAndReportShortcut(currentShortcut),
@@ -692,6 +691,7 @@ async function checkConnection() {
 
 
 async function init() {
+  renderIdlePill();
   await checkConnection();
   setInterval(checkConnection, CONNECTION_POLL_MS);
 
