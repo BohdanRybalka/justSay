@@ -10,9 +10,13 @@ vi.mock("../../api", () => ({
   api: apiMock,
 }));
 
-const { renderTranscribe } = await import("./transcribe");
+const copyToClipboardMock = vi.fn();
 
-const writeText = vi.fn();
+vi.mock("../../clipboard", () => ({
+  copyToClipboard: copyToClipboardMock,
+}));
+
+const { renderTranscribe } = await import("./transcribe");
 
 function render(): { container: HTMLElement; teardown: () => void } {
   const container = document.createElement("div");
@@ -45,10 +49,7 @@ function resultText(container: HTMLElement): HTMLElement {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  Object.defineProperty(navigator, "clipboard", {
-    value: { writeText },
-    configurable: true,
-  });
+  copyToClipboardMock.mockResolvedValue(true);
 });
 
 describe("renderTranscribe — the buttons the markup declares", () => {
@@ -74,12 +75,34 @@ describe("renderTranscribe — the buttons the markup declares", () => {
       expect(resultText(container).textContent).toBe("hello there");
     });
 
+    copyToClipboardMock.mockClear();
+
     container.querySelector<HTMLButtonElement>("#btn-copy")!.click();
 
     await vi.waitFor(() => {
-      expect(writeText).toHaveBeenCalledWith("hello there");
+      expect(container.querySelector("#btn-copy")!.textContent).toBe("Copied!");
     });
-    expect(container.querySelector("#btn-copy")!.textContent).toBe("Copied!");
+    expect(copyToClipboardMock).toHaveBeenCalledExactlyOnceWith("hello there");
+  });
+
+  it("btn-copy says Copy failed when the clipboard command fails", async () => {
+    apiMock.processFile.mockResolvedValue({
+      text: "hello there",
+      duration_ms: 1500,
+      copied_to_clipboard: false,
+    });
+    const { container } = render();
+    dropFile(container, buildFile("note.wav", 2048));
+    await vi.waitFor(() => {
+      expect(resultText(container).textContent).toBe("hello there");
+    });
+    copyToClipboardMock.mockResolvedValue(false);
+
+    container.querySelector<HTMLButtonElement>("#btn-copy")!.click();
+
+    await vi.waitFor(() => {
+      expect(container.querySelector("#btn-copy")!.textContent).toBe("Copy failed");
+    });
   });
 
   it("btn-reset hides the result panel and empties it", async () => {
@@ -140,11 +163,11 @@ describe("renderTranscribe — a file is refused before it is uploaded", () => {
 });
 
 describe("renderTranscribe — the result panel", () => {
-  it("a transcript arrives with its elapsed time and the clipboard note", async () => {
+  it("a transcript goes to the clipboard and arrives with its elapsed time and the clipboard note", async () => {
     apiMock.processFile.mockResolvedValue({
       text: "hello there",
       duration_ms: 1500,
-      copied_to_clipboard: true,
+      copied_to_clipboard: false,
     });
     const { container } = render();
 
@@ -153,8 +176,26 @@ describe("renderTranscribe — the result panel", () => {
     await vi.waitFor(() => {
       expect(status(container).textContent).toBe("Done in 1.50s · copied to clipboard");
     });
+    expect(copyToClipboardMock).toHaveBeenCalledExactlyOnceWith("hello there");
     expect(resultText(container).textContent).toBe("hello there");
     expect(status(container).className).toBe("result-status ok");
+  });
+
+  it("a transcript the clipboard refused arrives without the clipboard note", async () => {
+    apiMock.processFile.mockResolvedValue({
+      text: "hello there",
+      duration_ms: 1500,
+      copied_to_clipboard: false,
+    });
+    copyToClipboardMock.mockResolvedValue(false);
+    const { container } = render();
+
+    dropFile(container, buildFile("note.wav", 2048));
+
+    await vi.waitFor(() => {
+      expect(status(container).textContent).toBe("Done in 1.50s");
+    });
+    expect(resultText(container).textContent).toBe("hello there");
   });
 
   it("an empty transcript is labelled instead of left blank", async () => {
@@ -171,6 +212,7 @@ describe("renderTranscribe — the result panel", () => {
       expect(resultText(container).textContent).toBe("(empty result)");
     });
     expect(status(container).textContent).toBe("Done in 0.90s");
+    expect(copyToClipboardMock).not.toHaveBeenCalled();
   });
 
   it("a failed transcription shows the backend's message as an error", async () => {
@@ -290,6 +332,29 @@ describe("renderTranscribe — the drop zone", () => {
     await new Promise((resolve) => setTimeout(resolve, 25));
 
     expect(resultText(container).textContent).not.toBe("landed after teardown");
+    expect(copyToClipboardMock).not.toHaveBeenCalled();
+  });
+
+  it("a transcript whose copy finishes after teardown writes nothing", async () => {
+    apiMock.processFile.mockResolvedValue({
+      text: "copied after teardown",
+      duration_ms: 1000,
+      copied_to_clipboard: false,
+    });
+    let finishCopy: (copied: boolean) => void = () => {};
+    copyToClipboardMock.mockReturnValue(new Promise((resolve) => (finishCopy = resolve)));
+    const { container, teardown } = render();
+
+    dropFile(container, buildFile("slowcopy.wav", 2048));
+    await vi.waitFor(() => {
+      expect(copyToClipboardMock).toHaveBeenCalledTimes(1);
+    });
+
+    teardown();
+    finishCopy(true);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(resultText(container).textContent).not.toBe("copied after teardown");
   });
 
   it("a drop delivered after teardown transcribes nothing", async () => {

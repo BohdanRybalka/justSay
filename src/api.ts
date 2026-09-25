@@ -885,15 +885,15 @@ export const api = {
   stopMeetingRecording: () =>
     request<MeetingStopResponse>("POST", "/audio/meeting/stop", undefined, UNRECONCILED),
 
-  /** Stops the recorder as the handler's first act and can write the clipboard
-   *  as its last, so an abandoned one leaves both unknown and the transcript
-   *  possibly already in History. Transcription is legitimately slow — the local
-   *  path alone waits up to 300 s for readiness before it starts — so any budget
-   *  short enough to be useful fires on work that was going to finish. */
+  /** Stops the recorder as the handler's first act, so an abandoned one leaves
+   *  it unknown and the transcript possibly already in History. Transcription is
+   *  legitimately slow — the local path alone waits up to 300 s for readiness
+   *  before it starts — so any budget short enough to be useful fires on work
+   *  that was going to finish. The backend never copies: see `copyToClipboard`. */
   dictate: (sessionId: string, language = "uk") =>
     request<DictateResponse>(
       "POST",
-      `/pipeline/dictate?language=${language}`,
+      `/pipeline/dictate?language=${language}&copy_to_clipboard=false`,
       { session_id: sessionId },
       UNRECONCILED,
     ),
@@ -915,7 +915,7 @@ export const api = {
     const blob = new Blob([fileBytes], { type: "application/octet-stream" });
     form.append("file", blob, filename);
     return send<DictateResponse>(
-      `/pipeline/process-file?language=${language}`,
+      `/pipeline/process-file?language=${language}&copy_to_clipboard=false`,
       async () => {
         const token = await getToken();
         const headers: Record<string, string> = {};

@@ -7,6 +7,7 @@ import {
 } from "../accelerator";
 import { api, levelStream, REQUEST_TIMEOUT_MS } from "../api";
 import { hasOutlastedStartupBudget } from "../backend-startup";
+import { copyToClipboard } from "../clipboard";
 import {
   EVENT_MEETING_TOGGLE,
   EVENT_SETTINGS_CHANGED,
@@ -307,7 +308,9 @@ async function stopAndProcess() {
     return;
   }
 
-  const view = dictationResultView(outcome.result);
+  const { result } = outcome;
+  const copied = result.text.trim() !== "" && (await copyToClipboard(result.text));
+  const view = dictationResultView(result, copied);
   if (view) showResult(view);
   else setState("idle");
 }

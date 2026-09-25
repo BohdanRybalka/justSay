@@ -99,6 +99,17 @@ describe("token injection when a backend token is available", () => {
     expect(headerOf(0)["X-JustSay-Token"]).toBe("secret-token");
   });
 
+  it("processFile() never asks the backend to write the clipboard", async () => {
+    const { api } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ text: "hi" }));
+
+    await api.processFile(new ArrayBuffer(4), "clip.wav");
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "http://127.0.0.1:9377/pipeline/process-file?language=auto&copy_to_clipboard=false",
+    );
+  });
+
   it("levelStream() attaches X-JustSay-Token", async () => {
     const { levelStream } = await import("./api");
     fetchMock.mockResolvedValue({ ok: false, status: 500, body: null });
@@ -1104,7 +1115,7 @@ describe("session-carrying calls", () => {
     expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
       "http://127.0.0.1:9377/audio/start",
       "http://127.0.0.1:9377/audio/discard",
-      "http://127.0.0.1:9377/pipeline/dictate?language=uk",
+      "http://127.0.0.1:9377/pipeline/dictate?language=uk&copy_to_clipboard=false",
     ]);
     expect(bodies).toEqual([
       { session_id: SESSION_ID },

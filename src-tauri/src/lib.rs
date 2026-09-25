@@ -8,6 +8,7 @@ use tauri::{
 };
 
 mod backend;
+mod clipboard;
 mod widget_window;
 
 /// Kill the backend child process if one is running. Safe to call even if
@@ -283,7 +284,8 @@ pub fn run() {
             widget_window::set_widget_pill_rect,
             get_backend_token,
             set_meeting_recording,
-            show_settings_window
+            show_settings_window,
+            clipboard::write_clipboard_text
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
