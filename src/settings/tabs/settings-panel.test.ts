@@ -9,6 +9,7 @@ const {
   notifyErrorMock,
   apiMock,
   invokeMock,
+  renderKeysMock,
 } = vi.hoisted(() => ({
   saveSettingsMock: vi.fn(),
   emitSettingsChangedMock: vi.fn(async () => {}),
@@ -16,15 +17,22 @@ const {
   notifyErrorMock: vi.fn(async () => {}),
   apiMock: { getStorageInfo: vi.fn(), cleanupTemp: vi.fn(), clearHistory: vi.fn() },
   invokeMock: vi.fn(),
+  renderKeysMock: vi.fn(),
 }));
 
-vi.mock("../settings", () => ({ saveSettings: saveSettingsMock }));
+const CLOUD_STATUS = { gemini_key_set: false, groq_key_set: true };
+
+vi.mock("../settings", () => ({
+  saveSettings: saveSettingsMock,
+  getCloudKeyStatus: () => CLOUD_STATUS,
+}));
 vi.mock("./general", () => ({ emitSettingsChanged: emitSettingsChangedMock }));
 vi.mock("../../ui/theme", () => ({ applyAppTheme: applyAppThemeMock }));
 vi.mock("../../notify", () => ({ notifyError: notifyErrorMock }));
 vi.mock("../../api", () => ({ api: apiMock }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("./version-row", () => ({ renderVersionRow: vi.fn() }));
+vi.mock("./keys", () => ({ renderKeys: renderKeysMock }));
 
 import { renderSettingsPanel } from "./settings-panel";
 
@@ -209,5 +217,25 @@ describe("Delete all history", () => {
       ),
     );
     expect(buttonLabelled(area, "Delete all history").disabled).toBe(false);
+  });
+});
+
+describe("API keys", () => {
+  it("fold away, closed, between the card and Delete all history", () => {
+    const container = render("system");
+
+    const fold = container.querySelector<HTMLDetailsElement>("details.api-keys")!;
+    expect(fold.open).toBe(false);
+    expect(fold.classList.contains("fold")).toBe(true);
+    expect(fold.querySelector("summary")!.textContent).toBe("API keys");
+    expect(fold.previousElementSibling!.classList.contains("card")).toBe(true);
+    expect(fold.nextElementSibling!.classList.contains("history-delete")).toBe(true);
+  });
+
+  it("hold the key rows, drawn from the settings and the cloud key status", () => {
+    const container = render("system");
+
+    const rows = container.querySelector(".api-keys-rows");
+    expect(renderKeysMock).toHaveBeenCalledWith(rows, { theme: "system" }, CLOUD_STATUS);
   });
 });

@@ -396,9 +396,7 @@ describe("saveSettings — cloud-status refetch failure retains, does not null (
     await openSettingsPanel();
 
     expect(document.getElementById("groq-status")!.textContent).toContain("environment");
-    expect(document.getElementById("gemini-status")!.textContent).toBe(
-      "No key set — cloud STT will fail.",
-    );
+    expect(document.getElementById("gemini-replace")).toBeNull();
 
     apiMock.updateSettings.mockResolvedValueOnce({
       settings: buildSettings({ gemini_api_key: "***", groq_api_key: "" }),
@@ -412,7 +410,7 @@ describe("saveSettings — cloud-status refetch failure retains, does not null (
     (document.getElementById("gemini-save") as HTMLButtonElement).click();
 
     await vi.waitFor(() => {
-      expect(document.getElementById("gemini-status")!.textContent).toBe("Key stored.");
+      expect(document.getElementById("gemini-replace")).not.toBeNull();
     });
 
     const groqHint = document.getElementById("groq-status")!.textContent ?? "";
@@ -427,7 +425,7 @@ describe("saveSettings — cloud-status refetch failure retains, does not null (
 });
 
 describe("loadSettings — a later re-call's cloud-status refetch failure also retains, not nulls (Stage 3 fix)", () => {
-  it("a second loadSettings() call (e.g. after models.ts's STT-engine change) with a failing refetch keeps the prior cloud status", async () => {
+  it("a second loadSettings() call (e.g. after a routing change) with a failing refetch keeps the prior cloud status", async () => {
     apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.getSettings.mockResolvedValue(buildSettings({ gemini_api_key: "", groq_api_key: "" }));
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: true });

@@ -107,19 +107,7 @@ body {
   padding: 4px 16px;
 }
 
-.info-tip {
-  display: inline-block;
-  margin-left: 6px;
-  color: var(--text-muted);
-  font-size: 13px;
-  cursor: help;
-  user-select: none;
-}
-.info-tip:hover {
-  color: var(--accent);
-}
-
-select, input[type="text"], input[type="number"], input[type="password"] {
+select, input[type="text"], input[type="number"] {
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -129,27 +117,6 @@ select, input[type="text"], input[type="number"], input[type="password"] {
   font-family: inherit;
   outline: none;
   transition: border-color 0.15s;
-}
-
-.key-input-row input[disabled] {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.key-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.key-input-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.key-input-row input {
-  flex: 1;
-  min-width: 0;
 }
 
 select:focus, input:focus {
