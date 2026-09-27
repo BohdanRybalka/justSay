@@ -38,9 +38,11 @@ function button(label: string, className = "btn"): HTMLButtonElement {
 }
 
 /** Puts Cancel and `confirmLabel` in place of what `controls` holds until one
- *  is pressed, then puts it back. Resolves true only for `confirmLabel`. */
+ *  is pressed, then puts it back with focus on the button that asked.
+ *  Resolves true only for `confirmLabel`. */
 function confirmInline(controls: HTMLElement, confirmLabel: string): Promise<boolean> {
   const held = [...controls.childNodes];
+  const asker = document.activeElement;
   const cancel = button("Cancel");
   const confirm = button(confirmLabel, "btn btn-primary");
   controls.replaceChildren(cancel, confirm);
@@ -48,6 +50,7 @@ function confirmInline(controls: HTMLElement, confirmLabel: string): Promise<boo
   return new Promise((resolve) => {
     const answer = (yes: boolean): void => {
       controls.replaceChildren(...held);
+      if (asker instanceof HTMLElement && controls.contains(asker)) asker.focus();
       resolve(yes);
     };
     cancel.addEventListener("click", () => answer(false));

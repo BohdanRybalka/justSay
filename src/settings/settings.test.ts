@@ -1407,7 +1407,7 @@ describe("a file dropped where nothing in the page handles it", () => {
     expect(
       drop.defaultPrevented,
       "cancelling a text drop stops the browser inserting a folder path dragged from " +
-        "Explorer into the output-directory field, and nothing puts it there instead",
+        "Explorer into a text field, and nothing puts it there instead",
     ).toBe(false);
   });
 });

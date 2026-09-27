@@ -91,6 +91,18 @@ describe("Version row — check, install and restart", () => {
     expect(checkMock).toHaveBeenCalledTimes(1);
   });
 
+  it("forgets the old up-to-date time once an update is found", async () => {
+    localStorage.setItem(LAST_UP_TO_DATE_KEY, String(Date.now() - 86_400_000));
+    checkMock.mockResolvedValue(buildUpdate());
+    const { button } = renderRow();
+
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Install and restart"));
+
+    expect(localStorage.getItem(LAST_UP_TO_DATE_KEY)).toBeNull();
+    expect(renderRow().status.textContent).toBe("Never checked for updates");
+  });
+
   it("keeps the button disabled for the whole install", async () => {
     let finishInstall!: () => void;
     const downloadAndInstall = vi.fn(() => new Promise<void>((resolve) => (finishInstall = resolve)));

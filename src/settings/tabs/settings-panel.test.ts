@@ -172,6 +172,17 @@ describe("Delete all history", () => {
     expect(buttonLabelled(area, "Delete all history")).toBeDefined();
   });
 
+  it("hands focus back to the button that asked once the question is answered", async () => {
+    const area = deleteArea(render("system"));
+    const start = buttonLabelled(area, "Delete all history");
+
+    start.focus();
+    start.click();
+    buttonLabelled(area, "Cancel").click();
+
+    await vi.waitFor(() => expect(document.activeElement).toBe(start));
+  });
+
   it("deletes everything on the confirmation and says so", async () => {
     apiMock.clearHistory.mockResolvedValue({ deleted: 12 });
     const area = deleteArea(render("system"));

@@ -51,9 +51,10 @@ function readLastUpToDate(): number | null {
   }
 }
 
-function rememberUpToDate(at: number): void {
+function rememberUpToDate(at: number | null): void {
   try {
-    localStorage.setItem(LAST_UP_TO_DATE_KEY, String(at));
+    if (at === null) localStorage.removeItem(LAST_UP_TO_DATE_KEY);
+    else localStorage.setItem(LAST_UP_TO_DATE_KEY, String(at));
   } catch {}
 }
 
@@ -114,6 +115,7 @@ export function renderVersionRow(row: HTMLElement, isDestroyed: () => boolean): 
         offerCheck();
         return;
       }
+      rememberUpToDate(null);
       status.textContent = `Version ${found.version} is ready`;
       offerInstall(found, "Install and restart");
     } catch (err) {
