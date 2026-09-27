@@ -128,8 +128,12 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 
 const applyThemePreferenceMock = vi.fn();
+const applyAppThemeMock = vi.fn(async () => {});
 
-vi.mock("../ui/theme", () => ({ applyThemePreference: applyThemePreferenceMock }));
+vi.mock("../ui/theme", () => ({
+  applyThemePreference: applyThemePreferenceMock,
+  applyAppTheme: applyAppThemeMock,
+}));
 
 /** Delivers the first `settings-shown`, the way opening the hidden window does.
  *
@@ -164,6 +168,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     gemini_api_key: "",
     groq_api_key: "",
     meeting_consent_acknowledged: false,
+    theme: "system",
     ...overrides,
   };
 }
@@ -213,6 +218,16 @@ describe("theme", () => {
 
     expect(applyThemePreferenceMock).toHaveBeenCalledWith("system");
     await vi.waitFor(() => expect(settingsModule.getSettings()).not.toBeNull());
+  });
+
+  it("takes the theme the settings name once they load", async () => {
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
+    apiMock.getSettings.mockResolvedValue(buildSettings({ theme: "dark" }));
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
+
+    await import("./settings");
+
+    await vi.waitFor(() => expect(applyAppThemeMock).toHaveBeenCalledWith("dark"));
   });
 });
 

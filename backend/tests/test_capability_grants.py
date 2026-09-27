@@ -28,6 +28,7 @@ WINDOW_CONTROL_PERMISSIONS = frozenset(
     {"core:window:allow-minimize", "core:window:allow-toggle-maximize", "core:window:allow-close"}
 )
 MAIN_WINDOW_LABEL = "settings"
+APP_THEME_PERMISSION = "core:app:allow-set-app-theme"
 
 WIDGET_BUILDER_PATTERN = re.compile(
     r"WebviewWindowBuilder::new\([^;]*?\"widget\"[^;]*?\.build\(\)", re.DOTALL
@@ -169,4 +170,17 @@ def test_the_main_window_holds_every_title_bar_control_grant():
         f"the main window lost {sorted(missing)}. Its title bar draws minimise, maximise and close "
         "itself on Windows, so without the grant the button is refused silently at the IPC "
         "boundary and the window cannot be closed from its own bar."
+    )
+
+
+def test_the_main_window_may_set_the_app_theme():
+    granted_to_main = set()
+    for path in sorted(CAPABILITIES_DIR.glob("*.json")):
+        capability = json.loads(path.read_text(encoding="utf-8"))
+        if MAIN_WINDOW_LABEL in capability.get("windows", []):
+            granted_to_main.update(_permission_identifiers(capability))
+
+    assert APP_THEME_PERMISSION in granted_to_main, (
+        "the main window cannot set the app theme, so a chosen Light or Dark stops at the page: "
+        "scrollbars and the macOS title area keep following the OS."
     )

@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { applyThemePreference } from "./theme";
+import { applyAppTheme, applyThemePreference } from "./theme";
+
+const setThemeMock = vi.hoisted(() =>
+  vi.fn<(theme: "light" | "dark" | null) => Promise<void>>(async () => {}),
+);
+
+vi.mock("@tauri-apps/api/app", () => ({ setTheme: setThemeMock }));
 
 interface FakeColourScheme {
   matches: boolean;
@@ -63,6 +69,35 @@ describe("applyThemePreference", () => {
 
     applyThemePreference("light");
     scheme.switchTo(true);
+
+    expect(currentTheme()).toBe("light");
+  });
+});
+
+describe("applyAppTheme", () => {
+  it("hands a chosen theme to the app's native parts as well as the page", async () => {
+    stubColourScheme(false);
+
+    await applyAppTheme("dark");
+
+    expect(currentTheme()).toBe("dark");
+    expect(setThemeMock).toHaveBeenLastCalledWith("dark");
+  });
+
+  it("gives the native parts back to the OS when following the system", async () => {
+    stubColourScheme(true);
+
+    await applyAppTheme("system");
+
+    expect(currentTheme()).toBe("dark");
+    expect(setThemeMock).toHaveBeenLastCalledWith(null);
+  });
+
+  it("keeps the page's theme when there is no app behind the page", async () => {
+    stubColourScheme(false);
+    setThemeMock.mockRejectedValueOnce(new TypeError("no Tauri bridge"));
+
+    await expect(applyAppTheme("light")).resolves.toBeUndefined();
 
     expect(currentTheme()).toBe("light");
   });

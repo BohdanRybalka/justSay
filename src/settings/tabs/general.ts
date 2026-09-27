@@ -702,7 +702,7 @@ function loadEventApi(): Promise<typeof import("@tauri-apps/api/event")> {
   return eventApi;
 }
 
-async function emitSettingsChanged() {
+export async function emitSettingsChanged() {
   try {
     const { emit } = await loadEventApi();
     await emit(EVENT_SETTINGS_CHANGED);

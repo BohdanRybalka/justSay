@@ -26,7 +26,8 @@ import { renderMetrics } from "./tabs/metrics";
 import { renderWords } from "./tabs/words";
 import { renderTranscribe } from "./tabs/transcribe";
 import { renderAccount } from "./tabs/account";
-import { applyThemePreference } from "../ui/theme";
+import { renderSettingsPanel } from "./tabs/settings-panel";
+import { applyAppTheme, applyThemePreference } from "../ui/theme";
 import { mountIconSprite } from "../ui/icons";
 import { detectShortcutPlatform } from "../accelerator";
 import { renderTitlebar, wireTitlebar } from "./shell/titlebar";
@@ -116,8 +117,10 @@ const panels: Record<PanelName, PanelRenderer> = {
   history: (container) => hostLegacyTabs(container, [renderTranscribe, renderHistory]),
   dictation: (container, loaded, windowHidden) =>
     hostLegacyTabs(container, [(tab) => renderModels(tab, loaded, windowHidden)]),
-  settings: (container, loaded) =>
-    hostLegacyTabs(container, [(tab) => renderGeneral(tab, loaded), renderMetrics]),
+  settings: (container, loaded) => {
+    renderSettingsPanel(container, loaded);
+    return hostLegacyTabs(container, [(tab) => renderGeneral(tab, loaded), renderMetrics]);
+  },
   account: (container) => renderAccount(container, accountName),
 };
 
@@ -320,6 +323,7 @@ export async function loadSettings(): Promise<UserSettings> {
     ),
   ]);
   settings = loaded;
+  void applyAppTheme(loaded.theme);
   return settings;
 }
 
