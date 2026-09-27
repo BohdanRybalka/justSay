@@ -4,7 +4,7 @@
 /// The account's full name, or its login name when the OS holds no full name
 /// for it (a local Windows account often has none). Empty only when the OS
 /// answers neither.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn os_display_name() -> String {
     display_name(whoami::realname().ok(), whoami::username().ok())
 }

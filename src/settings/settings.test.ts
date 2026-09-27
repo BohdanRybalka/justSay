@@ -57,12 +57,16 @@ vi.mock("./tabs/words", () => ({
   }),
 }));
 
-const metricsTab = { destroy: vi.fn() };
+const metricsTab = {
+  destroy: vi.fn(),
+  releaseResources: vi.fn(),
+  resumeResources: vi.fn(),
+};
 
 vi.mock("./tabs/metrics", () => ({
   renderMetrics: vi.fn((container: HTMLElement) => {
     container.innerHTML = '<div id="metrics-tab-body"></div>';
-    return metricsTab.destroy;
+    return metricsTab;
   }),
 }));
 
@@ -310,6 +314,19 @@ describe("the sidebar", () => {
     expect(pane.querySelector(".avatar--large")!.textContent).toBe("BR");
     expect(pane.querySelector(".account-card-name")!.textContent).toBe("Bohdan Rybalka");
     expect(pane.textContent).toContain("On this computer.");
+  });
+
+  it("pauses and resumes every tab a panel hosts, not only the first", async () => {
+    await bootWithSettingsLoaded();
+    const { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } = await import("../contracts");
+    await openSettingsWindow();
+    openPanel("settings");
+
+    await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
+    expect(metricsTab.releaseResources).toHaveBeenCalledOnce();
+
+    await eventListeners.get(EVENT_SETTINGS_SHOWN)!({});
+    expect(metricsTab.resumeResources).toHaveBeenCalledOnce();
   });
 
   it("brings the pane back to the top on every switch", async () => {
