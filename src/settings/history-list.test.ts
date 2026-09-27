@@ -3,15 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HistoryCursor, HistoryEntry, HistoryPageResponse } from "../api";
 import { buildEntry } from "./history-page-stub.test-helper";
 
-const confirmMock = vi.fn();
-
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  confirm: confirmMock,
-}));
-
 const apiMock = {
   getHistory: vi.fn(),
-  clearHistory: vi.fn(),
 };
 
 /**
@@ -33,7 +26,7 @@ const { createHistoryList, formatEntryCount, sidecarTooOldText } = await import(
 const TRANSCRIPTS = { singular: "transcript", plural: "transcripts" };
 const ENTRIES = { singular: "entry", plural: "entries" };
 
-describe("formatEntryCount — the two tabs keep their own wording", () => {
+describe("formatEntryCount — counts in the noun it is given", () => {
   it("uses the plural for zero", () => {
     expect(formatEntryCount(0, TRANSCRIPTS)).toBe("0 transcripts");
     expect(formatEntryCount(0, ENTRIES)).toBe("0 entries");
@@ -56,7 +49,6 @@ interface Harness {
     rows: HTMLElement;
     loadMoreWrapper: HTMLElement;
     loadMoreButton: HTMLButtonElement;
-    clearButton: HTMLButtonElement;
   };
   paintedIds: () => string[];
   loadMoreVisible: () => boolean;
@@ -68,9 +60,8 @@ function harness(): Harness {
   const rows = document.createElement("div");
   const loadMoreWrapper = document.createElement("div");
   const loadMoreButton = document.createElement("button");
-  const clearButton = document.createElement("button");
   return {
-    elements: { count, rows, loadMoreWrapper, loadMoreButton, clearButton },
+    elements: { count, rows, loadMoreWrapper, loadMoreButton },
     paintedIds: () => Array.from(rows.children).map((el) => el.textContent!),
     loadMoreVisible: () => loadMoreWrapper.style.display === "block",
     countText: () => count.textContent!,
@@ -204,26 +195,6 @@ describe("createHistoryList — the client echoes cursors and never builds one",
 
     expect(sentCursors()).toEqual([null, first, null]);
     expect(h.paintedIds()).toEqual(["a", "b"]);
-  });
-
-  it("clearAll() drops the cursor, so nothing can page into the deleted history", async () => {
-    const h = harness();
-    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
-    confirmMock.mockResolvedValue(true);
-    apiMock.clearHistory.mockResolvedValue({ deleted: 5 });
-    queueResponses({ entries: [buildEntry("a"), buildEntry("b")], total: 5, next_cursor: cursor });
-
-    const list = listOver(h);
-    await list.load();
-    h.elements.clearButton.click();
-    await vi.waitFor(() => expect(apiMock.clearHistory).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() => expect(h.countText()).toBe("0 transcripts"));
-
-    h.elements.loadMoreButton.click();
-    await flush();
-
-    expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
-    expect(sentCursors()).toEqual([null]);
   });
 
   it("refuses an append while the stored cursor is null instead of re-asking for page one", async () => {
@@ -462,47 +433,6 @@ describe("createHistoryList — one request at a time decides the rows and the c
     expect(h.countText()).toBe("1 transcript");
   });
 
-  it("keeps the version-skew warning over an emptied store, because the backend is still the old one", async () => {
-    const h = harness();
-    apiMock.getHistory.mockResolvedValueOnce({
-      entries: [buildEntry("a")],
-      total: 5,
-      next_cursor: null,
-    });
-    apiMock.getHistory.mockRejectedValue(new SidecarTooOldError("no next_cursor"));
-    confirmMock.mockResolvedValue(true);
-    apiMock.clearHistory.mockResolvedValue({ deleted: 5 });
-
-    const list = listOver(h);
-    await list.load();
-    await list.load();
-    expect(h.countText()).toBe(sidecarTooOldText("History"));
-
-    h.elements.clearButton.click();
-    await vi.waitFor(() => expect(apiMock.clearHistory).toHaveBeenCalledTimes(1));
-    await flush();
-
-    expect(h.countText()).toBe(sidecarTooOldText("History"));
-    expect(h.loadMoreVisible()).toBe(false);
-    expect(h.elements.loadMoreButton.disabled).toBe(false);
-  });
-
-  it("clearAll() paints the empty count and hides Load more through the claim it took", async () => {
-    const h = harness();
-    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
-    queueResponses({ entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor });
-    confirmMock.mockResolvedValue(true);
-    apiMock.clearHistory.mockResolvedValue(undefined);
-
-    await listOver(h).load();
-    h.elements.clearButton.click();
-    await vi.waitFor(() => expect(apiMock.clearHistory).toHaveBeenCalledTimes(1));
-
-    await vi.waitFor(() => expect(h.countText()).toBe("0 transcripts"));
-    expect(h.loadMoreVisible()).toBe(false);
-    expect(h.elements.loadMoreButton.disabled).toBe(false);
-  });
-
   it("ignores a second Load more click while the first is still outstanding", async () => {
     const h = harness();
     const cursor: HistoryCursor = { ts: 300, id: "second-row" };
@@ -611,60 +541,6 @@ describe("createHistoryList — one request at a time decides the rows and the c
     expect(h.paintedIds()).toEqual(["a", "b", "c", "d"]);
   });
 
-  it("leaves Load more clickable after clearAll() superseded an outstanding append", async () => {
-    const h = harness();
-    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
-    const append = deferredPage();
-    confirmMock.mockResolvedValue(true);
-    apiMock.clearHistory.mockResolvedValue({ deleted: 4 });
-    let calls = 0;
-    apiMock.getHistory.mockImplementation(async () => {
-      calls += 1;
-      return calls === 2
-        ? append.promise
-        : { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor };
-    });
-
-    const list = listOver(h);
-    await list.load();
-    h.elements.loadMoreButton.click();
-    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
-    h.elements.clearButton.click();
-    await vi.waitFor(() => expect(h.countText()).toBe("0 transcripts"));
-    append.release({ entries: [buildEntry("c")], total: 4, next_cursor: null });
-    await flush();
-
-    expect(h.elements.loadMoreButton.disabled).toBe(false);
-    expect(sentCursors()).toEqual([null, cursor]);
-  });
-
-  it("lets clearAll() supersede an append that is still in flight", async () => {
-    const h = harness();
-    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
-    const append = deferredPage();
-    confirmMock.mockResolvedValue(true);
-    apiMock.clearHistory.mockResolvedValue({ deleted: 4 });
-    let calls = 0;
-    apiMock.getHistory.mockImplementation(async () => {
-      calls += 1;
-      return calls === 1
-        ? { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor }
-        : append.promise;
-    });
-
-    const list = listOver(h);
-    await list.load();
-    h.elements.loadMoreButton.click();
-    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
-    h.elements.clearButton.click();
-    await vi.waitFor(() => expect(h.countText()).toBe("0 transcripts"));
-    append.release({ entries: [buildEntry("c"), buildEntry("d")], total: 4, next_cursor: null });
-    await flush();
-
-    expect(h.paintedIds()).toEqual([]);
-    expect(h.countText()).toBe("0 transcripts");
-    expect(h.loadMoreVisible()).toBe(false);
-  });
 });
 
 describe("createHistoryList — Load more tracks next_cursor, not the total", () => {

@@ -3,12 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HistoryEntry, HistoryPageResponse } from "../../api";
 import { buildEntry, pagesByCursor } from "../history-page-stub.test-helper";
 
-const confirmMock = vi.fn();
-
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  confirm: confirmMock,
-}));
-
 const copyToClipboardMock = vi.fn();
 
 vi.mock("../../clipboard", () => ({
@@ -18,7 +12,6 @@ vi.mock("../../clipboard", () => ({
 const apiMock = {
   getHistory: vi.fn(),
   searchHistory: vi.fn(),
-  clearHistory: vi.fn(),
   deleteHistoryEntry: vi.fn(),
 };
 
@@ -61,10 +54,6 @@ async function renderPaged(total: number): Promise<HTMLElement> {
     expect(container.querySelector("#history-count")!.textContent).not.toBe("Loading...");
   });
   return container;
-}
-
-function clearButton(container: HTMLElement): HTMLButtonElement {
-  return container.querySelector<HTMLButtonElement>("#btn-clear-history")!;
 }
 
 /**
@@ -469,63 +458,9 @@ describe("renderHistory — Load more while a search owns the rows", () => {
     });
   });
 
-  it("ends a Clear All with the wrapper hidden and the button live", async () => {
-    apiMock.getHistory.mockResolvedValue({
-      entries: [buildEntry("1")],
-      total: 60,
-      next_cursor: { ts: 30, id: "30" },
-    });
-    confirmMock.mockResolvedValue(true);
-    apiMock.clearHistory.mockResolvedValue({ deleted: 60 });
-
-    const container = document.createElement("div");
-    renderHistory(container);
-    await vi.waitFor(() => {
-      expect(container.querySelector("#history-count")!.textContent).toBe("60 transcripts");
-    });
-
-    clearButton(container).click();
-    await vi.waitFor(() => {
-      expect(container.querySelector("#history-count")!.textContent).toBe("0 transcripts");
-    });
-
-    expect(container.querySelector<HTMLElement>("#history-load-more")!.style.display).toBe("none");
-    expect(container.querySelector<HTMLButtonElement>("#btn-load-more")!.disabled).toBe(false);
-  });
 });
 
 describe("renderHistory — the search hint belongs to the lane that put it up", () => {
-  it("clears Searching... when Clear All takes the rows over before the search answers", async () => {
-    const entries = [buildEntry("1"), buildEntry("2")];
-    apiMock.getHistory.mockResolvedValue({ entries, total: 2, next_cursor: null });
-    const search = deferred<{ entries: HistoryEntry[]; total: number }>();
-    apiMock.searchHistory.mockReturnValue(search.promise);
-    confirmMock.mockResolvedValue(true);
-    apiMock.clearHistory.mockResolvedValue({ deleted: 2 });
-
-    const container = document.createElement("div");
-    renderHistory(container);
-    await vi.waitFor(() => {
-      expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
-    });
-
-    await typeQuery(container, "hello");
-    await vi.waitFor(() => expect(apiMock.searchHistory).toHaveBeenCalledTimes(1));
-    expect(container.querySelector("#history-search-hint")!.textContent).toBe("Searching...");
-
-    clearButton(container).click();
-    await vi.waitFor(() => {
-      expect(container.querySelector("#history-count")!.textContent).toBe("0 transcripts");
-    });
-
-    search.release({ entries: [buildEntry("9")], total: 1 });
-    await flush();
-
-    expect(container.querySelector("#history-search-hint")!.textContent).toBe("");
-    expect(container.querySelector("#history-count")!.textContent).toBe("0 transcripts");
-    expect(container.querySelectorAll(".history-entry")).toHaveLength(0);
-  });
-
   it("keeps a failing search's own message, which the lane still owns", async () => {
     const entries = [buildEntry("1"), buildEntry("2")];
     apiMock.getHistory.mockResolvedValue({ entries, total: 2, next_cursor: null });
@@ -678,7 +613,7 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
 });
 
 describe("renderHistory — the version-skew message names this tab", () => {
-  it("says History, where the same module tells the Metrics tab to say Metrics", async () => {
+  it("says History, the name this tab hands the shared list", async () => {
     apiMock.getHistory.mockRejectedValue(new SidecarTooOldError("no next_cursor"));
     const container = document.createElement("div");
 
@@ -700,95 +635,6 @@ describe("renderHistory — a delete moves the total only when the rows are the 
     await deleteFirstRow(container);
 
     expect(container.querySelector("#history-count")!.textContent).toBe("1 transcript");
-  });
-});
-
-describe("renderHistory — Clear All leaves no message describing rows that are gone", () => {
-  it("clears a search error the box still shows, along with the box and the rows", async () => {
-    apiMock.getHistory.mockResolvedValue({
-      entries: [buildEntry("1"), buildEntry("2")],
-      total: 2,
-      next_cursor: null,
-    });
-    apiMock.searchHistory.mockRejectedValue(new Error("503 store busy"));
-    confirmMock.mockResolvedValue(true);
-    apiMock.clearHistory.mockResolvedValue({ deleted: 2 });
-
-    const container = document.createElement("div");
-    renderHistory(container);
-    await vi.waitFor(() => {
-      expect(container.querySelector("#history-count")!.textContent).toBe("2 transcripts");
-    });
-
-    await typeQuery(container, "hello");
-    await vi.waitFor(() => {
-      expect(container.querySelector("#history-search-hint")!.textContent).toBe("503 store busy");
-    });
-
-    clearButton(container).click();
-    await vi.waitFor(() => {
-      expect(container.querySelector("#history-count")!.textContent).toBe("0 transcripts");
-    });
-
-    expect(container.querySelector("#history-search-hint")!.textContent).toBe("");
-    expect(container.querySelector<HTMLInputElement>("#history-search")!.value).toBe("");
-  });
-});
-
-describe("renderHistory — Clear All asks before deleting everything", () => {
-  it("cancelling the dialog leaves every transcript in place", async () => {
-    confirmMock.mockResolvedValue(false);
-    const container = await renderWith(2);
-
-    clearButton(container).click();
-
-    await vi.waitFor(() => {
-      expect(confirmMock).toHaveBeenCalledTimes(1);
-    });
-    expect(apiMock.clearHistory).not.toHaveBeenCalled();
-    expect(container.querySelectorAll(".history-entry")).toHaveLength(2);
-  });
-
-  it("cancelling re-enables the button instead of leaving it dead", async () => {
-    confirmMock.mockResolvedValue(false);
-    const container = await renderWith(2);
-
-    clearButton(container).click();
-
-    await vi.waitFor(() => {
-      expect(clearButton(container).disabled).toBe(false);
-    });
-    expect(clearButton(container).textContent).toBe("Clear All");
-  });
-
-  it("the dialog names how many transcripts go and that Metrics shares them", async () => {
-    confirmMock.mockResolvedValue(false);
-    const container = await renderWith(2);
-
-    clearButton(container).click();
-
-    await vi.waitFor(() => {
-      expect(confirmMock).toHaveBeenCalledTimes(1);
-    });
-    const [message] = confirmMock.mock.calls[0];
-    expect(message).toContain("2 transcripts");
-    expect(message).toContain("Metrics");
-  });
-
-  it("confirming the dialog clears the list", async () => {
-    confirmMock.mockResolvedValue(true);
-    apiMock.clearHistory.mockResolvedValue({ deleted: 2 });
-    const container = await renderWith(2);
-
-    clearButton(container).click();
-
-    await vi.waitFor(() => {
-      expect(apiMock.clearHistory).toHaveBeenCalledTimes(1);
-    });
-    await vi.waitFor(() => {
-      expect(container.querySelector("#history-count")!.textContent).toBe("0 transcripts");
-    });
-    expect(container.querySelectorAll(".history-entry")).toHaveLength(0);
   });
 });
 

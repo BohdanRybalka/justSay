@@ -10,6 +10,7 @@ use tauri::{
 mod account;
 mod backend;
 mod clipboard;
+mod scratch_folder;
 mod widget_window;
 
 /// Kill the backend child process if one is running. Safe to call even if
@@ -290,7 +291,8 @@ pub fn run() {
             set_meeting_recording,
             show_settings_window,
             clipboard::write_clipboard_text,
-            account::os_display_name
+            account::os_display_name,
+            scratch_folder::open_scratch_folder
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
