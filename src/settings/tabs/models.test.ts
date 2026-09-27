@@ -48,6 +48,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     groq_api_key: "",
     meeting_consent_acknowledged: false,
     theme: "system",
+    display_name: "",
     ...overrides,
   };
 }

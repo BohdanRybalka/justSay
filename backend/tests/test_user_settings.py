@@ -377,6 +377,22 @@ def test_an_unknown_theme_is_refused():
         user_settings.update_user_settings({"theme": "sepia"})
 
 
+def test_the_name_is_left_to_the_computer_until_one_is_chosen():
+    assert user_settings.UserSettings().display_name == ""
+
+
+def test_a_chosen_name_survives_a_restart(isolated):
+    user_settings.update_user_settings({"display_name": "Богдан"})
+
+    user_settings._settings = None
+    assert user_settings.get_user_settings().display_name == "Богдан"
+
+
+def test_a_name_longer_than_the_field_holds_is_refused():
+    with pytest.raises(ValueError):
+        user_settings.update_user_settings({"display_name": "x" * 81})
+
+
 def test_sync_to_runtime_propagates_keys(monkeypatch):
     """sync_to_runtime pushes non-empty keys into the runtime STT config."""
     from app.config import settings as runtime_settings
