@@ -4,7 +4,12 @@ import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SHORTCUT, detectShortcutPlatform, formatAccelerator } from "../accelerator";
 import { BACKEND_WAIT_BUDGET_MS } from "../backend-startup";
-import { EVENT_MEETING_TOGGLE, EVENT_SHORTCUT_REQUESTED, EVENT_WIDGET_HOVER } from "../contracts";
+import {
+  EVENT_MEETING_TOGGLE,
+  EVENT_SETTINGS_CHANGED,
+  EVENT_SHORTCUT_REQUESTED,
+  EVENT_WIDGET_HOVER,
+} from "../contracts";
 import { PILL_HOVER_CLASS } from "./pill";
 import { CONNECTION_POLL_MS } from "./settings-retry";
 
@@ -198,7 +203,11 @@ beforeEach(() => {
       }
     },
   );
-  vi.stubGlobal("matchMedia", () => ({ addEventListener: () => {} }));
+  vi.stubGlobal("matchMedia", () => ({
+    matches: false,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
 });
 
 afterEach(() => {
@@ -246,6 +255,17 @@ describe("the widget window's shape", () => {
 
     const expected = formatAccelerator("Ctrl+Shift+KeyD", detectShortcutPlatform(navigator));
     await vi.waitFor(() => expect(pillLabel()).toBe(expected));
+  });
+
+  it("takes the theme the settings name, and the next one chosen in Settings", async () => {
+    apiMock.getSettings.mockResolvedValue({ language: "uk", shortcut: DEFAULT_SHORTCUT, theme: "dark" } as never);
+    await loadWidget();
+    await vi.waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
+
+    apiMock.getSettings.mockResolvedValue({ language: "uk", shortcut: DEFAULT_SHORTCUT, theme: "light" } as never);
+    await listeners.get(EVENT_SETTINGS_CHANGED)!({ payload: null });
+
+    await vi.waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
   });
 
   it("offers the shortcut that works, even when saving it to the settings failed", async () => {

@@ -361,6 +361,22 @@ def test_the_meeting_acknowledgement_defaults_to_not_given():
     assert user_settings.UserSettings().meeting_consent_acknowledged is False
 
 
+def test_the_theme_follows_the_system_until_one_is_chosen():
+    assert user_settings.UserSettings().theme == "system"
+
+
+def test_a_chosen_theme_survives_a_restart(isolated):
+    user_settings.update_user_settings({"theme": "dark"})
+
+    user_settings._settings = None
+    assert user_settings.get_user_settings().theme == "dark"
+
+
+def test_an_unknown_theme_is_refused():
+    with pytest.raises(ValueError):
+        user_settings.update_user_settings({"theme": "sepia"})
+
+
 def test_sync_to_runtime_propagates_keys(monkeypatch):
     """sync_to_runtime pushes non-empty keys into the runtime STT config."""
     from app.config import settings as runtime_settings

@@ -9,7 +9,7 @@ import {
   type WidgetSettings,
 } from "./settings-retry";
 
-const FETCHED: WidgetSettings = { language: "uk", shortcut: "Alt+Space" };
+const FETCHED: WidgetSettings = { language: "uk", shortcut: "Alt+Space", theme: "system" };
 
 function refused() {
   return new Error("HTTP 401 Missing or invalid API token");
@@ -290,7 +290,7 @@ describe("the bounded settings retry", () => {
   it("serves a settings change that arrives while a load is already running", async () => {
     const time = clock();
     const gate = deferred<WidgetSettings>();
-    const changed: WidgetSettings = { language: "en", shortcut: "Alt+Space" };
+    const changed: WidgetSettings = { language: "en", shortcut: "Alt+Space", theme: "dark" };
     const deps = actions({
       now: time.now,
       fetchSettings: vi.fn().mockImplementationOnce(() => gate.promise).mockResolvedValue(changed),

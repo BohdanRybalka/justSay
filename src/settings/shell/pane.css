@@ -29,6 +29,7 @@
   font-size: 13px;
 }
 
+.card + .legacy-tab,
 .legacy-tab + .legacy-tab {
   margin-top: 32px;
 }

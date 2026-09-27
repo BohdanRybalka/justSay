@@ -675,6 +675,7 @@ const settingsRetry = createSettingsRetry({
   isBusy: () => state === "recording" || state === "processing",
   fetchSettings: () => api.getSettings(),
   applySettings: async (settings) => {
+    applyThemePreference(settings.theme);
     currentLanguage = settings.language;
     currentShortcut = settings.shortcut;
     await applyAndReportShortcut(currentShortcut);

@@ -4,6 +4,7 @@
 
 import { BACKEND_BASE_URL } from "./contracts";
 import { TimedOutError } from "./timeout";
+import type { ThemePreference } from "./ui/theme";
 
 /** Why the per-launch token could not be obtained, retained so the UI can name
  *  the failing layer instead of presenting as a dead window (ADR 028).
@@ -560,6 +561,7 @@ export interface UserSettings {
   /** Whether the user has acknowledged the meeting-recording disclosure. The
    *  backend answers `403` to `POST /audio/meeting/start` until it is true. */
   meeting_consent_acknowledged: boolean;
+  theme: ThemePreference;
 }
 
 export interface CloudKeyStatus {

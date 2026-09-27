@@ -91,6 +91,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     gemini_api_key: "",
     groq_api_key: "",
     meeting_consent_acknowledged: false,
+    theme: "system",
     ...overrides,
   };
 }

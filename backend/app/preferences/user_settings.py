@@ -79,6 +79,8 @@ class UserSettings(BaseModel):
 
     meeting_consent_acknowledged: bool = False
 
+    theme: Literal["system", "light", "dark"] = "system"
+
 
 @dataclass
 class UpdateResult:
