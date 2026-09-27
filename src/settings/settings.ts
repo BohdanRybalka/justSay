@@ -26,6 +26,9 @@ import { renderMetrics } from "./tabs/metrics";
 import { renderWords } from "./tabs/words";
 import { renderTranscribe } from "./tabs/transcribe";
 import { applyThemePreference } from "../ui/theme";
+import { mountIconSprite } from "../ui/icons";
+import { detectShortcutPlatform } from "../accelerator";
+import { renderTitlebar, wireTitlebar } from "./shell/titlebar";
 
 
 let currentTab = "general";
@@ -46,6 +49,7 @@ const BACKEND_PROBE_INTERVAL_MS = 5000;
 const BACKEND_STILL_STARTING_MESSAGE = `The backend has not finished starting in ${BACKEND_WAIT_BUDGET_MS / 1000} seconds. It may still be coming up — try again, or restart JustSay.`;
 
 
+const titlebar = document.getElementById("titlebar")!;
 const tabContent = document.getElementById("tab-content")!;
 const navButtons = document.querySelectorAll<HTMLButtonElement>(".nav-btn");
 const backendStatus = document.getElementById("backend-status")!;
@@ -502,8 +506,21 @@ async function trackTabWindowVisibility() {
 }
 
 
+/** Hand the title bar's controls to this window; served by Vite there is no
+ *  window behind the page, and the bar stays drawn without them. */
+async function connectTitlebarToWindow() {
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await wireTitlebar(titlebar, getCurrentWindow());
+  } catch {
+  }
+}
+
 function init() {
   applyThemePreference("system");
+  mountIconSprite(document);
+  renderTitlebar(titlebar, detectShortcutPlatform(navigator));
+  void connectTitlebarToWindow();
   void initAppVersion();
   void trackTabWindowVisibility();
   renderSettingsUnavailable(tabContent, currentStartupScreen());

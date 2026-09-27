@@ -144,6 +144,7 @@ beforeEach(() => {
   releaseVisibilityRead = () => {};
   modelsMountedHidden.length = 0;
   document.body.innerHTML = `
+    <header id="titlebar" class="titlebar"></header>
     <ul class="sidebar-nav">
       <li><button class="nav-btn active" data-tab="general">General</button></li>
       <li><button class="nav-btn" data-tab="models">Models</button></li>
@@ -163,6 +164,21 @@ describe("theme", () => {
     const settingsModule = await import("./settings");
 
     expect(applyThemePreferenceMock).toHaveBeenCalledWith("system");
+    await vi.waitFor(() => expect(settingsModule.getSettings()).not.toBeNull());
+  });
+});
+
+describe("title bar", () => {
+  it("is drawn with the app's name as soon as the window loads", async () => {
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
+    apiMock.getSettings.mockResolvedValue(buildSettings());
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
+    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+
+    const settingsModule = await import("./settings");
+
+    expect(document.querySelector("#titlebar .titlebar-name")?.textContent).toBe("JustSay");
+    expect(document.querySelector("#titlebar #btn-close")).not.toBeNull();
     await vi.waitFor(() => expect(settingsModule.getSettings()).not.toBeNull());
   });
 });
