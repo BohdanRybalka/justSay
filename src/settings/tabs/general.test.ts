@@ -28,10 +28,6 @@ vi.mock("../settings", () => ({
   cachePersistedShortcut: cachePersistedShortcutMock,
 }));
 
-vi.mock("./keys", () => ({
-  renderKeys: vi.fn(() => () => {}),
-}));
-
 const notifyErrorMock = vi.fn();
 vi.mock("../../notify", () => ({
   notifyError: notifyErrorMock,

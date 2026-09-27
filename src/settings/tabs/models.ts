@@ -33,16 +33,6 @@ export function renderModels(
           <span id="stt-local-indicator" class="status-indicator-badge"></span>
         </div>
       </div>
-      <div class="setting-row" id="stt-engine-row" style="${settings.stt_mode === "cloud" ? "" : "display:none;"}">
-        <span class="label">Cloud engine
-          <span class="info-tip" title="Auto: short clips (≤ 30 s) go to Groq Whisper for speed; long audio goes to Gemini Native Audio. Pin Groq or Gemini to force one provider — pinned-Groq automatically falls back to Gemini for unsupported formats (.webm).">&#9432;</span>
-        </span>
-        <select id="stt-engine">
-          <option value="auto" ${settings.stt_engine === "auto" ? "selected" : ""}>Auto (recommended)</option>
-          <option value="groq" ${settings.stt_engine === "groq" ? "selected" : ""}>Groq Whisper (fast, short)</option>
-          <option value="gemini" ${settings.stt_engine === "gemini" ? "selected" : ""}>Gemini (long / any format)</option>
-        </select>
-      </div>
       <div class="setting-hint">
         Cloud short (&le; 30 s) → Groq Whisper · Cloud long → Gemini · Local → faster-whisper (NVIDIA/CPU) or whisper.cpp+Vulkan (Windows AMD/Intel)
       </div>
@@ -54,14 +44,6 @@ export function renderModels(
   const sttLocal = container.querySelector<HTMLButtonElement>("#stt-local")!;
   const sttLocalIndicator = container.querySelector<HTMLElement>("#stt-local-indicator")!;
   const sttPanel = container.querySelector<HTMLElement>("#stt-panel")!;
-  const engineRow = container.querySelector<HTMLElement>("#stt-engine-row")!;
-  const engineSelect = container.querySelector<HTMLSelectElement>("#stt-engine")!;
-
-  engineSelect.addEventListener("change", async () => {
-    const value = engineSelect.value as "auto" | "groq" | "gemini";
-    await api.updateSettings({ stt_engine: value });
-    await loadSettings();
-  });
 
   let currentSttMode = settings.stt_mode;
   let latestSttStatusToken = 0;
@@ -130,7 +112,6 @@ export function renderModels(
     currentSttMode = mode;
     sttCloud.classList.toggle("active", mode === "cloud");
     sttLocal.classList.toggle("active", mode === "local");
-    engineRow.style.display = mode === "cloud" ? "" : "none";
     await api.setSttMode(mode);
     await loadSettings();
     renderCurrentStt();

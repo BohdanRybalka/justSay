@@ -12,10 +12,9 @@ import {
   type ShortcutApplied,
   type ShortcutRequested,
 } from "../../contracts";
-import { saveSettings, getCloudKeyStatus, cachePersistedShortcut, type TabLifecycle } from "../settings";
+import { saveSettings, cachePersistedShortcut, type TabLifecycle } from "../settings";
 import { escapeHtml, meetingDisclosureHtml } from "../html";
 import { isDecisiveRefusal, newSessionId } from "../../session";
-import { renderKeys } from "./keys";
 import { notifyError } from "../../notify";
 import { levelFromDb } from "../../level";
 import { TimedOutError } from "../../timeout";
@@ -78,8 +77,6 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
       ${meetingDisclosureHtml(settings.meeting_consent_acknowledged)}
     </div>
 
-    <div id="api-keys-section"></div>
-
     <div class="setting-group">
       <div class="setting-label">Microphone Test</div>
       <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
@@ -103,9 +100,6 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
       notifyError(e instanceof Error ? e.message : String(e));
     }
   });
-
-  const keysSection = container.querySelector<HTMLElement>("#api-keys-section")!;
-  const destroyKeys = renderKeys(keysSection, settings, getCloudKeyStatus());
 
   const btnTest = container.querySelector<HTMLButtonElement>("#btn-test-mic")!;
   const recLabel = container.querySelector<HTMLElement>("#rec-label")!;
@@ -394,7 +388,6 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
         unlistenShortcutApplied();
         unlistenShortcutApplied = null;
       }
-      destroyKeys();
     },
     releaseResources,
   } satisfies TabLifecycle;

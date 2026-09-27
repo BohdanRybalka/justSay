@@ -1,45 +1,51 @@
+/**
+ * The API keys fold: one row per cloud key and the row that picks where
+ * recordings go. A key row is stored, env, unset, unknown or editing, and is
+ * redrawn alone; each key's subtitle follows the routing choice.
+ */
 import { type CloudKeyStatus, type UserSettings } from "../../api";
 import { MASKED_API_KEY } from "../../contracts";
+import { notifyError } from "../../notify";
+import { renderSegmented, type SegmentedOption } from "../../ui/controls";
 import { saveSettings, getCloudKeyStatus } from "../settings";
 
 type KeyField = "gemini_api_key" | "groq_api_key";
 type KeyRowState = "stored" | "env" | "unset" | "unknown" | "editing";
+type Engine = UserSettings["stt_engine"];
+type Provider = Exclude<Engine, "auto">;
 
 interface KeyRowSpec {
   field: KeyField;
+  provider: Provider;
   label: string;
-  unsetHint: string;
-  storedHint: string;
-  envHint: string;
-  unknownHint: string;
-  placeholder: string;
 }
 
-const ROWS: KeyRowSpec[] = [
-  {
-    field: "gemini_api_key",
-    label: "Gemini (STT — long audio &amp; structured)",
-    unsetHint: "No key set — cloud STT will fail.",
-    storedHint: "Key stored.",
-    envHint: "Key active (from environment). Saving a key here will override it.",
-    unknownHint: "Cannot verify key status — reopen Settings to retry.",
-    placeholder: "Paste your Gemini API key",
-  },
-  {
-    field: "groq_api_key",
-    label: "Groq (STT — short audio &amp; LLM)",
-    unsetHint: "No key set — cloud STT and LLM will fail.",
-    storedHint: "Key stored.",
-    envHint: "Key active (from environment). Saving a key here will override it.",
-    unknownHint: "Cannot verify key status — reopen Settings to retry.",
-    placeholder: "Paste your Groq API key",
-  },
+const ROWS: readonly KeyRowSpec[] = [
+  { field: "groq_api_key", provider: "groq", label: "Groq" },
+  { field: "gemini_api_key", provider: "gemini", label: "Google" },
 ];
 
-const MASKED_DISPLAY = "••••••••";
+const ENGINES: readonly SegmentedOption<Engine>[] = [
+  { value: "auto", label: "Automatic" },
+  { value: "groq", label: "Groq" },
+  { value: "gemini", label: "Google" },
+];
 
-function prefix(field: KeyField): string {
-  return field === "gemini_api_key" ? "gemini" : "groq";
+const ROUTE_HINTS: Readonly<Record<Engine, Readonly<Record<Provider, string>>>> = {
+  auto: { groq: "Used for short recordings", gemini: "Used for long recordings" },
+  groq: { groq: "Used for all recordings", gemini: "Used for files Groq can't read" },
+  gemini: { groq: "Not used for recordings", gemini: "Used for all recordings" },
+};
+
+const STATE_HINTS: Readonly<Partial<Record<KeyRowState, string>>> = {
+  env: "Key active (from environment). Saving a key here will override it.",
+  unknown: "Cannot verify key status — reopen Settings to retry.",
+};
+
+const MASKED_DISPLAY = "••••••••••••";
+
+function describeFailure(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 function cloudFlag(cloud: CloudKeyStatus, field: KeyField): boolean {
@@ -52,163 +58,114 @@ function rowState(settings: UserSettings, field: KeyField, cloud: CloudKeyStatus
   return cloudFlag(cloud, field) ? "env" : "unset";
 }
 
-function renderRowMarkup(spec: KeyRowSpec, state: KeyRowState): string {
-  const p = prefix(spec.field);
-  let inner: string;
+function keyControls(spec: KeyRowSpec, state: KeyRowState): string {
+  const p = spec.provider;
   if (state === "stored" || state === "env") {
-    inner = `
-      <input type="text" id="${p}-key-input" disabled
-        value="${MASKED_DISPLAY}"
-        aria-label="Stored API key (masked)" />
-      <div class="key-actions">
-        <button class="btn btn-secondary btn-sm" id="${p}-replace">Replace</button>
-      </div>
-    `;
-  } else if (state === "editing") {
-    inner = `
-      <input type="password" id="${p}-key-input" autocomplete="off" spellcheck="false"
-        placeholder="${spec.placeholder}" />
-      <div class="key-actions">
-        <button class="btn btn-secondary btn-sm" id="${p}-cancel">Cancel</button>
-        <button class="btn btn-primary btn-sm" id="${p}-save" disabled>Save</button>
-      </div>
-    `;
-  } else {
-    inner = `
-      <input type="password" id="${p}-key-input" autocomplete="off" spellcheck="false"
-        placeholder="${spec.placeholder}" />
-      <div class="key-actions">
-        <button class="btn btn-primary btn-sm" id="${p}-save" disabled>Save</button>
-      </div>
+    return `
+      <input class="masked-field num" id="${p}-key-input" value="${MASKED_DISPLAY}" readonly
+        aria-label="${spec.label} key, hidden" />
+      <button type="button" class="btn" id="${p}-replace">Replace</button>
     `;
   }
-
-  const statusText =
-    state === "stored"
-      ? spec.storedHint
-      : state === "env"
-        ? spec.envHint
-        : state === "unknown"
-          ? spec.unknownHint
-          : state === "editing"
-            ? "Editing stored key — Cancel to abort."
-            : spec.unsetHint;
-
+  const cancel = state === "editing" ? `<button type="button" class="btn" id="${p}-cancel">Cancel</button>` : "";
   return `
-    <div class="setting-group">
-      <div class="setting-label">${spec.label}</div>
-      <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 8px;">
-        <div class="key-input-row">
-          ${inner}
-        </div>
-        <div class="setting-hint" id="${p}-status" aria-live="polite">${statusText}</div>
-      </div>
-    </div>
+    <input class="masked-field" type="password" id="${p}-key-input" autocomplete="off" spellcheck="false"
+      placeholder="Paste your ${spec.label} key" aria-label="${spec.label} key" />
+    ${cancel}
+    <button type="button" class="btn btn-primary" id="${p}-save" disabled>Save</button>
   `;
 }
 
-export function renderKeys(
-  container: HTMLElement,
-  settings: UserSettings,
-  cloud: CloudKeyStatus | null,
-  overrideStates?: Partial<Record<KeyField, KeyRowState>>,
-): () => void {
-  const states: Record<KeyField, KeyRowState> = {
-    gemini_api_key: overrideStates?.gemini_api_key ?? rowState(settings, "gemini_api_key", cloud),
-    groq_api_key: overrideStates?.groq_api_key ?? rowState(settings, "groq_api_key", cloud),
+/**
+ * Fills `container` with the Groq, Google and "Recordings go to" rows. Save
+ * and the routing choice go through `saveSettings`; a routing save that fails
+ * puts the stored choice back and says so.
+ */
+export function renderKeys(container: HTMLElement, settings: UserSettings, cloud: CloudKeyStatus | null): void {
+  let current = settings;
+  let knownCloud = cloud;
+  container.innerHTML = `
+    ${ROWS.map((spec) => `<div class="setting-row key-row" data-provider="${spec.provider}"></div>`).join("")}
+    <div class="setting-row">
+      <div class="setting-row-text"><div class="setting-row-title">Recordings go to</div></div>
+      <div class="setting-row-controls"><div class="route-choice" aria-label="Recordings go to"></div></div>
+    </div>
+  `;
+  const rowOf = (spec: KeyRowSpec): HTMLElement =>
+    container.querySelector<HTMLElement>(`.key-row[data-provider="${spec.provider}"]`)!;
+
+  const showRoutes = (engine: Engine): void => {
+    for (const spec of ROWS) {
+      rowOf(spec).querySelector<HTMLElement>(".route-hint")!.textContent = ROUTE_HINTS[engine][spec.provider];
+    }
   };
 
-  container.innerHTML = `
-    <div class="setting-hint" style="margin-bottom: 12px;">
-      Keys are stored locally in your JustSay settings file. They are never sent back in API responses.
-    </div>
-    ${ROWS.map((spec) => renderRowMarkup(spec, states[spec.field])).join("")}
-  `;
+  const draw = (spec: KeyRowSpec, state: KeyRowState): void => {
+    const row = rowOf(spec);
+    const hadFocus = row.contains(document.activeElement);
+    row.innerHTML = `
+      <div class="setting-row-text">
+        <div class="setting-row-title">${spec.label}</div>
+        <div class="setting-row-hint route-hint">${ROUTE_HINTS[current.stt_engine][spec.provider]}</div>
+        <div class="setting-row-hint key-status" id="${spec.provider}-status" aria-live="polite">${STATE_HINTS[state] ?? ""}</div>
+      </div>
+      <div class="setting-row-controls">${keyControls(spec, state)}</div>
+    `;
+    wireKey(spec, state, row);
+    if (state === "editing") row.querySelector<HTMLInputElement>("input")!.focus();
+    else if (hadFocus) row.querySelector<HTMLElement>("button")?.focus();
+  };
 
-  for (const spec of ROWS) {
-    wireKey(container, spec, states[spec.field], settings, cloud, states);
-  }
-
-  for (const spec of ROWS) {
-    if (states[spec.field] === "editing") {
-      const input = container.querySelector<HTMLInputElement>(
-        `#${prefix(spec.field)}-key-input`,
-      );
-      if (input) {
-        requestAnimationFrame(() => input.focus());
-      }
-      break;
+  const wireKey = (spec: KeyRowSpec, state: KeyRowState, row: HTMLElement): void => {
+    const p = spec.provider;
+    const storedState = (): KeyRowState => rowState(current, spec.field, knownCloud);
+    if (state === "stored" || state === "env") {
+      row.querySelector(`#${p}-replace`)!.addEventListener("click", () => draw(spec, "editing"));
+      return;
     }
-  }
+    row.querySelector(`#${p}-cancel`)?.addEventListener("click", () => draw(spec, storedState()));
 
-  return () => {};
-}
-
-function wireKey(
-  container: HTMLElement,
-  spec: KeyRowSpec,
-  state: KeyRowState,
-  settings: UserSettings,
-  cloud: CloudKeyStatus | null,
-  states: Record<KeyField, KeyRowState>,
-): void {
-  const p = prefix(spec.field);
-  const input = container.querySelector<HTMLInputElement>(`#${p}-key-input`)!;
-  const status = container.querySelector<HTMLElement>(`#${p}-status`)!;
-
-  if (state === "stored" || state === "env") {
-    const replaceBtn = container.querySelector<HTMLButtonElement>(`#${p}-replace`)!;
-    replaceBtn.addEventListener("click", () => {
-      renderKeys(container, settings, cloud, {
-        ...states,
-        [spec.field]: "editing",
-      });
+    const input = row.querySelector<HTMLInputElement>(`#${p}-key-input`)!;
+    const save = row.querySelector<HTMLButtonElement>(`#${p}-save`)!;
+    const status = row.querySelector<HTMLElement>(`#${p}-status`)!;
+    const locked = [input, save, ...row.querySelectorAll<HTMLButtonElement>(`#${p}-cancel`)];
+    input.addEventListener("input", () => {
+      save.disabled = input.value.trim() === "";
     });
-    return;
-  }
+    save.addEventListener("click", async () => {
+      const value = input.value.trim();
+      if (!value) return;
+      locked.forEach((control) => (control.disabled = true));
+      save.textContent = "Saving…";
+      status.textContent = "";
+      try {
+        const { settings: fresh } = await saveSettings({ [spec.field]: value } as Partial<UserSettings>);
+        current = fresh;
+        knownCloud = getCloudKeyStatus();
+        draw(spec, storedState());
+      } catch (err) {
+        status.textContent = `Error: ${describeFailure(err)}`;
+        locked.forEach((control) => (control.disabled = false));
+        save.textContent = "Save";
+      }
+    });
+  };
 
-  if (state === "editing") {
-    const cancelBtn = container.querySelector<HTMLButtonElement>(`#${p}-cancel`);
-    if (cancelBtn) {
-      cancelBtn.addEventListener("click", () => {
-        renderKeys(container, settings, cloud, {
-          ...states,
-          [spec.field]: rowState(settings, spec.field, cloud),
-        });
-      });
-    }
-  }
-
-  const saveBtn = container.querySelector<HTMLButtonElement>(`#${p}-save`)!;
-
-  input.addEventListener("input", () => {
-    saveBtn.disabled = input.value.trim() === "";
-  });
-
-  saveBtn.addEventListener("click", async () => {
-    const value = input.value.trim();
-    if (!value) return;
-
-    saveBtn.disabled = true;
-    input.disabled = true;
-    saveBtn.textContent = "Saving…";
-    status.textContent = "";
-    const cancelBtnLock = container.querySelector<HTMLButtonElement>(`#${p}-cancel`);
-    if (cancelBtnLock) cancelBtnLock.disabled = true;
-
+  const choice = container.querySelector<HTMLElement>(".route-choice")!;
+  const showChoice = (engine: Engine): void =>
+    renderSegmented(choice, ENGINES, engine, (next) => void chooseEngine(next));
+  const chooseEngine = async (engine: Engine): Promise<void> => {
+    showRoutes(engine);
     try {
-      const { settings: fresh } = await saveSettings({
-        [spec.field]: value,
-      } as Partial<UserSettings>);
-      renderKeys(container, fresh, getCloudKeyStatus());
-    } catch (err) {
-      status.textContent = `Error: ${(err as Error).message}`;
-      saveBtn.disabled = false;
-      input.disabled = false;
-      saveBtn.textContent = "Save";
-      if (cancelBtnLock) cancelBtnLock.disabled = false;
+      const { settings: fresh } = await saveSettings({ stt_engine: engine });
+      current = fresh;
+    } catch (e) {
+      showChoice(current.stt_engine);
+      showRoutes(current.stt_engine);
+      void notifyError(`Could not save where recordings go: ${describeFailure(e)}`);
     }
-  });
+  };
 
-  input.dispatchEvent(new Event("input"));
+  for (const spec of ROWS) draw(spec, rowState(current, spec.field, knownCloud));
+  showChoice(current.stt_engine);
 }
