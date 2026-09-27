@@ -44,6 +44,13 @@ fn get_backend_token() -> String {
     backend::api_token().to_string()
 }
 
+/// The tray icon: the coloured app mark on Windows, a monochrome template on
+/// macOS so the menu bar tints it for its light and dark appearance.
+#[cfg(target_os = "macos")]
+const TRAY_ICON: &[u8] = include_bytes!("../icons/tray-template.png");
+#[cfg(not(target_os = "macos"))]
+const TRAY_ICON: &[u8] = include_bytes!("../icons/32x32.png");
+
 
 /// The tray's meeting-recording item, kept so its label can follow the actual
 /// recording state. Held in Tauri's managed state rather than a static: the
@@ -234,11 +241,12 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&settings_item, &meeting_item, &quit])?;
             app.manage(MeetingMenuItem(meeting_item));
 
-            let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
+            let icon = Image::from_bytes(TRAY_ICON)?;
 
             let app_handle = app.handle().clone();
             TrayIconBuilder::new()
                 .icon(icon)
+                .icon_as_template(cfg!(target_os = "macos"))
                 .menu(&menu)
                 .tooltip("JustSay — Voice to Text")
                 .on_menu_event(move |_tray, event| match event.id.as_ref() {
