@@ -155,3 +155,18 @@ def test_window_control_grants_reach_the_main_window_only():
                 "bar's minimise, maximise and close belong to the main window; granted to the "
                 "widget, its page could close or minimise the always-on-top widget for good."
             )
+
+
+def test_the_main_window_holds_every_title_bar_control_grant():
+    granted_to_main = set()
+    for path in sorted(CAPABILITIES_DIR.glob("*.json")):
+        capability = json.loads(path.read_text(encoding="utf-8"))
+        if MAIN_WINDOW_LABEL in capability.get("windows", []):
+            granted_to_main.update(_permission_identifiers(capability))
+
+    missing = sorted(WINDOW_CONTROL_PERMISSIONS - granted_to_main)
+    assert not missing, (
+        f"the main window lost {missing}. Its title bar draws minimise, maximise and close "
+        "itself on Windows, so without the grant the button is refused silently at the IPC "
+        "boundary and the window cannot be closed from its own bar."
+    )

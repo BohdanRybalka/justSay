@@ -21,6 +21,7 @@
 .titlebar-mark .icon {
   width: 11px;
   height: 11px;
+  pointer-events: none;
 }
 
 .titlebar-name {
