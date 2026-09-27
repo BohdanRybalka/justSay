@@ -1,3 +1,4 @@
+@scope (:root) to (.legacy-tab) {
 :where(.btn,.segmented button,.toggle,.mode-row,.word-chip-remove){font:inherit;color:inherit;cursor:pointer;border:0;background:none;padding:0;text-align:inherit}
 :where(.select select,.masked-field,.search-box input,.word-add input){font:inherit}
 
@@ -95,7 +96,6 @@
   animation:install-step-spin .8s linear infinite}
 .install-step--done .install-step-dot{background:var(--orange);border-color:var(--orange);color:#fff}
 .install-step--running,.install-step--done{color:var(--text)}
-@keyframes install-step-spin{to{transform:rotate(360deg)}}
 .install-bar{height:6px;border-radius:4px;background:var(--inset);overflow:hidden;margin:6px 0 2px}
 .install-bar>i{display:block;height:100%;width:0;background:var(--bar);border-radius:4px;transition:width .3s}
 .install-meta{display:flex;justify-content:space-between;font-size:11px;color:var(--muted)}
@@ -109,3 +109,5 @@
 .fold[open]>summary .icon{transform:rotate(180deg)}
 .masked-field{width:190px;padding:9px 12px;border-radius:9px;background:var(--inset);border:1px solid var(--border);
   font-size:12px;color:var(--muted)}
+}
+@keyframes install-step-spin{to{transform:rotate(360deg)}}

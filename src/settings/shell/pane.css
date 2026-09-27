@@ -1,0 +1,48 @@
+.app {
+  display: grid;
+  grid-template-columns: 214px 1fr;
+  flex: 1;
+  min-height: 0;
+}
+
+.pane {
+  background: var(--canvas);
+  overflow: auto;
+  position: relative;
+}
+
+.panel {
+  padding: 34px 32px 46px;
+  max-width: 830px;
+}
+
+.panel-title {
+  font-size: 21px;
+  letter-spacing: -.022em;
+  margin: 0 0 6px;
+  font-weight: 660;
+}
+
+.panel-subtitle {
+  margin: 0 0 22px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.legacy-tab + .legacy-tab {
+  margin-top: 32px;
+}
+
+.account-card {
+  padding: 26px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.account-card-name {
+  font-size: 20px;
+  font-weight: 645;
+  letter-spacing: -.022em;
+  min-width: 0;
+}

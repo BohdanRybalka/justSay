@@ -7,6 +7,7 @@ use tauri::{
     AppHandle, Emitter, Manager, RunEvent, WindowEvent, Wry,
 };
 
+mod account;
 mod backend;
 mod clipboard;
 mod widget_window;
@@ -288,7 +289,8 @@ pub fn run() {
             get_backend_token,
             set_meeting_recording,
             show_settings_window,
-            clipboard::write_clipboard_text
+            clipboard::write_clipboard_text,
+            account::os_display_name
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -44,6 +44,35 @@ vi.mock("./tabs/models", () => ({
   }),
 }));
 
+const wordsTab = {
+  destroy: vi.fn(),
+  releaseResources: vi.fn(),
+  resumeResources: vi.fn(),
+};
+
+vi.mock("./tabs/words", () => ({
+  renderWords: vi.fn((container: HTMLElement) => {
+    container.innerHTML = '<div id="words-tab-body"></div>';
+    return wordsTab;
+  }),
+}));
+
+const metricsTab = { destroy: vi.fn() };
+
+vi.mock("./tabs/metrics", () => ({
+  renderMetrics: vi.fn((container: HTMLElement) => {
+    container.innerHTML = '<div id="metrics-tab-body"></div>';
+    return metricsTab.destroy;
+  }),
+}));
+
+const readOsDisplayNameMock = vi.fn(async () => "Bohdan Rybalka");
+
+vi.mock("./shell/account-name", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./shell/account-name")>()),
+  readOsDisplayName: readOsDisplayNameMock,
+}));
+
 const eventListeners = new Map<string, (event: unknown) => unknown>();
 
 const listenAttemptsByEvent = new Map<string, number>();
@@ -108,6 +137,14 @@ async function openSettingsWindow(): Promise<void> {
   await eventListeners.get(EVENT_SETTINGS_SHOWN)!({});
 }
 
+/** Waits for the settings to load into the panel the window opens on, then
+ *  opens Settings, which hosts the old General tab. */
+async function openSettingsPanel(): Promise<void> {
+  await vi.waitFor(() => expect(document.getElementById("words-tab-body")).not.toBeNull());
+  document.querySelector<HTMLButtonElement>('[data-panel="settings"]')!.click();
+  expect(document.getElementById("btn-test-mic")).not.toBeNull();
+}
+
 function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
   return {
     language: "uk",
@@ -145,12 +182,19 @@ beforeEach(() => {
   modelsMountedHidden.length = 0;
   document.body.innerHTML = `
     <header id="titlebar" class="titlebar"></header>
-    <ul class="sidebar-nav">
-      <li><button class="nav-btn active" data-tab="general">General</button></li>
-      <li><button class="nav-btn" data-tab="models">Models</button></li>
-    </ul>
-    <div id="tab-content"></div>
-    <span id="backend-status"></span>
+    <nav id="sidebar">
+      <button class="account-row" data-panel="account" aria-current="false">
+        <span class="avatar"></span><span class="account-row-name">Account</span>
+      </button>
+      <button class="nav-item" data-panel="insights" aria-current="true">Insights</button>
+      <button class="nav-item" data-panel="history" aria-current="false">History</button>
+      <button class="nav-item" data-panel="dictation" aria-current="false">Dictation</button>
+      <button class="nav-item" data-panel="settings" aria-current="false">Settings</button>
+      <div id="sidebar-status" class="sidebar-status sidebar-status--starting">
+        <span class="sidebar-status-text">Starting…</span><span id="sidebar-version">v…</span>
+      </div>
+    </nav>
+    <main id="pane"></main>
   `;
 });
 
@@ -183,6 +227,107 @@ describe("title bar", () => {
   });
 });
 
+describe("the sidebar", () => {
+  async function bootWithSettingsLoaded(): Promise<void> {
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
+    apiMock.getSettings.mockResolvedValue(buildSettings());
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
+    apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+
+    await import("./settings");
+    await vi.waitFor(() => expect(document.getElementById("words-tab-body")).not.toBeNull());
+  }
+
+  const openPanel = (name: string) =>
+    document.querySelector<HTMLButtonElement>(`[data-panel="${name}"]`)!.click();
+
+  const currentPanels = () =>
+    Array.from(document.querySelectorAll<HTMLElement>('[data-panel][aria-current="true"]')).map(
+      (item) => item.dataset.panel,
+    );
+
+  it("opens the window on Insights, hosting the old Words tab in a legacy-tab", async () => {
+    await bootWithSettingsLoaded();
+
+    expect(document.querySelector("#pane > .panel > .legacy-tab > #words-tab-body")).not.toBeNull();
+    expect(currentPanels()).toEqual(["insights"]);
+  });
+
+  it("marks only the section that was clicked, and unmounts the one it left", async () => {
+    await bootWithSettingsLoaded();
+
+    openPanel("dictation");
+
+    expect(currentPanels()).toEqual(["dictation"]);
+    expect(document.getElementById("models-tab-body")).not.toBeNull();
+    expect(document.getElementById("words-tab-body")).toBeNull();
+    expect(wordsTab.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("hosts General and Metrics together in Settings, and lets go of both on leaving", async () => {
+    await bootWithSettingsLoaded();
+
+    openPanel("settings");
+
+    const hosted = document.querySelectorAll("#pane .legacy-tab");
+    expect(hosted).toHaveLength(2);
+    expect(hosted[0].querySelector("#btn-test-mic")).not.toBeNull();
+    expect(hosted[1].querySelector("#metrics-tab-body")).not.toBeNull();
+
+    openPanel("insights");
+
+    expect(metricsTab.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("shows the name this computer knows the user by, with its initials", async () => {
+    await bootWithSettingsLoaded();
+
+    const row = document.querySelector(".account-row")!;
+    await vi.waitFor(() =>
+      expect(row.querySelector(".account-row-name")!.textContent).toBe("Bohdan Rybalka"),
+    );
+    expect(row.querySelector(".avatar")!.textContent).toBe("BR");
+  });
+
+  it("still reads as Account when the computer gives no name", async () => {
+    readOsDisplayNameMock.mockResolvedValueOnce("");
+    await bootWithSettingsLoaded();
+
+    await vi.waitFor(() => expect(readOsDisplayNameMock).toHaveBeenCalled());
+    const row = document.querySelector(".account-row")!;
+    expect(row.querySelector(".account-row-name")!.textContent).toBe("Account");
+    expect(row.querySelector(".avatar")!.textContent).toBe("");
+  });
+
+  it("highlights the account row, and no section, while Account is open", async () => {
+    await bootWithSettingsLoaded();
+    await vi.waitFor(() => expect(readOsDisplayNameMock).toHaveBeenCalled());
+
+    openPanel("account");
+
+    expect(currentPanels()).toEqual(["account"]);
+    const pane = document.getElementById("pane")!;
+    expect(pane.querySelector(".avatar--large")!.textContent).toBe("BR");
+    expect(pane.querySelector(".account-card-name")!.textContent).toBe("Bohdan Rybalka");
+    expect(pane.textContent).toContain("On this computer.");
+  });
+
+  it("brings the pane back to the top on every switch", async () => {
+    await bootWithSettingsLoaded();
+    const pane = document.getElementById("pane")!;
+    const scrollWrites: number[] = [];
+    Object.defineProperty(pane, "scrollTop", {
+      configurable: true,
+      get: () => 0,
+      set: (value: number) => scrollWrites.push(value),
+    });
+
+    openPanel("dictation");
+
+    expect(scrollWrites).toEqual([0]);
+  });
+});
+
 describe("saveSettings — cloud-status refetch failure retains, does not null (Stage 3 fix)", () => {
   it("a failed refetch after saving Gemini leaves the untouched env-sourced Groq row rendering as env, not unset", async () => {
     apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
@@ -192,10 +337,7 @@ describe("saveSettings — cloud-status refetch failure retains, does not null (
 
     const settingsModule = await import("./settings");
 
-    await vi.waitFor(() => {
-      expect(settingsModule.getSettings()).not.toBeNull();
-      expect(document.getElementById("gemini-save")).not.toBeNull();
-    });
+    await openSettingsPanel();
 
     expect(document.getElementById("groq-status")!.textContent).toContain("environment");
     expect(document.getElementById("gemini-status")!.textContent).toBe(
@@ -264,15 +406,13 @@ describe("a shortcut the widget stored while this window was open", () => {
 
     const settingsModule = await import("./settings");
 
-    await vi.waitFor(() => {
-      expect(document.getElementById("btn-shortcut")).not.toBeNull();
-    });
+    await openSettingsPanel();
     expect(document.getElementById("btn-shortcut")!.textContent).toBe("Ctrl + Alt + V");
 
     settingsModule.cachePersistedShortcut("Ctrl+Alt+KeyB");
 
-    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.click();
-    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="general"]')!.click();
+    document.querySelector<HTMLButtonElement>('[data-panel="dictation"]')!.click();
+    document.querySelector<HTMLButtonElement>('[data-panel="settings"]')!.click();
 
     expect(document.getElementById("btn-shortcut")!.textContent).toBe("Ctrl + Alt + B");
     expect(settingsModule.getSettings()!.shortcut).toBe("Ctrl+Alt+KeyB");
@@ -281,7 +421,8 @@ describe("a shortcut the widget stored while this window was open", () => {
 });
 
 
-const backendStatusEl = () => document.getElementById("backend-status")!;
+const backendStatusEl = () => document.getElementById("sidebar-status")!;
+const statusText = () => backendStatusEl().querySelector(".sidebar-status-text")!.textContent;
 
 /** Boots settings.ts with /health healthy and /settings rejecting, and waits
  *  for the failure screen to have painted. */
@@ -293,13 +434,13 @@ async function bootWithFailedSettingsLoad(error: unknown) {
   const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
   await import("./settings");
   await vi.waitFor(() => {
-    expect(document.getElementById("tab-content")!.textContent).toContain("Cannot load settings");
+    expect(document.getElementById("pane")!.textContent).toContain("Cannot load settings");
   });
   return { consoleError };
 }
 
 describe("backend badge — health 200 + settings 401", () => {
-  it("reads 'Backend unauthorized', not the green 'Backend', and carries the diagnosis in its title", async () => {
+  it("reads \"Can't reach JustSay\", not Ready, and carries the diagnosis in its title", async () => {
     const { ApiAuthError } = await import("../api");
     sawAuthFailureMock.mockReturnValue(true);
     lastBridgeDiagnosisMock.mockReturnValue({ kind: "bridge-missing" });
@@ -309,10 +450,10 @@ describe("backend badge — health 200 + settings 401", () => {
     );
 
     await vi.waitFor(() => {
-      expect(backendStatusEl().textContent).toBe("Backend unauthorized");
+      expect(statusText()).toBe("Can't reach JustSay");
     });
-    expect(backendStatusEl().textContent).not.toBe("Backend");
-    expect(backendStatusEl().className).toBe("status-indicator error");
+    expect(statusText()).not.toBe("Ready");
+    expect(backendStatusEl().className).toBe("sidebar-status sidebar-status--unauthorized");
     expect(backendStatusEl().getAttribute("title")).toContain("bridge-missing");
 
     consoleError.mockRestore();
@@ -331,7 +472,7 @@ describe("backend badge — health 200 + settings 401", () => {
     );
 
     await vi.waitFor(() => {
-      expect(backendStatusEl().textContent).toBe("Backend unauthorized");
+      expect(statusText()).toBe("Can't reach JustSay");
     });
     expect(backendStatusEl().getAttribute("title")).toContain(
       "invoke-failed: command get_backend_token not found",
@@ -351,9 +492,9 @@ describe("backend badge — health 200 + settings 401", () => {
 
     await vi.waitFor(() => {
       expect(settingsModule.getSettings()).not.toBeNull();
-      expect(backendStatusEl().textContent).toBe("Backend");
+      expect(statusText()).toBe("Ready");
     });
-    expect(backendStatusEl().className).toBe("status-indicator online");
+    expect(backendStatusEl().className).toBe("sidebar-status sidebar-status--ready");
     expect(backendStatusEl().hasAttribute("title")).toBe(false);
   });
 });
@@ -368,23 +509,23 @@ describe("nav clicks after a failed settings load", () => {
       new ApiAuthError("Missing or invalid API token", { kind: "bridge-missing" }),
     );
 
-    const tabContent = document.getElementById("tab-content")!;
-    expect(tabContent.textContent).toContain("authenticate");
-    expect(tabContent.textContent).toContain("bridge-missing");
+    const pane = document.getElementById("pane")!;
+    expect(pane.textContent).toContain("authenticate");
+    expect(pane.textContent).toContain("bridge-missing");
 
-    const general = document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="general"]')!;
-    const models = document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!;
+    const general = document.querySelector<HTMLButtonElement>('[data-panel="settings"]')!;
+    const models = document.querySelector<HTMLButtonElement>('[data-panel="dictation"]')!;
 
     models.click();
 
-    expect(tabContent.textContent!.trim()).not.toBe("");
-    expect(tabContent.textContent).toContain("authenticate");
-    expect(models.classList.contains("active")).toBe(true);
-    expect(general.classList.contains("active")).toBe(false);
+    expect(pane.textContent!.trim()).not.toBe("");
+    expect(pane.textContent).toContain("authenticate");
+    expect(models.getAttribute("aria-current")).toBe("true");
+    expect(general.getAttribute("aria-current")).toBe("false");
 
     general.click();
-    expect(general.classList.contains("active")).toBe(true);
-    expect(tabContent.textContent).toContain("authenticate");
+    expect(general.getAttribute("aria-current")).toBe("true");
+    expect(pane.textContent).toContain("authenticate");
 
     consoleError.mockRestore();
   });
@@ -397,12 +538,12 @@ describe("a backend that answers but fails the settings request", () => {
       new ApiRequestError("settings store is locked", 500),
     );
 
-    const tabContent = document.getElementById("tab-content")!;
-    expect(tabContent.textContent).toContain("settings store is locked");
-    expect(tabContent.textContent).not.toContain("not responding");
-    expect(tabContent.textContent).not.toContain("authenticate");
-    expect(backendStatusEl().textContent).toBe("Backend");
-    expect(backendStatusEl().className).toBe("status-indicator online");
+    const pane = document.getElementById("pane")!;
+    expect(pane.textContent).toContain("settings store is locked");
+    expect(pane.textContent).not.toContain("not responding");
+    expect(pane.textContent).not.toContain("authenticate");
+    expect(statusText()).toBe("Ready");
+    expect(backendStatusEl().className).toBe("sidebar-status sidebar-status--ready");
 
     consoleError.mockRestore();
   });
@@ -425,11 +566,11 @@ describe("backend badge — health 200, then the first settings request 401s", (
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     await import("./settings");
     await vi.waitFor(() => {
-      expect(document.getElementById("tab-content")!.textContent).toContain("Cannot load settings");
+      expect(document.getElementById("pane")!.textContent).toContain("Cannot load settings");
     });
 
-    expect(backendStatusEl().textContent).toBe("Backend unauthorized");
-    expect(backendStatusEl().className).toBe("status-indicator error");
+    expect(statusText()).toBe("Can't reach JustSay");
+    expect(backendStatusEl().className).toBe("sidebar-status sidebar-status--unauthorized");
     expect(backendStatusEl().getAttribute("title")).toContain("invoke-timeout");
 
     consoleError.mockRestore();
@@ -446,26 +587,26 @@ describe("backend unreachable from the first poll", () => {
 
     const { BACKEND_WAIT_BUDGET_MS } = await import("../backend-startup");
     await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
 
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(tabContent.textContent).toContain("Starting JustSay");
-    expect(tabContent.textContent).not.toContain("Cannot load settings");
-    expect(tabContent.textContent).not.toContain("not responding");
+    expect(pane.textContent).toContain("Starting JustSay");
+    expect(pane.textContent).not.toContain("Cannot load settings");
+    expect(pane.textContent).not.toContain("not responding");
     expect(
-      tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled,
+      pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled,
       "/health alone can be the broken half, and a window with nothing in flight and no " +
         "way to ask is a window that reports a failure nothing ever attempted",
     ).toBe(false);
-    expect(backendStatusEl().textContent).toBe("Backend offline");
-    expect(backendStatusEl().className).toBe("status-indicator offline");
+    expect(statusText()).toBe("Starting…");
+    expect(backendStatusEl().className).toBe("sidebar-status sidebar-status--starting");
 
-    const painted = tabContent.firstElementChild;
+    const painted = pane.firstElementChild;
     await vi.advanceTimersByTimeAsync(BACKEND_WAIT_BUDGET_MS - 5000);
-    expect(tabContent.firstElementChild).toBe(painted);
-    expect(tabContent.textContent).not.toContain("Cannot load settings");
-    expect(tabContent.textContent).not.toContain("not responding");
+    expect(pane.firstElementChild).toBe(painted);
+    expect(pane.textContent).not.toContain("Cannot load settings");
+    expect(pane.textContent).not.toContain("not responding");
     expect(
       apiMock.getSettings,
       "a backend that has not answered /health cannot answer /settings either, so " +
@@ -474,21 +615,23 @@ describe("backend unreachable from the first poll", () => {
 
     await vi.advanceTimersByTimeAsync(5000);
 
-    expect(tabContent.textContent).toContain("Cannot load settings");
+    expect(pane.textContent).toContain("Cannot load settings");
     expect(
-      tabContent.textContent,
+      pane.textContent,
       "no request has failed here — the window gave up waiting — so a sentence about " +
         "one that did would describe something that never happened",
     ).toContain("has not finished starting");
-    expect(tabContent.textContent).not.toContain("was not responding");
-    expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(
+    expect(pane.textContent).not.toContain("was not responding");
+    expect(statusText()).toBe("Offline");
+    expect(backendStatusEl().className).toBe("sidebar-status sidebar-status--offline");
+    expect(pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(
       false,
     );
     expect(apiMock.getSettings).not.toHaveBeenCalled();
 
-    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.click();
-    expect(tabContent.textContent).not.toContain("Starting JustSay");
-    expect(tabContent.textContent).toContain("has not finished starting");
+    document.querySelector<HTMLButtonElement>('[data-panel="dictation"]')!.click();
+    expect(pane.textContent).not.toContain("Starting JustSay");
+    expect(pane.textContent).toContain("has not finished starting");
 
     vi.useRealTimers();
     consoleError.mockRestore();
@@ -503,22 +646,22 @@ describe("backend unreachable from the first poll", () => {
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
     await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(tabContent.textContent).toContain("Starting JustSay");
+    expect(pane.textContent).toContain("Starting JustSay");
     expect(apiMock.getSettings).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(5000);
 
     expect(
-      document.getElementById("lang-select"),
+      document.getElementById("words-tab-body"),
       "the poll already learns the backend came up, so a window that still waits for a " +
         "click is waiting for something it does not need",
     ).not.toBeNull();
-    expect(tabContent.querySelector("#btn-retry-settings")).toBeNull();
-    expect(tabContent.textContent).not.toContain("Starting JustSay");
-    expect(backendStatusEl().className).toBe("status-indicator online");
+    expect(pane.querySelector("#btn-retry-settings")).toBeNull();
+    expect(pane.textContent).not.toContain("Starting JustSay");
+    expect(backendStatusEl().className).toBe("sidebar-status sidebar-status--ready");
 
     vi.useRealTimers();
   });
@@ -532,22 +675,22 @@ describe("backend unreachable from the first poll", () => {
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
     await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
 
     await vi.waitFor(() => {
-      expect(tabContent.textContent).toContain("Cannot load settings");
+      expect(pane.textContent).toContain("Cannot load settings");
     });
-    const retry = tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!;
+    const retry = pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!;
     expect(retry.disabled).toBe(false);
 
     apiMock.getSettings.mockResolvedValue(buildSettings());
     retry.click();
 
     await vi.waitFor(() => {
-      expect(tabContent.textContent).not.toContain("Cannot load settings");
+      expect(pane.textContent).not.toContain("Cannot load settings");
     });
-    expect(document.getElementById("lang-select")).not.toBeNull();
-    expect(backendStatusEl().className).toBe("status-indicator online");
+    expect(document.getElementById("words-tab-body")).not.toBeNull();
+    expect(backendStatusEl().className).toBe("sidebar-status sidebar-status--ready");
 
     consoleError.mockRestore();
   });
@@ -559,10 +702,10 @@ describe("backend unreachable from the first poll", () => {
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: true, groq_key_set: true });
 
     await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
 
     await vi.waitFor(() => {
-      expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(
+      expect(pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(
         false,
       );
     });
@@ -573,19 +716,19 @@ describe("backend unreachable from the first poll", () => {
     );
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
-    tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
+    pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
     await vi.waitFor(() => {
       expect(apiMock.getSettings).toHaveBeenCalledTimes(2);
     });
 
-    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.click();
-    const repainted = tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!;
+    document.querySelector<HTMLButtonElement>('[data-panel="dictation"]')!.click();
+    const repainted = pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!;
     expect(repainted.disabled).toBe(true);
     repainted.click();
 
     release(buildSettings());
     await vi.waitFor(() => {
-      expect(tabContent.textContent).not.toContain("Cannot load settings");
+      expect(pane.textContent).not.toContain("Cannot load settings");
     });
     expect(apiMock.getSettings).toHaveBeenCalledTimes(2);
 
@@ -604,17 +747,17 @@ describe("backend unreachable from the first poll", () => {
     apiMock.cloudKeyStatus.mockReturnValue(new Promise(() => {}));
 
     await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(tabContent.textContent).toContain("Starting JustSay");
-    expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(true);
+    expect(pane.textContent).toContain("Starting JustSay");
+    expect(pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(true);
 
     await vi.advanceTimersByTimeAsync(41_000);
 
-    expect(tabContent.textContent).toContain("Cannot load settings");
-    expect(tabContent.textContent).toContain("Loading settings did not finish in time");
-    expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(false);
+    expect(pane.textContent).toContain("Cannot load settings");
+    expect(pane.textContent).toContain("Loading settings did not finish in time");
+    expect(pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(false);
 
     vi.useRealTimers();
     consoleError.mockRestore();
@@ -634,12 +777,12 @@ describe("backend unreachable from the first poll", () => {
 
     const { BACKEND_WAIT_BUDGET_MS } = await import("../backend-startup");
     await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
     await vi.advanceTimersByTimeAsync(BACKEND_WAIT_BUDGET_MS);
 
-    expect(tabContent.textContent).toContain("Cannot load settings");
-    expect(tabContent.textContent).toContain("(/settings, 15 s)");
-    expect(tabContent.textContent).not.toContain("accepted");
+    expect(pane.textContent).toContain("Cannot load settings");
+    expect(pane.textContent).toContain("(/settings, 15 s)");
+    expect(pane.textContent).not.toContain("accepted");
 
     vi.useRealTimers();
     consoleError.mockRestore();
@@ -652,20 +795,20 @@ describe("backend unreachable from the first poll", () => {
     apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
 
     await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
 
     await vi.waitFor(() => {
-      expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(
+      expect(pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(
         false,
       );
     });
-    tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
+    pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
 
     await vi.waitFor(() => {
       expect(apiMock.getSettings).toHaveBeenCalledTimes(2);
     });
     await vi.waitFor(() => {
-      const again = tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!;
+      const again = pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!;
       expect(again.disabled).toBe(false);
       expect(again.textContent).toBe("Try again");
     });
@@ -685,16 +828,16 @@ describe("a settings load that fails without the backend having answered it", ()
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
     await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
 
     await vi.advanceTimersByTimeAsync(0);
     expect(apiMock.getSettings).toHaveBeenCalledTimes(1);
-    expect(tabContent.textContent).toContain("Starting JustSay");
+    expect(pane.textContent).toContain("Starting JustSay");
 
     await vi.advanceTimersByTimeAsync(5000);
 
     expect(
-      document.getElementById("lang-select"),
+      document.getElementById("words-tab-body"),
       "a dropped socket is the opposite of an answer, so a window that gives up on one " +
         "waits for a click it should never have needed",
     ).not.toBeNull();
@@ -713,20 +856,20 @@ describe("a settings load that fails without the backend having answered it", ()
 
     const { BACKEND_WAIT_BUDGET_MS } = await import("../backend-startup");
     await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(tabContent.textContent).toContain("Starting JustSay");
+    expect(pane.textContent).toContain("Starting JustSay");
 
     vi.setSystemTime(new Date(Date.now() + BACKEND_WAIT_BUDGET_MS * 2));
     await vi.advanceTimersByTimeAsync(5000);
 
     expect(
-      tabContent.textContent,
+      pane.textContent,
       "the app launches at login, which is when Windows re-syncs the clock, so a wait " +
         "measured on the wall clock ends on a step rather than on elapsed time",
     ).toContain("Starting JustSay");
-    expect(tabContent.textContent).not.toContain("Cannot load settings");
+    expect(pane.textContent).not.toContain("Cannot load settings");
 
     vi.useRealTimers();
     consoleError.mockRestore();
@@ -742,24 +885,24 @@ describe("a settings load that fails without the backend having answered it", ()
 
     const { BACKEND_WAIT_BUDGET_MS } = await import("../backend-startup");
     await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
 
     await vi.advanceTimersByTimeAsync(0);
     expect(apiMock.getSettings).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(5000);
     expect(apiMock.getSettings).toHaveBeenCalledTimes(1);
-    expect(tabContent.textContent).toContain("Starting JustSay");
+    expect(pane.textContent).toContain("Starting JustSay");
 
     await vi.advanceTimersByTimeAsync(BACKEND_WAIT_BUDGET_MS - 5000);
 
     expect(
-      tabContent.textContent,
+      pane.textContent,
       "the load's own budget started one poll later than the window's, so a screen the " +
         "in-flight load suppresses outlasts the number that is supposed to bound it",
     ).not.toContain("Starting JustSay");
-    expect(tabContent.textContent).toContain("Cannot load settings");
-    expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(true);
+    expect(pane.textContent).toContain("Cannot load settings");
+    expect(pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(true);
 
     vi.useRealTimers();
     consoleError.mockRestore();
@@ -775,13 +918,13 @@ describe("the Try again button while the window is still starting", () => {
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
     await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(tabContent.textContent).toContain("Starting JustSay");
+    expect(pane.textContent).toContain("Starting JustSay");
     expect(apiMock.getSettings).not.toHaveBeenCalled();
 
-    tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
+    pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
     await vi.advanceTimersByTimeAsync(0);
 
     expect(
@@ -789,7 +932,7 @@ describe("the Try again button while the window is still starting", () => {
       "/settings can answer while /health does not, and a window with no way to ask " +
         "reports a failure nothing ever attempted",
     ).toHaveBeenCalledTimes(1);
-    expect(document.getElementById("lang-select")).not.toBeNull();
+    expect(document.getElementById("words-tab-body")).not.toBeNull();
 
     vi.useRealTimers();
   });
@@ -807,17 +950,17 @@ describe("the Try again button while the window is still starting", () => {
 
     const { BACKEND_WAIT_BUDGET_MS } = await import("../backend-startup");
     await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
 
     await vi.advanceTimersByTimeAsync(BACKEND_WAIT_BUDGET_MS - 5000);
-    expect(tabContent.textContent).toContain("Starting JustSay");
+    expect(pane.textContent).toContain("Starting JustSay");
     expect(apiMock.getSettings).not.toHaveBeenCalled();
 
     apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     await vi.advanceTimersByTimeAsync(5000);
 
-    expect(tabContent.textContent).toContain("Cannot load settings");
-    const retry = tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!;
+    expect(pane.textContent).toContain("Cannot load settings");
+    const retry = pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!;
     expect(
       retry.disabled,
       "this tick both gave up waiting and started a load, and a press in front of that " +
@@ -829,7 +972,7 @@ describe("the Try again button while the window is still starting", () => {
 
     release(buildSettings());
     await vi.advanceTimersByTimeAsync(0);
-    expect(document.getElementById("lang-select")).not.toBeNull();
+    expect(document.getElementById("words-tab-body")).not.toBeNull();
 
     vi.useRealTimers();
     consoleError.mockRestore();
@@ -849,12 +992,13 @@ describe("a 401 observed after settings have loaded", () => {
     apiMock.getSettings.mockResolvedValue(buildSettings());
 
     const settingsModule = await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
 
     await vi.advanceTimersByTimeAsync(0);
     expect(settingsModule.getSettings()).not.toBeNull();
-    expect(backendStatusEl().textContent).toBe("Backend");
+    expect(statusText()).toBe("Ready");
     await openSettingsWindow();
+    document.querySelector<HTMLButtonElement>('[data-panel="settings"]')!.click();
 
     const keyInput = document.getElementById("gemini-key-input") as HTMLInputElement;
     keyInput.value = "typing-in-progress";
@@ -862,22 +1006,22 @@ describe("a 401 observed after settings have loaded", () => {
     authFailed = true;
 
     await vi.advanceTimersByTimeAsync(5000);
-    expect(backendStatusEl().textContent).toBe("Backend unauthorized");
-    expect(backendStatusEl().className).toBe("status-indicator error");
+    expect(statusText()).toBe("Can't reach JustSay");
+    expect(backendStatusEl().className).toBe("sidebar-status sidebar-status--unauthorized");
     expect(backendStatusEl().getAttribute("title")).toContain("invoke-failed: boom");
-    expect(tabContent.textContent).not.toContain("Cannot load settings");
-    expect(tabContent.textContent).not.toContain("Starting JustSay");
+    expect(pane.textContent).not.toContain("Cannot load settings");
+    expect(pane.textContent).not.toContain("Starting JustSay");
     expect(document.getElementById("gemini-key-input")).toBe(keyInput);
     expect(keyInput.value).toBe("typing-in-progress");
 
     authFailed = false;
 
     await vi.advanceTimersByTimeAsync(5000);
-    expect(backendStatusEl().textContent).toBe("Backend");
-    expect(backendStatusEl().className).toBe("status-indicator online");
+    expect(statusText()).toBe("Ready");
+    expect(backendStatusEl().className).toBe("sidebar-status sidebar-status--ready");
     expect(backendStatusEl().hasAttribute("title")).toBe(false);
-    expect(tabContent.textContent).not.toContain("Cannot load settings");
-    expect(tabContent.textContent).not.toContain("Starting JustSay");
+    expect(pane.textContent).not.toContain("Cannot load settings");
+    expect(pane.textContent).not.toContain("Starting JustSay");
     expect(document.getElementById("gemini-key-input")).toBe(keyInput);
     expect(keyInput.value).toBe("typing-in-progress");
     expect(apiMock.getSettings).toHaveBeenCalledTimes(1);
@@ -894,23 +1038,23 @@ describe("a settings load that has not settled", () => {
     apiMock.getSettings.mockImplementation(() => new Promise<UserSettings>(() => {}));
 
     const settingsModule = await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(tabContent.textContent).toContain("Starting JustSay");
-    expect(tabContent.textContent).toContain("Waiting for the backend to start");
-    expect(backendStatusEl().textContent).toBe("Backend");
-    expect(backendStatusEl().className).toBe("status-indicator online");
+    expect(pane.textContent).toContain("Starting JustSay");
+    expect(pane.textContent).toContain("Waiting for the backend to start");
+    expect(statusText()).toBe("Ready");
+    expect(backendStatusEl().className).toBe("sidebar-status sidebar-status--ready");
     await openSettingsWindow();
 
     apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
     await vi.advanceTimersByTimeAsync(5000);
-    expect(backendStatusEl().textContent).toBe("Backend offline");
-    expect(tabContent.textContent).toContain("Starting JustSay");
+    expect(statusText()).toBe("Starting…");
+    expect(pane.textContent).toContain("Starting JustSay");
 
     await vi.advanceTimersByTimeAsync(15000);
     expect(settingsModule.getSettings()).toBeNull();
-    expect(tabContent.textContent).toContain("Starting JustSay");
+    expect(pane.textContent).toContain("Starting JustSay");
     expect(apiMock.getSettings).toHaveBeenCalledTimes(1);
 
     vi.useRealTimers();
@@ -927,10 +1071,10 @@ describe("a settings load that fails after the backend has gone away", () => {
     apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
 
     await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
     await openSettingsWindow();
     await vi.advanceTimersByTimeAsync(BACKEND_WAIT_BUDGET_MS);
-    expect(tabContent.textContent).toContain("Cannot load settings");
+    expect(pane.textContent).toContain("Cannot load settings");
 
     const pending: Array<(ok: boolean) => void> = [];
     apiMock.health.mockImplementation(
@@ -944,25 +1088,25 @@ describe("a settings load that fails after the backend has gone away", () => {
         }),
     );
 
-    tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
+    pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
     await vi.advanceTimersByTimeAsync(0);
     expect(pending.length).toBe(1);
 
     await vi.advanceTimersByTimeAsync(5000);
     pending[pending.length - 1](true);
     await vi.advanceTimersByTimeAsync(0);
-    expect(backendStatusEl().textContent).toBe("Backend");
+    expect(statusText()).toBe("Ready");
 
     pending[0](false);
     await vi.advanceTimersByTimeAsync(0);
 
     expect(
-      tabContent.textContent,
+      pane.textContent,
       "the retry's own probe saw the backend gone, and taking the shared reading instead " +
         "would name a state some other probe observed",
     ).toContain("was not responding");
-    expect(tabContent.textContent).not.toContain("The backend answered");
-    expect(backendStatusEl().textContent).toBe("Backend");
+    expect(pane.textContent).not.toContain("The backend answered");
+    expect(statusText()).toBe("Ready");
 
     vi.useRealTimers();
     consoleError.mockRestore();
@@ -1001,7 +1145,7 @@ describe("the Settings window's own health poll", () => {
     for (const settle of pending.slice(0, -1)) settle(false);
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(backendStatusEl().textContent).toBe("Backend");
+    expect(statusText()).toBe("Ready");
 
     vi.useRealTimers();
     consoleError.mockRestore();
@@ -1015,10 +1159,10 @@ describe("the Settings window's own health poll", () => {
     apiMock.cloudKeyStatus.mockRejectedValue(new TypeError("Failed to fetch"));
 
     await import("./settings");
-    const tabContent = document.getElementById("tab-content")!;
+    const pane = document.getElementById("pane")!;
     await vi.advanceTimersByTimeAsync(0);
     await vi.waitFor(() => {
-      expect(tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(
+      expect(pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(
         false,
       );
     });
@@ -1028,7 +1172,7 @@ describe("the Settings window's own health poll", () => {
     await vi.advanceTimersByTimeAsync(5000);
     const before = apiMock.health.mock.calls.length;
 
-    tabContent.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
+    pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.click();
     await vi.advanceTimersByTimeAsync(0);
 
     expect(apiMock.health.mock.calls.length - before).toBe(1);
@@ -1095,7 +1239,7 @@ describe("the Settings window being dismissed", () => {
     apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 2 });
 
     await import("./settings");
-    await vi.waitFor(() => expect(document.getElementById("btn-test-mic")).not.toBeNull());
+    await openSettingsPanel();
     await openSettingsWindow();
 
     const button = document.getElementById("btn-test-mic") as HTMLButtonElement;
@@ -1122,7 +1266,7 @@ describe("the Settings window being dismissed", () => {
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
     await import("./settings");
-    await vi.waitFor(() => expect(document.getElementById("btn-test-mic")).not.toBeNull());
+    await openSettingsPanel();
     await openSettingsWindow();
     const readsBefore = apiMock.getStorageInfo.mock.calls.length;
     const button = document.getElementById("btn-test-mic") as HTMLButtonElement;
@@ -1167,13 +1311,13 @@ describe("a file dropped where nothing in the page handles it", () => {
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
     await import("./settings");
-    await vi.waitFor(() => expect(document.getElementById("btn-test-mic")).not.toBeNull());
+    await openSettingsPanel();
   }
 
   function dispatchOnTheNav(type: string, carried: string[]): Event {
     const event = new Event(type, { bubbles: true, cancelable: true });
     Object.defineProperty(event, "dataTransfer", { value: { types: carried } });
-    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.dispatchEvent(event);
+    document.querySelector<HTMLButtonElement>('[data-panel="dictation"]')!.dispatchEvent(event);
     return event;
   }
 
@@ -1220,9 +1364,9 @@ describe("the Settings window coming back after a dismissal", () => {
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
     await import("./settings");
-    await vi.waitFor(() => expect(document.getElementById("btn-test-mic")).not.toBeNull());
+    await openSettingsPanel();
     await openSettingsWindow();
-    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.click();
+    document.querySelector<HTMLButtonElement>('[data-panel="dictation"]')!.click();
   }
 
   it("touches no tab hook on a show that followed no dismissal", async () => {
@@ -1253,7 +1397,7 @@ describe("the Settings window coming back after a dismissal", () => {
     await import("./settings");
     await openSettingsWindow();
 
-    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.click();
+    document.querySelector<HTMLButtonElement>('[data-panel="dictation"]')!.click();
     await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
 
     releaseSettings(buildSettings());
@@ -1288,7 +1432,7 @@ describe("the Settings window coming back after a dismissal", () => {
     await import("./settings");
     await openSettingsWindow();
 
-    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.click();
+    document.querySelector<HTMLButtonElement>('[data-panel="dictation"]')!.click();
     await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
 
     releaseSettings(buildSettings());
@@ -1301,8 +1445,8 @@ describe("the Settings window coming back after a dismissal", () => {
     ).toBe(true);
 
     await eventListeners.get(EVENT_SETTINGS_SHOWN)!({});
-    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="general"]')!.click();
-    document.querySelector<HTMLButtonElement>('.nav-btn[data-tab="models"]')!.click();
+    document.querySelector<HTMLButtonElement>('[data-panel="settings"]')!.click();
+    document.querySelector<HTMLButtonElement>('[data-panel="dictation"]')!.click();
 
     expect(
       modelsMountedHidden[modelsMountedHidden.length - 1],
@@ -1499,7 +1643,7 @@ describe("the Settings window's own health poll across a dismissal", () => {
       await import("./settings");
       await openSettingsWindow();
       await vi.advanceTimersByTimeAsync(BACKEND_WAIT_BUDGET_MS);
-      expect(document.getElementById("tab-content")!.textContent).toContain(
+      expect(document.getElementById("pane")!.textContent).toContain(
         "Cannot load settings",
       );
 
@@ -1523,8 +1667,7 @@ describe("the Settings window's own health poll across a dismissal", () => {
     vi.useFakeTimers();
     try {
       const { hidden } = await bootUnderFakeTimers();
-      const badge = document.getElementById("backend-status")!;
-      await vi.waitFor(() => expect(badge.textContent).toBe("Backend"));
+      await vi.waitFor(() => expect(statusText()).toBe("Ready"));
 
       let failTheProbe: (reason: Error) => void = () => {};
       apiMock.health.mockImplementationOnce(
@@ -1537,9 +1680,9 @@ describe("the Settings window's own health poll across a dismissal", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(
-        badge.textContent,
+        statusText(),
         "a probe the dismissal did not disown lands on an invisible window and repaints it",
-      ).toBe("Backend");
+      ).toBe("Ready");
     } finally {
       vi.useRealTimers();
     }

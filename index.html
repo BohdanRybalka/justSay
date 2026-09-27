@@ -8,36 +8,34 @@
   <link rel="stylesheet" href="/src/ui/tokens.css" />
   <link rel="stylesheet" href="/src/ui/fonts.css" />
   <link rel="stylesheet" href="/src/ui/base.css" />
+  <link rel="stylesheet" href="/src/ui/controls.css" />
   <link rel="stylesheet" href="/src/settings/settings.css" />
   <link rel="stylesheet" href="/src/settings/shell/titlebar.css" />
+  <link rel="stylesheet" href="/src/settings/shell/sidebar.css" />
+  <link rel="stylesheet" href="/src/settings/shell/pane.css" />
 </head>
 <body>
   <header id="titlebar" class="titlebar"></header>
   <div id="app" class="app">
-    <nav class="sidebar">
-      <div class="sidebar-header">
-        <img class="brand-logo" src="/icon.svg" width="22" height="22" alt="" aria-hidden="true" />
-        <span>JustSay</span>
-      </div>
-      <ul class="sidebar-nav">
-        <li><button class="nav-btn active" data-tab="general">General</button></li>
-        <li><button class="nav-btn" data-tab="words">Words</button></li>
-        <li><button class="nav-btn" data-tab="models">Models</button></li>
-        <li><button class="nav-btn" data-tab="transcribe">Transcribe</button></li>
-        <li><button class="nav-btn" data-tab="history">History</button></li>
-        <li><button class="nav-btn" data-tab="metrics">Metrics</button></li>
-      </ul>
-      <div class="sidebar-footer">
-        <span class="version num" id="sidebar-version">v…</span>
+    <nav id="sidebar" class="sidebar" aria-label="Sections">
+      <button type="button" class="account-row" data-panel="account" aria-current="false">
+        <span class="avatar"></span>
+        <span class="account-row-name">Account</span>
+        <svg class="icon" aria-hidden="true"><use href="#chev"/></svg>
+      </button>
+      <div class="sidebar-separator"></div>
+      <button type="button" class="nav-item" data-panel="insights" aria-current="true"><svg class="icon" aria-hidden="true"><use href="#chart"/></svg>Insights</button>
+      <button type="button" class="nav-item" data-panel="history" aria-current="false"><svg class="icon" aria-hidden="true"><use href="#clock"/></svg>History</button>
+      <button type="button" class="nav-item" data-panel="dictation" aria-current="false"><svg class="icon" aria-hidden="true"><use href="#sliders"/></svg>Dictation</button>
+      <button type="button" class="nav-item" data-panel="settings" aria-current="false"><svg class="icon" aria-hidden="true"><use href="#cog"/></svg>Settings</button>
+      <div id="sidebar-status" class="sidebar-status sidebar-status--starting">
+        <span class="sidebar-status-dot"></span>
+        <span class="sidebar-status-text">Starting…</span>
+        <span class="sidebar-status-separator">·</span>
+        <span id="sidebar-version" class="num">v…</span>
       </div>
     </nav>
-
-    <main class="content">
-      <div id="tab-content" class="pane"></div>
-      <footer class="status-bar">
-        <span id="backend-status" class="status-indicator offline">Backend offline</span>
-      </footer>
-    </main>
+    <main id="pane" class="pane"></main>
   </div>
 
   <script type="module" src="/src/settings/settings.ts"></script>
