@@ -251,4 +251,35 @@ describe("Recordings go to", () => {
 
     expect(routeHints(container).Groq).toBe("Used for all recordings");
   });
+
+  it("in Local mode each key says it is not used, whatever the routing choice", () => {
+    const container = render(buildSettings({ stt_mode: "local", stt_engine: "groq" }));
+
+    expect(routeHints(container)).toEqual({
+      Groq: "Not used while Local is on",
+      Google: "Not used while Local is on",
+    });
+
+    routeButton(container, "Automatic").click();
+
+    expect(routeHints(container).Groq).toBe("Not used while Local is on");
+  });
+
+  it("a failed save overtaken by a newer choice leaves the newer choice on screen", async () => {
+    let failFirst!: (e: Error) => void;
+    saveSettingsMock
+      .mockImplementationOnce(() => new Promise((_, reject) => (failFirst = reject)))
+      .mockResolvedValueOnce({ settings: buildSettings({ stt_engine: "gemini" }), warning: null });
+    const container = render(buildSettings({ stt_engine: "groq" }));
+
+    routeButton(container, "Automatic").click();
+    routeButton(container, "Google").click();
+    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledTimes(2));
+    failFirst(new Error("backend down"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(pressedRoute(container)).toBe("Google");
+    expect(routeHints(container).Google).toBe("Used for all recordings");
+    expect(notifyErrorMock).not.toHaveBeenCalled();
+  });
 });

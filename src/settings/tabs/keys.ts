@@ -1,7 +1,8 @@
 /**
  * The API keys fold: one row per cloud key and the row that picks where
  * recordings go. A key row is stored, env, unset, unknown or editing, and is
- * redrawn alone; each key's subtitle follows the routing choice.
+ * redrawn alone; each key's subtitle follows the routing choice, and in Local
+ * mode says the key is not used.
  */
 import { type CloudKeyStatus, type UserSettings } from "../../api";
 import { MASKED_API_KEY } from "../../contracts";
@@ -37,6 +38,8 @@ const ROUTE_HINTS: Readonly<Record<Engine, Readonly<Record<Provider, string>>>> 
   gemini: { groq: "Not used for recordings", gemini: "Used for all recordings" },
 };
 
+const LOCAL_HINT = "Not used while Local is on";
+
 const STATE_HINTS: Readonly<Partial<Record<KeyRowState, string>>> = {
   env: "Key active (from environment). Saving a key here will override it.",
   unknown: "Cannot verify key status — reopen Settings to retry.",
@@ -56,6 +59,10 @@ function rowState(settings: UserSettings, field: KeyField, cloud: CloudKeyStatus
   if (settings[field] === MASKED_API_KEY) return "stored";
   if (cloud === null) return "unknown";
   return cloudFlag(cloud, field) ? "env" : "unset";
+}
+
+function routeHint(settings: UserSettings, engine: Engine, provider: Provider): string {
+  return settings.stt_mode === "local" ? LOCAL_HINT : ROUTE_HINTS[engine][provider];
 }
 
 function keyControls(spec: KeyRowSpec, state: KeyRowState): string {
@@ -79,7 +86,7 @@ function keyControls(spec: KeyRowSpec, state: KeyRowState): string {
 /**
  * Fills `container` with the Groq, Google and "Recordings go to" rows. Save
  * and the routing choice go through `saveSettings`; a routing save that fails
- * puts the stored choice back and says so.
+ * puts the stored choice back and says so, unless a newer choice was made since.
  */
 export function renderKeys(container: HTMLElement, settings: UserSettings, cloud: CloudKeyStatus | null): void {
   let current = settings;
@@ -96,17 +103,17 @@ export function renderKeys(container: HTMLElement, settings: UserSettings, cloud
 
   const showRoutes = (engine: Engine): void => {
     for (const spec of ROWS) {
-      rowOf(spec).querySelector<HTMLElement>(".route-hint")!.textContent = ROUTE_HINTS[engine][spec.provider];
+      rowOf(spec).querySelector<HTMLElement>(".route-hint")!.textContent = routeHint(current, engine, spec.provider);
     }
   };
 
-  const draw = (spec: KeyRowSpec, state: KeyRowState): void => {
+  const draw = (spec: KeyRowSpec, state: KeyRowState, refocus?: boolean): void => {
     const row = rowOf(spec);
-    const hadFocus = row.contains(document.activeElement);
+    const hadFocus = refocus ?? row.contains(document.activeElement);
     row.innerHTML = `
       <div class="setting-row-text">
         <div class="setting-row-title">${spec.label}</div>
-        <div class="setting-row-hint route-hint">${ROUTE_HINTS[current.stt_engine][spec.provider]}</div>
+        <div class="setting-row-hint route-hint">${routeHint(current, current.stt_engine, spec.provider)}</div>
         <div class="setting-row-hint key-status" id="${spec.provider}-status" aria-live="polite">${STATE_HINTS[state] ?? ""}</div>
       </div>
       <div class="setting-row-controls">${keyControls(spec, state)}</div>
@@ -135,6 +142,7 @@ export function renderKeys(container: HTMLElement, settings: UserSettings, cloud
     save.addEventListener("click", async () => {
       const value = input.value.trim();
       if (!value) return;
+      const refocus = row.contains(document.activeElement);
       locked.forEach((control) => (control.disabled = true));
       save.textContent = "Saving…";
       status.textContent = "";
@@ -142,7 +150,7 @@ export function renderKeys(container: HTMLElement, settings: UserSettings, cloud
         const { settings: fresh } = await saveSettings({ [spec.field]: value } as Partial<UserSettings>);
         current = fresh;
         knownCloud = getCloudKeyStatus();
-        draw(spec, storedState());
+        draw(spec, storedState(), refocus);
       } catch (err) {
         status.textContent = `Error: ${describeFailure(err)}`;
         locked.forEach((control) => (control.disabled = false));
@@ -154,12 +162,15 @@ export function renderKeys(container: HTMLElement, settings: UserSettings, cloud
   const choice = container.querySelector<HTMLElement>(".route-choice")!;
   const showChoice = (engine: Engine): void =>
     renderSegmented(choice, ENGINES, engine, (next) => void chooseEngine(next));
+  let latestChoice = 0;
   const chooseEngine = async (engine: Engine): Promise<void> => {
+    const token = ++latestChoice;
     showRoutes(engine);
     try {
       const { settings: fresh } = await saveSettings({ stt_engine: engine });
-      current = fresh;
+      if (token === latestChoice) current = fresh;
     } catch (e) {
+      if (token !== latestChoice) return;
       showChoice(current.stt_engine);
       showRoutes(current.stt_engine);
       void notifyError(`Could not save where recordings go: ${describeFailure(e)}`);
