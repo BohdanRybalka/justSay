@@ -20,8 +20,6 @@ import { notifyError } from "../../notify";
 import { levelFromDb } from "../../level";
 import { TimedOutError } from "../../timeout";
 
-const UPDATES_CHECK_LABEL = "Check for updates";
-
 /** A discard that could not be delivered states what is known and promises
  *  nothing: whether the device was released is exactly what this window cannot
  *  find out. That is true whatever failed it — `recorder.discard()` is reached
@@ -37,46 +35,6 @@ const UPDATES_CHECK_LABEL = "Check for updates";
  *  here can establish that it did. */
 const MICROPHONE_UNCONFIRMED_LABEL =
   "The backend did not answer — the microphone may still be open";
-
-/** The subset of the updater plugin's `Update` this module actually uses. */
-interface PendingUpdate {
-  version: string;
-  currentVersion: string;
-  downloadAndInstall: () => Promise<unknown>;
-}
-
-/**
- * Turn an updater `check()` rejection into something a user can act on.
- *
- * The two recognised shapes both mean "the release exists but the manifest is
- * not usable yet", which reads as a broken app unless it is named.
- */
-function describeFailure(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-function describeUpdateCheckFailure(err: unknown): string {
-  const raw = describeFailure(err);
-  const lower = raw.toLowerCase();
-  if (
-    lower.includes("did not respond with a successful status code") ||
-    lower.includes("could not fetch a valid release json") ||
-    lower.includes("couldn't fetch a valid release json") ||
-    lower.includes("couldnt fetch a valid release json")
-  ) {
-    return (
-      "Check failed: the release manifest is not published yet. " +
-      "Make sure the latest GitHub release is no longer marked as Draft."
-    );
-  }
-  if (lower.includes("signature") || lower.includes("pubkey")) {
-    return (
-      "Check failed: the release manifest is not signed with the key this " +
-      "build trusts. Re-run the release workflow with TAURI_SIGNING_PRIVATE_KEY set."
-    );
-  }
-  return `Check failed: ${raw}`;
-}
 
 const LANGUAGES = [
   { code: "uk", label: "Ukrainian" },
@@ -133,43 +91,6 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
           <div class="level-meter-fill" id="level-fill"></div>
         </div>
       </div>
-    </div>
-
-    <div class="setting-group">
-      <div class="setting-label">History location</div>
-      <div class="setting-row">
-        <span class="label" style="flex: 1;">
-          <input type="text" id="output-dir" value="${escapeHtml(settings.output_dir)}" style="width: 100%;" />
-        </span>
-        <button class="btn btn-secondary" id="btn-browse" style="margin-left: 8px;">Browse</button>
-      </div>
-      <div class="setting-hint">Where your transcript history is stored. If you point this at a sync folder (Dropbox / iCloud / OneDrive), large history moves may take a while.</div>
-      <div id="output-dir-status" class="setting-hint" style="display: none;"></div>
-    </div>
-
-    <div class="setting-group">
-      <div class="setting-label">Recorded audio</div>
-      <div class="setting-hint">Temporary voice files kept after each dictation. Your history is never stored here and is not affected.</div>
-      <div class="setting-row">
-        <div>
-          <span class="label">Size</span>
-          <span class="value num" id="temp-size" style="margin-left: 8px;">...</span>
-        </div>
-        <button class="btn btn-danger" id="btn-cleanup">Clear Temp Files</button>
-      </div>
-    </div>
-
-    <div class="setting-group">
-      <div class="setting-label">About</div>
-      <div class="setting-row">
-        <span class="label">Version</span>
-        <span class="value num" id="app-version">…</span>
-      </div>
-      <div class="setting-row">
-        <span class="label">Updates</span>
-        <button class="btn btn-secondary" id="btn-check-updates">Check for updates</button>
-      </div>
-      <div class="value" id="updates-status" style="padding: 4px 16px; font-size: 11px; color: var(--text-muted);">Last checked: never.</div>
     </div>
   `;
 
@@ -348,16 +269,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
   const shortcutHint = container.querySelector<HTMLElement>("#shortcut-hint")!;
   let recording = false;
 
-  const outputDir = container.querySelector<HTMLInputElement>("#output-dir")!;
-  const outputStatus = container.querySelector<HTMLElement>("#output-dir-status")!;
-  const btnBrowse = container.querySelector<HTMLButtonElement>("#btn-browse")!;
-  const tempSize = container.querySelector<HTMLElement>("#temp-size")!;
-  const btnCleanup = container.querySelector<HTMLButtonElement>("#btn-cleanup")!;
-
-  let lastOutputDir = settings.output_dir;
-  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let destroyed = false;
-  loadFilesInfo(tempSize, () => destroyed);
   if (sessionAwaitingRelease) releaseAndRemember(sessionAwaitingRelease);
 
   const consentGroup = container.querySelector<HTMLElement>("#meeting-consent-group")!;
@@ -376,157 +288,6 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
         notifyError(e instanceof Error ? e.message : String(e));
       }
     });
-
-  function renderStatus(text: string, kind: "warning" | "error" | "ok") {
-    outputStatus.style.display = "block";
-    outputStatus.textContent = text;
-    outputStatus.style.color =
-      kind === "error" ? "var(--red)"
-      : kind === "warning" ? "var(--orange)"
-      : "var(--green)";
-  }
-
-  function clearStatus() {
-    outputStatus.style.display = "none";
-    outputStatus.textContent = "";
-  }
-
-  async function persistOutputDir(value: string) {
-    try {
-      const { warning } = await saveSettings({ output_dir: value });
-      if (destroyed) return;
-      lastOutputDir = value;
-      if (warning) {
-        renderStatus(warning, "warning");
-      } else {
-        clearStatus();
-      }
-      loadFilesInfo(tempSize, () => destroyed);
-    } catch (e) {
-      if (destroyed) return;
-      const msg = e instanceof Error ? e.message : String(e);
-      renderStatus(msg, "error");
-      outputDir.value = lastOutputDir;
-    }
-  }
-
-  outputDir.addEventListener("input", () => {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => persistOutputDir(outputDir.value), 600);
-  });
-
-  btnBrowse.addEventListener("click", async () => {
-    try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const selected = await open({ directory: true, title: "Select output directory" });
-      if (selected) {
-        outputDir.value = selected as string;
-        persistOutputDir(selected as string);
-      }
-    } catch {
-      outputDir.focus();
-      outputDir.select();
-    }
-  });
-
-  btnCleanup.addEventListener("click", async () => {
-    btnCleanup.disabled = true;
-    btnCleanup.textContent = "Cleaning...";
-    try {
-      const result = await api.cleanupTemp();
-      if (destroyed) return;
-      tempSize.textContent = `Freed ${formatBytes(result.freed_bytes)}`;
-      setTimeout(() => {
-        if (!destroyed) loadFilesInfo(tempSize, () => destroyed);
-      }, 500);
-    } catch (e) {
-      if (destroyed) return;
-      tempSize.textContent = "Failed";
-      console.error(e);
-    } finally {
-      if (!destroyed) {
-        btnCleanup.disabled = false;
-        btnCleanup.textContent = "Clear Temp Files";
-      }
-    }
-  });
-
-  const versionEl = container.querySelector<HTMLElement>("#app-version")!;
-  const updatesBtn = container.querySelector<HTMLButtonElement>("#btn-check-updates")!;
-  const updatesStatus = container.querySelector<HTMLElement>("#updates-status")!;
-
-  void (async () => {
-    try {
-      const { getVersion } = await import("@tauri-apps/api/app");
-      versionEl.textContent = await getVersion();
-    } catch {
-      versionEl.textContent = "unknown";
-    }
-  })();
-
-  let updatesBusy = false;
-  let pendingUpdate: PendingUpdate | null = null;
-
-  function armUpdatesButton(label: string) {
-    updatesBtn.textContent = label;
-    updatesBtn.disabled = false;
-    updatesBusy = false;
-  }
-
-  async function installPendingUpdate(update: PendingUpdate) {
-    updatesBtn.textContent = "Installing…";
-    updatesStatus.textContent = "Downloading and installing update…";
-    try {
-      await update.downloadAndInstall();
-    } catch (err) {
-      if (destroyed) return;
-      updatesStatus.textContent = `Install failed: ${describeFailure(err)}`;
-      armUpdatesButton("Retry install");
-      return;
-    }
-
-    try {
-      const { relaunch } = await import("@tauri-apps/plugin-process");
-      await relaunch();
-    } catch (err) {
-      if (destroyed) return;
-      pendingUpdate = null;
-      updatesStatus.textContent =
-        `The update is installed. Restarting JustSay failed: ${describeFailure(err)}. ` +
-        "Close and reopen the app to finish.";
-      armUpdatesButton(UPDATES_CHECK_LABEL);
-    }
-  }
-
-  async function checkForUpdate() {
-    updatesBtn.textContent = "Checking…";
-    updatesStatus.textContent = "Contacting update server…";
-    try {
-      const { check } = await import("@tauri-apps/plugin-updater");
-      const found = await check();
-      if (destroyed) return;
-      if (!found) {
-        updatesStatus.textContent = "You are up to date.";
-        armUpdatesButton(UPDATES_CHECK_LABEL);
-        return;
-      }
-      pendingUpdate = found;
-      updatesStatus.textContent = `Update available: ${found.version} (current ${found.currentVersion}).`;
-      armUpdatesButton("Install & Restart");
-    } catch (err) {
-      if (destroyed) return;
-      updatesStatus.textContent = describeUpdateCheckFailure(err);
-      armUpdatesButton(UPDATES_CHECK_LABEL);
-    }
-  }
-
-  updatesBtn.addEventListener("click", () => {
-    if (updatesBusy) return;
-    updatesBusy = true;
-    updatesBtn.disabled = true;
-    const update = pendingUpdate;
-    void (update ? installPendingUpdate(update) : checkForUpdate());
-  });
 
   async function requestShortcut(shortcut: string, revertLabelTo: string) {
     try {
@@ -611,24 +372,12 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
     } catch {}
   })();
 
-  /** A debounced save is work the user has already typed, so a teardown flushes
-   *  it rather than clearing the timer and losing it. Dismissing the window
-   *  inside the 600 ms window used to discard the edit silently — no save, no
-   *  error, and the old path back on screen from the re-render. */
-  function flushPendingOutputDir() {
-    if (!debounceTimer) return;
-    clearTimeout(debounceTimer);
-    debounceTimer = null;
-    void persistOutputDir(outputDir.value);
-  }
-
   /** The window was dismissed while this tab stays mounted, so everything that
-   *  is not a held resource — an update this tab has found, the values on
-   *  screen, the reads it has already paid for — is left exactly as it is. The
-   *  discard follows the same path a press of `Stop` does, including the label
-   *  it leaves when the backend does not answer. */
+   *  is not a held resource — the values on screen, the reads it has already
+   *  paid for — is left exactly as it is. The discard follows the same path a
+   *  press of `Stop` does, including the label it leaves when the backend does
+   *  not answer. */
   function releaseResources() {
-    flushPendingOutputDir();
     if (heldSession) void stopMicrophoneTest();
   }
 
@@ -636,7 +385,6 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
     destroy: () => {
       destroyed = true;
       stopCapture();
-      flushPendingOutputDir();
       stopLevelStream();
       if (heldSession) {
         releaseAndRemember(heldSession);
@@ -671,23 +419,6 @@ function releaseAndRemember(sessionId: string): void {
       if (isDecisiveRefusal(e) && sessionAwaitingRelease === sessionId) sessionAwaitingRelease = "";
     },
   );
-}
-
-async function loadFilesInfo(tempSize: HTMLElement, isDestroyed: () => boolean) {
-  try {
-    const info = await api.getStorageInfo();
-    if (isDestroyed()) return;
-    tempSize.textContent = formatBytes(info.temp_size_bytes);
-  } catch {
-    if (!isDestroyed()) tempSize.textContent = "Unknown";
-  }
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
 }
 
 let eventApi: Promise<typeof import("@tauri-apps/api/event")> | null = null;

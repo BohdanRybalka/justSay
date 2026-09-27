@@ -269,8 +269,8 @@ async def test_level_stream_not_recording_emits_only_done(client):
 async def test_history_limit_is_bounded(client):
     """`GET /history` returns full rows and had no bound at all, while both
     siblings in the same package clamp theirs — `/history/search` at
-    SEARCH_LIMIT_MAX and `/words/top` at TOP_LIMIT_MAX. The largest real caller
-    asks for 50 (`src/settings/tabs/metrics.ts`)."""
+    SEARCH_LIMIT_MAX and `/words/top` at TOP_LIMIT_MAX. The History tab asks for
+    30 (`src/settings/tabs/history.ts`)."""
     from app.transcripts.history import HISTORY_LIMIT_MAX
 
     assert (await client.get(f"/history?limit={HISTORY_LIMIT_MAX}")).status_code == 200

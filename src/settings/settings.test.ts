@@ -57,16 +57,25 @@ vi.mock("./tabs/words", () => ({
   }),
 }));
 
-const metricsTab = {
+const transcribeTab = vi.fn();
+
+vi.mock("./tabs/transcribe", () => ({
+  renderTranscribe: vi.fn((container: HTMLElement) => {
+    container.innerHTML = '<div id="transcribe-tab-body"></div>';
+    return transcribeTab;
+  }),
+}));
+
+const historyTab = {
   destroy: vi.fn(),
   releaseResources: vi.fn(),
   resumeResources: vi.fn(),
 };
 
-vi.mock("./tabs/metrics", () => ({
-  renderMetrics: vi.fn((container: HTMLElement) => {
-    container.innerHTML = '<div id="metrics-tab-body"></div>';
-    return metricsTab;
+vi.mock("./tabs/history", () => ({
+  renderHistory: vi.fn((container: HTMLElement) => {
+    container.innerHTML = '<div id="history-tab-body"></div>';
+    return historyTab;
   }),
 }));
 
@@ -283,19 +292,34 @@ describe("the sidebar", () => {
     expect(wordsTab.destroy).toHaveBeenCalledOnce();
   });
 
-  it("hosts General and Metrics together in Settings, and lets go of both on leaving", async () => {
+  it("hosts Transcribe and History together in History, and lets go of both on leaving", async () => {
+    await bootWithSettingsLoaded();
+
+    openPanel("history");
+
+    const hosted = document.querySelectorAll("#pane .legacy-tab");
+    expect(hosted).toHaveLength(2);
+    expect(hosted[0].querySelector("#transcribe-tab-body")).not.toBeNull();
+    expect(hosted[1].querySelector("#history-tab-body")).not.toBeNull();
+
+    openPanel("insights");
+
+    expect(transcribeTab).toHaveBeenCalledOnce();
+    expect(historyTab.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("draws the Settings card above the General content it still hosts", async () => {
     await bootWithSettingsLoaded();
 
     openPanel("settings");
 
-    const hosted = document.querySelectorAll("#pane .legacy-tab");
-    expect(hosted).toHaveLength(2);
+    const panel = document.querySelector("#pane > .panel")!;
+    expect(panel.querySelector(".card .storage-row")).not.toBeNull();
+    expect(panel.querySelector(".card .version-row")).not.toBeNull();
+    expect(panel.querySelector(".history-delete")).not.toBeNull();
+    const hosted = panel.querySelectorAll(".legacy-tab");
+    expect(hosted).toHaveLength(1);
     expect(hosted[0].querySelector("#btn-test-mic")).not.toBeNull();
-    expect(hosted[1].querySelector("#metrics-tab-body")).not.toBeNull();
-
-    openPanel("insights");
-
-    expect(metricsTab.destroy).toHaveBeenCalledOnce();
   });
 
   it("shows the name this computer knows the user by, with its initials", async () => {
@@ -335,13 +359,13 @@ describe("the sidebar", () => {
     await bootWithSettingsLoaded();
     const { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } = await import("../contracts");
     await openSettingsWindow();
-    openPanel("settings");
+    openPanel("history");
 
     await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
-    expect(metricsTab.releaseResources).toHaveBeenCalledOnce();
+    expect(historyTab.releaseResources).toHaveBeenCalledOnce();
 
     await eventListeners.get(EVENT_SETTINGS_SHOWN)!({});
-    expect(metricsTab.resumeResources).toHaveBeenCalledOnce();
+    expect(historyTab.resumeResources).toHaveBeenCalledOnce();
   });
 
   it("brings the pane back to the top on every switch", async () => {
@@ -1383,7 +1407,7 @@ describe("a file dropped where nothing in the page handles it", () => {
     expect(
       drop.defaultPrevented,
       "cancelling a text drop stops the browser inserting a folder path dragged from " +
-        "Explorer into the output-directory field, and nothing puts it there instead",
+        "Explorer into a text field, and nothing puts it there instead",
     ).toBe(false);
   });
 });

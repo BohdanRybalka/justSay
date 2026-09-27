@@ -173,7 +173,7 @@ def _reject_scratch_directory(candidate: Path) -> None:
     if _is_inside_scratch(candidate):
         raise ConfigurationError(
             f"output_dir cannot be inside the temporary audio directory "
-            f"({resolve_temp_dir()}); files there are deleted by Clear Temp Files"
+            f"({resolve_temp_dir()}); files there are deleted by Clear in Settings"
         )
 
 
@@ -192,7 +192,7 @@ def repair_scratch_output_dir() -> Path:
     if result == relocation.ConsolidateOutcome.FAILED:
         log.error(
             "History sits inside the scratch directory (%s) and could not be moved out: %s. "
-            "Continuing from the old location; Clear Temp Files will not touch it.",
+            "Continuing from the old location; clearing temporary audio will not touch it.",
             current, reason,
         )
         return current

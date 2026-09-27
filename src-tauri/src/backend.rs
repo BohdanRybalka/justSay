@@ -69,7 +69,7 @@ use tauri_plugin_shell::ShellExt;
 /// the Python side redirects them — where the data root is
 /// resolved the way the backend resolves its own — `JUSTSAY_DATA_DIR` first,
 /// otherwise the home directory joined with `.justsay` or `.justsay-dev`
-/// depending on `data_dir_choice()` — see `sidecar_log_dir_from()` and
+/// depending on `data_dir_choice()` — see `data_root_from()` and
 /// `append_sidecar_log()` below and
 /// `docs/adr/012-dev-mode-data-directory-isolation.md`.
 #[cfg(windows)]
@@ -295,9 +295,9 @@ fn http_client() -> Result<&'static reqwest::Client, String> {
         .map_err(|e| e.clone())
 }
 
-/// Where the sidecar log goes, mirroring `resolve_app_data_root()` in
+/// The data root, mirroring `resolve_app_data_root()` in
 /// `backend/app/core/app_paths.py`. Pure so each branch is testable without
-/// touching the process environment, which `sidecar_log_dir` reads for it.
+/// touching the process environment, which `data_root` reads for it.
 ///
 /// The order is Python's and has to stay Python's: an explicit
 /// `JUSTSAY_DATA_DIR` wins over everything, otherwise the home directory joined
@@ -312,16 +312,16 @@ fn http_client() -> Result<&'static reqwest::Client, String> {
 /// platforms, this side cannot, and a literal `~someone/data` is a *relative*
 /// path that `create_dir_all` would cheerfully create next to the app. Losing
 /// the log is recoverable; writing it somewhere nobody will look is not.
-fn sidecar_log_dir_from(
+fn data_root_from(
     data_dir_override: Option<&str>,
     home: Option<&str>,
     data_dir_name: &str,
 ) -> Option<PathBuf> {
     let home = home.filter(|value| !value.is_empty());
     if let Some(root) = data_dir_override.filter(|value| !value.is_empty()) {
-        return expand_leading_tilde(root, home).map(|path| path.join("logs"));
+        return expand_leading_tilde(root, home);
     }
-    Some(PathBuf::from(home?).join(data_dir_name).join("logs"))
+    Some(PathBuf::from(home?).join(data_dir_name))
 }
 
 fn expand_leading_tilde(path: &str, home: Option<&str>) -> Option<PathBuf> {
@@ -369,13 +369,30 @@ fn home_dir() -> Option<String> {
     }
 }
 
-fn sidecar_log_dir(data_dir_name: &str) -> Option<PathBuf> {
+fn data_root(data_dir_name: &str) -> Option<PathBuf> {
     let data_dir_override = std::env::var("JUSTSAY_DATA_DIR").ok();
-    sidecar_log_dir_from(
+    data_root_from(
         data_dir_override.as_deref(),
         home_dir().as_deref(),
         data_dir_name,
     )
+}
+
+fn sidecar_log_dir(data_dir_name: &str) -> Option<PathBuf> {
+    data_root(data_dir_name).map(|root| root.join("logs"))
+}
+
+/// `TEMP_DIR_NAME` in `backend/app/core/app_paths.py`; the cross-language test pins the two.
+const SCRATCH_DIR_NAME: &str = "tmp";
+
+fn scratch_dir_under(root: PathBuf) -> PathBuf {
+    root.join(SCRATCH_DIR_NAME)
+}
+
+/// Where the backend keeps temporary audio this launch, `resolve_temp_dir()` on the Python side.
+pub fn scratch_dir() -> Option<PathBuf> {
+    let (_, data_dir_name) = data_dir_choice();
+    data_root(data_dir_name).map(scratch_dir_under)
 }
 
 /// The development-versus-production choice this launch makes: the flag
@@ -417,7 +434,7 @@ fn startup_log_dir() -> Option<PathBuf> {
 const SIDECAR_LOG_MAX_BYTES: u64 = 1_000_000;
 
 /// Append one record to `sidecar.log` under the directory the caller resolved
-/// — see `sidecar_log_dir_from` and
+/// — see `data_root_from` and
 /// `docs/adr/012-dev-mode-data-directory-isolation.md`, so that a
 /// `tauri:dev:frozen` smoke-test run's captured output, and a run with
 /// `JUSTSAY_DATA_DIR` set, both land beside the sidecar's own
@@ -1717,8 +1734,8 @@ mod tests {
     #[test]
     fn an_explicit_data_dir_override_wins_over_the_home_directory() {
         assert_eq!(
-            sidecar_log_dir_from(Some("D:/scratch/js"), Some("C:/Users/me"), ".justsay"),
-            Some(PathBuf::from("D:/scratch/js").join("logs")),
+            data_root_from(Some("D:/scratch/js"), Some("C:/Users/me"), ".justsay"),
+            Some(PathBuf::from("D:/scratch/js")),
             "JUSTSAY_DATA_DIR is first in resolve_app_data_root()'s order and must be first here"
         );
     }
@@ -1726,35 +1743,35 @@ mod tests {
     #[test]
     fn an_empty_override_is_ignored_the_way_an_unset_one_is() {
         assert_eq!(
-            sidecar_log_dir_from(Some(""), Some("C:/Users/me"), ".justsay-dev"),
-            Some(PathBuf::from("C:/Users/me").join(".justsay-dev").join("logs"))
+            data_root_from(Some(""), Some("C:/Users/me"), ".justsay-dev"),
+            Some(PathBuf::from("C:/Users/me").join(".justsay-dev"))
         );
     }
 
     #[test]
     fn no_override_falls_back_to_the_home_directory_and_the_chosen_name() {
         assert_eq!(
-            sidecar_log_dir_from(None, Some("/home/me"), ".justsay-dev"),
-            Some(PathBuf::from("/home/me").join(".justsay-dev").join("logs"))
+            data_root_from(None, Some("/home/me"), ".justsay-dev"),
+            Some(PathBuf::from("/home/me").join(".justsay-dev"))
         );
     }
 
     #[test]
     fn a_leading_tilde_in_the_override_expands_the_way_path_expanduser_does() {
         assert_eq!(
-            sidecar_log_dir_from(Some("~"), Some("/home/me"), ".justsay"),
-            Some(PathBuf::from("/home/me").join("logs"))
+            data_root_from(Some("~"), Some("/home/me"), ".justsay"),
+            Some(PathBuf::from("/home/me"))
         );
         assert_eq!(
-            sidecar_log_dir_from(Some("~/data"), Some("/home/me"), ".justsay"),
-            Some(PathBuf::from("/home/me").join("data").join("logs"))
+            data_root_from(Some("~/data"), Some("/home/me"), ".justsay"),
+            Some(PathBuf::from("/home/me").join("data"))
         );
     }
 
     #[test]
     fn a_tilde_naming_another_account_gives_up_rather_than_writing_somewhere_relative() {
         assert_eq!(
-            sidecar_log_dir_from(Some("~someone/data"), Some("/home/me"), ".justsay"),
+            data_root_from(Some("~someone/data"), Some("/home/me"), ".justsay"),
             None,
             "Path.expanduser() resolves this to a real directory and this side cannot, so the              only honest answers are that one or none -- a literal ~someone/data is relative"
         );
@@ -1763,21 +1780,21 @@ mod tests {
     #[test]
     fn a_windows_separator_after_the_tilde_expands_too() {
         assert_eq!(
-            sidecar_log_dir_from(Some("~\\data"), Some("C:/Users/me"), ".justsay"),
-            Some(PathBuf::from("C:/Users/me").join("data").join("logs"))
+            data_root_from(Some("~\\data"), Some("C:/Users/me"), ".justsay"),
+            Some(PathBuf::from("C:/Users/me").join("data"))
         );
     }
 
     #[test]
     fn a_tilde_override_with_no_home_to_expand_it_writes_nothing() {
-        assert_eq!(sidecar_log_dir_from(Some("~/data"), None, ".justsay"), None);
+        assert_eq!(data_root_from(Some("~/data"), None, ".justsay"), None);
     }
 
     #[test]
     fn an_empty_home_counts_as_unset_the_way_an_empty_override_does() {
-        assert_eq!(sidecar_log_dir_from(None, Some(""), ".justsay"), None);
+        assert_eq!(data_root_from(None, Some(""), ".justsay"), None);
         assert_eq!(
-            sidecar_log_dir_from(Some("~/data"), Some(""), ".justsay"),
+            data_root_from(Some("~/data"), Some(""), ".justsay"),
             None,
             "an empty USERPROFILE would otherwise expand to a path relative to the CWD"
         );
@@ -1785,7 +1802,17 @@ mod tests {
 
     #[test]
     fn without_an_override_or_a_home_there_is_nowhere_to_write() {
-        assert_eq!(sidecar_log_dir_from(None, None, ".justsay"), None);
+        assert_eq!(data_root_from(None, None, ".justsay"), None);
+    }
+
+    #[test]
+    fn the_scratch_folder_sits_in_the_installed_and_the_dev_data_directory() {
+        for name in [".justsay", ".justsay-dev"] {
+            assert_eq!(
+                data_root_from(None, Some("C:/Users/me"), name).map(scratch_dir_under),
+                Some(PathBuf::from("C:/Users/me").join(name).join("tmp"))
+            );
+        }
     }
 
     fn scratch_log_dir(label: &str) -> PathBuf {
@@ -1862,7 +1889,7 @@ mod tests {
             !appeared,
             "None means do not write the log, never write it somewhere else. This pins the \
              short-circuit at the top of append_sidecar_log, not path resolution -- that is \
-             sidecar_log_dir_from's, and its own tests cover it. Deleting the file up front \
+             data_root_from's, and its own tests cover it. Deleting the file up front \
              instead of failing on it hid a live defect behind its own leftover"
         );
     }

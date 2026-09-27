@@ -1,4 +1,3 @@
-import { confirm } from "@tauri-apps/plugin-dialog";
 import { api, SidecarTooOldError, type HistoryCursor, type HistoryEntry } from "../api";
 import { isStaleStatusResponse } from "../stale-response";
 
@@ -8,13 +7,12 @@ export interface HistoryListNoun {
   plural: string;
 }
 
-/** The five elements the shared list writes to. Each tab owns its own markup and passes them in. */
+/** The four elements the shared list writes to. The tab owns its own markup and passes them in. */
 export interface HistoryListElements {
   count: HTMLElement;
   rows: HTMLElement;
   loadMoreWrapper: HTMLElement;
   loadMoreButton: HTMLButtonElement;
-  clearButton: HTMLButtonElement;
 }
 
 export interface HistoryListOptions {
@@ -26,7 +24,6 @@ export interface HistoryListOptions {
   createRow: (entry: HistoryEntry) => HTMLElement;
   renderEmptyState: (isEmpty: boolean) => void;
   isDestroyed: () => boolean;
-  onCleared?: () => void;
 }
 
 /**
@@ -109,12 +106,11 @@ export function formatEntryCount(total: number, noun: HistoryListNoun): string {
 }
 
 /**
- * Pagination, failure text, "Load more" wiring and the Clear All flow for the two tabs
- * that page over `api.getHistory`. It never creates markup and never owns a row's shape.
+ * Pagination, failure text and "Load more" wiring for a tab that pages over
+ * `api.getHistory`. It never creates markup and never owns a row's shape.
  */
 export function createHistoryList(options: HistoryListOptions): HistoryList {
-  const { pageSize, noun, featureName, elements, createRow, renderEmptyState, isDestroyed, onCleared } =
-    options;
+  const { pageSize, noun, featureName, elements, createRow, renderEmptyState, isDestroyed } = options;
 
   let cursor: HistoryCursor | null = null;
   let total = 0;
@@ -256,57 +252,8 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     }
   }
 
-  /**
-   * Deletes everything and puts the list back in its opening state. It supersedes
-   * any outstanding page without issuing a request of its own, so it releases the
-   * button itself once it has painted -- the superseded `loadPage` sees a newer
-   * token and will not.
-   */
-  async function clearAll(): Promise<void> {
-    if (total === 0) return;
-    elements.clearButton.disabled = true;
-    const confirmed = await confirm(
-      `Delete all ${formatEntryCount(total, noun)}? History and Metrics share the same data — both tabs will be cleared.`,
-      { title: "Clear History", kind: "warning" }
-    );
-    if (!confirmed) {
-      if (!isDestroyed()) {
-        elements.clearButton.disabled = false;
-      }
-      return;
-    }
-    if (!isDestroyed()) {
-      elements.clearButton.textContent = "Clearing...";
-    }
-    try {
-      await api.clearHistory();
-      if (isDestroyed()) return;
-      const claim = issueClaim();
-      cursor = null;
-      total = 0;
-      elements.rows.innerHTML = "";
-      renderEmptyState(true);
-      rowsAreOwnPage = true;
-      renderTotal(claim);
-      claim.renderLoadMore(false);
-      claim.release();
-      onCleared?.();
-    } catch (error) {
-      console.error(error);
-    } finally {
-      if (!isDestroyed()) {
-        elements.clearButton.disabled = false;
-        elements.clearButton.textContent = "Clear All";
-      }
-    }
-  }
-
   elements.loadMoreButton.addEventListener("click", () => {
     void loadPage(true);
-  });
-
-  elements.clearButton.addEventListener("click", () => {
-    void clearAll();
   });
 
   return {

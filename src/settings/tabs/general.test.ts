@@ -5,11 +5,9 @@ import type { UserSettings } from "../../api";
 import { TimedOutError } from "../../timeout";
 
 const apiMock = {
-  getStorageInfo: vi.fn(),
   audioDiscard: vi.fn(),
   audioStatus: vi.fn(),
   audioStart: vi.fn(),
-  cleanupTemp: vi.fn(),
   updateSettings: vi.fn(),
 };
 
@@ -57,20 +55,6 @@ const listenMock = vi.fn(
 vi.mock("@tauri-apps/api/event", () => ({
   emit: emitMock,
   listen: listenMock,
-}));
-
-const checkMock = vi.fn();
-vi.mock("@tauri-apps/plugin-updater", () => ({
-  check: checkMock,
-}));
-
-const relaunchMock = vi.fn();
-vi.mock("@tauri-apps/plugin-process", () => ({
-  relaunch: relaunchMock,
-}));
-
-vi.mock("@tauri-apps/api/app", () => ({
-  getVersion: vi.fn(async () => "0.13.0"),
 }));
 
 let renderGeneral: typeof import("./general").renderGeneral;
@@ -141,175 +125,7 @@ beforeEach(async () => {
   vi.resetAllMocks();
   vi.spyOn(console, "error").mockImplementation(consoleErrorMock);
   listenMock.mockImplementation(async () => unlistenMock);
-  apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
   levelStreamMock.mockImplementation(() => ({ abort: vi.fn() }));
-});
-
-describe("renderGeneral — the updates button", () => {
-  function renderUpdates(): {
-    button: HTMLButtonElement;
-    status: HTMLElement;
-  } {
-    const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
-    return {
-      button: container.querySelector<HTMLButtonElement>("#btn-check-updates")!,
-      status: container.querySelector<HTMLElement>("#updates-status")!,
-    };
-  }
-
-  function buildUpdate(downloadAndInstall = vi.fn(async () => {})) {
-    return { version: "0.14.0", currentVersion: "0.13.0", downloadAndInstall };
-  }
-
-  it("one click on Install & Restart installs once and checks nothing", async () => {
-    const downloadAndInstall = vi.fn(async () => {});
-    checkMock.mockResolvedValue(buildUpdate(downloadAndInstall));
-    const { button } = renderUpdates();
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(button.textContent).toBe("Install & Restart");
-    });
-    expect(checkMock).toHaveBeenCalledTimes(1);
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(relaunchMock).toHaveBeenCalledTimes(1);
-    });
-
-    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
-    expect(checkMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("the button stays disabled for the whole install", async () => {
-    let finishInstall!: () => void;
-    const downloadAndInstall = vi.fn(
-      () => new Promise<void>((resolve) => (finishInstall = resolve)),
-    );
-    checkMock.mockResolvedValue(buildUpdate(downloadAndInstall));
-    const { button } = renderUpdates();
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(button.textContent).toBe("Install & Restart");
-    });
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(button.textContent).toBe("Installing…");
-    });
-    expect(button.disabled).toBe(true);
-
-    button.click();
-    finishInstall();
-    await vi.waitFor(() => {
-      expect(relaunchMock).toHaveBeenCalledTimes(1);
-    });
-    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
-    expect(checkMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("a failed install re-arms the button for a retry that installs, not checks", async () => {
-    const downloadAndInstall = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("disk full"))
-      .mockResolvedValueOnce(undefined);
-    checkMock.mockResolvedValue(buildUpdate(downloadAndInstall));
-    const { button, status } = renderUpdates();
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(button.textContent).toBe("Install & Restart");
-    });
-    button.click();
-    await vi.waitFor(() => {
-      expect(button.textContent).toBe("Retry install");
-    });
-
-    expect(status.textContent).toContain("disk full");
-    expect(button.disabled).toBe(false);
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(downloadAndInstall).toHaveBeenCalledTimes(2);
-    });
-    expect(checkMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("the button is usable again after a check that found nothing", async () => {
-    checkMock.mockResolvedValue(null);
-    const { button, status } = renderUpdates();
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(status.textContent).toBe("You are up to date.");
-    });
-
-    expect(button.disabled).toBe(false);
-    expect(button.textContent).toBe("Check for updates");
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(checkMock).toHaveBeenCalledTimes(2);
-    });
-  });
-
-  it("a relaunch failure does not report the finished install as failed", async () => {
-    const downloadAndInstall = vi.fn(async () => {});
-    checkMock.mockResolvedValue(buildUpdate(downloadAndInstall));
-    relaunchMock.mockRejectedValue(new Error("process:allow-restart denied"));
-    const { button, status } = renderUpdates();
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(button.textContent).toBe("Install & Restart");
-    });
-    button.click();
-    await vi.waitFor(() => {
-      expect(button.textContent).toBe("Check for updates");
-    });
-
-    expect(status.textContent).toContain("The update is installed");
-    expect(status.textContent).not.toContain("Install failed");
-    expect(button.disabled).toBe(false);
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(checkMock).toHaveBeenCalledTimes(2);
-    });
-    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
-  });
-
-  it("a check that rejects with a non-Error still re-arms the button", async () => {
-    checkMock.mockRejectedValue(null);
-    const { button } = renderUpdates();
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(button.textContent).toBe("Check for updates");
-    });
-
-    expect(button.disabled).toBe(false);
-  });
-
-  it("the button is usable again after a check that failed", async () => {
-    checkMock.mockRejectedValue(new Error("could not fetch a valid release json"));
-    const { button, status } = renderUpdates();
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(status.textContent).toContain("not published yet");
-    });
-
-    expect(button.disabled).toBe(false);
-    expect(button.textContent).toBe("Check for updates");
-
-    button.click();
-    await vi.waitFor(() => {
-      expect(checkMock).toHaveBeenCalledTimes(2);
-    });
-  });
 });
 
 describe("renderGeneral — Dictation Language change (Bug 3)", () => {
@@ -734,72 +550,6 @@ describe("renderGeneral — meeting recording disclosure (spec 074, ADR 040)", (
   });
 });
 
-describe("renderGeneral — history path is separated from temp cleanup (spec 054)", () => {
-  function groupOf(container: HTMLElement, selector: string): HTMLElement {
-    return container.querySelector<HTMLElement>(selector)!.closest(".setting-group")!;
-  }
-
-  it("the history path and the Clear Temp Files button live in different groups", () => {
-    const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
-
-    const pathGroup = groupOf(container, "#output-dir");
-    const cleanupGroup = groupOf(container, "#btn-cleanup");
-
-    expect(pathGroup).not.toBe(cleanupGroup);
-  });
-
-  it("each group carries its own label so neither reads as the other's directory", () => {
-    const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
-
-    const pathLabel = groupOf(container, "#output-dir").querySelector(".setting-label")!;
-    const cleanupLabel = groupOf(container, "#btn-cleanup").querySelector(".setting-label")!;
-
-    expect(pathLabel.textContent).not.toBe(cleanupLabel.textContent);
-    expect(pathLabel.textContent).toMatch(/history/i);
-    expect(cleanupLabel.textContent).toMatch(/audio/i);
-  });
-});
-
-describe("renderGeneral — the output directory", () => {
-  function renderOutputDir() {
-    const container = document.createElement("div");
-    const lifecycle = renderGeneral(container, buildSettings());
-    return {
-      lifecycle,
-      input: container.querySelector<HTMLInputElement>("#output-dir")!,
-    };
-  }
-
-  it("saves an edit the user typed less than the debounce before the window was dismissed", async () => {
-    saveSettingsMock.mockResolvedValue({ settings: buildSettings(), warning: null });
-    const { lifecycle, input } = renderOutputDir();
-
-    input.value = "D:/typed";
-    input.dispatchEvent(new Event("input"));
-    lifecycle.releaseResources!();
-
-    await vi.waitFor(() =>
-      expect(saveSettingsMock).toHaveBeenCalledWith({ output_dir: "D:/typed" }),
-    );
-    expect(input.value).toBe("D:/typed");
-  });
-
-  it("saves that edit on a teardown too, rather than clearing the timer and losing it", async () => {
-    saveSettingsMock.mockResolvedValue({ settings: buildSettings(), warning: null });
-    const { lifecycle, input } = renderOutputDir();
-
-    input.value = "D:/typed";
-    input.dispatchEvent(new Event("input"));
-    lifecycle.destroy();
-
-    await vi.waitFor(() =>
-      expect(saveSettingsMock).toHaveBeenCalledWith({ output_dir: "D:/typed" }),
-    );
-  });
-});
-
 describe("renderGeneral — the microphone test", () => {
   const UNCONFIRMED_LABEL = "The backend did not answer — the microphone may still be open";
 
@@ -1077,13 +827,11 @@ describe("renderGeneral — the microphone test", () => {
 
     button.click();
     await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
-    const readsBefore = apiMock.getStorageInfo.mock.calls.length;
     lifecycle.releaseResources!();
 
     await vi.waitFor(() => expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession()));
     expect(button.textContent).toBe("Record");
     expect(label.textContent).toBe("Click to test microphone");
-    expect(apiMock.getStorageInfo.mock.calls.length).toBe(readsBefore);
   });
 
   it("puts an expired level-stream handshake into the label and leaves the recording alone", async () => {

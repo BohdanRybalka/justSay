@@ -29,9 +29,8 @@ export function renderHistory(container: HTMLElement): () => void {
       />
       <div id="history-search-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; min-height: 14px;"></div>
     </div>
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+    <div style="margin-bottom: 16px;">
       <span class="value" id="history-count">Loading...</span>
-      <button class="btn btn-danger" id="btn-clear-history">Clear All</button>
     </div>
     <div id="history-list"></div>
     <div id="history-load-more" style="text-align: center; padding: 12px; display: none;">
@@ -45,7 +44,6 @@ export function renderHistory(container: HTMLElement): () => void {
   const listEl = container.querySelector<HTMLElement>("#history-list")!;
   const loadMoreWrap = container.querySelector<HTMLElement>("#history-load-more")!;
   const btnLoadMore = container.querySelector<HTMLButtonElement>("#btn-load-more")!;
-  const btnClear = container.querySelector<HTMLButtonElement>("#btn-clear-history")!;
 
   let searchClaim: HistoryRowsClaim | null = null;
   let debounceTimer: number | null = null;
@@ -60,17 +58,12 @@ export function renderHistory(container: HTMLElement): () => void {
       rows: listEl,
       loadMoreWrapper: loadMoreWrap,
       loadMoreButton: btnLoadMore,
-      clearButton: btnClear,
     },
     createRow: createEntryElement,
     renderEmptyState: (isEmpty) => {
       if (isEmpty) listEl.innerHTML = EMPTY_HTML;
     },
     isDestroyed: () => destroyed,
-    onCleared: () => {
-      searchInput.value = "";
-      searchHint.textContent = "";
-    },
   });
 
   function noMatchesElement(): HTMLElement {
@@ -104,9 +97,9 @@ export function renderHistory(container: HTMLElement): () => void {
    * What the `finally` asks is whether a newer *search* exists, not whether this
    * lane is still current. A newer search owns the hint and has already written
    * its own text into it, so blanking it there would erase a live error message
-   * -- the same defect, moved one element over. Only a reload or a Clear All can
-   * supersede this lane while `searchClaim` still points at it, and after one of
-   * those there is no search on screen for the hint to describe.
+   * -- the same defect, moved one element over. Only a reload can supersede this
+   * lane while `searchClaim` still points at it, and after one there is no
+   * search on screen for the hint to describe.
    *
    * A `MalformedResponseError` is the client's own diagnosis of the reply, and
    * its message names the endpoint, so the hint says `Search failed` and the

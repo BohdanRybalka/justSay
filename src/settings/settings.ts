@@ -22,7 +22,6 @@ import { nextTabAction } from "./tab-visibility";
 import { renderGeneral } from "./tabs/general";
 import { renderModels } from "./tabs/models";
 import { renderHistory } from "./tabs/history";
-import { renderMetrics } from "./tabs/metrics";
 import { renderWords } from "./tabs/words";
 import { renderTranscribe } from "./tabs/transcribe";
 import { renderAccount } from "./tabs/account";
@@ -118,8 +117,15 @@ const panels: Record<PanelName, PanelRenderer> = {
   dictation: (container, loaded, windowHidden) =>
     hostLegacyTabs(container, [(tab) => renderModels(tab, loaded, windowHidden)]),
   settings: (container, loaded) => {
-    renderSettingsPanel(container, loaded);
-    return hostLegacyTabs(container, [(tab) => renderGeneral(tab, loaded), renderMetrics]);
+    const panel = renderSettingsPanel(container, loaded);
+    const general = hostLegacyTabs(container, [(tab) => renderGeneral(tab, loaded)]);
+    return {
+      ...general,
+      destroy: () => {
+        panel.destroy();
+        general.destroy();
+      },
+    };
   },
   account: (container) => renderAccount(container, accountName),
 };

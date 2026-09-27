@@ -1668,7 +1668,7 @@ def test_the_shell_reads_every_data_directory_variable_the_backend_reads() -> No
     not be reported as a missing binding.
 
     Mutation-checked three times, each applied alone: deleting the
-    ``JUSTSAY_DATA_DIR`` read from ``sidecar_log_dir`` fails this test naming
+    ``JUSTSAY_DATA_DIR`` read from ``data_root`` fails this test naming
     that function; reverting ``force_dev_data_dir`` to ``cfg!(debug_assertions)``
     alone fails it naming that binding; and renaming ``_FORCE_DEV_ENV_VAR``'s
     value in ``app_paths.py`` fails it naming the stale literals left in
@@ -1696,12 +1696,12 @@ def test_the_shell_reads_every_data_directory_variable_the_backend_reads() -> No
         "renamed variable left behind here, so the two sides resolve different directories"
     )
 
-    resolver = re.search(r"^fn sidecar_log_dir\(.*?^\}", rust, re.MULTILINE | re.DOTALL)
-    assert resolver, f"{backend_rel} no longer defines fn sidecar_log_dir"
+    resolver = re.search(r"^fn data_root\(.*?^\}", rust, re.MULTILINE | re.DOTALL)
+    assert resolver, f"{backend_rel} no longer defines fn data_root"
     data_dir_var = declared["_DATA_DIR_ENV_VAR"]
     assert data_dir_var in resolver.group(0), (
         f"{APP_PATHS_PY.name} resolves the data root from {data_dir_var!r} first, but "
-        f"{backend_rel}'s sidecar_log_dir does not read it"
+        f"{backend_rel}'s data_root does not read it"
     )
 
     force_dev = re.search(r"^\s*let force_dev_data_dir\s*=.*?;$", rust, re.MULTILINE | re.DOTALL)
@@ -1712,6 +1712,19 @@ def test_the_shell_reads_every_data_directory_variable_the_backend_reads() -> No
         f"{backend_rel} picks its name from the build profile alone, so a release build that "
         "inherits that variable writes the log under the production name while the backend "
         "resolves the development one"
+    )
+
+
+def test_the_shell_opens_the_folder_the_backend_keeps_temporary_audio_in() -> None:
+    """Open folder in Settings shows the directory the storage size and Clear act on.
+
+    Mutation-checked: renaming ``SCRATCH_DIR_NAME`` in backend.rs fails this test.
+    """
+    python = _extract(APP_PATHS_PY, r'^TEMP_DIR_NAME = "([^"]*)"$')
+    rust = _extract(BACKEND_RS, r'^const SCRATCH_DIR_NAME: &str = "([^"]*)";$')
+    assert rust == python, (
+        f"{BACKEND_RS.relative_to(REPO_ROOT).as_posix()} opens {rust} while "
+        f"{APP_PATHS_PY.name} keeps temporary audio in {python}"
     )
 
 
