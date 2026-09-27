@@ -42,8 +42,36 @@
 }
 
 .account-card-name {
+  font: inherit;
   font-size: 20px;
   font-weight: 645;
   letter-spacing: -.022em;
+  color: var(--text);
   min-width: 0;
+  max-width: 100%;
+  margin: -4px -8px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: none;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: text;
+}
+
+button.account-card-name:hover {
+  background: var(--inset);
+}
+
+.account-card-name--empty {
+  color: var(--muted);
+}
+
+.account-card-name-input {
+  flex: 1;
+  background: var(--inset);
+  border-color: var(--border-2);
+  outline: none;
 }

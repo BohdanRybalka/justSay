@@ -30,7 +30,7 @@ import { applyAppTheme, applyThemePreference } from "../ui/theme";
 import { mountIconSprite } from "../ui/icons";
 import { detectShortcutPlatform } from "../accelerator";
 import { renderTitlebar, wireTitlebar } from "./shell/titlebar";
-import { readOsDisplayName } from "./shell/account-name";
+import { displayName, readOsDisplayName } from "./shell/account-name";
 import {
   backendStateOf,
   renderAccountRow,
@@ -41,7 +41,7 @@ import {
 
 
 let currentPanel: PanelName = "insights";
-let accountName = "";
+let osAccountName = "";
 let settings: UserSettings | null = null;
 let cloudStatus: CloudKeyStatus | null = null;
 let activeTab: TabLifecycle | null = null;
@@ -127,7 +127,8 @@ const panels: Record<PanelName, PanelRenderer> = {
       },
     };
   },
-  account: (container) => renderAccount(container, accountName),
+  account: (container, loaded) =>
+    renderAccount(container, { chosen: loaded.display_name, osName: osAccountName }, renameUser),
 };
 
 /** `bridge-missing` / `bridge-timeout` / `bridge-failed: <detail>` /
@@ -330,6 +331,7 @@ export async function loadSettings(): Promise<UserSettings> {
   ]);
   settings = loaded;
   void applyAppTheme(loaded.theme);
+  renderAccountName();
   return settings;
 }
 
@@ -424,9 +426,21 @@ async function initAppVersion() {
 }
 
 
+function renderAccountName() {
+  renderAccountRow(
+    sidebar.querySelector(".account-row")!,
+    displayName(settings?.display_name ?? "", osAccountName),
+  );
+}
+
+async function renameUser(chosen: string): Promise<void> {
+  await saveSettings({ display_name: chosen });
+  renderAccountName();
+}
+
 async function initAccountName() {
-  accountName = await readOsDisplayName();
-  renderAccountRow(sidebar.querySelector(".account-row")!, accountName);
+  osAccountName = await readOsDisplayName();
+  renderAccountName();
   if (currentPanel === "account" && settings) switchPanel("account");
 }
 

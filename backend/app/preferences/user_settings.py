@@ -81,6 +81,8 @@ class UserSettings(BaseModel):
 
     theme: Literal["system", "light", "dark"] = "system"
 
+    display_name: str = Field(default="", max_length=80)
+
 
 @dataclass
 class UpdateResult:

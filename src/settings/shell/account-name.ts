@@ -1,6 +1,7 @@
 /**
- * The name the main window shows for the person using it: the OS account's
- * name, read once from the shell, and the initials its avatar carries.
+ * The name the main window shows for the person using it: the one they chose,
+ * else the OS account's name read once from the shell, and the initials its
+ * avatar carries.
  */
 import { withTimeout } from "../../timeout";
 
@@ -23,6 +24,11 @@ export async function readOsDisplayName(): Promise<string> {
     console.warn("Reading the account name failed:", e);
     return "";
   }
+}
+
+/** The chosen name, trimmed; the OS account's name when none was chosen. */
+export function displayName(chosen: string, osName: string): string {
+  return chosen.trim() || osName;
 }
 
 /** The first letter of each of the name's first two words, capitalised. */

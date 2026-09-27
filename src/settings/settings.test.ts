@@ -178,6 +178,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     groq_api_key: "",
     meeting_consent_acknowledged: false,
     theme: "system",
+    display_name: "",
     ...overrides,
   };
 }
@@ -256,9 +257,9 @@ describe("title bar", () => {
 });
 
 describe("the sidebar", () => {
-  async function bootWithSettingsLoaded(): Promise<void> {
+  async function bootWithSettingsLoaded(overrides: Partial<UserSettings> = {}): Promise<void> {
     apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
-    apiMock.getSettings.mockResolvedValue(buildSettings());
+    apiMock.getSettings.mockResolvedValue(buildSettings(overrides));
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
@@ -340,6 +341,35 @@ describe("the sidebar", () => {
     const row = document.querySelector(".account-row")!;
     expect(row.querySelector(".account-row-name")!.textContent).toBe("Account");
     expect(row.querySelector(".avatar")!.textContent).toBe("");
+  });
+
+  it("shows the name the user chose instead of the computer's", async () => {
+    await bootWithSettingsLoaded({ display_name: "Богдан" });
+
+    const row = document.querySelector(".account-row")!;
+    await vi.waitFor(() => expect(readOsDisplayNameMock).toHaveBeenCalled());
+    await vi.waitFor(() => expect(row.querySelector(".account-row-name")!.textContent).toBe("Богдан"));
+    expect(row.querySelector(".avatar")!.textContent).toBe("Б");
+  });
+
+  it("follows a rename made on the Account page", async () => {
+    await bootWithSettingsLoaded();
+    await vi.waitFor(() => expect(readOsDisplayNameMock).toHaveBeenCalled());
+    apiMock.updateSettings.mockResolvedValueOnce({
+      settings: buildSettings({ display_name: "Ada Lovelace" }),
+      warning: null,
+    });
+
+    openPanel("account");
+    document.querySelector<HTMLButtonElement>("#pane .account-card-name")!.click();
+    const input = document.querySelector<HTMLInputElement>("#pane .account-card-name-input")!;
+    input.value = "Ada Lovelace";
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+
+    const row = document.querySelector(".account-row")!;
+    await vi.waitFor(() => expect(row.querySelector(".account-row-name")!.textContent).toBe("Ada Lovelace"));
+    expect(row.querySelector(".avatar")!.textContent).toBe("AL");
+    expect(apiMock.updateSettings).toHaveBeenCalledWith({ display_name: "Ada Lovelace" });
   });
 
   it("highlights the account row, and no section, while Account is open", async () => {

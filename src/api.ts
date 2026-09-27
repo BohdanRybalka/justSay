@@ -562,7 +562,12 @@ export interface UserSettings {
    *  backend answers `403` to `POST /audio/meeting/start` until it is true. */
   meeting_consent_acknowledged: boolean;
   theme: ThemePreference;
+  /** The name the main window greets the user by; empty means the OS
+   *  account's name. At most `DISPLAY_NAME_MAX_LENGTH` characters. */
+  display_name: string;
 }
+
+export const DISPLAY_NAME_MAX_LENGTH = 80;
 
 export interface CloudKeyStatus {
   gemini_key_set: boolean;
