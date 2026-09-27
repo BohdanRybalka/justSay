@@ -1,5 +1,23 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "app": {
+    "windows": [
+      {
+        "label": "settings",
+        "title": "JustSay",
+        "url": "/index.html",
+        "width": 1044,
+        "height": 720,
+        "minWidth": 760,
+        "minHeight": 560,
+        "resizable": true,
+        "visible": false,
+        "center": true,
+        "dragDropEnabled": false,
+        "decorations": false
+      }
+    ]
+  },
   "bundle": {
     "resources": {
       "resources/justsay-backend": "justsay-backend",

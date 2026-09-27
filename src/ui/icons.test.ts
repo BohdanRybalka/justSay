@@ -6,7 +6,7 @@ const DESIGN_ICON_NAMES = [
   "mic", "check", "alert", "sliders", "clock", "chart", "cog", "globe", "file", "upload",
   "search", "copy", "star", "dots", "flame", "book", "sun", "moon", "chev", "x", "min", "sq",
   "stop", "refresh", "share", "folder", "cloud", "chip", "users", "speaker", "plus", "trend",
-  "sparkle", "exit",
+  "sparkle", "exit", "restore",
 ];
 
 afterEach(() => {

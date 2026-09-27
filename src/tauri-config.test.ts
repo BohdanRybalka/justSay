@@ -18,12 +18,25 @@ const EXACT_CONNECT_SRC = [
   `http://localhost:${BACKEND_PORT}`,
 ];
 
-type ShippedWindow = { label?: string; dragDropEnabled?: boolean };
+type ShippedWindow = Record<string, unknown> & { label?: string; dragDropEnabled?: boolean };
 type ShippedConfig = { app?: { security?: { csp?: string }; windows?: ShippedWindow[] } };
+type Platform = "windows" | "macos";
+
+const PLATFORMS: Platform[] = ["windows", "macos"];
+
+function readConfig(fileName: string): ShippedConfig {
+  const configPath = fileURLToPath(new URL(`../src-tauri/${fileName}`, import.meta.url));
+  return JSON.parse(readFileSync(configPath, "utf8")) as ShippedConfig;
+}
 
 function shippedConfig(): ShippedConfig {
-  const configPath = fileURLToPath(new URL("../src-tauri/tauri.conf.json", import.meta.url));
-  return JSON.parse(readFileSync(configPath, "utf8")) as ShippedConfig;
+  return readConfig("tauri.conf.json");
+}
+
+function platformMainWindow(platform: Platform): ShippedWindow | undefined {
+  return (readConfig(`tauri.${platform}.conf.json`).app?.windows ?? []).find(
+    (shippedWindow) => shippedWindow.label === "settings",
+  );
 }
 
 function shippedCsp(): string {
@@ -69,21 +82,62 @@ describe("shipped CSP (src-tauri/tauri.conf.json)", () => {
   });
 });
 
-describe("shipped settings window (src-tauri/tauri.conf.json)", () => {
-  const settingsWindow = (shippedConfig().app?.windows ?? []).find(
-    (shippedWindow) => shippedWindow.label === "settings",
-  );
+const PLATFORM_ONLY_KEYS: Record<Platform, Record<string, unknown>> = {
+  windows: { decorations: false },
+  macos: {
+    decorations: true,
+    titleBarStyle: "Overlay",
+    hiddenTitle: true,
+    trafficLightPosition: { x: 14, y: 21 },
+  },
+};
 
-  it("exists under the label the rest of the shell addresses it by", () => {
-    expect(settingsWindow, 'no window labelled "settings" in tauri.conf.json').toBeDefined();
+function withoutPlatformKeys(platform: Platform): Record<string, unknown> {
+  const shared = { ...platformMainWindow(platform) };
+  for (const key of Object.keys(PLATFORM_ONLY_KEYS[platform])) delete shared[key];
+  return shared;
+}
+
+describe("shipped main window (src-tauri/tauri.<platform>.conf.json)", () => {
+  it("is declared only per platform, because a platform file replaces the windows array whole", () => {
+    expect(
+      shippedConfig().app?.windows,
+      "a window in the shared tauri.conf.json is dead on Windows and macOS, whose files replace " +
+        "the array wholesale, and drifts from the entries that ship",
+    ).toBeUndefined();
   });
 
-  it("leaves drag-drop to the page instead of letting the shell intercept it", () => {
-    expect(
-      settingsWindow?.dragDropEnabled,
-      "dragDropEnabled must be false — at Tauri's default of true the shell installs its own " +
-        "drag-drop handler and the page never receives dragenter, dragover, dragleave or drop " +
-        "for an external file, which kills the Transcribe drop zone silently (ADR 087)",
-    ).toBe(false);
+  for (const platform of PLATFORMS) {
+    it(`exists on ${platform} under the label the rest of the shell addresses it by`, () => {
+      expect(platformMainWindow(platform), `no window labelled "settings" for ${platform}`).toBeDefined();
+    });
+
+    it(`leaves drag-drop to the page instead of letting the shell intercept it on ${platform}`, () => {
+      expect(
+        platformMainWindow(platform)?.dragDropEnabled,
+        "dragDropEnabled must be false — at Tauri's default of true the shell installs its own " +
+          "drag-drop handler and the page never receives dragenter, dragover, dragleave or drop " +
+          "for an external file, which kills the Transcribe drop zone silently (ADR 087)",
+      ).toBe(false);
+    });
+
+    it(`carries the title bar settings ${platform} needs`, () => {
+      expect(platformMainWindow(platform)).toMatchObject(PLATFORM_ONLY_KEYS[platform]);
+    });
+  }
+
+  it("opens as JustSay at the design's size on both platforms", () => {
+    expect(withoutPlatformKeys("windows")).toMatchObject({
+      title: "JustSay",
+      width: 1044,
+      height: 720,
+      minWidth: 760,
+      minHeight: 560,
+      visible: false,
+    });
+  });
+
+  it("agrees between platforms on everything but the title bar", () => {
+    expect(withoutPlatformKeys("macos")).toEqual(withoutPlatformKeys("windows"));
   });
 });

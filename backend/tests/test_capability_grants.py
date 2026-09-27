@@ -24,6 +24,10 @@ SHELL_PERMISSION_PREFIX = "shell:"
 FS_PERMISSION_PREFIX = "fs:"
 SHELL_PLUGIN_REGISTRATION = "tauri_plugin_shell::init()"
 DRAG_DROP_OPT_OUT = "drag_drop_enabled"
+WINDOW_CONTROL_PERMISSIONS = frozenset(
+    {"core:window:allow-minimize", "core:window:allow-toggle-maximize", "core:window:allow-close"}
+)
+MAIN_WINDOW_LABEL = "settings"
 
 WIDGET_BUILDER_PATTERN = re.compile(
     r"WebviewWindowBuilder::new\([^;]*?\"widget\"[^;]*?\.build\(\)", re.DOTALL
@@ -139,3 +143,15 @@ def test_the_widget_window_keeps_the_shell_drag_drop_handler():
         "cannot leave without restarting the app. Disable it only alongside a page-side guard "
         "like the Settings window's (ADR 087)."
     )
+
+
+def test_window_control_grants_reach_the_main_window_only():
+    for path in sorted(CAPABILITIES_DIR.glob("*.json")):
+        capability = json.loads(path.read_text(encoding="utf-8"))
+        granted = WINDOW_CONTROL_PERMISSIONS.intersection(_permission_identifiers(capability))
+        if granted:
+            assert capability.get("windows") == [MAIN_WINDOW_LABEL], (
+                f"{path.name} grants {sorted(granted)} to {capability.get('windows')}. The title "
+                "bar's minimise, maximise and close belong to the main window; granted to the "
+                "widget, its page could close or minimise the always-on-top widget for good."
+            )
