@@ -25,13 +25,23 @@ import { renderHistory } from "./tabs/history";
 import { renderMetrics } from "./tabs/metrics";
 import { renderWords } from "./tabs/words";
 import { renderTranscribe } from "./tabs/transcribe";
+import { renderAccount } from "./tabs/account";
 import { applyThemePreference } from "../ui/theme";
 import { mountIconSprite } from "../ui/icons";
 import { detectShortcutPlatform } from "../accelerator";
 import { renderTitlebar, wireTitlebar } from "./shell/titlebar";
+import { readOsDisplayName } from "./shell/account-name";
+import {
+  backendStateOf,
+  renderAccountRow,
+  renderPanelSelection,
+  renderSidebarStatus,
+  type PanelName,
+} from "./shell/sidebar";
 
 
-let currentTab = "general";
+let currentPanel: PanelName = "insights";
+let accountName = "";
 let settings: UserSettings | null = null;
 let cloudStatus: CloudKeyStatus | null = null;
 let activeTab: TabLifecycle | null = null;
@@ -50,9 +60,9 @@ const BACKEND_STILL_STARTING_MESSAGE = `The backend has not finished starting in
 
 
 const titlebar = document.getElementById("titlebar")!;
-const tabContent = document.getElementById("tab-content")!;
-const navButtons = document.querySelectorAll<HTMLButtonElement>(".nav-btn");
-const backendStatus = document.getElementById("backend-status")!;
+const pane = document.getElementById("pane")!;
+const sidebar = document.getElementById("sidebar")!;
+const sidebarStatus = document.getElementById("sidebar-status")!;
 
 
 /** What a tab hands back so this window can let go of what it is holding.
@@ -74,19 +84,41 @@ function asLifecycle(teardown: TabTeardown): TabLifecycle | null {
   return typeof teardown === "function" ? { destroy: teardown } : teardown;
 }
 
-type TabRenderer = (
+type PanelRenderer = (
   container: HTMLElement,
   settings: UserSettings,
   windowHidden: boolean,
 ) => TabTeardown;
 
-const tabs: Record<string, TabRenderer> = {
-  general: renderGeneral,
-  models: renderModels,
-  transcribe: (container) => renderTranscribe(container),
-  history: (container) => renderHistory(container),
-  metrics: (container) => renderMetrics(container),
-  words: (container, _settings, windowHidden) => renderWords(container, windowHidden),
+/** Mount old tabs, whole, into a panel whose redesign has not landed yet.
+ *  Each sits in its own `.legacy-tab`, the only place the old stylesheet
+ *  reaches, and the panel answers for all of them as one. */
+function hostLegacyTabs(
+  container: HTMLElement,
+  mounts: ((tab: HTMLElement) => TabTeardown)[],
+): TabLifecycle {
+  const hosted = mounts.flatMap((mount) => {
+    const tab = document.createElement("div");
+    tab.className = "legacy-tab";
+    container.append(tab);
+    return asLifecycle(mount(tab)) ?? [];
+  });
+  return {
+    destroy: () => hosted.forEach((tab) => tab.destroy()),
+    releaseResources: () => hosted.forEach((tab) => tab.releaseResources?.()),
+    resumeResources: () => hosted.forEach((tab) => tab.resumeResources?.()),
+  };
+}
+
+const panels: Record<PanelName, PanelRenderer> = {
+  insights: (container, _settings, windowHidden) =>
+    hostLegacyTabs(container, [(tab) => renderWords(tab, windowHidden)]),
+  history: (container) => hostLegacyTabs(container, [renderTranscribe, renderHistory]),
+  dictation: (container, loaded, windowHidden) =>
+    hostLegacyTabs(container, [(tab) => renderModels(tab, loaded, windowHidden)]),
+  settings: (container, loaded) =>
+    hostLegacyTabs(container, [(tab) => renderGeneral(tab, loaded), renderMetrics]),
+  account: (container) => renderAccount(container, accountName),
 };
 
 /** `bridge-missing` / `bridge-timeout` / `bridge-failed: <detail>` /
@@ -141,25 +173,26 @@ function renderSettingsUnavailable(container: HTMLElement, screen: BackendStartu
     activeTab.destroy();
     activeTab = null;
   }
-  container.innerHTML = "";
+  const panel = renderEmptyPanel(container);
   renderedUnavailable = { screen, retryDisabled: settingsLoadInFlight };
 
   const starting = screen === "starting";
 
-  const title = document.createElement("div");
-  title.className = "tab-title";
+  const title = document.createElement("h2");
+  title.className = "panel-title";
   title.textContent = starting ? "Starting JustSay…" : "Cannot load settings";
 
   const explanation = document.createElement("p");
-  explanation.style.color = "var(--text-dim)";
+  explanation.className = "panel-subtitle";
   explanation.textContent = starting
     ? "Waiting for the backend to start."
     : settingsError ?? BACKEND_STILL_STARTING_MESSAGE;
 
-  container.append(title, explanation);
+  panel.append(title, explanation);
 
   const retry = document.createElement("button");
-  retry.className = "btn btn-secondary";
+  retry.type = "button";
+  retry.className = "btn";
   retry.id = "btn-retry-settings";
   retry.textContent = "Try again";
   retry.disabled = settingsLoadInFlight;
@@ -168,7 +201,17 @@ function renderSettingsUnavailable(container: HTMLElement, screen: BackendStartu
     retry.textContent = "Retrying…";
     void loadSettingsIntoUi();
   });
-  container.append(retry);
+  panel.append(retry);
+}
+
+/** Empty the pane and put one `.panel` in it, scrolled to the top. */
+function renderEmptyPanel(container: HTMLElement): HTMLElement {
+  container.innerHTML = "";
+  container.scrollTop = 0;
+  const panel = document.createElement("div");
+  panel.className = "panel";
+  container.append(panel);
+  return panel;
 }
 
 /** Whether the backend answered this request and refused it — a 401, or any
@@ -193,7 +236,7 @@ async function loadSettingsIntoUi(observedReachable: boolean | null = null): Pro
     await withTimeout(loadSettings(), BACKEND_WAIT_BUDGET_MS);
     settingsError = null;
     settingsLoadInFlight = false;
-    switchTab(currentTab);
+    switchPanel(currentPanel);
     applyProbeSchedule(currentStartupScreen());
   } catch (e) {
     const answered = backendAnsweredAndFailed(e);
@@ -201,7 +244,7 @@ async function loadSettingsIntoUi(observedReachable: boolean | null = null): Pro
     settingsError = settingsUnavailableMessage(e, reachable || answered);
     settingsLoadInFlight = false;
     const screen = currentStartupScreen();
-    renderSettingsUnavailable(tabContent, screen);
+    renderSettingsUnavailable(pane, screen);
     renderBackendStatus(backendReachable);
     applyProbeSchedule(screen);
     console.error("Failed to load settings:", e);
@@ -245,33 +288,26 @@ function refreshUnavailableScreen(screen: BackendStartupScreen) {
   ) {
     return;
   }
-  renderSettingsUnavailable(tabContent, screen);
+  renderSettingsUnavailable(pane, screen);
 }
 
-function switchTab(tabName: string) {
+function switchPanel(panelName: PanelName) {
   if (activeTab) {
     activeTab.destroy();
     activeTab = null;
   }
 
-  currentTab = tabName;
-
-  navButtons.forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.tab === tabName);
-  });
-
-  tabContent.innerHTML = "";
+  currentPanel = panelName;
+  renderPanelSelection(sidebar, panelName);
 
   if (!settings) {
-    renderSettingsUnavailable(tabContent, currentStartupScreen());
+    renderSettingsUnavailable(pane, currentStartupScreen());
     return;
   }
 
-  const renderFn = tabs[tabName];
-  if (renderFn) {
-    activeTab = asLifecycle(renderFn(tabContent, settings, settingsWindowHidden));
-    if (settingsWindowHidden) activeTab?.releaseResources?.();
-  }
+  const panel = renderEmptyPanel(pane);
+  activeTab = asLifecycle(panels[panelName](panel, settings, settingsWindowHidden));
+  if (settingsWindowHidden) activeTab?.releaseResources?.();
 }
 
 
@@ -315,23 +351,15 @@ export function getCloudKeyStatus(): CloudKeyStatus | null {
 
 
 function renderBackendStatus(reachable: boolean) {
-  if (!reachable) {
-    backendStatus.textContent = "Backend offline";
-    backendStatus.className = "status-indicator offline";
-    backendStatus.removeAttribute("title");
-    return;
-  }
-
-  if (sawAuthFailure()) {
-    backendStatus.textContent = "Backend unauthorized";
-    backendStatus.className = "status-indicator error";
-    backendStatus.title = `Backend rejected an authenticated request (401). Tauri bridge: ${bridgeDiagnosisText(lastBridgeDiagnosis())}`;
-    return;
-  }
-
-  backendStatus.textContent = "Backend";
-  backendStatus.className = "status-indicator online";
-  backendStatus.removeAttribute("title");
+  const state = backendStateOf({
+    reachable,
+    refusedRequest: sawAuthFailure(),
+    starting: currentStartupScreen() === "starting",
+  });
+  const diagnosis = state === "unauthorized"
+    ? `Backend rejected an authenticated request (401). Tauri bridge: ${bridgeDiagnosisText(lastBridgeDiagnosis())}`
+    : null;
+  renderSidebarStatus(sidebarStatus, state, diagnosis);
 }
 
 let latestBackendProbeToken = 0;
@@ -386,12 +414,17 @@ async function initAppVersion() {
 }
 
 
-navButtons.forEach((btn) => {
-  btn.addEventListener("click", () => {
-    const tab = btn.dataset.tab;
-    if (tab && (tab !== currentTab || !settings)) {
-      switchTab(tab);
-    }
+async function initAccountName() {
+  accountName = await readOsDisplayName();
+  renderAccountRow(sidebar.querySelector(".account-row")!, accountName);
+  if (currentPanel === "account" && settings) switchPanel("account");
+}
+
+
+sidebar.querySelectorAll<HTMLButtonElement>("[data-panel]").forEach((item) => {
+  item.addEventListener("click", () => {
+    const panel = item.dataset.panel as PanelName;
+    if (panel !== currentPanel || !settings) switchPanel(panel);
   });
 });
 
@@ -522,8 +555,9 @@ function init() {
   renderTitlebar(titlebar, detectShortcutPlatform(navigator));
   void connectTitlebarToWindow();
   void initAppVersion();
+  void initAccountName();
   void trackTabWindowVisibility();
-  renderSettingsUnavailable(tabContent, currentStartupScreen());
+  renderSettingsUnavailable(pane, currentStartupScreen());
   void probeBackend();
   applyStartupDecision();
 }
