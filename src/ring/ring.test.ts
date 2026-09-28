@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  EVENT_MEETING_TOGGLE,
+  EVENT_NAVIGATE_PANEL,
   EVENT_RING_CLOSED,
   EVENT_RING_OPENED,
   EVENT_RING_POINTER,
@@ -12,18 +14,37 @@ import { PETAL_HOVER_CLASS, RING_OPEN_CLASS } from "./ring-view";
 
 const listeners = new Map<string, (event: unknown) => unknown>();
 
-const { invokeMock, getSettingsMock } = vi.hoisted(() => ({
+const SETTINGS = {
+  theme: "dark",
+  language: "uk",
+  previous_language: "en",
+  meeting_consent_acknowledged: true,
+  meetings_enabled: true,
+};
+
+const { invokeMock, emitMock, getSettingsMock, getMeetingStatusMock, updateSettingsMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(async (_command: string) => {}),
-  getSettingsMock: vi.fn(async () => ({ theme: "dark" })),
+  emitMock: vi.fn(async (_event: string, _payload?: unknown) => {}),
+  getSettingsMock: vi.fn(async (): Promise<Record<string, unknown>> => ({})),
+  getMeetingStatusMock: vi.fn(async () => ({ is_recording: false })),
+  updateSettingsMock: vi.fn(async (_updates: Record<string, unknown>) => ({})),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({
+  emit: emitMock,
   listen: vi.fn(async (event: string, handler: (payload: unknown) => unknown) => {
     listeners.set(event, handler);
     return () => {};
   }),
 }));
-vi.mock("../api", () => ({ api: { getSettings: getSettingsMock } }));
+vi.mock("../api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api")>()),
+  api: {
+    getSettings: getSettingsMock,
+    getMeetingStatus: getMeetingStatusMock,
+    updateSettings: updateSettingsMock,
+  },
+}));
 
 async function loadRing(): Promise<HTMLElement> {
   const html = readFileSync(resolve(__dirname, "../../ring.html"), "utf-8");
@@ -39,9 +60,15 @@ function shell(event: string, payload?: unknown) {
   listeners.get(event)!({ payload });
 }
 
+function petal(ring: HTMLElement, index: number): HTMLElement {
+  return ring.querySelectorAll<HTMLElement>(".ring-petal")[index];
+}
+
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
+  getSettingsMock.mockResolvedValue(SETTINGS);
+  getMeetingStatusMock.mockResolvedValue({ is_recording: false });
   listeners.clear();
   delete document.documentElement.dataset.theme;
   vi.stubGlobal("matchMedia", () => ({
@@ -106,9 +133,65 @@ describe("the ring window", () => {
     await loadRing();
     await vi.waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
 
-    getSettingsMock.mockResolvedValueOnce({ theme: "light" });
+    getSettingsMock.mockResolvedValueOnce({ ...SETTINGS, theme: "light" });
     shell(EVENT_SETTINGS_CHANGED);
 
     await vi.waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
+  });
+
+  it("names the language in use and offers to stop a meeting being recorded", async () => {
+    const ring = await loadRing();
+    await vi.waitFor(() => expect(petal(ring, 2).getAttribute("aria-label")).toBe("Language · Ukrainian"));
+
+    getMeetingStatusMock.mockResolvedValueOnce({ is_recording: true });
+    shell(EVENT_RING_OPENED);
+
+    await vi.waitFor(() => expect(petal(ring, 0).getAttribute("aria-label")).toBe("Stop the meeting"));
+  });
+
+  it("hands a meeting to the widget, which owns the meeting flow", async () => {
+    const ring = await loadRing();
+    await vi.waitFor(() => expect(getMeetingStatusMock).toHaveBeenCalled());
+
+    petal(ring, 0).click();
+
+    await vi.waitFor(() => expect(emitMock).toHaveBeenCalledWith(EVENT_MEETING_TOGGLE));
+  });
+
+  it("opens the meetings switch in the main window while meetings are off", async () => {
+    getSettingsMock.mockResolvedValue({ ...SETTINGS, meetings_enabled: false });
+    const ring = await loadRing();
+    await vi.waitFor(() => expect(petal(ring, 2).getAttribute("aria-label")).toBe("Language · Ukrainian"));
+
+    petal(ring, 0).click();
+
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("show_settings_window"));
+    expect(emitMock).toHaveBeenCalledWith(EVENT_NAVIGATE_PANEL, { panel: "dictation", section: "meetings" });
+    expect(emitMock).not.toHaveBeenCalledWith(EVENT_MEETING_TOGGLE);
+  });
+
+  it("switches to the language used before and tells the other windows", async () => {
+    const ring = await loadRing();
+    await vi.waitFor(() => expect(petal(ring, 2).getAttribute("aria-label")).toBe("Language · Ukrainian"));
+
+    petal(ring, 2).click();
+
+    await vi.waitFor(() => expect(emitMock).toHaveBeenCalledWith(EVENT_SETTINGS_CHANGED));
+    expect(updateSettingsMock).toHaveBeenCalledWith({ language: "en" });
+  });
+
+  it("opens the main window on History for a file and on Settings for Settings", async () => {
+    const ring = await loadRing();
+
+    petal(ring, 1).click();
+    await vi.waitFor(() =>
+      expect(emitMock).toHaveBeenCalledWith(EVENT_NAVIGATE_PANEL, { panel: "history", section: null }),
+    );
+
+    petal(ring, 3).click();
+    await vi.waitFor(() =>
+      expect(emitMock).toHaveBeenCalledWith(EVENT_NAVIGATE_PANEL, { panel: "settings", section: null }),
+    );
+    expect(invokeMock).toHaveBeenCalledWith("show_settings_window");
   });
 });

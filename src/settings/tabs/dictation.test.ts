@@ -76,6 +76,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     theme: "system",
     display_name: "",
     paste_at_cursor: true,
+    previous_language: "",
     ...overrides,
   };
 }
