@@ -75,7 +75,7 @@ describe("the ring window", () => {
     const ring = await loadRing();
     shell(EVENT_RING_OPENED);
 
-    ring.querySelectorAll<HTMLElement>(".ring-petal")[4].click();
+    ring.querySelectorAll<HTMLElement>(".ring-petal")[3].click();
 
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("close_ring"));
   });

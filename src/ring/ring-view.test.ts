@@ -35,13 +35,13 @@ function label(root: HTMLElement): { text: string | null; shown: boolean } {
 }
 
 describe("the ring's geometry", () => {
-  it("puts five petals 38px out, 72° apart, the first straight above the centre", () => {
-    expect(RING_PETALS).toHaveLength(5);
+  it("puts four petals 38px out, 90° apart, the first straight above the centre", () => {
+    expect(RING_PETALS).toHaveLength(4);
     const [top, second] = [petalCentre(0), petalCentre(1)];
     expect(top.x).toBeCloseTo(0);
     expect(top.y).toBeCloseTo(-38);
-    expect(Math.atan2(second.y, second.x) * (180 / Math.PI)).toBeCloseTo(-18);
-    for (let i = 0; i < 5; i++) {
+    expect(Math.atan2(second.y, second.x) * (180 / Math.PI)).toBeCloseTo(0);
+    for (let i = 0; i < 4; i++) {
       expect(Math.hypot(petalCentre(i).x, petalCentre(i).y)).toBeCloseTo(38);
     }
   });
@@ -50,7 +50,7 @@ describe("the ring's geometry", () => {
     expect(petalAt({ x: 0, y: -38 }, null)).toBe(0);
     expect(petalAt({ x: 0, y: -52 }, null)).toBe(0);
     expect(petalAt({ x: 0, y: 0 }, null)).toBeNull();
-    const betweenFirstTwo = { x: 38 * Math.cos(-0.94), y: 38 * Math.sin(-0.94) };
+    const betweenFirstTwo = { x: 38 * Math.cos(-Math.PI / 4), y: 38 * Math.sin(-Math.PI / 4) };
     expect(petalAt(betweenFirstTwo, null)).toBeNull();
   });
 
@@ -81,16 +81,14 @@ describe("the ring on the page", () => {
       "Transcribe a file",
       "Language · English",
       "Settings",
-      "Processed in the cloud",
     ]);
     expect(petals.map((petal) => petal.style.getPropertyValue("--a"))).toEqual([
       "-90deg",
-      "-18deg",
-      "54deg",
-      "126deg",
-      "198deg",
+      "0deg",
+      "90deg",
+      "180deg",
     ]);
-    expect(petals.map((petal) => petal.style.getPropertyValue("--i"))).toEqual(["0", "1", "2", "3", "4"]);
+    expect(petals.map((petal) => petal.style.getPropertyValue("--i"))).toEqual(["0", "1", "2", "3"]);
   });
 
   it("grows the petal under the pointer and names it in the label", () => {

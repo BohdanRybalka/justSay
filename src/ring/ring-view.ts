@@ -1,5 +1,5 @@
 /**
- * The ring's five petals around its centre: drawn once, opened and closed as
+ * The ring's four petals around its centre: drawn once, opened and closed as
  * the shell says, and hovered from the pointer position the shell reports.
  */
 
@@ -16,7 +16,6 @@ export const RING_PETALS: readonly RingPetal[] = [
   { icon: "upload", label: "Transcribe a file" },
   { icon: "globe", label: "Language · English" },
   { icon: "cog", label: "Settings" },
-  { icon: "cloud", label: "Processed in the cloud" },
 ];
 
 const RING_RADIUS = 38;

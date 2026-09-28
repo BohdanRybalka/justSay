@@ -1,4 +1,4 @@
-//! The ring window: five actions around the cursor, opened by a right-click on
+//! The ring window: four actions around the cursor, opened by a right-click on
 //! the widget. It is built once and kept hidden, and like the widget it never
 //! takes focus. While it is open a loop sends the page the pointer's offset
 //! from the centre, which the page turns into the hovered petal, and closes the
@@ -27,7 +27,7 @@ const WINDOW_SIZE: f64 = 200.0;
 const EDGE_MARGIN_TOP: f64 = 70.0;
 
 /// Logical distance kept from the sides and the bottom, where the label hangs
-/// 58px below the centre and is up to about 180px wide.
+/// 64px below the centre and is up to about 180px wide.
 const EDGE_MARGIN_SIDES_AND_BOTTOM: f64 = 96.0;
 
 /// Logical distance from the centre within which a press belongs to the ring:
