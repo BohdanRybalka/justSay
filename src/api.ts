@@ -571,6 +571,8 @@ export interface UserSettings {
   /** The name the main window greets the user by; empty means the OS
    *  account's name. At most `DISPLAY_NAME_MAX_LENGTH` characters. */
   display_name: string;
+  /** Dictated text is pasted into the focused app, not only copied. */
+  paste_at_cursor: boolean;
 }
 
 /** Whether the backend will start a meeting recording: the two settings

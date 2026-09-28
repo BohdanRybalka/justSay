@@ -39,7 +39,7 @@ const EVERY_VIEW: PillView[] = [
   { kind: "rest", hint: "Ctrl + Alt + V" },
   { kind: "listening", elapsedSeconds: 7, level: 0.5 },
   { kind: "working" },
-  { kind: "done", words: 117 },
+  { kind: "done", words: 117, delivery: "pasted" },
   { kind: "noSpeech" },
   { kind: "alert", label: "No connection" },
 ];
@@ -69,8 +69,9 @@ describe("the pill while something happens", () => {
   it.each([
     [{ kind: "listening", elapsedSeconds: 7.9, level: 0 }, ["pill--live"], null, "0:07"],
     [{ kind: "working" }, [], null, "Writing it down"],
-    [{ kind: "done", words: 117 }, [], "#check", "117 words · copied"],
-    [{ kind: "done", words: 1 }, [], "#check", "1 word · copied"],
+    [{ kind: "done", words: 117, delivery: "pasted" }, [], "#check", "117 words · pasted"],
+    [{ kind: "done", words: 117, delivery: "copied" }, [], "#check", "117 words · copied"],
+    [{ kind: "done", words: 1, delivery: "copied" }, [], "#check", "1 word · copied"],
     [{ kind: "noSpeech" }, [], null, "No speech"],
     [{ kind: "alert", label: "Mic is busy" }, ["pill--alert"], "#alert", "Mic is busy"],
   ] as [PillView, string[], string | null, string][])(

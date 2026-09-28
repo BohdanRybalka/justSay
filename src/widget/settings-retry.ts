@@ -52,7 +52,12 @@ import { withTimeout } from "../timeout";
 
 export type WidgetSettings = Pick<
   UserSettings,
-  "language" | "shortcut" | "theme" | "meeting_consent_acknowledged" | "meetings_enabled"
+  | "language"
+  | "shortcut"
+  | "theme"
+  | "meeting_consent_acknowledged"
+  | "meetings_enabled"
+  | "paste_at_cursor"
 >;
 
 export const CONNECTION_POLL_MS = 5_000;

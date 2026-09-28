@@ -421,6 +421,17 @@ def test_a_name_longer_than_the_field_holds_is_refused():
         user_settings.update_user_settings({"display_name": "x" * 81})
 
 
+def test_dictated_text_is_pasted_where_you_type_until_turned_off():
+    assert user_settings.UserSettings().paste_at_cursor is True
+
+
+def test_turning_paste_off_survives_a_restart(isolated):
+    user_settings.update_user_settings({"paste_at_cursor": False})
+
+    user_settings._settings = None
+    assert user_settings.get_user_settings().paste_at_cursor is False
+
+
 def test_sync_to_runtime_propagates_keys(monkeypatch):
     """sync_to_runtime pushes non-empty keys into the runtime STT config."""
     from app.config import settings as runtime_settings

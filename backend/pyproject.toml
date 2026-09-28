@@ -83,7 +83,7 @@ ignore_names = [
     "size_bytes",
     "copied_to_clipboard", "discarded_reason",
     "temp_size_bytes", "freed_bytes", "gemini_key_set", "groq_key_set",
-    "shortcut", "theme", "display_name", "package_installed", "model_loaded", "model_ram_mb",
+    "shortcut", "theme", "display_name", "paste_at_cursor", "package_installed", "model_loaded", "model_ram_mb",
     "model_downloaded", "model_bytes",
     "total_audio_seconds", "word", "highlighted_text",
     "row_factory", "LimitFlags", "settings_customise_sources",

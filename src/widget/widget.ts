@@ -7,7 +7,7 @@ import {
 } from "../accelerator";
 import { api, levelStream, meetingLevelStream, meetingsTurnedOn, REQUEST_TIMEOUT_MS } from "../api";
 import { hasOutlastedStartupBudget } from "../backend-startup";
-import { copyToClipboard } from "../clipboard";
+import { deliverDictation } from "../clipboard";
 import {
   EVENT_MEETING_TOGGLE,
   EVENT_SETTINGS_CHANGED,
@@ -55,6 +55,7 @@ let firstHealthCheckAt: number | null = null;
 
 let currentShortcut = DEFAULT_SHORTCUT;
 let currentLanguage = "uk";
+let pasteAtCursor = true;
 const shortcutPlatform = detectShortcutPlatform(navigator);
 
 /** A finished dictation reads for about two seconds (spec §3.1); a one-off
@@ -309,8 +310,9 @@ async function stopAndProcess() {
   }
 
   const { result } = outcome;
-  const copied = result.text.trim() !== "" && (await copyToClipboard(result.text));
-  const view = dictationResultView(result, copied);
+  const spoken = result.text.trim() !== "";
+  const delivery = spoken ? await deliverDictation(result.text, pasteAtCursor) : "failed";
+  const view = dictationResultView(result, delivery);
   if (view) showResult(view);
   else setState("idle");
 }
@@ -678,6 +680,7 @@ const settingsRetry = createSettingsRetry({
     applyThemePreference(settings.theme);
     void invokeShell("set_meetings_enabled", { enabled: meetingsTurnedOn(settings) });
     currentLanguage = settings.language;
+    pasteAtCursor = settings.paste_at_cursor;
     currentShortcut = settings.shortcut;
     await applyAndReportShortcut(currentShortcut);
   },

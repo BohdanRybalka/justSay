@@ -37,6 +37,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     meetings_enabled: false,
     theme: "system",
     display_name: "",
+    paste_at_cursor: true,
     ...overrides,
   };
 }
