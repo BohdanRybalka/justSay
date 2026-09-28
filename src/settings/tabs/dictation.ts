@@ -13,7 +13,7 @@ import {
   type ShortcutRequested,
 } from "../../contracts";
 import { saveSettings, cachePersistedShortcut, type TabLifecycle } from "../settings";
-import { escapeHtml, meetingDisclosureHtml } from "../html";
+import { escapeHtml } from "../html";
 import { isDecisiveRefusal, newSessionId } from "../../session";
 import { notifyError } from "../../notify";
 import { levelFromDb } from "../../level";
@@ -52,8 +52,8 @@ const SHORTCUT_HINT = "Hold it down while you speak";
 const NO_MICROPHONE = "No microphone";
 const UNKNOWN_MICROPHONE = "Your default microphone";
 
-/** Dictation's everyday card — language, shortcut, microphone — with the
- *  meeting disclosure under it, added to the end of `container`. */
+/** Dictation's everyday card — language, shortcut, microphone — added to the
+ *  end of `container`. */
 export function renderDictation(container: HTMLElement, settings: UserSettings): TabLifecycle {
   const platform = detectShortcutPlatform(navigator);
   let destroyed = false;
@@ -95,11 +95,6 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
           <div class="level-meter"><i id="level-fill"></i></div>
           <button type="button" class="btn" id="btn-test-mic">Test</button>
         </div>
-      </div>
-    </div>
-    <div class="legacy-tab">
-      <div class="setting-group" id="meeting-consent-group">
-        ${meetingDisclosureHtml(settings.meeting_consent_acknowledged)}
       </div>
     </div>
   `,
@@ -311,23 +306,6 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
   }
 
   if (sessionAwaitingRelease) releaseAndRemember(sessionAwaitingRelease);
-
-  const consentGroup = container.querySelector<HTMLElement>("#meeting-consent-group")!;
-  consentGroup
-    .querySelector<HTMLButtonElement>("#btn-meeting-consent")!
-    .addEventListener("click", async (event) => {
-      const button = event.currentTarget as HTMLButtonElement;
-      button.disabled = true;
-      try {
-        await saveSettings({ meeting_consent_acknowledged: true });
-        if (destroyed) return;
-        consentGroup.innerHTML = meetingDisclosureHtml(true);
-      } catch (e) {
-        if (destroyed) return;
-        button.disabled = false;
-        notifyError(e instanceof Error ? e.message : String(e));
-      }
-    });
 
   async function requestShortcut(shortcut: string, revertLabelTo: string) {
     try {

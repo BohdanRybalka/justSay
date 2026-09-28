@@ -50,7 +50,10 @@
 import type { UserSettings } from "../api";
 import { withTimeout } from "../timeout";
 
-export type WidgetSettings = Pick<UserSettings, "language" | "shortcut" | "theme">;
+export type WidgetSettings = Pick<
+  UserSettings,
+  "language" | "shortcut" | "theme" | "meeting_consent_acknowledged" | "meetings_enabled"
+>;
 
 export const CONNECTION_POLL_MS = 5_000;
 

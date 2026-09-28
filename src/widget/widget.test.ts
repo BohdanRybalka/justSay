@@ -268,6 +268,20 @@ describe("the widget window's shape", () => {
     await vi.waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
   });
 
+  it("shows Record a meeting in the tray only while meetings are turned on", async () => {
+    const turnedOn = { meeting_consent_acknowledged: true, meetings_enabled: true };
+    apiMock.getSettings.mockResolvedValue({ language: "uk", shortcut: DEFAULT_SHORTCUT, ...turnedOn } as never);
+    await loadWidget();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_meetings_enabled", { enabled: true }));
+
+    apiMock.getSettings.mockResolvedValue(
+      { language: "uk", shortcut: DEFAULT_SHORTCUT, ...turnedOn, meetings_enabled: false } as never,
+    );
+    await listeners.get(EVENT_SETTINGS_CHANGED)!({ payload: null });
+
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenLastCalledWith("set_meetings_enabled", { enabled: false }));
+  });
+
   it("offers the shortcut that works, even when saving it to the settings failed", async () => {
     apiMock.updateSettings.mockRejectedValue(new TypeError("Failed to fetch"));
     await loadWidget();

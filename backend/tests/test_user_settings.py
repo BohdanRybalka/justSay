@@ -361,6 +361,34 @@ def test_the_meeting_acknowledgement_defaults_to_not_given():
     assert user_settings.UserSettings().meeting_consent_acknowledged is False
 
 
+@pytest.mark.parametrize("acknowledged", [True, False])
+def test_record_meetings_starts_as_the_stored_acknowledgement(isolated, acknowledged):
+    """A file from before the switch existed keeps meetings on for whoever acknowledged."""
+    settings_path = isolated["settings_dir"] / "settings.json"
+    settings_path.write_text(
+        json.dumps({"meeting_consent_acknowledged": acknowledged}), encoding="utf-8"
+    )
+    user_settings._settings = None
+
+    assert user_settings.get_user_settings().meetings_enabled is acknowledged
+
+
+def test_record_meetings_turned_off_stays_off_after_a_reload(isolated):
+    user_settings.update_user_settings(
+        {"meeting_consent_acknowledged": True, "meetings_enabled": False}
+    )
+
+    user_settings._settings = None
+    loaded = user_settings.get_user_settings()
+
+    assert loaded.meeting_consent_acknowledged is True
+    assert loaded.meetings_enabled is False
+
+
+def test_record_meetings_is_off_by_default():
+    assert user_settings.UserSettings().meetings_enabled is False
+
+
 def test_the_theme_follows_the_system_until_one_is_chosen():
     assert user_settings.UserSettings().theme == "system"
 

@@ -36,10 +36,17 @@ const modeTab = {
 };
 
 const modeMountedHidden: boolean[] = [];
+let modeChangeListener: ((mode: "cloud" | "local") => void) | null = null;
 
 vi.mock("./tabs/dictation-mode", () => ({
-  renderDictationMode: vi.fn((container: HTMLElement, _settings: unknown, windowHidden: boolean) => {
+  renderDictationMode: vi.fn((
+    container: HTMLElement,
+    _settings: unknown,
+    windowHidden: boolean,
+    onModeChange: (mode: "cloud" | "local") => void,
+  ) => {
     modeMountedHidden.push(windowHidden);
+    modeChangeListener = onModeChange;
     container.insertAdjacentHTML("beforeend", '<div id="dictation-mode-body"></div>');
     return modeTab;
   }),
@@ -181,6 +188,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     gemini_api_key: "",
     groq_api_key: "",
     meeting_consent_acknowledged: false,
+    meetings_enabled: false,
     theme: "system",
     display_name: "",
     ...overrides,
@@ -326,7 +334,7 @@ describe("the sidebar", () => {
     expect(panel.querySelector("#btn-test-mic")).toBeNull();
   });
 
-  it("opens Dictation on its everyday card, with the disclosure and the mode rows under it", async () => {
+  it("opens Dictation on its everyday card, with the mode rows and then MEETINGS under it", async () => {
     await bootWithSettingsLoaded();
 
     openPanel("dictation");
@@ -336,12 +344,20 @@ describe("the sidebar", () => {
     expect(card.querySelector("#lang-select")).not.toBeNull();
     expect(card.querySelector("#btn-shortcut")).not.toBeNull();
     expect(card.querySelector("#btn-test-mic")).not.toBeNull();
-    const hosted = panel.querySelectorAll(":scope > .legacy-tab");
-    expect(hosted).toHaveLength(1);
-    expect(hosted[0].querySelector("#meeting-consent-group")).not.toBeNull();
+    expect(panel.querySelectorAll(".legacy-tab")).toHaveLength(0);
     const modeRows = panel.querySelector(":scope > #dictation-mode-body")!;
-    expect(card.compareDocumentPosition(hosted[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const meetings = panel.querySelector("#meetings-toggle")!;
     expect(card.compareDocumentPosition(modeRows) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(modeRows.compareDocumentPosition(meetings) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("names where a meeting becomes text after a new mode is picked", async () => {
+    await bootWithSettingsLoaded();
+    openPanel("dictation");
+
+    modeChangeListener!("local");
+
+    expect(document.querySelector("#meetings-hint")!.textContent).toMatch(/on this computer$/);
   });
 
   it("shows the name this computer knows the user by, with its initials", async () => {

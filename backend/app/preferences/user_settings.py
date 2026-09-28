@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from app import embeddings
 from app.core.app_paths import resolve_app_data_root, resolve_temp_dir
@@ -78,10 +78,19 @@ class UserSettings(BaseModel):
     groq_api_key: str = ""
 
     meeting_consent_acknowledged: bool = False
+    meetings_enabled: bool = False
 
     theme: Literal["system", "light", "dark"] = "system"
 
     display_name: str = Field(default="", max_length=80)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _meetings_start_as_acknowledged(cls, data: object) -> object:
+        """A file from before the switch has it on exactly when the disclosure was acknowledged."""
+        if isinstance(data, dict) and "meetings_enabled" not in data:
+            return {**data, "meetings_enabled": data.get("meeting_consent_acknowledged", False)}
+        return data
 
 
 @dataclass
