@@ -218,6 +218,29 @@ describe("renderDictionary", () => {
     expect(view.chips()).toEqual(["Tauri"]);
   });
 
+  it("saves one list at a time, the second after the first answers", async () => {
+    let answerFirst!: () => void;
+    saveSettingsMock.mockReturnValueOnce(new Promise<void>((resolve) => (answerFirst = resolve)));
+    const view = render();
+
+    view.type("Tauri");
+    view.type("Rybalka");
+    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledTimes(1));
+    answerFirst();
+    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledTimes(2));
+
+    expect(lastSavedPrompt()).toBe("Tauri, Rybalka");
+  });
+
+  it("ignores the Enter that confirms an input-method composition", () => {
+    const view = render();
+    view.input.value = "東京";
+
+    view.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true }));
+
+    expect(view.chips()).toEqual([]);
+  });
+
   it("shows a typed word as text, never as markup", () => {
     const view = render("<img src=x onerror=alert(1)>");
 

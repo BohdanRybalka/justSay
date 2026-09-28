@@ -147,7 +147,7 @@ export function renderDictionary(container: HTMLElement, settings: UserSettings)
 
   addButton.addEventListener("click", add);
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") add();
+    if (event.key === "Enter" && !event.isComposing) add();
   });
   input.addEventListener("input", () => {
     hint.hidden = true;
