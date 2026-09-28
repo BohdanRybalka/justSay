@@ -15,6 +15,7 @@ const FETCHED: WidgetSettings = {
   theme: "system",
   meeting_consent_acknowledged: false,
   meetings_enabled: false,
+  paste_at_cursor: true,
 };
 
 function refused() {

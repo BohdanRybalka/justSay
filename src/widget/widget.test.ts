@@ -143,7 +143,7 @@ vi.mock("../notify", async (importOriginal) => {
 });
 
 const { invokeMock } = vi.hoisted(() => ({
-  invokeMock: vi.fn<(command: string, args?: unknown) => Promise<void>>(async () => {}),
+  invokeMock: vi.fn<(command: string, args?: unknown) => Promise<unknown>>(async () => {}),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -191,7 +191,7 @@ beforeEach(() => {
     system_level_db: -60,
     capture_incident: null,
   });
-  invokeMock.mockResolvedValue(undefined);
+  invokeMock.mockImplementation(async (command) => (command === "paste_text" ? "pasted" : undefined));
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.stubGlobal(
@@ -570,9 +570,7 @@ describe("a meeting that goes wrong while nobody is looking", () => {
     await loadWidget();
     apiMock.audioStart.mockResolvedValue(recordingStatus());
     apiMock.dictate.mockResolvedValue({ text: "one", duration_ms: 100, copied_to_clipboard: false });
-    invokeMock.mockImplementation(async (command) => {
-      if (command === "write_clipboard_text") throw new Error("the clipboard stayed busy");
-    });
+    invokeMock.mockImplementation(async (command) => (command === "paste_text" ? "failed" : undefined));
     const root = document.getElementById("widget")!;
     root.dispatchEvent(new MouseEvent("click"));
     await vi.waitFor(() => expect(pillView()).toBe("listening"));
@@ -939,9 +937,9 @@ describe("what a dictation looks like from start to finish", () => {
 
     widget.dispatchEvent(new MouseEvent("click"));
     await vi.waitFor(() => expect(pillView()).toBe("done"));
-    expect(invokeMock).toHaveBeenCalledWith("write_clipboard_text", { text: "one two three" });
+    expect(invokeMock).toHaveBeenCalledWith("paste_text", { text: "one two three" });
     expect(document.querySelector("#widget .pill-content .pill-label")?.textContent).toBe(
-      "3 words · copied",
+      "3 words · pasted",
     );
 
     await vi.advanceTimersByTimeAsync(1_900);
@@ -963,15 +961,40 @@ describe("what a dictation looks like from start to finish", () => {
     widget.dispatchEvent(new MouseEvent("click"));
 
     await vi.waitFor(() => expect(pillView()).toBe("noSpeech"));
+    expect(invokeMock).not.toHaveBeenCalledWith("paste_text", expect.anything());
     expect(invokeMock).not.toHaveBeenCalledWith("write_clipboard_text", expect.anything());
+  });
+
+  it("only copies, and says so, when pasting is turned off", async () => {
+    apiMock.getSettings.mockResolvedValue(
+      { language: "uk", shortcut: DEFAULT_SHORTCUT, paste_at_cursor: false } as never,
+    );
+    const widget = await startListening();
+    apiMock.dictate.mockResolvedValue({ text: "one two", duration_ms: 100, copied_to_clipboard: false });
+
+    widget.dispatchEvent(new MouseEvent("click"));
+
+    await vi.waitFor(() => expect(pillView()).toBe("done"));
+    expect(invokeMock).toHaveBeenCalledWith("write_clipboard_text", { text: "one two" });
+    expect(invokeMock).not.toHaveBeenCalledWith("paste_text", expect.anything());
+    expect(pillLabel()).toBe("2 words · copied");
+  });
+
+  it("says copied when the text could only be copied", async () => {
+    const widget = await startListening();
+    apiMock.dictate.mockResolvedValue({ text: "one two", duration_ms: 100, copied_to_clipboard: false });
+    invokeMock.mockImplementation(async (command) => (command === "paste_text" ? "copied" : undefined));
+
+    widget.dispatchEvent(new MouseEvent("click"));
+
+    await vi.waitFor(() => expect(pillView()).toBe("done"));
+    expect(pillLabel()).toBe("2 words · copied");
   });
 
   it("says Copy failed when the shell cannot put the text on the clipboard", async () => {
     const widget = await startListening();
     apiMock.dictate.mockResolvedValue({ text: "one two", duration_ms: 100, copied_to_clipboard: false });
-    invokeMock.mockImplementation(async (command) => {
-      if (command === "write_clipboard_text") throw new Error("the clipboard stayed busy");
-    });
+    invokeMock.mockImplementation(async (command) => (command === "paste_text" ? "failed" : undefined));
 
     widget.dispatchEvent(new MouseEvent("click"));
 

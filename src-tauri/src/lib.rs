@@ -10,6 +10,7 @@ use tauri::{
 mod account;
 mod backend;
 mod clipboard;
+mod paste;
 mod scratch_folder;
 mod widget_window;
 
@@ -348,6 +349,9 @@ pub fn run() {
             set_meetings_enabled,
             show_settings_window,
             clipboard::write_clipboard_text,
+            paste::paste_text,
+            paste::paste_permission_granted,
+            paste::open_accessibility_settings,
             account::os_display_name,
             scratch_folder::open_scratch_folder
         ])

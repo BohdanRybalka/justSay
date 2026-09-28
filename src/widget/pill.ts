@@ -12,7 +12,7 @@ export type PillView =
   | { kind: "rest"; hint: string }
   | { kind: "listening"; elapsedSeconds: number; level: number }
   | { kind: "working" }
-  | { kind: "done"; words: number }
+  | { kind: "done"; words: number; delivery: "pasted" | "copied" }
   | { kind: "noSpeech" }
   | { kind: "alert"; label: string };
 
@@ -86,7 +86,8 @@ function fill(slot: HTMLElement, view: PillView): void {
     }
     case "done":
       part(slot, ".pill-count").textContent = String(view.words);
-      part(slot, ".pill-unit").textContent = view.words === 1 ? " word · copied" : " words · copied";
+      part(slot, ".pill-unit").textContent =
+        `${view.words === 1 ? " word" : " words"} · ${view.delivery}`;
       return;
     case "alert":
       part(slot, ".pill-label").textContent = view.label;

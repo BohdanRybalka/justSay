@@ -84,6 +84,8 @@ class UserSettings(BaseModel):
 
     display_name: str = Field(default="", max_length=80)
 
+    paste_at_cursor: bool = True
+
     @model_validator(mode="before")
     @classmethod
     def _meetings_start_as_acknowledged(cls, data: object) -> object:

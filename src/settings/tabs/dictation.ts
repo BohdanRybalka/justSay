@@ -19,6 +19,7 @@ import { notifyError } from "../../notify";
 import { levelFromDb } from "../../level";
 import { TimedOutError } from "../../timeout";
 import { renderSelect } from "../../ui/controls";
+import { PASTE_ROW, wirePasteRow } from "./dictation-paste";
 
 /** A discard that could not be delivered states what is known and promises
  *  nothing: whether the device was released is exactly what this window cannot
@@ -85,7 +86,7 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
         <div class="setting-row-controls">
           <button type="button" class="keycap num" id="btn-shortcut" aria-describedby="shortcut-hint">${escapeHtml(formatAccelerator(settings.shortcut, platform))}</button>
         </div>
-      </div>
+      </div>${PASTE_ROW}
       <div class="setting-row">
         <div class="setting-row-text">
           <div class="setting-row-title">Microphone</div>
@@ -99,6 +100,8 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
     </div>
   `,
   );
+
+  const unwirePasteRow = wirePasteRow(container, settings, () => void emitSettingsChanged());
 
   const langSelect = container.querySelector<HTMLSelectElement>("#lang-select")!;
   renderSelect(langSelect);
@@ -402,6 +405,7 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
   return {
     destroy: () => {
       destroyed = true;
+      unwirePasteRow();
       stopCapture();
       stopLevelStream();
       if (heldSession) {

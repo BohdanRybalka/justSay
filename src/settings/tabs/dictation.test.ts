@@ -75,6 +75,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     meetings_enabled: false,
     theme: "system",
     display_name: "",
+    paste_at_cursor: true,
     ...overrides,
   };
 }
@@ -142,6 +143,25 @@ describe("renderDictation — the everyday card", () => {
     expect(container.querySelector("#lang-select")!.parentElement!.classList.contains("select")).toBe(
       true,
     );
+  });
+
+  it("lists the rows in the design's order, paste between shortcut and microphone", () => {
+    const container = document.createElement("div");
+    renderDictation(container, buildSettings());
+
+    expect(
+      [...container.querySelectorAll(".setting-row-title")].map((title) => title.textContent),
+    ).toEqual(["Language", "Shortcut", "Paste where I'm typing", "Microphone"]);
+    expect(container.querySelector("#paste-toggle")!.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("stops rechecking the paste permission once the tab is torn down", () => {
+    const container = document.createElement("div");
+    const removed = vi.spyOn(window, "removeEventListener");
+
+    renderDictation(container, buildSettings()).destroy();
+
+    expect(removed).toHaveBeenCalledWith("focus", expect.any(Function));
   });
 
   it("names the microphone the backend records from", async () => {
