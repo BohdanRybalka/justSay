@@ -99,8 +99,28 @@ class LocalReadinessTimeoutError(ResourceUnavailableError):
     """
 
 
+EXPECTED_MODEL_BYTES: dict[str, int] = {
+    "tiny": 77_691_713,
+    "base": 147_951_465,
+    "small": 487_601_967,
+    "medium": 1_533_763_059,
+    "large-v2": 3_094_623_691,
+    "large-v3": 3_095_033_483,
+    "large-v3-turbo": 1_624_555_275,
+}
+
+
 class LocalSTTStatus(BaseModel):
+    """``available``: this build has, or can install, an engine for this machine.
+
+    ``model_bytes`` is the model's size on disk when ``model_downloaded``, else its
+    expected download size, and ``None`` for a model size with no known size.
+    """
+
+    available: bool = False
     package_installed: bool = False
+    model_downloaded: bool = False
+    model_bytes: int | None = None
     model_loaded: bool = False
     model_name: str = ""
     model_ram_mb: int | None = None
@@ -148,9 +168,14 @@ def check_status(stt_settings: STTSettings) -> LocalSTTStatus:
     else:
         last_error = None
     model_is_loaded = routing.is_model_loaded() if installed else False
+    on_disk = _model_bytes_on_disk(kind, stt_settings.whisper_model_size)
+    expected = EXPECTED_MODEL_BYTES.get(stt_settings.whisper_model_size)
 
     return LocalSTTStatus(
+        available=installed or _local_install_refusal() is None,
         package_installed=installed,
+        model_downloaded=on_disk is not None,
+        model_bytes=expected if on_disk is None else on_disk,
         model_loaded=model_is_loaded,
         model_name=stt_settings.whisper_model_size,
         model_ram_mb=_estimate_model_ram_mb() if model_is_loaded else None,
@@ -526,6 +551,26 @@ def _check_package_installed() -> bool:
         return True
     except ImportError:
         return False
+
+
+def _model_bytes_on_disk(kind: LocalProviderKind, model_size: str) -> int | None:
+    """Bytes of the ``model_size`` model ``kind`` loads, or ``None`` when it is not on disk.
+
+    Reads only what is already here: whisper.cpp's GGML file, or faster-whisper's
+    Hugging Face snapshot with downloads forbidden, which counts once its weights are.
+    """
+    if kind == LocalProviderKind.WHISPER_CPP_SERVER:
+        path = local_whisper_cpp_cmd.resolve_model_path(model_size)
+        return path.stat().st_size if path.is_file() else None
+    try:
+        from faster_whisper.utils import download_model
+
+        folder = Path(download_model(model_size, local_files_only=True))
+    except Exception:
+        return None
+    if not (folder / "model.bin").is_file():
+        return None
+    return sum(f.stat().st_size for f in folder.iterdir() if f.is_file())
 
 
 def _local_install_refusal() -> str | None:

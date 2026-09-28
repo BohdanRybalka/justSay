@@ -29,19 +29,19 @@ vi.mock("../api", async (importOriginal) => {
   };
 });
 
-const modelsTab = {
+const modeTab = {
   destroy: vi.fn(),
   releaseResources: vi.fn(),
   resumeResources: vi.fn(),
 };
 
-const modelsMountedHidden: boolean[] = [];
+const modeMountedHidden: boolean[] = [];
 
-vi.mock("./tabs/models", () => ({
-  renderModels: vi.fn((container: HTMLElement, _settings: unknown, windowHidden: boolean) => {
-    modelsMountedHidden.push(windowHidden);
-    container.innerHTML = '<div id="models-tab-body"></div>';
-    return modelsTab;
+vi.mock("./tabs/dictation-mode", () => ({
+  renderDictationMode: vi.fn((container: HTMLElement, _settings: unknown, windowHidden: boolean) => {
+    modeMountedHidden.push(windowHidden);
+    container.insertAdjacentHTML("beforeend", '<div id="dictation-mode-body"></div>');
+    return modeTab;
   }),
 }));
 
@@ -202,7 +202,7 @@ beforeEach(() => {
   minimisationReads = 0;
   holdVisibilityRead = false;
   releaseVisibilityRead = () => {};
-  modelsMountedHidden.length = 0;
+  modeMountedHidden.length = 0;
   document.body.innerHTML = `
     <header id="titlebar" class="titlebar"></header>
     <nav id="sidebar">
@@ -292,7 +292,7 @@ describe("the sidebar", () => {
     openPanel("dictation");
 
     expect(currentPanels()).toEqual(["dictation"]);
-    expect(document.getElementById("models-tab-body")).not.toBeNull();
+    expect(document.getElementById("dictation-mode-body")).not.toBeNull();
     expect(document.getElementById("words-tab-body")).toBeNull();
     expect(wordsTab.destroy).toHaveBeenCalledOnce();
   });
@@ -326,7 +326,7 @@ describe("the sidebar", () => {
     expect(panel.querySelector("#btn-test-mic")).toBeNull();
   });
 
-  it("opens Dictation on its everyday card, with the disclosure and the old Models tab under it", async () => {
+  it("opens Dictation on its everyday card, with the disclosure and the mode rows under it", async () => {
     await bootWithSettingsLoaded();
 
     openPanel("dictation");
@@ -337,10 +337,11 @@ describe("the sidebar", () => {
     expect(card.querySelector("#btn-shortcut")).not.toBeNull();
     expect(card.querySelector("#btn-test-mic")).not.toBeNull();
     const hosted = panel.querySelectorAll(":scope > .legacy-tab");
-    expect(hosted).toHaveLength(2);
+    expect(hosted).toHaveLength(1);
     expect(hosted[0].querySelector("#meeting-consent-group")).not.toBeNull();
-    expect(hosted[1].querySelector("#models-tab-body")).not.toBeNull();
+    const modeRows = panel.querySelector(":scope > #dictation-mode-body")!;
     expect(card.compareDocumentPosition(hosted[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(card.compareDocumentPosition(modeRows) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("shows the name this computer knows the user by, with its initials", async () => {
@@ -1481,11 +1482,11 @@ describe("the Settings window coming back after a dismissal", () => {
     await eventListeners.get(EVENT_SETTINGS_SHOWN)!({});
 
     expect(
-      modelsTab.resumeResources,
+      modeTab.resumeResources,
       "the tray item shows an already visible window, and resuming there starts a " +
         "second interval beside the live one",
     ).not.toHaveBeenCalled();
-    expect(modelsTab.releaseResources).not.toHaveBeenCalled();
+    expect(modeTab.releaseResources).not.toHaveBeenCalled();
   });
 
   it("mounts a tab into a dismissed window without starting anything, then resumes it once", async () => {
@@ -1505,22 +1506,22 @@ describe("the Settings window coming back after a dismissal", () => {
     await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
 
     releaseSettings(buildSettings());
-    await vi.waitFor(() => expect(document.getElementById("models-tab-body")).not.toBeNull());
+    await vi.waitFor(() => expect(document.getElementById("dictation-mode-body")).not.toBeNull());
 
     expect(
-      modelsTab.releaseResources,
+      modeTab.releaseResources,
       "a slow cold start lands the tab in a window the user has already closed, and a tab " +
         "that keeps its interval there polls for the life of the app",
     ).toHaveBeenCalledTimes(1);
-    expect(modelsTab.resumeResources).not.toHaveBeenCalled();
+    expect(modeTab.resumeResources).not.toHaveBeenCalled();
 
     await eventListeners.get(EVENT_SETTINGS_SHOWN)!({});
 
     expect(
-      modelsTab.resumeResources,
+      modeTab.resumeResources,
       "and the show that follows must leave one live interval, not a second beside it",
     ).toHaveBeenCalledTimes(1);
-    expect(modelsTab.releaseResources).toHaveBeenCalledTimes(1);
+    expect(modeTab.releaseResources).toHaveBeenCalledTimes(1);
   });
 
   it("tells each tab whether the window it is mounting into is dismissed", async () => {
@@ -1540,10 +1541,10 @@ describe("the Settings window coming back after a dismissal", () => {
     await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
 
     releaseSettings(buildSettings());
-    await vi.waitFor(() => expect(modelsMountedHidden).toHaveLength(1));
+    await vi.waitFor(() => expect(modeMountedHidden).toHaveLength(1));
 
     expect(
-      modelsMountedHidden[0],
+      modeMountedHidden[0],
       "a release only runs once the tab has returned, by which point its mount-time " +
         "reads are away; a tab that is told can skip them instead",
     ).toBe(true);
@@ -1553,7 +1554,7 @@ describe("the Settings window coming back after a dismissal", () => {
     document.querySelector<HTMLButtonElement>('[data-panel="dictation"]')!.click();
 
     expect(
-      modelsMountedHidden[modelsMountedHidden.length - 1],
+      modeMountedHidden[modeMountedHidden.length - 1],
       "and a tab mounted into a window the user is looking at must read at once",
     ).toBe(false);
   });
@@ -1568,8 +1569,8 @@ describe("the Settings window coming back after a dismissal", () => {
     await eventListeners.get(EVENT_SETTINGS_SHOWN)!({});
     await eventListeners.get(EVENT_SETTINGS_SHOWN)!({});
 
-    expect(modelsTab.releaseResources).toHaveBeenCalledTimes(1);
-    expect(modelsTab.resumeResources).toHaveBeenCalledTimes(1);
+    expect(modeTab.releaseResources).toHaveBeenCalledTimes(1);
+    expect(modeTab.resumeResources).toHaveBeenCalledTimes(1);
   });
 
   it("polls on its own when the event bus refuses every subscription", async () => {

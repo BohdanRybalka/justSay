@@ -49,6 +49,7 @@ def _patches(
         patch.object(local_setup, "_check_package_installed", return_value=installed),
         patch.object(local_setup, "_detect_gpu", return_value=gpu),
         patch.object(local_setup, "is_macos_arm64", return_value=macos_arm64),
+        patch.object(local_setup, "_model_bytes_on_disk", return_value=None),
     ]
 
 
@@ -85,6 +86,100 @@ def test_check_status_reports_installed_package():
     assert status.gpu_vendor == "none"
     assert status.device == "cpu"
     assert status.compute_type == "int8"
+
+
+@pytest.mark.parametrize(
+    ("installed", "refusal", "available"),
+    [
+        (True, "refused", True),
+        (False, None, True),
+        (False, "refused", False),
+    ],
+)
+def test_check_status_calls_the_engine_available_when_present_or_installable(
+    installed, refusal, available
+):
+    with _apply(
+        _patches(installed, (False, None, "none"))
+        + [patch.object(local_setup, "_local_install_refusal", return_value=refusal)]
+    ):
+        status = check_status(STTSettings())
+
+    assert status.available is available
+
+
+def test_check_status_reports_the_size_of_a_model_already_on_disk():
+    with _apply(_patches(True, (False, None, "none"))):
+        with patch.object(local_setup, "_model_bytes_on_disk", return_value=1_621_665_983):
+            status = check_status(STTSettings(whisper_model_size="large-v3-turbo"))
+
+    assert status.model_downloaded is True
+    assert status.model_bytes == 1_621_665_983
+
+
+@pytest.mark.parametrize(
+    ("model_size", "expected"),
+    [("large-v3-turbo", 1_624_555_275), ("small", 487_601_967), ("custom-finetune", None)],
+)
+def test_check_status_reports_the_download_size_of_a_model_not_on_disk(model_size, expected):
+    with _apply(_patches(True, (False, None, "none"))):
+        status = check_status(STTSettings(whisper_model_size=model_size))
+
+    assert status.model_downloaded is False
+    assert status.model_bytes == expected
+
+
+def test_model_bytes_on_disk_reads_the_ggml_file_whisper_cpp_loads(monkeypatch, tmp_path):
+    model = tmp_path / "ggml-small.bin"
+    monkeypatch.setattr(
+        local_whisper_cpp_cmd, "resolve_model_path", lambda size: tmp_path / f"ggml-{size}.bin"
+    )
+    kind = local_setup.LocalProviderKind.WHISPER_CPP_SERVER
+
+    assert local_setup._model_bytes_on_disk(kind, "small") is None
+    model.write_bytes(b"x" * 1234)
+    assert local_setup._model_bytes_on_disk(kind, "small") == 1234
+
+
+def test_model_bytes_on_disk_sums_the_cached_faster_whisper_snapshot(monkeypatch, tmp_path):
+    (tmp_path / "model.bin").write_bytes(b"x" * 1000)
+    (tmp_path / "config.json").write_bytes(b"x" * 24)
+    calls = []
+
+    def cached_only(size, local_files_only=False):
+        calls.append((size, local_files_only))
+        return str(tmp_path)
+
+    fake_utils = SimpleNamespace(download_model=cached_only)
+    monkeypatch.setitem(sys.modules, "faster_whisper.utils", fake_utils)
+    kind = local_setup.LocalProviderKind.FASTER_WHISPER
+
+    assert local_setup._model_bytes_on_disk(kind, "small") == 1024
+    assert calls == [("small", True)]
+
+
+def test_model_bytes_on_disk_is_none_for_a_snapshot_whose_weights_never_arrived(
+    monkeypatch, tmp_path
+):
+    (tmp_path / "config.json").write_bytes(b"x" * 24)
+    (tmp_path / "tokenizer.json").write_bytes(b"x" * 24)
+    fake_utils = SimpleNamespace(download_model=lambda size, local_files_only=False: str(tmp_path))
+    monkeypatch.setitem(sys.modules, "faster_whisper.utils", fake_utils)
+    kind = local_setup.LocalProviderKind.FASTER_WHISPER
+
+    assert local_setup._model_bytes_on_disk(kind, "small") is None
+
+
+def test_model_bytes_on_disk_is_none_when_the_cache_has_no_snapshot(monkeypatch):
+    def not_cached(size, local_files_only=False):
+        raise FileNotFoundError(size)
+
+    fake_utils = SimpleNamespace(download_model=not_cached)
+    monkeypatch.setitem(sys.modules, "faster_whisper.utils", fake_utils)
+
+    kind = local_setup.LocalProviderKind.FASTER_WHISPER
+
+    assert local_setup._model_bytes_on_disk(kind, "small") is None
 
 
 def test_check_status_uses_cuda_when_gpu_auto():
@@ -916,6 +1011,7 @@ def test_check_status_probes_gpu_at_most_once_through_the_real_unmocked_provider
     monkeypatch.setattr(
         "app.stt.local_whisper_cpp_cmd.resolve_binary_path", lambda: Path("whisper-server.exe")
     )
+    monkeypatch.setattr(local_setup, "_model_bytes_on_disk", lambda kind, size: None)
 
     probe_source_calls = {"n": 0}
     real_env_override = gpu_probe._probe_env_override
