@@ -249,7 +249,8 @@ mod platform {
     }
 
     pub(super) fn modifiers_held() -> bool {
-        unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) } & MODIFIERS != 0
+        let flags = unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) };
+        flags & MODIFIERS != 0
     }
 
     /// Main thread only: the layout lookup asserts it.
