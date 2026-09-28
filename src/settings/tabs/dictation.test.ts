@@ -5,6 +5,7 @@ import type { UserSettings } from "../../api";
 import { TimedOutError } from "../../timeout";
 
 const apiMock = {
+  inputDevice: vi.fn(),
   audioDiscard: vi.fn(),
   audioStatus: vi.fn(),
   audioStart: vi.fn(),
@@ -53,7 +54,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: listenMock,
 }));
 
-let renderGeneral: typeof import("./general").renderGeneral;
+let renderDictation: typeof import("./dictation").renderDictation;
 const { REQUEST_TIMEOUT_MS } = await import("../../api");
 
 function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
@@ -87,14 +88,14 @@ const realAddEventListener = document.addEventListener.bind(document);
  *  Two things outlive a test here, and both are order-dependent by construction,
  *  so both stay invisible until the suite is shuffled.
  *
- *  `renderGeneral` arms a `document` keydown listener the moment `#btn-shortcut`
+ *  `renderDictation` arms a `document` keydown listener the moment `#btn-shortcut`
  *  is clicked, and only `TabLifecycle.destroy` takes it off again — which most
  *  tests never call. A test ending mid-capture leaves a live handler bound to a
  *  container nobody can reach: it answers the *next* test's `capture()`, consumes
  *  the outcome that test queued on `emitMock`, and strands the container being
  *  asserted on. `document` cannot be re-imported, so its listeners are tracked.
  *
- *  `general.ts` also keeps `sessionAwaitingRelease` at module scope. A test whose
+ *  `dictation.ts` also keeps `sessionAwaitingRelease` at module scope. A test whose
  *  `audioDiscard` rejects non-decisively leaves it set, and the next render reads
  *  it and issues a discard nobody asked for. That one is closed by re-importing
  *  the module per test rather than by undoing anything. */
@@ -109,12 +110,14 @@ async function undoWhatTheTestLeftBehind(): Promise<void> {
 }
 
 const consoleErrorMock = vi.fn();
+const MIC_NAME = "Microphone (Realtek Audio)";
+const RESULT_HINT = "setting-row-hint--result";
 
 afterEach(undoWhatTheTestLeftBehind);
 
 beforeEach(async () => {
   vi.resetModules();
-  ({ renderGeneral } = await import("./general"));
+  ({ renderDictation } = await import("./dictation"));
   document.addEventListener = ((...args: DocumentListener) => {
     addedDocumentListeners.push(args);
     realAddEventListener(...args);
@@ -123,9 +126,118 @@ beforeEach(async () => {
   vi.spyOn(console, "error").mockImplementation(consoleErrorMock);
   listenMock.mockImplementation(async () => unlistenMock);
   levelStreamMock.mockImplementation(() => ({ abort: vi.fn() }));
+  apiMock.inputDevice.mockResolvedValue({ name: MIC_NAME });
 });
 
-describe("renderGeneral — Dictation Language change (Bug 3)", () => {
+describe("renderDictation — the everyday card", () => {
+  function micHintOf(container: HTMLElement): HTMLElement {
+    return container.querySelector<HTMLElement>("#mic-hint")!;
+  }
+
+  it("puts the language select in the design's select box", () => {
+    const container = document.createElement("div");
+    renderDictation(container, buildSettings());
+
+    expect(container.querySelector("#lang-select")!.parentElement!.classList.contains("select")).toBe(
+      true,
+    );
+  });
+
+  it("names the microphone the backend records from", async () => {
+    const container = document.createElement("div");
+    renderDictation(container, buildSettings());
+
+    await vi.waitFor(() => expect(micHintOf(container).textContent).toBe(MIC_NAME));
+    expect(apiMock.inputDevice).toHaveBeenCalledOnce();
+    expect(micHintOf(container).classList.contains(RESULT_HINT)).toBe(false);
+  });
+
+  it("says there is no microphone when the machine has none", async () => {
+    apiMock.inputDevice.mockResolvedValue({ name: null });
+    const container = document.createElement("div");
+    renderDictation(container, buildSettings());
+
+    await vi.waitFor(() => expect(micHintOf(container).textContent).toBe("No microphone"));
+  });
+
+  it("falls back to the default microphone when the name cannot be read", async () => {
+    apiMock.inputDevice.mockRejectedValue(new TypeError("Failed to fetch"));
+    const container = document.createElement("div");
+    renderDictation(container, buildSettings());
+
+    await vi.waitFor(() =>
+      expect(micHintOf(container).textContent).toBe("Your default microphone"),
+    );
+  });
+
+  it("keeps a test result on screen when the name arrives after it", async () => {
+    const { ApiRequestError } = await import("../../api");
+    let answerName: (device: { name: string }) => void = () => {};
+    apiMock.inputDevice.mockImplementation(
+      () => new Promise((resolve) => (answerName = resolve)),
+    );
+    apiMock.audioStart.mockRejectedValue(new ApiRequestError("Already recording", 409));
+    const container = document.createElement("div");
+    renderDictation(container, buildSettings());
+
+    container.querySelector<HTMLButtonElement>("#btn-test-mic")!.click();
+    await vi.waitFor(() =>
+      expect(micHintOf(container).textContent).toBe("Microphone busy (widget recording)"),
+    );
+    answerName({ name: MIC_NAME });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(micHintOf(container).textContent).toBe("Microphone busy (widget recording)");
+    expect(micHintOf(container).classList.contains(RESULT_HINT)).toBe(true);
+  });
+
+  it("shows a test result in clay and the plain name again once a test runs", async () => {
+    const { ApiRequestError } = await import("../../api");
+    apiMock.audioStart.mockRejectedValueOnce(new ApiRequestError("Already recording", 409));
+    apiMock.audioStart.mockResolvedValue({
+      is_recording: true,
+      duration_seconds: 0,
+      level_db: -60,
+      session_id: null,
+    });
+    const container = document.createElement("div");
+    renderDictation(container, buildSettings());
+    const button = container.querySelector<HTMLButtonElement>("#btn-test-mic")!;
+    await vi.waitFor(() => expect(micHintOf(container).textContent).toBe(MIC_NAME));
+
+    button.click();
+    await vi.waitFor(() => expect(micHintOf(container).classList.contains(RESULT_HINT)).toBe(true));
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
+
+    expect(micHintOf(container).textContent).toBe(MIC_NAME);
+    expect(micHintOf(container).classList.contains(RESULT_HINT)).toBe(false);
+  });
+
+  it("marks the keycap while it listens and puts the outcome in clay under it", async () => {
+    const container = document.createElement("div");
+    renderDictation(container, buildSettings());
+    const keycap = container.querySelector<HTMLButtonElement>("#btn-shortcut")!;
+    const hint = container.querySelector<HTMLElement>("#shortcut-hint")!;
+    expect(hint.textContent).toBe("Hold it down while you speak");
+
+    keycap.click();
+    expect(keycap.textContent).toBe("Press keys…");
+    expect(keycap.classList.contains("keycap--capturing")).toBe(true);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "b", code: "KeyB", ctrlKey: true, altKey: true }),
+    );
+    expect(keycap.classList.contains("keycap--capturing")).toBe(false);
+    expect(hint.classList.contains(RESULT_HINT)).toBe(true);
+
+    keycap.click();
+    expect(hint.textContent).toBe("Hold it down while you speak");
+    expect(hint.classList.contains(RESULT_HINT)).toBe(false);
+  });
+});
+
+describe("renderDictation — Dictation Language change (Bug 3)", () => {
   it("changing the language select persists the value AND emits settings-changed", async () => {
     saveSettingsMock.mockResolvedValue({
       settings: buildSettings({ language: "en" }),
@@ -133,7 +245,7 @@ describe("renderGeneral — Dictation Language change (Bug 3)", () => {
     });
 
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings({ language: "uk" }));
+    renderDictation(container, buildSettings({ language: "uk" }));
 
     const langSelect = container.querySelector<HTMLSelectElement>("#lang-select")!;
     langSelect.value = "en";
@@ -151,7 +263,7 @@ describe("renderGeneral — Dictation Language change (Bug 3)", () => {
     saveSettingsMock.mockRejectedValue(new Error("network down"));
 
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings({ language: "uk" }));
+    renderDictation(container, buildSettings({ language: "uk" }));
 
     const langSelect = container.querySelector<HTMLSelectElement>("#lang-select")!;
     langSelect.value = "en";
@@ -164,7 +276,7 @@ describe("renderGeneral — Dictation Language change (Bug 3)", () => {
   });
 });
 
-describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
+describe("renderDictation — push-to-talk shortcut (spec 071)", () => {
   function withPlatform(value: string, run: () => void) {
     Object.defineProperty(navigator, "platform", { value, configurable: true });
     try {
@@ -185,7 +297,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
 
   it("labels the button with the stored accelerator in the host platform's form", () => {
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
 
     expect(container.querySelector("#btn-shortcut")!.textContent).toBe("Ctrl + Alt + V");
   });
@@ -193,7 +305,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
   it("labels the button with Apple glyphs on a Mac navigator", () => {
     withPlatform("MacIntel", () => {
       const container = document.createElement("div");
-      renderGeneral(container, buildSettings({ shortcut: "Super+Alt+KeyV" }));
+      renderDictation(container, buildSettings({ shortcut: "Super+Alt+KeyV" }));
 
       expect(container.querySelector("#btn-shortcut")!.textContent).toBe("⌥⌘V");
     });
@@ -201,7 +313,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
 
   it("requests the captured combination and never claims a restart is needed", async () => {
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
     capture(container, { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
 
     expect(hintOf(container).textContent).toBe("Applying…");
@@ -213,7 +325,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
 
   it("writes nothing on the capture path — the widget persists only after it registers", async () => {
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
     capture(container, { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
 
     await vi.waitFor(() => {
@@ -228,7 +340,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
     emitMock.mockRejectedValueOnce(new Error("bridge down"));
 
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
     capture(container, { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
 
     await vi.waitFor(() => {
@@ -240,7 +352,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
 
   it("names the host platform's modifiers when none was held", () => {
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
     capture(container, { key: "b", code: "KeyB" });
 
     expect(hintOf(container).textContent).toBe("Must include at least one modifier (Ctrl, Alt, Shift, Win)");
@@ -249,7 +361,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
 
   it("replaces the hint with the outcome the widget reports", async () => {
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
 
     await vi.waitFor(() => {
       expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
@@ -281,7 +393,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
 
   it("puts the button label back to the combination that is still firing after a refusal", async () => {
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
     capture(container, { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
 
     expect(container.querySelector("#btn-shortcut")!.textContent).toBe("Ctrl + Alt + B");
@@ -304,7 +416,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
 
   it("says the shortcut is live but unsaved when the widget could not store it", async () => {
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
 
     await vi.waitFor(() => {
       expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
@@ -327,7 +439,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
 
   it("refreshes the cached settings with the shortcut the widget stored", async () => {
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
 
     await vi.waitFor(() => {
       expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
@@ -349,7 +461,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
 
   it("leaves the cached settings alone when the widget could not store the shortcut", async () => {
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
 
     await vi.waitFor(() => {
       expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
@@ -383,7 +495,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
     const removeSpy = vi.spyOn(document, "removeEventListener");
 
     const container = document.createElement("div");
-    const { destroy } = renderGeneral(container, buildSettings());
+    const { destroy } = renderDictation(container, buildSettings());
     container.querySelector<HTMLButtonElement>("#btn-shortcut")!.click();
 
     const added = addSpy.mock.calls.filter(([type]) => type === "keydown");
@@ -404,7 +516,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
     const addSpy = vi.spyOn(document, "addEventListener");
 
     const container = document.createElement("div");
-    const { destroy } = renderGeneral(container, buildSettings());
+    const { destroy } = renderDictation(container, buildSettings());
     container.querySelector<HTMLButtonElement>("#btn-shortcut")!.click();
 
     const registered = addSpy.mock.calls.find(([type]) => type === "keydown")!;
@@ -416,12 +528,12 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(emitMock).not.toHaveBeenCalled();
-    expect(container.querySelector("#btn-shortcut")!.textContent).toBe("Press keys...");
+    expect(container.querySelector("#btn-shortcut")!.textContent).toBe("Press keys…");
   });
 
   it("an abandoned capture leaves no keydown handler behind after destroy", async () => {
     const container = document.createElement("div");
-    const { destroy } = renderGeneral(container, buildSettings());
+    const { destroy } = renderDictation(container, buildSettings());
 
     container.querySelector<HTMLButtonElement>("#btn-shortcut")!.click();
     destroy();
@@ -435,7 +547,7 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
 
   it("releases the shortcut-applied listener when the tab is destroyed", async () => {
     const container = document.createElement("div");
-    const { destroy } = renderGeneral(container, buildSettings());
+    const { destroy } = renderDictation(container, buildSettings());
 
     await vi.waitFor(() => {
       expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
@@ -446,14 +558,14 @@ describe("renderGeneral — push-to-talk shortcut (spec 071)", () => {
   });
 });
 
-describe("renderGeneral — meeting recording disclosure (spec 074, ADR 040)", () => {
+describe("renderDictation — meeting recording disclosure (spec 074, ADR 040)", () => {
   function group(container: HTMLElement): HTMLElement {
     return container.querySelector<HTMLElement>("#meeting-consent-group")!;
   }
 
   it("states that the user carries the consent obligation", () => {
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
 
     const text = group(container).querySelector("#meeting-consent-responsibility")!.textContent!;
 
@@ -463,7 +575,7 @@ describe("renderGeneral — meeting recording disclosure (spec 074, ADR 040)", (
 
   it("states that Cloud mode sends the other participants' audio to the provider", () => {
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
 
     const text = group(container).querySelector("#meeting-consent-cloud")!.textContent!;
 
@@ -474,7 +586,7 @@ describe("renderGeneral — meeting recording disclosure (spec 074, ADR 040)", (
 
   it("offers the acknowledgement while it has not been given", () => {
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings({ meeting_consent_acknowledged: false }));
+    renderDictation(container, buildSettings({ meeting_consent_acknowledged: false }));
 
     const button = group(container).querySelector<HTMLButtonElement>("#btn-meeting-consent")!;
 
@@ -486,7 +598,7 @@ describe("renderGeneral — meeting recording disclosure (spec 074, ADR 040)", (
 
   it("shows the already-acknowledged state instead of asking again", () => {
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings({ meeting_consent_acknowledged: true }));
+    renderDictation(container, buildSettings({ meeting_consent_acknowledged: true }));
 
     const button = group(container).querySelector<HTMLButtonElement>("#btn-meeting-consent")!;
 
@@ -503,7 +615,7 @@ describe("renderGeneral — meeting recording disclosure (spec 074, ADR 040)", (
     });
 
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
     group(container).querySelector<HTMLButtonElement>("#btn-meeting-consent")!.click();
 
     await vi.waitFor(() => {
@@ -520,7 +632,7 @@ describe("renderGeneral — meeting recording disclosure (spec 074, ADR 040)", (
     saveSettingsMock.mockRejectedValue(new Error("backend down"));
 
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
     const button = group(container).querySelector<HTMLButtonElement>("#btn-meeting-consent")!;
     button.click();
 
@@ -537,7 +649,7 @@ describe("renderGeneral — meeting recording disclosure (spec 074, ADR 040)", (
     });
 
     const container = document.createElement("div");
-    renderGeneral(container, buildSettings());
+    renderDictation(container, buildSettings());
     group(container).querySelector<HTMLButtonElement>("#btn-meeting-consent")!.click();
 
     await vi.waitFor(() => {
@@ -547,7 +659,7 @@ describe("renderGeneral — meeting recording disclosure (spec 074, ADR 040)", (
   });
 });
 
-describe("renderGeneral — the microphone test", () => {
+describe("renderDictation — the microphone test", () => {
   const UNCONFIRMED_LABEL = "The backend did not answer — the microphone may still be open";
 
   function idleStatus(overrides: Record<string, unknown> = {}) {
@@ -566,12 +678,12 @@ describe("renderGeneral — the microphone test", () => {
 
   function renderMicrophoneTest() {
     const container = document.createElement("div");
-    const lifecycle = renderGeneral(container, buildSettings());
+    const lifecycle = renderDictation(container, buildSettings());
     return {
       container,
       lifecycle,
       button: container.querySelector<HTMLButtonElement>("#btn-test-mic")!,
-      label: container.querySelector<HTMLElement>("#rec-label")!,
+      label: container.querySelector<HTMLElement>("#mic-hint")!,
       fill: container.querySelector<HTMLElement>("#level-fill")!,
     };
   }
@@ -584,10 +696,10 @@ describe("renderGeneral — the microphone test", () => {
     button.click();
     await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
     button.click();
-    await vi.waitFor(() => expect(button.textContent).toBe("Record"));
+    await vi.waitFor(() => expect(button.textContent).toBe("Test"));
 
     expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession());
-    expect(label.textContent).toBe("Click to test microphone");
+    expect(label.textContent).toBe(MIC_NAME);
   });
 
   it("starts without a pre-flight status read, since the start's own 409 cannot be stale", async () => {
@@ -608,7 +720,7 @@ describe("renderGeneral — the microphone test", () => {
     button.click();
     await vi.waitFor(() => expect(label.textContent).toBe("Microphone busy (widget recording)"));
 
-    expect(button.textContent).toBe("Record");
+    expect(button.textContent).toBe("Test");
   });
 
   it.each([
@@ -653,7 +765,7 @@ describe("renderGeneral — the microphone test", () => {
     button.click();
     await vi.waitFor(() => expect(apiMock.audioDiscard).toHaveBeenCalledOnce());
     button.click();
-    await vi.waitFor(() => expect(button.textContent).toBe("Record"));
+    await vi.waitFor(() => expect(button.textContent).toBe("Test"));
 
     expect(apiMock.audioStart).toHaveBeenCalledOnce();
     expect(apiMock.audioDiscard.mock.calls).toEqual([[mintedSession()], [mintedSession()]]);
@@ -663,7 +775,7 @@ describe("renderGeneral — the microphone test", () => {
     apiMock.audioStart.mockResolvedValue(idleStatus({ is_recording: true }));
     apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 2 });
     const container = document.createElement("div");
-    const { destroy } = renderGeneral(container, buildSettings());
+    const { destroy } = renderDictation(container, buildSettings());
     const button = container.querySelector<HTMLButtonElement>("#btn-test-mic")!;
 
     button.click();
@@ -684,7 +796,8 @@ describe("renderGeneral — the microphone test", () => {
     button.click();
     await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
 
-    expect(label.textContent).toBe("Recording...");
+    expect(label.textContent).toBe(MIC_NAME);
+    expect(label.classList.contains(RESULT_HINT)).toBe(false);
     expect(levelStreamMock).toHaveBeenCalledOnce();
   });
 
@@ -702,7 +815,7 @@ describe("renderGeneral — the microphone test", () => {
     expect(levelStreamMock).not.toHaveBeenCalled();
 
     button.click();
-    await vi.waitFor(() => expect(button.textContent).toBe("Record"));
+    await vi.waitFor(() => expect(button.textContent).toBe("Test"));
     expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession());
   });
 
@@ -716,7 +829,7 @@ describe("renderGeneral — the microphone test", () => {
       expect(label.textContent).toBe("Failed to start");
     });
 
-    expect(button.textContent).toBe("Record");
+    expect(button.textContent).toBe("Test");
   });
 
   it("reads a 403 as the recorder's own answer, so the button comes back to Record", async () => {
@@ -729,8 +842,8 @@ describe("renderGeneral — the microphone test", () => {
     await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
     button.click();
 
-    await vi.waitFor(() => expect(button.textContent).toBe("Record"));
-    expect(label.textContent).toBe("Click to test microphone");
+    await vi.waitFor(() => expect(button.textContent).toBe("Test"));
+    expect(label.textContent).toBe(MIC_NAME);
     expect(label.textContent).not.toBe(UNCONFIRMED_LABEL);
   });
 
@@ -744,8 +857,8 @@ describe("renderGeneral — the microphone test", () => {
     await vi.waitFor(() => expect(button.textContent).toBe("Stop"));
     button.click();
 
-    await vi.waitFor(() => expect(button.textContent).toBe("Record"));
-    expect(label.textContent).toBe("Click to test microphone");
+    await vi.waitFor(() => expect(button.textContent).toBe("Test"));
+    expect(label.textContent).toBe(MIC_NAME);
   });
 
   it("keeps the session and the unconfirmed label when the discard itself goes unanswered", async () => {
@@ -786,7 +899,7 @@ describe("renderGeneral — the microphone test", () => {
         }),
     );
     apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 0 });
-    const { button, label, lifecycle } = renderMicrophoneTest();
+    const { button, lifecycle } = renderMicrophoneTest();
 
     button.click();
     await vi.waitFor(() => expect(landStart).not.toBeNull());
@@ -795,7 +908,7 @@ describe("renderGeneral — the microphone test", () => {
     await vi.waitFor(() => expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession()));
 
     expect(levelStreamMock).not.toHaveBeenCalled();
-    expect(label.textContent).not.toBe("Recording...");
+    expect(button.textContent).toBe("Test");
   });
 
   it("hands an unconfirmed release to the next render rather than dropping the only handle", async () => {
@@ -811,7 +924,7 @@ describe("renderGeneral — the microphone test", () => {
     await vi.waitFor(() => expect(apiMock.audioDiscard).toHaveBeenCalledWith(session));
 
     apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 0 });
-    renderGeneral(document.createElement("div"), buildSettings());
+    renderDictation(document.createElement("div"), buildSettings());
 
     await vi.waitFor(() => expect(apiMock.audioDiscard).toHaveBeenCalledTimes(2));
     expect(apiMock.audioDiscard.mock.calls[1][0]).toBe(session);
@@ -827,8 +940,8 @@ describe("renderGeneral — the microphone test", () => {
     lifecycle.releaseResources!();
 
     await vi.waitFor(() => expect(apiMock.audioDiscard).toHaveBeenCalledWith(mintedSession()));
-    expect(button.textContent).toBe("Record");
-    expect(label.textContent).toBe("Click to test microphone");
+    expect(button.textContent).toBe("Test");
+    expect(label.textContent).toBe(MIC_NAME);
   });
 
   it("puts an expired level-stream handshake into the label and leaves the recording alone", async () => {

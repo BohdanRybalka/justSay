@@ -581,7 +581,7 @@ def test_every_tauri_event_name_is_declared_once() -> None:
     identifier uses plus the Rust literal emit sites. It does **not** assert
     that the two sit on opposite sides of any boundary -- a name emitted and
     listened for within one file satisfies it. Mutation-checked: deleting
-    the sole emit(EVENT_SETTINGS_CHANGED) call in settings/tabs/general.ts, with
+    the sole emit(EVENT_SETTINGS_CHANGED) call in settings/tabs/dictation.ts, with
     the constant and its listener left in place, fails this test naming
     EVENT_SETTINGS_CHANGED as declared and listened for but never emitted.
     """

@@ -496,6 +496,11 @@ export interface RecordingStatus {
   session_id: string | null;
 }
 
+/** The microphone dictation records from, `null` when the machine has none. */
+export interface InputDevice {
+  name: string | null;
+}
+
 export interface DiscardResponse {
   duration_seconds: number;
 }
@@ -738,6 +743,8 @@ export const api = {
   health: () => request<HealthResponse>("GET", "/health", undefined, REREADABLE),
 
   audioStatus: () => request<RecordingStatus>("GET", "/audio/status", undefined, REREADABLE),
+
+  inputDevice: () => request<InputDevice>("GET", "/audio/input-device", undefined, REREADABLE),
 
   getMeetingStatus: () =>
     request<MeetingStatus>("GET", "/audio/meeting/status", undefined, REREADABLE),

@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
+import sounddevice as sd
 import soundfile as sf
 from pydantic import ValidationError
 
@@ -24,7 +25,7 @@ from app.audio.analysis import (
 )
 from app.audio.base import write_wav, write_wav_streaming
 from app.audio.config import AudioSettings
-from app.audio.recorder import MicrophoneRecorder, NotRecordingError
+from app.audio.recorder import MicrophoneRecorder, NotRecordingError, default_input_name
 from app.audio.session import SESSION_MISMATCH_DETAIL, SessionMismatchError
 from app.audio.system_source import SystemAudioUnavailableError
 
@@ -410,6 +411,66 @@ async def test_instant_prompt_opens_no_system_audio_source(client, monkeypatch, 
     assert resp.status_code == 200
     assert recorder.is_recording is True
     recorder.cleanup()
+
+
+@pytest.mark.anyio
+async def test_input_device_names_the_default_input_it_records_from(client):
+    input_info = {"name": "Microphone (Realtek Audio)", "max_input_channels": 2}
+    with patch("app.audio.recorder.sd.query_devices", return_value=input_info) as query:
+        resp = await client.get("/audio/input-device")
+
+    query.assert_called_once_with(kind="input")
+    assert resp.status_code == 200
+    assert resp.json() == {"name": "Microphone (Realtek Audio)"}
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(sd.PortAudioError("Error querying device -1"), id="no-default-input"),
+        pytest.param(ValueError("No input device matching 'USB'"), id="no-matching-input"),
+    ],
+)
+def test_no_input_device_is_named_none_rather_than_raised(failure):
+    with patch("app.audio.recorder.sd.query_devices", side_effect=failure):
+        assert default_input_name() is None
+
+
+def _host_apis_with_defaults(listed: list[str], defaults: list[int]):
+    """Patches PortAudio to list `listed` by index, one host API per entry in
+    `defaults` naming its default input, and the first host API's default as
+    the process-wide one."""
+
+    def query_devices(device=None, kind=None):
+        if kind == "input":
+            device = defaults[0]
+        if device < 0:
+            raise sd.PortAudioError(f"Error querying device {device}")
+        return {"name": listed[device], "max_input_channels": 1}
+
+    hostapis = [{"default_input_device": index} for index in defaults]
+    return (
+        patch("app.audio.recorder.sd.query_devices", side_effect=query_devices),
+        patch("app.audio.recorder.sd.query_hostapis", return_value=hostapis),
+    )
+
+
+CUT = "Headset Microphone (Jabra Evolv"
+JABRA_65 = "Headset Microphone (Jabra Evolve2 65)"
+JABRA_85 = "Headset Microphone (Jabra Evolve2 85)"
+
+
+def test_a_name_mme_cut_at_its_limit_is_completed_from_another_host_apis_default():
+    assert len(CUT) == 31
+    devices, hostapis = _host_apis_with_defaults([CUT, JABRA_85, JABRA_65], [0, -1, 2])
+    with devices, hostapis:
+        assert default_input_name() == JABRA_65
+
+
+def test_a_name_under_the_limit_is_never_extended_to_a_longer_device():
+    devices, hostapis = _host_apis_with_defaults(["USB Mic", "USB Mic 2"], [0, 1])
+    with devices, hostapis:
+        assert default_input_name() == "USB Mic"
 
 
 def test_config_rejects_negative_sample_rate():

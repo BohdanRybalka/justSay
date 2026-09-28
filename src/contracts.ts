@@ -44,7 +44,7 @@ export const EVENT_WIDGET_HOVER = "widget-hover";
 
 /** The Settings window was dismissed. The shell intercepts `CloseRequested`,
  *  prevents it and hides the window, so the webview stays mounted and no tab's
- *  teardown ever runs — a microphone the General tab holds outlives the window
+ *  teardown ever runs — a microphone the Dictation panel holds outlives the window
  *  that opened it. The Rust side emits this after `hide()` and `settings.ts`
  *  calls the active tab's `releaseResources` on it, leaving the tab mounted.
  *  An event we emit ourselves rather than `visibilitychange`, which WebView2

@@ -1,8 +1,7 @@
 /**
  * The Settings panel's own card — Appearance, Storage and Version — then the
- * folded API keys and Delete all history under it, drawn above the old General
- * content the panel still hosts. Both deletions ask once, inline, before
- * anything is removed.
+ * folded API keys and Delete all history under it. Both deletions ask once,
+ * inline, before anything is removed.
  */
 import { api, type UserSettings } from "../../api";
 import { notifyError } from "../../notify";
@@ -10,7 +9,7 @@ import { renderFold, renderSegmented, type SegmentedOption } from "../../ui/cont
 import { icon } from "../../ui/icons";
 import { applyAppTheme, type ThemePreference } from "../../ui/theme";
 import { getCloudKeyStatus, saveSettings, type TabLifecycle } from "../settings";
-import { emitSettingsChanged } from "./general";
+import { emitSettingsChanged } from "./dictation";
 import { renderKeys } from "./keys";
 import { renderVersionRow } from "./version-row";
 

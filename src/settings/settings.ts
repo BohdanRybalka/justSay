@@ -19,7 +19,7 @@ import { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } from "../contracts";
 import { TimedOutError, withTimeout } from "../timeout";
 import { isStaleStatusResponse } from "../stale-response";
 import { nextTabAction } from "./tab-visibility";
-import { renderGeneral } from "./tabs/general";
+import { renderDictation } from "./tabs/dictation";
 import { renderModels } from "./tabs/models";
 import { renderHistory } from "./tabs/history";
 import { renderWords } from "./tabs/words";
@@ -90,6 +90,15 @@ type PanelRenderer = (
   windowHidden: boolean,
 ) => TabTeardown;
 
+/** Several parts of one panel answering as one. */
+function combineLifecycles(parts: TabLifecycle[]): TabLifecycle {
+  return {
+    destroy: () => parts.forEach((part) => part.destroy()),
+    releaseResources: () => parts.forEach((part) => part.releaseResources?.()),
+    resumeResources: () => parts.forEach((part) => part.resumeResources?.()),
+  };
+}
+
 /** Mount old tabs, whole, into a panel whose redesign has not landed yet.
  *  Each sits in its own `.legacy-tab`, the only place the old stylesheet
  *  reaches, and the panel answers for all of them as one. */
@@ -97,17 +106,14 @@ function hostLegacyTabs(
   container: HTMLElement,
   mounts: ((tab: HTMLElement) => TabTeardown)[],
 ): TabLifecycle {
-  const hosted = mounts.flatMap((mount) => {
-    const tab = document.createElement("div");
-    tab.className = "legacy-tab";
-    container.append(tab);
-    return asLifecycle(mount(tab)) ?? [];
-  });
-  return {
-    destroy: () => hosted.forEach((tab) => tab.destroy()),
-    releaseResources: () => hosted.forEach((tab) => tab.releaseResources?.()),
-    resumeResources: () => hosted.forEach((tab) => tab.resumeResources?.()),
-  };
+  return combineLifecycles(
+    mounts.flatMap((mount) => {
+      const tab = document.createElement("div");
+      tab.className = "legacy-tab";
+      container.append(tab);
+      return asLifecycle(mount(tab)) ?? [];
+    }),
+  );
 }
 
 const panels: Record<PanelName, PanelRenderer> = {
@@ -115,18 +121,11 @@ const panels: Record<PanelName, PanelRenderer> = {
     hostLegacyTabs(container, [(tab) => renderWords(tab, windowHidden)]),
   history: (container) => hostLegacyTabs(container, [renderTranscribe, renderHistory]),
   dictation: (container, loaded, windowHidden) =>
-    hostLegacyTabs(container, [(tab) => renderModels(tab, loaded, windowHidden)]),
-  settings: (container, loaded) => {
-    const panel = renderSettingsPanel(container, loaded);
-    const general = hostLegacyTabs(container, [(tab) => renderGeneral(tab, loaded)]);
-    return {
-      ...general,
-      destroy: () => {
-        panel.destroy();
-        general.destroy();
-      },
-    };
-  },
+    combineLifecycles([
+      renderDictation(container, loaded),
+      hostLegacyTabs(container, [(tab) => renderModels(tab, loaded, windowHidden)]),
+    ]),
+  settings: renderSettingsPanel,
   account: (container, loaded) =>
     renderAccount(container, { chosen: loaded.display_name, osName: osAccountName }, renameUser),
 };

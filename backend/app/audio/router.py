@@ -22,7 +22,7 @@ from app.audio.dependencies import (
     get_recorder,
 )
 from app.audio.meeting_recorder import MEETING_BUSY_DETAIL, MeetingRecorder
-from app.audio.recorder import MicrophoneRecorder
+from app.audio.recorder import MicrophoneRecorder, default_input_name
 from app.audio.session import SessionRef
 from app.core.utils import sse_event
 from app.preferences.user_settings import get_user_settings
@@ -70,6 +70,12 @@ class DiscardResponse(BaseModel):
     duration_seconds: float
 
 
+class InputDevice(BaseModel):
+    """The microphone dictation records from; `name` is `null` when there is none."""
+
+    name: str | None
+
+
 class MeetingStopResponse(BaseModel):
     """Deliberately separate from StopResponse.
 
@@ -98,7 +104,7 @@ class MeetingStatus(BaseModel):
 
 
 _CONSENT_REQUIRED_DETAIL = (
-    "Meeting recording has not been acknowledged — open Settings → General and "
+    "Meeting recording has not been acknowledged — open Dictation and "
     "confirm you are responsible for obtaining the participants' consent"
 )
 
@@ -193,6 +199,11 @@ async def discard_recording(
 @router.get("/status", response_model=RecordingStatus)
 async def recording_status(recorder: MicrophoneRecorder = Depends(get_recorder)):
     return _recording_status(recorder)
+
+
+@router.get("/input-device", response_model=InputDevice)
+def input_device() -> InputDevice:
+    return InputDevice(name=default_input_name())
 
 
 @router.post("/meeting/start", response_model=MeetingStatus)
