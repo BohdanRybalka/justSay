@@ -13,7 +13,6 @@ body {
 }
 
 .pill {
-  --pill-glass: color-mix(in srgb, var(--glass) 45%, var(--surface));
   display: inline-flex;
   align-items: center;
   gap: 7px;

@@ -35,7 +35,7 @@ enigo = "0.6.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-nspanel = "2.1.0"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSPasteboard"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -46,4 +46,5 @@ windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
 ] }

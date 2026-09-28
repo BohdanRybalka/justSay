@@ -227,6 +227,17 @@ describe("the widget window's shape", () => {
     });
   });
 
+  it("opens the ring on a right-click instead of the page's menu, without starting a dictation", async () => {
+    await loadWidget();
+    const rightClick = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 });
+
+    document.getElementById("widget")!.dispatchEvent(rightClick);
+
+    expect(rightClick.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("open_ring", undefined));
+    expect(apiMock.audioStart).not.toHaveBeenCalled();
+  });
+
   it("shows the hover look while the shell says the pointer is near the pill", async () => {
     await loadWidget();
     await vi.waitFor(() => expect(listeners.get(EVENT_WIDGET_HOVER)).toBeTypeOf("function"));

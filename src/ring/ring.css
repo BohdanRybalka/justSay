@@ -1,0 +1,97 @@
+html, body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+}
+
+.ring {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+}
+
+.ring-guide {
+  position: absolute;
+  left: -38px;
+  top: -38px;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  border: 1px dashed color-mix(in srgb, var(--orange) 44%, transparent);
+  opacity: 0;
+  transform: scale(.5);
+  transition: opacity .16s, transform .22s cubic-bezier(.2,1.1,.35,1);
+}
+
+.ring--open .ring-guide {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.ring-petal {
+  --s: .35;
+  --r: 0px;
+  position: absolute;
+  left: -14px;
+  top: -14px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--pill-glass);
+  border: 1px solid var(--glass-edge);
+  box-shadow: var(--sh-glass);
+  display: grid;
+  place-items: center;
+  color: var(--text-2);
+  cursor: pointer;
+  opacity: 0;
+  transform: rotate(var(--a)) translate(var(--r)) rotate(calc(-1 * var(--a))) scale(var(--s));
+  transition: transform .2s cubic-bezier(.2,1.35,.4,1), opacity .14s, background .15s, color .15s, border-color .15s;
+  transition-delay: calc(var(--i) * 18ms);
+}
+
+.ring--open .ring-petal {
+  --s: 1;
+  --r: 38px;
+  opacity: 1;
+}
+
+.ring--open .ring-petal--hover {
+  --s: 1.24;
+  background: var(--orange);
+  border-color: var(--orange);
+  color: #fff;
+}
+
+.ring-petal .icon {
+  width: 13px;
+  height: 13px;
+  stroke-width: 2;
+}
+
+.ring-label {
+  position: absolute;
+  left: 0;
+  top: 64px;
+  transform: translate(-50%, 4px);
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: var(--text);
+  color: var(--canvas);
+  font-size: 11px;
+  font-weight: 570;
+  white-space: nowrap;
+  opacity: 0;
+  transition: .14s;
+  pointer-events: none;
+}
+
+.ring--open .ring-label--shown {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}

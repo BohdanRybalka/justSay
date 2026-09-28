@@ -4,19 +4,23 @@ A capability constrains the webview's IPC calls and never Rust, so the shell
 plugin's named-binary scope validated nothing and is gone (ADR 085). The
 filesystem grant went the same way once the page stopped reading a dropped file
 by path (ADR 087). Deleting the shell scope also removed the last visible sign
-that its registration is load-bearing. The widget window, built in Rust rather
-than declared in the config, is pinned here because it has no page-side guard.
+that its registration is load-bearing. The widget and ring windows, built in
+Rust rather than declared in the config, are pinned here because neither has a
+page-side guard.
 """
 
 import json
 import re
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CAPABILITIES_DIR = REPO_ROOT / "src-tauri" / "capabilities"
 TAURI_SHARED_CONF = REPO_ROOT / "src-tauri" / "tauri.conf.json"
 LIB_RS = REPO_ROOT / "src-tauri" / "src" / "lib.rs"
 WIDGET_WINDOW_RS = REPO_ROOT / "src-tauri" / "src" / "widget_window.rs"
+RING_WINDOW_RS = REPO_ROOT / "src-tauri" / "src" / "ring_window.rs"
 
 CAPABILITY_SUFFIXES = (".json", ".json5", ".toml")
 PARSEABLE_SUFFIX = ".json"
@@ -30,9 +34,10 @@ WINDOW_CONTROL_PERMISSIONS = frozenset(
 MAIN_WINDOW_LABEL = "settings"
 APP_THEME_PERMISSION = "core:app:allow-set-app-theme"
 
-WIDGET_BUILDER_PATTERN = re.compile(
-    r"WebviewWindowBuilder::new\([^;]*?\"widget\"[^;]*?\.build\(\)", re.DOTALL
-)
+RUST_BUILT_WINDOWS = {
+    "widget": (WIDGET_WINDOW_RS, "src/widget/widget.ts"),
+    "ring": (RING_WINDOW_RS, "src/ring/ring.ts"),
+}
 
 
 def _permission_identifiers(capability: object) -> list[str]:
@@ -84,11 +89,15 @@ def _granted_permissions() -> tuple[tuple[str, str], ...]:
     return tuple(granted)
 
 
-def _widget_builder_chain() -> str:
-    """The widget window's `WebviewWindowBuilder` chain, as written in its module."""
-    match = WIDGET_BUILDER_PATTERN.search(WIDGET_WINDOW_RS.read_text(encoding="utf-8"))
+def _builder_chain(label: str) -> str:
+    """One Rust-built window's `WebviewWindowBuilder` chain, as written in its module."""
+    module = RUST_BUILT_WINDOWS[label][0]
+    pattern = re.compile(
+        rf"WebviewWindowBuilder::new\([^;]*?\"{label}\"[^;]*?\.build\(\)", re.DOTALL
+    )
+    match = pattern.search(module.read_text(encoding="utf-8"))
     assert match, (
-        f"no widget WebviewWindowBuilder chain found in {WIDGET_WINDOW_RS.name}. The window "
+        f"no {label} WebviewWindowBuilder chain found in {module.name}. The window "
         "moved or was renamed, and this gate now reads nothing."
     )
     return match.group(0)
@@ -136,13 +145,15 @@ def test_no_capability_source_grants_a_filesystem_permission():
     )
 
 
-def test_the_widget_window_keeps_the_shell_drag_drop_handler():
-    assert DRAG_DROP_OPT_OUT not in _widget_builder_chain(), (
-        f"the widget window now sets {DRAG_DROP_OPT_OUT}. At false the page receives external "
-        "drops, and src/widget/widget.ts registers no drop listener, so a dropped file "
-        "navigates a transparent, undecorated, always-on-top webview to a file:// URL the user "
-        "cannot leave without restarting the app. Disable it only alongside a page-side guard "
-        "like the Settings window's (ADR 087)."
+@pytest.mark.parametrize("label", sorted(RUST_BUILT_WINDOWS))
+def test_a_rust_built_window_keeps_the_shell_drag_drop_handler(label):
+    page = RUST_BUILT_WINDOWS[label][1]
+    assert DRAG_DROP_OPT_OUT not in _builder_chain(label), (
+        f"the {label} window now sets {DRAG_DROP_OPT_OUT}. At false the page receives external "
+        f"drops, and {page} registers no drop listener, so a dropped file navigates a "
+        "transparent, undecorated, always-on-top webview to a file:// URL the user cannot "
+        "leave without restarting the app. Disable it only alongside a page-side guard like "
+        "the Settings window's (ADR 087)."
     )
 
 
