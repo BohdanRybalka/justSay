@@ -104,7 +104,7 @@ fn wait_for_released_modifiers(
 }
 
 /// Recent macOS asserts that keyboard-layout lookups run on the main thread,
-/// and enigo makes them while sending keys; both platforms send from there.
+/// and the chord looks up the key that types "v"; both platforms send from there.
 fn on_main_thread(
     app: &AppHandle,
     task: impl FnOnce() -> Result<(), String> + Send + 'static,
