@@ -15,6 +15,7 @@ const ring = document.getElementById("ring")!;
 mountIconSprite(document);
 applyThemePreference("system");
 mountRing(ring, () => void askShellToClose());
+document.addEventListener("contextmenu", (event) => event.preventDefault());
 
 async function askShellToClose() {
   try {
@@ -36,7 +37,10 @@ async function applyThemeSetting() {
 async function listenToShell() {
   try {
     const { listen } = await import("@tauri-apps/api/event");
-    await listen(EVENT_RING_OPENED, () => openRing(ring));
+    await listen(EVENT_RING_OPENED, () => {
+      openRing(ring);
+      void applyThemeSetting();
+    });
     await listen(EVENT_RING_CLOSED, () => closeRing(ring));
     await listen<RingPointer>(EVENT_RING_POINTER, ({ payload }) => followPointer(ring, payload));
     await listen(EVENT_SETTINGS_CHANGED, () => void applyThemeSetting());

@@ -80,6 +80,28 @@ describe("the ring window", () => {
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("close_ring"));
   });
 
+  it("never shows the webview's own menu on a right-click inside the ring", async () => {
+    const ring = await loadRing();
+    shell(EVENT_RING_OPENED);
+    const rightClick = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 });
+
+    ring.querySelectorAll<HTMLElement>(".ring-petal")[0].dispatchEvent(rightClick);
+
+    expect(rightClick.defaultPrevented).toBe(true);
+  });
+
+  it("reads the theme again on opening when the backend was not up at launch", async () => {
+    getSettingsMock.mockRejectedValueOnce(new Error("connection refused"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await loadRing();
+    await vi.waitFor(() => expect(getSettingsMock).toHaveBeenCalledTimes(1));
+    expect(document.documentElement.dataset.theme).toBe("light");
+
+    shell(EVENT_RING_OPENED);
+
+    await vi.waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
+  });
+
   it("takes the theme the settings name, and the next one chosen in Settings", async () => {
     await loadRing();
     await vi.waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
