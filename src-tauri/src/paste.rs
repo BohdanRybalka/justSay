@@ -32,11 +32,17 @@ const MODIFIER_POLL_INTERVAL: Duration = Duration::from_millis(15);
 /// instead of reading the event stream miss a shorter chord.
 const CHORD_HOLD: Duration = Duration::from_millis(100);
 
+/// Chromium, Electron and Qt apps read the clipboard through their own
+/// change notification, and a chord that lands before it arrives pastes
+/// nothing; Handy waits the same 60 ms before its chord.
+const CLIPBOARD_SETTLE: Duration = Duration::from_millis(60);
+
 /// Put `text` on the clipboard and paste it into the focused app.
 #[tauri::command(async)]
 pub fn paste_text(app: AppHandle, text: String) -> PasteOutcome {
     deliver(
         || crate::clipboard::write_clipboard_text(text),
+        || thread::sleep(CLIPBOARD_SETTLE),
         || {
             wait_for_released_modifiers(
                 platform::modifiers_held,
@@ -64,6 +70,7 @@ pub fn open_accessibility_settings() -> Result<(), String> {
 
 fn deliver(
     write: impl FnOnce() -> Result<(), String>,
+    settle: impl FnOnce(),
     modifiers_released: impl FnOnce() -> bool,
     chord: impl FnOnce() -> Result<(), String>,
 ) -> PasteOutcome {
@@ -71,6 +78,7 @@ fn deliver(
         log::warn!("Dictated text did not reach the clipboard — {}", e);
         return PasteOutcome::Failed;
     }
+    settle();
     if !modifiers_released() {
         log::info!("A modifier key stayed down, so the text was only copied");
         return PasteOutcome::Copied;
@@ -336,6 +344,7 @@ mod tests {
                 order.borrow_mut().push("write");
                 Ok(())
             },
+            || order.borrow_mut().push("settle"),
             || true,
             || {
                 order.borrow_mut().push("chord");
@@ -343,7 +352,7 @@ mod tests {
             },
         );
         assert_eq!(outcome, PasteOutcome::Pasted);
-        assert_eq!(*order.borrow(), vec!["write", "chord"]);
+        assert_eq!(*order.borrow(), vec!["write", "settle", "chord"]);
     }
 
     #[test]
@@ -351,6 +360,7 @@ mod tests {
         let chord_sent = Cell::new(false);
         let outcome = deliver(
             || Err("busy".into()),
+            || {},
             || true,
             || {
                 chord_sent.set(true);
@@ -366,6 +376,7 @@ mod tests {
         let chord_sent = Cell::new(false);
         let outcome = deliver(
             || Ok(()),
+            || {},
             || false,
             || {
                 chord_sent.set(true);
@@ -378,7 +389,7 @@ mod tests {
 
     #[test]
     fn a_refused_chord_leaves_the_text_copied() {
-        let outcome = deliver(|| Ok(()), || true, || Err("no permission".into()));
+        let outcome = deliver(|| Ok(()), || {}, || true, || Err("no permission".into()));
         assert_eq!(outcome, PasteOutcome::Copied);
     }
 
