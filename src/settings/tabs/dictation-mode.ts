@@ -65,40 +65,49 @@ interface RowView {
   hint: string;
   alert: boolean;
   locked: boolean;
+  disabled: boolean;
   action: string;
 }
 
 function localView(row: LocalRow): RowView {
   switch (row.state) {
     case "checking":
-      return { hint: "…", alert: false, locked: false, action: "" };
+      return { hint: "…", alert: false, locked: false, disabled: false, action: "" };
     case "unavailable":
-      return { hint: "Not available on this computer", alert: false, locked: true, action: "" };
+      return { hint: "Not available on this computer", alert: false, locked: true, disabled: true, action: "" };
     case "not-installed":
       return {
         hint: row.bytes === null ? "Not installed" : `Not installed · ${formatModelSize(row.bytes)}`,
         alert: false,
         locked: true,
+        disabled: false,
         action: '<span class="btn btn-blue btn-small">Install</span>',
       };
     case "starting":
-      return { hint: "Starting…", alert: false, locked: false, action: "" };
+      return { hint: "Starting…", alert: false, locked: false, disabled: false, action: "" };
     case "installed":
       return {
         hint: "Installed · runs on this computer",
         alert: false,
         locked: false,
+        disabled: false,
         action: '<span class="chip">Ready</span>',
       };
     case "failed":
-      return { hint: row.reason, alert: true, locked: false, action: '<span class="btn btn-small">Try again</span>' };
+      return {
+        hint: row.reason,
+        alert: true,
+        locked: false,
+        disabled: false,
+        action: '<span class="btn btn-small">Try again</span>',
+      };
   }
 }
 
 function drawRow(row: HTMLButtonElement, checked: boolean, view: RowView): void {
   row.setAttribute("aria-checked", String(checked));
   row.classList.toggle("mode-row--locked", view.locked);
-  if (view.locked) row.setAttribute("aria-disabled", "true");
+  if (view.disabled) row.setAttribute("aria-disabled", "true");
   else row.removeAttribute("aria-disabled");
   const hint = row.querySelector<HTMLElement>(".mode-row-hint")!;
   hint.textContent = view.hint;
@@ -149,13 +158,17 @@ export function renderDictationMode(
       hint: keyMissing ? CLOUD_KEY_MISSING : CLOUD_HINT,
       alert: keyMissing,
       locked: false,
+      disabled: false,
       action: "",
     });
     drawRow(localRowEl, currentMode === "local", localView(localRow(lastRead, currentMode === "local")));
   }
 
+  /** Only Local's reads count, so a failure already shown is not shown again
+   *  after a trip through Cloud. */
   function reportNewFailure(status: LocalSTTStatus) {
-    const reported = currentMode === "local" ? (status.last_error ?? null) : null;
+    if (currentMode !== "local") return;
+    const reported = status.last_error ?? null;
     if (onIndicatorStateChange(prevLastError, reported)) notifyError(displayableError(reported)!);
     prevLastError = reported;
   }

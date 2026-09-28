@@ -557,7 +557,7 @@ def _model_bytes_on_disk(kind: LocalProviderKind, model_size: str) -> int | None
     """Bytes of the ``model_size`` model ``kind`` loads, or ``None`` when it is not on disk.
 
     Reads only what is already here: whisper.cpp's GGML file, or faster-whisper's
-    Hugging Face cache with downloads forbidden.
+    Hugging Face snapshot with downloads forbidden, which counts once its weights are.
     """
     if kind == LocalProviderKind.WHISPER_CPP_SERVER:
         path = local_whisper_cpp_cmd.resolve_model_path(model_size)
@@ -568,7 +568,9 @@ def _model_bytes_on_disk(kind: LocalProviderKind, model_size: str) -> int | None
         folder = Path(download_model(model_size, local_files_only=True))
     except Exception:
         return None
-    return sum(f.stat().st_size for f in folder.iterdir() if f.is_file()) or None
+    if not (folder / "model.bin").is_file():
+        return None
+    return sum(f.stat().st_size for f in folder.iterdir() if f.is_file())
 
 
 def _local_install_refusal() -> str | None:

@@ -158,6 +158,18 @@ def test_model_bytes_on_disk_sums_the_cached_faster_whisper_snapshot(monkeypatch
     assert calls == [("small", True)]
 
 
+def test_model_bytes_on_disk_is_none_for_a_snapshot_whose_weights_never_arrived(
+    monkeypatch, tmp_path
+):
+    (tmp_path / "config.json").write_bytes(b"x" * 24)
+    (tmp_path / "tokenizer.json").write_bytes(b"x" * 24)
+    fake_utils = SimpleNamespace(download_model=lambda size, local_files_only=False: str(tmp_path))
+    monkeypatch.setitem(sys.modules, "faster_whisper.utils", fake_utils)
+    kind = local_setup.LocalProviderKind.FASTER_WHISPER
+
+    assert local_setup._model_bytes_on_disk(kind, "small") is None
+
+
 def test_model_bytes_on_disk_is_none_when_the_cache_has_no_snapshot(monkeypatch):
     def not_cached(size, local_files_only=False):
         raise FileNotFoundError(size)

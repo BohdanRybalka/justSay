@@ -420,6 +420,32 @@ describe("renderDictationMode — the two rows", () => {
     expect(row(container, "cloud").getAttribute("aria-checked")).toBe(String(mode === "cloud"));
   });
 
+  it("dims a model not yet downloaded without telling a screen reader it cannot be used", async () => {
+    const container = await render(buildStatus({ model_downloaded: false }), { stt_mode: "cloud" });
+    await vi.waitFor(() => expect(action(container)).toBe("Install"));
+
+    expect(row(container, "local").classList.contains("mode-row--locked")).toBe(true);
+    expect(row(container, "local").hasAttribute("aria-disabled")).toBe(false);
+  });
+
+  it("raises no second toast for the same failure after a trip through Cloud", async () => {
+    const container = await render(buildStatus({ last_error: "CUDA out of memory" }), { stt_mode: "local" });
+    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledOnce());
+
+    row(container, "cloud").click();
+    await vi.waitFor(() => expect(apiMock.setSttMode).toHaveBeenCalledWith("cloud"));
+    await vi.waitFor(() => expect(apiMock.sttLocalStatus.mock.calls.length).toBeGreaterThan(1));
+    await new Promise((done) => setTimeout(done, 0));
+    expect(action(container)).toBe("Ready");
+    row(container, "local").click();
+    const readsBeforeLocal = apiMock.sttLocalStatus.mock.calls.length;
+    await vi.waitFor(() => expect(apiMock.sttLocalStatus.mock.calls.length).toBeGreaterThan(readsBeforeLocal));
+    await new Promise((done) => setTimeout(done, 0));
+
+    expect(action(container)).toBe("Try again");
+    expect(notifyErrorMock).toHaveBeenCalledOnce();
+  });
+
   it("dims the row of an engine this computer cannot run and ignores a click on it", async () => {
     const container = await render(buildStatus({ available: false }), { stt_mode: "cloud" });
     await vi.waitFor(() => expect(hint(container, "local").textContent).toBe("Not available on this computer"));
