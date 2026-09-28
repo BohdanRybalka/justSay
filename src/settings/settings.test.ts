@@ -1324,7 +1324,7 @@ describe("the Settings window's own health poll", () => {
 });
 
 describe("the Settings window being dismissed", () => {
-  it("releases the microphone the General tab was holding", async () => {
+  it("releases the microphone the Dictation panel was holding", async () => {
     const { EVENT_SETTINGS_HIDDEN } = await import("../contracts");
     apiMock.health.mockResolvedValue({
       status: "ok",

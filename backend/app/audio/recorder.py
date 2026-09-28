@@ -32,6 +32,9 @@ class NotRecordingError(NotReadyError):
 
 
 
+MME_NAME_LIMIT = 31
+
+
 def default_input_name() -> str | None:
     """The name of the OS default input, the device `MicrophoneRecorder` opens.
 
@@ -39,9 +42,20 @@ def default_input_name() -> str | None:
     when it initialises, so the name is the one this process started with.
     """
     try:
-        return sd.query_devices(kind="input")["name"]
+        name = sd.query_devices(kind="input")["name"]
     except (sd.PortAudioError, ValueError):
         return None
+    return _completed_name(name) if len(name) == MME_NAME_LIMIT else name
+
+
+def _completed_name(cut: str) -> str:
+    """A name Windows MME cut at its 31-character limit, completed from the
+    same device as another host API lists it, or `cut` when none does."""
+    for device in sd.query_devices():
+        full = device["name"]
+        if device["max_input_channels"] > 0 and len(full) > len(cut) and full.startswith(cut):
+            return full
+    return cut
 
 
 class MicrophoneRecorder(AudioRecorder):

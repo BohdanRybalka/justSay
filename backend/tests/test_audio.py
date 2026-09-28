@@ -436,6 +436,35 @@ def test_no_input_device_is_named_none_rather_than_raised(failure):
         assert default_input_name() is None
 
 
+def _devices_as_portaudio_lists_them(default_name: str, listed: list[str]):
+    def query_devices(kind=None):
+        if kind == "input":
+            return {"name": default_name, "max_input_channels": 1}
+        return [{"name": name, "max_input_channels": 1} for name in listed]
+
+    return query_devices
+
+
+def test_a_name_mme_cut_at_its_limit_is_completed_from_the_same_device_elsewhere():
+    cut = "Microphone (G435 Wireless Gamin"
+    assert len(cut) == 31
+    listed = [cut, "Microphone (G435 Wireless Gaming Headset)"]
+    with patch(
+        "app.audio.recorder.sd.query_devices",
+        side_effect=_devices_as_portaudio_lists_them(cut, listed),
+    ):
+        assert default_input_name() == "Microphone (G435 Wireless Gaming Headset)"
+
+
+def test_a_name_under_the_limit_is_never_extended_to_a_longer_device():
+    listed = ["USB Mic", "USB Mic 2"]
+    with patch(
+        "app.audio.recorder.sd.query_devices",
+        side_effect=_devices_as_portaudio_lists_them("USB Mic", listed),
+    ):
+        assert default_input_name() == "USB Mic"
+
+
 def test_config_rejects_negative_sample_rate():
     with pytest.raises(ValidationError):
         AudioSettings(sample_rate=-1, channels=1)
