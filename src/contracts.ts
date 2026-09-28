@@ -42,6 +42,17 @@ export const EVENT_MEETING_TOGGLE = "meeting-toggle";
  *  no mouse events where its window lets clicks through. */
 export const EVENT_WIDGET_HOVER = "widget-hover";
 
+/** The ring opened at the cursor, or closed. The shell shows and hides the
+ *  ring's window itself, whatever closed it, and says so, so the page replays
+ *  the fan-out on each opening and starts the next one from rest. */
+export const EVENT_RING_OPENED = "ring-opened";
+export const EVENT_RING_CLOSED = "ring-closed";
+
+/** Where the pointer is while the ring is open. The shell reads the cursor
+ *  itself: a webview in a window of an app that is not active is not reliably
+ *  told where the mouse is, and the ring never activates the app. */
+export const EVENT_RING_POINTER = "ring-pointer";
+
 /** The Settings window was dismissed. The shell intercepts `CloseRequested`,
  *  prevents it and hides the window, so the webview stays mounted and no tab's
  *  teardown ever runs — a microphone the Dictation panel holds outlives the window
@@ -89,6 +100,12 @@ export interface ShortcutRequested {
 /** Payload of `EVENT_WIDGET_HOVER`. */
 export interface WidgetHover {
   inside: boolean;
+}
+
+/** Payload of `EVENT_RING_POINTER`: logical pixels from the ring's centre. */
+export interface RingPointer {
+  x: number;
+  y: number;
 }
 
 /** Payload of `EVENT_SHORTCUT_APPLIED` — the widget's answer, carrying both

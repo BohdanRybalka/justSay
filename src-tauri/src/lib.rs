@@ -11,6 +11,7 @@ mod account;
 mod backend;
 mod clipboard;
 mod paste;
+mod ring_window;
 mod scratch_folder;
 mod widget_window;
 
@@ -287,6 +288,7 @@ pub fn run() {
             backend::spawn_watchdog(app.handle().clone());
 
             widget_window::build(app)?;
+            ring_window::build(app)?;
 
             let settings_item =
                 MenuItem::with_id(app, "settings", "Open JustSay", true, None::<&str>)?;
@@ -344,6 +346,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             widget_window::widget_ready,
             widget_window::set_widget_pill_rect,
+            ring_window::open_ring,
+            ring_window::close_ring,
             get_backend_token,
             set_meeting_recording,
             set_meetings_enabled,

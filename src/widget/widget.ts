@@ -512,6 +512,11 @@ widget.addEventListener("click", (event) => {
   void recordingIntent.request("toggle");
 });
 
+widget.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+  void invokeShell("open_ring");
+});
+
 
 watchPillRect(widget, (rect) => void invokeShell("set_widget_pill_rect", { ...rect }));
 
