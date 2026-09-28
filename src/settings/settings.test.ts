@@ -474,6 +474,10 @@ describe("the sidebar", () => {
     await fromAnotherWindow(EVENT_NAVIGATE_PANEL, { payload: { panel: "dictation", section: "meetings" } });
     expect(currentPanels()).toEqual(["dictation"]);
     expect(scrolledTo).toEqual([document.getElementById("meetings-toggle")!.closest(".card")]);
+
+    await fromAnotherWindow(EVENT_NAVIGATE_PANEL, { payload: { panel: "dictation", section: "meetings" } });
+    expect(modeTab.destroy).not.toHaveBeenCalled();
+    expect(scrolledTo).toHaveLength(2);
   });
 
   it("shows a language the ring switched to on the Dictation panel", async () => {
@@ -497,7 +501,7 @@ describe("the sidebar", () => {
     await fromAnotherWindow(EVENT_SETTINGS_CHANGED, {});
 
     await vi.waitFor(() => expect(apiMock.getSettings).toHaveBeenCalledTimes(readsBefore + 1));
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(modeTab.destroy).not.toHaveBeenCalled();
   });
 });

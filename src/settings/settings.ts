@@ -22,6 +22,7 @@ import {
   EVENT_SETTINGS_SHOWN,
   type NavigatePanel,
 } from "../contracts";
+import { loadEventApi } from "../event-api";
 import { TimedOutError, withTimeout } from "../timeout";
 import { isStaleStatusResponse } from "../stale-response";
 import { nextTabAction } from "./tab-visibility";
@@ -455,18 +456,10 @@ async function initAccountName() {
 }
 
 
-let eventApi: Promise<typeof import("@tauri-apps/api/event")> | null = null;
-
-/** One import of the event API for every subscription on this page. */
-function loadEventApi(): Promise<typeof import("@tauri-apps/api/event")> {
-  eventApi ??= import("@tauri-apps/api/event");
-  return eventApi;
-}
-
 /** Open the panel another window asked for, scrolled to the section it names
  *  once the panel is drawn. */
 function navigateTo(target: NavigatePanel) {
-  switchPanel(target.panel);
+  if (target.panel !== currentPanel || !settings) switchPanel(target.panel);
   if (target.section === "meetings") {
     pane.querySelector("#meetings-toggle")?.closest(".card")?.scrollIntoView({ block: "center" });
   }

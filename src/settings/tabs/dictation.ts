@@ -18,6 +18,7 @@ import { isDecisiveRefusal, newSessionId } from "../../session";
 import { notifyError } from "../../notify";
 import { levelFromDb } from "../../level";
 import { DICTATION_LANGUAGES } from "../../languages";
+import { loadEventApi } from "../../event-api";
 import { TimedOutError } from "../../timeout";
 import { renderSelect } from "../../ui/controls";
 import { PASTE_ROW, wirePasteRow } from "./dictation-paste";
@@ -430,18 +431,6 @@ function releaseAndRemember(sessionId: string): void {
       if (isDecisiveRefusal(e) && sessionAwaitingRelease === sessionId) sessionAwaitingRelease = "";
     },
   );
-}
-
-let eventApi: Promise<typeof import("@tauri-apps/api/event")> | null = null;
-
-function loadEventApi(): Promise<typeof import("@tauri-apps/api/event")> {
-  if (!eventApi) {
-    eventApi = import("@tauri-apps/api/event").catch((e) => {
-      eventApi = null;
-      throw e;
-    });
-  }
-  return eventApi;
 }
 
 export async function emitSettingsChanged() {
