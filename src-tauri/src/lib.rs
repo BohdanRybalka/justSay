@@ -240,9 +240,9 @@ fn hide_settings(app: &AppHandle) {
     }
 }
 
-/// Bring the settings window up on the meeting disclosure. Called when the
-/// backend refuses to start a recording because it has not been acknowledged
-/// (docs/adr/040-recording-other-people-is-not-covered-by-zero-leak.md).
+/// Bring the settings window up. Called when the backend refuses to start a
+/// meeting recording because Record meetings is off or its disclosure has not
+/// been acknowledged (docs/adr/040-recording-other-people-is-not-covered-by-zero-leak.md).
 #[tauri::command]
 fn show_settings_window(app: AppHandle) {
     show_settings(&app);
