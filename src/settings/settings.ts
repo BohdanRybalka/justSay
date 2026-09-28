@@ -20,7 +20,7 @@ import { TimedOutError, withTimeout } from "../timeout";
 import { isStaleStatusResponse } from "../stale-response";
 import { nextTabAction } from "./tab-visibility";
 import { renderDictation } from "./tabs/dictation";
-import { renderModels } from "./tabs/models";
+import { renderDictationMode } from "./tabs/dictation-mode";
 import { renderHistory } from "./tabs/history";
 import { renderWords } from "./tabs/words";
 import { renderTranscribe } from "./tabs/transcribe";
@@ -123,7 +123,7 @@ const panels: Record<PanelName, PanelRenderer> = {
   dictation: (container, loaded, windowHidden) =>
     combineLifecycles([
       renderDictation(container, loaded),
-      hostLegacyTabs(container, [(tab) => renderModels(tab, loaded, windowHidden)]),
+      renderDictationMode(container, loaded, windowHidden),
     ]),
   settings: renderSettingsPanel,
   account: (container, loaded) =>

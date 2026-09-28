@@ -25,10 +25,6 @@ body {
   flex-direction: column;
 }
 
-@keyframes status-indicator-spin {
-  to { transform: rotate(360deg); }
-}
-
 @scope (.legacy-tab) {
 * {
   margin: 0;
@@ -314,55 +310,6 @@ select {
 .btn-sm {
   padding: 5px 12px;
   font-size: 12px;
-}
-
-.status-indicator-badge {
-  display: none;
-  width: 13px;
-  height: 13px;
-  margin-left: 8px;
-  vertical-align: middle;
-  border-radius: 50%;
-}
-
-.status-indicator-badge--loading {
-  display: inline-block;
-  border: 2px solid var(--border-2);
-  border-top-color: var(--blue);
-  animation: status-indicator-spin 0.7s linear infinite;
-}
-
-.status-indicator-badge--ready {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--green);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.status-indicator-badge--ready::before {
-  content: "\2713";
-}
-
-.status-indicator-badge--error {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--red);
-  font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
-  outline: none;
-}
-
-.status-indicator-badge--error::before {
-  content: "!";
-}
-
-.status-indicator-badge--error:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
 }
 
 .word-cards {

@@ -84,6 +84,7 @@ ignore_names = [
     "copied_to_clipboard", "discarded_reason",
     "temp_size_bytes", "freed_bytes", "gemini_key_set", "groq_key_set",
     "shortcut", "theme", "display_name", "package_installed", "model_loaded", "model_ram_mb",
+    "model_downloaded", "model_bytes",
     "total_audio_seconds", "word", "highlighted_text",
     "row_factory", "LimitFlags", "settings_customise_sources",
     "log_file_path", "_reset_library_cache",

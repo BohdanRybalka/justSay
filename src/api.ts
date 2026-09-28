@@ -580,7 +580,12 @@ export interface CloudKeyStatus {
 }
 
 export interface LocalSTTStatus {
+  /** This build has, or can install, an engine for this machine. */
+  available: boolean;
   package_installed: boolean;
+  model_downloaded: boolean;
+  /** On disk when `model_downloaded`, else the expected download; null when unknown. */
+  model_bytes: number | null;
   model_loaded: boolean;
   model_name: string;
   model_ram_mb: number | null;

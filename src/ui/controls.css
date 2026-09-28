@@ -91,6 +91,7 @@
 .mode-row-text b{display:block;font-size:14.5px;font-weight:620;letter-spacing:-.012em}
 .mode-row-text small{font-size:11.5px;color:var(--muted)}
 .mode-row--locked{cursor:default;opacity:.72}
+.mode-row-text .mode-row-alert{color:var(--orange)}
 .install-step{display:flex;align-items:center;gap:11px;padding:9px 0;font-size:12.5px;color:var(--muted)}
 .install-step-dot{width:20px;height:20px;border-radius:50%;border:2px solid var(--border-2);flex:none;
   display:grid;place-items:center;color:transparent;transition:.2s}
