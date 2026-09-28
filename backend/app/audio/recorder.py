@@ -32,6 +32,18 @@ class NotRecordingError(NotReadyError):
 
 
 
+def default_input_name() -> str | None:
+    """The name of the OS default input, the device `MicrophoneRecorder` opens.
+
+    `None` when the machine has no input device. PortAudio lists devices once,
+    when it initialises, so the name is the one this process started with.
+    """
+    try:
+        return sd.query_devices(kind="input")["name"]
+    except (sd.PortAudioError, ValueError):
+        return None
+
+
 class MicrophoneRecorder(AudioRecorder):
     """Records audio from the default microphone input."""
 

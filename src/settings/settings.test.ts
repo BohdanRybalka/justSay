@@ -8,6 +8,7 @@ const apiMock = {
   updateSettings: vi.fn(),
   cloudKeyStatus: vi.fn(),
   getStorageInfo: vi.fn(),
+  inputDevice: vi.fn(async () => ({ name: "Microphone (Realtek Audio)" })),
   audioDiscard: vi.fn(),
   audioStatus: vi.fn(),
   audioStart: vi.fn(),
@@ -105,7 +106,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 /** How often this page has asked the bus for one named subscription.
  *
- *  Keyed by name rather than totalled, because the General tab subscribes to
+ *  Keyed by name rather than totalled, because the Dictation panel subscribes to
  *  `shortcut-applied` once the settings load resolves and a total cannot tell
  *  that attempt from the two this suite steers. */
 function listenAttempts(event: string): number {
@@ -155,12 +156,15 @@ async function openSettingsWindow(): Promise<void> {
 }
 
 /** Waits for the settings to load into the panel the window opens on, then
- *  opens Settings, which hosts the old General tab. */
-async function openSettingsPanel(): Promise<void> {
+ *  opens `panel`, checking it drew the element only it has. */
+async function openLoadedPanel(panel: "settings" | "dictation", drawn: string): Promise<void> {
   await vi.waitFor(() => expect(document.getElementById("words-tab-body")).not.toBeNull());
-  document.querySelector<HTMLButtonElement>('[data-panel="settings"]')!.click();
-  expect(document.getElementById("btn-test-mic")).not.toBeNull();
+  document.querySelector<HTMLButtonElement>(`[data-panel="${panel}"]`)!.click();
+  expect(document.querySelector(drawn)).not.toBeNull();
 }
+
+const openSettingsPanel = () => openLoadedPanel("settings", ".storage-row");
+const openDictationPanel = () => openLoadedPanel("dictation", "#btn-test-mic");
 
 function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
   return {
@@ -309,7 +313,7 @@ describe("the sidebar", () => {
     expect(historyTab.destroy).toHaveBeenCalledOnce();
   });
 
-  it("draws the Settings card above the General content it still hosts", async () => {
+  it("draws the Settings card with nothing old hosted under it", async () => {
     await bootWithSettingsLoaded();
 
     openPanel("settings");
@@ -318,9 +322,25 @@ describe("the sidebar", () => {
     expect(panel.querySelector(".card .storage-row")).not.toBeNull();
     expect(panel.querySelector(".card .version-row")).not.toBeNull();
     expect(panel.querySelector(".history-delete")).not.toBeNull();
-    const hosted = panel.querySelectorAll(".legacy-tab");
-    expect(hosted).toHaveLength(1);
-    expect(hosted[0].querySelector("#btn-test-mic")).not.toBeNull();
+    expect(panel.querySelectorAll(".legacy-tab")).toHaveLength(0);
+    expect(panel.querySelector("#btn-test-mic")).toBeNull();
+  });
+
+  it("opens Dictation on its everyday card, with the disclosure and the old Models tab under it", async () => {
+    await bootWithSettingsLoaded();
+
+    openPanel("dictation");
+
+    const panel = document.querySelector("#pane > .panel")!;
+    const card = panel.querySelector(":scope > .card")!;
+    expect(card.querySelector("#lang-select")).not.toBeNull();
+    expect(card.querySelector("#btn-shortcut")).not.toBeNull();
+    expect(card.querySelector("#btn-test-mic")).not.toBeNull();
+    const hosted = panel.querySelectorAll(":scope > .legacy-tab");
+    expect(hosted).toHaveLength(2);
+    expect(hosted[0].querySelector("#meeting-consent-group")).not.toBeNull();
+    expect(hosted[1].querySelector("#models-tab-body")).not.toBeNull();
+    expect(card.compareDocumentPosition(hosted[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("shows the name this computer knows the user by, with its initials", async () => {
@@ -482,7 +502,7 @@ describe("loadSettings — a later re-call's cloud-status refetch failure also r
 
 
 describe("a shortcut the widget stored while this window was open", () => {
-  it("survives a tab switch instead of the General tab redrawing the one loaded at open", async () => {
+  it("survives a panel switch instead of Dictation redrawing the one loaded at open", async () => {
     apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.getSettings.mockResolvedValue(buildSettings({ shortcut: "Ctrl+Alt+KeyV" }));
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
@@ -490,13 +510,13 @@ describe("a shortcut the widget stored while this window was open", () => {
 
     const settingsModule = await import("./settings");
 
-    await openSettingsPanel();
+    await openDictationPanel();
     expect(document.getElementById("btn-shortcut")!.textContent).toBe("Ctrl + Alt + V");
 
     settingsModule.cachePersistedShortcut("Ctrl+Alt+KeyB");
 
-    document.querySelector<HTMLButtonElement>('[data-panel="dictation"]')!.click();
     document.querySelector<HTMLButtonElement>('[data-panel="settings"]')!.click();
+    document.querySelector<HTMLButtonElement>('[data-panel="dictation"]')!.click();
 
     expect(document.getElementById("btn-shortcut")!.textContent).toBe("Ctrl + Alt + B");
     expect(settingsModule.getSettings()!.shortcut).toBe("Ctrl+Alt+KeyB");
@@ -1323,7 +1343,7 @@ describe("the Settings window being dismissed", () => {
     apiMock.audioDiscard.mockResolvedValue({ duration_seconds: 2 });
 
     await import("./settings");
-    await openSettingsPanel();
+    await openDictationPanel();
     await openSettingsWindow();
 
     const button = document.getElementById("btn-test-mic") as HTMLButtonElement;
@@ -1350,16 +1370,16 @@ describe("the Settings window being dismissed", () => {
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
     await import("./settings");
-    await openSettingsPanel();
+    await openDictationPanel();
     await openSettingsWindow();
-    const readsBefore = apiMock.getStorageInfo.mock.calls.length;
+    const readsBefore = apiMock.inputDevice.mock.calls.length;
     const button = document.getElementById("btn-test-mic") as HTMLButtonElement;
 
     await vi.waitFor(() => expect(eventListeners.get(EVENT_SETTINGS_HIDDEN)).toBeTypeOf("function"));
     await eventListeners.get(EVENT_SETTINGS_HIDDEN)!({});
     await vi.waitFor(() => expect(apiMock.cloudKeyStatus).toHaveBeenCalled());
 
-    expect(apiMock.getStorageInfo.mock.calls.length).toBe(readsBefore);
+    expect(apiMock.inputDevice.mock.calls.length).toBe(readsBefore);
     expect(document.getElementById("btn-test-mic")).toBe(button);
   });
 

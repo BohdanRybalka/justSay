@@ -26,7 +26,7 @@ vi.mock("../settings", () => ({
   saveSettings: saveSettingsMock,
   getCloudKeyStatus: () => CLOUD_STATUS,
 }));
-vi.mock("./general", () => ({ emitSettingsChanged: emitSettingsChangedMock }));
+vi.mock("./dictation", () => ({ emitSettingsChanged: emitSettingsChangedMock }));
 vi.mock("../../ui/theme", () => ({ applyAppTheme: applyAppThemeMock }));
 vi.mock("../../notify", () => ({ notifyError: notifyErrorMock }));
 vi.mock("../../api", () => ({ api: apiMock }));

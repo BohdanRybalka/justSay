@@ -18,6 +18,7 @@ import { isDecisiveRefusal, newSessionId } from "../../session";
 import { notifyError } from "../../notify";
 import { levelFromDb } from "../../level";
 import { TimedOutError } from "../../timeout";
+import { renderSelect } from "../../ui/controls";
 
 /** A discard that could not be delivered states what is known and promises
  *  nothing: whether the device was released is exactly what this window cannot
@@ -46,52 +47,66 @@ const LANGUAGES = [
   { code: "zh", label: "Chinese" },
 ];
 
-export function renderGeneral(container: HTMLElement, settings: UserSettings): TabLifecycle {
+const RESULT_HINT = "setting-row-hint--result";
+const SHORTCUT_HINT = "Hold it down while you speak";
+const NO_MICROPHONE = "No microphone";
+const UNKNOWN_MICROPHONE = "Your default microphone";
+
+/** Dictation's everyday card — language, shortcut, microphone — with the
+ *  meeting disclosure under it, added to the end of `container`. */
+export function renderDictation(container: HTMLElement, settings: UserSettings): TabLifecycle {
   const platform = detectShortcutPlatform(navigator);
+  let destroyed = false;
 
-  container.innerHTML = `
-    <h2 class="tab-title">General</h2>
-
-    <div class="setting-group">
-      <div class="setting-label">Dictation Language</div>
+  container.insertAdjacentHTML(
+    "beforeend",
+    `
+    <h2 class="panel-title">Dictation</h2>
+    <p class="panel-subtitle">How talking turns into text.</p>
+    <div class="card">
       <div class="setting-row">
-        <span class="label">Language</span>
-        <select id="lang-select">
-          ${LANGUAGES.map(
-            (l) => `<option value="${l.code}" ${l.code === settings.language ? "selected" : ""}>${l.label}</option>`
-          ).join("")}
-        </select>
-      </div>
-    </div>
-
-    <div class="setting-group">
-      <div class="setting-label">Global Shortcut</div>
-      <div class="setting-row">
-        <span class="label">Push-to-talk</span>
-        <button class="btn btn-secondary" id="btn-shortcut">${escapeHtml(formatAccelerator(settings.shortcut, platform))}</button>
-      </div>
-      <div class="value" id="shortcut-hint" style="padding: 4px 16px; font-size: 11px; color: var(--text-muted);">Click to change. Press new key combination, then release.</div>
-    </div>
-
-    <div class="setting-group" id="meeting-consent-group">
-      ${meetingDisclosureHtml(settings.meeting_consent_acknowledged)}
-    </div>
-
-    <div class="setting-group">
-      <div class="setting-label">Microphone Test</div>
-      <div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 12px;">
-        <div style="display: flex; align-items: center; justify-content: space-between;">
-          <span class="label" id="rec-label">Click to test microphone</span>
-          <button class="btn btn-primary" id="btn-test-mic">Record</button>
+        <div class="setting-row-text">
+          <div class="setting-row-title">Language</div>
+          <div class="setting-row-hint">Pick the one you speak most</div>
         </div>
-        <div class="level-meter">
-          <div class="level-meter-fill" id="level-fill"></div>
+        <div class="setting-row-controls">
+          <select id="lang-select" aria-label="Language">
+            ${LANGUAGES.map(
+              (l) => `<option value="${l.code}" ${l.code === settings.language ? "selected" : ""}>${l.label}</option>`
+            ).join("")}
+          </select>
         </div>
       </div>
+      <div class="setting-row">
+        <div class="setting-row-text">
+          <div class="setting-row-title">Shortcut</div>
+          <div class="setting-row-hint" id="shortcut-hint" aria-live="polite">${SHORTCUT_HINT}</div>
+        </div>
+        <div class="setting-row-controls">
+          <button type="button" class="keycap num" id="btn-shortcut" aria-describedby="shortcut-hint">${escapeHtml(formatAccelerator(settings.shortcut, platform))}</button>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-row-text">
+          <div class="setting-row-title">Microphone</div>
+          <div class="setting-row-hint" id="mic-hint" aria-live="polite">…</div>
+        </div>
+        <div class="setting-row-controls">
+          <div class="level-meter"><i id="level-fill"></i></div>
+          <button type="button" class="btn" id="btn-test-mic">Test</button>
+        </div>
+      </div>
     </div>
-  `;
+    <div class="legacy-tab">
+      <div class="setting-group" id="meeting-consent-group">
+        ${meetingDisclosureHtml(settings.meeting_consent_acknowledged)}
+      </div>
+    </div>
+  `,
+  );
 
   const langSelect = container.querySelector<HTMLSelectElement>("#lang-select")!;
+  renderSelect(langSelect);
   langSelect.addEventListener("change", async () => {
     try {
       await saveSettings({ language: langSelect.value });
@@ -102,8 +117,34 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
   });
 
   const btnTest = container.querySelector<HTMLButtonElement>("#btn-test-mic")!;
-  const recLabel = container.querySelector<HTMLElement>("#rec-label")!;
+  const micHint = container.querySelector<HTMLElement>("#mic-hint")!;
   const levelFill = container.querySelector<HTMLElement>("#level-fill")!;
+
+  let micName = "…";
+  let micHintShowsName = true;
+
+  function showMicName() {
+    micHintShowsName = true;
+    micHint.textContent = micName;
+    micHint.classList.remove(RESULT_HINT);
+  }
+
+  function showMicResult(text: string) {
+    micHintShowsName = false;
+    micHint.textContent = text;
+    micHint.classList.add(RESULT_HINT);
+  }
+
+  void api.inputDevice().then(
+    ({ name }) => {
+      micName = name ?? NO_MICROPHONE;
+      if (!destroyed && micHintShowsName) showMicName();
+    },
+    () => {
+      micName = UNKNOWN_MICROPHONE;
+      if (!destroyed && micHintShowsName) showMicName();
+    },
+  );
 
   let isRecording = false;
   /** The session this tab started and has not seen released. Kept across a
@@ -130,7 +171,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
       () => {},
       (error) => {
         if (levelStreamAbort !== stream) return;
-        recLabel.textContent = `Recording — the level meter stopped: ${error}`;
+        showMicResult(`Recording — the level meter stopped: ${error}`);
       },
     );
     levelStreamAbort = stream;
@@ -164,7 +205,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
   function showRecording() {
     isRecording = true;
     btnTest.textContent = "Stop";
-    recLabel.textContent = "Recording...";
+    showMicName();
     startLevelStream(levelFill);
   }
 
@@ -176,8 +217,8 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
   function showIdle() {
     heldSession = "";
     isRecording = false;
-    btnTest.textContent = "Record";
-    recLabel.textContent = "Click to test microphone";
+    btnTest.textContent = "Test";
+    showMicName();
     stopLevelStream();
     levelFill.style.width = "0%";
   }
@@ -197,7 +238,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
       if (!isDecisiveRefusal(e)) {
         stopLevelStream();
         levelFill.style.width = "0%";
-        recLabel.textContent = MICROPHONE_UNCONFIRMED_LABEL;
+        showMicResult(MICROPHONE_UNCONFIRMED_LABEL);
         return;
       }
     }
@@ -234,14 +275,15 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
         }
         isRecording = true;
         btnTest.textContent = "Stop";
-        recLabel.textContent = MICROPHONE_UNCONFIRMED_LABEL;
+        showMicResult(MICROPHONE_UNCONFIRMED_LABEL);
         return;
       }
       heldSession = "";
-      recLabel.textContent =
+      showMicResult(
         e instanceof ApiRequestError && e.status === 409
           ? "Microphone busy (widget recording)"
-          : "Failed to start";
+          : "Failed to start",
+      );
       return;
     }
     if (destroyed) {
@@ -263,7 +305,11 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
   const shortcutHint = container.querySelector<HTMLElement>("#shortcut-hint")!;
   let recording = false;
 
-  let destroyed = false;
+  function showShortcutResult(text: string) {
+    shortcutHint.textContent = text;
+    shortcutHint.classList.add(RESULT_HINT);
+  }
+
   if (sessionAwaitingRelease) releaseAndRemember(sessionAwaitingRelease);
 
   const consentGroup = container.querySelector<HTMLElement>("#meeting-consent-group")!;
@@ -291,7 +337,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       if (!destroyed) {
-        shortcutHint.textContent = `Could not apply the shortcut: ${message}`;
+        showShortcutResult(`Could not apply the shortcut: ${message}`);
         shortcutBtn.textContent = revertLabelTo;
       }
       notifyError(message);
@@ -306,15 +352,16 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
       captureHandler = null;
     }
     recording = false;
+    shortcutBtn.classList.remove("keycap--capturing");
   }
 
   shortcutBtn.addEventListener("click", () => {
     if (recording) return;
     recording = true;
-    shortcutBtn.textContent = "Press keys...";
-    shortcutBtn.classList.add("btn-primary");
-    shortcutBtn.classList.remove("btn-secondary");
-    shortcutHint.textContent = "Press your desired key combination...";
+    shortcutBtn.textContent = "Press keys…";
+    shortcutBtn.classList.add("keycap--capturing");
+    shortcutHint.textContent = SHORTCUT_HINT;
+    shortcutHint.classList.remove(RESULT_HINT);
 
     captureHandler = (e: KeyboardEvent) => {
       if (destroyed) return;
@@ -323,7 +370,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
 
       const captured = acceleratorFromKeyEvent(e);
       if (!captured.ok) {
-        if (captured.reason === "no-modifier") shortcutHint.textContent = modifierHint(platform);
+        if (captured.reason === "no-modifier") showShortcutResult(modifierHint(platform));
         return;
       }
 
@@ -331,9 +378,7 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
 
       stopCapture();
       shortcutBtn.textContent = formatAccelerator(captured.accelerator, platform);
-      shortcutBtn.classList.remove("btn-primary");
-      shortcutBtn.classList.add("btn-secondary");
-      shortcutHint.textContent = "Applying…";
+      showShortcutResult("Applying…");
 
       void requestShortcut(captured.accelerator, activeLabel);
     };
@@ -349,17 +394,18 @@ export function renderGeneral(container: HTMLElement, settings: UserSettings): T
         if (destroyed) return;
         const label = formatAccelerator(payload.shortcut, platform);
         if (!payload.ok) {
-          shortcutHint.textContent = `${label} was not accepted: ${payload.reason ?? "unknown reason"}`;
+          showShortcutResult(`${label} was not accepted: ${payload.reason ?? "unknown reason"}`);
           shortcutBtn.textContent = payload.stillActive
             ? formatAccelerator(payload.stillActive, platform)
             : "Not set";
           return;
         }
         if (payload.persisted === true) cachePersistedShortcut(payload.shortcut);
-        shortcutHint.textContent =
+        showShortcutResult(
           payload.persisted === false
             ? `${label} is active now, but could not be saved: ${payload.reason ?? "unknown reason"}`
-            : `${label} is active now.`;
+            : `${label} is active now.`,
+        );
       });
       if (destroyed) unlisten();
       else unlistenShortcutApplied = unlisten;

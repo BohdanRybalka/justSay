@@ -19,10 +19,6 @@
   flex: none;
 }
 
-.history-delete + .legacy-tab {
-  margin-top: 32px;
-}
-
 .key-status:empty {
   display: none;
 }

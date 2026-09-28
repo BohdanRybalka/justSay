@@ -205,22 +205,6 @@ select {
   cursor: not-allowed;
 }
 
-.level-meter {
-  height: 8px;
-  background: var(--bg-input);
-  border-radius: 4px;
-  overflow: hidden;
-  margin-top: 8px;
-}
-
-.level-meter-fill {
-  height: 100%;
-  background: var(--green);
-  border-radius: 4px;
-  transition: width 0.1s;
-  width: 0%;
-}
-
 .status-badge {
   display: inline-block;
   padding: 2px 8px;
