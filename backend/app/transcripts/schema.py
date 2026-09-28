@@ -12,12 +12,18 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections.abc import Sequence
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+ADD_COLUMN_FROM_VERSION = 5
 UNKNOWN_TS = 0
 STORED_TS_MAX = 253402300799000
+
+ENTRY_SOURCES = ("dictation", "file", "meeting")
+DEFAULT_SOURCE = "dictation"
+SOURCE_NAME_MAX = 200
 
 ENTRY_COLUMNS = (
     "id",
@@ -30,6 +36,9 @@ ENTRY_COLUMNS = (
     "word_count",
     "model_name",
     "tokens_used",
+    "source",
+    "source_name",
+    "starred",
 )
 
 ENTRY_READ_COLUMNS = tuple(c for c in ENTRY_COLUMNS if c != "cleaned_text")
@@ -65,8 +74,23 @@ CREATE TABLE IF NOT EXISTS entries (
 );
 """
 
-_DDL_V5_ENTRIES = """
-CREATE TABLE entries_v5 (
+_SOURCES_SQL = ", ".join(f"'{source}'" for source in ENTRY_SOURCES)
+
+_V6_ADDED_COLUMNS = (
+    (
+        "source",
+        f"TEXT NOT NULL DEFAULT '{DEFAULT_SOURCE}' CHECK (source IN ({_SOURCES_SQL}))",
+    ),
+    (
+        "source_name",
+        "TEXT CHECK (source_name IS NULL OR "
+        f"(typeof(source_name) = 'text' AND length(source_name) <= {SOURCE_NAME_MAX}))",
+    ),
+    ("starred", "INTEGER NOT NULL DEFAULT 0 CHECK (starred IN (0, 1))"),
+)
+
+_DDL_REBUILT_ENTRIES = """
+CREATE TABLE entries_rebuilt (
   id TEXT PRIMARY KEY NOT NULL CHECK (typeof(id) = 'text'),
   ts INTEGER NOT NULL CHECK (typeof(ts) = 'integer' AND ts BETWEEN 0 AND @MAXTS@),
   language TEXT NOT NULL CHECK (typeof(language) = 'text'),
@@ -78,9 +102,12 @@ CREATE TABLE entries_v5 (
   ),
   word_count INTEGER CHECK (word_count IS NULL OR typeof(word_count) = 'integer'),
   model_name TEXT CHECK (model_name IS NULL OR typeof(model_name) = 'text'),
-  tokens_used INTEGER CHECK (tokens_used IS NULL OR typeof(tokens_used) = 'integer')
+  tokens_used INTEGER CHECK (tokens_used IS NULL OR typeof(tokens_used) = 'integer'),
+  @ADDED@
 )
-""".replace("@MAXTS@", str(STORED_TS_MAX))
+""".replace("@MAXTS@", str(STORED_TS_MAX)).replace(
+    "@ADDED@", ",\n  ".join(f"{name} {definition}" for name, definition in _V6_ADDED_COLUMNS)
+)
 
 _REPAIRED_TS_SQL = (
     "CASE WHEN typeof(ts) IN ('integer', 'real') AND ts BETWEEN 0 AND @MAXTS@ "
@@ -119,6 +146,9 @@ _MISSING_COLUMN_SQL = {
     "word_count": "NULL",
     "model_name": "NULL",
     "tokens_used": "NULL",
+    "source": f"'{DEFAULT_SOURCE}'",
+    "source_name": "NULL",
+    "starred": "0",
 }
 
 
@@ -138,6 +168,15 @@ _REPAIRED_COLUMN_SQL = {
     "word_count": _repaired_numeric_sql("word_count"),
     "model_name": _repaired_nullable_sql("model_name", "'text'"),
     "tokens_used": _repaired_numeric_sql("tokens_used"),
+    "source": f"CASE WHEN source IN ({_SOURCES_SQL}) THEN source ELSE '{DEFAULT_SOURCE}' END",
+    "source_name": (
+        "CASE WHEN typeof(source_name) = 'text' "
+        f"THEN substr(source_name, 1, {SOURCE_NAME_MAX}) ELSE NULL END"
+    ),
+    "starred": (
+        "CASE WHEN typeof(starred) IN ('integer', 'real') AND starred IN (0, 1) "
+        "THEN CAST(starred AS INTEGER) ELSE 0 END"
+    ),
 }
 
 _REPLACE_TS_INDEX_WITH_TS_ID_INDEX = """
@@ -159,7 +198,7 @@ CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
   INSERT INTO entry_fts(entry_fts, rowid, cleaned_text)
   VALUES('delete', old.rowid, old.cleaned_text);
 END;
-CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
+CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE OF cleaned_text ON entries BEGIN
   INSERT INTO entry_fts(entry_fts, rowid, cleaned_text)
   VALUES('delete', old.rowid, old.cleaned_text);
   INSERT INTO entry_fts(rowid, cleaned_text) VALUES (new.rowid, new.cleaned_text);
@@ -170,19 +209,25 @@ END;
 def _init_schema(conn: sqlite3.Connection) -> None:
     """Version-aware migrator. Run on every connection open (ADR 053).
 
-    Below v5, and on a fresh database: ``_migrate_to_v5_locked``, the v3 DDL, then
-    ``user_version = 5`` LAST. At v5: re-run the idempotent DDL, rebuilding FTS.
+    Below v5, and on a fresh database: ``_rebuild_entries_locked``, the v3 DDL, then
+    ``user_version`` LAST. At v5: a backup copy, then ``_add_v6_columns_locked``. At
+    v5 and above: the idempotent DDL, rebuilding FTS; an open that starts at v6 or
+    later removes the backup.
     """
     from app.transcripts import vector_store
 
     conn.executescript(_DDL_V1)
     current = conn.execute("PRAGMA user_version").fetchone()[0]
-    if current < SCHEMA_VERSION:
-        if not _migrate_to_v5_locked(conn):
+    if current < ADD_COLUMN_FROM_VERSION:
+        if not _rebuild_entries_locked(conn):
             return
         conn.executescript(vector_store._DDL_V3)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     else:
+        if current == ADD_COLUMN_FROM_VERSION:
+            _back_up_store(conn)
+            if not _add_v6_columns_locked(conn):
+                return
         conn.executescript(_REPLACE_TS_INDEX_WITH_TS_ID_INDEX)
         conn.executescript(_DDL_V2)
         entries_rows = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
@@ -203,13 +248,82 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             conn.execute("INSERT INTO entry_fts(entry_fts) VALUES('rebuild')")
 
         conn.executescript(vector_store._DDL_V3)
+        if current > ADD_COLUMN_FROM_VERSION:
+            _remove_store_backup(conn)
 
 
-def _migrate_to_v5_locked(conn: sqlite3.Connection) -> bool:
+def migration_backup_path(store_file: Path) -> Path:
+    """Where the copy of ``store_file`` taken before the v5 -> v6 change lives."""
+    return store_file.with_name(f"{store_file.stem}.v{ADD_COLUMN_FROM_VERSION}.bak")
+
+
+def _store_file(conn: sqlite3.Connection) -> Path | None:
+    main = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
+    return Path(main) if main else None
+
+
+def _back_up_store(conn: sqlite3.Connection) -> None:
+    """Copy the open store to ``migration_backup_path`` through SQLite's backup API.
+
+    An in-memory store has nothing to copy. A failed copy is logged and removed,
+    and the migration goes ahead: the change it guards is one transaction.
+    """
+    store = _store_file(conn)
+    if store is None:
+        return
+    backup = migration_backup_path(store)
+    try:
+        backup.unlink(missing_ok=True)
+        target = sqlite3.connect(backup)
+        try:
+            conn.backup(target)
+        finally:
+            target.close()
+    except (OSError, sqlite3.Error):
+        log.exception("Could not copy the history store to %s before migrating it", backup)
+        backup.unlink(missing_ok=True)
+
+
+def _remove_store_backup(conn: sqlite3.Connection) -> None:
+    store = _store_file(conn)
+    if store is None:
+        return
+    try:
+        migration_backup_path(store).unlink(missing_ok=True)
+    except OSError as e:
+        log.warning("Could not remove the pre-migration history copy: %s", e)
+
+
+def _add_v6_columns_locked(conn: sqlite3.Connection) -> bool:
+    """Add the v6 columns to a v5 ``entries`` in one transaction, no table rebuild.
+
+    Drops ``entries_au`` so ``_DDL_V2`` recreates it narrowed to ``cleaned_text``.
+    Returns whether it landed and **never raises**: a failure leaves the store at v5.
+    """
+    try:
+        stored = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
+        conn.execute("BEGIN")
+        for name, definition in _V6_ADDED_COLUMNS:
+            if name not in stored:
+                conn.execute(f"ALTER TABLE entries ADD COLUMN {name} {definition}")
+        conn.execute("DROP TRIGGER IF EXISTS entries_au")
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.execute("COMMIT")
+    except sqlite3.Error:
+        log.exception("Adding the v6 history columns failed; leaving the store at v5")
+        return False
+    finally:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+    return True
+
+
+def _rebuild_entries_locked(conn: sqlite3.Connection) -> bool:
     """Rebuild ``entries`` so every stored row is one the app can read and order.
 
-    Runs below v5 and on a fresh database. Returns whether the rebuild landed and
-    **never raises**: a store it cannot repair keeps the table and version it has.
+    Runs below v5 and on a fresh database, straight into the current shape. Returns
+    whether the rebuild landed and **never raises**: a store it cannot repair keeps
+    the table and version it has.
     """
     from app.transcripts import vector_store
 
@@ -235,10 +349,10 @@ def _migrate_to_v5_locked(conn: sqlite3.Connection) -> bool:
         stored_rows = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
         for trigger in ("entries_ai", "entries_ad", "entries_au", "entries_ad_vec"):
             conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-        conn.execute("DROP TABLE IF EXISTS entries_v5")
-        conn.execute(_DDL_V5_ENTRIES)
+        conn.execute("DROP TABLE IF EXISTS entries_rebuilt")
+        conn.execute(_DDL_REBUILT_ENTRIES)
         copied = conn.execute(
-            f"INSERT OR IGNORE INTO entries_v5 (rowid, {column_list}) "
+            f"INSERT OR IGNORE INTO entries_rebuilt (rowid, {column_list}) "
             f"SELECT rowid, {select_list} FROM entries"
         ).rowcount
         if copied == 0 < stored_rows:
@@ -246,7 +360,7 @@ def _migrate_to_v5_locked(conn: sqlite3.Connection) -> bool:
                 f"the rebuilt table would hold none of the {stored_rows} stored rows"
             )
         conn.execute("DROP TABLE entries")
-        conn.execute("ALTER TABLE entries_v5 RENAME TO entries")
+        conn.execute("ALTER TABLE entries_rebuilt RENAME TO entries")
         conn.execute("COMMIT")
     except sqlite3.Error:
         log.exception("Rebuilding the history table failed; leaving the store at its version")

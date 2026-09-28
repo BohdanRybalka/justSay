@@ -117,10 +117,11 @@ def relocate(new_dir: Path) -> tuple[RelocateOutcome, str | None]:
             log.exception("Relocate failed: %s", e)
             return RelocateOutcome.FAILED, f"Move failed: {e}"
 
-        try:
-            old_path.unlink()
-        except OSError as e:
-            log.warning("History moved but %s could not be removed: %s", old_path, e)
+        for left_behind in (old_path, schema.migration_backup_path(old_path)):
+            try:
+                left_behind.unlink(missing_ok=True)
+            except OSError as e:
+                log.warning("History moved but %s could not be removed: %s", left_behind, e)
         log.info("Relocated history %s → %s", old_path, new_path)
         return RelocateOutcome.MOVED, None
 

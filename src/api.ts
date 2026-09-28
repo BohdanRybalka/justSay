@@ -639,6 +639,8 @@ export interface CleanupResult {
   freed_bytes: number;
 }
 
+export type EntrySource = "dictation" | "file" | "meeting";
+
 export interface HistoryEntry {
   id: string;
   /** ISO 8601, or `null` when the stored recording time could not be
@@ -654,6 +656,10 @@ export interface HistoryEntry {
   tokens_used: number | null;
   audio_duration_seconds: number | null;
   word_count: number | null;
+  source: EntrySource;
+  /** A file's name as the user saw it; `null` for dictations and meetings. */
+  source_name: string | null;
+  starred: boolean;
   /** Populated only by /history/search responses. Already HTML-escaped on
    *  the backend with `<mark>…</mark>` wrappers around matched spans —
    *  assign directly to `innerHTML`, do NOT re-escape. */

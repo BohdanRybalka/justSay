@@ -76,6 +76,7 @@ async def dictate(
             copy_to_clipboard=copy_to_clipboard,
             audio_duration=captured_duration if captured_duration > 0.0 else None,
             background_tasks=background_tasks,
+            source="dictation",
         )
         return DictateResponse(**result.__dict__)
     except JustSayError:
@@ -113,6 +114,8 @@ async def process_file(
             language=language,
             copy_to_clipboard=copy_to_clipboard,
             background_tasks=background_tasks,
+            source="file",
+            source_name=file.filename,
         )
         return DictateResponse(**result.__dict__)
     except HTTPException:
