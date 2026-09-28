@@ -50,10 +50,13 @@ def default_input_name() -> str | None:
 
 def _completed_name(cut: str) -> str:
     """A name Windows MME cut at its 31-character limit, completed from the
-    same device as another host API lists it, or `cut` when none does."""
-    for device in sd.query_devices():
-        full = device["name"]
-        if device["max_input_channels"] > 0 and len(full) > len(cut) and full.startswith(cut):
+    default input another host API names, or `cut` when none extends it."""
+    for hostapi in sd.query_hostapis():
+        index = hostapi["default_input_device"]
+        if index < 0:
+            continue
+        full = sd.query_devices(index)["name"]
+        if len(full) > len(cut) and full.startswith(cut):
             return full
     return cut
 

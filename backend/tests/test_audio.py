@@ -436,32 +436,40 @@ def test_no_input_device_is_named_none_rather_than_raised(failure):
         assert default_input_name() is None
 
 
-def _devices_as_portaudio_lists_them(default_name: str, listed: list[str]):
-    def query_devices(kind=None):
+def _host_apis_with_defaults(listed: list[str], defaults: list[int]):
+    """Patches PortAudio to list `listed` by index, one host API per entry in
+    `defaults` naming its default input, and the first host API's default as
+    the process-wide one."""
+
+    def query_devices(device=None, kind=None):
         if kind == "input":
-            return {"name": default_name, "max_input_channels": 1}
-        return [{"name": name, "max_input_channels": 1} for name in listed]
+            device = defaults[0]
+        if device < 0:
+            raise sd.PortAudioError(f"Error querying device {device}")
+        return {"name": listed[device], "max_input_channels": 1}
 
-    return query_devices
+    hostapis = [{"default_input_device": index} for index in defaults]
+    return (
+        patch("app.audio.recorder.sd.query_devices", side_effect=query_devices),
+        patch("app.audio.recorder.sd.query_hostapis", return_value=hostapis),
+    )
 
 
-def test_a_name_mme_cut_at_its_limit_is_completed_from_the_same_device_elsewhere():
-    cut = "Microphone (G435 Wireless Gamin"
-    assert len(cut) == 31
-    listed = [cut, "Microphone (G435 Wireless Gaming Headset)"]
-    with patch(
-        "app.audio.recorder.sd.query_devices",
-        side_effect=_devices_as_portaudio_lists_them(cut, listed),
-    ):
-        assert default_input_name() == "Microphone (G435 Wireless Gaming Headset)"
+CUT = "Headset Microphone (Jabra Evolv"
+JABRA_65 = "Headset Microphone (Jabra Evolve2 65)"
+JABRA_85 = "Headset Microphone (Jabra Evolve2 85)"
+
+
+def test_a_name_mme_cut_at_its_limit_is_completed_from_another_host_apis_default():
+    assert len(CUT) == 31
+    devices, hostapis = _host_apis_with_defaults([CUT, JABRA_85, JABRA_65], [0, -1, 2])
+    with devices, hostapis:
+        assert default_input_name() == JABRA_65
 
 
 def test_a_name_under_the_limit_is_never_extended_to_a_longer_device():
-    listed = ["USB Mic", "USB Mic 2"]
-    with patch(
-        "app.audio.recorder.sd.query_devices",
-        side_effect=_devices_as_portaudio_lists_them("USB Mic", listed),
-    ):
+    devices, hostapis = _host_apis_with_defaults(["USB Mic", "USB Mic 2"], [0, 1])
+    with devices, hostapis:
         assert default_input_name() == "USB Mic"
 
 
