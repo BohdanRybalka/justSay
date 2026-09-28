@@ -11,9 +11,17 @@ import {
   PETAL_HOVER_CLASS,
   petalAt,
   petalCentre,
+  renderPetalLabels,
   RING_OPEN_CLASS,
   RING_PETALS,
 } from "./ring-view";
+
+const NAMES = {
+  meeting: "Record a meeting",
+  file: "Transcribe a file",
+  language: "Language · English",
+  settings: "Settings",
+} as const;
 
 function ringRoot(): HTMLElement {
   const html = readFileSync(resolve(__dirname, "../../ring.html"), "utf-8");
@@ -71,6 +79,7 @@ describe("the ring on the page", () => {
     onPick.mockClear();
     root = ringRoot();
     mountRing(root, onPick);
+    renderPetalLabels(root, (action) => NAMES[action]);
   });
 
   it("draws one labelled button per action, in order, around the centre", () => {
@@ -112,7 +121,17 @@ describe("the ring on the page", () => {
 
     root.querySelectorAll<HTMLElement>(".ring-petal")[2].click();
 
-    expect(onPick).toHaveBeenCalledWith(2);
+    expect(onPick).toHaveBeenCalledWith("language");
+  });
+
+  it("renames the hovered petal's label when its state changes", () => {
+    openRing(root);
+    followPointer(root, petalCentre(2));
+
+    renderPetalLabels(root, (action) => (action === "language" ? "Language · Ukrainian" : NAMES[action]));
+
+    expect(root.querySelectorAll(".ring-petal")[2].getAttribute("aria-label")).toBe("Language · Ukrainian");
+    expect(label(root)).toEqual({ text: "Language · Ukrainian", shown: true });
   });
 
   it("closes back to rest, so the next opening fans out with nothing hovered", () => {

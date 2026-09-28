@@ -540,6 +540,9 @@ export interface DictateResponse {
 
 export interface UserSettings {
   language: string;
+  /** The language set before `language`, kept by the backend on every change;
+   *  empty until the language has been changed once. */
+  previous_language: string;
   shortcut: string;
   output_dir: string;
   stt_mode: "cloud" | "local";

@@ -192,6 +192,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     theme: "system",
     display_name: "",
     paste_at_cursor: true,
+    previous_language: "",
     ...overrides,
   };
 }
@@ -451,6 +452,57 @@ describe("the sidebar", () => {
     openPanel("dictation");
 
     expect(scrollWrites).toEqual([0]);
+  });
+
+  async function fromAnotherWindow(event: string, delivered: unknown): Promise<void> {
+    await vi.waitFor(() => expect(eventListeners.get(event)).toBeTypeOf("function"));
+    eventListeners.get(event)!(delivered);
+  }
+
+  it("opens the panel the ring asks for, at the meetings switch when it names them", async () => {
+    await bootWithSettingsLoaded();
+    const { EVENT_NAVIGATE_PANEL } = await import("../contracts");
+    const scrolledTo: Element[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolledTo.push(this);
+    };
+
+    await fromAnotherWindow(EVENT_NAVIGATE_PANEL, { payload: { panel: "history", section: null } });
+    expect(currentPanels()).toEqual(["history"]);
+    expect(scrolledTo).toEqual([]);
+
+    await fromAnotherWindow(EVENT_NAVIGATE_PANEL, { payload: { panel: "dictation", section: "meetings" } });
+    expect(currentPanels()).toEqual(["dictation"]);
+    expect(scrolledTo).toEqual([document.getElementById("meetings-toggle")!.closest(".card")]);
+
+    await fromAnotherWindow(EVENT_NAVIGATE_PANEL, { payload: { panel: "dictation", section: "meetings" } });
+    expect(modeTab.destroy).not.toHaveBeenCalled();
+    expect(scrolledTo).toHaveLength(2);
+  });
+
+  it("shows a language the ring switched to on the Dictation panel", async () => {
+    await bootWithSettingsLoaded({ language: "uk" });
+    const { EVENT_SETTINGS_CHANGED } = await import("../contracts");
+    openPanel("dictation");
+    expect(document.querySelector<HTMLSelectElement>("#lang-select")!.value).toBe("uk");
+
+    apiMock.getSettings.mockResolvedValue(buildSettings({ language: "en", previous_language: "uk" }));
+    await fromAnotherWindow(EVENT_SETTINGS_CHANGED, {});
+
+    await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#lang-select")!.value).toBe("en"));
+  });
+
+  it("leaves the panel alone when a change elsewhere did not touch the language", async () => {
+    await bootWithSettingsLoaded({ language: "uk" });
+    const { EVENT_SETTINGS_CHANGED } = await import("../contracts");
+    openPanel("dictation");
+    const readsBefore = apiMock.getSettings.mock.calls.length;
+
+    await fromAnotherWindow(EVENT_SETTINGS_CHANGED, {});
+
+    await vi.waitFor(() => expect(apiMock.getSettings).toHaveBeenCalledTimes(readsBefore + 1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(modeTab.destroy).not.toHaveBeenCalled();
   });
 });
 

@@ -5,17 +5,18 @@
 
 import type { RingPointer } from "../contracts";
 import { icon, type IconName } from "../ui/icons";
+import type { RingAction } from "./ring-actions";
 
 interface RingPetal {
   icon: IconName;
-  label: string;
+  action: RingAction;
 }
 
 export const RING_PETALS: readonly RingPetal[] = [
-  { icon: "users", label: "Record a meeting" },
-  { icon: "upload", label: "Transcribe a file" },
-  { icon: "globe", label: "Language · English" },
-  { icon: "cog", label: "Settings" },
+  { icon: "users", action: "meeting" },
+  { icon: "upload", action: "file" },
+  { icon: "globe", action: "language" },
+  { icon: "cog", action: "settings" },
 ];
 
 const RING_RADIUS = 38;
@@ -51,18 +52,24 @@ function petals(root: HTMLElement): HTMLElement[] {
   return [...root.querySelectorAll<HTMLElement>(".ring-petal")];
 }
 
-export function mountRing(root: HTMLElement, onPick: (index: number) => void): void {
+export function mountRing(root: HTMLElement, onPick: (action: RingAction) => void): void {
   RING_PETALS.forEach((petal, index) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "ring-petal";
     button.style.setProperty("--i", String(index));
     button.style.setProperty("--a", `${petalAngle(index)}deg`);
-    button.setAttribute("aria-label", petal.label);
     button.innerHTML = icon(petal.icon);
-    button.addEventListener("click", () => onPick(index));
+    button.addEventListener("click", () => onPick(petal.action));
     root.appendChild(button);
   });
+}
+
+/** Names each petal; the label under the ring reads the hovered one's name. */
+export function renderPetalLabels(root: HTMLElement, labelOf: (action: RingAction) => string): void {
+  petals(root).forEach((petal, index) => petal.setAttribute("aria-label", labelOf(RING_PETALS[index].action)));
+  const hovered = petals(root).findIndex((petal) => petal.classList.contains(PETAL_HOVER_CLASS));
+  if (hovered !== -1) hoverPetal(root, hovered);
 }
 
 /** Starts from rest before opening, so every opening fans out again. */
@@ -83,7 +90,7 @@ export function hoverPetal(root: HTMLElement, hovered: number | null): void {
   petals(root).forEach((petal, index) => petal.classList.toggle(PETAL_HOVER_CLASS, index === hovered));
   const label = root.querySelector<HTMLElement>(".ring-label")!;
   label.classList.toggle(LABEL_SHOWN_CLASS, hovered !== null);
-  if (hovered !== null) label.textContent = RING_PETALS[hovered].label;
+  if (hovered !== null) label.textContent = petals(root)[hovered].getAttribute("aria-label");
 }
 
 export function followPointer(root: HTMLElement, pointer: RingPointer): void {

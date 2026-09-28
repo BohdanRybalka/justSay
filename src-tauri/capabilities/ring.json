@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "ring",
-  "description": "The right-click ring hears the shell's events and nothing more",
+  "description": "The right-click ring hears the shell's events and passes picked actions to the other windows",
   "windows": ["ring"],
   "permissions": [
     "core:default"

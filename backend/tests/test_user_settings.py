@@ -432,6 +432,23 @@ def test_turning_paste_off_survives_a_restart(isolated):
     assert user_settings.get_user_settings().paste_at_cursor is False
 
 
+def test_changing_the_language_remembers_the_one_before_it(isolated):
+    user_settings.update_user_settings({"language": "uk"})
+    user_settings.update_user_settings({"language": "en"})
+
+    user_settings._settings = None
+    assert user_settings.get_user_settings().previous_language == "uk"
+
+
+def test_saving_the_same_language_keeps_the_one_before_it(isolated):
+    user_settings.update_user_settings({"language": "uk"})
+    user_settings.update_user_settings({"language": "en"})
+
+    user_settings.update_user_settings({"language": "en", "theme": "dark"})
+
+    assert user_settings.get_user_settings().previous_language == "uk"
+
+
 def test_sync_to_runtime_propagates_keys(monkeypatch):
     """sync_to_runtime pushes non-empty keys into the runtime STT config."""
     from app.config import settings as runtime_settings

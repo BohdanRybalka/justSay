@@ -45,6 +45,7 @@ class UserSettings(BaseModel):
     """User-editable settings. Auto-saved to disk on mutation."""
 
     language: str = "uk"
+    previous_language: str = ""
     shortcut: str = "Ctrl+Alt+KeyV"
     output_dir: str = Field(default_factory=lambda: str(_settings_dir()))
 
@@ -142,6 +143,9 @@ def update_user_settings(updates: dict) -> UpdateResult:
 
         if "whisper_model_size" in updates:
             _validate_whisper_model_size(updates["whisper_model_size"])
+
+        if "language" in updates and updates["language"] != current.language:
+            updates = {**updates, "previous_language": current.language}
 
         merged = UserSettings.model_validate({**current.model_dump(), **updates})
         _save(merged)

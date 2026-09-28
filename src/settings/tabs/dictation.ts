@@ -17,6 +17,8 @@ import { escapeHtml } from "../html";
 import { isDecisiveRefusal, newSessionId } from "../../session";
 import { notifyError } from "../../notify";
 import { levelFromDb } from "../../level";
+import { DICTATION_LANGUAGES } from "../../languages";
+import { loadEventApi } from "../../event-api";
 import { TimedOutError } from "../../timeout";
 import { renderSelect } from "../../ui/controls";
 import { PASTE_ROW, wirePasteRow } from "./dictation-paste";
@@ -36,17 +38,6 @@ import { PASTE_ROW, wirePasteRow } from "./dictation-paste";
  *  here can establish that it did. */
 const MICROPHONE_UNCONFIRMED_LABEL =
   "The backend did not answer — the microphone may still be open";
-
-const LANGUAGES = [
-  { code: "uk", label: "Ukrainian" },
-  { code: "en", label: "English" },
-  { code: "de", label: "German" },
-  { code: "fr", label: "French" },
-  { code: "es", label: "Spanish" },
-  { code: "pl", label: "Polish" },
-  { code: "ja", label: "Japanese" },
-  { code: "zh", label: "Chinese" },
-];
 
 const RESULT_HINT = "setting-row-hint--result";
 const SHORTCUT_HINT = "Hold it down while you speak";
@@ -72,7 +63,7 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
         </div>
         <div class="setting-row-controls">
           <select id="lang-select" aria-label="Language">
-            ${LANGUAGES.map(
+            ${DICTATION_LANGUAGES.map(
               (l) => `<option value="${l.code}" ${l.code === settings.language ? "selected" : ""}>${l.label}</option>`
             ).join("")}
           </select>
@@ -440,18 +431,6 @@ function releaseAndRemember(sessionId: string): void {
       if (isDecisiveRefusal(e) && sessionAwaitingRelease === sessionId) sessionAwaitingRelease = "";
     },
   );
-}
-
-let eventApi: Promise<typeof import("@tauri-apps/api/event")> | null = null;
-
-function loadEventApi(): Promise<typeof import("@tauri-apps/api/event")> {
-  if (!eventApi) {
-    eventApi = import("@tauri-apps/api/event").catch((e) => {
-      eventApi = null;
-      throw e;
-    });
-  }
-  return eventApi;
 }
 
 export async function emitSettingsChanged() {

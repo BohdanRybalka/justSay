@@ -15,7 +15,14 @@ import {
   type BackendStartupDecision,
   type BackendStartupScreen,
 } from "../backend-startup";
-import { EVENT_SETTINGS_HIDDEN, EVENT_SETTINGS_SHOWN } from "../contracts";
+import {
+  EVENT_NAVIGATE_PANEL,
+  EVENT_SETTINGS_CHANGED,
+  EVENT_SETTINGS_HIDDEN,
+  EVENT_SETTINGS_SHOWN,
+  type NavigatePanel,
+} from "../contracts";
+import { loadEventApi } from "../event-api";
 import { TimedOutError, withTimeout } from "../timeout";
 import { isStaleStatusResponse } from "../stale-response";
 import { nextTabAction } from "./tab-visibility";
@@ -449,6 +456,39 @@ async function initAccountName() {
 }
 
 
+/** Open the panel another window asked for, scrolled to the section it names
+ *  once the panel is drawn. */
+function navigateTo(target: NavigatePanel) {
+  if (target.panel !== currentPanel || !settings) switchPanel(target.panel);
+  if (target.section === "meetings") {
+    pane.querySelector("#meetings-toggle")?.closest(".card")?.scrollIntoView({ block: "center" });
+  }
+}
+
+/** A language changed from the ring reaches this window's copy of the
+ *  settings, and a Dictation panel on screen is drawn again to show it. */
+async function followSettingsChangedElsewhere() {
+  if (!settings || settingsLoadInFlight) return;
+  const shownLanguage = settings.language;
+  try {
+    settings = await api.getSettings();
+  } catch (e) {
+    console.warn("Could not re-read the settings after a change elsewhere:", e);
+    return;
+  }
+  if (settings.language !== shownLanguage && currentPanel === "dictation") switchPanel("dictation");
+}
+
+async function listenToOtherWindows() {
+  try {
+    const { listen } = await loadEventApi();
+    await listen<NavigatePanel>(EVENT_NAVIGATE_PANEL, ({ payload }) => navigateTo(payload));
+    await listen(EVENT_SETTINGS_CHANGED, () => void followSettingsChangedElsewhere());
+  } catch {
+  }
+}
+
+
 sidebar.querySelectorAll<HTMLButtonElement>("[data-panel]").forEach((item) => {
   item.addEventListener("click", () => {
     const panel = item.dataset.panel as PanelName;
@@ -550,7 +590,7 @@ async function readWindowVisibility() {
 async function trackTabWindowVisibility() {
   let showEdgeAttached = false;
   try {
-    const { listen } = await import("@tauri-apps/api/event");
+    const { listen } = await loadEventApi();
     await listen(EVENT_SETTINGS_SHOWN, () => handleVisibilityEdge("shown"));
     showEdgeAttached = true;
     await listen(EVENT_SETTINGS_HIDDEN, () => handleVisibilityEdge("hidden"));
@@ -585,6 +625,7 @@ function init() {
   void initAppVersion();
   void initAccountName();
   void trackTabWindowVisibility();
+  void listenToOtherWindows();
   renderSettingsUnavailable(pane, currentStartupScreen());
   void probeBackend();
   applyStartupDecision();
