@@ -87,5 +87,5 @@ ignore_names = [
     "model_downloaded", "model_bytes",
     "total_audio_seconds", "word", "highlighted_text",
     "row_factory", "LimitFlags", "settings_customise_sources",
-    "log_file_path", "_reset_library_cache",
+    "log_file_path", "_reset_library_cache", "_meetings_start_as_acknowledged",
 ]

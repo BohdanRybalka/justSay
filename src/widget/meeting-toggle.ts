@@ -54,10 +54,10 @@
 import { ApiRequestError, type MeetingStopResponse } from "../api";
 import { describeMeetingIncident } from "./meeting-health";
 
-export const DISCLOSURE_REQUIRED_MESSAGE =
-  "Read the meeting-recording disclosure before recording a call.";
+export const MEETINGS_OFF_MESSAGE =
+  "Turn on Record meetings in Dictation before recording a call.";
 
-const DISCLOSURE_REQUIRED_STATUS = 403;
+const MEETINGS_OFF_STATUS = 403;
 const ALREADY_STOPPED_STATUS = 409;
 const ALREADY_RECORDING_STATUS = 409;
 const NOTHING_CAPTURED_STATUS = 410;
@@ -116,7 +116,7 @@ export interface MeetingToggleActions {
   showIndicator(): void;
   hideIndicator(): void;
   setTrayRecording(active: boolean): Promise<void>;
-  openDisclosure(): Promise<void>;
+  openSettings(): Promise<void>;
   reportError(message: string): void;
 }
 
@@ -154,9 +154,9 @@ export async function runMeetingToggle(actions: MeetingToggleActions): Promise<v
     }
     actions.hideIndicator();
     await actions.setTrayRecording(false);
-    if (e instanceof ApiRequestError && e.status === DISCLOSURE_REQUIRED_STATUS) {
-      await actions.openDisclosure();
-      actions.reportError(DISCLOSURE_REQUIRED_MESSAGE);
+    if (e instanceof ApiRequestError && e.status === MEETINGS_OFF_STATUS) {
+      await actions.openSettings();
+      actions.reportError(MEETINGS_OFF_MESSAGE);
       return;
     }
     actions.reportError(describeFailure(e));

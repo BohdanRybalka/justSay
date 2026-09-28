@@ -5,7 +5,7 @@ import {
   shortcutFailureMessage,
   shouldReapplyShortcut,
 } from "../accelerator";
-import { api, levelStream, meetingLevelStream, REQUEST_TIMEOUT_MS } from "../api";
+import { api, levelStream, meetingLevelStream, meetingsTurnedOn, REQUEST_TIMEOUT_MS } from "../api";
 import { hasOutlastedStartupBudget } from "../backend-startup";
 import { copyToClipboard } from "../clipboard";
 import {
@@ -467,7 +467,7 @@ const meetingToggleActions: MeetingToggleActions = {
   showIndicator: beginMeetingIndicator,
   hideIndicator: endMeetingIndicator,
   setTrayRecording: (active) => invokeShell("set_meeting_recording", { active }),
-  openDisclosure: () => invokeShell("show_settings_window"),
+  openSettings: () => invokeShell("show_settings_window"),
   reportError: (message) => {
     console.error("Meeting recording:", message);
     notifyError(message);
@@ -676,6 +676,7 @@ const settingsRetry = createSettingsRetry({
   fetchSettings: () => api.getSettings(),
   applySettings: async (settings) => {
     applyThemePreference(settings.theme);
+    void invokeShell("set_meetings_enabled", { enabled: meetingsTurnedOn(settings) });
     currentLanguage = settings.language;
     currentShortcut = settings.shortcut;
     await applyAndReportShortcut(currentShortcut);

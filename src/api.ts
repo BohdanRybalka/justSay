@@ -292,9 +292,8 @@ export interface ErrorBody {
 export const CONFIGURATION_ERROR_CODE = "configuration_error";
 
 /** Thrown on any non-401 failure, carrying the status so a caller can branch
- *  on it. The meeting-recording flow needs `403` specifically: it means the
- *  consent disclosure has not been acknowledged, which is a UI step rather
- *  than an error to report.
+ *  on it. The meeting-recording flow needs `403` specifically: it means
+ *  Record meetings is off, which is a UI step rather than an error to report.
  *
  *  `code` is `null` whenever the body carried none — a crash, a non-JSON
  *  answer, or any 4xx the backend raises outside its refusal hierarchy. */
@@ -563,13 +562,23 @@ export interface UserSettings {
    *  no-op (backend ignores it). */
   gemini_api_key: string;
   groq_api_key: string;
-  /** Whether the user has acknowledged the meeting-recording disclosure. The
-   *  backend answers `403` to `POST /audio/meeting/start` until it is true. */
+  /** Whether the user has acknowledged the meeting-recording disclosure. */
   meeting_consent_acknowledged: boolean;
+  /** The Record meetings switch. `POST /audio/meeting/start` answers `403`
+   *  unless this and the acknowledgement are both true. */
+  meetings_enabled: boolean;
   theme: ThemePreference;
   /** The name the main window greets the user by; empty means the OS
    *  account's name. At most `DISPLAY_NAME_MAX_LENGTH` characters. */
   display_name: string;
+}
+
+/** Whether the backend will start a meeting recording: the two settings
+ *  `POST /audio/meeting/start` checks before it answers anything but `403`. */
+export function meetingsTurnedOn(
+  settings: Pick<UserSettings, "meeting_consent_acknowledged" | "meetings_enabled">,
+): boolean {
+  return settings.meeting_consent_acknowledged && settings.meetings_enabled;
 }
 
 export const DISPLAY_NAME_MAX_LENGTH = 80;

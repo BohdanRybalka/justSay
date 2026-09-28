@@ -54,24 +54,76 @@ const TRAY_ICON: &[u8] = include_bytes!("../icons/tray-template.png");
 const TRAY_ICON: &[u8] = include_bytes!("../icons/32x32.png");
 
 
-/// The tray's meeting-recording item, kept so its label can follow the actual
-/// recording state. Held in Tauri's managed state rather than a static: the
-/// item is created inside `setup`, and the command that relabels it runs later
-/// on whichever thread the WebView's IPC lands on.
-struct MeetingMenuItem(MenuItem<Wry>);
+/// Where the meeting item sits in the tray menu when it is shown: under
+/// "Open JustSay".
+const MEETING_ITEM_POSITION: usize = 1;
+
+#[derive(Default)]
+struct MeetingTrayState {
+    enabled: bool,
+    recording: bool,
+    shown: bool,
+}
+
+/// The tray's meeting-recording item and the menu it is shown in. Held in
+/// Tauri's managed state rather than a static: both are created inside `setup`,
+/// and the commands that change them run later on whichever thread the
+/// WebView's IPC lands on.
+struct MeetingTray {
+    menu: Menu<Wry>,
+    item: MenuItem<Wry>,
+    state: Mutex<MeetingTrayState>,
+}
+
+/// The item is in the tray while Record meetings is on, and also while a
+/// meeting is being recorded, so one running when the switch goes off can
+/// still be stopped from the tray.
+fn meeting_item_shown(enabled: bool, recording: bool) -> bool {
+    enabled || recording
+}
+
+impl MeetingTray {
+    fn update(&self, change: impl FnOnce(&mut MeetingTrayState)) {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        change(&mut state);
+        let label = if state.recording {
+            "Stop recording the meeting"
+        } else {
+            "Record a meeting"
+        };
+        let _ = self.item.set_text(label);
+        let shown = meeting_item_shown(state.enabled, state.recording);
+        if shown == state.shown {
+            return;
+        }
+        let result = if shown {
+            self.menu.insert(&self.item, MEETING_ITEM_POSITION)
+        } else {
+            self.menu.remove(&self.item)
+        };
+        match result {
+            Ok(()) => state.shown = shown,
+            Err(e) => log::warn!("Updating the tray's meeting item failed: {}", e),
+        }
+    }
+}
 
 /// Relabel the tray item after the widget has started or stopped a meeting
 /// recording. HTTP stays in TypeScript and Rust stays a system-events layer,
 /// which is why the widget calls the backend and then tells the shell.
 #[tauri::command]
 fn set_meeting_recording(app: AppHandle, active: bool) {
-    if let Some(item) = app.try_state::<MeetingMenuItem>() {
-        let label = if active {
-            "Stop recording the meeting"
-        } else {
-            "Record a meeting"
-        };
-        let _ = item.0.set_text(label);
+    if let Some(tray) = app.try_state::<MeetingTray>() {
+        tray.update(|state| state.recording = active);
+    }
+}
+
+/// Show or remove the tray's meeting item as the Record meetings switch
+/// changes; the widget sends it each time it reads the settings.
+#[tauri::command]
+fn set_meetings_enabled(app: AppHandle, enabled: bool) {
+    if let Some(tray) = app.try_state::<MeetingTray>() {
+        tray.update(|state| state.enabled = enabled);
     }
 }
 
@@ -240,8 +292,12 @@ pub fn run() {
             let meeting_item =
                 MenuItem::with_id(app, "meeting", "Record a meeting", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit JustSay", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&settings_item, &meeting_item, &quit])?;
-            app.manage(MeetingMenuItem(meeting_item));
+            let menu = Menu::with_items(app, &[&settings_item, &quit])?;
+            app.manage(MeetingTray {
+                menu: menu.clone(),
+                item: meeting_item,
+                state: Mutex::default(),
+            });
 
             let icon = Image::from_bytes(TRAY_ICON)?;
 
@@ -289,6 +345,7 @@ pub fn run() {
             widget_window::set_widget_pill_rect,
             get_backend_token,
             set_meeting_recording,
+            set_meetings_enabled,
             show_settings_window,
             clipboard::write_clipboard_text,
             account::os_display_name,
@@ -307,10 +364,18 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        settings_is_on_screen, settings_on_screen_from_window_event,
+        meeting_item_shown, settings_is_on_screen, settings_on_screen_from_window_event,
         settings_visibility_to_announce,
     };
     use tauri::{PhysicalSize, WindowEvent};
+
+    #[test]
+    fn the_meeting_item_leaves_the_tray_when_meetings_are_off_and_none_is_recording() {
+        assert!(meeting_item_shown(true, false));
+        assert!(meeting_item_shown(true, true));
+        assert!(meeting_item_shown(false, true));
+        assert!(!meeting_item_shown(false, false));
+    }
 
     #[test]
     fn the_settings_surface_is_on_screen_only_while_visible_and_not_minimised() {
