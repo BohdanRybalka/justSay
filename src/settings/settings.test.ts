@@ -334,7 +334,7 @@ describe("the sidebar", () => {
     expect(panel.querySelector("#btn-test-mic")).toBeNull();
   });
 
-  it("opens Dictation on its everyday card, with the mode rows and then MEETINGS under it", async () => {
+  it("opens Dictation on its everyday card, with the mode rows, MEETINGS and then the dictionary under it", async () => {
     await bootWithSettingsLoaded();
 
     openPanel("dictation");
@@ -349,6 +349,8 @@ describe("the sidebar", () => {
     const meetings = panel.querySelector("#meetings-toggle")!;
     expect(card.compareDocumentPosition(modeRows) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(modeRows.compareDocumentPosition(meetings) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const dictionary = panel.querySelector("#dictionary-input")!;
+    expect(meetings.compareDocumentPosition(dictionary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("names where a meeting becomes text after a new mode is picked", async () => {
