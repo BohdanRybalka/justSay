@@ -17,7 +17,8 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from typing import Literal
 
 import sqlite_vec
 from pydantic import BaseModel, Field
@@ -26,6 +27,8 @@ from app.core.app_paths import resolve_app_data_root
 from app.transcripts import schema
 
 log = logging.getLogger(__name__)
+
+EntrySource = Literal["dictation", "file", "meeting"]
 
 HISTORY_FILENAME = "history.db"
 STATS_TTL_SECONDS = 5.0
@@ -62,6 +65,9 @@ class HistoryEntry(BaseModel):
     tokens_used: int | None = None
     audio_duration_seconds: float | None = None
     word_count: int | None = None
+    source: EntrySource = "dictation"
+    source_name: str | None = None
+    starred: bool = False
 
 
 class HistoryCursor(BaseModel):
@@ -233,8 +239,14 @@ def save_entry(
     tokens_used: int | None = None,
     audio_duration_seconds: float | None = None,
     word_count: int | None = None,
+    source: EntrySource = "dictation",
+    source_name: str | None = None,
 ) -> HistoryEntry:
-    """Append a new entry. ``text`` is written to both legacy columns for compat."""
+    """Append a new entry. ``text`` is written to both legacy columns for compat.
+
+    ``source_name`` is stored as its last path component, cut to
+    ``schema.SOURCE_NAME_MAX`` characters; blank is stored as ``None``.
+    """
     timestamp = datetime.now(timezone.utc).isoformat()
     entry = HistoryEntry(
         id=uuid.uuid4().hex[:12],
@@ -246,6 +258,8 @@ def save_entry(
         tokens_used=tokens_used,
         audio_duration_seconds=audio_duration_seconds,
         word_count=word_count,
+        source=source,
+        source_name=_stored_source_name(source_name),
     )
     ts_ms = _iso_to_epoch_ms(timestamp)
 
@@ -267,6 +281,9 @@ def save_entry(
                     "word_count": entry.word_count,
                     "model_name": entry.model_name,
                     "tokens_used": entry.tokens_used,
+                    "source": entry.source,
+                    "source_name": entry.source_name,
+                    "starred": int(entry.starred),
                 },
             )
             conn.execute("COMMIT")
@@ -276,6 +293,11 @@ def save_entry(
         invalidate_derived_caches_locked()
 
     return entry
+
+
+def _stored_source_name(name: str | None) -> str | None:
+    base = PureWindowsPath(name).name.strip() if name else ""
+    return base[: schema.SOURCE_NAME_MAX] or None
 
 
 def _clamp_limit(limit: int) -> int:
@@ -544,6 +566,9 @@ def _row_to_entry(row: sqlite3.Row) -> HistoryEntry:
         word_count=row["word_count"],
         model_name=row["model_name"],
         tokens_used=row["tokens_used"],
+        source=row["source"],
+        source_name=row["source_name"],
+        starred=bool(row["starred"]),
     )
 
 

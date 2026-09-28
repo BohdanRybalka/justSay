@@ -19,7 +19,7 @@ from app.audio.vad import analyze_vad
 from app.pipeline.utils import detect_duration
 from app.stt.config import stt_settings
 from app.stt.routing import get_routed_provider, is_local_provider
-from app.transcripts.history import save_entry
+from app.transcripts.history import EntrySource, save_entry
 
 log = logging.getLogger(__name__)
 
@@ -42,11 +42,15 @@ async def process_audio(
     copy_to_clipboard: bool = True,
     audio_duration: float | None = None,
     background_tasks: BackgroundTasks | None = None,
+    *,
+    source: EntrySource,
+    source_name: str | None = None,
 ) -> ProcessingResult:
     """Full pipeline: route STT by duration+format -> transcribe -> clipboard.
 
     ``background_tasks``, when provided, schedules embedding generation to run
-    after the response is sent. Never awaited synchronously here.
+    after the response is sent. Never awaited synchronously here. ``source`` and
+    ``source_name`` say where the history entry came from.
     """
     start = time.perf_counter()
 
@@ -165,6 +169,8 @@ async def process_audio(
             tokens_used=result.tokens_used,
             audio_duration_seconds=duration,
             word_count=word_count,
+            source=source,
+            source_name=source_name,
         )
         if background_tasks is not None and text:
             from app.transcripts import vector_store

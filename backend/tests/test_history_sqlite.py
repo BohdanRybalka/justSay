@@ -51,7 +51,7 @@ def test_user_version_set(isolated_storage, tmp_path):
         version = conn.execute("PRAGMA user_version").fetchone()[0]
     finally:
         conn.close()
-    assert version == 5
+    assert version == schema.SCHEMA_VERSION
 
 
 def test_pragmas_set_in_factory(isolated_storage, tmp_path):
@@ -366,16 +366,17 @@ def test_operational_error_mapped_to_503(isolated_storage, tmp_path):
 
 
 
-def test_schema_version_is_v5(isolated_storage, tmp_path):
+def test_schema_version_is_v6(isolated_storage, tmp_path):
     """Bumped to 3 by Phase 3 (sqlite-vec), then to 4 by spec 146, which rebuilt
     ``entries`` behind a constraint that refuses a row with no id or a
     non-integer ``ts``, then to 5 by spec 152, which rebuilt it again without
-    the ``style`` column the removed Normal / AI Prompt switch wrote."""
+    the ``style`` column the removed Normal / AI Prompt switch wrote, then to 6
+    by JS-231, which added ``source``, ``source_name`` and ``starred``."""
     target = tmp_path / "target"
     history.bootstrap(target)
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
 
 
 def test_fts_table_and_triggers_exist(isolated_storage, tmp_path):
@@ -454,7 +455,7 @@ def test_migration_v1_to_v2_populates_fts(isolated_storage, tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.SCHEMA_VERSION
         hits = conn.execute(
             "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'brown'"
         ).fetchall()
@@ -546,7 +547,7 @@ def test_crash_before_user_version_pragma_retries(isolated_storage, tmp_path, mo
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.SCHEMA_VERSION
         hits = conn.execute(
             "SELECT rowid FROM entry_fts WHERE entry_fts MATCH 'crash'"
         ).fetchall()
@@ -593,7 +594,7 @@ def test_v1_to_current_migration_lands_in_one_boot(isolated_storage, tmp_path):
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.SCHEMA_VERSION
         names = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
         ).fetchall()}
@@ -623,7 +624,7 @@ def test_v2_to_current_migration_keeps_the_fts_index(isolated_storage, tmp_path)
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.SCHEMA_VERSION
         names = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
         ).fetchall()}
@@ -660,7 +661,7 @@ def test_crash_before_v3_user_version_pragma_retries(isolated_storage, tmp_path)
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.SCHEMA_VERSION
         names = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
         ).fetchall()}
@@ -2646,7 +2647,7 @@ def test_an_existing_database_swaps_its_index_without_a_schema_bump(isolated_sto
         user_version = conn.execute("PRAGMA user_version").fetchone()[0]
     assert "entries_ts_id_idx" in indexes_after
     assert "entries_ts_idx" not in indexes_after
-    assert user_version == 5
+    assert user_version == schema.SCHEMA_VERSION
     assert [e.id for e in history.get_page().entries] == [kept]
 
 
@@ -3041,7 +3042,7 @@ def test_a_bootstrapped_store_has_no_style_column(isolated_storage, tmp_path):
         conn.close()
     assert "style" not in columns
     assert columns == set(schema.ENTRY_COLUMNS)
-    assert version == 5
+    assert version == schema.SCHEMA_VERSION
 
 
 def test_a_v4_store_keeps_every_row_its_rowid_and_its_embeddings(
@@ -3086,7 +3087,7 @@ def test_a_v4_store_keeps_every_row_its_rowid_and_its_embeddings(
     assert after == before, "every row keeps its id and its rowid"
     assert embeddings_after == embeddings_before == 3
     assert vectors == 3
-    assert version == 5
+    assert version == schema.SCHEMA_VERSION
     assert "style" not in columns
     assert {e.text for e in history.get_page(limit=10).entries} == {
         "a faithful transcript",
@@ -3137,15 +3138,15 @@ def test_a_store_already_at_the_current_version_is_not_rebuilt_again(
         history._close_conn_locked()
 
     calls = []
-    original = schema._migrate_to_v5_locked
+    original = schema._rebuild_entries_locked
     try:
-        schema._migrate_to_v5_locked = lambda conn: (
+        schema._rebuild_entries_locked = lambda conn: (
             calls.append(1),
             original(conn),
         )[1]
         history.bootstrap(tmp_path)
     finally:
-        schema._migrate_to_v5_locked = original
+        schema._rebuild_entries_locked = original
 
     assert calls == [], "a current-version store must not be migrated a second time"
     with history._lock:
@@ -3346,7 +3347,7 @@ def test_a_foreign_store_the_constraints_reject_still_lets_the_app_start(
         version = history._ensure_conn_locked().execute(
             "PRAGMA user_version"
         ).fetchone()[0]
-    assert version == 5
+    assert version == schema.SCHEMA_VERSION
 
 
 def test_a_store_missing_a_column_this_build_knows_still_opens(
@@ -3466,7 +3467,7 @@ def test_a_rebuild_that_raises_mid_transaction_still_lets_the_app_start(
     read at all: rolled back, logged, version untouched, app running.
     """
     _seed_v3_store_with_unorderable_rows(tmp_path / "history.db")
-    monkeypatch.setattr(schema, "_DDL_V5_ENTRIES", "CREATE TABLE entries_v5 (nope")
+    monkeypatch.setattr(schema, "_DDL_REBUILT_ENTRIES", "CREATE TABLE entries_rebuilt (nope")
 
     history.bootstrap(tmp_path)
 

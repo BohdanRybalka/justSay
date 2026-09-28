@@ -89,6 +89,20 @@ async def test_process_file_forwards_explicit_language_code_unchanged(client):
     assert mock_process_audio.call_args.kwargs["language"] == "uk"
 
 
+@pytest.mark.anyio
+async def test_process_file_records_the_upload_as_a_file_under_its_name(client):
+    mock_process_audio = AsyncMock(return_value=_fake_result())
+    with patch("app.pipeline.router.process_audio", mock_process_audio):
+        resp = await client.post(
+            "/pipeline/process-file",
+            files={"file": ("standup notes.wav", _wav_bytes(), "audio/wav")},
+        )
+
+    assert resp.status_code == 200
+    assert mock_process_audio.call_args.kwargs["source"] == "file"
+    assert mock_process_audio.call_args.kwargs["source_name"] == "standup notes.wav"
+
+
 
 
 @pytest.mark.anyio
@@ -244,6 +258,22 @@ async def test_dictate_without_a_session_id_stops_unconditionally(client, tmp_pa
 
     assert resp.status_code == 200
     recorder.stop.assert_awaited_once_with(None)
+
+
+@pytest.mark.anyio
+async def test_dictate_records_a_dictation(client, tmp_path, monkeypatch):
+    recording = tmp_path / "rec.wav"
+    recording.write_bytes(_wav_bytes())
+    app.dependency_overrides[get_recorder] = lambda: _stopping_recorder(recording)
+    monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: None)
+    mock_process_audio = AsyncMock(return_value=_fake_result())
+
+    with patch("app.pipeline.router.process_audio", mock_process_audio):
+        resp = await client.post("/pipeline/dictate")
+
+    assert resp.status_code == 200
+    assert mock_process_audio.call_args.kwargs["source"] == "dictation"
+    assert mock_process_audio.call_args.kwargs.get("source_name") is None
 
 
 @pytest.mark.anyio

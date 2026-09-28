@@ -12,6 +12,9 @@ export function buildEntry(id: string): HistoryEntry {
     tokens_used: null,
     audio_duration_seconds: 3.5,
     word_count: 4,
+    source: "dictation",
+    source_name: null,
+    starred: false,
   };
 }
 
