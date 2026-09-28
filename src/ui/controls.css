@@ -25,6 +25,7 @@
 .btn{display:inline-flex;align-items:center;gap:7px;padding:8px 13px;border-radius:9px;background:var(--surface);
   border:1px solid var(--border-2);font-size:12px;font-weight:550;transition:.15s;box-shadow:var(--sh-1)}
 .btn:hover{background:var(--inset)}
+.btn[hidden]{display:none}
 .btn-primary{background:var(--warm);border-color:transparent;color:#fff;box-shadow:var(--sh-warm)}
 .btn-primary:hover{background:var(--warm);filter:brightness(1.05)}
 .btn-blue{background:var(--blue);border-color:var(--blue);color:#fff}
