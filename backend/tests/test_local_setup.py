@@ -1011,6 +1011,7 @@ def test_check_status_probes_gpu_at_most_once_through_the_real_unmocked_provider
     monkeypatch.setattr(
         "app.stt.local_whisper_cpp_cmd.resolve_binary_path", lambda: Path("whisper-server.exe")
     )
+    monkeypatch.setattr(local_setup, "_model_bytes_on_disk", lambda kind, size: None)
 
     probe_source_calls = {"n": 0}
     real_env_override = gpu_probe._probe_env_override
