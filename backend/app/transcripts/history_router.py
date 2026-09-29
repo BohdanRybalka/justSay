@@ -17,6 +17,7 @@ from app.transcripts.history import (
     compute_stats,
     delete_entry,
     get_page,
+    set_starred,
 )
 from app.transcripts.store_errors import store_busy_as_503
 
@@ -34,6 +35,14 @@ class ClearResult(BaseModel):
 
 class DeleteResult(BaseModel):
     deleted: bool
+
+
+class StarRequest(BaseModel):
+    starred: bool
+
+
+class StarResult(BaseModel):
+    starred: bool
 
 
 _FTS_QUERY_ERROR_MARKERS = (
@@ -58,18 +67,20 @@ async def list_history(
     before_id: str | None = Query(None),
     after_ts: int | None = Query(None, ge=CURSOR_TS_MIN, le=CURSOR_TS_MAX),
     after_id: str | None = Query(None),
+    starred: bool = Query(False),
 ):
     """One page of history: older than ``before_*`` newest first, or newer than ``after_*``.
 
     No cursor asks for the first page. Half a cursor, or both cursors, is 422
     (ADR 053). The newer rows come oldest first; both ``*_ts`` are bounded.
+    ``starred=true`` pages over starred entries only.
     """
     before = _cursor("before", before_ts, before_id)
     after = _cursor("after", after_ts, after_id)
     if before is not None and after is not None:
         raise HTTPException(status_code=422, detail="send before_* or after_*, not both")
     with store_busy_as_503():
-        return get_page(limit=limit, before=before, after=after)
+        return get_page(limit=limit, before=before, after=after, starred_only=starred)
 
 
 def _cursor(side: str, ts: int | None, entry_id: str | None) -> HistoryCursor | None:
@@ -95,6 +106,7 @@ async def history_search(
         max_length=500,
     ),
     limit: int = Query(20, ge=1, le=search.SEARCH_LIMIT_MAX),
+    starred: bool = Query(False),
 ):
     """Hybrid search: the FTS5/BM25 + LIKE lane and the semantic lane, fused by RRF.
 
@@ -103,12 +115,20 @@ async def history_search(
     """
     try:
         with store_busy_as_503():
-            entries = await search.search_history_hybrid(q, limit=limit)
+            entries = await search.search_history_hybrid(q, limit=limit, starred_only=starred)
     except sqlite3.OperationalError as e:
         if _is_fts_syntax_error(e):
             raise HTTPException(status_code=400, detail="Invalid search query") from e
         raise
     return HistorySearchResponse(entries=entries, total=len(entries))
+
+
+@router.put("/{entry_id}/star", response_model=StarResult)
+async def star_entry(entry_id: str, body: StarRequest):
+    with store_busy_as_503():
+        if not set_starred(entry_id, body.starred):
+            raise HTTPException(status_code=404, detail="Entry not found")
+    return StarResult(starred=body.starred)
 
 
 @router.delete("/{entry_id}", response_model=DeleteResult)

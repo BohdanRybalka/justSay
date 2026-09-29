@@ -115,6 +115,7 @@ function listOver(
     createRow,
     renderEmptyState: () => {},
     isDestroyed,
+    starredOnly: () => false,
   });
 }
 
@@ -185,7 +186,7 @@ describe("createHistoryList — the client echoes cursors and never builds one",
     await listOver(h).load();
 
     expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
-    expect(apiMock.getHistory.mock.calls[0]).toEqual([2, null]);
+    expect(apiMock.getHistory.mock.calls[0]).toEqual([2, null, false]);
   });
 
   it("sends the previous response's next_cursor back verbatim when the sentinel is crossed", async () => {
@@ -633,7 +634,7 @@ describe("createHistoryList — rows newer than the newest one painted", () => {
     store.unshift(buildEntry("d"), buildEntry("c"));
     await list.loadNewer();
 
-    expect(apiMock.getNewerHistory.mock.calls[0]).toEqual([5, positionOf(buildEntry("b"))]);
+    expect(apiMock.getNewerHistory.mock.calls[0]).toEqual([5, positionOf(buildEntry("b")), false]);
     expect(h.paintedIds()).toEqual(["d", "c", "b", "a"]);
     expect(h.countText()).toBe("4 transcripts");
   });

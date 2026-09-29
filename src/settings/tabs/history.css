@@ -240,6 +240,7 @@
 }
 
 .entry-actions {
+  position: relative;
   margin-left: auto;
   display: flex;
   gap: 3px;
@@ -248,8 +249,13 @@
 }
 
 .entry:hover .entry-actions,
-.entry:focus-within .entry-actions {
+.entry:focus-within .entry-actions,
+.entry--menu-open .entry-actions {
   opacity: 1;
+}
+
+.entry--menu-open {
+  z-index: 4;
 }
 
 .entry-actions button {
@@ -266,6 +272,39 @@
 
 .entry-actions button:hover {
   background: var(--inset);
+  color: var(--text);
+}
+
+.entry-actions .entry-star--on {
+  color: var(--orange);
+}
+
+.entry-star--on .icon {
+  fill: currentColor;
+}
+
+.entry-actions .entry-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 5;
+  min-width: 132px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--sh-2), var(--bevel);
+}
+
+.entry-actions .entry-menu button {
+  width: 100%;
+  height: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 12.5px;
   color: var(--text);
 }
 

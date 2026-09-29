@@ -55,6 +55,8 @@ export interface HistoryListOptions {
   createRow: (entry: HistoryEntry) => HTMLElement;
   renderEmptyState: (isEmpty: boolean) => void;
   isDestroyed: () => boolean;
+  /** Read on every request, so a reload after the filter changes pages under the new one. */
+  starredOnly: () => boolean;
 }
 
 export const SENTINEL_READING = "timeline-more--reading";
@@ -128,8 +130,17 @@ export function formatEntryCount(total: number, noun: HistoryListNoun): string {
  * shape or its place on screen.
  */
 export function createHistoryList(options: HistoryListOptions): HistoryList {
-  const { pageSize, noun, featureName, elements, rows, createRow, renderEmptyState, isDestroyed } =
-    options;
+  const {
+    pageSize,
+    noun,
+    featureName,
+    elements,
+    rows,
+    createRow,
+    renderEmptyState,
+    isDestroyed,
+    starredOnly,
+  } = options;
 
   let cursor: HistoryCursor | null = null;
   let newest: HistoryCursor | null = null;
@@ -216,7 +227,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     const claim = issueClaim();
     elements.sentinel.classList.add(SENTINEL_READING);
     try {
-      const response = await api.getHistory(pageSize, append ? cursor : null);
+      const response = await api.getHistory(pageSize, append ? cursor : null, starredOnly());
       if (!claim.isCurrent()) return;
 
       const built = build(response.entries);
@@ -261,7 +272,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     const claim = issueClaim();
     let page: HistoryPageResponse | null = null;
     try {
-      page = await api.getNewerHistory(pageSize, newest);
+      page = await api.getNewerHistory(pageSize, newest, starredOnly());
       if (!claim.isCurrent()) return;
       const built = build([...page.entries].reverse());
       total = page.total;

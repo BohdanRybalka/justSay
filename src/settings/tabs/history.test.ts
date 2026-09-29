@@ -22,6 +22,7 @@ const apiMock = {
   getNewerHistory: vi.fn(),
   searchHistory: vi.fn(),
   deleteHistoryEntry: vi.fn(),
+  setHistoryStarred: vi.fn(),
 };
 
 /**
@@ -127,7 +128,26 @@ async function typeQuery(container: HTMLElement, value: string): Promise<void> {
   await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
 }
 
+function openMenuOf(card: HTMLElement): HTMLButtonElement {
+  const more = card.querySelector<HTMLButtonElement>('[data-action="more"]')!;
+  more.click();
+  return more;
+}
+
+function starOf(card: HTMLElement): HTMLButtonElement {
+  return card.querySelector<HTMLButtonElement>('[data-action="star"]')!;
+}
+
+async function showStarred(container: HTMLElement): Promise<void> {
+  const starred = Array.from(container.querySelectorAll<HTMLButtonElement>("#history-filter button")).find(
+    (button) => button.textContent === "Starred"
+  )!;
+  starred.click();
+  await flush();
+}
+
 async function deleteFirstRow(container: HTMLElement): Promise<void> {
+  openMenuOf(cards(container)[0]);
   cards(container)[0].querySelector<HTMLButtonElement>('[data-action="delete"]')!.click();
   await vi.waitFor(() => expect(apiMock.deleteHistoryEntry).toHaveBeenCalledTimes(1));
 }
@@ -151,7 +171,7 @@ describe("renderHistory — paging as the end scrolls into view", () => {
   it("asks for 30 recordings on the first paint and keeps the sentinel up", async () => {
     const container = await renderPaged(40);
 
-    expect(apiMock.getHistory.mock.calls[0]).toEqual([30, null]);
+    expect(apiMock.getHistory.mock.calls[0]).toEqual([30, null, false]);
     expect(cards(container)).toHaveLength(30);
     expect(sentinel(container).hidden).toBe(false);
   });
@@ -162,7 +182,7 @@ describe("renderHistory — paging as the end scrolls into view", () => {
     cross();
 
     await vi.waitFor(() => expect(cards(container)).toHaveLength(40));
-    expect(apiMock.getHistory.mock.calls[1]).toEqual([30, { ts: 30, id: "30" }]);
+    expect(apiMock.getHistory.mock.calls[1]).toEqual([30, { ts: 30, id: "30" }, false]);
     expect(sentinel(container).hidden).toBe(true);
   });
 
@@ -410,6 +430,120 @@ describe("renderHistory — Copy", () => {
         "Copy failed"
       );
     });
+  });
+});
+
+describe("renderHistory — Star", () => {
+  it("stars an entry and unstars it again, filling the star while it is on", async () => {
+    apiMock.setHistoryStarred.mockImplementation(async (_id: string, starred: boolean) => ({ starred }));
+    const container = await renderWith(1);
+    const star = starOf(cards(container)[0]);
+
+    star.click();
+    await flush();
+    expect(apiMock.setHistoryStarred).toHaveBeenLastCalledWith("1", true);
+    expect(star.getAttribute("aria-pressed")).toBe("true");
+    expect(star.classList.contains("entry-star--on")).toBe(true);
+
+    star.click();
+    await flush();
+    expect(apiMock.setHistoryStarred).toHaveBeenLastCalledWith("1", false);
+    expect(star.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("shows an entry that is already starred as starred", async () => {
+    const { container } = await renderAndWait([{ ...buildEntry("a"), starred: true }]);
+
+    expect(starOf(cards(container)[0]).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("puts the star back when saving it failed", async () => {
+    let fail: (error: Error) => void = () => {};
+    apiMock.setHistoryStarred.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        fail = reject;
+      })
+    );
+    const container = await renderWith(1);
+    const star = starOf(cards(container)[0]);
+
+    star.click();
+    await flush();
+    expect(star.getAttribute("aria-pressed")).toBe("true");
+
+    fail(new Error("offline"));
+    await flush();
+    expect(star.getAttribute("aria-pressed")).toBe("false");
+    expect(star.classList.contains("entry-star--on")).toBe(false);
+  });
+});
+
+describe("renderHistory — All / Starred", () => {
+  it("reloads with starred entries only, and says so when there are none", async () => {
+    const container = await renderWith(2);
+    apiMock.getHistory.mockResolvedValue(pageOf([], 0, null));
+
+    await showStarred(container);
+
+    expect(apiMock.getHistory).toHaveBeenLastCalledWith(30, null, true);
+    await vi.waitFor(() =>
+      expect(container.querySelector(".history-empty")!.textContent).toBe("Nothing starred yet.")
+    );
+  });
+
+  it("keeps a search to starred entries once Starred is on", async () => {
+    const container = await renderWith(1);
+    apiMock.searchHistory.mockResolvedValue({ entries: [], total: 0 });
+
+    await typeQuery(container, "budget");
+    expect(apiMock.searchHistory).toHaveBeenLastCalledWith("budget", 30, false);
+
+    await showStarred(container);
+    expect(apiMock.searchHistory).toHaveBeenLastCalledWith("budget", 30, true);
+  });
+
+  it("asks the poll for starred entries only while Starred is on", async () => {
+    const container = await renderWith(1);
+    apiMock.getHistory.mockResolvedValue(pageOf([buildEntry("s")], 1, null));
+    await showStarred(container);
+
+    await vi.advanceTimersByTimeAsync(NEWER_POLL_MS);
+
+    expect(apiMock.getNewerHistory).toHaveBeenLastCalledWith(30, expect.anything(), true);
+  });
+});
+
+describe("renderHistory — the more menu", () => {
+  it("opens under More with Delete in it, and Escape closes it back onto More", async () => {
+    const container = await renderWith(1);
+    const more = openMenuOf(cards(container)[0]);
+
+    expect(more.getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement!.textContent).toBe("Delete");
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+
+    expect(container.querySelector(".entry-menu")).toBeNull();
+    expect(more.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(more);
+  });
+
+  it("closes on a click anywhere outside it", async () => {
+    const container = await renderWith(1);
+    openMenuOf(cards(container)[0]);
+
+    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+
+    expect(container.querySelector(".entry-menu")).toBeNull();
+  });
+
+  it("keeps one menu open at a time", async () => {
+    const container = await renderWith(2);
+    openMenuOf(cards(container)[0]);
+    openMenuOf(cards(container)[1]);
+
+    expect(container.querySelectorAll(".entry-menu")).toHaveLength(1);
+    expect(cards(container)[1].querySelector(".entry-menu")).not.toBeNull();
   });
 });
 
@@ -775,6 +909,29 @@ describe("renderHistory — a delete", () => {
     await deleteFirstRow(container);
 
     expect(countText(container)).toBe("1 recording");
+  });
+
+  it("takes the deleted card out of its day header's totals", async () => {
+    apiMock.deleteHistoryEntry.mockResolvedValue({ deleted: true });
+    apiMock.getHistory.mockResolvedValue(
+      pageOf(
+        [
+          { ...buildEntry("a"), timestamp: at(1, 10), word_count: 7 },
+          { ...buildEntry("b"), timestamp: at(1, 9), word_count: 5 },
+        ],
+        2,
+        null,
+        { days: [{ date: "2026-08-01", recordings: 2, words: 12 }] }
+      )
+    );
+    const { container } = mount();
+    await vi.waitFor(() => expect(cards(container)).toHaveLength(2));
+
+    await deleteFirstRow(container);
+    await flush();
+
+    expect(container.querySelector(".day-head")!.textContent).toBe("Today·1 recording·5 words");
+    expect(container.querySelector(".entry-menu")).toBeNull();
   });
 
   it("takes an emptied day off the timeline", async () => {

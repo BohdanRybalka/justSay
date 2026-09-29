@@ -324,23 +324,36 @@ def _clamp_limit(limit: int) -> int:
     return max(1, min(int(limit), HISTORY_LIMIT_MAX))
 
 
-_CURSOR_PAGE_WHERE = "WHERE (ts, id) < (:before_ts, :before_id) "
+_BEFORE_CURSOR = "(ts, id) < (:before_ts, :before_id)"
+_AFTER_CURSOR = "(ts, id) > (:after_ts, :after_id)"
+_CURSOR_PAGE_WHERE = f"WHERE {_BEFORE_CURSOR} "
 _CURSOR_PAGE_ORDER = "ORDER BY ts DESC, id DESC LIMIT :row_limit"
-_NEWER_PAGE_WHERE = "WHERE (ts, id) > (:after_ts, :after_id) "
 _NEWER_PAGE_ORDER = "ORDER BY ts ASC, id ASC LIMIT :row_limit"
 _LOCAL_DAY = "date(ts / 1000, 'unixepoch', 'localtime')"
 _KNOWN_TS = f"ts > {schema.UNKNOWN_TS} AND ts <= {schema.STORED_TS_MAX}"
+_STARRED = "starred = 1"
+
+
+def _where(*conditions: str | None) -> str:
+    kept = [condition for condition in conditions if condition]
+    return f"WHERE {' AND '.join(kept)} " if kept else ""
+
+
+def _starred_condition(starred_only: bool) -> str | None:
+    return _STARRED if starred_only else None
 
 
 def _entries_locked(
-    conn: sqlite3.Connection, limit: int, before: HistoryCursor | None
+    conn: sqlite3.Connection, limit: int, before: HistoryCursor | None, starred_only: bool
 ) -> list[sqlite3.Row]:
     """Caller MUST hold ``_lock``. Newest first, at most ``limit`` rows returned.
 
     "Is there another page" is ``_has_more_locked``'s separate key-only question
     (ADR 055). Needs SQLite >= ``ROW_VALUE_MIN_SQLITE_VERSION`` for the row value.
     """
-    where = _CURSOR_PAGE_WHERE if before is not None else ""
+    where = _where(
+        _BEFORE_CURSOR if before is not None else None, _starred_condition(starred_only)
+    )
     params: dict[str, object] = {"row_limit": limit}
     if before is not None:
         params["before_ts"] = before.ts
@@ -353,12 +366,12 @@ def _entries_locked(
 
 
 def _newer_entries_locked(
-    conn: sqlite3.Connection, limit: int, after: HistoryCursor
+    conn: sqlite3.Connection, limit: int, after: HistoryCursor, starred_only: bool
 ) -> list[sqlite3.Row]:
     """Caller MUST hold ``_lock``. Rows strictly newer than ``after``, oldest first."""
     return conn.execute(
         f"SELECT {schema.columns_sql(schema.ENTRY_READ_COLUMNS)} FROM entries "
-        f"{_NEWER_PAGE_WHERE}{_NEWER_PAGE_ORDER}",
+        f"{_where(_AFTER_CURSOR, _starred_condition(starred_only))}{_NEWER_PAGE_ORDER}",
         {"after_ts": after.ts, "after_id": after.id, "row_limit": limit},
     ).fetchall()
 
@@ -367,12 +380,16 @@ def _has_known_ts(ts: object) -> bool:
     return isinstance(ts, int) and schema.UNKNOWN_TS < ts <= schema.STORED_TS_MAX
 
 
-def _days_locked(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[HistoryDay]:
+def _days_locked(
+    conn: sqlite3.Connection, rows: list[sqlite3.Row], starred_only: bool
+) -> list[HistoryDay]:
     """Caller MUST hold ``_lock``. Whole-day totals for every local day in ``rows``.
 
-    ``rows`` is contiguous in ``(ts, id)`` order, so every row between the start
-    of its oldest day and the end of its newest belongs to one of its own days.
+    ``rows`` is contiguous in ``(ts, id)`` order among the rows ``starred_only``
+    keeps, so every kept row between the start of its oldest day and the end of
+    its newest belongs to one of its own days, and only kept rows are counted.
     """
+    starred = _starred_condition(starred_only)
     known = [row["ts"] for row in rows if _has_known_ts(row["ts"])]
     days: list[HistoryDay] = []
     if known:
@@ -387,7 +404,7 @@ def _days_locked(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Hist
             HistoryDay(date=day, recordings=recordings, words=words)
             for day, recordings, words in conn.execute(
                 f"SELECT {_LOCAL_DAY} AS day, COUNT(*), COALESCE(SUM(word_count), 0) "
-                "FROM entries WHERE ts >= :start AND ts < :end "
+                f"FROM entries {_where('ts >= :start AND ts < :end', starred)}"
                 "GROUP BY day ORDER BY day DESC",
                 {
                     "start": max(start, schema.UNKNOWN_TS + 1),
@@ -397,21 +414,25 @@ def _days_locked(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Hist
         ]
     if len(known) < len(rows):
         recordings, words = conn.execute(
-            f"SELECT COUNT(*), COALESCE(SUM(word_count), 0) FROM entries WHERE NOT ({_KNOWN_TS})"
+            "SELECT COUNT(*), COALESCE(SUM(word_count), 0) FROM entries "
+            f"{_where(f'NOT ({_KNOWN_TS})', starred)}"
         ).fetchone()
         days.append(HistoryDay(date=None, recordings=recordings, words=words))
     return days
 
 
-def _has_more_locked(conn: sqlite3.Connection, after_ts: int, after_id: str) -> bool:
-    """Caller MUST hold ``_lock``. Whether a row exists strictly after that position.
+def _has_more_locked(
+    conn: sqlite3.Connection, after_ts: int, after_id: str, starred_only: bool
+) -> bool:
+    """Caller MUST hold ``_lock``. Whether a kept row exists strictly after that position.
 
-    Takes primitives, so no ``HistoryCursor`` is built until the answer is yes, and
-    selects no transcript column, so ``entries_ts_id_idx`` answers without a row.
+    Takes primitives, so no ``HistoryCursor`` is built until the answer is yes. Unfiltered,
+    it selects no transcript column, so ``entries_ts_id_idx`` answers without a row.
     """
+    where = _where(_BEFORE_CURSOR, _starred_condition(starred_only))
     return (
         conn.execute(
-            f"SELECT 1 FROM entries {_CURSOR_PAGE_WHERE}{_CURSOR_PAGE_ORDER}",
+            f"SELECT 1 FROM entries {where}{_CURSOR_PAGE_ORDER}",
             {"before_ts": after_ts, "before_id": after_id, "row_limit": 1},
         ).fetchone()
         is not None
@@ -493,30 +514,39 @@ def _count_locked(conn: sqlite3.Connection) -> int:
     return total
 
 
+def _starred_count_locked(conn: sqlite3.Connection) -> int:
+    """Caller MUST hold ``_lock``. How many rows are starred, counted afresh."""
+    return conn.execute(f"SELECT COUNT(*) FROM entries WHERE {_STARRED}").fetchone()[0]
+
+
 def get_page(
-    limit: int = 50, before: HistoryCursor | None = None, after: HistoryCursor | None = None
+    limit: int = 50,
+    before: HistoryCursor | None = None,
+    after: HistoryCursor | None = None,
+    starred_only: bool = False,
 ) -> HistoryPage:
     """The page past ``before`` (older) or ``after`` (newer, oldest first), and its context.
 
-    One acquisition of ``_lock`` covers every read, so no in-process write lands
-    between them; the total may be up to ``STATS_TTL_SECONDS`` behind (ADR 055).
+    ``starred_only`` narrows rows, days and total to starred rows. One acquisition of
+    ``_lock`` covers every read; the unfiltered total may be up to ``STATS_TTL_SECONDS``
+    behind (ADR 055).
     """
     clamped_limit = _clamp_limit(limit)
     with _lock:
         conn = _ensure_conn_locked()
         next_cursor: HistoryCursor | None = None
         if after is not None:
-            rows = _newer_entries_locked(conn, clamped_limit, after)
+            rows = _newer_entries_locked(conn, clamped_limit, after, starred_only)
             newest = rows[-1] if rows else None
         else:
-            rows = _entries_locked(conn, clamped_limit, before)
+            rows = _entries_locked(conn, clamped_limit, before, starred_only)
             newest = rows[0] if rows else None
             if len(rows) == clamped_limit and _has_more_locked(
-                conn, rows[-1]["ts"], rows[-1]["id"]
+                conn, rows[-1]["ts"], rows[-1]["id"], starred_only
             ):
                 next_cursor = HistoryCursor(ts=rows[-1]["ts"], id=rows[-1]["id"])
-        days = _days_locked(conn, rows)
-        total = _count_locked(conn)
+        days = _days_locked(conn, rows, starred_only)
+        total = _starred_count_locked(conn) if starred_only else _count_locked(conn)
     return HistoryPage(
         entries=[_row_to_entry(r) for r in rows],
         total=total,
@@ -524,6 +554,26 @@ def get_page(
         newest_cursor=None if newest is None else HistoryCursor(ts=newest["ts"], id=newest["id"]),
         days=days,
     )
+
+
+def set_starred(entry_id: str, starred: bool) -> bool:
+    """Stars or unstars one entry; ``False`` when no entry has that id.
+
+    No derived cache counts stars, so none is invalidated.
+    """
+    with _lock:
+        conn = _ensure_conn_locked()
+        conn.execute("BEGIN")
+        try:
+            cursor = conn.execute(
+                "UPDATE entries SET starred = ? WHERE id = ?", (int(starred), entry_id)
+            )
+            found = cursor.rowcount > 0
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return found
 
 
 def delete_entry(entry_id: str) -> bool:

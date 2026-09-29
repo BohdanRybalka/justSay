@@ -135,7 +135,9 @@ def _substring_page_locked(
     ).fetchall()
 
 
-def _substring_lane(tokens: list[str], exclude_ids: set[str], wanted: int) -> list[sqlite3.Row]:
+def _substring_lane(
+    tokens: list[str], exclude_ids: set[str], wanted: int, starred_only: bool
+) -> list[sqlite3.Row]:
     """The mid-word substring lane, walked in bounded pages, in ``ts DESC, id DESC``.
 
     ``history._lock`` is taken once per page, so the hold is bounded by
@@ -145,7 +147,8 @@ def _substring_lane(tokens: list[str], exclude_ids: set[str], wanted: int) -> li
         return []
 
     like_sql = " AND ".join(
-        f"cleaned_text LIKE :like_{i} ESCAPE '\\'" for i in range(len(tokens))
+        [f"cleaned_text LIKE :like_{i} ESCAPE '\\'" for i in range(len(tokens))]
+        + ([history._STARRED] if starred_only else [])
     )
     like_params = {f"like_{i}": f"%{_escape_like(t)}%" for i, t in enumerate(tokens)}
 
@@ -181,7 +184,9 @@ def _substring_lane(tokens: list[str], exclude_ids: set[str], wanted: int) -> li
     return [by_id[i] for i in collected if i in by_id]
 
 
-def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
+def search_history(
+    q: str, limit: int = 20, starred_only: bool = False
+) -> list[HistorySearchHit]:
     """Two-lane search: FTS5 BM25 prefix match, then a ``LIKE`` substring fallback.
 
     The lanes run one after the other and de-duplicate in Python, so they do not
@@ -201,6 +206,7 @@ def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
             "bm25(entry_fts) AS rank "
             "FROM entry_fts JOIN entries e ON e.rowid = entry_fts.rowid "
             "WHERE entry_fts MATCH ? "
+            f"{f'AND e.{history._STARRED} ' if starred_only else ''}"
             "ORDER BY rank ASC LIMIT ?",
             (fts_expr, clamped_limit),
         ).fetchall()
@@ -208,7 +214,7 @@ def search_history(q: str, limit: int = 20) -> list[HistorySearchHit]:
     rows = list(fts_rows)
     rows.extend(
         _substring_lane(
-            tokens, {r["id"] for r in fts_rows}, clamped_limit - len(rows)
+            tokens, {r["id"] for r in fts_rows}, clamped_limit - len(rows), starred_only
         )
     )
 
@@ -298,17 +304,22 @@ def _rrf_fuse(
     return [by_id[eid] for eid in ranked[:limit]]
 
 
-async def search_history_hybrid(q: str, limit: int = 20) -> list[HistorySearchHit]:
+async def search_history_hybrid(
+    q: str, limit: int = 20, starred_only: bool = False
+) -> list[HistorySearchHit]:
     """Run the FTS/LIKE lane and the semantic lane concurrently and fuse with RRF.
 
     Both lanes fetch a fixed ``SEARCH_LIMIT_MAX`` candidate pool whatever ``limit``
     is, and the blocking FTS lane runs via ``asyncio.to_thread`` so they overlap.
+    ``starred_only`` filters the FTS lane in SQL and the semantic pool after it.
     """
     clamped_limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
     if not q or not q.strip():
         return []
     fts_hits, semantic_hits = await asyncio.gather(
-        asyncio.to_thread(search_history, q, SEARCH_LIMIT_MAX),
+        asyncio.to_thread(search_history, q, SEARCH_LIMIT_MAX, starred_only),
         _semantic_lane(q, SEARCH_LIMIT_MAX),
     )
+    if starred_only:
+        semantic_hits = [hit for hit in semantic_hits if hit.starred]
     return _rrf_fuse(fts_hits, semantic_hits, clamped_limit)
