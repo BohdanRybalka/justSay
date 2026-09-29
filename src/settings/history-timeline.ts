@@ -151,11 +151,23 @@ export function createTimelineRows(container: HTMLElement, now: () => Date = () 
     rowRemoved(element) {
       const root = element.closest<HTMLElement>(".day-group");
       element.remove();
-      if (!root || root.querySelector(".day-body")!.children.length > 0) return;
-      root.remove();
-      for (const [mapKey, group] of groups) {
-        if (group.root === root) groups.delete(mapKey);
+      const entry = Array.from(groups).find(([, group]) => group.root === root);
+      if (!entry) return;
+      const [mapKey, group] = entry;
+      const day = totals.get(mapKey);
+      if (day) {
+        totals.set(mapKey, {
+          ...day,
+          recordings: day.recordings - 1,
+          words: day.words - Number(element.dataset.words ?? 0),
+        });
       }
+      if (group.body.children.length === 0) {
+        group.root.remove();
+        groups.delete(mapKey);
+        totals.delete(mapKey);
+      }
+      paintHeads();
     },
   };
 }

@@ -734,13 +734,6 @@ function checkedObjectBody(endpoint: string, body: unknown): Record<string, unkn
   return body as Record<string, unknown>;
 }
 
-/** The two fields `/history` and `/history/search` both promise. A 200 carrying
- *  neither `entries` nor `total` paints `undefined transcripts` over an empty
- *  list, which is a worse answer than a named failure.
- *
- *  It is a presence check on two top-level fields, not a general response
- *  validator and not a check on an entry's own shape: every other endpoint still
- *  casts, and giving them one is a separate task with a separate budget. */
 /** A `/history` page whose `presence` field was checked for before anything
  *  else, the optional fields normalised, and both list fields checked. */
 async function historyPage(path: string, presence: "next_cursor" | "newest_cursor") {
@@ -760,6 +753,13 @@ async function historyPage(path: string, presence: "next_cursor" | "newest_curso
   };
 }
 
+/** The two fields `/history` and `/history/search` both promise. A 200 carrying
+ *  neither `entries` nor `total` paints `undefined transcripts` over an empty
+ *  list, which is a worse answer than a named failure.
+ *
+ *  It is a presence check on two top-level fields, not a general response
+ *  validator and not a check on an entry's own shape: every other endpoint still
+ *  casts, and giving them one is a separate task with a separate budget. */
 function checkedHistoryFields<T extends HistoryListResponse>(
   endpoint: string,
   body: Record<string, unknown>,

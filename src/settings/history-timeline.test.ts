@@ -170,4 +170,15 @@ describe("createTimelineRows — day groups", () => {
 
     expect(layout(container).map((group) => group.ids)).toEqual([["c", "a"]]);
   });
+
+  it("takes a removed card off its day's header, whose totals came from the backend", () => {
+    const container = document.createElement("div");
+    const rows = createTimelineRows(container, () => NOW);
+    const a = row("a", at(1, 10), 100);
+    rows.replace([a, row("b", at(1, 9), 50)], [{ date: "2026-08-01", recordings: 3, words: 300 }]);
+
+    rows.rowRemoved(a.element);
+
+    expect(layout(container)[0].head).toBe("Today·2 recordings·200 words");
+  });
 });
