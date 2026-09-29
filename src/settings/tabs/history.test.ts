@@ -217,7 +217,7 @@ describe("renderHistory — the timeline", () => {
     ]);
 
     const card = cards(container)[0];
-    expect(card.firstElementChild!.nextElementSibling!.className).toBe("entry-text");
+    expect(card.firstElementChild!.nextElementSibling!.firstElementChild!.className).toBe("entry-text");
     const meta = card.querySelector(".entry-meta")!;
     expect(meta.textContent!.replace(/\s+/g, " ").trim()).toBe("18:26·1:00·1,212 words");
     expect(card.textContent).not.toContain("process");
@@ -252,11 +252,11 @@ describe("renderHistory — the timeline", () => {
     FakeResizeObserver.latest!.resize();
 
     expect(long.classList.contains("entry--long")).toBe(true);
-    expect(long.querySelector(".entry-more")!.textContent).toBe("Show more");
+    expect(long.querySelector(".entry-more")!.textContent).toBe("… more");
     expect(short.classList.contains("entry--long")).toBe(false);
   });
 
-  it("expands a long card in place and collapses it again, from the text or from Show more", async () => {
+  it("expands a long card from its more, and collapses it from its less or from the text", async () => {
     const { container } = await renderAndWait([buildEntry("a")]);
     const card = cards(container)[0];
     layOut(card, 120, 42);
@@ -264,15 +264,18 @@ describe("renderHistory — the timeline", () => {
 
     card.querySelector<HTMLElement>(".entry-more")!.click();
     expect(card.classList.contains("entry--expanded")).toBe(true);
-    expect(card.querySelector(".entry-more")!.textContent).toBe("Show less");
 
     layOut(card, 120, 120);
     FakeResizeObserver.latest!.resize();
     expect(card.classList.contains("entry--long")).toBe(true);
 
+    card.querySelector<HTMLElement>(".entry-less")!.click();
+    expect(card.classList.contains("entry--expanded")).toBe(false);
+
+    card.querySelector<HTMLElement>(".entry-text")!.click();
+    expect(card.classList.contains("entry--expanded")).toBe(true);
     card.querySelector<HTMLElement>(".entry-text")!.click();
     expect(card.classList.contains("entry--expanded")).toBe(false);
-    expect(card.querySelector(".entry-more")!.textContent).toBe("Show more");
   });
 
   it("measures every card a search paints, so a cut-off match offers Show more", async () => {
@@ -326,7 +329,8 @@ describe("renderHistory — the timeline", () => {
 
     const text = cards(container)[0].querySelector(".entry-text")!;
     expect(text.querySelector("mark")!.textContent).toBe("test");
-    expect(text.textContent).toBe("a test & more");
+    expect(text.firstChild!.textContent).toBe("a ");
+    expect(text.textContent).toBe("a test & moreless");
   });
 
   it("says how to start when there is nothing yet", async () => {

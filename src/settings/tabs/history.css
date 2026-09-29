@@ -141,8 +141,13 @@
   border-left: 3px solid var(--blue);
 }
 
+.entry-body {
+  position: relative;
+  margin-bottom: 9px;
+}
+
 .entry-text {
-  margin: 0 0 9px;
+  margin: 0;
   font-size: 13.5px;
   line-height: 1.55;
   display: -webkit-box;
@@ -150,8 +155,11 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
   overflow-wrap: anywhere;
-  cursor: pointer;
   user-select: text;
+}
+
+.entry--long .entry-text {
+  cursor: pointer;
 }
 
 .entry--expanded .entry-text {
@@ -167,27 +175,43 @@
   padding: 0 2px;
 }
 
-.entry-more {
+.entry-more,
+.entry-less {
   display: none;
-  margin: -4px 0 9px;
   padding: 0;
   border: 0;
-  background: none;
-  color: var(--blue);
   font: inherit;
-  font-size: 12px;
+  font-size: 13.5px;
+  line-height: 1.55;
   font-weight: 600;
+  color: var(--orange);
   cursor: pointer;
 }
 
-.entry-more:hover {
-  color: var(--blue-hi);
-  text-decoration: underline;
+.entry-more {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  padding-left: 36px;
+  background: linear-gradient(90deg, transparent, var(--surface) 30px);
 }
 
-.entry--long .entry-more,
-.entry--expanded .entry-more {
-  display: inline-block;
+.entry-less {
+  margin-left: 6px;
+  background: none;
+}
+
+.entry-more:hover,
+.entry-less:hover {
+  color: var(--orange-hi);
+}
+
+.entry--long:not(.entry--expanded) .entry-more {
+  display: block;
+}
+
+.entry--expanded .entry-less {
+  display: inline;
 }
 
 .entry-meta {

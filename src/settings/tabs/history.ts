@@ -17,8 +17,6 @@ const SEARCH_DEBOUNCE_MS = 300;
 export const NEWER_POLL_MS = 5000;
 const PAGE_SIZE = 30;
 const COPIED_FLASH_MS = 1500;
-const SHOW_MORE = "Show more";
-const SHOW_LESS = "Show less";
 
 const SOURCE_ICONS: Record<HistoryEntry["source"], IconName> = {
   dictation: "mic",
@@ -203,8 +201,10 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
 
     el.innerHTML = `
       <span class="entry-dot">${icon(SOURCE_ICONS[entry.source], "small")}</span>
-      <p class="entry-text">${textHtml}</p>
-      <button type="button" class="entry-more" data-action="expand">${SHOW_MORE}</button>
+      <div class="entry-body">
+        <p class="entry-text">${textHtml}<button type="button" class="entry-less" data-action="expand" aria-label="Show less">less</button></p>
+        <button type="button" class="entry-more" data-action="expand" aria-label="Show more">… more</button>
+      </div>
       <div class="entry-meta">${metaLine(entry)}${sourceBadge(entry)}<span class="entry-actions">
         <button type="button" data-action="copy" aria-label="Copy">${icon("copy", "small")}</button>
         <button type="button" data-action="delete" aria-label="Delete">${icon("x", "small")}</button>
@@ -218,8 +218,7 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
       const button = target.closest<HTMLButtonElement>("button[data-action]");
       const onLongText = target.closest(".entry-text") && el.classList.contains("entry--long");
       if (onLongText || button?.dataset.action === "expand") {
-        const expanded = el.classList.toggle("entry--expanded");
-        el.querySelector(".entry-more")!.textContent = expanded ? SHOW_LESS : SHOW_MORE;
+        el.classList.toggle("entry--expanded");
         return;
       }
       if (!button) return;
