@@ -104,6 +104,27 @@ def test_typo_terms_are_capped_closest_first():
     assert len(terms) <= search.TYPO_EXPANSIONS_MAX
 
 
+def test_a_rarer_typo_neighbour_never_crowds_out_the_word_you_typed():
+    """BM25 ranks the rarer ``melting`` above ``meeting``; typo terms only fill
+    the slots the word itself left free."""
+    for _ in range(6):
+        history.save_entry(text="weekly meeting", duration_ms=1)
+    for _ in range(2):
+        history.save_entry(text="ice melting", duration_ms=1)
+
+    assert [h.text for h in search.search_history("meeting", limit=4)] == ["weekly meeting"] * 4
+    assert [h.text for h in search.search_history("meeting", limit=8)] == (
+        ["weekly meeting"] * 6 + ["ice melting"] * 2
+    )
+
+
+def test_a_typo_word_with_a_latin_accent_is_still_marked():
+    history.save_entry(text="Meet at the café", duration_ms=1)
+    hits = search.search_history("cafr", limit=5)
+    assert hits[0].highlighted_text == 'Meet at the <mark class="near">café</mark>'
+    assert search._fold_like_fts("Café мій їжак") == "cafe мій їжак"
+
+
 def test_build_highlight_basic_match():
     out = search._build_highlight("правив у файлі", ["прав"])
     assert '<mark class="near">прав</mark>ив у файлі' in out
@@ -774,7 +795,7 @@ def test_a_filled_fts_lane_leaves_the_substring_lane_out_of_the_store(monkeypatc
     """``residual == 0``: the lane must cost zero acquisitions, not one wasted one.
 
     The rows are seeded before the counting wrapper is installed, so the writes
-    are not counted -- the two left are the typo vocabulary read and the FTS lane.
+    are not counted -- the single acquisition left is the FTS lane's.
     """
     for i in range(5):
         history.save_entry(text=f"правда{i} буде", duration_ms=1)
@@ -785,7 +806,7 @@ def test_a_filled_fts_lane_leaves_the_substring_lane_out_of_the_store(monkeypatc
     hits = search.search_history("прав", limit=3)
 
     assert len(hits) == 3
-    assert lock.acquisitions == 2
+    assert lock.acquisitions == 1
 
 
 def test_an_underscore_in_a_query_matches_an_underscore_and_not_any_character():

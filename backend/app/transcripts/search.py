@@ -14,6 +14,7 @@ import html
 import logging
 import re
 import sqlite3
+import unicodedata
 from typing import Literal
 
 from app.stt.config import stt_settings
@@ -163,6 +164,16 @@ def _match_kind(text: str | None, tokens: list[str]) -> MatchKind:
     return "near" if missing else "exact"
 
 
+def _fold_like_fts(raw: str) -> str:
+    """``raw`` as the ``unicode61 remove_diacritics 2`` tokenizer stores it: lowercased,
+    a Latin letter's diacritic dropped (café → cafe), a Cyrillic й or ї kept."""
+    folded = []
+    for char in raw.lower():
+        base = unicodedata.normalize("NFD", char)[0]
+        folded.append(base if base.isascii() else char)
+    return "".join(folded)
+
+
 def _build_highlight(
     text: str | None, tokens: list[str], typo_terms: frozenset[str] = frozenset()
 ) -> str:
@@ -177,7 +188,7 @@ def _build_highlight(
     typo_spans = [
         (m.start(), m.end(), False)
         for m in _WORD_RE.finditer(text)
-        if m.group().lower() in typo_terms
+        if _fold_like_fts(m.group()) in typo_terms
     ]
     spans = sorted(_token_spans(text, tokens) + typo_spans)
     if not spans:
@@ -299,13 +310,27 @@ def _substring_lane(
     return [by_id[i] for i in collected if i in by_id]
 
 
+def _fts_rows(expression: str, limit: int, starred_only: bool) -> list[sqlite3.Row]:
+    """Up to ``limit`` rows matching the FTS5 ``expression``, best BM25 rank first."""
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        return conn.execute(
+            f"SELECT {schema.columns_sql(schema.ENTRY_COLUMNS, alias='e')}, "
+            "bm25(entry_fts) AS rank "
+            "FROM entry_fts JOIN entries e ON e.rowid = entry_fts.rowid "
+            "WHERE entry_fts MATCH ? "
+            f"{f'AND e.{history._STARRED} ' if starred_only else ''}"
+            "ORDER BY rank ASC LIMIT ?",
+            (expression, limit),
+        ).fetchall()
+
+
 def search_history(
     q: str, limit: int = 20, starred_only: bool = False
 ) -> list[HistorySearchHit]:
-    """Two-lane search: FTS5 BM25 prefix or typo match, then a ``LIKE`` substring fallback.
-
-    The lanes run one after the other and de-duplicate in Python, so they do not
-    read one snapshot (ADR 061). Only ``len(q)`` is ever logged, never ``q``.
+    """Three lanes, each filling what the one before left: FTS5 BM25 prefix match,
+    the same widened by typo terms, then a ``LIKE`` substring walk. They do not read
+    one snapshot and de-duplicate in Python (ADR 061). Only ``len(q)`` is logged.
     """
     clamped_limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
     log.debug("search len=%d", len(q or ""))
@@ -313,24 +338,17 @@ def search_history(
     tokens = _query_tokens(q or "")
     if not tokens:
         return []
-    typo_terms = _typo_terms(tokens)
 
-    with history._lock:
-        conn = history._ensure_conn_locked()
-        fts_rows = conn.execute(
-            f"SELECT {schema.columns_sql(schema.ENTRY_COLUMNS, alias='e')}, "
-            "bm25(entry_fts) AS rank "
-            "FROM entry_fts JOIN entries e ON e.rowid = entry_fts.rowid "
-            "WHERE entry_fts MATCH ? "
-            f"{f'AND e.{history._STARRED} ' if starred_only else ''}"
-            "ORDER BY rank ASC LIMIT ?",
-            (_fts_expression(tokens, typo_terms), clamped_limit),
-        ).fetchall()
-
-    rows = list(fts_rows)
+    rows = _fts_rows(_fts_expression(tokens, {}), clamped_limit, starred_only)
+    typo_terms = _typo_terms(tokens) if len(rows) < clamped_limit else {}
+    if typo_terms:
+        seen = {r["id"] for r in rows}
+        widened = _fts_rows(_fts_expression(tokens, typo_terms), clamped_limit, starred_only)
+        rows.extend(r for r in widened if r["id"] not in seen)
+    rows = rows[:clamped_limit]
     rows.extend(
         _substring_lane(
-            tokens, {r["id"] for r in fts_rows}, clamped_limit - len(rows), starred_only
+            tokens, {r["id"] for r in rows}, clamped_limit - len(rows), starred_only
         )
     )
 
