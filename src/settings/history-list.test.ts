@@ -104,7 +104,8 @@ function listOver(
   h: Harness,
   pageSize = 2,
   isDestroyed: () => boolean = () => false,
-  createRow: (entry: HistoryEntry) => HTMLElement = defaultCreateRow
+  createRow: (entry: HistoryEntry) => HTMLElement = defaultCreateRow,
+  starredOnly: () => boolean = () => false
 ) {
   return createHistoryList({
     pageSize,
@@ -115,7 +116,7 @@ function listOver(
     createRow,
     renderEmptyState: () => {},
     isDestroyed,
-    starredOnly: () => false,
+    starredOnly,
   });
 }
 
@@ -283,6 +284,29 @@ describe("createHistoryList — the client echoes cursors and never builds one",
     await vi.waitFor(() => expect(h.placedDays).toHaveLength(2));
 
     expect(h.placedDays).toEqual([[today], [older]]);
+  });
+});
+
+describe("createHistoryList — a filter change whose reload failed", () => {
+  it("pages nothing onto rows read under the other filter, and the poll retries the reload", async () => {
+    const h = harness();
+    let starredOnly = false;
+    queueResponses(pageOf(entries("a", "b"), 3, { ts: 1, id: "b" }));
+    const list = listOver(h, 2, () => false, defaultCreateRow, () => starredOnly);
+    await list.load();
+
+    starredOnly = true;
+    apiMock.getHistory.mockRejectedValueOnce(new Error("busy"));
+    await list.load();
+    cross();
+    await vi.waitFor(() => expect(h.reading()).toBe(false));
+    expect(apiMock.getHistory).toHaveBeenCalledTimes(2);
+
+    queueResponses(pageOf(entries("s"), 1, null));
+    await list.loadNewer();
+
+    expect(apiMock.getHistory).toHaveBeenLastCalledWith(2, null, true);
+    expect(h.paintedIds()).toEqual(["s"]);
   });
 });
 

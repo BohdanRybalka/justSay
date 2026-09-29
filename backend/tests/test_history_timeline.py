@@ -128,7 +128,7 @@ def test_the_newer_read_seeks_the_composite_index():
             str(row[-1])
             for row in conn.execute(
                 f"EXPLAIN QUERY PLAN SELECT id FROM entries "
-                f"WHERE {history._AFTER_CURSOR} {history._NEWER_PAGE_ORDER}",
+                f"{history._where(history._AFTER_CURSOR, None)}{history._NEWER_PAGE_ORDER}",
                 {"after_ts": 0, "after_id": "", "row_limit": 1},
             ).fetchall()
         )

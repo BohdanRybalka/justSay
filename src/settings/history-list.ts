@@ -55,7 +55,8 @@ export interface HistoryListOptions {
   createRow: (entry: HistoryEntry) => HTMLElement;
   renderEmptyState: (isEmpty: boolean) => void;
   isDestroyed: () => boolean;
-  /** Read on every request, so a reload after the filter changes pages under the new one. */
+  /** Read on every request. Until a reload under a new filter lands, paging waits and
+   *  the newer-rows turn retries that reload instead. */
   starredOnly: () => boolean;
 }
 
@@ -150,6 +151,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
   let latestClaim: HistoryRowsClaim | null = null;
   let rowsAreOwnPage = false;
   let pagingHeld = false;
+  let paintedStarredOnly = false;
 
   const observer = new IntersectionObserver((records) => {
     if (records.some((record) => record.isIntersecting)) void loadOlder();
@@ -226,8 +228,9 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     if (append && cursor === null) return;
     const claim = issueClaim();
     elements.sentinel.classList.add(SENTINEL_READING);
+    const askedStarredOnly = starredOnly();
     try {
-      const response = await api.getHistory(pageSize, append ? cursor : null, starredOnly());
+      const response = await api.getHistory(pageSize, append ? cursor : null, askedStarredOnly);
       if (!claim.isCurrent()) return;
 
       const built = build(response.entries);
@@ -242,6 +245,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
       } else {
         rows.replace(built, response.days);
         newest = response.newest_cursor;
+        paintedStarredOnly = askedStarredOnly;
       }
       renderEmptyState(response.entries.length === 0 && !append);
 
@@ -262,13 +266,15 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
   }
 
   function loadOlder(): Promise<void> {
-    if (pagingHeld || !rowsAreOwnPage) return Promise.resolve();
+    if (pagingHeld || !rowsAreOwnPage || starredOnly() !== paintedStarredOnly) {
+      return Promise.resolve();
+    }
     return loadPage(true);
   }
 
   async function loadNewer(): Promise<void> {
     if (isDestroyed() || pagingHeld || !rowsAreOwnPage) return;
-    if (newest === null) return loadPage(false);
+    if (newest === null || starredOnly() !== paintedStarredOnly) return loadPage(false);
     const claim = issueClaim();
     let page: HistoryPageResponse | null = null;
     try {
