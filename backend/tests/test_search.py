@@ -61,7 +61,7 @@ def test_sanitize_whitespace_and_empty():
 
 def test_build_highlight_basic_match():
     out = search._build_highlight("правив у файлі", ["прав"])
-    assert "<mark>прав</mark>ив у файлі" in out
+    assert '<mark class="near">прав</mark>ив у файлі' in out
 
 
 def test_build_highlight_case_insensitive_cyrillic():
@@ -131,12 +131,33 @@ def test_build_highlight_empty_tokens_returns_escaped_text():
     assert search._build_highlight("anything", []) == "anything"
 
 
+def test_build_highlight_sets_a_word_part_apart_from_a_whole_word():
+    out = search._build_highlight("Test tests, latest_test", ["test"])
+    assert out == (
+        '<mark>Test</mark> <mark class="near">test</mark>s, '
+        'la<mark class="near">test</mark>_<mark class="near">test</mark>'
+    )
+
+
+def test_a_merged_mark_is_whole_when_any_of_its_parts_is():
+    assert search._build_highlight("test", ["test", "tes"]) == "<mark>test</mark>"
+
+
+def test_a_hit_is_exact_only_when_every_token_stands_as_a_whole_word():
+    assert search._match_kind("Прав і правда", ["прав"]) == "exact"
+    assert search._match_kind("tests and latest", ["test"]) == "close"
+    assert search._match_kind("the test report", ["test", "rep"]) == "close"
+    assert search._match_kind("the test report", ["test", "report"]) == "exact"
+    assert search._match_kind("anything", []) == "close"
+    assert search._match_kind(None, ["x"]) == "close"
+
+
 def test_search_history_prefix_match_returns_highlight():
     history.save_entry(text="правив у файлі", duration_ms=1, language="uk")
     hits = search.search_history("прав", limit=5)
     assert len(hits) == 1
     assert isinstance(hits[0], search.HistorySearchHit)
-    assert "<mark>прав</mark>ив" in hits[0].highlighted_text
+    assert '<mark class="near">прав</mark>ив' in hits[0].highlighted_text
 
 
 def test_search_history_no_results_no_crash():
@@ -151,7 +172,7 @@ def test_search_history_like_fallback_catches_substring():
     hits = search.search_history("кадабр", limit=5)
     assert len(hits) == 1
     assert "абракадабра" in hits[0].text
-    assert "<mark>кадабр</mark>" in hits[0].highlighted_text
+    assert '<mark class="near">кадабр</mark>' in hits[0].highlighted_text
 
 
 def test_search_history_dedup_when_both_lanes_match():
@@ -206,7 +227,8 @@ async def test_search_endpoint_returns_highlighted_text_field(client):
     data = resp.json()
     assert len(data["entries"]) == 1
     assert "highlighted_text" in data["entries"][0]
-    assert "<mark>прав</mark>" in data["entries"][0]["highlighted_text"]
+    assert '<mark class="near">прав</mark>' in data["entries"][0]["highlighted_text"]
+    assert data["entries"][0]["match"] == "close"
 
 
 
@@ -446,6 +468,39 @@ def test_rrf_fuse_dedup_combined_score_and_highlight_precedence():
     assert [h.id for h in fused_vs_solo] == ["shared", "solo"]
 
 
+def _hybrid_with(fts_hits, semantic_hits):
+    return (
+        patch("app.transcripts.search.search_history", return_value=fts_hits),
+        patch("app.transcripts.search._semantic_lane", new=AsyncMock(return_value=semantic_hits)),
+    )
+
+
+@pytest.mark.asyncio
+async def test_hybrid_answers_exact_then_word_parts_then_a_few_meaning_only_hits():
+    near = _make_hit("near").model_copy(update={"match": "close"})
+    exact = _make_hit("exact").model_copy(update={"match": "exact"})
+    meaning = [_make_hit(f"m{i}") for i in range(search.SEMANTIC_ONLY_MAX + 2)]
+    fts_patch, semantic_patch = _hybrid_with([near, exact], [exact, *meaning])
+
+    with fts_patch, semantic_patch:
+        hits = await search.search_history_hybrid("test", limit=30)
+
+    kept_meaning = [h.id for h in meaning[: search.SEMANTIC_ONLY_MAX]]
+    assert [h.id for h in hits] == ["exact", "near", *kept_meaning]
+    assert [h.match for h in hits] == ["exact"] + ["close"] * (1 + search.SEMANTIC_ONLY_MAX)
+
+
+@pytest.mark.asyncio
+async def test_hybrid_keeps_every_word_hit_and_cuts_at_the_limit():
+    worded = [_make_hit(f"w{i}").model_copy(update={"match": "close"}) for i in range(5)]
+    fts_patch, semantic_patch = _hybrid_with(worded, [_make_hit("m")])
+
+    with fts_patch, semantic_patch:
+        hits = await search.search_history_hybrid("test", limit=4)
+
+    assert [h.id for h in hits] == ["w0", "w1", "w2", "w3"]
+
+
 @pytest.mark.asyncio
 async def test_search_history_hybrid_runs_lanes_concurrently():
     """Proves the two lanes actually run concurrently via asyncio.gather,
@@ -533,7 +588,7 @@ def test_search_does_not_hold_the_store_lock_while_highlighting(monkeypatch):
     hits = search.search_history("прав", limit=5)
 
     assert len(hits) == 1
-    assert "<mark>прав</mark>ив" in hits[0].highlighted_text
+    assert '<mark class="near">прав</mark>ив' in hits[0].highlighted_text
     assert lock_was_free == [True]
 
 

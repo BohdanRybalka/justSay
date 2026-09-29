@@ -9,8 +9,14 @@ import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
 import { copyToClipboard } from "../../clipboard";
 import { renderSegmented } from "../../ui/controls";
 import { icon, type IconName } from "../../ui/icons";
-import { createHistoryList, sidecarTooOldText, SENTINEL_READING, type HistoryRowsClaim } from "../history-list";
-import { countOf, createTimelineRows, formatClock, formatDuration } from "../history-timeline";
+import {
+  createHistoryList,
+  sidecarTooOldText,
+  SENTINEL_READING,
+  type BuiltRow,
+  type HistoryRowsClaim,
+} from "../history-list";
+import { countOf, createTimelineRows, formatClock, formatDuration, matchDayGroups } from "../history-timeline";
 import { escapeHtml } from "../html";
 import type { TabLifecycle } from "../settings";
 
@@ -18,6 +24,7 @@ const SEARCH_DEBOUNCE_MS = 300;
 export const NEWER_POLL_MS = 5000;
 const PAGE_SIZE = 30;
 const COPIED_FLASH_MS = 1500;
+const EXCERPT_LEAD_CHARS = 80;
 
 const SOURCE_ICONS: Record<HistoryEntry["source"], IconName> = {
   dictation: "mic",
@@ -54,8 +61,23 @@ function markLongTexts(records: readonly ResizeObserverEntry[], observer: Resize
     }
     const card = target.closest<HTMLElement>(".entry");
     if (!card || card.classList.contains("entry--expanded")) continue;
-    card.classList.toggle("entry--long", target.scrollHeight > target.clientHeight + 1);
+    const cutOff = target.scrollHeight > target.clientHeight + 1;
+    card.classList.toggle("entry--long", cutOff || card.classList.contains("entry--excerpt"));
   }
+}
+
+/** The backend's marked text starting a few words before its first mark, or `null` when the
+ *  first mark already sits near the start. Cut on the parsed nodes, so no entity is split. */
+export function matchExcerpt(highlighted: string): string | null {
+  const template = document.createElement("template");
+  template.innerHTML = highlighted;
+  const lead = template.content.firstChild;
+  if (lead?.nodeType !== Node.TEXT_NODE || lead.nextSibling?.nodeName !== "MARK") return null;
+  const text = lead.textContent ?? "";
+  if (text.length <= EXCERPT_LEAD_CHARS) return null;
+  const tail = text.slice(-EXCERPT_LEAD_CHARS);
+  lead.textContent = `…${tail.slice(tail.search(/\s/) + 1)}`;
+  return template.innerHTML;
 }
 
 function metaSeparator(): string {
@@ -87,7 +109,7 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
   const section = document.createElement("div");
   section.className = "history";
   section.innerHTML = `
-    <div class="search-box">${icon("search")}<input type="search" id="history-search" placeholder="Search transcripts..." aria-label="Search" /><div id="history-filter" aria-label="Show"></div></div>
+    <div class="search-box">${icon("search")}<input type="search" id="history-search" placeholder="Search what you said" aria-label="Search" /><div id="history-filter" aria-label="Show"></div></div>
     <div class="history-search-hint" id="history-search-hint"></div>
     <div class="history-count" id="history-count">Loading...</div>
     <div class="timeline">
@@ -150,8 +172,21 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
   function noMatchesElement(): HTMLElement {
     const el = document.createElement("p");
     el.className = "history-empty";
-    el.textContent = "No matches";
+    el.textContent = "Nothing you said matches that.";
     return el;
+  }
+
+  /** Exact matches by day, then everything looser under "Close matches". */
+  function searchTiers(rows: readonly BuiltRow[]): HTMLElement[] {
+    const painted = matchDayGroups(rows.filter((row) => row.entry.match === "exact"));
+    const close = rows.filter((row) => row.entry.match !== "exact");
+    if (close.length > 0) {
+      const heading = document.createElement("h3");
+      heading.className = "search-tier";
+      heading.textContent = "Close matches";
+      painted.push(heading, ...matchDayGroups(close));
+    }
+    return painted;
   }
 
   /**
@@ -170,11 +205,8 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
     searchHint.textContent = "Searching...";
     try {
       const resp = await api.searchHistory(q, PAGE_SIZE, starredOnly);
-      claim.replaceRows(
-        resp.entries.length === 0
-          ? [noMatchesElement()]
-          : resp.entries.map((entry) => createEntryElement(entry))
-      );
+      const built = resp.entries.map((entry) => ({ entry, element: createEntryElement(entry) }));
+      claim.replaceRows(built.length === 0 ? [noMatchesElement()] : searchTiers(built));
       claim.renderCount(`${resp.total} match${resp.total !== 1 ? "es" : ""}`);
       claim.renderMore(false);
       if (claim.isCurrent()) {
@@ -270,11 +302,17 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
     const textHtml = entry.highlighted_text
       ? entry.highlighted_text
       : escapeHtml(entry.text).replace(/\n/g, "<br>");
+    const excerpt = entry.highlighted_text ? matchExcerpt(entry.highlighted_text) : null;
+    if (excerpt !== null) el.classList.add("entry--excerpt");
+    const shownHtml =
+      excerpt === null
+        ? textHtml
+        : `<span class="entry-full">${textHtml}</span><span class="entry-excerpt">${excerpt}</span>`;
 
     el.innerHTML = `
       <span class="entry-dot">${icon(SOURCE_ICONS[entry.source], "small")}</span>
       <div class="entry-body">
-        <p class="entry-text">${textHtml}<button type="button" class="entry-less" data-action="expand" aria-label="Show less">less</button></p>
+        <p class="entry-text">${shownHtml}<button type="button" class="entry-less" data-action="expand" aria-label="Show less">less</button></p>
         <button type="button" class="entry-more" data-action="expand" aria-label="Show more">… more</button>
       </div>
       <div class="entry-meta">${metaLine(entry)}${sourceBadge(entry)}<span class="entry-actions">

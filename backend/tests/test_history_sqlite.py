@@ -901,7 +901,7 @@ async def test_search_no_longer_accepts_mode_param(isolated_storage, tmp_path, c
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["entries"]) == 1
-    assert "<mark>прав</mark>" in data["entries"][0]["highlighted_text"]
+    assert '<mark class="near">прав</mark>' in data["entries"][0]["highlighted_text"]
 
 
 @pytest.mark.asyncio

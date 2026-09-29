@@ -2,10 +2,9 @@
 
 ``search_history`` is FTS5 BM25 prefix match plus a paged ``LIKE`` walk,
 ``search_history_semantic`` is vector distance over ``vec_entries``, and
-``search_history_hybrid`` fuses both with RRF. This module owns no connection:
-it borrows ``history._lock`` and ``history._ensure_conn_locked`` for every
-statement and takes its column lists from ``schema``, so a lock covers a
-statement and never a walk of the table.
+``search_history_hybrid`` fuses both with RRF and answers exact hits, close
+word hits and at most ``SEMANTIC_ONLY_MAX`` meaning-only hits, in that order.
+This module owns no connection: it borrows ``history._lock`` for every statement.
 """
 
 from __future__ import annotations
@@ -15,6 +14,7 @@ import html
 import logging
 import re
 import sqlite3
+from typing import Literal
 
 from app.stt.config import stt_settings
 from app.transcripts import history, schema
@@ -24,10 +24,15 @@ log = logging.getLogger(__name__)
 SEARCH_LIMIT_MAX = 100
 SEARCH_SCAN_CHUNK_ROWS = 200
 RRF_K = 60
+SEMANTIC_ONLY_MAX = 3
+NEAR_MARK_OPEN = '<mark class="near">'
+
+MatchKind = Literal["exact", "close"]
 
 
 class HistorySearchHit(history.HistoryEntry):
     highlighted_text: str = ""
+    match: MatchKind = "close"
 
 
 _SANITIZE_KEEP_RE = re.compile(r"[^\w\s'’‘]", re.UNICODE)
@@ -48,42 +53,64 @@ def _sanitize_fts_query(q: str) -> tuple[str, list[str]]:
     return " ".join(f"{t}*" for t in tokens), tokens
 
 
-def _build_highlight(text: str | None, tokens: list[str]) -> str:
-    """HTML-escape ``text`` and wrap any ``tokens`` in it in ``<mark>…</mark>``.
+def _is_word_char(char: str) -> bool:
+    return char.isalnum() or char == "_"
 
-    Case-insensitive. Offsets come from the raw text, overlapping spans merge into
-    one ``<mark>``, and every segment is escaped, so no raw markup ever survives.
-    """
-    if not text:
-        return ""
-    if not tokens:
-        return html.escape(text)
 
-    spans: list[tuple[int, int]] = []
+def _token_spans(text: str, tokens: list[str]) -> list[tuple[int, int, bool]]:
+    """Every case-insensitive occurrence of every token as ``(start, end, whole_word)``."""
+    spans: list[tuple[int, int, bool]] = []
     for tok in tokens:
         if not tok:
             continue
         for m in re.finditer(re.escape(tok), text, flags=re.IGNORECASE):
-            if m.end() > m.start():
-                spans.append((m.start(), m.end()))
+            start, end = m.start(), m.end()
+            if end > start:
+                whole = not (start > 0 and _is_word_char(text[start - 1])) and not (
+                    end < len(text) and _is_word_char(text[end])
+                )
+                spans.append((start, end, whole))
+    return spans
 
+
+def _match_kind(text: str | None, tokens: list[str]) -> MatchKind:
+    """``exact`` when every token stands in ``text`` as a whole word at least once."""
+    if not text or not tokens:
+        return "close"
+    missing = {tok.lower() for tok in tokens if tok}
+    for start, end, whole in _token_spans(text, tokens):
+        if whole:
+            missing.discard(text[start:end].lower())
+    return "close" if missing else "exact"
+
+
+def _build_highlight(text: str | None, tokens: list[str]) -> str:
+    """HTML-escape ``text`` and wrap any ``tokens`` in it in a mark.
+
+    Case-insensitive; overlapping spans merge into one mark, a plain ``<mark>``
+    when any part of it is a whole word and ``<mark class="near">`` when it only
+    sits inside a word. Every segment is escaped, so no raw markup survives.
+    """
+    if not text:
+        return ""
+    spans = sorted(_token_spans(text, tokens))
     if not spans:
         return html.escape(text)
 
-    spans.sort()
-    merged: list[list[int]] = [[spans[0][0], spans[0][1]]]
-    for start, end in spans[1:]:
+    merged: list[list] = [list(spans[0])]
+    for start, end, whole in spans[1:]:
         if start <= merged[-1][1]:
             merged[-1][1] = max(merged[-1][1], end)
+            merged[-1][2] = merged[-1][2] or whole
         else:
-            merged.append([start, end])
+            merged.append([start, end, whole])
 
     out: list[str] = []
     cursor = 0
-    for start, end in merged:
+    for start, end, whole in merged:
         if start > cursor:
             out.append(html.escape(text[cursor:start]))
-        out.append("<mark>")
+        out.append("<mark>" if whole else NEAR_MARK_OPEN)
         out.append(html.escape(text[start:end]))
         out.append("</mark>")
         cursor = end
@@ -95,10 +122,10 @@ def _build_highlight(text: str | None, tokens: list[str]) -> str:
 def _hit_from_row(row, tokens: list[str]) -> HistorySearchHit:
     """Build a search hit from a row that includes ``cleaned_text``."""
     base = history._row_to_entry(row)
-    highlighted = _build_highlight(row["cleaned_text"], tokens)
     return HistorySearchHit(
         **base.model_dump(),
-        highlighted_text=highlighted,
+        highlighted_text=_build_highlight(row["cleaned_text"], tokens),
+        match=_match_kind(row["cleaned_text"], tokens),
     )
 
 
@@ -309,9 +336,9 @@ async def search_history_hybrid(
 ) -> list[HistorySearchHit]:
     """Run the FTS/LIKE lane and the semantic lane concurrently and fuse with RRF.
 
-    Both lanes fetch a fixed ``SEARCH_LIMIT_MAX`` candidate pool whatever ``limit``
-    is, and the blocking FTS lane runs via ``asyncio.to_thread`` so they overlap.
-    ``starred_only`` filters the FTS lane in SQL and the semantic pool after it.
+    Answers exact hits, then close word hits, then at most ``SEMANTIC_ONLY_MAX``
+    hits only the semantic lane found, each group in fused order. Both lanes fetch
+    ``SEARCH_LIMIT_MAX`` candidates concurrently; ``starred_only`` filters both.
     """
     clamped_limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
     if not q or not q.strip():
@@ -322,4 +349,9 @@ async def search_history_hybrid(
     )
     if starred_only:
         semantic_hits = [hit for hit in semantic_hits if hit.starred]
-    return _rrf_fuse(fts_hits, semantic_hits, clamped_limit)
+    fused = _rrf_fuse(fts_hits, semantic_hits, len(fts_hits) + len(semantic_hits))
+    worded = {hit.id for hit in fts_hits}
+    exact = [hit for hit in fused if hit.match == "exact"]
+    near = [hit for hit in fused if hit.id in worded and hit.match == "close"]
+    meaning_only = [hit for hit in fused if hit.id not in worded][:SEMANTIC_ONLY_MAX]
+    return (exact + near + meaning_only)[:clamped_limit]
