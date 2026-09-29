@@ -244,13 +244,17 @@
   margin-left: auto;
   display: flex;
   gap: 3px;
+}
+
+.entry-actions > button {
   opacity: 0;
   transition: opacity .15s;
 }
 
-.entry:hover .entry-actions,
-.entry:focus-within .entry-actions,
-.entry--menu-open .entry-actions {
+.entry:hover .entry-actions > button,
+.entry:focus-within .entry-actions > button,
+.entry--menu-open .entry-actions > button,
+.entry-actions > .entry-star--on {
   opacity: 1;
 }
 
