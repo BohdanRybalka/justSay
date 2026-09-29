@@ -32,6 +32,7 @@ try:
     from app.preferences.router import router as settings_router
     from app.stt.router import router as stt_router
     from app.transcripts.history_router import router as history_router
+    from app.transcripts.insights_router import router as insights_router
     from app.transcripts.words_router import router as words_router
 except Exception as e:
     log.critical(
@@ -171,6 +172,7 @@ app.include_router(api_router)
 app.include_router(settings_router)
 app.include_router(scratch_router)
 app.include_router(history_router)
+app.include_router(insights_router)
 app.include_router(words_router)
 app.include_router(stt_router, prefix="/stt", tags=["STT"])
 app.include_router(audio_router, prefix="/audio", tags=["Audio"])

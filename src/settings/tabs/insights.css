@@ -1,0 +1,126 @@
+.insights + .legacy-tab {
+  margin-top: 32px;
+}
+
+.panel-subtitle b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.panel-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.saved-card {
+  position: relative;
+  overflow: hidden;
+  border-radius: 18px;
+  padding: 30px 32px 26px;
+  background: var(--warm);
+  color: #fff;
+  box-shadow: var(--sh-warm);
+}
+
+.saved-card::after {
+  content: "";
+  position: absolute;
+  right: -70px;
+  bottom: -130px;
+  width: 320px;
+  height: 320px;
+  border-radius: 50%;
+  background: rgba(255,255,255,.07);
+}
+
+.saved-card-label {
+  font-size: 11px;
+  letter-spacing: .11em;
+  font-weight: 700;
+  opacity: .8;
+}
+
+.saved-card-value {
+  font-size: 56px;
+  font-weight: 740;
+  letter-spacing: -.045em;
+  line-height: 1;
+  margin: 12px 0 10px;
+}
+
+.saved-card-note {
+  margin: 0;
+  font-size: 14px;
+  opacity: .9;
+  max-width: 44ch;
+}
+
+.saved-compare {
+  position: relative;
+  z-index: 1;
+  margin-top: 22px;
+}
+
+.saved-compare-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 9px;
+  font-size: 12px;
+}
+
+.saved-compare-row > span:first-child {
+  width: 72px;
+  opacity: .85;
+}
+
+.saved-compare-row b {
+  font-weight: 650;
+}
+
+.saved-compare-track {
+  position: relative;
+  flex: 1;
+  max-width: 400px;
+  height: 14px;
+  border-radius: 7px;
+  background: rgba(255,255,255,.22);
+}
+
+.saved-compare-track i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 7px;
+  background: rgba(255,255,255,.94);
+}
+
+.saved-compare-track--dim i {
+  background: rgba(255,255,255,.4);
+}
+
+.saved-figures {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 38px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(255,255,255,.22);
+}
+
+.saved-figures b {
+  display: block;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -.028em;
+}
+
+.saved-figures span {
+  font-size: 11.5px;
+  opacity: .8;
+}
