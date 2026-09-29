@@ -101,8 +101,11 @@ def test_rows_without_audio_length_keep_their_words_out_of_time_figures():
 
 def test_no_speaking_time_has_no_pace():
     _save(datetime(2026, 8, 20, 9, 0), 10)
+    _save(datetime(2026, 8, 20, 10, 0), 10, 0.04)
 
-    assert insights.compute_insights(now=NOW).month.pace_wpm is None
+    month = insights.compute_insights(now=NOW).month
+
+    assert (month.speaking_seconds, month.pace_wpm) == (0.0, None)
 
 
 def test_the_streak_holds_through_today_until_the_first_dictation():
@@ -142,6 +145,16 @@ def test_a_write_refreshes_the_figures():
     _save(datetime(2026, 8, 20, 10, 0), 5)
 
     assert insights.compute_insights(now=NOW).today.words == 15
+
+
+def test_the_figures_move_to_a_new_day_without_a_write():
+    _save(datetime(2026, 8, 20, 9, 0), 10)
+    assert insights.compute_insights(now=NOW).today.words == 10
+
+    tomorrow = insights.compute_insights(now=datetime(2026, 8, 21, 0, 5))
+
+    assert tomorrow.today.words == 0
+    assert tomorrow.streak.current_days == 1
 
 
 @pytest.mark.asyncio

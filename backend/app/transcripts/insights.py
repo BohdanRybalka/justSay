@@ -85,7 +85,7 @@ def compute_insights(now: datetime | None = None) -> Insights:
 
 def _figures(days: dict[date, _Day], today: date) -> Insights:
     month = [d for day, d in days.items() if day >= today.replace(day=1)]
-    speaking = sum(d.speaking_seconds for d in month)
+    speaking = round(sum(d.speaking_seconds for d in month), 1)
     timed_words = sum(d.timed_words for d in month)
     typing = timed_words * 60 / TYPING_WPM
     today_day = days.get(today, _NO_DICTATION)
@@ -94,7 +94,7 @@ def _figures(days: dict[date, _Day], today: date) -> Insights:
         month=MonthFigures(
             words=sum(d.words for d in month),
             recordings=sum(d.recordings for d in month),
-            speaking_seconds=round(speaking, 1),
+            speaking_seconds=speaking,
             typing_seconds=round(typing, 1),
             pace_wpm=round(timed_words * 60 / speaking) if speaking > 0 else None,
         ),
