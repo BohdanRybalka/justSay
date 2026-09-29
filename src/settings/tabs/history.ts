@@ -38,7 +38,7 @@ export function renderHistoryHeading(container: HTMLElement): void {
 }
 
 /** Marks a collapsed card whose text is cut off, which is what shows its "Show more".
- *  Each text is watched on its own, so a new card, an expand and a resize are all measured;
+ *  Each text is watched on its own, so a new card, a collapse and a resize are all measured;
  *  a text that has left the page is let go. */
 function markLongTexts(records: readonly ResizeObserverEntry[], observer: ResizeObserver): void {
   for (const { target } of records) {

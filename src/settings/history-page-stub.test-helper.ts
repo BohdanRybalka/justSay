@@ -122,7 +122,8 @@ export class FakeResizeObserver {
   }
 
   unobserve(target: Element): void {
-    this.targets.splice(this.targets.indexOf(target), 1);
+    const index = this.targets.indexOf(target);
+    if (index !== -1) this.targets.splice(index, 1);
   }
 
   disconnect(): void {

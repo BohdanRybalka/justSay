@@ -281,6 +281,7 @@ describe("renderHistory — the timeline", () => {
     await typeQuery(container, "test");
     await vi.waitFor(() => expect(countText(container)).toBe("1 match"));
     const match = cards(container)[0];
+    expect(FakeResizeObserver.latest!.watched()).toContain(match.querySelector(".entry-text"));
     layOut(match, 120, 42);
 
     FakeResizeObserver.latest!.resize();
