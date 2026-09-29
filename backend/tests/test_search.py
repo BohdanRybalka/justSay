@@ -145,11 +145,11 @@ def test_a_merged_mark_is_whole_when_any_of_its_parts_is():
 
 def test_a_hit_is_exact_only_when_every_token_stands_as_a_whole_word():
     assert search._match_kind("Прав і правда", ["прав"]) == "exact"
-    assert search._match_kind("tests and latest", ["test"]) == "close"
-    assert search._match_kind("the test report", ["test", "rep"]) == "close"
+    assert search._match_kind("tests and latest", ["test"]) == "near"
+    assert search._match_kind("the test report", ["test", "rep"]) == "near"
     assert search._match_kind("the test report", ["test", "report"]) == "exact"
-    assert search._match_kind("anything", []) == "close"
-    assert search._match_kind(None, ["x"]) == "close"
+    assert search._match_kind("anything", []) == "meaning"
+    assert search._match_kind(None, ["x"]) == "near"
 
 
 def test_search_history_prefix_match_returns_highlight():
@@ -228,7 +228,7 @@ async def test_search_endpoint_returns_highlighted_text_field(client):
     assert len(data["entries"]) == 1
     assert "highlighted_text" in data["entries"][0]
     assert '<mark class="near">прав</mark>' in data["entries"][0]["highlighted_text"]
-    assert data["entries"][0]["match"] == "close"
+    assert data["entries"][0]["match"] == "near"
 
 
 
@@ -477,7 +477,7 @@ def _hybrid_with(fts_hits, semantic_hits):
 
 @pytest.mark.asyncio
 async def test_hybrid_answers_exact_then_word_parts_then_a_few_meaning_only_hits():
-    near = _make_hit("near").model_copy(update={"match": "close"})
+    near = _make_hit("near").model_copy(update={"match": "near"})
     exact = _make_hit("exact").model_copy(update={"match": "exact"})
     meaning = [_make_hit(f"m{i}") for i in range(search.SEMANTIC_ONLY_MAX + 2)]
     fts_patch, semantic_patch = _hybrid_with([near, exact], [exact, *meaning])
@@ -487,12 +487,12 @@ async def test_hybrid_answers_exact_then_word_parts_then_a_few_meaning_only_hits
 
     kept_meaning = [h.id for h in meaning[: search.SEMANTIC_ONLY_MAX]]
     assert [h.id for h in hits] == ["exact", "near", *kept_meaning]
-    assert [h.match for h in hits] == ["exact"] + ["close"] * (1 + search.SEMANTIC_ONLY_MAX)
+    assert [h.match for h in hits] == ["exact", "near"] + ["meaning"] * search.SEMANTIC_ONLY_MAX
 
 
 @pytest.mark.asyncio
 async def test_hybrid_keeps_every_word_hit_and_cuts_at_the_limit():
-    worded = [_make_hit(f"w{i}").model_copy(update={"match": "close"}) for i in range(5)]
+    worded = [_make_hit(f"w{i}").model_copy(update={"match": "near"}) for i in range(5)]
     fts_patch, semantic_patch = _hybrid_with(worded, [_make_hit("m")])
 
     with fts_patch, semantic_patch:

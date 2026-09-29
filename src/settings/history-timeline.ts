@@ -96,6 +96,16 @@ export function matchDayGroups(rows: readonly BuiltRow[], now: Date = new Date()
   return [...groups.values()];
 }
 
+const CLOSE_MATCHES_CLASS = "search-tier";
+
+/** The heading above the search results that hold the words only loosely. */
+export function closeMatchesHeading(): HTMLElement {
+  const heading = document.createElement("h3");
+  heading.className = CLOSE_MATCHES_CLASS;
+  heading.textContent = "Close matches";
+  return heading;
+}
+
 export interface TimelineRows extends HistoryRows {
   /** Takes one card off the timeline, and its day with it once the day is empty. */
   rowRemoved(element: HTMLElement): void;
@@ -195,6 +205,8 @@ export function createTimelineRows(container: HTMLElement, now: () => Date = () 
       if (!entry) {
         if (root?.querySelector(".day-body")!.children.length === 0) root.remove();
         else if (root) paintMatchHead(root, now());
+        const heading = container.querySelector(`.${CLOSE_MATCHES_CLASS}`);
+        if (heading && !heading.nextElementSibling) heading.remove();
         return;
       }
       const [mapKey, group] = entry;

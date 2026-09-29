@@ -369,13 +369,13 @@ describe("renderHistory — the timeline", () => {
     expect(text.textContent).toBe("a test & moreless");
   });
 
-  it("paints exact matches by day, then everything looser under Close matches", async () => {
+  it("paints exact matches by day, then word parts, then meaning-only matches last, however new", async () => {
     apiMock.searchHistory.mockResolvedValue({
       entries: [
         { ...buildEntry("x1"), timestamp: at(1, 9), match: "exact" },
-        { ...buildEntry("c1"), timestamp: at(1, 10), match: "close" },
+        { ...buildEntry("n1"), timestamp: at(1, 8), match: "near" },
         { ...buildEntry("x2"), timestamp: at(1, 11), match: "exact" },
-        { ...buildEntry("m1"), timestamp: at(1, 8) },
+        { ...buildEntry("m1"), timestamp: at(1, 11, 30), match: "meaning" },
       ],
       total: 4,
     });
@@ -388,9 +388,31 @@ describe("renderHistory — the timeline", () => {
     expect(painted.map((el) => el.querySelector(".day-head")?.textContent ?? el.textContent)).toEqual([
       "Today·2 matches",
       "Close matches",
-      "Today·2 matches",
+      "Today·1 match",
+      "Today·1 match",
     ]);
-    expect(Array.from(cards(container)).map((el) => el.dataset.id)).toEqual(["x2", "x1", "c1", "m1"]);
+    expect(Array.from(cards(container)).map((el) => el.dataset.id)).toEqual(["x2", "x1", "n1", "m1"]);
+  });
+
+  it("takes Close matches away with the last loose result deleted", async () => {
+    apiMock.deleteHistoryEntry.mockResolvedValue({ deleted: true });
+    apiMock.searchHistory.mockResolvedValue({
+      entries: [
+        { ...buildEntry("x1"), match: "exact" },
+        { ...buildEntry("n1"), match: "near" },
+      ],
+      total: 2,
+    });
+    const { container } = await renderAndWait([buildEntry("1")]);
+    await typeQuery(container, "test");
+    await vi.waitFor(() => expect(countText(container)).toBe("2 matches"));
+
+    openMenuOf(cards(container)[1]);
+    container.querySelector<HTMLButtonElement>('[data-action="delete"]')!.click();
+    await flush();
+
+    expect(Array.from(cards(container)).map((el) => el.dataset.id)).toEqual(["x1"]);
+    expect(container.querySelector(".search-tier")).toBeNull();
   });
 
   it("leaves Close matches out when every result is exact", async () => {

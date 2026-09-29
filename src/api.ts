@@ -666,12 +666,12 @@ export interface HistoryEntry {
    *  longer word is `<mark class="near">`. */
   highlighted_text?: string;
   /** Populated only by /history/search: `exact` when every searched word
-   *  stands in the text as a whole word; `close` for word parts and for
-   *  entries found by meaning alone, which come last. */
+   *  stands in the text as a whole word, `near` when a word only sits inside
+   *  a longer one, `meaning` for an entry found by meaning alone. */
   match?: SearchMatch;
 }
 
-export type SearchMatch = "exact" | "close";
+export type SearchMatch = "exact" | "near" | "meaning";
 
 export interface HistoryListResponse {
   entries: HistoryEntry[];

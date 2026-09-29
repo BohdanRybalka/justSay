@@ -27,12 +27,12 @@ RRF_K = 60
 SEMANTIC_ONLY_MAX = 3
 NEAR_MARK_OPEN = '<mark class="near">'
 
-MatchKind = Literal["exact", "close"]
+MatchKind = Literal["exact", "near", "meaning"]
 
 
 class HistorySearchHit(history.HistoryEntry):
     highlighted_text: str = ""
-    match: MatchKind = "close"
+    match: MatchKind = "meaning"
 
 
 _SANITIZE_KEEP_RE = re.compile(r"[^\w\s'’‘]", re.UNICODE)
@@ -74,14 +74,17 @@ def _token_spans(text: str, tokens: list[str]) -> list[tuple[int, int, bool]]:
 
 
 def _match_kind(text: str | None, tokens: list[str]) -> MatchKind:
-    """``exact`` when every token stands in ``text`` as a whole word at least once."""
-    if not text or not tokens:
-        return "close"
+    """``exact`` when every token stands in ``text`` as a whole word at least once,
+    ``meaning`` for a hit found without words (the semantic lane), else ``near``."""
+    if not tokens:
+        return "meaning"
+    if not text:
+        return "near"
     missing = {tok.lower() for tok in tokens if tok}
     for start, end, whole in _token_spans(text, tokens):
         if whole:
             missing.discard(text[start:end].lower())
-    return "close" if missing else "exact"
+    return "near" if missing else "exact"
 
 
 def _build_highlight(text: str | None, tokens: list[str]) -> str:
@@ -352,6 +355,6 @@ async def search_history_hybrid(
     fused = _rrf_fuse(fts_hits, semantic_hits, len(fts_hits) + len(semantic_hits))
     worded = {hit.id for hit in fts_hits}
     exact = [hit for hit in fused if hit.match == "exact"]
-    near = [hit for hit in fused if hit.id in worded and hit.match == "close"]
+    near = [hit for hit in fused if hit.id in worded and hit.match == "near"]
     meaning_only = [hit for hit in fused if hit.id not in worded][:SEMANTIC_ONLY_MAX]
     return (exact + near + meaning_only)[:clamped_limit]

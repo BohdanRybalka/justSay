@@ -16,7 +16,14 @@ import {
   type BuiltRow,
   type HistoryRowsClaim,
 } from "../history-list";
-import { countOf, createTimelineRows, formatClock, formatDuration, matchDayGroups } from "../history-timeline";
+import {
+  closeMatchesHeading,
+  countOf,
+  createTimelineRows,
+  formatClock,
+  formatDuration,
+  matchDayGroups,
+} from "../history-timeline";
 import { escapeHtml } from "../html";
 import type { TabLifecycle } from "../settings";
 
@@ -176,16 +183,16 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
     return el;
   }
 
-  /** Exact matches by day, then everything looser under "Close matches". */
+  /** Exact matches by day; under "Close matches", word parts by day and then, last, the
+   *  entries found by meaning alone. */
   function searchTiers(rows: readonly BuiltRow[]): HTMLElement[] {
-    const painted = matchDayGroups(rows.filter((row) => row.entry.match === "exact"));
-    const close = rows.filter((row) => row.entry.match !== "exact");
-    if (close.length > 0) {
-      const heading = document.createElement("h3");
-      heading.className = "search-tier";
-      heading.textContent = "Close matches";
-      painted.push(heading, ...matchDayGroups(close));
-    }
+    const kind = (match: HistoryEntry["match"]) => rows.filter((row) => row.entry.match === match);
+    const near = matchDayGroups(kind("near"));
+    const meaning = matchDayGroups(
+      rows.filter((row) => row.entry.match !== "exact" && row.entry.match !== "near"),
+    );
+    const painted = matchDayGroups(kind("exact"));
+    if (near.length + meaning.length > 0) painted.push(closeMatchesHeading(), ...near, ...meaning);
     return painted;
   }
 
