@@ -121,10 +121,16 @@ export class FakeResizeObserver {
     this.targets.push(target);
   }
 
-  unobserve(): void {}
+  unobserve(target: Element): void {
+    this.targets.splice(this.targets.indexOf(target), 1);
+  }
 
   disconnect(): void {
     this.targets.length = 0;
+  }
+
+  watched(): readonly Element[] {
+    return this.targets;
   }
 
   resize(): void {

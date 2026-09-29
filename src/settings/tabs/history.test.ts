@@ -48,6 +48,7 @@ function at(day: number, hour: number, minute = 0): string {
 }
 
 function mount(container = document.createElement("div")) {
+  document.body.append(container);
   return { container, lifecycle: renderHistory(container, SETTINGS) };
 }
 
@@ -141,6 +142,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  document.body.replaceChildren();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -271,6 +273,33 @@ describe("renderHistory — the timeline", () => {
     card.querySelector<HTMLElement>(".entry-text")!.click();
     expect(card.classList.contains("entry--expanded")).toBe(false);
     expect(card.querySelector(".entry-more")!.textContent).toBe("Show more");
+  });
+
+  it("measures every card a search paints, so a cut-off match offers Show more", async () => {
+    apiMock.searchHistory.mockResolvedValue({ entries: [buildEntry("9")], total: 1 });
+    const { container } = await renderAndWait([buildEntry("1")]);
+    await typeQuery(container, "test");
+    await vi.waitFor(() => expect(countText(container)).toBe("1 match"));
+    const match = cards(container)[0];
+    layOut(match, 120, 42);
+
+    FakeResizeObserver.latest!.resize();
+
+    expect(match.classList.contains("entry--long")).toBe(true);
+  });
+
+  it("lets go of a card's text once it has left the page, and of everything on teardown", async () => {
+    apiMock.searchHistory.mockResolvedValue({ entries: [buildEntry("9")], total: 1 });
+    const { container, lifecycle } = await renderAndWait([buildEntry("1")]);
+    const first = cards(container)[0].querySelector(".entry-text")!;
+    await typeQuery(container, "test");
+    await vi.waitFor(() => expect(countText(container)).toBe("1 match"));
+
+    FakeResizeObserver.latest!.resize();
+    expect(FakeResizeObserver.latest!.watched()).not.toContain(first);
+
+    lifecycle.destroy();
+    expect(FakeResizeObserver.latest!.watched()).toHaveLength(0);
   });
 
   it("leaves a short card alone when its text is clicked", async () => {

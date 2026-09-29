@@ -37,14 +37,18 @@ export function renderHistoryHeading(container: HTMLElement): void {
   );
 }
 
-/** Marks every collapsed card whose text is cut off, which is what shows its "Show more".
- *  Runs whenever the timeline's size changes: a page landing, a card expanding, a resize. */
-function markLongTexts(records: readonly ResizeObserverEntry[]): void {
-  for (const record of records) {
-    for (const card of record.target.querySelectorAll<HTMLElement>(".entry:not(.entry--expanded)")) {
-      const text = card.querySelector<HTMLElement>(".entry-text");
-      if (text) card.classList.toggle("entry--long", text.scrollHeight > text.clientHeight + 1);
+/** Marks a collapsed card whose text is cut off, which is what shows its "Show more".
+ *  Each text is watched on its own, so a new card, an expand and a resize are all measured;
+ *  a text that has left the page is let go. */
+function markLongTexts(records: readonly ResizeObserverEntry[], observer: ResizeObserver): void {
+  for (const { target } of records) {
+    if (!target.isConnected) {
+      observer.unobserve(target);
+      continue;
     }
+    const card = target.closest<HTMLElement>(".entry");
+    if (!card || card.classList.contains("entry--expanded")) continue;
+    card.classList.toggle("entry--long", target.scrollHeight > target.clientHeight + 1);
   }
 }
 
@@ -92,7 +96,6 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
   const daysEl = section.querySelector<HTMLElement>("#history-days")!;
   const timeline = createTimelineRows(daysEl);
   const textFit = new ResizeObserver(markLongTexts);
-  textFit.observe(daysEl);
   const shortcut = formatAccelerator(settings.shortcut, detectShortcutPlatform(navigator));
 
   let searchClaim: HistoryRowsClaim | null = null;
@@ -207,6 +210,8 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
         <button type="button" data-action="delete" aria-label="Delete">${icon("x", "small")}</button>
       </span></div>
     `;
+
+    textFit.observe(el.querySelector(".entry-text")!);
 
     el.addEventListener("click", async (e) => {
       const target = e.target as HTMLElement;
