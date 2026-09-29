@@ -1704,21 +1704,21 @@ def test_get_page_never_releases_the_store_lock_between_its_reads(isolated_stora
     real_count_locked = history._count_locked
     real_days_locked = history._days_locked
 
-    def entries(conn, limit, before):
+    def entries(conn, limit, before, starred_only):
         events.append("read-entries")
-        return real_entries_locked(conn, limit, before)
+        return real_entries_locked(conn, limit, before, starred_only)
 
-    def has_more(conn, after_ts, after_id):
+    def has_more(conn, after_ts, after_id, starred_only):
         events.append("read-has-more")
-        return real_has_more_locked(conn, after_ts, after_id)
+        return real_has_more_locked(conn, after_ts, after_id, starred_only)
 
     def count(conn):
         events.append("read-count")
         return real_count_locked(conn)
 
-    def days(conn, rows):
+    def days(conn, rows, starred_only):
         events.append("read-days")
-        return real_days_locked(conn, rows)
+        return real_days_locked(conn, rows, starred_only)
 
     with (
         patch.object(history, "_lock", _RecordingLock(history._lock, events)),
@@ -1907,8 +1907,8 @@ def test_the_page_read_asks_for_exactly_the_clamped_limit(isolated_storage, tmp_
     real_entries_locked = history._entries_locked
     read_sizes: list[int] = []
 
-    def entries(conn, limit, before):
-        rows = real_entries_locked(conn, limit, before)
+    def entries(conn, limit, before, starred_only):
+        rows = real_entries_locked(conn, limit, before, starred_only)
         read_sizes.append(len(rows))
         return rows
 

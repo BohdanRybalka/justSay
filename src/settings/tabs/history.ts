@@ -7,6 +7,7 @@ import {
 } from "../../api";
 import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
 import { copyToClipboard } from "../../clipboard";
+import { renderSegmented } from "../../ui/controls";
 import { icon, type IconName } from "../../ui/icons";
 import { createHistoryList, sidecarTooOldText, SENTINEL_READING, type HistoryRowsClaim } from "../history-list";
 import { countOf, createTimelineRows, formatClock, formatDuration } from "../history-timeline";
@@ -23,6 +24,13 @@ const SOURCE_ICONS: Record<HistoryEntry["source"], IconName> = {
   file: "file",
   meeting: "users",
 };
+
+type HistoryFilter = "all" | "starred";
+
+const FILTER_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "starred", label: "Starred" },
+] as const;
 
 const SKELETON_CARD = `<div class="entry entry--skeleton" aria-hidden="true"><span class="entry-dot"></span><i></i><i></i></div>`;
 
@@ -79,7 +87,7 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
   const section = document.createElement("div");
   section.className = "history";
   section.innerHTML = `
-    <div class="search-box">${icon("search")}<input type="search" id="history-search" placeholder="Search transcripts..." aria-label="Search" /></div>
+    <div class="search-box">${icon("search")}<input type="search" id="history-search" placeholder="Search transcripts..." aria-label="Search" /><div id="history-filter" aria-label="Show"></div></div>
     <div class="history-search-hint" id="history-search-hint"></div>
     <div class="history-count" id="history-count">Loading...</div>
     <div class="timeline">
@@ -100,6 +108,8 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
   let debounceTimer: number | null = null;
   let pollTimer: number | null = null;
   let destroyed = false;
+  let starredOnly = false;
+  let openMenu: { menu: HTMLElement; trigger: HTMLButtonElement } | null = null;
 
   const list = createHistoryList({
     pageSize: PAGE_SIZE,
@@ -112,12 +122,30 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
     rows: timeline,
     createRow: createEntryElement,
     renderEmptyState: (isEmpty) => {
-      if (isEmpty) {
-        daysEl.innerHTML = `<p class="history-empty">Nothing here yet. Hold <b>${escapeHtml(shortcut)}</b> anywhere and talk.</p>`;
-      }
+      if (!isEmpty) return;
+      daysEl.innerHTML = starredOnly
+        ? `<p class="history-empty">Nothing starred yet.</p>`
+        : `<p class="history-empty">Nothing here yet. Hold <b>${escapeHtml(shortcut)}</b> anywhere and talk.</p>`;
     },
     isDestroyed: () => destroyed,
+    starredOnly: () => starredOnly,
   });
+
+  function showCurrentView(): void {
+    const query = searchInput.value.trim();
+    if (query) void runSearch(query);
+    else void list.load();
+  }
+
+  renderSegmented<HistoryFilter>(
+    section.querySelector<HTMLElement>("#history-filter")!,
+    FILTER_OPTIONS,
+    "all",
+    (filter) => {
+      starredOnly = filter === "starred";
+      showCurrentView();
+    },
+  );
 
   function noMatchesElement(): HTMLElement {
     const el = document.createElement("p");
@@ -141,7 +169,7 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
     searchClaim = claim;
     searchHint.textContent = "Searching...";
     try {
-      const resp = await api.searchHistory(q, PAGE_SIZE);
+      const resp = await api.searchHistory(q, PAGE_SIZE, starredOnly);
       claim.replaceRows(
         resp.entries.length === 0
           ? [noMatchesElement()]
@@ -180,14 +208,58 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
     const value = searchInput.value.trim();
     debounceTimer = window.setTimeout(() => {
       debounceTimer = null;
-      if (!value) {
-        searchHint.textContent = "";
-        void list.load();
-      } else {
-        void runSearch(value);
-      }
+      if (!value) searchHint.textContent = "";
+      showCurrentView();
     }, SEARCH_DEBOUNCE_MS);
   });
+
+  function closeMenu(returnFocus = false): void {
+    if (!openMenu) return;
+    const { menu, trigger } = openMenu;
+    openMenu = null;
+    menu.remove();
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.closest(".entry")?.classList.remove("entry--menu-open");
+    document.removeEventListener("pointerdown", closeMenuOutside, true);
+    document.removeEventListener("keydown", closeMenuOnEscape, true);
+    if (returnFocus) trigger.focus();
+  }
+
+  function closeMenuOutside(event: Event): void {
+    const target = event.target as Node;
+    if (openMenu && !openMenu.menu.contains(target) && !openMenu.trigger.contains(target)) {
+      closeMenu();
+    }
+  }
+
+  function closeMenuOnEscape(event: KeyboardEvent): void {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    closeMenu(true);
+  }
+
+  /** The card's "more" menu, under its trigger; one menu is open at a time. */
+  function toggleMenu(trigger: HTMLButtonElement): void {
+    const wasOpen = openMenu?.trigger === trigger;
+    closeMenu();
+    if (wasOpen) return;
+    const menu = document.createElement("div");
+    menu.className = "entry-menu";
+    menu.setAttribute("role", "menu");
+    menu.innerHTML = `<button type="button" role="menuitem" data-action="delete">${icon("x", "small")}Delete</button>`;
+    trigger.after(menu);
+    trigger.setAttribute("aria-expanded", "true");
+    trigger.closest(".entry")?.classList.add("entry--menu-open");
+    openMenu = { menu, trigger };
+    document.addEventListener("pointerdown", closeMenuOutside, true);
+    document.addEventListener("keydown", closeMenuOnEscape, true);
+    menu.querySelector("button")!.focus();
+  }
+
+  function paintStar(button: HTMLButtonElement, starred: boolean): void {
+    button.setAttribute("aria-pressed", String(starred));
+    button.classList.toggle("entry-star--on", starred);
+  }
 
   function createEntryElement(entry: HistoryEntry): HTMLElement {
     const el = document.createElement("article");
@@ -207,11 +279,15 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
       </div>
       <div class="entry-meta">${metaLine(entry)}${sourceBadge(entry)}<span class="entry-actions">
         <button type="button" data-action="copy" aria-label="Copy">${icon("copy", "small")}</button>
-        <button type="button" data-action="delete" aria-label="Delete">${icon("x", "small")}</button>
+        <button type="button" class="entry-star" data-action="star" aria-label="Star">${icon("star", "small")}</button>
+        <button type="button" data-action="more" aria-label="More" aria-haspopup="menu" aria-expanded="false">${icon("dots", "small")}</button>
       </span></div>
     `;
 
     textFit.observe(el.querySelector(".entry-text")!);
+    let starred = entry.starred;
+    let starSaving = false;
+    paintStar(el.querySelector<HTMLButtonElement>('[data-action="star"]')!, starred);
 
     el.addEventListener("click", async (e) => {
       const target = e.target as HTMLElement;
@@ -223,7 +299,22 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
       }
       if (!button) return;
 
-      if (button.dataset.action === "copy") {
+      if (button.dataset.action === "more") {
+        toggleMenu(button);
+      } else if (button.dataset.action === "star") {
+        if (starSaving) return;
+        starSaving = true;
+        paintStar(button, !starred);
+        try {
+          await api.setHistoryStarred(entry.id, !starred);
+          starred = !starred;
+        } catch (err) {
+          paintStar(button, starred);
+          console.error(err);
+        } finally {
+          starSaving = false;
+        }
+      } else if (button.dataset.action === "copy") {
         const copied = await copyToClipboard(entry.text);
         button.innerHTML = icon(copied ? "check" : "alert", "small");
         button.setAttribute("aria-label", copied ? "Copied" : "Copy failed");
@@ -231,7 +322,8 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
           button.innerHTML = icon("copy", "small");
           button.setAttribute("aria-label", "Copy");
         }, COPIED_FLASH_MS);
-      } else {
+      } else if (button.dataset.action === "delete") {
+        closeMenu();
         try {
           await api.deleteHistoryEntry(entry.id);
           timeline.rowRemoved(el);
@@ -260,6 +352,7 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
   return {
     destroy() {
       destroyed = true;
+      closeMenu();
       stopPolling();
       list.disconnect();
       textFit.disconnect();

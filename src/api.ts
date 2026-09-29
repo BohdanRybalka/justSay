@@ -753,6 +753,11 @@ async function historyPage(path: string, presence: "next_cursor" | "newest_curso
   };
 }
 
+/** The filter both History reads accept; absent means every entry. */
+function starredQuery(starredOnly: boolean): string {
+  return starredOnly ? "&starred=true" : "";
+}
+
 /** The two fields `/history` and `/history/search` both promise. A 200 carrying
  *  neither `entries` nor `total` paints `undefined transcripts` over an empty
  *  list, which is a worse answer than a named failure.
@@ -850,11 +855,11 @@ export const api = {
    *  an entry malformed in a way no check here anticipated fails over an intact
    *  list. A validator here would have to know every field each tab's row
    *  reads to make the same promise. */
-  getHistory: (limit = 50, cursor: HistoryCursor | null = null) =>
+  getHistory: (limit = 50, cursor: HistoryCursor | null = null, starredOnly = false) =>
     historyPage(
       cursor === null
-        ? `/history?limit=${limit}`
-        : `/history?limit=${limit}&before_ts=${cursor.ts}&before_id=${encodeURIComponent(cursor.id)}`,
+        ? `/history?limit=${limit}${starredQuery(starredOnly)}`
+        : `/history?limit=${limit}&before_ts=${cursor.ts}&before_id=${encodeURIComponent(cursor.id)}${starredQuery(starredOnly)}`,
       "next_cursor",
     ),
 
@@ -862,9 +867,9 @@ export const api = {
    *  back — oldest first. A backend predating this read ignores `after_*` and
    *  answers the first page, which would repaint rows already on screen, so a
    *  body without `newest_cursor` is version skew rather than a page. */
-  getNewerHistory: (limit: number, after: HistoryCursor) =>
+  getNewerHistory: (limit: number, after: HistoryCursor, starredOnly = false) =>
     historyPage(
-      `/history?limit=${limit}&after_ts=${after.ts}&after_id=${encodeURIComponent(after.id)}`,
+      `/history?limit=${limit}&after_ts=${after.ts}&after_id=${encodeURIComponent(after.id)}${starredQuery(starredOnly)}`,
       "newest_cursor",
     ),
 
@@ -889,12 +894,12 @@ export const api = {
    *  failed check never travels through the version-skew catch: a malformed 200
    *  is neither a `404` nor a `405`, but reporting it as skew would be the kind
    *  of mistake a catch this wide invites. */
-  searchHistory: async (q: string, limit = 30) => {
+  searchHistory: async (q: string, limit = 30, starredOnly = false) => {
     let body: unknown;
     try {
       body = await request<unknown>(
         "GET",
-        `/history/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+        `/history/search?q=${encodeURIComponent(q)}&limit=${limit}${starredQuery(starredOnly)}`,
         undefined,
         UNRECONCILED,
       );
@@ -1028,6 +1033,16 @@ export const api = {
    *  — and the natural retry is a second destructive call issued against a
    *  backend still executing the first. */
   cleanupTemp: () => request<CleanupResult>("POST", "/settings/cleanup", undefined, UNRECONCILED),
+
+  /** Waits like `deleteHistoryEntry`: a star written after the caller gave up
+   *  would leave the icon showing the opposite of what is stored. */
+  setHistoryStarred: (id: string, starred: boolean) =>
+    request<{ starred: boolean }>(
+      "PUT",
+      `/history/${encodeURIComponent(id)}/star`,
+      { starred },
+      UNRECONCILED,
+    ),
 
   deleteHistoryEntry: (id: string) =>
     request<{ deleted: boolean }>("DELETE", `/history/${id}`, undefined, UNRECONCILED),

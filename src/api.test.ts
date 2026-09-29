@@ -635,6 +635,7 @@ describe("a backend that accepts a request and never answers", () => {
     ["sttLocalUnload", (a: Api) => a.sttLocalUnload()],
     ["cleanupTemp", (a: Api) => a.cleanupTemp()],
     ["deleteHistoryEntry", (a: Api) => a.deleteHistoryEntry("1")],
+    ["setHistoryStarred", (a: Api) => a.setHistoryStarred("1", true)],
     ["clearHistory", (a: Api) => a.clearHistory()],
     ["searchHistory", (a: Api) => a.searchHistory("note")],
   ])("waits %s out rather than reporting an outcome nobody established", async (_name, call) => {
@@ -1242,6 +1243,39 @@ describe("the history cursor on the wire", () => {
     await api.getHistory(30);
 
     expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:9377/history?limit=30");
+  });
+
+  it("narrows every History read to starred entries only when asked", async () => {
+    const { api } = await import("./api");
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        okJson({ entries: [], total: 0, next_cursor: null, newest_cursor: null, days: [] }),
+      ),
+    );
+
+    await api.getHistory(30, { ts: 5, id: "x" }, true);
+    await api.getNewerHistory(30, { ts: 5, id: "x" }, true);
+    await api.searchHistory("note", 30, true);
+    await api.getHistory(30);
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "http://127.0.0.1:9377/history?limit=30&before_ts=5&before_id=x&starred=true",
+      "http://127.0.0.1:9377/history?limit=30&after_ts=5&after_id=x&starred=true",
+      "http://127.0.0.1:9377/history/search?q=note&limit=30&starred=true",
+      "http://127.0.0.1:9377/history?limit=30",
+    ]);
+  });
+
+  it("stars an entry with a PUT carrying the new state", async () => {
+    const { api } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ starred: true }));
+
+    await expect(api.setHistoryStarred("a/b", true)).resolves.toEqual({ starred: true });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:9377/history/a%2Fb/star");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(String(init.body))).toEqual({ starred: true });
   });
 
   it("sends both halves of a cursor together, since the backend rejects half of one", async () => {
