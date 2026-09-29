@@ -2036,7 +2036,7 @@ def test_the_shipped_word_search_read_keeps_its_ordering_index(isolated_storage,
 
     reads = [
         s
-        for s in _statements_from(lambda: search.search_history("ntry", limit=5))
+        for s in _statements_from(lambda: search.search_history("ntr", limit=5))
         if _reads_entries(s) and "LIKE" in s.upper()
     ]
     assert reads, "search.search_history issued no LIKE read over entries"
