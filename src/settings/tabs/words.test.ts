@@ -14,16 +14,21 @@ vi.mock("../../api", async (importOriginal) => {
 import { renderWords } from "./words";
 
 function buildStats(overrides: Partial<HistoryStats> = {}): HistoryStats {
+  const totalWords = overrides.total_words ?? 100;
   return {
     total_entries: 1,
-    total_words: 100,
+    total_words: totalWords,
     today_words: 10,
     week_words: 50,
     total_audio_seconds: 60,
     by_language: {},
-    by_model: {},
+    by_model: { demo: totalWords },
     ...overrides,
   } as HistoryStats;
+}
+
+function shownWords(): string | undefined {
+  return document.querySelector("#words-by-model .bucket-value")?.textContent ?? undefined;
 }
 
 const noTopWords: TopWordsResponse = { items: [], scanned: 0 };
@@ -63,7 +68,7 @@ describe("the Words tab's 5 s poll", () => {
     settle[0](buildStats({ total_words: 111 }));
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(document.getElementById("words-stat-lifetime")!.textContent).toBe(
+    expect(shownWords()).toBe(
       (222).toLocaleString("uk-UA"),
     );
 
@@ -98,7 +103,7 @@ describe("the whole-page read the empty-to-non-empty transition triggers", () =>
     await vi.advanceTimersByTimeAsync(0);
 
     expect(container.textContent).not.toContain("No transcriptions yet");
-    expect(document.getElementById("words-stat-lifetime")!.textContent).toBe(
+    expect(shownWords()).toBe(
       (55).toLocaleString("uk-UA"),
     );
 
@@ -218,7 +223,7 @@ describe("the Words tab after the Settings window is dismissed", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(
-      document.getElementById("words-stat-lifetime")?.textContent,
+      shownWords(),
       "a returning user is shown the repair in the same tick as the window, rather than " +
         "left on the error line until the next poll fires five seconds later",
     ).toBe((4321).toLocaleString("uk-UA"));
@@ -301,7 +306,7 @@ describe("the Words tab after the Settings window is dismissed", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(
-      document.getElementById("words-stat-lifetime")!.textContent,
+      shownWords(),
       "the read the returning user is waiting on is the newer one, and the answer the " +
         "dismissal disowned must not paint the figures it read before the window closed",
     ).toBe((999).toLocaleString("uk-UA"));
@@ -339,7 +344,7 @@ describe("the Words tab after the Settings window is dismissed", () => {
       "a read the dismissal disowned may not paint its failure either: the window is back, " +
         "its own read has landed, and an error from before it is not what is on screen",
     ).not.toContain("Failed to load");
-    expect(document.getElementById("words-stat-lifetime")?.textContent).toBe(
+    expect(shownWords()).toBe(
       (999).toLocaleString("uk-UA"),
     );
 
@@ -421,7 +426,7 @@ describe("the Words tab while the Settings window stays open", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(
-      document.getElementById("words-stat-lifetime")?.textContent,
+      shownWords(),
       "the window is open and the backend has answered again, so the screen has to come " +
         "back on its own rather than wait for the user to close and reopen it",
     ).toBe((4321).toLocaleString("uk-UA"));
@@ -439,7 +444,7 @@ describe("the Words tab while the Settings window stays open", () => {
     document.body.appendChild(container);
     const tab = renderWords(container);
     await vi.advanceTimersByTimeAsync(0);
-    expect(document.getElementById("words-stat-entries")).not.toBeNull();
+    expect(document.getElementById("words-by-model")).not.toBeNull();
 
     await vi.advanceTimersByTimeAsync(5000);
     await vi.advanceTimersByTimeAsync(0);
@@ -450,7 +455,7 @@ describe("the Words tab while the Settings window stays open", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(
-      document.getElementById("words-stat-lifetime")?.textContent,
+      shownWords(),
       "a read that threw with the entry count back at zero paints the same error line as " +
         "any other, and the tick that follows has to replace it like any other",
     ).toBe((4321).toLocaleString("uk-UA"));
@@ -534,7 +539,7 @@ describe("the Words tab while the Settings window stays open", () => {
         "is the one thing a 404 does remove",
     ).toBeNull();
     expect(container.textContent).not.toContain("Top words");
-    expect(document.getElementById("words-stat-entries")).not.toBeNull();
+    expect(document.getElementById("words-by-model")).not.toBeNull();
 
     await vi.advanceTimersByTimeAsync(60_000);
 

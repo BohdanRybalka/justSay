@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatCoarseDuration, formatElapsedClock } from "./format";
+import { formatCoarseDuration, formatElapsedClock, formatHoursClock, wholeMinutes } from "./format";
 
 describe("formatElapsedClock — the dictation and meeting clock", () => {
   it("counts the elapsed time up in minutes and seconds", () => {
@@ -15,10 +15,10 @@ describe("formatElapsedClock — the dictation and meeting clock", () => {
 });
 
 describe("formatCoarseDuration — a total read at a glance", () => {
-  it("drops to the largest useful unit", () => {
-    expect(formatCoarseDuration(45)).toBe("45 s");
-    expect(formatCoarseDuration(3665)).toBe("1 h 1 m");
-    expect(formatCoarseDuration(125)).toBe("2 m 5 s");
+  it("shows hours and minutes, or minutes alone under an hour", () => {
+    expect(formatCoarseDuration(10620)).toBe("2 h 57 m");
+    expect(formatCoarseDuration(3600)).toBe("1 h 0 m");
+    expect(formatCoarseDuration(125)).toBe("2 m");
   });
 
   it("treats absent, zero and negative totals as zero", () => {
@@ -27,8 +27,25 @@ describe("formatCoarseDuration — a total read at a glance", () => {
   });
 });
 
-describe("the two formatters stay distinguishable", () => {
-  it("renders the same input two different ways, which is why they are two functions", () => {
-    expect(formatElapsedClock(61)).not.toBe(formatCoarseDuration(61));
+describe("formatHoursClock — a long total beside another", () => {
+  it("writes hours and two-digit minutes", () => {
+    expect(formatHoursClock(16020)).toBe("4:27");
+    expect(formatHoursClock(300)).toBe("0:05");
+    expect(formatHoursClock(0)).toBe("0:00");
+  });
+});
+
+describe("wholeMinutes", () => {
+  it("rounds to the nearest minute and never goes below zero", () => {
+    expect(wholeMinutes(89)).toBe(1);
+    expect(wholeMinutes(90)).toBe(2);
+    expect(wholeMinutes(-30)).toBe(0);
+  });
+});
+
+describe("the formatters stay distinguishable", () => {
+  it("render the same input different ways, which is why they are separate functions", () => {
+    expect(formatElapsedClock(3600)).not.toBe(formatCoarseDuration(3600));
+    expect(formatHoursClock(3600)).not.toBe(formatElapsedClock(3600));
   });
 });

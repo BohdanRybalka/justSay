@@ -626,6 +626,21 @@ export interface HistoryStats {
   by_model: Record<string, number>;
 }
 
+/** The Insights panel's figures, over dictations only (`GET /insights`). */
+export interface Insights {
+  today: { words: number; recordings: number };
+  /** The calendar month to date. `typing_seconds` is the same words typed by hand;
+   *  `pace_wpm` is null when no dictation this month knows its length. */
+  month: {
+    words: number;
+    recordings: number;
+    speaking_seconds: number;
+    typing_seconds: number;
+    pace_wpm: number | null;
+  };
+  streak: { current_days: number; longest_days: number };
+}
+
 export interface StorageInfo {
   temp_size_bytes: number;
 }
@@ -881,6 +896,8 @@ export const api = {
     ),
 
   historyStats: () => request<HistoryStats>("GET", "/history/stats", undefined, REREADABLE),
+
+  insights: () => request<Insights>("GET", "/insights", undefined, REREADABLE),
 
   wordsTop: (lang: "all" | "uk" | "en" = "all", limit = 50) =>
     request<TopWordsResponse>("GET", `/words/top?lang=${lang}&limit=${limit}`, undefined, REREADABLE),

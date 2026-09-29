@@ -4,7 +4,6 @@ import {
   type HistoryStats,
   type TopWordsResponse,
 } from "../../api";
-import { formatCoarseDuration } from "../../format";
 import { escapeHtml } from "../html";
 import { isStaleStatusResponse } from "../../stale-response";
 import type { TabLifecycle } from "../settings";
@@ -158,12 +157,6 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
         return;
       }
 
-      renderText("words-stat-today", stats.today_words.toLocaleString("uk-UA"));
-      renderText("words-stat-week", stats.week_words.toLocaleString("uk-UA"));
-      renderText("words-stat-lifetime", stats.total_words.toLocaleString("uk-UA"));
-      renderText("words-stat-audio", formatCoarseDuration(stats.total_audio_seconds));
-      renderText("words-stat-entries", stats.total_entries.toLocaleString("uk-UA"));
-
       if (topBelongsOnScreen && topLang === requestedLang) {
         topEl!.innerHTML = renderTopWordsBody(top);
       }
@@ -180,11 +173,6 @@ export function renderWords(container: HTMLElement, windowHidden = false): TabLi
       if (cancelled || isStaleStatusResponse(token, latestStatsToken)) return;
       console.error("refreshStats failed:", e);
     }
-  }
-
-  function renderText(id: string, value: string) {
-    const el = document.getElementById(id);
-    if (el) el.textContent = value;
   }
 
   function wireLangToggle() {
@@ -268,34 +256,10 @@ function renderBody(
   }
 
   return `
-    ${renderStatsCards(stats)}
     ${top.kind === "unsupported" ? "" : renderTopWordsBlock(top, lang)}
     ${renderBucket("By language", "words-by-lang", stats.by_language, (code) => LANGUAGE_LABELS[code] || code)}
     ${renderBucket("By model", "words-by-model", stats.by_model, (m) => m)}
   `;
-}
-
-function renderStatsCards(s: HistoryStats): string {
-  const cards = `
-    <div class="word-cards">
-      ${bigCard("Today", "words-stat-today", s.today_words)}
-      ${bigCard("This week", "words-stat-week", s.week_words)}
-      ${bigCard("Lifetime", "words-stat-lifetime", s.total_words)}
-    </div>
-  `;
-
-  const audioBlock = `
-    <div class="setting-row" style="margin-top:16px;">
-      <span class="label">Total audio time</span>
-      <span class="value num" id="words-stat-audio">${formatCoarseDuration(s.total_audio_seconds)}</span>
-    </div>
-    <div class="setting-row">
-      <span class="label">Transcriptions</span>
-      <span class="value num" id="words-stat-entries">${s.total_entries.toLocaleString("uk-UA")}</span>
-    </div>
-  `;
-
-  return cards + audioBlock;
 }
 
 function renderTopWordsBlock(top: TopPresent, lang: Lang): string {
@@ -348,16 +312,6 @@ function renderTopWords(top: TopWordsResponse): string {
     <div class="bucket-list">${rows}</div>
     <div class="value" style="color:var(--text-muted); font-size:11px; margin-top:6px;">
       Based on ${top.scanned.toLocaleString("uk-UA")} transcript${top.scanned !== 1 ? "s" : ""}.
-    </div>
-  `;
-}
-
-function bigCard(label: string, valueId: string, count: number): string {
-  return `
-    <div class="word-card">
-      <div class="word-card-label">${label}</div>
-      <div class="word-card-value num" id="${valueId}">${count.toLocaleString("uk-UA")}</div>
-      <div class="word-card-sub">words</div>
     </div>
   `;
 }

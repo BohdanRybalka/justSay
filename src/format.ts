@@ -16,13 +16,20 @@ export function formatElapsedClock(seconds: number): string {
   return `${minutes}:${remainder.toString().padStart(2, "0")}`;
 }
 
-/** `h m` / `m s` / `s` — a total, read at a glance rather than watched. */
+/** `h m` / `m` — a total, read at a glance rather than watched. */
 export function formatCoarseDuration(seconds: number): string {
-  if (!seconds || seconds < 0) return "0 m";
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const remainder = Math.floor(seconds % 60);
-  if (hours > 0) return `${hours} h ${minutes} m`;
-  if (minutes > 0) return `${minutes} m ${remainder} s`;
-  return `${remainder} s`;
+  const minutes = wholeMinutes(seconds);
+  const hours = Math.floor(minutes / 60);
+  return hours > 0 ? `${hours} h ${minutes % 60} m` : `${minutes} m`;
+}
+
+/** `h:mm` — a long total set beside another one. */
+export function formatHoursClock(seconds: number): string {
+  const minutes = wholeMinutes(seconds);
+  return `${Math.floor(minutes / 60)}:${(minutes % 60).toString().padStart(2, "0")}`;
+}
+
+/** The nearest whole minute; absent and negative totals are zero. */
+export function wholeMinutes(seconds: number): number {
+  return seconds > 0 ? Math.round(seconds / 60) : 0;
 }

@@ -32,6 +32,7 @@ import { renderDictationMeetings, type MeetingsGroup } from "./tabs/dictation-me
 import { renderDictionary } from "./tabs/dictionary";
 import { renderHistory, renderHistoryHeading } from "./tabs/history";
 import { renderWords } from "./tabs/words";
+import { renderInsights } from "./tabs/insights";
 import { renderTranscribe } from "./tabs/transcribe";
 import { renderAccount } from "./tabs/account";
 import { renderSettingsPanel } from "./tabs/settings-panel";
@@ -126,8 +127,11 @@ function hostLegacyTabs(
 }
 
 const panels: Record<PanelName, PanelRenderer> = {
-  insights: (container, _settings, windowHidden) =>
-    hostLegacyTabs(container, [(tab) => renderWords(tab, windowHidden)]),
+  insights: (container, loaded, windowHidden) => {
+    const viewer = { name: displayName(loaded.display_name, osAccountName), shortcut: loaded.shortcut };
+    const insights = renderInsights(container, viewer, windowHidden);
+    return combineLifecycles([insights, hostLegacyTabs(container, [(tab) => renderWords(tab, windowHidden)])]);
+  },
   history: (container, loaded) => {
     renderHistoryHeading(container);
     const transcribe = hostLegacyTabs(container, [renderTranscribe]);
@@ -456,7 +460,7 @@ async function renameUser(chosen: string): Promise<void> {
 async function initAccountName() {
   osAccountName = await readOsDisplayName();
   renderAccountName();
-  if (currentPanel === "account" && settings) switchPanel("account");
+  if ((currentPanel === "account" || currentPanel === "insights") && settings) switchPanel(currentPanel);
 }
 
 

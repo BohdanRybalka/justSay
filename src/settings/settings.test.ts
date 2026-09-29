@@ -65,6 +65,16 @@ vi.mock("./tabs/words", () => ({
   }),
 }));
 
+const insightsViewers: { name: string; shortcut: string }[] = [];
+
+vi.mock("./tabs/insights", () => ({
+  renderInsights: vi.fn((container: HTMLElement, viewer: { name: string; shortcut: string }) => {
+    insightsViewers.push(viewer);
+    container.insertAdjacentHTML("beforeend", '<div id="insights-body"></div>');
+    return { destroy: vi.fn() };
+  }),
+}));
+
 const transcribeTab = vi.fn();
 
 vi.mock("./tabs/transcribe", () => ({
@@ -216,6 +226,7 @@ beforeEach(() => {
   holdVisibilityRead = false;
   releaseVisibilityRead = () => {};
   modeMountedHidden.length = 0;
+  insightsViewers.length = 0;
   document.body.innerHTML = `
     <header id="titlebar" class="titlebar"></header>
     <nav id="sidebar">
@@ -378,6 +389,20 @@ describe("the sidebar", () => {
       expect(row.querySelector(".account-row-name")!.textContent).toBe("Bohdan Rybalka"),
     );
     expect(row.querySelector(".avatar")!.textContent).toBe("BR");
+  });
+
+  it("greets by the computer's name once it arrives, with the saved shortcut", async () => {
+    let answerName: (name: string) => void = () => {};
+    readOsDisplayNameMock.mockImplementationOnce(() => new Promise((resolve) => (answerName = resolve)));
+    await bootWithSettingsLoaded();
+    expect(insightsViewers[insightsViewers.length - 1].name).toBe("");
+
+    answerName("Bohdan Rybalka");
+
+    await vi.waitFor(() =>
+      expect(insightsViewers[insightsViewers.length - 1]).toEqual({ name: "Bohdan Rybalka", shortcut: "Ctrl+Alt+KeyV" }),
+    );
+    expect(currentPanels()).toEqual(["insights"]);
   });
 
   it("still reads as Account when the computer gives no name", async () => {

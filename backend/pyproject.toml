@@ -86,6 +86,7 @@ ignore_names = [
     "shortcut", "theme", "display_name", "paste_at_cursor", "previous_language", "package_installed", "model_loaded", "model_ram_mb",
     "model_downloaded", "model_bytes",
     "total_audio_seconds", "word", "highlighted_text", "newest_cursor",
+    "typing_seconds", "pace_wpm", "streak", "current_days", "longest_days",
     "row_factory", "LimitFlags", "settings_customise_sources",
     "log_file_path", "_reset_library_cache", "_meetings_start_as_acknowledged",
 ]
