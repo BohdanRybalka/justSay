@@ -1,9 +1,9 @@
 """Transcript search — the FTS5 lane, the LIKE fallback, the semantic lane and RRF fusion.
 
-``search_history`` is FTS5 BM25 prefix match plus a paged ``LIKE`` walk,
-``search_history_semantic`` is vector distance over ``vec_entries``, and
-``search_history_hybrid`` fuses both with RRF and answers exact hits, close
-word hits and at most ``SEMANTIC_ONLY_MAX`` meaning-only hits, in that order.
+``search_history`` is FTS5 BM25 prefix match, widened by words a typo or two
+away, plus a paged ``LIKE`` walk; ``search_history_semantic`` is vector distance
+over ``vec_entries``, and ``search_history_hybrid`` fuses both with RRF: exact
+hits, close word hits, at most ``SEMANTIC_ONLY_MAX`` meaning-only hits, in order.
 This module owns no connection: it borrows ``history._lock`` for every statement.
 """
 
@@ -26,6 +26,11 @@ SEARCH_SCAN_CHUNK_ROWS = 200
 RRF_K = 60
 SEMANTIC_ONLY_MAX = 3
 NEAR_MARK_OPEN = '<mark class="near">'
+TYPO_EXPANSIONS_MAX = 50
+_VOCAB_DDL = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS temp.entry_fts_vocab "
+    "USING fts5vocab(main, entry_fts, row)"
+)
 
 MatchKind = Literal["exact", "near", "meaning"]
 
@@ -38,19 +43,90 @@ class HistorySearchHit(history.HistoryEntry):
 _SANITIZE_KEEP_RE = re.compile(r"[^\w\s'’‘]", re.UNICODE)
 
 
-def _sanitize_fts_query(q: str) -> tuple[str, list[str]]:
-    """Whitelist-sanitize ``q`` and return ``(fts_expression, tokens)``.
+_WORD_RE = re.compile(r"[^\W_]+")
 
-    ``("", [])`` when the sanitised query is empty. Tokens are lowercased so that
-    ``NOT``/``AND``/``OR``/``NEAR`` cease to be FTS5 operators and stay terms.
+
+def _query_tokens(q: str) -> list[str]:
+    """Whitelist-sanitize ``q`` into lowercased tokens, ``[]`` when nothing is left.
+
+    No token holds a double quote, so each can sit inside an FTS5 string.
     """
     if not q:
-        return "", []
-    cleaned = _SANITIZE_KEEP_RE.sub(" ", q)
-    tokens = [t.lower() for t in cleaned.split() if t]
-    if not tokens:
-        return "", []
-    return " ".join(f"{t}*" for t in tokens), tokens
+        return []
+    return [t.lower() for t in _SANITIZE_KEEP_RE.sub(" ", q).split()]
+
+
+def _fts_expression(tokens: list[str], typo_terms: dict[str, list[str]]) -> str:
+    """Every token as a quoted prefix OR'd with its typo terms as whole words, ANDed.
+
+    Quoting keeps an apostrophe or ``NOT`` a term rather than FTS5 syntax.
+    """
+    groups = []
+    for tok in tokens:
+        alternatives = [f'"{tok}"*'] + [f'"{term}"' for term in typo_terms.get(tok, [])]
+        groups.append(
+            alternatives[0] if len(alternatives) == 1 else f"({' OR '.join(alternatives)})"
+        )
+    return " AND ".join(groups)
+
+
+def _typo_budget(token: str) -> int:
+    """Edits a token may be from a stored word, Elasticsearch's ``fuzziness: AUTO``:
+    none up to 2 characters, one up to 5, two beyond. A token the FTS tokenizer
+    would split (an apostrophe, an underscore) gets none."""
+    if len(token) <= 2 or not _WORD_RE.fullmatch(token):
+        return 0
+    return 1 if len(token) <= 5 else 2
+
+
+def _typo_distance(a: str, b: str, budget: int) -> int:
+    """Optimal string alignment distance, where swapping two neighbours is one edit
+    as in Lucene's fuzzy query; anything past ``budget`` answers ``budget + 1``."""
+    if abs(len(a) - len(b)) > budget:
+        return budget + 1
+    before_prev: list[int] = []
+    prev = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        row = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            row[j] = min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] != b[j - 1]))
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                row[j] = min(row[j], before_prev[j - 2] + 1)
+        if min(row) > budget:
+            return budget + 1
+        before_prev, prev = prev, row
+    return min(prev[-1], budget + 1)
+
+
+def _typo_terms(tokens: list[str]) -> dict[str, list[str]]:
+    """Stored words within each token's typo budget that its prefix does not
+    already reach, closest then most used first, at most ``TYPO_EXPANSIONS_MAX``.
+
+    The vocabulary is read under ``history._lock``; distances run after it is freed.
+    """
+    budgets = {tok: _typo_budget(tok) for tok in tokens if _typo_budget(tok)}
+    if not budgets:
+        return {}
+    shortest = min(len(tok) - budget for tok, budget in budgets.items())
+    longest = max(len(tok) + budget for tok, budget in budgets.items())
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        conn.execute(_VOCAB_DDL)
+        vocab = conn.execute(
+            "SELECT term, doc FROM temp.entry_fts_vocab WHERE length(term) BETWEEN ? AND ?",
+            (shortest, longest),
+        ).fetchall()
+    found: dict[str, list[str]] = {}
+    for tok, budget in budgets.items():
+        ranked = sorted(
+            (distance, -doc, term)
+            for term, doc in vocab
+            if not term.startswith(tok)
+            and (distance := _typo_distance(tok, term, budget)) <= budget
+        )
+        if ranked:
+            found[tok] = [term for _, _, term in ranked[:TYPO_EXPANSIONS_MAX]]
+    return found
 
 
 def _is_word_char(char: str) -> bool:
@@ -87,16 +163,23 @@ def _match_kind(text: str | None, tokens: list[str]) -> MatchKind:
     return "near" if missing else "exact"
 
 
-def _build_highlight(text: str | None, tokens: list[str]) -> str:
-    """HTML-escape ``text`` and wrap any ``tokens`` in it in a mark.
+def _build_highlight(
+    text: str | None, tokens: list[str], typo_terms: frozenset[str] = frozenset()
+) -> str:
+    """HTML-escape ``text`` and wrap any ``tokens`` and ``typo_terms`` words in a mark.
 
     Case-insensitive; overlapping spans merge into one mark, a plain ``<mark>``
-    when any part of it is a whole word and ``<mark class="near">`` when it only
-    sits inside a word. Every segment is escaped, so no raw markup survives.
+    when any part of it is a token as a whole word and ``<mark class="near">``
+    otherwise. Every segment is escaped, so no raw markup survives.
     """
     if not text:
         return ""
-    spans = sorted(_token_spans(text, tokens))
+    typo_spans = [
+        (m.start(), m.end(), False)
+        for m in _WORD_RE.finditer(text)
+        if m.group().lower() in typo_terms
+    ]
+    spans = sorted(_token_spans(text, tokens) + typo_spans)
     if not spans:
         return html.escape(text)
 
@@ -122,12 +205,14 @@ def _build_highlight(text: str | None, tokens: list[str]) -> str:
     return "".join(out)
 
 
-def _hit_from_row(row, tokens: list[str]) -> HistorySearchHit:
+def _hit_from_row(
+    row, tokens: list[str], typo_terms: frozenset[str] = frozenset()
+) -> HistorySearchHit:
     """Build a search hit from a row that includes ``cleaned_text``."""
     base = history._row_to_entry(row)
     return HistorySearchHit(
         **base.model_dump(),
-        highlighted_text=_build_highlight(row["cleaned_text"], tokens),
+        highlighted_text=_build_highlight(row["cleaned_text"], tokens, typo_terms),
         match=_match_kind(row["cleaned_text"], tokens),
     )
 
@@ -217,7 +302,7 @@ def _substring_lane(
 def search_history(
     q: str, limit: int = 20, starred_only: bool = False
 ) -> list[HistorySearchHit]:
-    """Two-lane search: FTS5 BM25 prefix match, then a ``LIKE`` substring fallback.
+    """Two-lane search: FTS5 BM25 prefix or typo match, then a ``LIKE`` substring fallback.
 
     The lanes run one after the other and de-duplicate in Python, so they do not
     read one snapshot (ADR 061). Only ``len(q)`` is ever logged, never ``q``.
@@ -225,9 +310,10 @@ def search_history(
     clamped_limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
     log.debug("search len=%d", len(q or ""))
 
-    fts_expr, tokens = _sanitize_fts_query(q or "")
+    tokens = _query_tokens(q or "")
     if not tokens:
         return []
+    typo_terms = _typo_terms(tokens)
 
     with history._lock:
         conn = history._ensure_conn_locked()
@@ -238,7 +324,7 @@ def search_history(
             "WHERE entry_fts MATCH ? "
             f"{f'AND e.{history._STARRED} ' if starred_only else ''}"
             "ORDER BY rank ASC LIMIT ?",
-            (fts_expr, clamped_limit),
+            (_fts_expression(tokens, typo_terms), clamped_limit),
         ).fetchall()
 
     rows = list(fts_rows)
@@ -248,7 +334,8 @@ def search_history(
         )
     )
 
-    return [_hit_from_row(r, tokens) for r in rows[:clamped_limit]]
+    marked_typos = frozenset(term for terms in typo_terms.values() for term in terms)
+    return [_hit_from_row(r, tokens, marked_typos) for r in rows[:clamped_limit]]
 
 
 async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearchHit]:

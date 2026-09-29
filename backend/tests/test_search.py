@@ -16,17 +16,16 @@ from app.transcripts import history, search, vector_store
 pytestmark = pytest.mark.usefixtures("isolated_transcript_storage")
 
 
-def test_sanitize_lowercases_and_appends_star():
-    expr, tokens = search._sanitize_fts_query("Я прав")
-    assert expr == "я* прав*"
+def test_query_tokens_are_lowercased_and_each_becomes_a_quoted_prefix():
+    tokens = search._query_tokens("Я прав")
     assert tokens == ["я", "прав"]
+    assert search._fts_expression(tokens, {}) == '"я"* AND "прав"*'
 
 
-def test_sanitize_lowercases_fts5_operator_keywords():
-    """``NOT*``/``AND*``/``OR*`` raise FTS5 syntax errors when uppercase.
-    The sanitizer must lowercase them so they become literal prefix terms."""
-    expr, tokens = search._sanitize_fts_query("NOT AND OR meeting")
-    assert expr == "not* and* or* meeting*"
+def test_fts5_operator_keywords_stay_terms():
+    """``NOT``/``AND``/``OR`` are FTS5 operators; lowercased and quoted they are terms."""
+    expr = search._fts_expression(search._query_tokens("NOT AND OR meeting"), {})
+    assert expr == '"not"* AND "and"* AND "or"* AND "meeting"*'
     history.save_entry(text="meeting brief", duration_ms=1)
     with history._lock:
         conn = history._ensure_conn_locked()
@@ -35,28 +34,74 @@ def test_sanitize_lowercases_fts5_operator_keywords():
         ).fetchone()
 
 
-def test_sanitize_strips_fts5_specials_and_dash_slash():
-    """`-` is FTS5 NOT, `/` is part of `NEAR/n`. Both must be stripped.
-    The trailing ``*`` per token is the prefix syntax we deliberately
-    add, so we only check that NO ``*`` appears inside a token."""
-    expr, _tokens = search._sanitize_fts_query('"(bad:chars)*')
-    assert expr == "bad* chars*"
-    for bad in '"():':
-        assert bad not in expr
-
-    expr, tokens = search._sanitize_fts_query("-правив")
-    assert expr == "правив*"
-    assert tokens == ["правив"]
-
-    expr, _tokens = search._sanitize_fts_query("NEAR/3 word")
-    assert "/" not in expr
-    assert "near*" in expr and "3*" in expr and "word*" in expr
+def test_query_tokens_strip_fts5_specials_and_dash_slash():
+    """`-` is FTS5 NOT, `/` is part of `NEAR/n`, `"` would close a quoted term."""
+    assert search._query_tokens('"(bad:chars)*') == ["bad", "chars"]
+    assert search._query_tokens("-правив") == ["правив"]
+    assert search._query_tokens("NEAR/3 word") == ["near", "3", "word"]
 
 
-def test_sanitize_whitespace_and_empty():
-    assert search._sanitize_fts_query("") == ("", [])
-    assert search._sanitize_fts_query("   ") == ("", [])
-    assert search._sanitize_fts_query("\t\n") == ("", [])
+def test_query_tokens_whitespace_and_empty():
+    assert search._query_tokens("") == []
+    assert search._query_tokens("   ") == []
+    assert search._query_tokens("\t\n") == []
+
+
+def test_a_word_with_an_apostrophe_is_searched_without_an_fts_error():
+    history.save_entry(text="I don't know yet", duration_ms=1)
+    hits = search.search_history("don't", limit=5)
+    assert [h.text for h in hits] == ["I don't know yet"]
+
+
+def test_the_typo_budget_follows_elasticsearch_auto_fuzziness():
+    assert [search._typo_budget(t) for t in ["ab", "abc", "abcde", "abcdef"]] == [0, 1, 1, 2]
+    assert search._typo_budget("don't") == 0
+
+
+def test_a_swap_of_two_neighbouring_letters_is_one_edit():
+    assert search._typo_distance("tset", "test", 1) == 1
+    assert search._typo_distance("tst", "test", 1) == 1
+    assert search._typo_distance("tezt", "test", 1) == 1
+    assert search._typo_distance("tsxt", "test", 1) == 2
+    assert search._typo_distance("abcdef", "abcxyz", 2) == 3
+
+
+def test_a_one_letter_typo_finds_the_word_as_a_close_match():
+    history.save_entry(text="Run the test again", duration_ms=1)
+    history.save_entry(text="nothing related", duration_ms=1)
+    hits = search.search_history("tset", limit=5)
+    assert [h.text for h in hits] == ["Run the test again"]
+    assert hits[0].match == "near"
+    assert hits[0].highlighted_text == 'Run the <mark class="near">test</mark> again'
+
+
+def test_a_two_letter_word_needs_an_exact_match():
+    history.save_entry(text="go home", duration_ms=1)
+    assert search.search_history("og", limit=5) == []
+
+
+def test_a_typo_widens_one_word_and_the_others_still_have_to_match():
+    history.save_entry(text="the test report", duration_ms=1)
+    history.save_entry(text="the test plan", duration_ms=1)
+    hits = search.search_history("tset report", limit=5)
+    assert [h.text for h in hits] == ["the test report"]
+    assert hits[0].highlighted_text == (
+        'the <mark class="near">test</mark> <mark>report</mark>'
+    )
+
+
+def test_a_word_the_prefix_already_reaches_is_not_a_typo_term():
+    history.save_entry(text="tests and tent", duration_ms=1)
+    assert search._typo_terms(["test"]) == {"test": ["tent"]}
+
+
+def test_typo_terms_are_capped_closest_first():
+    words = " ".join(f"ca{chr(ord('a') + i)}" for i in range(26))
+    history.save_entry(text=f"{words} cat", duration_ms=1)
+    history.save_entry(text="cat", duration_ms=1)
+    terms = search._typo_terms(["cxt"])["cxt"]
+    assert terms[0] == "cat"
+    assert len(terms) <= search.TYPO_EXPANSIONS_MAX
 
 
 def test_build_highlight_basic_match():
@@ -576,12 +621,12 @@ def test_search_does_not_hold_the_store_lock_while_highlighting(monkeypatch):
     real_build_highlight = search._build_highlight
     lock_was_free: list[bool] = []
 
-    def probing_build_highlight(text, tokens):
+    def probing_build_highlight(text, tokens, typo_terms=frozenset()):
         acquired = history._lock.acquire(blocking=False)
         lock_was_free.append(acquired)
         if acquired:
             history._lock.release()
-        return real_build_highlight(text, tokens)
+        return real_build_highlight(text, tokens, typo_terms)
 
     monkeypatch.setattr(search, "_build_highlight", probing_build_highlight)
 
@@ -729,7 +774,7 @@ def test_a_filled_fts_lane_leaves_the_substring_lane_out_of_the_store(monkeypatc
     """``residual == 0``: the lane must cost zero acquisitions, not one wasted one.
 
     The rows are seeded before the counting wrapper is installed, so the writes
-    are not counted -- the single acquisition left is the FTS lane's.
+    are not counted -- the two left are the typo vocabulary read and the FTS lane.
     """
     for i in range(5):
         history.save_entry(text=f"правда{i} буде", duration_ms=1)
@@ -740,7 +785,7 @@ def test_a_filled_fts_lane_leaves_the_substring_lane_out_of_the_store(monkeypatc
     hits = search.search_history("прав", limit=3)
 
     assert len(hits) == 3
-    assert lock.acquisitions == 1
+    assert lock.acquisitions == 2
 
 
 def test_an_underscore_in_a_query_matches_an_underscore_and_not_any_character():
