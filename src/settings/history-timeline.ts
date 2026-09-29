@@ -56,6 +56,56 @@ export function countOf(value: number, singular: string, plural: string): string
   return `<span class="num">${formatNumber(value)}</span> ${value === 1 ? singular : plural}`;
 }
 
+function dayHeadHtml(key: string | null, today: Date, counts: readonly string[]): string {
+  return (
+    `<span class="day-head-dot"></span><b>${escapeHtml(formatDayLabel(key, today))}</b>` +
+    counts.map((count) => `<span>·</span><span>${count}</span>`).join("")
+  );
+}
+
+function paintMatchHead(root: HTMLElement, today: Date): void {
+  const key = root.dataset.day || null;
+  const matches = root.querySelector(".day-body")!.children.length;
+  root.querySelector(".day-head")!.innerHTML = dayHeadHtml(key, today, [
+    countOf(matches, "match", "matches"),
+  ]);
+}
+
+function newestFirst(a: BuiltRow, b: BuiltRow): number {
+  const at = (row: BuiltRow) =>
+    row.entry.timestamp == null ? -Infinity : new Date(row.entry.timestamp).getTime();
+  return at(b) - at(a);
+}
+
+/** Search results as day groups, newest day first, each header counting the matches under it. */
+export function matchDayGroups(rows: readonly BuiltRow[], now: Date = new Date()): HTMLElement[] {
+  const groups = new Map<string, HTMLElement>();
+  for (const row of [...rows].sort(newestFirst)) {
+    const key = dayKeyOf(row.entry);
+    let root = groups.get(key ?? UNKNOWN_DAY);
+    if (!root) {
+      root = document.createElement("section");
+      root.className = "day-group";
+      root.dataset.day = key ?? "";
+      root.innerHTML = `<div class="day-head"></div><div class="day-body"></div>`;
+      groups.set(key ?? UNKNOWN_DAY, root);
+    }
+    root.querySelector(".day-body")!.append(row.element);
+  }
+  for (const root of groups.values()) paintMatchHead(root, now);
+  return [...groups.values()];
+}
+
+const CLOSE_MATCHES_CLASS = "search-tier";
+
+/** The heading above the search results that hold the words only loosely. */
+export function closeMatchesHeading(): HTMLElement {
+  const heading = document.createElement("h3");
+  heading.className = CLOSE_MATCHES_CLASS;
+  heading.textContent = "Close matches";
+  return heading;
+}
+
 export interface TimelineRows extends HistoryRows {
   /** Takes one card off the timeline, and its day with it once the day is empty. */
   rowRemoved(element: HTMLElement): void;
@@ -113,10 +163,10 @@ export function createTimelineRows(container: HTMLElement, now: () => Date = () 
         recordings: cards.length,
         words: cards.reduce((sum, card) => sum + Number(card.dataset.words ?? 0), 0),
       };
-      group.head.innerHTML =
-        `<span class="day-head-dot"></span><b>${escapeHtml(formatDayLabel(group.key, today))}</b>` +
-        `<span>·</span><span>${countOf(day.recordings, "recording", "recordings")}</span>` +
-        `<span>·</span><span>${countOf(day.words, "word", "words")}</span>`;
+      group.head.innerHTML = dayHeadHtml(group.key, today, [
+        countOf(day.recordings, "recording", "recordings"),
+        countOf(day.words, "word", "words"),
+      ]);
     }
   }
 
@@ -152,7 +202,13 @@ export function createTimelineRows(container: HTMLElement, now: () => Date = () 
       const root = element.closest<HTMLElement>(".day-group");
       element.remove();
       const entry = Array.from(groups).find(([, group]) => group.root === root);
-      if (!entry) return;
+      if (!entry) {
+        if (root?.querySelector(".day-body")!.children.length === 0) root.remove();
+        else if (root) paintMatchHead(root, now());
+        const heading = container.querySelector(`.${CLOSE_MATCHES_CLASS}`);
+        if (heading && !heading.nextElementSibling) heading.remove();
+        return;
+      }
       const [mapKey, group] = entry;
       const day = totals.get(mapKey);
       if (day) {

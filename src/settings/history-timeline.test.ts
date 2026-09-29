@@ -11,6 +11,7 @@ import {
   formatDuration,
   formatNumber,
   localDayKey,
+  matchDayGroups,
 } from "./history-timeline";
 
 const NOW = new Date(2026, 7, 1, 12, 0);
@@ -180,5 +181,39 @@ describe("createTimelineRows — day groups", () => {
     rows.rowRemoved(a.element);
 
     expect(layout(container)[0].head).toBe("Today·2 recordings·200 words");
+  });
+});
+
+const JULY_28 = new Date(2026, 6, 28, 9).toISOString();
+
+describe("matchDayGroups — search results by day", () => {
+  it("puts results under their day, newest first whatever the ranking, counting matches", () => {
+    const container = document.createElement("div");
+    container.append(
+      ...matchDayGroups(
+        [row("old", JULY_28), row("unknown", null), row("a", at(1, 9)), row("b", at(1, 11))],
+        NOW,
+      ),
+    );
+
+    expect(layout(container)).toEqual([
+      { head: "Today·2 matches", ids: ["b", "a"] },
+      { head: "Tuesday, 28 July·1 match", ids: ["old"] },
+      { head: "Date unknown·1 match", ids: ["unknown"] },
+    ]);
+  });
+
+  it("recounts a result day when one of its cards is deleted, and drops the emptied day", () => {
+    const container = document.createElement("div");
+    const rows = createTimelineRows(container, () => NOW);
+    const a = row("a", at(1, 9));
+    const b = row("b", at(1, 11));
+    const c = row("c", JULY_28);
+    rows.replaceWith(matchDayGroups([a, b, c], NOW));
+
+    rows.rowRemoved(a.element);
+    rows.rowRemoved(c.element);
+
+    expect(layout(container)).toEqual([{ head: "Today·1 match", ids: ["b"] }]);
   });
 });

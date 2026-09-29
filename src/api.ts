@@ -662,9 +662,16 @@ export interface HistoryEntry {
   starred: boolean;
   /** Populated only by /history/search responses. Already HTML-escaped on
    *  the backend with `<mark>…</mark>` wrappers around matched spans —
-   *  assign directly to `innerHTML`, do NOT re-escape. */
+   *  assign directly to `innerHTML`, do NOT re-escape. A match inside a
+   *  longer word is `<mark class="near">`. */
   highlighted_text?: string;
+  /** Populated only by /history/search: `exact` when every searched word
+   *  stands in the text as a whole word, `near` when a word only sits inside
+   *  a longer one, `meaning` for an entry found by meaning alone. */
+  match?: SearchMatch;
 }
+
+export type SearchMatch = "exact" | "near" | "meaning";
 
 export interface HistoryListResponse {
   entries: HistoryEntry[];

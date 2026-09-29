@@ -37,7 +37,7 @@ vi.mock("../../api", async (importOriginal) => {
 
 const { SidecarTooOldError, MalformedResponseError } = await import("../../api");
 const { sidecarTooOldText } = await import("../history-list");
-const { renderHistory, NEWER_POLL_MS } = await import("./history");
+const { renderHistory, NEWER_POLL_MS, matchExcerpt } = await import("./history");
 
 const SETTINGS = { shortcut: "Ctrl+Alt+KeyV" } as UserSettings;
 
@@ -165,6 +165,22 @@ afterEach(() => {
   document.body.replaceChildren();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("matchExcerpt — the text around the first match", () => {
+  it("starts a few whole words before a match deep in the text, keeping the backend's markup", () => {
+    const excerpt = matchExcerpt(`${"alpha ".repeat(20)}R&amp;D <mark>test</mark> &lt;b&gt;`)!;
+
+    expect(excerpt).toMatch(/^…alpha /);
+    expect(excerpt).toContain("R&amp;D <mark>test</mark> &lt;b&gt;");
+    expect(excerpt.match(/alpha/g)!.length).toBeLessThan(20);
+  });
+
+  it("leaves a text alone when its first match is near the start or there is none", () => {
+    expect(matchExcerpt("a <mark>test</mark> here")).toBeNull();
+    expect(matchExcerpt("<mark>test</mark> here")).toBeNull();
+    expect(matchExcerpt("no mark ".repeat(20))).toBeNull();
+  });
 });
 
 describe("renderHistory — paging as the end scrolls into view", () => {
@@ -351,6 +367,88 @@ describe("renderHistory — the timeline", () => {
     expect(text.querySelector("mark")!.textContent).toBe("test");
     expect(text.firstChild!.textContent).toBe("a ");
     expect(text.textContent).toBe("a test & moreless");
+  });
+
+  it("paints exact matches by day, then word parts, then meaning-only matches last, however new", async () => {
+    apiMock.searchHistory.mockResolvedValue({
+      entries: [
+        { ...buildEntry("x1"), timestamp: at(1, 9), match: "exact" },
+        { ...buildEntry("n1"), timestamp: at(1, 8), match: "near" },
+        { ...buildEntry("x2"), timestamp: at(1, 11), match: "exact" },
+        { ...buildEntry("m1"), timestamp: at(1, 11, 30), match: "meaning" },
+      ],
+      total: 4,
+    });
+    const { container } = await renderAndWait([buildEntry("1")]);
+
+    await typeQuery(container, "test");
+    await vi.waitFor(() => expect(countText(container)).toBe("4 matches"));
+
+    const painted = Array.from(container.querySelector("#history-days")!.children);
+    expect(painted.map((el) => el.querySelector(".day-head")?.textContent ?? el.textContent)).toEqual([
+      "Today·2 matches",
+      "Close matches",
+      "Today·1 match",
+      "Today·1 match",
+    ]);
+    expect(Array.from(cards(container)).map((el) => el.dataset.id)).toEqual(["x2", "x1", "n1", "m1"]);
+  });
+
+  it("takes Close matches away with the last loose result deleted", async () => {
+    apiMock.deleteHistoryEntry.mockResolvedValue({ deleted: true });
+    apiMock.searchHistory.mockResolvedValue({
+      entries: [
+        { ...buildEntry("x1"), match: "exact" },
+        { ...buildEntry("n1"), match: "near" },
+      ],
+      total: 2,
+    });
+    const { container } = await renderAndWait([buildEntry("1")]);
+    await typeQuery(container, "test");
+    await vi.waitFor(() => expect(countText(container)).toBe("2 matches"));
+
+    openMenuOf(cards(container)[1]);
+    container.querySelector<HTMLButtonElement>('[data-action="delete"]')!.click();
+    await flush();
+
+    expect(Array.from(cards(container)).map((el) => el.dataset.id)).toEqual(["x1"]);
+    expect(container.querySelector(".search-tier")).toBeNull();
+  });
+
+  it("leaves Close matches out when every result is exact", async () => {
+    apiMock.searchHistory.mockResolvedValue({
+      entries: [{ ...buildEntry("x1"), match: "exact" }],
+      total: 1,
+    });
+    const { container } = await renderAndWait([buildEntry("1")]);
+
+    await typeQuery(container, "test");
+    await vi.waitFor(() => expect(countText(container)).toBe("1 match"));
+
+    expect(container.querySelector(".search-tier")).toBeNull();
+  });
+
+  it("opens a result whose match sits deep in the text at the match, and expands to all of it", async () => {
+    const lead = "word ".repeat(40);
+    apiMock.searchHistory.mockResolvedValue({
+      entries: [{ ...buildEntry("9"), highlighted_text: `${lead}<mark>test</mark> end`, match: "exact" }],
+      total: 1,
+    });
+    const { container } = await renderAndWait([buildEntry("1")]);
+    await typeQuery(container, "test");
+    await vi.waitFor(() => expect(countText(container)).toBe("1 match"));
+    const card = cards(container)[0];
+    layOut(card, 21, 21);
+
+    FakeResizeObserver.latest!.resize();
+
+    const excerpt = card.querySelector(".entry-excerpt")!;
+    expect(excerpt.textContent!.startsWith("…word")).toBe(true);
+    expect(excerpt.querySelector("mark")!.textContent).toBe("test");
+    expect(card.querySelector(".entry-full")!.textContent).toBe(`${lead}test end`);
+    expect(card.classList.contains("entry--long")).toBe(true);
+    card.querySelector<HTMLElement>(".entry-text")!.click();
+    expect(card.classList.contains("entry--expanded")).toBe(true);
   });
 
   it("says how to start when there is nothing yet", async () => {
@@ -722,7 +820,9 @@ describe("renderHistory — a reload and a search cannot both own the rows", () 
     append.release(pageOf([buildEntry("31")], 60, null));
     await flush();
 
-    expect(container.querySelector(".history-empty")!.textContent).toBe("No matches");
+    expect(container.querySelector(".history-empty")!.textContent).toBe(
+      "Nothing you said matches that.",
+    );
     expect(sentinel(container).hidden).toBe(true);
     cross();
     await flush();

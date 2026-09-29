@@ -175,6 +175,23 @@
   padding: 0 2px;
 }
 
+.entry-text mark.near {
+  background: color-mix(in srgb, var(--orange-mute) 50%, transparent);
+  font-weight: 600;
+}
+
+.entry--excerpt:not(.entry--expanded) .entry-full,
+.entry--expanded .entry-excerpt {
+  display: none;
+}
+
+.search-tier {
+  margin: 6px 0 12px;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--text-2);
+}
+
 .entry-more,
 .entry-less {
   display: none;
