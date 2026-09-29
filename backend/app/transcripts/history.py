@@ -81,16 +81,31 @@ class HistoryCursor(BaseModel):
     id: str
 
 
-class HistoryPage(BaseModel):
-    """One page, the total it is a page of, and where the next one starts.
+class HistoryDay(BaseModel):
+    """One local day's totals, counted over every row of that day, not the page's.
 
-    ``next_cursor`` is ``None`` on the last page. ``total`` is what the user
-    reads on screen, not how the client decides whether more rows exist.
+    ``date`` is ``YYYY-MM-DD`` in the machine's time zone; ``None`` gathers the
+    rows whose recording time is unknown.
+    """
+
+    date: str | None
+    recordings: int
+    words: int
+
+
+class HistoryPage(BaseModel):
+    """One page, the total it is a page of, where the next one starts, its days.
+
+    ``next_cursor`` is ``None`` on the last page and on a newer-rows read.
+    ``newest_cursor`` is the position of the newest row in ``entries``, the one
+    a later newer-rows read asks after. ``days`` covers every day in ``entries``.
     """
 
     entries: list[HistoryEntry]
     total: int
     next_cursor: HistoryCursor | None = None
+    newest_cursor: HistoryCursor | None = None
+    days: list[HistoryDay] = []
 
 
 class HistoryStats(BaseModel):
@@ -311,6 +326,10 @@ def _clamp_limit(limit: int) -> int:
 
 _CURSOR_PAGE_WHERE = "WHERE (ts, id) < (:before_ts, :before_id) "
 _CURSOR_PAGE_ORDER = "ORDER BY ts DESC, id DESC LIMIT :row_limit"
+_NEWER_PAGE_WHERE = "WHERE (ts, id) > (:after_ts, :after_id) "
+_NEWER_PAGE_ORDER = "ORDER BY ts ASC, id ASC LIMIT :row_limit"
+_LOCAL_DAY = "date(ts / 1000, 'unixepoch', 'localtime')"
+_KNOWN_TS = f"ts > {schema.UNKNOWN_TS} AND ts <= {schema.STORED_TS_MAX}"
 
 
 def _entries_locked(
@@ -331,6 +350,57 @@ def _entries_locked(
         f"{where}{_CURSOR_PAGE_ORDER}",
         params,
     ).fetchall()
+
+
+def _newer_entries_locked(
+    conn: sqlite3.Connection, limit: int, after: HistoryCursor
+) -> list[sqlite3.Row]:
+    """Caller MUST hold ``_lock``. Rows strictly newer than ``after``, oldest first."""
+    return conn.execute(
+        f"SELECT {schema.columns_sql(schema.ENTRY_READ_COLUMNS)} FROM entries "
+        f"{_NEWER_PAGE_WHERE}{_NEWER_PAGE_ORDER}",
+        {"after_ts": after.ts, "after_id": after.id, "row_limit": limit},
+    ).fetchall()
+
+
+def _has_known_ts(ts: object) -> bool:
+    return isinstance(ts, int) and schema.UNKNOWN_TS < ts <= schema.STORED_TS_MAX
+
+
+def _days_locked(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[HistoryDay]:
+    """Caller MUST hold ``_lock``. Whole-day totals for every local day in ``rows``.
+
+    ``rows`` is contiguous in ``(ts, id)`` order, so every row between the start
+    of its oldest day and the end of its newest belongs to one of its own days.
+    """
+    known = [row["ts"] for row in rows if _has_known_ts(row["ts"])]
+    days: list[HistoryDay] = []
+    if known:
+        start, end = conn.execute(
+            "SELECT CAST(strftime('%s', date(:oldest / 1000, 'unixepoch', 'localtime'), "
+            "'utc') AS INTEGER) * 1000, "
+            "CAST(strftime('%s', date(:newest / 1000, 'unixepoch', 'localtime'), "
+            "'+1 day', 'utc') AS INTEGER) * 1000",
+            {"oldest": min(known), "newest": max(known)},
+        ).fetchone()
+        days = [
+            HistoryDay(date=day, recordings=recordings, words=words)
+            for day, recordings, words in conn.execute(
+                f"SELECT {_LOCAL_DAY} AS day, COUNT(*), COALESCE(SUM(word_count), 0) "
+                "FROM entries WHERE ts >= :start AND ts < :end "
+                "GROUP BY day ORDER BY day DESC",
+                {
+                    "start": max(start, schema.UNKNOWN_TS + 1),
+                    "end": min(end, schema.STORED_TS_MAX + 1),
+                },
+            ).fetchall()
+        ]
+    if len(known) < len(rows):
+        recordings, words = conn.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(word_count), 0) FROM entries WHERE NOT ({_KNOWN_TS})"
+        ).fetchone()
+        days.append(HistoryDay(date=None, recordings=recordings, words=words))
+    return days
 
 
 def _has_more_locked(conn: sqlite3.Connection, after_ts: int, after_id: str) -> bool:
@@ -423,24 +493,36 @@ def _count_locked(conn: sqlite3.Connection) -> int:
     return total
 
 
-def get_page(limit: int = 50, before: HistoryCursor | None = None) -> HistoryPage:
-    """The page starting strictly after ``before``, the total, and the next position.
+def get_page(
+    limit: int = 50, before: HistoryCursor | None = None, after: HistoryCursor | None = None
+) -> HistoryPage:
+    """The page past ``before`` (older) or ``after`` (newer, oldest first), and its context.
 
-    One acquisition of ``_lock`` covers all three reads, so no in-process write lands
+    One acquisition of ``_lock`` covers every read, so no in-process write lands
     between them; the total may be up to ``STATS_TTL_SECONDS`` behind (ADR 055).
     """
     clamped_limit = _clamp_limit(limit)
     with _lock:
         conn = _ensure_conn_locked()
-        rows = _entries_locked(conn, clamped_limit, before)
         next_cursor: HistoryCursor | None = None
-        if len(rows) == clamped_limit and _has_more_locked(
-            conn, rows[-1]["ts"], rows[-1]["id"]
-        ):
-            next_cursor = HistoryCursor(ts=rows[-1]["ts"], id=rows[-1]["id"])
+        if after is not None:
+            rows = _newer_entries_locked(conn, clamped_limit, after)
+            newest = rows[-1] if rows else None
+        else:
+            rows = _entries_locked(conn, clamped_limit, before)
+            newest = rows[0] if rows else None
+            if len(rows) == clamped_limit and _has_more_locked(
+                conn, rows[-1]["ts"], rows[-1]["id"]
+            ):
+                next_cursor = HistoryCursor(ts=rows[-1]["ts"], id=rows[-1]["id"])
+        days = _days_locked(conn, rows)
         total = _count_locked(conn)
     return HistoryPage(
-        entries=[_row_to_entry(r) for r in rows], total=total, next_cursor=next_cursor
+        entries=[_row_to_entry(r) for r in rows],
+        total=total,
+        next_cursor=next_cursor,
+        newest_cursor=None if newest is None else HistoryCursor(ts=newest["ts"], id=newest["id"]),
+        days=days,
     )
 
 

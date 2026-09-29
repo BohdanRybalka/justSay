@@ -1702,6 +1702,7 @@ def test_get_page_never_releases_the_store_lock_between_its_reads(isolated_stora
     real_entries_locked = history._entries_locked
     real_has_more_locked = history._has_more_locked
     real_count_locked = history._count_locked
+    real_days_locked = history._days_locked
 
     def entries(conn, limit, before):
         events.append("read-entries")
@@ -1715,15 +1716,27 @@ def test_get_page_never_releases_the_store_lock_between_its_reads(isolated_stora
         events.append("read-count")
         return real_count_locked(conn)
 
+    def days(conn, rows):
+        events.append("read-days")
+        return real_days_locked(conn, rows)
+
     with (
         patch.object(history, "_lock", _RecordingLock(history._lock, events)),
         patch.object(history, "_entries_locked", entries),
         patch.object(history, "_has_more_locked", has_more),
         patch.object(history, "_count_locked", count),
+        patch.object(history, "_days_locked", days),
     ):
         page = history.get_page(limit=3)
 
-    assert events == ["acquire", "read-entries", "read-has-more", "read-count", "release"], (
+    assert events == [
+        "acquire",
+        "read-entries",
+        "read-has-more",
+        "read-days",
+        "read-count",
+        "release",
+    ], (
         "the store lock was released between two of the page's reads, so a write "
         f"can land between them: {events}"
     )
@@ -2261,7 +2274,7 @@ def test_the_total_is_counted_once_until_a_write_lands(
         return [
             statement
             for statement in _statements_from(action)
-            if "COUNT(*)" in statement.upper() and "FROM ENTRIES" in statement.upper()
+            if " ".join(statement.split()).upper() == "SELECT COUNT(*) FROM ENTRIES"
         ]
 
     def three_pages():
@@ -2497,6 +2510,7 @@ def test_the_plan_probe_names_the_shape_that_walked_the_index(isolated_storage):
 
 
 def _bulk_seed(target, count):
+    """``count`` rows ten minutes apart, so a page's days hold a day's rows, not the store."""
     history.bootstrap(target)
     with history._lock:
         conn = history._ensure_conn_locked()
@@ -2505,7 +2519,7 @@ def _bulk_seed(target, count):
             conn.executemany(
                 "INSERT INTO entries(id, ts, language, raw_text, cleaned_text, duration_ms) "
                 "VALUES (?, ?, 'uk', 'row', 'row', 1)",
-                [(f"{index:012d}", 1_700_000_000_000 + index) for index in range(count)],
+                [(f"{index:012d}", 1_700_000_000_000 + index * 600_000) for index in range(count)],
             )
             conn.execute("COMMIT")
         except Exception:
@@ -2588,8 +2602,8 @@ def test_reading_the_last_page_costs_the_same_at_2000_rows_and_at_8000(isolated_
 
     What the instrument reaches is on record rather than assumed. The counter is
     open across the whole call rather than across a statement the test re-runs, and
-    that call issues exactly the three reads asserted below: the page read, the
-    key-only has-more probe beside it, and the whole-store total. Inside that
+    that call issues exactly the four reads asserted below: the page read, the
+    key-only has-more probe beside it, the page's day totals and the whole-store total. Inside that
     window the page read's size dependence is visible per opcode, and the total's
     is not: ``SELECT COUNT(*)`` compiles to a single ``OP_Count`` whose b-tree walk
     happens inside one instruction, so a step counter reads it flat at any store
@@ -2599,9 +2613,10 @@ def test_reading_the_last_page_costs_the_same_at_2000_rows_and_at_8000(isolated_
     small_cursor, small_offset, small_reads = _last_page_probe(2_000, tmp_path, "small")
     large_cursor, large_offset, _ = _last_page_probe(8_000, tmp_path, "large")
 
-    assert len(small_reads) == 3, small_reads
+    assert len(small_reads) == 4, small_reads
     assert any("raw_text" in statement for statement in small_reads), small_reads
     assert any("COUNT(*)" in statement.upper() for statement in small_reads), small_reads
+    assert any("localtime" in statement for statement in small_reads), small_reads
     assert any(
         "raw_text" not in statement and "COUNT(*)" not in statement.upper()
         for statement in small_reads

@@ -679,10 +679,22 @@ export interface HistoryCursor {
   id: string;
 }
 
+/** One local day's totals over every row of that day, not only the page's.
+ *  `date` is `YYYY-MM-DD` on this machine's clock; `null` gathers the rows
+ *  whose recording time is unknown. */
+export interface HistoryDay {
+  date: string | null;
+  recordings: number;
+  words: number;
+}
+
 export interface HistoryPageResponse {
   entries: HistoryEntry[];
   total: number;
   next_cursor: HistoryCursor | null;
+  /** The newest row in `entries`, the position a newer-rows read asks after. */
+  newest_cursor: HistoryCursor | null;
+  days: HistoryDay[];
 }
 
 /** Thrown when the backend is older than the contract the frontend was built
@@ -720,6 +732,25 @@ function checkedObjectBody(endpoint: string, body: unknown): Record<string, unkn
     throw new MalformedResponseError(`${endpoint} returned a body that is not an object`);
   }
   return body as Record<string, unknown>;
+}
+
+/** A `/history` page whose `presence` field was checked for before anything
+ *  else, the optional fields normalised, and both list fields checked. */
+async function historyPage(path: string, presence: "next_cursor" | "newest_cursor") {
+  const body = checkedObjectBody(
+    "/history",
+    await request<unknown>("GET", path, undefined, REREADABLE),
+  );
+  if (!(presence in body)) {
+    throw new SidecarTooOldError(`/history returned no ${presence} field`);
+  }
+  const page = checkedHistoryFields<HistoryPageResponse>("/history", body);
+  return {
+    ...page,
+    next_cursor: page.next_cursor ?? null,
+    newest_cursor: page.newest_cursor ?? null,
+    days: Array.isArray(page.days) ? page.days : [],
+  };
 }
 
 /** The two fields `/history` and `/history/search` both promise. A 200 carrying
@@ -819,24 +850,23 @@ export const api = {
    *  an entry malformed in a way no check here anticipated fails over an intact
    *  list. A validator here would have to know every field each tab's row
    *  reads to make the same promise. */
-  getHistory: async (limit = 50, cursor: HistoryCursor | null = null) => {
-    const body = checkedObjectBody(
-      "/history",
-      await request<unknown>(
-        "GET",
-        cursor === null
-          ? `/history?limit=${limit}`
-          : `/history?limit=${limit}&before_ts=${cursor.ts}&before_id=${encodeURIComponent(cursor.id)}`,
-        undefined,
-        REREADABLE,
-      ),
-    );
-    if (!("next_cursor" in body)) {
-      throw new SidecarTooOldError("/history returned no next_cursor field");
-    }
-    const page = checkedHistoryFields<HistoryPageResponse>("/history", body);
-    return { ...page, next_cursor: page.next_cursor ?? null };
-  },
+  getHistory: (limit = 50, cursor: HistoryCursor | null = null) =>
+    historyPage(
+      cursor === null
+        ? `/history?limit=${limit}`
+        : `/history?limit=${limit}&before_ts=${cursor.ts}&before_id=${encodeURIComponent(cursor.id)}`,
+      "next_cursor",
+    ),
+
+  /** Rows strictly newer than `after` — a `newest_cursor` the backend handed
+   *  back — oldest first. A backend predating this read ignores `after_*` and
+   *  answers the first page, which would repaint rows already on screen, so a
+   *  body without `newest_cursor` is version skew rather than a page. */
+  getNewerHistory: (limit: number, after: HistoryCursor) =>
+    historyPage(
+      `/history?limit=${limit}&after_ts=${after.ts}&after_id=${encodeURIComponent(after.id)}`,
+      "newest_cursor",
+    ),
 
   historyStats: () => request<HistoryStats>("GET", "/history/stats", undefined, REREADABLE),
 

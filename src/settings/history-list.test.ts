@@ -1,18 +1,24 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryCursor, HistoryEntry, HistoryPageResponse } from "../api";
-import { buildEntry } from "./history-page-stub.test-helper";
+import type { HistoryCursor, HistoryDay, HistoryEntry, HistoryPageResponse } from "../api";
+import type { BuiltRow, HistoryRows } from "./history-list";
+import {
+  buildEntry,
+  FakeObserver,
+  newerByCursor,
+  pageOf,
+  positionOf,
+} from "./history-page-stub.test-helper";
 
 const apiMock = {
   getHistory: vi.fn(),
+  getNewerHistory: vi.fn(),
 };
 
 /**
  * Only `api` is replaced. Everything else in the module -- `SidecarTooOldError`
  * above all -- stays the real export, so the `instanceof` branch under test is
- * tied to the class `api.getHistory` actually throws. A stand-in class of the
- * same name passes whatever the module does, including throwing a plain
- * `Error`.
+ * tied to the class `api.getHistory` actually throws.
  */
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
@@ -21,10 +27,16 @@ vi.mock("../api", async (importOriginal) => {
 
 const { SidecarTooOldError } = await import("../api");
 const { api: unmockedApi } = await vi.importActual<typeof import("../api")>("../api");
-const { createHistoryList, formatEntryCount, sidecarTooOldText } = await import("./history-list");
+const { createHistoryList, formatEntryCount, sidecarTooOldText, SENTINEL_READING } = await import(
+  "./history-list"
+);
 
 const TRANSCRIPTS = { singular: "transcript", plural: "transcripts" };
 const ENTRIES = { singular: "entry", plural: "entries" };
+
+function cross(): void {
+  FakeObserver.latest!.cross();
+}
 
 describe("formatEntryCount — counts in the noun it is given", () => {
   it("uses the plural for zero", () => {
@@ -44,26 +56,46 @@ describe("formatEntryCount — counts in the noun it is given", () => {
 });
 
 interface Harness {
-  elements: {
-    count: HTMLElement;
-    rows: HTMLElement;
-    loadMoreWrapper: HTMLElement;
-    loadMoreButton: HTMLButtonElement;
-  };
+  elements: { count: HTMLElement; sentinel: HTMLElement };
+  rows: HistoryRows;
+  placedDays: HistoryDay[][];
   paintedIds: () => string[];
-  loadMoreVisible: () => boolean;
+  sentinelVisible: () => boolean;
+  reading: () => boolean;
   countText: () => string;
 }
 
+/** A flat stand-in for the tab's timeline: rows in one container, in the order placed. */
 function harness(): Harness {
   const count = document.createElement("div");
-  const rows = document.createElement("div");
-  const loadMoreWrapper = document.createElement("div");
-  const loadMoreButton = document.createElement("button");
+  const sentinel = document.createElement("div");
+  const container = document.createElement("div");
+  const placedDays: HistoryDay[][] = [];
+  const elementsOf = (rows: readonly BuiltRow[]) => rows.map((row) => row.element);
+  const rows: HistoryRows = {
+    replace(built, days) {
+      placedDays.push([...days]);
+      container.replaceChildren(...elementsOf(built));
+    },
+    append(built, days) {
+      placedDays.push([...days]);
+      container.append(...elementsOf(built));
+    },
+    prepend(built, days) {
+      placedDays.push([...days]);
+      container.prepend(...elementsOf(built));
+    },
+    replaceWith(elements) {
+      container.replaceChildren(...elements);
+    },
+  };
   return {
-    elements: { count, rows, loadMoreWrapper, loadMoreButton },
-    paintedIds: () => Array.from(rows.children).map((el) => el.textContent!),
-    loadMoreVisible: () => loadMoreWrapper.style.display === "block",
+    elements: { count, sentinel },
+    rows,
+    placedDays,
+    paintedIds: () => Array.from(container.children).map((el) => el.textContent!),
+    sentinelVisible: () => !sentinel.hidden,
+    reading: () => sentinel.classList.contains(SENTINEL_READING),
     countText: () => count.textContent!,
   };
 }
@@ -79,6 +111,7 @@ function listOver(
     noun: TRANSCRIPTS,
     featureName: "History",
     elements: h.elements,
+    rows: h.rows,
     createRow,
     renderEmptyState: () => {},
     isDestroyed,
@@ -91,23 +124,17 @@ function defaultCreateRow(entry: HistoryEntry): HTMLElement {
   return row;
 }
 
-/**
- * What both tabs' real row builders do with an entry missing a field they read:
- * History's reaches `escapeHtml(entry.language)` and Words' reads the same
- * entry shape, so the row throws rather than coming back half-built.
- */
-function createRowRequiringLanguage(entry: HistoryEntry): HTMLElement {
-  if (typeof entry.language !== "string") {
-    throw new TypeError("entry.language is not a string");
+/** What the tab's real card builder does with an entry missing a field it reads. */
+function createRowRequiringText(entry: HistoryEntry): HTMLElement {
+  if (typeof entry.text !== "string") {
+    throw new TypeError("entry.text is not a string");
   }
   return defaultCreateRow(entry);
 }
 
 /**
- * A backend the test drives by hand rather than by reimplementing the page
- * arithmetic. Each queued response is handed out in order; what is asserted is
- * the cursor the list *sent*, which a stub that computed its own answer would
- * hide.
+ * A backend the test drives by hand. Each queued response is handed out in
+ * order; what is asserted is the cursor the list *sent*.
  */
 function queueResponses(...responses: HistoryPageResponse[]): void {
   let index = 0;
@@ -118,110 +145,9 @@ function sentCursors(): (HistoryCursor | null)[] {
   return apiMock.getHistory.mock.calls.map((call) => call[1] as HistoryCursor | null);
 }
 
-beforeEach(() => {
-  vi.clearAllMocks();
-});
-
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
-
-describe("createHistoryList — the client echoes cursors and never builds one", () => {
-  it("sends no cursor for the first page", async () => {
-    const h = harness();
-    queueResponses({ entries: [buildEntry("a")], total: 1, next_cursor: null });
-
-    await listOver(h).load();
-
-    expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
-    expect(apiMock.getHistory.mock.calls[0]).toEqual([2, null]);
-  });
-
-  it("sends the previous response's next_cursor back verbatim on Load more", async () => {
-    const h = harness();
-    const cursor: HistoryCursor = { ts: 1_700_000_000_042, id: "ff00ff00ff00" };
-    queueResponses(
-      { entries: [buildEntry("a"), buildEntry("b")], total: 3, next_cursor: cursor },
-      { entries: [buildEntry("c")], total: 3, next_cursor: null }
-    );
-
-    const list = listOver(h);
-    await list.load();
-    h.elements.loadMoreButton.click();
-    await vi.waitFor(() => {
-      expect(apiMock.getHistory).toHaveBeenCalledTimes(2);
-    });
-
-    expect(sentCursors()).toEqual([null, cursor]);
-    expect(h.paintedIds()).toEqual(["a", "b", "c"]);
-  });
-
-  it("keeps paging from the newest cursor rather than the first one", async () => {
-    const h = harness();
-    const first: HistoryCursor = { ts: 300, id: "second-row" };
-    const second: HistoryCursor = { ts: 100, id: "fourth-row" };
-    queueResponses(
-      { entries: [buildEntry("a"), buildEntry("b")], total: 5, next_cursor: first },
-      { entries: [buildEntry("c"), buildEntry("d")], total: 5, next_cursor: second },
-      { entries: [buildEntry("e")], total: 5, next_cursor: null }
-    );
-
-    const list = listOver(h);
-    await list.load();
-    h.elements.loadMoreButton.click();
-    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
-    h.elements.loadMoreButton.click();
-    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(3));
-
-    expect(sentCursors()).toEqual([null, first, second]);
-    expect(h.paintedIds()).toEqual(["a", "b", "c", "d", "e"]);
-  });
-
-  it("load() asks from the newest row again without discarding the stored cursor", async () => {
-    const h = harness();
-    const first: HistoryCursor = { ts: 300, id: "second-row" };
-    const second: HistoryCursor = { ts: 100, id: "fourth-row" };
-    queueResponses(
-      { entries: [buildEntry("a"), buildEntry("b")], total: 5, next_cursor: first },
-      { entries: [buildEntry("c"), buildEntry("d")], total: 5, next_cursor: second },
-      { entries: [buildEntry("a"), buildEntry("b")], total: 5, next_cursor: first }
-    );
-
-    const list = listOver(h);
-    await list.load();
-    h.elements.loadMoreButton.click();
-    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
-    await list.load();
-
-    expect(sentCursors()).toEqual([null, first, null]);
-    expect(h.paintedIds()).toEqual(["a", "b"]);
-  });
-
-  it("refuses an append while the stored cursor is null instead of re-asking for page one", async () => {
-    const h = harness();
-    queueResponses({ entries: [buildEntry("a")], total: 1, next_cursor: null });
-
-    await listOver(h).load();
-    h.elements.loadMoreButton.click();
-    await flush();
-
-    expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
-    expect(sentCursors()).toEqual([null]);
-  });
-
-  it("leaves the button as it found it when it refuses an append", async () => {
-    const h = harness();
-    queueResponses({ entries: [buildEntry("a")], total: 1, next_cursor: null });
-
-    await listOver(h).load();
-    expect(h.elements.loadMoreButton.disabled).toBe(false);
-
-    h.elements.loadMoreButton.click();
-    await flush();
-
-    expect(h.elements.loadMoreButton.disabled).toBe(false);
-  });
-});
+function entries(...ids: string[]): HistoryEntry[] {
+  return ids.map(buildEntry);
+}
 
 /**
  * A response the list is still waiting on. `release` hands it the page, so a test
@@ -242,6 +168,185 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.stubGlobal("IntersectionObserver", FakeObserver);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("createHistoryList — the client echoes cursors and never builds one", () => {
+  it("sends no cursor for the first page", async () => {
+    const h = harness();
+    queueResponses(pageOf(entries("a"), 1, null));
+
+    await listOver(h).load();
+
+    expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
+    expect(apiMock.getHistory.mock.calls[0]).toEqual([2, null]);
+  });
+
+  it("sends the previous response's next_cursor back verbatim when the sentinel is crossed", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 1_700_000_000_042, id: "ff00ff00ff00" };
+    queueResponses(pageOf(entries("a", "b"), 3, cursor), pageOf(entries("c"), 3, null));
+
+    const list = listOver(h);
+    await list.load();
+    cross();
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
+
+    expect(sentCursors()).toEqual([null, cursor]);
+    await vi.waitFor(() => expect(h.paintedIds()).toEqual(["a", "b", "c"]));
+  });
+
+  it("keeps paging from the newest cursor rather than the first one", async () => {
+    const h = harness();
+    const first: HistoryCursor = { ts: 300, id: "second-row" };
+    const second: HistoryCursor = { ts: 100, id: "fourth-row" };
+    queueResponses(
+      pageOf(entries("a", "b"), 5, first),
+      pageOf(entries("c", "d"), 5, second),
+      pageOf(entries("e"), 5, null)
+    );
+
+    const list = listOver(h);
+    await list.load();
+    cross();
+    await vi.waitFor(() => expect(h.paintedIds()).toHaveLength(4));
+    cross();
+    await vi.waitFor(() => expect(h.paintedIds()).toHaveLength(5));
+
+    expect(sentCursors()).toEqual([null, first, second]);
+    expect(h.paintedIds()).toEqual(["a", "b", "c", "d", "e"]);
+  });
+
+  it("load() asks from the newest row again without discarding the stored cursor", async () => {
+    const h = harness();
+    const first: HistoryCursor = { ts: 300, id: "second-row" };
+    const second: HistoryCursor = { ts: 100, id: "fourth-row" };
+    queueResponses(
+      pageOf(entries("a", "b"), 5, first),
+      pageOf(entries("c", "d"), 5, second),
+      pageOf(entries("a", "b"), 5, first)
+    );
+
+    const list = listOver(h);
+    await list.load();
+    cross();
+    await vi.waitFor(() => expect(h.paintedIds()).toHaveLength(4));
+    await list.load();
+
+    expect(sentCursors()).toEqual([null, first, null]);
+    expect(h.paintedIds()).toEqual(["a", "b"]);
+  });
+
+  it("asks for nothing when the sentinel is crossed on the last page", async () => {
+    const h = harness();
+    queueResponses(pageOf(entries("a"), 1, null));
+
+    await listOver(h).load();
+    cross();
+    await flush();
+
+    expect(sentCursors()).toEqual([null]);
+  });
+
+  it("asks for nothing when the sentinel is crossed before the first page has landed", async () => {
+    const h = harness();
+    const first = deferredPage();
+    apiMock.getHistory.mockReturnValue(first.promise);
+
+    const list = listOver(h);
+    void list.load();
+    cross();
+    await flush();
+
+    expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands every page's days to the rows it paints", async () => {
+    const h = harness();
+    const today: HistoryDay = { date: "2026-08-01", recordings: 9, words: 120 };
+    const older: HistoryDay = { date: "2026-07-30", recordings: 1, words: 4 };
+    queueResponses(
+      pageOf(entries("a", "b"), 3, { ts: 1, id: "b" }, { days: [today] }),
+      pageOf(entries("c"), 3, null, { days: [older] })
+    );
+
+    const list = listOver(h);
+    await list.load();
+    cross();
+    await vi.waitFor(() => expect(h.placedDays).toHaveLength(2));
+
+    expect(h.placedDays).toEqual([[today], [older]]);
+  });
+});
+
+describe("createHistoryList — the sentinel", () => {
+  it("shows the skeleton while a page is read and takes it away when the page lands", async () => {
+    const h = harness();
+    const second = deferredPage();
+    let calls = 0;
+    apiMock.getHistory.mockImplementation(async () => {
+      calls += 1;
+      return calls === 1 ? pageOf(entries("a", "b"), 3, { ts: 1, id: "b" }) : second.promise;
+    });
+
+    const list = listOver(h);
+    await list.load();
+    expect(h.reading()).toBe(false);
+
+    cross();
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
+    expect(h.reading()).toBe(true);
+
+    second.release(pageOf(entries("c"), 3, null));
+    await flush();
+
+    expect(h.reading()).toBe(false);
+  });
+
+  it("looks at the sentinel afresh once a page has landed, so a sentinel still in view pages again", async () => {
+    const h = harness();
+    queueResponses(pageOf(entries("a", "b"), 3, { ts: 1, id: "b" }));
+
+    await listOver(h).load();
+
+    expect(FakeObserver.latest!.observeCalls).toBe(2);
+    expect(FakeObserver.latest!.watching).toBe(true);
+  });
+
+  it("stops watching the sentinel on disconnect", () => {
+    const h = harness();
+
+    listOver(h).disconnect();
+
+    expect(FakeObserver.latest!.watching).toBe(false);
+  });
+
+  it("is shown while next_cursor is non-null, even though the total is already painted", async () => {
+    const h = harness();
+    queueResponses(pageOf(entries("a", "b"), 2, { ts: 300, id: "second-row" }));
+
+    await listOver(h).load();
+
+    expect(h.sentinelVisible()).toBe(true);
+    expect(h.countText()).toBe("2 transcripts");
+  });
+
+  it("is hidden when next_cursor is null even though rows are still missing", async () => {
+    const h = harness();
+    queueResponses(pageOf(entries("a"), 99, null));
+
+    await listOver(h).load();
+
+    expect(h.sentinelVisible()).toBe(false);
+  });
+});
+
 describe("createHistoryList — one request at a time decides the rows and the cursor", () => {
   it("names the version skew when the backend omits next_cursor entirely", async () => {
     const h = harness();
@@ -254,11 +359,7 @@ describe("createHistoryList — one request at a time decides the rows and the c
 
   it("keeps the version-skew warning painted when a row is deleted afterwards", async () => {
     const h = harness();
-    apiMock.getHistory.mockResolvedValueOnce({
-      entries: [buildEntry("a"), buildEntry("b")],
-      total: 2,
-      next_cursor: null,
-    });
+    apiMock.getHistory.mockResolvedValueOnce(pageOf(entries("a", "b"), 2, null));
     apiMock.getHistory.mockRejectedValue(new SidecarTooOldError("no next_cursor"));
 
     const list = listOver(h);
@@ -273,7 +374,7 @@ describe("createHistoryList — one request at a time decides the rows and the c
 
   it("leaves the painted rows alone when a 200 carries a cursor but no page", async () => {
     const h = harness();
-    queueResponses({ entries: [buildEntry("a"), buildEntry("b")], total: 2, next_cursor: null });
+    queueResponses(pageOf(entries("a", "b"), 2, null));
     const list = listOver(h);
     await list.load();
     expect(h.paintedIds()).toEqual(["a", "b"]);
@@ -297,10 +398,10 @@ describe("createHistoryList — one request at a time decides the rows and the c
   it("leaves the painted rows alone when a well-formed page carries a malformed entry", async () => {
     const h = harness();
     queueResponses(
-      { entries: [buildEntry("a"), buildEntry("b")], total: 2, next_cursor: null },
-      { entries: [{ id: "c" } as unknown as HistoryEntry], total: 1, next_cursor: null }
+      pageOf(entries("a", "b"), 2, null),
+      pageOf([{ id: "c" } as unknown as HistoryEntry], 1, null)
     );
-    const list = listOver(h, 2, () => false, createRowRequiringLanguage);
+    const list = listOver(h, 2, () => false, createRowRequiringText);
     await list.load();
     expect(h.paintedIds()).toEqual(["a", "b"]);
 
@@ -313,18 +414,13 @@ describe("createHistoryList — one request at a time decides the rows and the c
   it("leaves the appended rows alone when a second page carries a malformed entry", async () => {
     const h = harness();
     queueResponses(
-      { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: { ts: 1, id: "b" } },
-      {
-        entries: [buildEntry("c"), { id: "d" } as unknown as HistoryEntry],
-        total: 4,
-        next_cursor: null,
-      }
+      pageOf(entries("a", "b"), 4, { ts: 1, id: "b" }),
+      pageOf([buildEntry("c"), { id: "d" } as unknown as HistoryEntry], 4, null)
     );
-    const list = listOver(h, 2, () => false, createRowRequiringLanguage);
+    const list = listOver(h, 2, () => false, createRowRequiringText);
     await list.load();
-    expect(h.paintedIds()).toEqual(["a", "b"]);
 
-    h.elements.loadMoreButton.click();
+    cross();
     await vi.waitFor(() => expect(h.countText()).toBe("Failed to load"));
 
     expect(h.paintedIds()).toEqual(["a", "b"]);
@@ -339,86 +435,77 @@ describe("createHistoryList — one request at a time decides the rows and the c
     expect(h.countText()).toBe("Failed to load");
   });
 
-  it("claimRows() disables Load more and leaves the wrapper alone, so an unrepainted list stays pageable", async () => {
+  it("claimRows() holds paging and leaves the sentinel alone until the lane releases it", async () => {
     const h = harness();
     const cursor: HistoryCursor = { ts: 300, id: "second-row" };
-    queueResponses({ entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor });
+    queueResponses(pageOf(entries("a", "b"), 4, cursor), pageOf(entries("c"), 4, null));
 
     const list = listOver(h);
     await list.load();
-    expect(h.loadMoreVisible()).toBe(true);
-
     const claim = list.claimRows();
 
-    expect(h.loadMoreVisible()).toBe(true);
-    expect(h.elements.loadMoreButton.disabled).toBe(true);
-
-    h.elements.loadMoreButton.click();
+    cross();
     await flush();
     expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
+    expect(h.sentinelVisible()).toBe(true);
 
     claim.release();
-
-    expect(h.loadMoreVisible()).toBe(true);
-    expect(h.elements.loadMoreButton.disabled).toBe(false);
+    cross();
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
+    expect(sentCursors()).toEqual([null, cursor]);
   });
 
-  it("claimRows() touches nothing once the tab is gone", async () => {
+  it("a claim taken after teardown writes nothing", async () => {
     const h = harness();
-    const cursor: HistoryCursor = { ts: 300, id: "second-row" };
-    queueResponses({ entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor });
+    queueResponses(pageOf(entries("a", "b"), 2, null));
     let destroyed = false;
 
     const list = listOver(h, 2, () => destroyed);
     await list.load();
-    expect(h.elements.loadMoreButton.disabled).toBe(false);
 
     destroyed = true;
-    list.claimRows();
+    const claim = list.claimRows();
+    claim.renderCount("late");
+    claim.replaceRows([]);
 
-    expect(h.elements.loadMoreButton.disabled).toBe(false);
+    expect(h.countText()).toBe("2 transcripts");
+    expect(h.paintedIds()).toEqual(["a", "b"]);
   });
 
-  it("only the current claim hands Load more back, so a superseded append cannot re-enable it", async () => {
+  it("only the current claim ends the hold, so a superseded append cannot start paging again", async () => {
     const h = harness();
     const cursor: HistoryCursor = { ts: 300, id: "second-row" };
     const append = deferredPage();
     let calls = 0;
     apiMock.getHistory.mockImplementation(async () => {
       calls += 1;
-      return calls === 2
-        ? append.promise
-        : { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor };
+      return calls === 2 ? append.promise : pageOf(entries("a", "b"), 4, cursor);
     });
 
     const list = listOver(h);
     await list.load();
-    h.elements.loadMoreButton.click();
+    cross();
     await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
-    expect(h.elements.loadMoreButton.disabled).toBe(true);
 
     const claim = list.claimRows();
-
-    append.release({ entries: [buildEntry("c")], total: 4, next_cursor: null });
+    append.release(pageOf(entries("c"), 4, null));
     await flush();
 
     expect(claim.isCurrent()).toBe(true);
     expect(h.paintedIds()).toEqual(["a", "b"]);
-    expect(h.elements.loadMoreButton.disabled).toBe(true);
+    cross();
+    await flush();
+    expect(apiMock.getHistory).toHaveBeenCalledTimes(2);
 
     claim.release();
-
-    expect(h.elements.loadMoreButton.disabled).toBe(false);
+    cross();
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(3));
   });
 
   it("clears the version-skew warning once a page comes back carrying a cursor", async () => {
     const h = harness();
     apiMock.getHistory.mockRejectedValueOnce(new SidecarTooOldError("no next_cursor"));
-    apiMock.getHistory.mockResolvedValue({
-      entries: [buildEntry("a"), buildEntry("b")],
-      total: 2,
-      next_cursor: null,
-    });
+    apiMock.getHistory.mockResolvedValue(pageOf(entries("a", "b"), 2, null));
 
     const list = listOver(h);
     await list.load();
@@ -433,27 +520,21 @@ describe("createHistoryList — one request at a time decides the rows and the c
     expect(h.countText()).toBe("1 transcript");
   });
 
-  it("ignores a second Load more click while the first is still outstanding", async () => {
+  it("ignores a second crossing while the first page is still outstanding", async () => {
     const h = harness();
     const cursor: HistoryCursor = { ts: 300, id: "second-row" };
     const second = deferredPage();
     let calls = 0;
     apiMock.getHistory.mockImplementation(async () => {
       calls += 1;
-      return calls === 1
-        ? { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor }
-        : second.promise;
+      return calls === 1 ? pageOf(entries("a", "b"), 4, cursor) : second.promise;
     });
 
     const list = listOver(h);
     await list.load();
-    h.elements.loadMoreButton.click();
-    h.elements.loadMoreButton.click();
-    second.release({
-      entries: [buildEntry("c"), buildEntry("d")],
-      total: 4,
-      next_cursor: null,
-    });
+    cross();
+    cross();
+    second.release(pageOf(entries("c", "d"), 4, null));
     await flush();
 
     expect(apiMock.getHistory).toHaveBeenCalledTimes(2);
@@ -468,26 +549,26 @@ describe("createHistoryList — one request at a time decides the rows and the c
     apiMock.getHistory.mockImplementation(async () => {
       calls += 1;
       if (calls === 2) return append.promise;
-      return { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor };
+      return pageOf(entries("a", "b"), 4, cursor);
     });
 
     const list = listOver(h);
     await list.load();
-    h.elements.loadMoreButton.click();
+    cross();
     await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
     await list.load();
-    append.release({ entries: [buildEntry("c"), buildEntry("d")], total: 4, next_cursor: null });
+    append.release(pageOf(entries("c", "d"), 4, null));
     await flush();
 
     expect(h.paintedIds()).toEqual(["a", "b"]);
-    expect(h.loadMoreVisible()).toBe(true);
+    expect(h.sentinelVisible()).toBe(true);
 
-    h.elements.loadMoreButton.click();
+    cross();
     await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(4));
     expect(sentCursors()).toEqual([null, cursor, null, cursor]);
   });
 
-  it("keeps Load more refused while the reload that superseded an append is outstanding", async () => {
+  it("keeps paging held while the reload that superseded an append is outstanding", async () => {
     const h = harness();
     const cursor: HistoryCursor = { ts: 300, id: "second-row" };
     const append = deferredPage();
@@ -497,34 +578,32 @@ describe("createHistoryList — one request at a time decides the rows and the c
       calls += 1;
       if (calls === 2) return append.promise;
       if (calls === 3) return reload.promise;
-      return { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor };
+      return pageOf(entries("a", "b"), 4, cursor);
     });
 
     const list = listOver(h);
     await list.load();
-    h.elements.loadMoreButton.click();
+    cross();
     await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
     void list.load();
     await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(3));
-    append.release({ entries: [buildEntry("c")], total: 4, next_cursor: null });
+    append.release(pageOf(entries("c"), 4, null));
     await flush();
 
-    expect(h.elements.loadMoreButton.disabled).toBe(true);
-    h.elements.loadMoreButton.click();
+    cross();
+    await flush();
     expect(apiMock.getHistory).toHaveBeenCalledTimes(3);
   });
 
-  it("leaves the rows, the cursor and Load more untouched when a reload fails", async () => {
+  it("leaves the rows, the cursor and the sentinel untouched when a reload fails", async () => {
     const h = harness();
     const cursor: HistoryCursor = { ts: 300, id: "second-row" };
     let calls = 0;
     apiMock.getHistory.mockImplementation(async () => {
       calls += 1;
       if (calls === 2) throw new Error("503 store busy");
-      if (calls === 3) {
-        return { entries: [buildEntry("c"), buildEntry("d")], total: 4, next_cursor: null };
-      }
-      return { entries: [buildEntry("a"), buildEntry("b")], total: 4, next_cursor: cursor };
+      if (calls === 3) return pageOf(entries("c", "d"), 4, null);
+      return pageOf(entries("a", "b"), 4, cursor);
     });
 
     const list = listOver(h);
@@ -532,63 +611,158 @@ describe("createHistoryList — one request at a time decides the rows and the c
     await list.load();
 
     expect(h.paintedIds()).toEqual(["a", "b"]);
-    expect(h.loadMoreVisible()).toBe(true);
+    expect(h.sentinelVisible()).toBe(true);
 
-    h.elements.loadMoreButton.click();
+    cross();
     await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(3));
 
     expect(sentCursors()).toEqual([null, null, cursor]);
-    expect(h.paintedIds()).toEqual(["a", "b", "c", "d"]);
+    await vi.waitFor(() => expect(h.paintedIds()).toEqual(["a", "b", "c", "d"]));
   });
-
 });
 
-describe("createHistoryList — Load more tracks next_cursor, not the total", () => {
-  it("shows the control when next_cursor is non-null", async () => {
+describe("createHistoryList — rows newer than the newest one painted", () => {
+  it("asks after the newest row of the first page and puts what arrives on top, newest first", async () => {
     const h = harness();
-    queueResponses({
-      entries: [buildEntry("a"), buildEntry("b")],
-      total: 2,
-      next_cursor: { ts: 300, id: "second-row" },
-    });
+    const store = entries("b", "a");
+    queueResponses(pageOf([...store], 2, null));
+    apiMock.getNewerHistory.mockImplementation(newerByCursor(store));
 
-    await listOver(h).load();
+    const list = listOver(h, 5);
+    await list.load();
+    store.unshift(buildEntry("d"), buildEntry("c"));
+    await list.loadNewer();
 
-    expect(h.loadMoreVisible()).toBe(true);
+    expect(apiMock.getNewerHistory.mock.calls[0]).toEqual([5, positionOf(buildEntry("b"))]);
+    expect(h.paintedIds()).toEqual(["d", "c", "b", "a"]);
+    expect(h.countText()).toBe("4 transcripts");
   });
 
-  it("hides the control when next_cursor is null even though rows are still missing", async () => {
+  it("never paints a row twice however often it asks", async () => {
     const h = harness();
-    queueResponses({ entries: [buildEntry("a")], total: 99, next_cursor: null });
+    const store = entries("a");
+    queueResponses(pageOf([...store], 1, null));
+    apiMock.getNewerHistory.mockImplementation(newerByCursor(store));
 
-    await listOver(h).load();
+    const list = listOver(h, 5);
+    await list.load();
+    store.unshift(buildEntry("b"));
+    await list.loadNewer();
+    await list.loadNewer();
+    store.unshift(buildEntry("c"));
+    await list.loadNewer();
+    await list.loadNewer();
 
-    expect(h.loadMoreVisible()).toBe(false);
+    expect(h.paintedIds()).toEqual(["c", "b", "a"]);
   });
 
-  it("shows the control when next_cursor is non-null even though the total is already painted", async () => {
+  it("keeps asking while a newer page comes back full", async () => {
     const h = harness();
-    queueResponses({
-      entries: [buildEntry("a"), buildEntry("b")],
-      total: 2,
-      next_cursor: { ts: 300, id: "second-row" },
+    const store = entries("a");
+    queueResponses(pageOf([...store], 1, null));
+    apiMock.getNewerHistory.mockImplementation(newerByCursor(store));
+
+    const list = listOver(h, 2);
+    await list.load();
+    store.unshift(...entries("f", "e", "d", "c", "b"));
+    await list.loadNewer();
+
+    expect(apiMock.getNewerHistory).toHaveBeenCalledTimes(3);
+    expect(h.paintedIds()).toEqual(["f", "e", "d", "c", "b", "a"]);
+  });
+
+  it("hands the newer page's days to the rows, so a grown day's header refreshes", async () => {
+    const h = harness();
+    const grown: HistoryDay = { date: "2026-08-01", recordings: 2, words: 8 };
+    queueResponses(pageOf(entries("a"), 1, null));
+    apiMock.getNewerHistory.mockResolvedValue(pageOf(entries("b"), 2, null, { days: [grown] }));
+
+    const list = listOver(h, 5);
+    await list.load();
+    await list.loadNewer();
+
+    expect(h.placedDays[h.placedDays.length - 1]).toEqual([grown]);
+  });
+
+  it("skips its turn while a page is being read", async () => {
+    const h = harness();
+    const second = deferredPage();
+    let calls = 0;
+    apiMock.getHistory.mockImplementation(async () => {
+      calls += 1;
+      return calls === 1 ? pageOf(entries("a", "b"), 4, { ts: 1, id: "b" }) : second.promise;
     });
 
-    await listOver(h).load();
+    const list = listOver(h);
+    await list.load();
+    cross();
+    await vi.waitFor(() => expect(apiMock.getHistory).toHaveBeenCalledTimes(2));
+    await list.loadNewer();
 
-    expect(h.loadMoreVisible()).toBe(true);
-    expect(h.countText()).toBe("2 transcripts");
+    expect(apiMock.getNewerHistory).not.toHaveBeenCalled();
+  });
+
+  it("skips its turn while another lane's rows are on screen", async () => {
+    const h = harness();
+    queueResponses(pageOf(entries("a"), 1, null));
+
+    const list = listOver(h);
+    await list.load();
+    const claim = list.claimRows();
+    claim.replaceRows([]);
+    claim.release();
+    await list.loadNewer();
+
+    expect(apiMock.getNewerHistory).not.toHaveBeenCalled();
+  });
+
+  it("asks for the first page again while the history it painted was empty", async () => {
+    const h = harness();
+    queueResponses(pageOf([], 0, null), pageOf(entries("a"), 1, null));
+
+    const list = listOver(h);
+    await list.load();
+    await list.loadNewer();
+
+    expect(sentCursors()).toEqual([null, null]);
+    expect(apiMock.getNewerHistory).not.toHaveBeenCalled();
+    expect(h.paintedIds()).toEqual(["a"]);
+  });
+
+  it("paints nothing and keeps the count when the read fails", async () => {
+    const h = harness();
+    queueResponses(pageOf(entries("a"), 1, null));
+    apiMock.getNewerHistory.mockRejectedValue(new Error("503 store busy"));
+
+    const list = listOver(h);
+    await list.load();
+    await list.loadNewer();
+
+    expect(h.paintedIds()).toEqual(["a"]);
+    expect(h.countText()).toBe("1 transcript");
+  });
+
+  it("drops a newer page that a reload superseded", async () => {
+    const h = harness();
+    const newer = deferredPage();
+    queueResponses(pageOf(entries("a"), 1, null), pageOf(entries("a"), 1, null));
+    apiMock.getNewerHistory.mockReturnValue(newer.promise);
+
+    const list = listOver(h);
+    await list.load();
+    const poll = list.loadNewer();
+    await list.load();
+    newer.release(pageOf(entries("b"), 2, null));
+    await poll;
+
+    expect(h.paintedIds()).toEqual(["a"]);
   });
 });
 
 describe("createHistoryList — the count is the stored total, not the painted rows", () => {
   it("renders the total the response carried, not how many rows arrived", async () => {
     const h = harness();
-    queueResponses({
-      entries: [buildEntry("a"), buildEntry("b")],
-      total: 57,
-      next_cursor: { ts: 300, id: "second-row" },
-    });
+    queueResponses(pageOf(entries("a", "b"), 57, { ts: 300, id: "second-row" }));
 
     await listOver(h).load();
 
@@ -597,7 +771,7 @@ describe("createHistoryList — the count is the stored total, not the painted r
 
   it("entryRemoved() decrements the displayed number and asks the backend for nothing", async () => {
     const h = harness();
-    queueResponses({ entries: [buildEntry("a")], total: 57, next_cursor: null });
+    queueResponses(pageOf(entries("a"), 57, null));
 
     const list = listOver(h);
     await list.load();

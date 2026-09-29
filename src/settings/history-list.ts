@@ -1,4 +1,11 @@
-import { api, SidecarTooOldError, type HistoryCursor, type HistoryEntry } from "../api";
+import {
+  api,
+  SidecarTooOldError,
+  type HistoryCursor,
+  type HistoryDay,
+  type HistoryEntry,
+  type HistoryPageResponse,
+} from "../api";
 import { isStaleStatusResponse } from "../stale-response";
 
 /** The singular/plural pair a tab uses when it names its own rows. */
@@ -7,12 +14,35 @@ export interface HistoryListNoun {
   plural: string;
 }
 
-/** The four elements the shared list writes to. The tab owns its own markup and passes them in. */
+/** A row the list built from an entry before anything on screen was touched. */
+export interface BuiltRow {
+  entry: HistoryEntry;
+  element: HTMLElement;
+}
+
+/**
+ * Where rows go. The tab owns the layout — day groups, headers — and the list
+ * owns when and in what order a page lands.
+ */
+export interface HistoryRows {
+  /** Replaces whatever is painted with the first page, newest first. */
+  replace(rows: readonly BuiltRow[], days: readonly HistoryDay[]): void;
+  /** Adds an older page below what is painted, newest first. */
+  append(rows: readonly BuiltRow[], days: readonly HistoryDay[]): void;
+  /** Adds rows newer than everything painted above it, newest first. */
+  prepend(rows: readonly BuiltRow[], days: readonly HistoryDay[]): void;
+  /** Paints another lane's elements in place of the list's own. */
+  replaceWith(elements: readonly HTMLElement[]): void;
+}
+
+/**
+ * The two elements the shared list writes to. `sentinel` sits below the rows:
+ * scrolling it into view asks for the next page, and while a page is read it
+ * carries the `--reading` class the skeleton cards hang on.
+ */
 export interface HistoryListElements {
   count: HTMLElement;
-  rows: HTMLElement;
-  loadMoreWrapper: HTMLElement;
-  loadMoreButton: HTMLButtonElement;
+  sentinel: HTMLElement;
 }
 
 export interface HistoryListOptions {
@@ -21,34 +51,31 @@ export interface HistoryListOptions {
   /** The tab's own name, as the version-skew message says it. */
   featureName: string;
   elements: HistoryListElements;
+  rows: HistoryRows;
   createRow: (entry: HistoryEntry) => HTMLElement;
   renderEmptyState: (isEmpty: boolean) => void;
   isDestroyed: () => boolean;
 }
 
+export const SENTINEL_READING = "timeline-more--reading";
+
 /**
- * A lane's permission to write to the shared count and "Load more" elements,
- * valid only while nothing newer has taken the rows over.
+ * A lane's permission to write to the shared count and sentinel, valid only
+ * while nothing newer has taken the rows over.
  *
- * Taking a claim is what supersedes every other lane, so one counter decides
- * both who paints and who the tab believes painted. Both writers are no-ops
- * once `isCurrent()` is false, so a late answer needs no staleness test of its
- * own beyond the one it already asks before touching rows.
+ * Taking a claim supersedes every other lane and holds paging: while the latest
+ * claim is unreleased, the sentinel asks for nothing and the newer-rows poll
+ * skips its turn, so nothing pages under a paint that has not happened yet.
+ * `release()` ends the hold and looks at the sentinel again.
  *
- * `release()` hands "Load more" back once the lane is done with it. Taking a
- * claim disables the button rather than hiding it, so nothing can page under a
- * paint that has not happened yet; releasing is how the button comes back for a
- * lane that ended without painting rows of its own.
- *
- * `replaceRows` is the only way to paint the shared row container from outside
- * this module, and painting through it is what records that the rows on screen
- * are no longer the list's own page. A lane that claims and then never answers
- * therefore leaves the list's own rows described by the list's own count.
+ * `replaceRows` is the only way to paint the rows from outside this module, and
+ * painting through it records that the rows on screen are no longer the list's
+ * own page, which is what stops paging and the poll until a reload.
  */
 export interface HistoryRowsClaim {
   isCurrent(): boolean;
   renderCount(text: string): void;
-  renderLoadMore(visible: boolean): void;
+  renderMore(visible: boolean): void;
   replaceRows(rows: readonly HTMLElement[]): void;
   release(): void;
 }
@@ -56,41 +83,31 @@ export interface HistoryRowsClaim {
 export interface HistoryList {
   /**
    * Asks for the first page with no cursor and, once it arrives, replaces
-   * whatever is painted and adopts the cursor the response carried. A request
+   * whatever is painted and adopts both cursors the response carried. A request
    * that fails changes nothing.
    */
   load(): Promise<void>;
   /**
+   * Asks for the rows newer than the newest one painted and puts them on top,
+   * and keeps asking while pages come back full. Does nothing while another
+   * request is outstanding or the rows belong to another lane; a failure is
+   * logged and paints nothing, since the next turn asks again.
+   */
+  loadNewer(): Promise<void>;
+  /**
    * Takes the rows over for a lane the list does not own, such as History's
    * search, and hands back the only way to write to the shared count and
-   * "Load more" from outside this module.
-   *
-   * Claiming disables "Load more" for as long as the lane runs and leaves the
-   * wrapper alone. The claiming lane is about to paint something the stored
-   * cursor does not describe, so a click while it runs would append rows from a
-   * page nothing on screen came from; a disabled button refuses that click
-   * without taking the button away from rows the lane may never repaint. The
-   * lane calls `release()` when it is done, and a lane that painted its own
-   * rows hides the wrapper itself.
-   *
-   * The hold lasts exactly as long as the claiming lane is outstanding, and
-   * nothing bounds that from here. `api.searchHistory` has no client-side
-   * budget, so a backend that never answers a search leaves the button disabled
-   * until some newer lane supersedes the claim -- emptying the search box, which
-   * reloads the page and releases the button, is the recovery.
+   * sentinel from outside this module. The lane calls `release()` when it is
+   * done, and a lane that painted its own rows hides the sentinel itself.
    */
   claimRows(): HistoryRowsClaim;
   /**
    * Drops one from the running total after a single-entry delete, and does
    * nothing at all while the rows on screen belong to another lane.
-   *
-   * The list knows whose paint is showing, so the caller does not have to: a
-   * delete during a History search leaves the match count alone, and the same
-   * delete after a reload has taken the rows back decrements the total. Asking
-   * the caller to guard meant asking a claim whether it was superseded, which
-   * is a question a claim answers `false` to after teardown as well.
    */
   entryRemoved(): void;
+  /** Stops watching the sentinel. */
+  disconnect(): void;
 }
 
 /**
@@ -106,36 +123,42 @@ export function formatEntryCount(total: number, noun: HistoryListNoun): string {
 }
 
 /**
- * Pagination, failure text and "Load more" wiring for a tab that pages over
- * `api.getHistory`. It never creates markup and never owns a row's shape.
+ * Pagination, the newer-rows read, failure text and the sentinel for a tab that
+ * pages over `api.getHistory`. It never creates markup and never owns a row's
+ * shape or its place on screen.
  */
 export function createHistoryList(options: HistoryListOptions): HistoryList {
-  const { pageSize, noun, featureName, elements, createRow, renderEmptyState, isDestroyed } = options;
+  const { pageSize, noun, featureName, elements, rows, createRow, renderEmptyState, isDestroyed } =
+    options;
 
   let cursor: HistoryCursor | null = null;
+  let newest: HistoryCursor | null = null;
   let total = 0;
   let latestIssuedToken = 0;
   let backendOmitsCursor = false;
   let latestClaim: HistoryRowsClaim | null = null;
   let rowsAreOwnPage = false;
+  let pagingHeld = false;
 
-  function renderCount(text: string): void {
-    elements.count.textContent = text;
-  }
+  const observer = new IntersectionObserver((records) => {
+    if (records.some((record) => record.isIntersecting)) void loadOlder();
+  });
+  observer.observe(elements.sentinel);
 
-  function renderLoadMore(visible: boolean): void {
-    elements.loadMoreWrapper.style.display = visible ? "block" : "none";
+  /**
+   * Observing again is what makes the observer report where the sentinel is
+   * now: a page that landed may or may not have pushed it out of view, and only
+   * a fresh observation says which after layout.
+   */
+  function rewatchSentinel(): void {
+    observer.unobserve(elements.sentinel);
+    observer.observe(elements.sentinel);
   }
 
   /**
    * The total, or the version-skew warning while the backend is still omitting
-   * the cursor.
-   *
-   * Sticky against `entryRemoved`, not permanent: the count is the number that
-   * is lying when the backend omits the cursor, so deleting a row afterwards
-   * must not paint a plausible total back over the warning. A page that comes
-   * back carrying a cursor is what clears it, so restarting the backend on a
-   * version that answers correctly stops the warning without a remount.
+   * the cursor. Sticky against `entryRemoved`; a page that comes back carrying a
+   * cursor is what clears it.
    */
   function renderTotal(claim: HistoryRowsClaim): void {
     claim.renderCount(
@@ -145,14 +168,9 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
   /**
    * Issues a claim, which supersedes every lane already holding one: the token
-   * is bumped, the new claim is recorded as the list's own writer and
-   * "Load more" is disabled for the duration of the lane. Reading this as a
-   * plain factory is the mistake it is named against -- calling it "just to get
-   * a claim" silently invalidates every request in flight.
-   *
-   * The disable lives here rather than in each caller because both of them go
-   * through this one function, and the one place that knows whether the tab is
-   * still mounted is the `isCurrent` this claim is built around.
+   * is bumped, the new claim is recorded as the list's own writer and paging is
+   * held for the duration of the lane. Calling it "just to get a claim"
+   * silently invalidates every request in flight.
    */
   function issueClaim(): HistoryRowsClaim {
     const token = ++latestIssuedToken;
@@ -160,84 +178,64 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     const claim: HistoryRowsClaim = {
       isCurrent,
       renderCount(text: string) {
-        if (isCurrent()) renderCount(text);
+        if (isCurrent()) elements.count.textContent = text;
       },
-      renderLoadMore(visible: boolean) {
-        if (isCurrent()) renderLoadMore(visible);
+      renderMore(visible: boolean) {
+        if (isCurrent()) elements.sentinel.hidden = !visible;
       },
-      replaceRows(rows: readonly HTMLElement[]) {
+      replaceRows(painted: readonly HTMLElement[]) {
         if (!isCurrent()) return;
-        elements.rows.innerHTML = "";
-        for (const row of rows) {
-          elements.rows.appendChild(row);
-        }
+        rows.replaceWith(painted);
         rowsAreOwnPage = false;
       },
       release() {
-        if (isCurrent()) elements.loadMoreButton.disabled = false;
+        if (!isCurrent()) return;
+        pagingHeld = false;
+        elements.sentinel.classList.remove(SENTINEL_READING);
+        rewatchSentinel();
       },
     };
     latestClaim = claim;
-    if (isCurrent()) {
-      elements.loadMoreButton.disabled = true;
-    }
+    if (isCurrent()) pagingHeld = true;
     return claim;
+  }
+
+  function build(entries: readonly HistoryEntry[]): BuiltRow[] {
+    return entries.map((entry) => ({ entry, element: createRow(entry) }));
   }
 
   /**
    * One page, appended or replacing. A reload asks with no cursor without
-   * discarding the stored one: nothing painted is destroyed before its
-   * replacement has arrived, so a request that fails or is superseded leaves the
-   * rows, the cursor and "Load more" exactly as they were. A reload whose
-   * request 503s would otherwise leave the button visible over a null cursor,
-   * and the next click would re-fetch and re-append the first page -- the
-   * duplicate this whole spec exists to remove.
-   *
-   * Staleness is `isStaleStatusResponse` behind a claim, the one mechanism this
-   * app uses for a late answer, and a second click is refused by disabling the
-   * button rather than by a flag beside it: the condition then lives on the
-   * element it governs and cannot drift out of step with a counter.
-   *
-   * An append with no stored cursor would ask for the first page and append it
-   * under itself, so it is refused before the claim is issued and before the
-   * button is touched: a refused click supersedes nothing and leaves the button
-   * as it found it. That invariant used to be held up by every call site
-   * happening to hide the button, which the next call site added would not have
-   * known to do.
-   *
-   * "Nothing painted is destroyed" covers a row this list cannot build, not
-   * only a request that fails: every row is built before the count is written
-   * and before the container is emptied, so a `createRow` that throws on a
-   * malformed entry lands in the same `catch` with the previous page still on
-   * screen. Validating the arriving shape instead would have to enumerate every
-   * field each tab's row reads, in a module that renders neither.
+   * discarding the stored one, and every row is built before the count is
+   * written or anything is painted, so a request that fails, is superseded, or
+   * carries an entry `createRow` cannot build leaves the rows and both cursors
+   * exactly as they were.
    */
   async function loadPage(append: boolean): Promise<void> {
     if (append && cursor === null) return;
     const claim = issueClaim();
+    elements.sentinel.classList.add(SENTINEL_READING);
     try {
       const response = await api.getHistory(pageSize, append ? cursor : null);
       if (!claim.isCurrent()) return;
 
-      const builtRows = response.entries.map((entry) => createRow(entry));
+      const built = build(response.entries);
 
       total = response.total;
       backendOmitsCursor = false;
       rowsAreOwnPage = true;
       renderTotal(claim);
 
-      if (!append) {
-        elements.rows.innerHTML = "";
+      if (append) {
+        rows.append(built, response.days);
+      } else {
+        rows.replace(built, response.days);
+        newest = response.newest_cursor;
       }
-
-      for (const row of builtRows) {
-        elements.rows.appendChild(row);
-      }
-
       renderEmptyState(response.entries.length === 0 && !append);
 
       cursor = response.next_cursor;
-      claim.renderLoadMore(cursor !== null);
+      claim.renderMore(cursor !== null);
     } catch (error) {
       if (!claim.isCurrent()) return;
       if (error instanceof SidecarTooOldError) {
@@ -252,19 +250,46 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     }
   }
 
-  elements.loadMoreButton.addEventListener("click", () => {
-    void loadPage(true);
-  });
+  function loadOlder(): Promise<void> {
+    if (pagingHeld || !rowsAreOwnPage) return Promise.resolve();
+    return loadPage(true);
+  }
+
+  async function loadNewer(): Promise<void> {
+    if (isDestroyed() || pagingHeld || !rowsAreOwnPage) return;
+    if (newest === null) return loadPage(false);
+    const claim = issueClaim();
+    let page: HistoryPageResponse | null = null;
+    try {
+      page = await api.getNewerHistory(pageSize, newest);
+      if (!claim.isCurrent()) return;
+      const built = build([...page.entries].reverse());
+      total = page.total;
+      renderTotal(claim);
+      if (built.length > 0) rows.prepend(built, page.days);
+      newest = page.newest_cursor ?? newest;
+    } catch (error) {
+      page = null;
+      console.error(error);
+    } finally {
+      claim.release();
+    }
+    if (page !== null && page.entries.length === pageSize) await loadNewer();
+  }
 
   return {
     load() {
       return loadPage(false);
     },
+    loadNewer,
     claimRows: issueClaim,
     entryRemoved() {
       if (!rowsAreOwnPage || latestClaim === null) return;
       total--;
       renderTotal(latestClaim);
+    },
+    disconnect() {
+      observer.disconnect();
     },
   };
 }

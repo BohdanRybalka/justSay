@@ -81,8 +81,11 @@ const historyTab = {
 };
 
 vi.mock("./tabs/history", () => ({
+  renderHistoryHeading: vi.fn((container: HTMLElement) => {
+    container.insertAdjacentHTML("beforeend", '<h2 id="history-heading"></h2>');
+  }),
   renderHistory: vi.fn((container: HTMLElement) => {
-    container.innerHTML = '<div id="history-tab-body"></div>';
+    container.insertAdjacentHTML("beforeend", '<div id="history-tab-body"></div>');
     return historyTab;
   }),
 }));
@@ -307,15 +310,18 @@ describe("the sidebar", () => {
     expect(wordsTab.destroy).toHaveBeenCalledOnce();
   });
 
-  it("hosts Transcribe and History together in History, and lets go of both on leaving", async () => {
+  it("hosts the old Transcribe tab between History's heading and its timeline, and lets go of both on leaving", async () => {
     await bootWithSettingsLoaded();
 
     openPanel("history");
 
     const hosted = document.querySelectorAll("#pane .legacy-tab");
-    expect(hosted).toHaveLength(2);
+    expect(hosted).toHaveLength(1);
     expect(hosted[0].querySelector("#transcribe-tab-body")).not.toBeNull();
-    expect(hosted[1].querySelector("#history-tab-body")).not.toBeNull();
+    const order = Array.from(document.querySelector("#pane > .panel")!.children).map(
+      (child) => child.id || child.className,
+    );
+    expect(order).toEqual(["history-heading", "legacy-tab", "history-tab-body"]);
 
     openPanel("insights");
 
