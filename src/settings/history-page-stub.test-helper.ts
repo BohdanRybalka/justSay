@@ -107,3 +107,30 @@ export class FakeObserver {
     );
   }
 }
+
+/** A `ResizeObserver` a test drives by hand: `resize()` reports every watched element changed. */
+export class FakeResizeObserver {
+  static latest: FakeResizeObserver | null = null;
+  private readonly targets: Element[] = [];
+
+  constructor(private readonly callback: ResizeObserverCallback) {
+    FakeResizeObserver.latest = this;
+  }
+
+  observe(target: Element): void {
+    this.targets.push(target);
+  }
+
+  unobserve(): void {}
+
+  disconnect(): void {
+    this.targets.length = 0;
+  }
+
+  resize(): void {
+    this.callback(
+      this.targets.map((target) => ({ target }) as ResizeObserverEntry),
+      this as unknown as ResizeObserver
+    );
+  }
+}

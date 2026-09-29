@@ -17,6 +17,8 @@ const SEARCH_DEBOUNCE_MS = 300;
 export const NEWER_POLL_MS = 5000;
 const PAGE_SIZE = 30;
 const COPIED_FLASH_MS = 1500;
+const SHOW_MORE = "Show more";
+const SHOW_LESS = "Show less";
 
 const SOURCE_ICONS: Record<HistoryEntry["source"], IconName> = {
   dictation: "mic",
@@ -33,6 +35,17 @@ export function renderHistoryHeading(container: HTMLElement): void {
     `<h2 class="panel-title">History</h2>
     <p class="panel-subtitle">Everything you've said, kept on this machine.</p>`,
   );
+}
+
+/** Marks every collapsed card whose text is cut off, which is what shows its "Show more".
+ *  Runs whenever the timeline's size changes: a page landing, a card expanding, a resize. */
+function markLongTexts(records: readonly ResizeObserverEntry[]): void {
+  for (const record of records) {
+    for (const card of record.target.querySelectorAll<HTMLElement>(".entry:not(.entry--expanded)")) {
+      const text = card.querySelector<HTMLElement>(".entry-text");
+      if (text) card.classList.toggle("entry--long", text.scrollHeight > text.clientHeight + 1);
+    }
+  }
 }
 
 function metaSeparator(): string {
@@ -78,6 +91,8 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
   const searchHint = section.querySelector<HTMLElement>("#history-search-hint")!;
   const daysEl = section.querySelector<HTMLElement>("#history-days")!;
   const timeline = createTimelineRows(daysEl);
+  const textFit = new ResizeObserver(markLongTexts);
+  textFit.observe(daysEl);
   const shortcut = formatAccelerator(settings.shortcut, detectShortcutPlatform(navigator));
 
   let searchClaim: HistoryRowsClaim | null = null;
@@ -186,6 +201,7 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
     el.innerHTML = `
       <span class="entry-dot">${icon(SOURCE_ICONS[entry.source], "small")}</span>
       <p class="entry-text">${textHtml}</p>
+      <button type="button" class="entry-more" data-action="expand">${SHOW_MORE}</button>
       <div class="entry-meta">${metaLine(entry)}${sourceBadge(entry)}<span class="entry-actions">
         <button type="button" data-action="copy" aria-label="Copy">${icon("copy", "small")}</button>
         <button type="button" data-action="delete" aria-label="Delete">${icon("x", "small")}</button>
@@ -194,11 +210,13 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
 
     el.addEventListener("click", async (e) => {
       const target = e.target as HTMLElement;
-      if (target.closest(".entry-text")) {
-        el.classList.toggle("entry--expanded");
+      const button = target.closest<HTMLButtonElement>("button[data-action]");
+      const onLongText = target.closest(".entry-text") && el.classList.contains("entry--long");
+      if (onLongText || button?.dataset.action === "expand") {
+        const expanded = el.classList.toggle("entry--expanded");
+        el.querySelector(".entry-more")!.textContent = expanded ? SHOW_LESS : SHOW_MORE;
         return;
       }
-      const button = target.closest<HTMLButtonElement>("button[data-action]");
       if (!button) return;
 
       if (button.dataset.action === "copy") {
@@ -240,6 +258,7 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
       destroyed = true;
       stopPolling();
       list.disconnect();
+      textFit.disconnect();
       if (debounceTimer !== null) window.clearTimeout(debounceTimer);
     },
     releaseResources: stopPolling,

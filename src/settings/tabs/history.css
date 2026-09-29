@@ -160,9 +160,34 @@
 }
 
 .entry-text mark {
-  background: var(--orange-soft);
+  background: var(--orange-mute);
   color: var(--text);
-  border-radius: 2px;
+  font-weight: 650;
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+.entry-more {
+  display: none;
+  margin: -4px 0 9px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--blue);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.entry-more:hover {
+  color: var(--blue-hi);
+  text-decoration: underline;
+}
+
+.entry--long .entry-more,
+.entry--expanded .entry-more {
+  display: inline-block;
 }
 
 .entry-meta {

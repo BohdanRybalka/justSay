@@ -5,6 +5,7 @@ import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
 import {
   buildEntry,
   FakeObserver,
+  FakeResizeObserver,
   newerByCursor,
   pageOf,
   pagesByCursor,
@@ -87,6 +88,13 @@ async function renderAndWait(entries: HistoryEntry[], total = entries.length, ne
   return mounted;
 }
 
+/** jsdom lays nothing out, so a card's text is given the heights a browser would measure. */
+function layOut(card: HTMLElement, scrollHeight: number, clientHeight: number): void {
+  const text = card.querySelector(".entry-text")!;
+  Object.defineProperty(text, "scrollHeight", { configurable: true, value: scrollHeight });
+  Object.defineProperty(text, "clientHeight", { configurable: true, value: clientHeight });
+}
+
 function cross(): void {
   FakeObserver.latest!.cross();
 }
@@ -128,6 +136,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
   vi.stubGlobal("IntersectionObserver", FakeObserver);
+  vi.stubGlobal("ResizeObserver", FakeResizeObserver);
   apiMock.getNewerHistory.mockResolvedValue(pageOf([], 0, null, { newest_cursor: null }));
 });
 
@@ -232,15 +241,62 @@ describe("renderHistory — the timeline", () => {
     expect(meeting.querySelector(".entry-dot use")!.getAttribute("href")).toBe("#users");
   });
 
-  it("expands the text in place on a click and collapses it on the next", async () => {
+  it("offers Show more only on a card whose text is cut off", async () => {
+    const { container } = await renderAndWait([buildEntry("long"), buildEntry("short")]);
+    const [long, short] = Array.from(cards(container));
+    layOut(long, 120, 42);
+    layOut(short, 21, 21);
+
+    FakeResizeObserver.latest!.resize();
+
+    expect(long.classList.contains("entry--long")).toBe(true);
+    expect(long.querySelector(".entry-more")!.textContent).toBe("Show more");
+    expect(short.classList.contains("entry--long")).toBe(false);
+  });
+
+  it("expands a long card in place and collapses it again, from the text or from Show more", async () => {
     const { container } = await renderAndWait([buildEntry("a")]);
     const card = cards(container)[0];
+    layOut(card, 120, 42);
+    FakeResizeObserver.latest!.resize();
 
-    card.querySelector<HTMLElement>(".entry-text")!.click();
+    card.querySelector<HTMLElement>(".entry-more")!.click();
     expect(card.classList.contains("entry--expanded")).toBe(true);
+    expect(card.querySelector(".entry-more")!.textContent).toBe("Show less");
+
+    layOut(card, 120, 120);
+    FakeResizeObserver.latest!.resize();
+    expect(card.classList.contains("entry--long")).toBe(true);
 
     card.querySelector<HTMLElement>(".entry-text")!.click();
     expect(card.classList.contains("entry--expanded")).toBe(false);
+    expect(card.querySelector(".entry-more")!.textContent).toBe("Show more");
+  });
+
+  it("leaves a short card alone when its text is clicked", async () => {
+    const { container } = await renderAndWait([buildEntry("a")]);
+    const card = cards(container)[0];
+    layOut(card, 21, 21);
+    FakeResizeObserver.latest!.resize();
+
+    card.querySelector<HTMLElement>(".entry-text")!.click();
+
+    expect(card.classList.contains("entry--expanded")).toBe(false);
+  });
+
+  it("marks matched words with the backend's own markup, never escaped again", async () => {
+    apiMock.searchHistory.mockResolvedValue({
+      entries: [{ ...buildEntry("9"), highlighted_text: "a <mark>test</mark> &amp; more" }],
+      total: 1,
+    });
+    const { container } = await renderAndWait([buildEntry("1")]);
+
+    await typeQuery(container, "test");
+    await vi.waitFor(() => expect(countText(container)).toBe("1 match"));
+
+    const text = cards(container)[0].querySelector(".entry-text")!;
+    expect(text.querySelector("mark")!.textContent).toBe("test");
+    expect(text.textContent).toBe("a test & more");
   });
 
   it("says how to start when there is nothing yet", async () => {
