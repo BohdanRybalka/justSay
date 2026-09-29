@@ -1,74 +1,111 @@
-import { api, MalformedResponseError, SidecarTooOldError, type HistoryEntry } from "../../api";
+import {
+  api,
+  MalformedResponseError,
+  SidecarTooOldError,
+  type HistoryEntry,
+  type UserSettings,
+} from "../../api";
+import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
 import { copyToClipboard } from "../../clipboard";
-import { createHistoryList, sidecarTooOldText, type HistoryRowsClaim } from "../history-list";
+import { icon, type IconName } from "../../ui/icons";
+import { createHistoryList, sidecarTooOldText, SENTINEL_READING, type HistoryRowsClaim } from "../history-list";
+import { countOf, createTimelineRows, formatClock, formatDuration } from "../history-timeline";
 import { escapeHtml } from "../html";
-
-const DATE_FORMATTER = new Intl.DateTimeFormat("uk-UA", {
-  day: "2-digit",
-  month: "short",
-});
-const TIME_FORMATTER = new Intl.DateTimeFormat("uk-UA", {
-  hour: "2-digit",
-  minute: "2-digit",
-  hour12: false,
-});
+import type { TabLifecycle } from "../settings";
 
 const SEARCH_DEBOUNCE_MS = 300;
+export const NEWER_POLL_MS = 5000;
 const PAGE_SIZE = 30;
-const EMPTY_HTML = `<div style="color: var(--text-muted); padding: 32px; text-align: center;">No transcripts yet</div>`;
+const COPIED_FLASH_MS = 1500;
 
-export function renderHistory(container: HTMLElement): () => void {
-  container.innerHTML = `
-    <h2 class="tab-title">History</h2>
-    <div style="margin-bottom: 12px;">
-      <input
-        type="search"
-        id="history-search"
-        placeholder="Search transcripts..."
-        style="width: 100%; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text); font-size: 14px;"
-      />
-      <div id="history-search-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; min-height: 14px;"></div>
-    </div>
-    <div style="margin-bottom: 16px;">
-      <span class="value" id="history-count">Loading...</span>
-    </div>
-    <div id="history-list"></div>
-    <div id="history-load-more" style="text-align: center; padding: 12px; display: none;">
-      <button class="btn btn-secondary" id="btn-load-more">Load more</button>
+const SOURCE_ICONS: Record<HistoryEntry["source"], IconName> = {
+  dictation: "mic",
+  file: "file",
+  meeting: "users",
+};
+
+const SKELETON_CARD = `<div class="entry entry--skeleton" aria-hidden="true"><span class="entry-dot"></span><i></i><i></i></div>`;
+
+/** The panel's title and subtitle, which sit above whatever the panel hosts before the timeline. */
+export function renderHistoryHeading(container: HTMLElement): void {
+  container.insertAdjacentHTML(
+    "beforeend",
+    `<h2 class="panel-title">History</h2>
+    <p class="panel-subtitle">Everything you've said, kept on this machine.</p>`,
+  );
+}
+
+function metaSeparator(): string {
+  return `<span class="entry-meta-sep">·</span>`;
+}
+
+function sourceBadge(entry: HistoryEntry): string {
+  if (entry.source === "file" && entry.source_name) {
+    return `<span class="entry-source">${icon("file", "small")}${escapeHtml(entry.source_name)}</span>`;
+  }
+  if (entry.source === "meeting") {
+    return `<span class="entry-source">${icon("users", "small")}meeting</span>`;
+  }
+  return "";
+}
+
+function metaLine(entry: HistoryEntry): string {
+  const parts = [entry.timestamp == null ? "—" : formatClock(new Date(entry.timestamp))];
+  if (entry.audio_duration_seconds != null) {
+    parts.push(`<span class="num">${formatDuration(entry.audio_duration_seconds)}</span>`);
+  }
+  if (entry.word_count != null) parts.push(countOf(entry.word_count, "word", "words"));
+  return parts.map((part) => `<span>${part}</span>`).join(metaSeparator());
+}
+
+/** History as a day-grouped timeline under the old search box, paging as it scrolls and
+ *  picking up new recordings every few seconds while the window is on screen. */
+export function renderHistory(container: HTMLElement, settings: UserSettings): TabLifecycle {
+  const section = document.createElement("div");
+  section.className = "history";
+  section.innerHTML = `
+    <div class="search-box">${icon("search")}<input type="search" id="history-search" placeholder="Search transcripts..." aria-label="Search" /></div>
+    <div class="history-search-hint" id="history-search-hint"></div>
+    <div class="history-count" id="history-count">Loading...</div>
+    <div class="timeline">
+      <div id="history-days"></div>
+      <div class="timeline-more ${SENTINEL_READING}" id="history-more">${SKELETON_CARD.repeat(3)}</div>
     </div>
   `;
+  container.append(section);
 
-  const searchInput = container.querySelector<HTMLInputElement>("#history-search")!;
-  const searchHint = container.querySelector<HTMLElement>("#history-search-hint")!;
-  const countEl = container.querySelector<HTMLElement>("#history-count")!;
-  const listEl = container.querySelector<HTMLElement>("#history-list")!;
-  const loadMoreWrap = container.querySelector<HTMLElement>("#history-load-more")!;
-  const btnLoadMore = container.querySelector<HTMLButtonElement>("#btn-load-more")!;
+  const searchInput = section.querySelector<HTMLInputElement>("#history-search")!;
+  const searchHint = section.querySelector<HTMLElement>("#history-search-hint")!;
+  const daysEl = section.querySelector<HTMLElement>("#history-days")!;
+  const timeline = createTimelineRows(daysEl);
+  const shortcut = formatAccelerator(settings.shortcut, detectShortcutPlatform(navigator));
 
   let searchClaim: HistoryRowsClaim | null = null;
   let debounceTimer: number | null = null;
+  let pollTimer: number | null = null;
   let destroyed = false;
 
   const list = createHistoryList({
     pageSize: PAGE_SIZE,
-    noun: { singular: "transcript", plural: "transcripts" },
+    noun: { singular: "recording", plural: "recordings" },
     featureName: "History",
     elements: {
-      count: countEl,
-      rows: listEl,
-      loadMoreWrapper: loadMoreWrap,
-      loadMoreButton: btnLoadMore,
+      count: section.querySelector<HTMLElement>("#history-count")!,
+      sentinel: section.querySelector<HTMLElement>("#history-more")!,
     },
+    rows: timeline,
     createRow: createEntryElement,
     renderEmptyState: (isEmpty) => {
-      if (isEmpty) listEl.innerHTML = EMPTY_HTML;
+      if (isEmpty) {
+        daysEl.innerHTML = `<p class="history-empty">Nothing here yet. Hold <b>${escapeHtml(shortcut)}</b> anywhere and talk.</p>`;
+      }
     },
     isDestroyed: () => destroyed,
   });
 
   function noMatchesElement(): HTMLElement {
-    const el = document.createElement("div");
-    el.style.cssText = "color: var(--text-muted); padding: 32px; text-align: center;";
+    const el = document.createElement("p");
+    el.className = "history-empty";
     el.textContent = "No matches";
     return el;
   }
@@ -77,34 +114,11 @@ export function renderHistory(container: HTMLElement): () => void {
    * The search lane, holding a claim on the shared rows for as long as what is on
    * screen is its own paint.
    *
-   * Every row it paints goes through `claim.replaceRows`, including the empty
-   * state, so the shared list is the only writer of the row container and knows
-   * whose paint is on screen. A search that claims and then fails repaints
-   * nothing, and the list's own count keeps describing the list's own rows.
-   *
-   * The claim is taken before the request rather than after it, so a page load
-   * already in flight is superseded at the moment the user asks for matches and
-   * cannot repaint the unfiltered history over them when it answers. It is what
-   * "am I showing search results?" reads, so the lane that painted and the lane
-   * the tab believes painted are always the same lane.
-   *
-   * The hint is the one element the claim does not cover, because it belongs to
-   * this tab rather than to the shared list. A search that is itself superseded
-   * returns without writing its own outcome, so the `finally` clears the hint it
-   * put up -- otherwise "Searching..." stays on screen for good over rows some
-   * other lane painted.
-   *
-   * What the `finally` asks is whether a newer *search* exists, not whether this
-   * lane is still current. A newer search owns the hint and has already written
-   * its own text into it, so blanking it there would erase a live error message
-   * -- the same defect, moved one element over. Only a reload can supersede this
-   * lane while `searchClaim` still points at it, and after one there is no
-   * search on screen for the hint to describe.
-   *
-   * A `MalformedResponseError` is the client's own diagnosis of the reply, and
-   * its message names the endpoint, so the hint says `Search failed` and the
-   * diagnosis goes to the console instead: a path is for the log, not for the
-   * user. Every other failure still relays what the backend sent.
+   * The claim is taken before the request, so a page load already in flight is
+   * superseded the moment the user asks for matches. The hint belongs to this
+   * tab, not the list: a superseded search clears the hint it put up only while
+   * no newer search owns it, so a live error message is never blanked. A
+   * `MalformedResponseError` names an endpoint, which is for the log, not the user.
    */
   async function runSearch(q: string) {
     const claim = list.claimRows();
@@ -118,7 +132,7 @@ export function renderHistory(container: HTMLElement): () => void {
           : resp.entries.map((entry) => createEntryElement(entry))
       );
       claim.renderCount(`${resp.total} match${resp.total !== 1 ? "es" : ""}`);
-      claim.renderLoadMore(false);
+      claim.renderMore(false);
       if (claim.isCurrent()) {
         searchHint.textContent = "";
       }
@@ -160,54 +174,45 @@ export function renderHistory(container: HTMLElement): () => void {
   });
 
   function createEntryElement(entry: HistoryEntry): HTMLElement {
-    const el = document.createElement("div");
-    el.className = "history-entry";
+    const el = document.createElement("article");
+    el.className = `entry entry--${entry.source}`;
+    el.tabIndex = 0;
     el.dataset.id = entry.id;
-
-    const date = entry.timestamp == null ? null : new Date(entry.timestamp);
-
-    const badges: string[] = [];
-    badges.push(`<span class="history-badge">${(entry.duration_ms / 1000).toFixed(2)} s process</span>`);
-    if (entry.audio_duration_seconds != null) {
-      badges.push(`<span class="history-badge">${entry.audio_duration_seconds.toFixed(1)} s audio</span>`);
-    }
-    if (entry.word_count != null) {
-      badges.push(`<span class="history-badge">${entry.word_count} words</span>`);
-    }
-    badges.push(`<span class="history-badge">${escapeHtml(entry.language)}</span>`);
 
     const textHtml = entry.highlighted_text
       ? entry.highlighted_text
       : escapeHtml(entry.text).replace(/\n/g, "<br>");
 
     el.innerHTML = `
-      <div class="history-entry-header">
-        <div class="history-stamp">
-          <span class="history-stamp-date">${date === null ? "—" : DATE_FORMATTER.format(date)}</span>
-          <span class="history-stamp-time num">${date === null ? "" : TIME_FORMATTER.format(date)}</span>
-        </div>
-        <div class="history-badges">${badges.join("")}</div>
-      </div>
-      <div class="history-text">${textHtml}</div>
-      <div class="history-actions">
-        <button class="btn btn-secondary btn-sm" data-action="copy">Copy</button>
-        <button class="btn btn-secondary btn-sm" data-action="delete">Delete</button>
-      </div>
+      <span class="entry-dot">${icon(SOURCE_ICONS[entry.source], "small")}</span>
+      <p class="entry-text">${textHtml}</p>
+      <div class="entry-meta">${metaLine(entry)}${sourceBadge(entry)}<span class="entry-actions">
+        <button type="button" data-action="copy" aria-label="Copy">${icon("copy", "small")}</button>
+        <button type="button" data-action="delete" aria-label="Delete">${icon("x", "small")}</button>
+      </span></div>
     `;
 
     el.addEventListener("click", async (e) => {
       const target = e.target as HTMLElement;
-      const action = target.dataset.action;
-      if (!action) return;
+      if (target.closest(".entry-text")) {
+        el.classList.toggle("entry--expanded");
+        return;
+      }
+      const button = target.closest<HTMLButtonElement>("button[data-action]");
+      if (!button) return;
 
-      if (action === "copy") {
+      if (button.dataset.action === "copy") {
         const copied = await copyToClipboard(entry.text);
-        target.textContent = copied ? "Copied!" : "Copy failed";
-        setTimeout(() => (target.textContent = "Copy"), 1500);
-      } else if (action === "delete") {
+        button.innerHTML = icon(copied ? "check" : "alert", "small");
+        button.setAttribute("aria-label", copied ? "Copied" : "Copy failed");
+        window.setTimeout(() => {
+          button.innerHTML = icon("copy", "small");
+          button.setAttribute("aria-label", "Copy");
+        }, COPIED_FLASH_MS);
+      } else {
         try {
           await api.deleteHistoryEntry(entry.id);
-          el.remove();
+          timeline.rowRemoved(el);
           list.entryRemoved();
         } catch (err) {
           console.error(err);
@@ -218,10 +223,29 @@ export function renderHistory(container: HTMLElement): () => void {
     return el;
   }
 
-  void list.load();
+  function startPolling(): void {
+    if (pollTimer === null) pollTimer = window.setInterval(() => void list.loadNewer(), NEWER_POLL_MS);
+  }
 
-  return () => {
-    destroyed = true;
-    if (debounceTimer !== null) window.clearTimeout(debounceTimer);
+  function stopPolling(): void {
+    if (pollTimer !== null) window.clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
+  void list.load();
+  startPolling();
+
+  return {
+    destroy() {
+      destroyed = true;
+      stopPolling();
+      list.disconnect();
+      if (debounceTimer !== null) window.clearTimeout(debounceTimer);
+    },
+    releaseResources: stopPolling,
+    resumeResources() {
+      void list.loadNewer();
+      startPolling();
+    },
   };
 }

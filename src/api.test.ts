@@ -1198,6 +1198,43 @@ describe("the history cursor on the wire", () => {
     expect((error as Error).message).toBe("store busy");
   });
 
+  it("asks for newer rows after the position it was handed, both halves together", async () => {
+    const { api } = await import("./api");
+    const newest = { ts: 1_700_000_000_042, id: "a&b" };
+    fetchMock.mockResolvedValue(
+      okJson({ entries: [], total: 0, next_cursor: null, newest_cursor: null, days: [] }),
+    );
+
+    const page = await api.getNewerHistory(30, newest);
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "http://127.0.0.1:9377/history?limit=30&after_ts=1700000000042&after_id=a%26b",
+    );
+    expect(page.days).toEqual([]);
+  });
+
+  it("calls a newer-rows answer without newest_cursor version skew, so old rows are never repainted", async () => {
+    const { api, SidecarTooOldError } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ entries: [], total: 0, next_cursor: null }));
+
+    const error = await api.getNewerHistory(30, { ts: 1, id: "x" }).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    expect(error).toBeInstanceOf(SidecarTooOldError);
+  });
+
+  it("reads a first page without days or newest_cursor as having neither", async () => {
+    const { api } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ entries: [], total: 0, next_cursor: null }));
+
+    const page = await api.getHistory(30);
+
+    expect(page.days).toEqual([]);
+    expect(page.newest_cursor).toBeNull();
+  });
+
   it("sends no cursor parameter at all for the first page", async () => {
     const { api } = await import("./api");
     fetchMock.mockResolvedValue(okJson({ entries: [], total: 0, next_cursor: null }));

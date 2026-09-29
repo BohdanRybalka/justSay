@@ -1,0 +1,255 @@
+.legacy-tab + .history {
+  margin-top: 32px;
+}
+
+.history-search-hint {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-top: 6px;
+  min-height: 14px;
+}
+
+.history-count {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.history-empty {
+  margin: 0;
+  padding: 8px 0;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.timeline {
+  position: relative;
+  margin-top: 18px;
+  padding-left: 32px;
+}
+
+.timeline::before {
+  content: "";
+  position: absolute;
+  left: 13px;
+  top: 14px;
+  bottom: 14px;
+  width: 2px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--border), var(--border) 70%, transparent);
+}
+
+.day-group {
+  margin-bottom: 22px;
+}
+
+.day-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 10px -32px;
+  padding: 8px 0 8px 32px;
+  background: linear-gradient(180deg, var(--canvas) 70%, transparent);
+}
+
+.day-head-dot {
+  position: absolute;
+  left: 6px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--canvas);
+  border: 2px solid var(--border-2);
+}
+
+.day-head b {
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.day-head > span {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.entry {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 14px 16px;
+  margin-bottom: 8px;
+  box-shadow: var(--bevel);
+  transition: .16s;
+}
+
+.entry:hover {
+  border-color: var(--border-2);
+  box-shadow: var(--sh-1), var(--bevel);
+  transform: translateX(2px);
+}
+
+.entry::before {
+  content: "";
+  position: absolute;
+  left: -25px;
+  top: 20px;
+  width: 10px;
+  height: 1.5px;
+  background: var(--border-2);
+}
+
+.entry-dot {
+  position: absolute;
+  left: -32px;
+  top: 14px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  border: 2px solid var(--canvas);
+}
+
+.entry-dot .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.entry--dictation .entry-dot {
+  background: var(--orange-soft);
+  color: var(--orange);
+}
+
+.entry--file .entry-dot {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.entry--meeting .entry-dot {
+  background: var(--blue);
+  color: #fff;
+}
+
+.entry--file {
+  border-left: 3px solid var(--blue-mute);
+}
+
+.entry--meeting {
+  border-left: 3px solid var(--blue);
+}
+
+.entry-text {
+  margin: 0 0 9px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  user-select: text;
+}
+
+.entry--expanded .entry-text {
+  display: block;
+  -webkit-line-clamp: unset;
+}
+
+.entry-text mark {
+  background: var(--orange-soft);
+  color: var(--text);
+  border-radius: 2px;
+}
+
+.entry-meta {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 11.5px;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+
+.entry-meta-sep {
+  opacity: .45;
+}
+
+.entry-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-weight: 560;
+  font-size: 10.5px;
+}
+
+.entry-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 3px;
+  opacity: 0;
+  transition: opacity .15s;
+}
+
+.entry:hover .entry-actions,
+.entry:focus-within .entry-actions {
+  opacity: 1;
+}
+
+.entry-actions button {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.entry-actions button:hover {
+  background: var(--inset);
+  color: var(--text);
+}
+
+.timeline-more {
+  min-height: 1px;
+}
+
+.timeline-more .entry--skeleton {
+  display: none;
+}
+
+.timeline-more--reading .entry--skeleton {
+  display: block;
+  height: 74px;
+  box-shadow: none;
+}
+
+.entry--skeleton:hover {
+  transform: none;
+}
+
+.entry--skeleton .entry-dot {
+  background: var(--inset);
+}
+
+.entry--skeleton i {
+  display: block;
+  height: 10px;
+  border-radius: 5px;
+  background: var(--inset);
+  margin-bottom: 10px;
+}
+
+.entry--skeleton i:last-child {
+  width: 40%;
+}

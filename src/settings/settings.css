@@ -32,19 +32,16 @@ body {
   box-sizing: border-box;
 }
 
-.history-text::-webkit-scrollbar,
 #metrics-table-wrap::-webkit-scrollbar,
 .result-text::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
-.history-text::-webkit-scrollbar-track,
 #metrics-table-wrap::-webkit-scrollbar-track,
 .result-text::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.history-text::-webkit-scrollbar-thumb,
 #metrics-table-wrap::-webkit-scrollbar-thumb,
 .result-text::-webkit-scrollbar-thumb {
   background: var(--border-2);
@@ -52,7 +49,6 @@ body {
   border: 2px solid transparent;
   background-clip: content-box;
 }
-.history-text::-webkit-scrollbar-thumb:hover,
 #metrics-table-wrap::-webkit-scrollbar-thumb:hover,
 .result-text::-webkit-scrollbar-thumb:hover {
   background: var(--muted);
@@ -222,89 +218,6 @@ select {
 .status-badge.pending {
   background: var(--inset);
   color: var(--text-2);
-}
-
-.history-entry {
-  background: var(--bg-card);
-  border-radius: var(--radius);
-  padding: 16px 18px;
-  margin-bottom: 12px;
-  transition: background 0.15s ease;
-}
-
-.history-entry:hover {
-  background: var(--bg-input);
-}
-
-.history-entry-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.history-stamp {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex-shrink: 0;
-}
-
-.history-stamp-date {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-}
-
-.history-stamp-time {
-  font-size: 12px;
-  color: var(--text-dim);
-}
-
-.history-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  justify-content: flex-end;
-}
-
-.history-badge {
-  font-size: 11px;
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: var(--bg-input);
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.history-text {
-  font-size: 15px;
-  color: var(--text);
-  line-height: 1.6;
-  margin-bottom: 12px;
-  max-height: 200px;
-  overflow-y: auto;
-  word-break: break-word;
-  user-select: text;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border-2) transparent;
-}
-
-.history-text mark {
-  background: var(--orange-mute);
-  color: inherit;
-  border-radius: 2px;
-  padding: 0 1px;
-  font-weight: 600;
-}
-
-.history-actions {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
 }
 
 .btn-sm {

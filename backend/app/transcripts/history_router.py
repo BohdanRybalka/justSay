@@ -56,19 +56,28 @@ async def list_history(
     limit: int = Query(50, ge=1, le=HISTORY_LIMIT_MAX),
     before_ts: int | None = Query(None, ge=CURSOR_TS_MIN, le=CURSOR_TS_MAX),
     before_id: str | None = Query(None),
+    after_ts: int | None = Query(None, ge=CURSOR_TS_MIN, le=CURSOR_TS_MAX),
+    after_id: str | None = Query(None),
 ):
-    """One page of history, newest first, at the cursor the last response handed back.
+    """One page of history: older than ``before_*`` newest first, or newer than ``after_*``.
 
-    Both cursor parameters absent asks for the first page and both present is a
-    complete position; half a cursor is 422 (ADR 053). ``before_ts`` is bounded.
+    No cursor asks for the first page. Half a cursor, or both cursors, is 422
+    (ADR 053). The newer rows come oldest first; both ``*_ts`` are bounded.
     """
-    if (before_ts is None) != (before_id is None):
-        raise HTTPException(
-            status_code=422, detail="before_ts and before_id must be sent together"
-        )
-    before = None if before_ts is None else HistoryCursor(ts=before_ts, id=before_id)
+    before = _cursor("before", before_ts, before_id)
+    after = _cursor("after", after_ts, after_id)
+    if before is not None and after is not None:
+        raise HTTPException(status_code=422, detail="send before_* or after_*, not both")
     with store_busy_as_503():
-        return get_page(limit=limit, before=before)
+        return get_page(limit=limit, before=before, after=after)
+
+
+def _cursor(side: str, ts: int | None, entry_id: str | None) -> HistoryCursor | None:
+    if (ts is None) != (entry_id is None):
+        raise HTTPException(
+            status_code=422, detail=f"{side}_ts and {side}_id must be sent together"
+        )
+    return None if ts is None else HistoryCursor(ts=ts, id=entry_id)
 
 
 @router.get("/stats", response_model=HistoryStats)
