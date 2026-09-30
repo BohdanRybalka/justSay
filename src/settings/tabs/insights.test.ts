@@ -197,6 +197,40 @@ describe("the Insights panel", () => {
     expect(container.querySelector(".chart-range [aria-pressed=true]")!.textContent).toBe("7d");
   });
 
+  it("keeps the chart and its switch when a quiet week comes back empty", async () => {
+    const tab = await mount(buildInsights());
+    const empty = buildInsights({ month: { recordings: 0 }, days: spokenDays(Array(7).fill(0)), previous_period_words: 0 });
+    apiMock.insights.mockResolvedValue(empty);
+    container.querySelector<HTMLButtonElement>(".chart-range button")!.click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    tab.resumeResources!();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(container.querySelectorAll(".chart-bar")).toHaveLength(7);
+    expect(container.querySelector(".chart-range [aria-pressed=true]")!.textContent).toBe("7d");
+  });
+
+  it("lets a switch and a returning window both land, then redraws the chosen span", async () => {
+    const tab = await mount(buildInsights());
+    const answers: ((figures: Insights) => void)[] = [];
+    apiMock.insights.mockImplementation(() => new Promise<Insights>((resolve) => answers.push(resolve)));
+
+    tab.resumeResources!();
+    container.querySelector<HTMLButtonElement>(".chart-range button")!.click();
+    answers[1](buildInsights({ days: spokenDays([1, 2, 3, 4, 5, 6, 7]) }));
+    await vi.advanceTimersByTimeAsync(0);
+    answers[0](buildInsights({ today: { words: 5 } }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(text("#insights-today")).toContain("5 words");
+    expect(apiMock.insights.mock.calls.map(([days]) => days)).toEqual([30, 30, 7, 7]);
+    answers[2](buildInsights({ days: spokenDays([9, 9, 9, 9, 9, 9, 9]) }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(container.querySelectorAll(".chart-bar")).toHaveLength(7);
+    expect(container.querySelector(".chart-range [aria-pressed=true]")!.textContent).toBe("7d");
+  });
+
   it("keeps the chosen span when the window comes back", async () => {
     const tab = await mount(buildInsights());
     container.querySelector<HTMLButtonElement>(".chart-range button")!.click();

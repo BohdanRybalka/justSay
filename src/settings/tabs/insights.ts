@@ -66,24 +66,29 @@ export function renderInsights(
   const shortcut = formatAccelerator(viewer.shortcut, detectShortcutPlatform(navigator));
 
   let latestRead = 0;
+  let latestChartRead = 0;
   let span: ChartSpan = 30;
   let chart: WordsChart | null = null;
 
   async function read(): Promise<void> {
     const token = ++latestRead;
+    latestChartRead += 1;
+    const requested = span;
     const greeting = greetingFor(new Date().getHours());
     title.textContent = firstName ? `${greeting}, ${firstName}` : greeting;
     try {
-      const figures = await api.insights(span);
+      const figures = await api.insights(requested);
       if (token !== latestRead) return;
       today.innerHTML = todayLine(figures.today, shortcut);
+      const chartShown = chart !== null;
       body.innerHTML = figures.month.recordings > 0 ? savedCard(figures) : "";
       chart = null;
-      if (!hasSpoken(figures)) return;
+      if (!chartShown && !hasSpoken(figures)) return;
       const host = document.createElement("div");
       body.append(host);
       chart = mountWordsChart(host, span, (next) => void switchSpan(next));
-      chart.draw(figures, span);
+      if (requested === span) chart.draw(figures, span);
+      else void switchSpan(span);
     } catch (e) {
       if (token !== latestRead) return;
       showFailure(e);
@@ -92,13 +97,13 @@ export function renderInsights(
 
   async function switchSpan(next: ChartSpan): Promise<void> {
     span = next;
-    const token = ++latestRead;
+    const token = ++latestChartRead;
     try {
       const figures = await api.insights(next);
-      if (token !== latestRead) return;
+      if (token !== latestChartRead) return;
       chart?.draw(figures, next);
     } catch (e) {
-      if (token !== latestRead) return;
+      if (token !== latestChartRead) return;
       showFailure(e);
     }
   }
@@ -112,6 +117,7 @@ export function renderInsights(
 
   const disown = () => {
     latestRead += 1;
+    latestChartRead += 1;
   };
 
   if (!windowHidden) void read();
