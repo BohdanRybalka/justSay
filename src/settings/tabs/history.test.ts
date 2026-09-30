@@ -546,6 +546,19 @@ describe("renderHistory — files being transcribed", () => {
     expect(container.querySelector(".history-empty")).not.toBeNull();
   });
 
+  it("lets a finished card go at once under the Starred filter, where its entry will not appear", async () => {
+    apiMock.getHistory.mockResolvedValue(pageOf([], 0, null, { newest_cursor: null }));
+    apiMock.jobs.mockResolvedValue([running]);
+    const { container } = mount();
+    await vi.waitFor(() => expect(container.querySelector(".entry--job")).not.toBeNull());
+    await showStarred(container);
+
+    apiMock.jobs.mockResolvedValue([{ ...running, stage: "done", progress: 1, entry_id: "new" }]);
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS);
+
+    expect(container.querySelector(".entry--job")).toBeNull();
+  });
+
   it("reads the jobs when one is started, and stops reading while the window is hidden", async () => {
     const { lifecycle } = await renderAndWait([buildEntry("a")]);
     await flush();

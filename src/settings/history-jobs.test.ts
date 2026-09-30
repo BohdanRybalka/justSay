@@ -129,6 +129,18 @@ describe("createJobCards", () => {
     expect(shown).toEqual([]);
   });
 
+  it("reads again a second after a failed read, even before any card is up", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    apiMock.jobs.mockRejectedValueOnce(new Error("the backend did not answer /jobs within 15 seconds"));
+    const cards = createJobCards(show, entrySaved, entryShown);
+    await cards.refresh();
+
+    apiMock.jobs.mockResolvedValue([job()]);
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS);
+
+    expect(shown).toHaveLength(1);
+  });
+
   it("keeps reading after a failed read while a card is up", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     apiMock.jobs.mockResolvedValue([job()]);

@@ -33,7 +33,7 @@ export interface JobCards {
  * The cards of files being transcribed. `show` receives them newest first whenever the set
  * changes. A finished job's card stays, asking `entrySaved` to paint its row, until
  * `entryShown` finds that row, so the card turns into the entry where it stood. A job this
- * page removed is never painted again; a failed read is tried again while cards are up.
+ * page removed is never painted again; a failed read is tried again a second later.
  */
 export function createJobCards(
   show: (cards: HTMLElement[]) => void,
@@ -111,7 +111,7 @@ export function createJobCards(
       jobs = await api.jobs();
     } catch (err) {
       console.error(err);
-      if (current === generation && cards.size > 0) readAgainSoon();
+      if (current === generation) readAgainSoon();
       return;
     }
     if (current !== generation) return;

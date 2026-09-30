@@ -226,6 +226,19 @@ async def test_a_cancelled_transcription_holds_the_turn_until_its_answer_then_sa
     after.release.set()
 
 
+async def test_a_cancelled_job_stays_cancelled_when_its_answer_is_a_failure(queue, fakes):
+    pipeline = _FakePipeline(outcome=ResourceUnavailableError("the provider said no"))
+    job_id = _start(queue, fakes, pipeline)
+    await asyncio.wait_for(pipeline.transcribing.wait(), 1)
+
+    queue.cancel_or_dismiss(job_id)
+    pipeline.release.set()
+    await _settle(queue, job_id)
+
+    view = _view(queue, job_id)
+    assert (view.stage, view.error) == ("cancelled", None)
+
+
 async def test_a_job_cancelled_while_a_dictation_ran_never_sends_its_audio(queue, gate, fakes):
     pipeline = _FakePipeline()
     with gate.dictating():

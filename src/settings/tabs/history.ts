@@ -395,7 +395,10 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
   const jobs = createJobCards(
     (jobCards) => timeline.setPending(jobCards),
     () => list.loadNewer(),
-    (entryId) => Array.from(daysEl.querySelectorAll<HTMLElement>(".entry")).some((el) => el.dataset.id === entryId),
+    (entryId) =>
+      starredOnly ||
+      searchInput.value.trim() !== "" ||
+      Array.from(daysEl.querySelectorAll<HTMLElement>(".entry")).some((el) => el.dataset.id === entryId),
   );
 
   function startPolling(): void {
