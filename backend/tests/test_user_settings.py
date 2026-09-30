@@ -31,7 +31,6 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(user_settings, "_settings", None)
     monkeypatch.setattr(history, "_output_dir", settings_dir)
     monkeypatch.setattr(history, "_conn", None)
-    monkeypatch.setattr(history, "_stats_cache", None)
 
     yield {"settings_dir": settings_dir}
 

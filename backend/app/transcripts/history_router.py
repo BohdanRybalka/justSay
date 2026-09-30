@@ -1,4 +1,4 @@
-"""History API — list, delete, clear, aggregate stats over transcript history."""
+"""History API — list, search, star, delete and clear transcript history."""
 
 import sqlite3
 
@@ -12,9 +12,7 @@ from app.transcripts.history import (
     HISTORY_LIMIT_MAX,
     HistoryCursor,
     HistoryPage,
-    HistoryStats,
     clear_all,
-    compute_stats,
     delete_entry,
     get_page,
     set_starred,
@@ -89,13 +87,6 @@ def _cursor(side: str, ts: int | None, entry_id: str | None) -> HistoryCursor | 
             status_code=422, detail=f"{side}_ts and {side}_id must be sent together"
         )
     return None if ts is None else HistoryCursor(ts=ts, id=entry_id)
-
-
-@router.get("/stats", response_model=HistoryStats)
-async def history_stats():
-    """Aggregate word counts (today / week / lifetime, by language and model)."""
-    with store_busy_as_503():
-        return compute_stats()
 
 
 @router.get("/search", response_model=HistorySearchResponse)

@@ -85,8 +85,9 @@ ignore_names = [
     "temp_size_bytes", "freed_bytes", "gemini_key_set", "groq_key_set",
     "shortcut", "theme", "display_name", "paste_at_cursor", "previous_language", "package_installed", "model_loaded", "model_ram_mb",
     "model_downloaded", "model_bytes",
-    "total_audio_seconds", "word", "highlighted_text", "newest_cursor",
+    "highlighted_text", "newest_cursor",
     "typing_seconds", "pace_wpm", "streak", "current_days", "longest_days", "previous_period_words", "WEEK",
+    "vocabulary", "peak_hour", "share", "meetings_week",
     "row_factory", "LimitFlags", "settings_customise_sources",
     "log_file_path", "_reset_library_cache", "_meetings_start_as_acknowledged",
 ]

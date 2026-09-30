@@ -1,10 +1,9 @@
-"""Word frequency over stored transcripts.
+"""Word frequency over stored dictations.
 
-Derived from ``entries`` on demand: no counter table, no writes inside
-``save_entry``'s lock window, no decrement-on-delete. Tokenisation runs in
-Python over result rows. Both the Ukrainian and the English stop-word lists are
-always applied, because real transcripts code-switch and ``entries.language``
-records the dictation mode rather than the language of the text (ADR 016).
+Derived from ``entries`` on demand and cached on ``history.derived_generation_locked``;
+tokenisation runs in Python, outside the store lock. Files and meetings carry other
+voices, so only rows whose ``source`` is ``dictation`` count. Both stop-word lists always
+apply to the favourite words, because real dictations code-switch (ADR 016).
 Searching transcripts lives in ``app.transcripts.search``.
 """
 
@@ -12,7 +11,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Literal
+from typing import NamedTuple
 
 from pydantic import BaseModel
 
@@ -26,7 +25,15 @@ STOPWORDS_ALL: frozenset[str] = STOPWORDS_UK | STOPWORDS_EN
 
 _TOKEN_RE = re.compile(r"[\wЀ-ӿ]+(?:['’][\wЀ-ӿ]+)*", re.UNICODE)
 
-_top_words_cache: dict[str, tuple[int, int, Counter[str]]] = {}
+_DICTATIONS_SQL = "SELECT cleaned_text FROM entries WHERE source = 'dictation'"
+
+
+class DictationTokens(NamedTuple):
+    generation: int
+    counts: Counter[str]
+
+
+_tokens_cache: DictationTokens | None = None
 
 
 def tokenize(text: str) -> list[str]:
@@ -38,6 +45,26 @@ def tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
+def dictation_tokens() -> DictationTokens:
+    """Every token of every dictation, counted, as of ``generation``.
+
+    A miss reads and tokenises every dictation, so run it off the event loop.
+    """
+    global _tokens_cache
+    with history._lock:
+        generation = history.derived_generation_locked()
+        if _tokens_cache is not None and _tokens_cache.generation == generation:
+            return _tokens_cache
+        rows = history._ensure_conn_locked().execute(_DICTATIONS_SQL).fetchall()
+    tokens = DictationTokens(
+        generation, Counter(token for row in rows for token in tokenize(row["cleaned_text"]))
+    )
+    with history._lock:
+        if history.derived_generation_locked() == generation:
+            _tokens_cache = tokens
+    return tokens
+
+
 class WordCount(BaseModel):
     word: str
     count: int
@@ -45,56 +72,18 @@ class WordCount(BaseModel):
 
 class TopWordsResponse(BaseModel):
     items: list[WordCount]
-    scanned: int
 
 
-def top_words(
-    lang: Literal["all", "uk", "en"] = "all",
-    limit: int = 50,
-) -> TopWordsResponse:
-    """Top-N words across (filtered) entries, merged UK+EN stop-words applied.
-
-    ``limit`` clamps the output only: a miss reads and tokenises every row, so run
-    it off the event loop. Counts cache on ``history.derived_generation_locked``.
-    """
+def top_words(limit: int = 50) -> TopWordsResponse:
+    """The ``limit`` most said dictation words, stop-words and one-letter tokens left out."""
+    content = Counter(
+        {
+            word: count
+            for word, count in dictation_tokens().counts.items()
+            if len(word) >= 2 and word not in STOPWORDS_ALL
+        }
+    )
     clamped_limit = max(1, min(int(limit), TOP_LIMIT_MAX))
-
-    if lang == "all":
-        sql = "SELECT cleaned_text FROM entries"
-        params: tuple = ()
-    else:
-        sql = "SELECT cleaned_text FROM entries WHERE language = ?"
-        params = (lang,)
-
-    rows = None
-    with history._lock:
-        generation = history.derived_generation_locked()
-        cached = _top_words_cache.get(lang)
-        if cached is not None and cached[0] == generation:
-            _, scanned, counter = cached
-        else:
-            conn = history._ensure_conn_locked()
-            rows = conn.execute(sql, params).fetchall()
-
-    if rows is not None:
-        counter = Counter()
-        for row in rows:
-            for tok in tokenize(row["cleaned_text"]):
-                if tok in STOPWORDS_ALL:
-                    continue
-                if len(tok) < 2:
-                    continue
-                counter[tok] += 1
-        scanned = len(rows)
-
-        with history._lock:
-            if history.derived_generation_locked() == generation:
-                for stale in [k for k, v in _top_words_cache.items() if v[0] != generation]:
-                    del _top_words_cache[stale]
-                _top_words_cache[lang] = (generation, scanned, counter)
-
-    items = [
-        WordCount(word=w, count=c)
-        for w, c in counter.most_common(clamped_limit)
-    ]
-    return TopWordsResponse(items=items, scanned=scanned)
+    return TopWordsResponse(
+        items=[WordCount(word=w, count=c) for w, c in content.most_common(clamped_limit)]
+    )

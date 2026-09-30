@@ -225,53 +225,6 @@ select {
   font-size: 12px;
 }
 
-.bucket-list {
-  background: var(--bg-card);
-  border-radius: var(--radius);
-  padding: 10px 16px;
-}
-
-.bucket-row {
-  display: grid;
-  grid-template-columns: 130px 1fr auto;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 0;
-}
-
-.bucket-row + .bucket-row {
-  border-top: 1px solid var(--border);
-}
-
-.bucket-label {
-  font-size: 12px;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.bucket-bar {
-  height: 6px;
-  background: var(--bg-input);
-  border-radius: 3px;
-  overflow: hidden;
-}
-
-.bucket-bar-fill {
-  height: 100%;
-  background: var(--accent);
-  border-radius: 3px;
-  transition: width 0.4s ease;
-}
-
-.bucket-value {
-  font-size: 12px;
-  color: var(--text);
-  min-width: 60px;
-  text-align: right;
-}
-
 .dropzone {
   background: var(--bg-card);
   border: 2px dashed var(--border);

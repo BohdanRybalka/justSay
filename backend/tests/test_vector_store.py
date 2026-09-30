@@ -24,7 +24,6 @@ def _isolated_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(history, "_output_dir", tmp_path)
     monkeypatch.setattr(history, "_conn", None)
-    monkeypatch.setattr(history, "_stats_cache", None)
     history.bootstrap(tmp_path)
     yield
     with history._lock:

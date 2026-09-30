@@ -1,4 +1,4 @@
-"""Insights figures: today, the month, the streak — dictations only, local days.
+"""Insights figures: today, the month, the streak, the voice — dictations only, local days.
 
 Every timestamp is built from a naive local ``datetime``, the rule SQLite's
 ``'localtime'`` applies to the rows.
@@ -32,9 +32,10 @@ def _save(
     words: int,
     seconds: float | None = None,
     source: history.EntrySource = "dictation",
+    text: str = "said",
 ) -> None:
     entry_id = history.save_entry(
-        text="said", duration_ms=1, word_count=words,
+        text=text, duration_ms=1, word_count=words,
         audio_duration_seconds=seconds, source=source,
     ).id
     with history._lock:
@@ -207,6 +208,77 @@ def test_each_span_reads_its_own_days():
     assert week.previous_period_words == 0
 
 
+def test_vocabulary_counts_every_distinct_dictated_word_stopwords_included():
+    _save(datetime(2019, 3, 1, 9, 0), 5, text="The cat and THE dog")
+    _save(datetime(2026, 8, 20, 9, 0), 3, text="the кіт і cat")
+    _save(datetime(2026, 8, 20, 10, 0), 3, source="meeting", text="colleagues say different things")
+
+    assert insights.compute_insights(now=NOW).vocabulary == 6
+
+
+def test_the_peak_hour_is_the_busiest_over_thirty_days_with_its_neighbours_share():
+    _save(datetime(2026, 7, 21, 18, 0), 5000)
+    _save(datetime(2026, 7, 22, 17, 59), 100)
+    _save(datetime(2026, 8, 20, 18, 30), 400)
+    _save(datetime(2026, 8, 19, 19, 5), 100)
+    _save(datetime(2026, 8, 18, 9, 0), 200)
+    _save(datetime(2026, 8, 20, 18, 0), 9000, source="meeting")
+
+    peak = insights.compute_insights(now=NOW).peak_hour
+
+    assert peak is not None
+    assert (peak.hour, peak.share) == (18, 0.75)
+
+
+def test_the_peak_hour_wraps_midnight_and_takes_the_earliest_on_a_tie():
+    _save(datetime(2026, 8, 20, 0, 10), 100)
+    _save(datetime(2026, 8, 19, 23, 50), 50)
+    _save(datetime(2026, 8, 19, 12, 0), 100)
+    _save(datetime(2026, 8, 19, 22, 0), 50)
+
+    peak = insights.compute_insights(now=NOW).peak_hour
+
+    assert peak is not None
+    assert (peak.hour, peak.share) == (0, 0.5)
+
+
+def test_no_words_in_thirty_days_has_no_peak_hour():
+    _save(datetime(2026, 7, 21, 18, 0), 500)
+
+    assert insights.compute_insights(now=NOW).peak_hour is None
+
+
+def test_the_longest_run_is_the_longest_dictation_ever():
+    _save(datetime(2019, 3, 1, 9, 0), 715, 393.04)
+    _save(datetime(2026, 8, 20, 9, 0), 40, 60)
+    _save(datetime(2026, 8, 20, 10, 0), 9000)
+    _save(datetime(2026, 8, 20, 11, 0), 6000, 2892, source="meeting")
+
+    longest = insights.compute_insights(now=NOW).longest
+
+    assert longest is not None
+    assert (longest.seconds, longest.words) == (393.0, 715)
+
+
+def test_no_timed_dictation_has_no_longest_run():
+    _save(datetime(2026, 8, 20, 9, 0), 40)
+
+    assert insights.compute_insights(now=NOW).longest is None
+
+
+def test_meetings_this_week_are_the_last_seven_local_days():
+    _save(datetime(2026, 8, 13, 23, 59, 59), 100, 600, source="meeting")
+    _save(datetime(2026, 8, 14, 0, 0, 1), 100, 2892, source="meeting")
+    _save(datetime(2026, 8, 20, 9, 0), 100, 1600.04, source="meeting")
+    _save(datetime(2026, 8, 20, 12, 0), 100, source="meeting")
+    _save(datetime(2026, 8, 21, 9, 0), 100, 600, source="meeting")
+    _save(datetime(2026, 8, 20, 10, 0), 100, 600)
+
+    meetings = insights.compute_insights(now=NOW).meetings_week
+
+    assert (meetings.count, meetings.seconds) == (3, 4492.0)
+
+
 @pytest.mark.asyncio
 async def test_insights_endpoint_answers_with_the_figures(client):
     _save(datetime.now(), 42, 30)
@@ -223,6 +295,10 @@ async def test_insights_endpoint_answers_with_the_figures(client):
     assert len(data["days"]) == 30
     assert data["days"][-1]["words"] == 42
     assert data["previous_period_words"] == 0
+    assert data["vocabulary"] == 1
+    assert data["peak_hour"]["share"] == 1.0
+    assert data["longest"] == {"seconds": 30.0, "words": 42}
+    assert data["meetings_week"] == {"count": 0, "seconds": 0.0}
 
 
 @pytest.mark.asyncio
