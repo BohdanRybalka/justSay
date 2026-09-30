@@ -533,6 +533,19 @@ describe("renderHistory — files being transcribed", () => {
     expect(Array.from(cards(container)).map((el) => el.dataset.id)).toEqual(["saved", "old"]);
   });
 
+  it("keeps a file's card on an empty History through the reloads that repaint it", async () => {
+    apiMock.getHistory.mockResolvedValue(pageOf([], 0, null, { newest_cursor: null }));
+    apiMock.jobs.mockResolvedValue([running]);
+    const { container } = mount();
+    await vi.waitFor(() => expect(container.querySelector(".entry--job")).not.toBeNull());
+
+    apiMock.jobs.mockResolvedValue([{ ...running, stage: "failed", progress: null, error: "Add an API key in Settings" }]);
+    await vi.advanceTimersByTimeAsync(NEWER_POLL_MS);
+
+    expect(container.querySelector(".entry--job .entry-job-status")!.textContent).toBe("Add an API key in Settings");
+    expect(container.querySelector(".history-empty")).not.toBeNull();
+  });
+
   it("reads the jobs when one is started, and stops reading while the window is hidden", async () => {
     const { lifecycle } = await renderAndWait([buildEntry("a")]);
     await flush();

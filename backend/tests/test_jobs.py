@@ -204,18 +204,38 @@ async def test_cancelling_a_queued_job_never_transcribes_it(queue, fakes):
     first.release.set()
 
 
-async def test_cancelling_a_transcribing_job_stops_it_without_an_entry(queue, fakes):
-    pipeline = _FakePipeline()
-    job_id = _start(queue, fakes, pipeline)
-    await asyncio.wait_for(pipeline.transcribing.wait(), 1)
+async def test_a_cancelled_transcription_holds_the_turn_until_its_answer_then_saves_nothing(
+    queue, fakes
+):
+    cancelled, after = _FakePipeline(), _FakePipeline()
+    job_id = _start(queue, fakes, cancelled)
+    _start(queue, fakes, after)
+    await asyncio.wait_for(cancelled.transcribing.wait(), 1)
 
-    queue.cancel_or_dismiss(job_id)
+    assert queue.cancel_or_dismiss(job_id) == "cancelled"
+    await asyncio.sleep(0.02)
+    assert _view(queue, job_id).stage == "cancelled"
+    assert after.calls == []
+
+    cancelled.release.set()
     await _settle(queue, job_id)
-
     view = _view(queue, job_id)
     assert (view.stage, view.entry_id) == ("cancelled", None)
-    assert queue._jobs[job_id].task.cancelled()
-    assert not pipeline.calls[0]["path"].exists()
+    assert not cancelled.calls[0]["path"].exists()
+    await asyncio.wait_for(after.transcribing.wait(), 1)
+    after.release.set()
+
+
+async def test_a_job_cancelled_while_a_dictation_ran_never_sends_its_audio(queue, gate, fakes):
+    pipeline = _FakePipeline()
+    with gate.dictating():
+        job_id = _start(queue, fakes, pipeline)
+        await asyncio.sleep(0.05)
+        queue.cancel_or_dismiss(job_id)
+
+    await _settle(queue, job_id)
+    assert not pipeline.transcribing.is_set()
+    assert _view(queue, job_id).stage == "cancelled"
 
 
 async def test_a_job_being_saved_cannot_be_cancelled(queue, fakes):
@@ -252,7 +272,7 @@ async def test_a_finished_job_shows_for_a_minute_and_a_failed_one_until_dismisse
     ("outcome", "reason"),
     [
         ("silence", jobs.NO_SPEECH_REASON),
-        ("unsaved", jobs.NOT_SAVED_REASON),
+        ("unsaved", jobs.FAILED_REASON),
         (ConfigurationError("Groq API key is missing."), jobs.NO_KEY_REASON),
         (ResourceUnavailableError("Gemini returned no transcription"), jobs.FAILED_REASON),
         (KeyError("provider"), jobs.FAILED_REASON),
@@ -380,4 +400,5 @@ async def test_cancel_answers_404_for_an_unknown_job_and_409_while_saving(client
     queue._jobs[job_id].stage = "transcribing"
     cancelled = await client.delete(f"/jobs/{job_id}")
     assert (cancelled.status_code, cancelled.json()) == (200, {"outcome": "cancelled"})
+    pipeline.release.set()
     await _settle(queue, job_id)

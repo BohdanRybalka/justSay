@@ -30,6 +30,8 @@ function job(overrides: Partial<FileJob> = {}): FileJob {
 let shown: HTMLElement[];
 const show = (cards: HTMLElement[]) => (shown = cards);
 const entrySaved = vi.fn();
+let painted: string[];
+const entryShown = (id: string) => painted.includes(id);
 
 function status(card: HTMLElement): string {
   return card.querySelector(".entry-job-status")!.textContent!;
@@ -39,6 +41,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
   shown = [];
+  painted = [];
   entrySaved.mockResolvedValue(undefined);
   apiMock.removeJob.mockResolvedValue({ outcome: "cancelled" });
 });
@@ -62,7 +65,7 @@ describe("jobStatusText", () => {
 describe("createJobCards", () => {
   it("paints a running job with its name, bar and status, and reads again every second", async () => {
     apiMock.jobs.mockResolvedValue([job()]);
-    const cards = createJobCards(show, entrySaved);
+    const cards = createJobCards(show, entrySaved, entryShown);
 
     await cards.refresh();
 
@@ -79,13 +82,13 @@ describe("createJobCards", () => {
 
   it("stops reading once nothing is running, and while paused", async () => {
     apiMock.jobs.mockResolvedValue([]);
-    const idle = createJobCards(show, entrySaved);
+    const idle = createJobCards(show, entrySaved, entryShown);
     await idle.refresh();
     await vi.advanceTimersByTimeAsync(JOBS_POLL_MS * 5);
     expect(apiMock.jobs).toHaveBeenCalledTimes(1);
 
     apiMock.jobs.mockResolvedValue([job()]);
-    const running = createJobCards(show, entrySaved);
+    const running = createJobCards(show, entrySaved, entryShown);
     await running.refresh();
     running.pause();
     await vi.advanceTimersByTimeAsync(JOBS_POLL_MS * 5);
@@ -94,7 +97,7 @@ describe("createJobCards", () => {
 
   it("keeps a finished card until its entry is painted, then lets it go", async () => {
     apiMock.jobs.mockResolvedValue([job()]);
-    const cards = createJobCards(show, entrySaved);
+    const cards = createJobCards(show, entrySaved, entryShown);
     await cards.refresh();
     let paintEntry!: () => void;
     entrySaved.mockReturnValue(new Promise<void>((resolve) => (paintEntry = resolve)));
@@ -104,14 +107,45 @@ describe("createJobCards", () => {
     expect(entrySaved).toHaveBeenCalledTimes(1);
     expect(shown).toHaveLength(1);
 
+    painted.push("e1");
     paintEntry();
     await vi.advanceTimersByTimeAsync(0);
     expect(shown).toEqual([]);
   });
 
+  it("asks for the entry again while it has not been painted, and keeps the card meanwhile", async () => {
+    apiMock.jobs.mockResolvedValue([job()]);
+    const cards = createJobCards(show, entrySaved, entryShown);
+    await cards.refresh();
+
+    apiMock.jobs.mockResolvedValue([job({ stage: "done", progress: 1, entry_id: "e1" })]);
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS);
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS);
+    expect(entrySaved).toHaveBeenCalledTimes(2);
+    expect(shown).toHaveLength(1);
+
+    painted.push("e1");
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS);
+    expect(shown).toEqual([]);
+  });
+
+  it("keeps reading after a failed read while a card is up", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    apiMock.jobs.mockResolvedValue([job()]);
+    const cards = createJobCards(show, entrySaved, entryShown);
+    await cards.refresh();
+
+    apiMock.jobs.mockRejectedValueOnce(new Error("the backend did not answer /jobs within 15 seconds"));
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS);
+    apiMock.jobs.mockResolvedValue([job({ stage: "failed", progress: null, error: "Add an API key in Settings" })]);
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS);
+
+    expect(status(shown[0])).toBe("Add an API key in Settings");
+  });
+
   it("does not paint a job that finished while the page was away", async () => {
     apiMock.jobs.mockResolvedValue([job({ stage: "done", progress: 1, entry_id: "e1" }), job({ id: "j2", stage: "cancelled" })]);
-    const cards = createJobCards(show, entrySaved);
+    const cards = createJobCards(show, entrySaved, entryShown);
 
     await cards.refresh();
 
@@ -121,7 +155,7 @@ describe("createJobCards", () => {
 
   it("cancels from the ×, and a later read listing the job as cancelled paints nothing", async () => {
     apiMock.jobs.mockResolvedValue([job()]);
-    const cards = createJobCards(show, entrySaved);
+    const cards = createJobCards(show, entrySaved, entryShown);
     await cards.refresh();
     const button = shown[0].querySelector<HTMLButtonElement>("button")!;
     expect(button.getAttribute("aria-label")).toBe("Cancel");
@@ -140,7 +174,7 @@ describe("createJobCards", () => {
     apiMock.jobs.mockResolvedValue([job({ stage: "saving", progress: null })]);
     apiMock.removeJob.mockRejectedValue(new Error("This file is already being saved to History"));
     vi.spyOn(console, "error").mockImplementation(() => {});
-    const cards = createJobCards(show, entrySaved);
+    const cards = createJobCards(show, entrySaved, entryShown);
     await cards.refresh();
 
     shown[0].querySelector<HTMLButtonElement>("button")!.click();
@@ -152,7 +186,7 @@ describe("createJobCards", () => {
   it("shows a failure's reason with a Dismiss that removes it", async () => {
     apiMock.jobs.mockResolvedValue([job({ stage: "failed", progress: null, error: "Add an API key in Settings" })]);
     apiMock.removeJob.mockResolvedValue({ outcome: "dismissed" });
-    const cards = createJobCards(show, entrySaved);
+    const cards = createJobCards(show, entrySaved, entryShown);
     await cards.refresh();
 
     const card = shown[0];
@@ -169,7 +203,7 @@ describe("createJobCards", () => {
   it("drops what a read left in flight when the page paused", async () => {
     let answer!: (jobs: FileJob[]) => void;
     apiMock.jobs.mockReturnValue(new Promise((resolve) => (answer = resolve)));
-    const cards = createJobCards(show, entrySaved);
+    const cards = createJobCards(show, entrySaved, entryShown);
 
     const reading = cards.refresh();
     cards.pause();

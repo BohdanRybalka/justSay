@@ -159,9 +159,12 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
     createRow: createEntryElement,
     renderEmptyState: (isEmpty) => {
       if (!isEmpty) return;
-      daysEl.innerHTML = starredOnly
-        ? `<p class="history-empty">Nothing starred yet.</p>`
-        : `<p class="history-empty">Nothing here yet. Hold <b>${escapeHtml(shortcut)}</b> anywhere and talk.</p>`;
+      daysEl.insertAdjacentHTML(
+        "beforeend",
+        starredOnly
+          ? `<p class="history-empty">Nothing starred yet.</p>`
+          : `<p class="history-empty">Nothing here yet. Hold <b>${escapeHtml(shortcut)}</b> anywhere and talk.</p>`,
+      );
     },
     isDestroyed: () => destroyed,
     starredOnly: () => starredOnly,
@@ -392,6 +395,7 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
   const jobs = createJobCards(
     (jobCards) => timeline.setPending(jobCards),
     () => list.loadNewer(),
+    (entryId) => Array.from(daysEl.querySelectorAll<HTMLElement>(".entry")).some((el) => el.dataset.id === entryId),
   );
 
   function startPolling(): void {

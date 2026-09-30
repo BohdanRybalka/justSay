@@ -41,7 +41,6 @@ FILE_LANGUAGE = "auto"
 
 NO_SPEECH_REASON = "We didn't hear any speech in this file"
 NO_KEY_REASON = "Add an API key in Settings"
-NOT_SAVED_REASON = "Couldn't save the text to History"
 FAILED_REASON = "Couldn't turn this file into text. Try again"
 
 _CANCELLABLE: frozenset[JobStage] = frozenset({"queued", "transcribing"})
@@ -97,6 +96,10 @@ class _Job:
     task: asyncio.Task | None = None
 
 
+class _JobCancelledError(Exception):
+    pass
+
+
 class _JobObserver:
     def __init__(self, queue: JobQueue, job: _Job) -> None:
         self._queue = queue
@@ -105,10 +108,16 @@ class _JobObserver:
     async def before_transcribe(self, model_name: str, audio_duration: float | None) -> None:
         self._job.expected_seconds = await _expected_seconds(model_name, audio_duration)
         await self._queue.gate.wait_for_none()
+        self._stop_if_cancelled()
         self._job.started_at = self._queue.clock()
 
     def before_save(self) -> None:
+        self._stop_if_cancelled()
         self._job.stage = "saving"
+
+    def _stop_if_cancelled(self) -> None:
+        if self._job.stage == "cancelled":
+            raise _JobCancelledError
 
     def saved(self, entry_id: str) -> None:
         self._job.entry_id = entry_id
@@ -180,7 +189,8 @@ class JobQueue:
     def cancel_or_dismiss(self, job_id: str) -> RemovalOutcome | None:
         """Cancel a queued or transcribing job, forget a finished one; ``None`` for an unknown id.
 
-        Raises ``NotReadyError`` while the text is being saved: it is about to be in History.
+        A transcribing job's request cannot be recalled, so it keeps its turn until the answer
+        comes and is then thrown away unsaved. Raises ``NotReadyError`` while saving.
         """
         job = self._jobs.get(job_id)
         if job is None:
@@ -188,10 +198,10 @@ class JobQueue:
         if job.stage == "saving":
             raise NotReadyError("This file is already being saved to History")
         if job.stage in _CANCELLABLE:
+            if job.stage == "queued" and job.task is not None:
+                job.task.cancel()
             job.stage = "cancelled"
             job.finished_at = self.clock()
-            if job.task is not None:
-                job.task.cancel()
             return "cancelled"
         del self._jobs[job_id]
         return "dismissed"
@@ -231,7 +241,7 @@ class JobQueue:
             if result.discarded_reason is not None:
                 self._fail(job, NO_SPEECH_REASON)
             elif job.entry_id is None:
-                self._fail(job, NOT_SAVED_REASON)
+                self._fail(job, FAILED_REASON)
             else:
                 job.stage = "done"
                 job.finished_at = self.clock()
@@ -240,6 +250,8 @@ class JobQueue:
                 tasks.spawn_background_task(
                     vector_store.run_background_indexer(), name="vector-store-indexer"
                 )
+        except _JobCancelledError:
+            log.info("File job %s cancelled; its answer was not saved", job.id)
         except ConfigurationError:
             self._fail(job, NO_KEY_REASON)
         except JustSayError as refusal:
@@ -252,6 +264,8 @@ class JobQueue:
             _discard(job.path)
 
     def _fail(self, job: _Job, reason: str) -> None:
+        if job.stage == "cancelled":
+            return
         job.stage = "failed"
         job.error = reason
         job.finished_at = self.clock()

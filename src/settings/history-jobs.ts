@@ -31,12 +31,14 @@ export interface JobCards {
 
 /**
  * The cards of files being transcribed. `show` receives them newest first whenever the set
- * changes; a finished job waits for `entrySaved` to paint its row before its card goes, so the
- * card turns into the entry where it stood. A job this page removed is never painted again.
+ * changes. A finished job's card stays, asking `entrySaved` to paint its row, until
+ * `entryShown` finds that row, so the card turns into the entry where it stood. A job this
+ * page removed is never painted again; a failed read is tried again while cards are up.
  */
 export function createJobCards(
   show: (cards: HTMLElement[]) => void,
   entrySaved: () => Promise<void>,
+  entryShown: (entryId: string) => boolean,
 ): JobCards {
   const cards = new Map<string, HTMLElement>();
   const gone = new Set<string>();
@@ -84,12 +86,21 @@ export function createJobCards(
     }
   }
 
-  function finish(job: FileJob, card: HTMLElement | undefined): HTMLElement | null {
-    gone.add(job.id);
-    if (job.stage !== "done" || card === undefined) return null;
+  function lingers(job: FileJob, card: HTMLElement | undefined): card is HTMLElement {
+    const entryId = job.entry_id;
+    if (job.stage !== "done" || card === undefined || entryId === null) {
+      gone.add(job.id);
+      return false;
+    }
     paint(card, job);
-    void entrySaved().finally(() => removeCard(job.id));
-    return card;
+    void entrySaved().then(() => {
+      if (entryShown(entryId)) removeCard(job.id);
+    });
+    return true;
+  }
+
+  function readAgainSoon(): void {
+    timer = window.setTimeout(() => void refresh(), JOBS_POLL_MS);
   }
 
   async function refresh(): Promise<void> {
@@ -100,16 +111,20 @@ export function createJobCards(
       jobs = await api.jobs();
     } catch (err) {
       console.error(err);
+      if (current === generation && cards.size > 0) readAgainSoon();
       return;
     }
     if (current !== generation) return;
     const order: HTMLElement[] = [];
+    let waiting = false;
     for (const job of jobs) {
       if (gone.has(job.id)) continue;
       const existing = cards.get(job.id);
       if (!RUNNING.has(job.stage) && job.stage !== "failed") {
-        const lingering = finish(job, existing);
-        if (lingering) order.push(lingering);
+        if (lingers(job, existing)) {
+          order.push(existing);
+          waiting = true;
+        }
         continue;
       }
       const card = existing ?? createCard(job);
@@ -122,9 +137,7 @@ export function createJobCards(
       for (const card of order) cards.set(card.dataset.job!, card);
       publish();
     }
-    if (jobs.some((job) => RUNNING.has(job.stage))) {
-      timer = window.setTimeout(() => void refresh(), JOBS_POLL_MS);
-    }
+    if (waiting || jobs.some((job) => RUNNING.has(job.stage))) readAgainSoon();
   }
 
   function pause(): void {
