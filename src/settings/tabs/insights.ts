@@ -1,13 +1,15 @@
 /**
- * The Insights panel: a greeting with today's dictation, then the clay card of the
- * time talking saved this month. The backend computes every figure; this panel
- * formats them, and reads them again each time the window comes back on screen.
+ * The Insights panel: a greeting with today's dictation, the clay card of the time
+ * talking saved this month, then the words-per-day chart. The backend computes every
+ * figure; this panel formats them, and reads them again each time the window comes
+ * back on screen. The chart's 7d / 30d switch reads again and redraws the chart alone.
  */
-import { api, type Insights } from "../../api";
+import { api, type ChartSpan, type Insights } from "../../api";
 import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
 import { formatCoarseDuration, formatHoursClock, wholeMinutes } from "../../format";
 import { escapeHtml } from "../html";
 import type { TabLifecycle } from "../settings";
+import { mountWordsChart, type WordsChart } from "./insights-chart";
 
 export interface InsightsViewer {
   name: string;
@@ -64,22 +66,48 @@ export function renderInsights(
   const shortcut = formatAccelerator(viewer.shortcut, detectShortcutPlatform(navigator));
 
   let latestRead = 0;
+  let span: ChartSpan = 30;
+  let chart: WordsChart | null = null;
 
   async function read(): Promise<void> {
     const token = ++latestRead;
     const greeting = greetingFor(new Date().getHours());
     title.textContent = firstName ? `${greeting}, ${firstName}` : greeting;
     try {
-      const figures = await api.insights();
+      const figures = await api.insights(span);
       if (token !== latestRead) return;
       today.innerHTML = todayLine(figures.today, shortcut);
       body.innerHTML = figures.month.recordings > 0 ? savedCard(figures) : "";
+      chart = null;
+      if (!hasSpoken(figures)) return;
+      const host = document.createElement("div");
+      body.append(host);
+      chart = mountWordsChart(host, span, (next) => void switchSpan(next));
+      chart.draw(figures, span);
     } catch (e) {
       if (token !== latestRead) return;
-      console.error("Reading insights failed:", e);
-      body.innerHTML = `<p class="panel-error">Insights could not be read. <button type="button" class="btn btn-small">Try again</button></p>`;
-      body.querySelector("button")!.addEventListener("click", () => void read());
+      showFailure(e);
     }
+  }
+
+  async function switchSpan(next: ChartSpan): Promise<void> {
+    span = next;
+    const token = ++latestRead;
+    try {
+      const figures = await api.insights(next);
+      if (token !== latestRead) return;
+      chart?.draw(figures, next);
+    } catch (e) {
+      if (token !== latestRead) return;
+      showFailure(e);
+    }
+  }
+
+  function showFailure(e: unknown): void {
+    console.error("Reading insights failed:", e);
+    chart = null;
+    body.innerHTML = `<p class="panel-error">Insights could not be read. <button type="button" class="btn btn-small">Try again</button></p>`;
+    body.querySelector("button")!.addEventListener("click", () => void read());
   }
 
   const disown = () => {
@@ -88,6 +116,10 @@ export function renderInsights(
 
   if (!windowHidden) void read();
   return { destroy: disown, releaseResources: disown, resumeResources: () => void read() };
+}
+
+function hasSpoken({ month, days, previous_period_words }: Insights): boolean {
+  return month.recordings > 0 || previous_period_words > 0 || days.some((day) => day.words > 0);
 }
 
 function todayLine(today: Insights["today"], shortcut: string): string {

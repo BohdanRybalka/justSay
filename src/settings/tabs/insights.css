@@ -124,3 +124,162 @@
   font-size: 11.5px;
   opacity: .8;
 }
+
+.chart {
+  padding: 18px 18px 14px;
+}
+
+.chart-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.chart-top b {
+  font-size: 13.5px;
+  font-weight: 570;
+}
+
+.chart-range {
+  margin-left: auto;
+}
+
+.chart-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 7px;
+  background: var(--orange-soft);
+  color: var(--orange);
+  font-size: 11px;
+  font-weight: 660;
+}
+
+.chart-delta[hidden] {
+  display: none;
+}
+
+.chart-delta .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.chart-plot {
+  position: relative;
+  container-type: inline-size;
+  height: 172px;
+  margin-top: 22px;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.chart-average {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1.5px dashed var(--border-2);
+  pointer-events: none;
+}
+
+.chart-average b {
+  position: absolute;
+  left: 0;
+  top: -17px;
+  font-size: 10px;
+  color: var(--muted);
+  font-weight: 600;
+  background: var(--surface);
+  padding: 0 5px;
+}
+
+.chart-bar {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background .15s;
+}
+
+.chart-bar:hover {
+  background: var(--inset);
+}
+
+.chart-bar:focus-visible {
+  outline: 2px solid var(--orange);
+  outline-offset: 1px;
+}
+
+.chart-bar i {
+  display: block;
+  width: 100%;
+  border-radius: 5px 5px 3px 3px;
+  background: var(--bar);
+  transition: height .5s cubic-bezier(.2,.9,.3,1), opacity .15s;
+  opacity: .5;
+}
+
+.chart-bar--weekend i {
+  opacity: .28;
+}
+
+.chart-bar--best i {
+  opacity: 1;
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--orange);
+}
+
+.chart-bar:hover i,
+.chart-bar:focus-visible i {
+  opacity: .92;
+}
+
+.chart-callout,
+.chart-plot > .chart-tip {
+  --shift: clamp(calc(var(--center) * -1cqw), -50%, calc(100cqw - var(--center) * 1cqw - 100%));
+  position: absolute;
+  left: calc(var(--center) * 1cqw);
+  transform: translate(var(--shift), -100%);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.chart-callout {
+  padding: 6px 11px;
+  border-radius: 9px;
+  background: var(--text);
+  color: var(--canvas);
+  font-size: 11px;
+  font-weight: 600;
+  box-shadow: var(--sh);
+}
+
+.chart-callout::after {
+  content: "";
+  position: absolute;
+  left: calc(-1 * var(--shift));
+  bottom: -4px;
+  width: 8px;
+  height: 8px;
+  transform: translateX(-50%) rotate(45deg);
+  background: var(--text);
+}
+
+.chart-plot > .chart-tip {
+  bottom: 0;
+}
+
+.chart-tip span {
+  color: var(--muted);
+}
+
+.chart-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 9px;
+}

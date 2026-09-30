@@ -639,7 +639,13 @@ export interface Insights {
     pace_wpm: number | null;
   };
   streak: { current_days: number; longest_days: number };
+  /** Words per local day for the chart's span, oldest first and ending today, zero-filled;
+   *  `previous_period_words` sums the same number of days just before. */
+  days: { date: string; words: number }[];
+  previous_period_words: number;
 }
+
+export type ChartSpan = 7 | 30;
 
 export interface StorageInfo {
   temp_size_bytes: number;
@@ -897,7 +903,8 @@ export const api = {
 
   historyStats: () => request<HistoryStats>("GET", "/history/stats", undefined, REREADABLE),
 
-  insights: () => request<Insights>("GET", "/insights", undefined, REREADABLE),
+  insights: (days: ChartSpan = 30) =>
+    request<Insights>("GET", `/insights?days=${days}`, undefined, REREADABLE),
 
   wordsTop: (lang: "all" | "uk" | "en" = "all", limit = 50) =>
     request<TopWordsResponse>("GET", `/words/top?lang=${lang}&limit=${limit}`, undefined, REREADABLE),
