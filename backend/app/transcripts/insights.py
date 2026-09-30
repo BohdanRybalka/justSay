@@ -3,12 +3,13 @@
 Files and meetings carry other voices, so every figure reads rows whose ``source``
 is ``dictation``. Days are the machine's local days, the rule ``/history`` applies.
 Time figures skip rows that do not know their audio length; word figures keep them.
-Figures cache on ``history.derived_generation_locked`` and the local date.
+Figures cache on ``history.derived_generation_locked``, the local date and the chart span.
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from enum import IntEnum
 from typing import NamedTuple
 
 from pydantic import BaseModel
@@ -16,6 +17,11 @@ from pydantic import BaseModel
 from app.transcripts import history
 
 TYPING_WPM = 40
+
+
+class ChartSpan(IntEnum):
+    WEEK = 7
+    MONTH = 30
 
 _DAYS_SQL = (
     f"SELECT {history._LOCAL_DAY} AS day, COUNT(*), COALESCE(SUM(word_count), 0), "
@@ -50,10 +56,21 @@ class StreakFigures(BaseModel):
     longest_days: int
 
 
+class DayWords(BaseModel):
+    date: date
+    words: int
+
+
 class Insights(BaseModel):
+    """``days`` are the chart's last days up to today, oldest first, zero-filled;
+    ``previous_period_words`` sums the same number of days just before them.
+    """
+
     today: TodayFigures
     month: MonthFigures
     streak: StreakFigures
+    days: list[DayWords]
+    previous_period_words: int
 
 
 class _Day(NamedTuple):
@@ -65,25 +82,25 @@ class _Day(NamedTuple):
 
 _NO_DICTATION = _Day(0, 0, 0, 0.0)
 
-_cache: tuple[int, date, Insights] | None = None
+_cache: tuple[int, date, int, Insights] | None = None
 
 
-def compute_insights(now: datetime | None = None) -> Insights:
-    """Today, this month and the streak, as of ``now`` (the local clock by default)."""
+def compute_insights(span: int = ChartSpan.MONTH, now: datetime | None = None) -> Insights:
+    """Today, this month, the streak and ``span`` chart days, as of ``now`` (local clock)."""
     global _cache
     today = (now or datetime.now().astimezone()).date()
     with history._lock:
         generation = history.derived_generation_locked()
-        if _cache is not None and _cache[:2] == (generation, today):
-            return _cache[2]
+        if _cache is not None and _cache[:3] == (generation, today, span):
+            return _cache[3]
         rows = history._ensure_conn_locked().execute(_DAYS_SQL).fetchall()
         days = {date.fromisoformat(row[0]): _Day(*row[1:]) for row in rows}
-        insights = _figures({day: d for day, d in days.items() if day <= today}, today)
-        _cache = (generation, today, insights)
+        insights = _figures({day: d for day, d in days.items() if day <= today}, today, span)
+        _cache = (generation, today, span, insights)
         return insights
 
 
-def _figures(days: dict[date, _Day], today: date) -> Insights:
+def _figures(days: dict[date, _Day], today: date, span: int) -> Insights:
     month = [d for day, d in days.items() if day >= today.replace(day=1)]
     speaking = round(sum(d.speaking_seconds for d in month), 1)
     timed_words = sum(d.timed_words for d in month)
@@ -99,7 +116,19 @@ def _figures(days: dict[date, _Day], today: date) -> Insights:
             pace_wpm=round(timed_words * 60 / speaking) if speaking > 0 else None,
         ),
         streak=_streak(set(days), today),
+        days=[DayWords(date=day, words=_words(days, day)) for day in _span_days(today, span)],
+        previous_period_words=sum(
+            _words(days, day) for day in _span_days(today - timedelta(days=span), span)
+        ),
     )
+
+
+def _span_days(last: date, span: int) -> list[date]:
+    return [last - timedelta(days=back) for back in range(span - 1, -1, -1)]
+
+
+def _words(days: dict[date, _Day], day: date) -> int:
+    return days.get(day, _NO_DICTATION).words
 
 
 def _streak(days: set[date], today: date) -> StreakFigures:

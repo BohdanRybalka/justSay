@@ -11,12 +11,20 @@ vi.mock("../../api", async (importOriginal) => {
 
 import { greetingFor, paceLine, renderInsights, savedPhrase } from "./insights";
 
+function spokenDays(words: number[]): Insights["days"] {
+  return words.map((value, index) => ({ date: `2026-09-${String(index + 30 - words.length).padStart(2, "0")}`, words: value }));
+}
+
 function buildInsights(overrides: {
   today?: Partial<Insights["today"]>;
   month?: Partial<Insights["month"]>;
   streak?: Partial<Insights["streak"]>;
+  days?: Insights["days"];
+  previous_period_words?: number;
 } = {}): Insights {
   return {
+    days: overrides.days ?? spokenDays([...Array(28).fill(100), 300]),
+    previous_period_words: overrides.previous_period_words ?? 2000,
     today: { words: 1212, recordings: 8, ...overrides.today },
     month: {
       words: 10666,
@@ -150,6 +158,89 @@ describe("the Insights panel", () => {
 
     expect(text("#insights-today")).toBe("Hold Ctrl + Alt + V anywhere and talk.");
     expect(container.querySelector(".saved-card")).toBeNull();
+  });
+
+  it("draws the last 30 days under the card, and nothing before a first dictation", async () => {
+    await mount(buildInsights());
+    expect(apiMock.insights).toHaveBeenCalledWith(30);
+    expect(container.querySelectorAll(".chart-bar")).toHaveLength(29);
+    expect(text(".chart-delta")).toBe("+55% vs previous 30 days");
+
+    container.innerHTML = "";
+    await mount(buildInsights({ month: { recordings: 0 }, days: spokenDays(Array(30).fill(0)), previous_period_words: 0 }));
+    expect(container.querySelector(".chart")).toBeNull();
+  });
+
+  it("keeps the chart for last month's words when this month has none yet", async () => {
+    await mount(buildInsights({ month: { recordings: 0 }, days: spokenDays([...Array(29).fill(0), 40]) }));
+
+    expect(container.querySelector(".saved-card")).toBeNull();
+    expect(container.querySelectorAll(".chart-bar")).toHaveLength(30);
+  });
+
+  it("switches to 7 days by redrawing the chart alone", async () => {
+    await mount(buildInsights());
+    const card = container.querySelector(".saved-card");
+    const todayLine = container.querySelector("#insights-today")!.innerHTML;
+    apiMock.insights.mockResolvedValue(
+      buildInsights({ today: { words: 9 }, days: spokenDays([1, 2, 3, 4, 5, 6, 7]), previous_period_words: 0 }),
+    );
+
+    [...container.querySelectorAll<HTMLButtonElement>(".chart-range button")].find((b) => b.textContent === "7d")!.click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(apiMock.insights).toHaveBeenLastCalledWith(7);
+    expect(container.querySelectorAll(".chart-bar")).toHaveLength(7);
+    expect(container.querySelector<HTMLElement>(".chart-delta")!.hidden).toBe(true);
+    expect(container.querySelector(".saved-card")).toBe(card);
+    expect(container.querySelector("#insights-today")!.innerHTML).toBe(todayLine);
+    expect(container.querySelector(".chart-range [aria-pressed=true]")!.textContent).toBe("7d");
+  });
+
+  it("keeps the chart and its switch when a quiet week comes back empty", async () => {
+    const tab = await mount(buildInsights());
+    const empty = buildInsights({ month: { recordings: 0 }, days: spokenDays(Array(7).fill(0)), previous_period_words: 0 });
+    apiMock.insights.mockResolvedValue(empty);
+    container.querySelector<HTMLButtonElement>(".chart-range button")!.click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    tab.resumeResources!();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(container.querySelectorAll(".chart-bar")).toHaveLength(7);
+    expect(container.querySelector(".chart-range [aria-pressed=true]")!.textContent).toBe("7d");
+  });
+
+  it("lets a switch and a returning window both land, then redraws the chosen span", async () => {
+    const tab = await mount(buildInsights());
+    const answers: ((figures: Insights) => void)[] = [];
+    apiMock.insights.mockImplementation(() => new Promise<Insights>((resolve) => answers.push(resolve)));
+
+    tab.resumeResources!();
+    container.querySelector<HTMLButtonElement>(".chart-range button")!.click();
+    answers[1](buildInsights({ days: spokenDays([1, 2, 3, 4, 5, 6, 7]) }));
+    await vi.advanceTimersByTimeAsync(0);
+    answers[0](buildInsights({ today: { words: 5 } }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(text("#insights-today")).toContain("5 words");
+    expect(apiMock.insights.mock.calls.map(([days]) => days)).toEqual([30, 30, 7, 7]);
+    answers[2](buildInsights({ days: spokenDays([9, 9, 9, 9, 9, 9, 9]) }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(container.querySelectorAll(".chart-bar")).toHaveLength(7);
+    expect(container.querySelector(".chart-range [aria-pressed=true]")!.textContent).toBe("7d");
+  });
+
+  it("keeps the chosen span when the window comes back", async () => {
+    const tab = await mount(buildInsights());
+    container.querySelector<HTMLButtonElement>(".chart-range button")!.click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    tab.resumeResources!();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(apiMock.insights).toHaveBeenLastCalledWith(7);
+    expect(container.querySelector(".chart-range [aria-pressed=true]")!.textContent).toBe("7d");
   });
 
   it("greets without a name when none is known", async () => {

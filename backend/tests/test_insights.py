@@ -157,6 +157,56 @@ def test_the_figures_move_to_a_new_day_without_a_write():
     assert tomorrow.streak.current_days == 1
 
 
+def test_chart_days_end_today_oldest_first_and_zero_filled():
+    _save(datetime(2026, 8, 13, 23, 59, 59), 7)
+    _save(datetime(2026, 8, 14, 0, 0, 1), 30)
+    _save(datetime(2026, 8, 14, 9, 0), 12)
+    _save(datetime(2026, 8, 20, 9, 0), 5)
+    _save(datetime(2026, 8, 20, 10, 0), 900, source="meeting")
+    _save(datetime(2026, 8, 21, 9, 0), 400)
+
+    days = insights.compute_insights(7, now=NOW).days
+
+    assert [(d.date.isoformat(), d.words) for d in days] == [
+        ("2026-08-14", 42), ("2026-08-15", 0), ("2026-08-16", 0), ("2026-08-17", 0),
+        ("2026-08-18", 0), ("2026-08-19", 0), ("2026-08-20", 5),
+    ]
+
+
+def test_thirty_chart_days_reach_back_across_the_month_end():
+    _save(datetime(2026, 7, 22, 12, 0), 11)
+    _save(datetime(2026, 7, 21, 12, 0), 99)
+
+    days = insights.compute_insights(30, now=NOW).days
+
+    assert len(days) == 30
+    assert (days[0].date.isoformat(), days[0].words) == ("2026-07-22", 11)
+    assert days[-1].date.isoformat() == "2026-08-20"
+
+
+def test_the_previous_period_is_the_same_number_of_days_just_before():
+    _save(datetime(2026, 8, 6, 23, 59, 59), 1000)
+    _save(datetime(2026, 8, 7, 0, 0, 1), 20)
+    _save(datetime(2026, 8, 13, 23, 59, 59), 3)
+    _save(datetime(2026, 8, 13, 12, 0), 900, source="file")
+    _save(datetime(2026, 8, 14, 0, 0, 1), 50)
+
+    figures = insights.compute_insights(7, now=NOW)
+
+    assert figures.previous_period_words == 23
+    assert sum(d.words for d in figures.days) == 50
+
+
+def test_each_span_reads_its_own_days():
+    _save(datetime(2026, 8, 1, 9, 0), 10)
+
+    assert len(insights.compute_insights(30, now=NOW).days) == 30
+    week = insights.compute_insights(7, now=NOW)
+
+    assert len(week.days) == 7
+    assert week.previous_period_words == 0
+
+
 @pytest.mark.asyncio
 async def test_insights_endpoint_answers_with_the_figures(client):
     _save(datetime.now(), 42, 30)
@@ -170,3 +220,16 @@ async def test_insights_endpoint_answers_with_the_figures(client):
     assert set(data["month"]) == {
         "words", "recordings", "speaking_seconds", "typing_seconds", "pace_wpm",
     }
+    assert len(data["days"]) == 30
+    assert data["days"][-1]["words"] == 42
+    assert data["previous_period_words"] == 0
+
+
+@pytest.mark.asyncio
+async def test_insights_endpoint_takes_seven_or_thirty_days_only(client):
+    week = await client.get("/insights?days=7")
+    other = await client.get("/insights?days=10")
+
+    assert week.status_code == 200
+    assert len(week.json()["days"]) == 7
+    assert other.status_code == 422
