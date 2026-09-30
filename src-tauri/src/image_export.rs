@@ -13,18 +13,32 @@ const FALLBACK_NAME: &str = "JustSay.png";
 
 fn png_body<'a>(request: &'a Request<'_>) -> Result<&'a [u8], String> {
     match request.body() {
-        InvokeBody::Raw(bytes) if bytes.starts_with(PNG_SIGNATURE) => Ok(bytes),
-        _ => Err("the body is not a PNG image".into()),
+        InvokeBody::Raw(bytes) => png_only(bytes),
+        InvokeBody::Json(_) => Err("the body is not raw bytes".into()),
     }
+}
+
+fn png_only(bytes: &[u8]) -> Result<&[u8], String> {
+    if bytes.starts_with(PNG_SIGNATURE) {
+        Ok(bytes)
+    } else {
+        Err("the body is not a PNG image".into())
+    }
+}
+
+fn suggested_name(request: &Request<'_>) -> String {
+    file_name_only(
+        request
+            .headers()
+            .get(SUGGESTED_NAME_HEADER)
+            .and_then(|value| value.to_str().ok()),
+    )
 }
 
 /// The last path component of the page's suggested file name, so the
 /// suggestion can name a file and never a folder.
-fn suggested_name(request: &Request<'_>) -> String {
-    request
-        .headers()
-        .get(SUGGESTED_NAME_HEADER)
-        .and_then(|value| value.to_str().ok())
+fn file_name_only(suggested: Option<&str>) -> String {
+    suggested
         .and_then(|name| Path::new(name).file_name())
         .and_then(|name| name.to_str())
         .unwrap_or(FALLBACK_NAME)
@@ -69,7 +83,25 @@ fn write_image(path: &Path, png: &[u8]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::write_image;
+    use super::{file_name_only, png_only, write_image};
+
+    #[test]
+    fn only_png_bytes_are_accepted() {
+        assert!(png_only(b"\x89PNG\r\n\x1a\nrest").is_ok());
+        assert!(png_only(b"GIF89a").is_err());
+        assert!(png_only(b"").is_err());
+    }
+
+    #[test]
+    fn the_suggestion_names_a_file_and_never_a_folder() {
+        assert_eq!(
+            file_name_only(Some("JustSay-September-2026.png")),
+            "JustSay-September-2026.png"
+        );
+        assert_eq!(file_name_only(Some("../../Windows/evil.png")), "evil.png");
+        assert_eq!(file_name_only(Some("..")), "JustSay.png");
+        assert_eq!(file_name_only(None), "JustSay.png");
+    }
 
     #[test]
     fn the_file_holds_exactly_the_bytes_given() {

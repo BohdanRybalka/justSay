@@ -65,7 +65,7 @@ describe("the card drawn as an image", () => {
       "118 wpm",
       "three times your typing",
     ]);
-    expect(drawn[1].font).toBe(`700 56px "JetBrains Mono", ui-monospace, monospace`);
+    expect(drawn[1].font).toBe(`740 56px "JetBrains Mono", ui-monospace, monospace`);
     expect(drawn[2].alpha).toBe(0.9);
     const rows = drawn.map((run) => run.y);
     expect(rows.slice(0, 5)).toEqual([...rows.slice(0, 5)].sort((a, b) => a - b));

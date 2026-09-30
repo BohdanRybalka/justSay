@@ -437,6 +437,38 @@ describe("the Insights panel", () => {
     expect(container.querySelector(".words-note")).toBeNull();
   });
 
+  it("drops a filter answer that a later switch has overtaken", async () => {
+    await mount(buildInsights());
+    let answerFillers: (top: TopWordsResponse) => void = () => {};
+    apiMock.wordsTop.mockImplementationOnce(() => new Promise<TopWordsResponse>((resolve) => (answerFillers = resolve)));
+    const [all, fillers] = container.querySelectorAll<HTMLButtonElement>(".words-filter button");
+
+    fillers.click();
+    apiMock.wordsTop.mockResolvedValue({ items: FAVOURITES, note: NOTE });
+    all.click();
+    await vi.advanceTimersByTimeAsync(0);
+    answerFillers(FILLERS_ONLY);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(container.querySelectorAll(".word-row")).toHaveLength(7);
+  });
+
+  it("reads the words again when the filter changed while the panel was reading", async () => {
+    const tab = await mount(buildInsights());
+    let answerAll: (top: TopWordsResponse) => void = () => {};
+    apiMock.wordsTop.mockImplementationOnce(() => new Promise<TopWordsResponse>((resolve) => (answerAll = resolve)));
+    tab.resumeResources!();
+    apiMock.wordsTop.mockResolvedValue(FILLERS_ONLY);
+
+    container.querySelectorAll<HTMLButtonElement>(".words-filter button")[1].click();
+    await vi.advanceTimersByTimeAsync(0);
+    answerAll({ items: FAVOURITES, note: NOTE });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(container.querySelector(".words-filter [aria-pressed=true]")!.textContent).toBe("Fillers");
+    expect([...container.querySelectorAll(".podium-word")].map((word) => word.textContent)).toEqual(["so", "like", "just"]);
+  });
+
   it("copies the card as an image and says so", async () => {
     await mount(buildInsights());
     const png = new Uint8Array([137, 80]);

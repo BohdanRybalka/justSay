@@ -133,11 +133,17 @@ def test_a_filler_of_several_words_counts_once_and_its_words_not_again():
     assert "мовити" not in counts
 
 
-def test_the_longest_filler_wins_where_two_start_together():
-    history.save_entry(text="так би мовити", duration_ms=1)
+def test_the_longest_filler_wins_where_two_start_together(monkeypatch):
+    monkeypatch.setattr(
+        words,
+        "_PHRASES",
+        {("kind", "of"): "kind of", ("kind", "of", "like"): "kind of like"},
+    )
+    monkeypatch.setattr(words, "_LONGEST_PHRASE", 3)
 
-    assert words.top_words(limit=10).items[0].word == "так би мовити"
-    assert "як би" not in _counts(words.top_words(limit=10))
+    said = list(words.said_words(words.tokenize("kind of like this, kind of that")))
+
+    assert said == ["kind of like", "this", "kind of", "that"]
 
 
 def test_fillers_a_stopword_list_holds_are_still_counted():

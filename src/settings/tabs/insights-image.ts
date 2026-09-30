@@ -50,10 +50,10 @@ const SANS = `"Inter", system-ui, sans-serif`;
 const MONO = `"JetBrains Mono", ui-monospace, monospace`;
 const FONTS = {
   label: `700 11px ${SANS}`,
-  value: `700 56px ${MONO}`,
+  value: `740 56px ${MONO}`,
   note: `400 14px ${SANS}`,
   compareLabel: `400 12px ${SANS}`,
-  compareTime: `600 12px ${MONO}`,
+  compareTime: `650 12px ${MONO}`,
   figure: `700 20px ${MONO}`,
   figureLabel: `400 11.5px ${SANS}`,
 };
@@ -122,7 +122,7 @@ export function drawSavedCard(ctx: Context, view: SavedCardView, { height, noteL
     const trackY = middle - COMPARE_TRACK / 2;
     pill(ctx, trackX, trackY, track, "rgba(255,255,255,.22)");
     pill(ctx, trackX, trackY, track * row.fraction, row.dim ? "rgba(255,255,255,.4)" : "rgba(255,255,255,.94)");
-    text(ctx, row.time, FONTS.compareTime, 1, trackX + track + FLEX_GAP, middle);
+    text(ctx, row.time, FONTS.compareTime, 1, trackX + track + FLEX_GAP, middle, "-0.24px");
     y += COMPARE_ROW;
   }
 

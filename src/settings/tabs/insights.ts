@@ -98,7 +98,8 @@ export function renderInsights(
       body.insertAdjacentHTML("beforeend", voiceFacts(figures));
       const wordsHost = document.createElement("div");
       body.append(wordsHost);
-      favouriteWords = mountFavouriteWords(wordsHost, favourites, wordFilter, (next) => void switchWords(next));
+      favouriteWords = mountFavouriteWords(wordsHost, favourites.top, wordFilter, (next) => void switchWords(next));
+      if (favourites.filter !== wordFilter) void switchWords(wordFilter);
       if (card !== null) mountShare(card);
     } catch (e) {
       if (token !== latestRead) return;
@@ -106,11 +107,12 @@ export function renderInsights(
     }
   }
 
-  async function readWords(): Promise<TopWordsResponse> {
-    const top = await api.wordsTop(FAVOURITE_WORDS, wordFilter);
-    if (top.note !== null || wordFilter === "all") return top;
+  async function readWords(): Promise<{ top: TopWordsResponse; filter: WordFilter }> {
+    const filter = wordFilter;
+    const top = await api.wordsTop(FAVOURITE_WORDS, filter);
+    if (top.note !== null || filter === "all") return { top, filter };
     wordFilter = "all";
-    return api.wordsTop(FAVOURITE_WORDS, wordFilter);
+    return { top: await api.wordsTop(FAVOURITE_WORDS, "all"), filter: "all" };
   }
 
   async function switchWords(next: WordFilter): Promise<void> {
