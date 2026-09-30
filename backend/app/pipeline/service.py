@@ -9,6 +9,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 import pyperclip
 from fastapi import BackgroundTasks
@@ -36,6 +37,16 @@ class ProcessingResult:
     discarded_reason: str | None = None
 
 
+class PipelineObserver(Protocol):
+    """What a caller showing progress hears from ``process_audio``, in this order."""
+
+    async def before_transcribe(self, model_name: str, audio_duration: float | None) -> None: ...
+
+    def before_save(self) -> None: ...
+
+    def saved(self, entry_id: str) -> None: ...
+
+
 async def process_audio(
     audio_path: Path,
     language: str = "uk",
@@ -45,12 +56,13 @@ async def process_audio(
     *,
     source: EntrySource,
     source_name: str | None = None,
+    observer: PipelineObserver | None = None,
 ) -> ProcessingResult:
     """Full pipeline: route STT by duration+format -> transcribe -> clipboard.
 
     ``background_tasks``, when provided, schedules embedding generation to run
-    after the response is sent. Never awaited synchronously here. ``source`` and
-    ``source_name`` say where the history entry came from.
+    after the response is sent. ``source`` and ``source_name`` say where the
+    history entry came from; ``observer`` hears the route, the save and its id.
     """
     start = time.perf_counter()
 
@@ -107,6 +119,9 @@ async def process_audio(
 
         await await_local_ready(stt_settings)
 
+    if observer is not None:
+        await observer.before_transcribe(stt.model_name, duration)
+
     try:
         result = await stt.transcribe(
             audio_path,
@@ -160,6 +175,9 @@ async def process_audio(
     if language == "auto" and result.detected_language:
         effective_language = result.detected_language
 
+    if observer is not None:
+        observer.before_save()
+
     try:
         entry = save_entry(
             text=text,
@@ -172,6 +190,8 @@ async def process_audio(
             source=source,
             source_name=source_name,
         )
+        if observer is not None:
+            observer.saved(entry.id)
         if background_tasks is not None and text:
             from app.transcripts import vector_store
 

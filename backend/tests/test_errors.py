@@ -58,14 +58,14 @@ from tests.app_modules import APP_DIR, app_modules
 
 _ERRORS_SOURCE = Path(errors.__file__)
 _DELIBERATELY_OUTSIDE_THE_HIERARCHY = frozenset(
-    {"app.audio.analysis.MalformedCaptureBlockError"}
+    {"app.audio.analysis.MalformedCaptureBlockError", "app.pipeline.jobs._JobCancelledError"}
 )
 _BUILTIN_EXCEPTION_BASES = frozenset(
     name
     for name, value in vars(builtins).items()
     if isinstance(value, type) and issubclass(value, BaseException)
 )
-_DECLARED_EXCEPTION_CLASS_COUNT = 14
+_DECLARED_EXCEPTION_CLASS_COUNT = 15
 _HIERARCHY_MEMBER_COUNT = 13
 _WEB_FRAMEWORK_ROOTS = frozenset({"fastapi", "starlette"})
 

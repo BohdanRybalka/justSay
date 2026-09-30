@@ -1,6 +1,6 @@
 """Tests for `app.pipeline.upload_validation` — both gates it holds.
 
-The content gate (Plan 008 / Task 3 tech-debt batch): `/pipeline/process-file`
+The content gate (Plan 008 / Task 3 tech-debt batch): `/jobs/file`
 used to trust the filename's extension alone. `validate_audio_upload` covers
 empty/short files, extension/content mismatch (renamed executables), niche
 formats we trust on extension, and the MIME→extension family map.

@@ -441,7 +441,7 @@ async function fetchJsonUntilAnswered<T>(
 }
 
 /** The one place a `Budget` decides which of the two mechanisms runs, so a call
- *  that builds its own request — `processFile` and its `FormData` — is placed
+ *  that builds its own request — `startFileJob` and its `FormData` — is placed
  *  by the same object every other endpoint is placed by. */
 function send<T>(
   path: string,
@@ -536,6 +536,22 @@ export interface DictateResponse {
    *  write, no History row. Not an error: dictationResultView renders it as
    *  "No speech". */
   discarded_reason?: string | null;
+}
+
+export type FileJobStage = "queued" | "transcribing" | "saving" | "done" | "failed" | "cancelled";
+
+/** A file being turned into text in the background, as `GET /jobs` lists it. */
+export interface FileJob {
+  id: string;
+  kind: "file";
+  name: string;
+  stage: FileJobStage;
+  /** 0–1, estimated from this machine's past speed; null while it cannot be told. */
+  progress: number | null;
+  /** Why a failed job failed, in plain words. */
+  error: string | null;
+  /** The History row a done job wrote. */
+  entry_id: string | null;
 }
 
 export interface UserSettings {
@@ -1015,24 +1031,15 @@ export const api = {
       UNRECONCILED,
     ),
 
-  /** Upload an audio file to the pipeline. Accepts an ArrayBuffer of file bytes.
-   *  `language` defaults to `"auto"` — every STT provider maps that sentinel
-   *  onto its own native auto-detect mechanism (see `STTProvider.transcribe`'s
-   *  docstring in the backend for the per-provider translation).
-   *
-   *  `UNRECONCILED` for the same reason as `dictate`: it transcribes and writes
-   *  a History row before it answers, and abandoning it reports a failure for a
-   *  transcription that may already have been saved. */
-  processFile: (
-    fileBytes: ArrayBuffer,
-    filename: string,
-    language = "auto",
-  ): Promise<DictateResponse> => {
+  /** Queues an audio file and answers its job id at once; the text lands in
+   *  History and never on the clipboard. `UNRECONCILED`: abandoning it could
+   *  leave a job running that the caller never learned the id of. */
+  startFileJob: (fileBytes: ArrayBuffer, filename: string): Promise<{ id: string }> => {
     const form = new FormData();
     const blob = new Blob([fileBytes], { type: "application/octet-stream" });
     form.append("file", blob, filename);
-    return send<DictateResponse>(
-      `/pipeline/process-file?language=${language}&copy_to_clipboard=false`,
+    return send<{ id: string }>(
+      "/jobs/file",
       async () => {
         const token = await getToken();
         const headers: Record<string, string> = {};
@@ -1044,6 +1051,18 @@ export const api = {
       UNRECONCILED,
     );
   },
+
+  /** Running jobs, failed ones until dismissed, and those finished in the last minute, newest first. */
+  jobs: () => request<FileJob[]>("GET", "/jobs", undefined, REREADABLE),
+
+  /** Cancels a queued or transcribing job, or dismisses a finished one. */
+  removeJob: (id: string) =>
+    request<{ outcome: "cancelled" | "dismissed" }>(
+      "DELETE",
+      `/jobs/${encodeURIComponent(id)}`,
+      undefined,
+      UNRECONCILED,
+    ),
 
   setSttMode: (mode: "cloud" | "local") => request("PUT", "/stt/mode", { mode }, UNRECONCILED),
 

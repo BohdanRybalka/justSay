@@ -109,6 +109,9 @@ export function closeMatchesHeading(): HTMLElement {
 export interface TimelineRows extends HistoryRows {
   /** Takes one card off the timeline, and its day with it once the day is empty. */
   rowRemoved(element: HTMLElement): void;
+  /** Cards for work still under way, kept at the top of today above its recordings and
+   *  counted in none of its totals; hidden while another lane's elements are painted. */
+  setPending(elements: readonly HTMLElement[]): void;
 }
 
 interface DayGroup {
@@ -126,11 +129,36 @@ interface DayGroup {
 export function createTimelineRows(container: HTMLElement, now: () => Date = () => new Date()): TimelineRows {
   const groups = new Map<string, DayGroup>();
   const totals = new Map<string, HistoryDay>();
+  const pendingSlot = document.createElement("div");
+  pendingSlot.className = "day-pending";
+  let pending: readonly HTMLElement[] = [];
+  let showingOwnRows = true;
 
   function reset(): void {
     groups.clear();
     totals.clear();
     container.replaceChildren();
+  }
+
+  function dropGroup(mapKey: string, group: DayGroup): void {
+    group.root.remove();
+    groups.delete(mapKey);
+    totals.delete(mapKey);
+  }
+
+  function mountPending(): void {
+    const todayKey = localDayKey(now());
+    const today = groups.get(todayKey);
+    if (today && !container.contains(today.root)) dropGroup(todayKey, today);
+    pendingSlot.replaceChildren(...pending);
+    if (!showingOwnRows || pending.length === 0) {
+      pendingSlot.remove();
+      const bare = groups.get(todayKey);
+      if (bare && bare.body.children.length === 0) dropGroup(todayKey, bare);
+      return;
+    }
+    const group = groupFor(todayKey, true);
+    group.root.insertBefore(pendingSlot, group.body);
   }
 
   function groupFor(key: string | null, atTop: boolean): DayGroup {
@@ -180,23 +208,32 @@ export function createTimelineRows(container: HTMLElement, now: () => Date = () 
   function append(rows: readonly BuiltRow[], days: readonly HistoryDay[]): void {
     adoptDays(days);
     for (const row of rows) place(row, false);
+    mountPending();
     paintHeads();
   }
 
   return {
     replace(rows, days) {
       reset();
+      showingOwnRows = true;
       append(rows, days);
     },
     append,
     prepend(rows, days) {
       adoptDays(days);
       for (const row of [...rows].reverse()) place(row, true);
+      mountPending();
       paintHeads();
     },
     replaceWith(elements) {
       reset();
+      showingOwnRows = false;
       container.append(...elements);
+    },
+    setPending(elements) {
+      pending = elements;
+      mountPending();
+      paintHeads();
     },
     rowRemoved(element) {
       const root = element.closest<HTMLElement>(".day-group");
@@ -218,11 +255,8 @@ export function createTimelineRows(container: HTMLElement, now: () => Date = () 
           words: day.words - Number(element.dataset.words ?? 0),
         });
       }
-      if (group.body.children.length === 0) {
-        group.root.remove();
-        groups.delete(mapKey);
-        totals.delete(mapKey);
-      }
+      if (group.body.children.length === 0) dropGroup(mapKey, group);
+      mountPending();
       paintHeads();
     },
   };

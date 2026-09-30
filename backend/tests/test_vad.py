@@ -231,7 +231,7 @@ def test_analyze_vad_returns_none_for_corrupt_file(tmp_path, monkeypatch):
 
 
 def test_analyze_vad_returns_none_for_m4a_container_stub(tmp_path, monkeypatch):
-    """AC-4(b), the load-bearing case: /pipeline/process-file accepts
+    """AC-4(b), the load-bearing case: /jobs/file accepts
     .m4a/.webm which libsndfile cannot open. Treating "undecodable" as
     "silent" would silently break that tab."""
     monkeypatch.setattr(vad_module, "_get_library", _BenignLibrary)

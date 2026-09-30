@@ -1,20 +1,17 @@
 """Pipeline endpoints — unified audio-to-text flows."""
 
 import logging
-import uuid
-from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.audio.config import audio_settings
 from app.audio.dependencies import get_recorder
 from app.audio.recorder import MicrophoneRecorder
 from app.audio.session import SessionRef
-from app.core.constants import MAX_UPLOAD_SIZE
 from app.core.errors import JustSayError
+from app.core.scratch import discard_scratch_file
+from app.pipeline.jobs import dictation_gate
 from app.pipeline.service import process_audio
-from app.pipeline.upload_validation import read_upload_with_limit, validate_audio_upload
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -24,20 +21,8 @@ _PIPELINE_CRASHED_DETAIL = (
 )
 
 
-def _discard_scratch_file(path: Path) -> None:
-    """Delete a scratch file without letting the delete replace the response.
-
-    Both call sites sit in a ``finally``, where an ``OSError`` would turn an
-    already-built response into a bare 500.
-    """
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        log.warning("Could not remove scratch file %s", path, exc_info=True)
-
-
 class DictateResponse(BaseModel):
-    """Wire shape for /pipeline/dictate and /pipeline/process-file responses."""
+    """Wire shape for /pipeline/dictate responses."""
     text: str
     duration_ms: int
     copied_to_clipboard: bool
@@ -70,14 +55,15 @@ async def dictate(
     )
 
     try:
-        result = await process_audio(
-            audio_path,
-            language=language,
-            copy_to_clipboard=copy_to_clipboard,
-            audio_duration=captured_duration if captured_duration > 0.0 else None,
-            background_tasks=background_tasks,
-            source="dictation",
-        )
+        with dictation_gate.dictating():
+            result = await process_audio(
+                audio_path,
+                language=language,
+                copy_to_clipboard=copy_to_clipboard,
+                audio_duration=captured_duration if captured_duration > 0.0 else None,
+                background_tasks=background_tasks,
+                source="dictation",
+            )
         return DictateResponse(**result.__dict__)
     except JustSayError:
         raise
@@ -88,45 +74,4 @@ async def dictate(
             detail=_PIPELINE_CRASHED_DETAIL,
         )
     finally:
-        _discard_scratch_file(audio_path)
-
-
-@router.post("/process-file", response_model=DictateResponse)
-async def process_file(
-    file: UploadFile,
-    background_tasks: BackgroundTasks,
-    language: str = "auto",
-    copy_to_clipboard: bool = True,
-):
-    """Process an uploaded audio file through the full pipeline."""
-    ext = Path(file.filename).suffix.lower() if file.filename else ""
-    content = await read_upload_with_limit(file, MAX_UPLOAD_SIZE)
-    validate_audio_upload(content, file.filename)
-
-    temp_path = audio_settings.temp_dir / f"pipeline_{uuid.uuid4().hex}{ext}"
-
-    try:
-        audio_settings.temp_dir.mkdir(parents=True, exist_ok=True)
-        temp_path.write_bytes(content)
-
-        result = await process_audio(
-            temp_path,
-            language=language,
-            copy_to_clipboard=copy_to_clipboard,
-            background_tasks=background_tasks,
-            source="file",
-            source_name=file.filename,
-        )
-        return DictateResponse(**result.__dict__)
-    except HTTPException:
-        raise
-    except JustSayError:
-        raise
-    except Exception:
-        log.exception("Pipeline failure")
-        raise HTTPException(
-            status_code=500,
-            detail=_PIPELINE_CRASHED_DETAIL,
-        )
-    finally:
-        _discard_scratch_file(temp_path)
+        discard_scratch_file(audio_path)

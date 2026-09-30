@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryEntry, HistoryPageResponse, UserSettings } from "../../api";
+import type { FileJob, HistoryEntry, HistoryPageResponse, UserSettings } from "../../api";
 import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
 import {
   buildEntry,
@@ -23,6 +23,8 @@ const apiMock = {
   searchHistory: vi.fn(),
   deleteHistoryEntry: vi.fn(),
   setHistoryStarred: vi.fn(),
+  jobs: vi.fn(),
+  removeJob: vi.fn(),
 };
 
 /**
@@ -38,6 +40,7 @@ vi.mock("../../api", async (importOriginal) => {
 const { SidecarTooOldError, MalformedResponseError } = await import("../../api");
 const { sidecarTooOldText } = await import("../history-list");
 const { renderHistory, NEWER_POLL_MS, matchExcerpt } = await import("./history");
+const { JOBS_POLL_MS } = await import("../history-jobs");
 
 const SETTINGS = { shortcut: "Ctrl+Alt+KeyV" } as UserSettings;
 
@@ -159,6 +162,7 @@ beforeEach(() => {
   vi.stubGlobal("IntersectionObserver", FakeObserver);
   vi.stubGlobal("ResizeObserver", FakeResizeObserver);
   apiMock.getNewerHistory.mockResolvedValue(pageOf([], 0, null, { newest_cursor: null }));
+  apiMock.jobs.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -498,6 +502,80 @@ describe("renderHistory — new recordings appear while it is open", () => {
     await vi.advanceTimersByTimeAsync(NEWER_POLL_MS * 3);
 
     expect(apiMock.getNewerHistory).not.toHaveBeenCalled();
+  });
+});
+
+describe("renderHistory — files being transcribed", () => {
+  const running: FileJob = {
+    id: "j1",
+    kind: "file",
+    name: "interview.m4a",
+    stage: "transcribing",
+    progress: 0.25,
+    error: null,
+    entry_id: null,
+  };
+
+  it("shows a running file at the top of Today and swaps it for its entry when it is saved", async () => {
+    const store = [{ ...buildEntry("old"), timestamp: at(1, 9) }];
+    apiMock.getHistory.mockResolvedValue(pageOf([...store], 1, null));
+    apiMock.getNewerHistory.mockImplementation(newerByCursor(store));
+    apiMock.jobs.mockResolvedValue([running]);
+    const { container } = mount();
+    await vi.waitFor(() => expect(container.querySelector(".entry--job")).not.toBeNull());
+    expect(Array.from(cards(container)).map((el) => el.dataset.id ?? el.dataset.job)).toEqual(["j1", "old"]);
+
+    store.unshift({ ...buildEntry("saved"), timestamp: at(1, 11), source: "file" });
+    apiMock.jobs.mockResolvedValue([{ ...running, stage: "done", progress: 1, entry_id: "saved" }]);
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS);
+    await flush();
+
+    expect(Array.from(cards(container)).map((el) => el.dataset.id)).toEqual(["saved", "old"]);
+  });
+
+  it("keeps a file's card on an empty History through the reloads that repaint it", async () => {
+    apiMock.getHistory.mockResolvedValue(pageOf([], 0, null, { newest_cursor: null }));
+    apiMock.jobs.mockResolvedValue([running]);
+    const { container } = mount();
+    await vi.waitFor(() => expect(container.querySelector(".entry--job")).not.toBeNull());
+
+    apiMock.jobs.mockResolvedValue([{ ...running, stage: "failed", progress: null, error: "Add an API key in Settings" }]);
+    await vi.advanceTimersByTimeAsync(NEWER_POLL_MS);
+
+    expect(container.querySelector(".entry--job .entry-job-status")!.textContent).toBe("Add an API key in Settings");
+    expect(container.querySelector(".history-empty")).not.toBeNull();
+  });
+
+  it("lets a finished card go at once under the Starred filter, where its entry will not appear", async () => {
+    apiMock.getHistory.mockResolvedValue(pageOf([], 0, null, { newest_cursor: null }));
+    apiMock.jobs.mockResolvedValue([running]);
+    const { container } = mount();
+    await vi.waitFor(() => expect(container.querySelector(".entry--job")).not.toBeNull());
+    await showStarred(container);
+
+    apiMock.jobs.mockResolvedValue([{ ...running, stage: "done", progress: 1, entry_id: "new" }]);
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS);
+
+    expect(container.querySelector(".entry--job")).toBeNull();
+  });
+
+  it("reads the jobs when one is started, and stops reading while the window is hidden", async () => {
+    const { lifecycle } = await renderAndWait([buildEntry("a")]);
+    await flush();
+    expect(apiMock.jobs).toHaveBeenCalledTimes(1);
+    apiMock.jobs.mockResolvedValue([running]);
+
+    lifecycle.jobStarted();
+    await flush();
+    expect(apiMock.jobs).toHaveBeenCalledTimes(2);
+
+    lifecycle.releaseResources!();
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS * 3);
+    expect(apiMock.jobs).toHaveBeenCalledTimes(2);
+
+    lifecycle.resumeResources!();
+    await flush();
+    expect(apiMock.jobs).toHaveBeenCalledTimes(3);
   });
 });
 

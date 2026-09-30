@@ -20,7 +20,9 @@ from pathlib import Path
 
 import httpx
 
+from app.core.audio_formats import UNREADABLE_HERE
 from app.core.errors import ResourceUnavailableError
+from app.core.scratch import discard_scratch_file
 from app.stt.base import (
     STTProvider,
     TranscriptionResult,
@@ -55,6 +57,12 @@ _GRACE_POLL_MAX_ATTEMPTS = 30
 _port_lock = threading.Lock()
 
 _download_lock = threading.Lock()
+
+_SERVER_DECODES = frozenset({".wav", ".mp3", ".flac", ".aiff", ".aif"})
+_DECODE_BLOCK_FRAMES = 65536
+_SERVER_RATE = 16000
+_SERVER_CANNOT_READ = "failed to read audio data"
+_SERVER_FAILED = "The local engine could not turn this audio into text"
 
 _HF_MODEL_URL_TEMPLATE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{size}.bin"
 _DOWNLOAD_CHUNK_SIZE = 1024 * 1024
@@ -236,6 +244,40 @@ def _assign_to_job_object(process: subprocess.Popen) -> None:
             "Object -- falling back to atexit-only orphan reaping.",
             getattr(process, "pid", "?"), exc_info=True,
         )
+
+
+def _readable_by_server(audio_path: Path) -> Path:
+    """``audio_path`` when whisper-server decodes its format, else a 16 kHz mono WAV copy beside it.
+
+    whisper-server reads WAV, MP3, FLAC, AIFF and Ogg Vorbis but not Ogg Opus (WhatsApp voice
+    notes) and converts everything to 16 kHz mono itself. A file soundfile cannot open either
+    raises ``ResourceUnavailableError(UNREADABLE_HERE)``; any later failure removes the copy.
+    """
+    if audio_path.suffix.lower() in _SERVER_DECODES:
+        return audio_path
+    import numpy as np
+    import soundfile as sf
+    import soxr
+
+    try:
+        source = sf.SoundFile(str(audio_path))
+    except RuntimeError as exc:
+        diagnostic = f"{audio_path.suffix}: {exc}"
+        raise ResourceUnavailableError(UNREADABLE_HERE, diagnostic=diagnostic) from exc
+    target = audio_path.with_name(f"{audio_path.stem}-pcm.wav")
+    try:
+        with source, sf.SoundFile(
+            str(target), "w", samplerate=_SERVER_RATE, channels=1, format="WAV", subtype="PCM_16"
+        ) as sink:
+            stream = soxr.ResampleStream(source.samplerate, _SERVER_RATE, 1, dtype="float32")
+            blocks = source.blocks(_DECODE_BLOCK_FRAMES, dtype="float32", always_2d=True)
+            for block in blocks:
+                sink.write(stream.resample_chunk(block.mean(axis=1), last=False))
+            sink.write(stream.resample_chunk(np.zeros(0, dtype=np.float32), last=True))
+    except Exception:
+        discard_scratch_file(target)
+        raise
+    return target
 
 
 class WhisperCppServerSTTProvider(STTProvider):
@@ -429,12 +471,21 @@ class WhisperCppServerSTTProvider(STTProvider):
         )
 
         def _post() -> tuple[str, str | None, float | None]:
-            with open(audio_path, "rb") as f:
-                files = {"file": (audio_path.name, f, "audio/wav")}
-                with httpx.Client(timeout=_INFERENCE_TIMEOUT) as client:
-                    resp = client.post(url, data=data, files=files)
+            sendable = _readable_by_server(audio_path)
+            try:
+                with open(sendable, "rb") as f:
+                    files = {"file": (sendable.name, f, "audio/wav")}
+                    with httpx.Client(timeout=_INFERENCE_TIMEOUT) as client:
+                        resp = client.post(url, data=data, files=files)
+            finally:
+                if sendable != audio_path:
+                    discard_scratch_file(sendable)
             resp.raise_for_status()
             body = resp.json()
+            error = body.get("error")
+            if error is not None:
+                message = UNREADABLE_HERE if error == _SERVER_CANNOT_READ else _SERVER_FAILED
+                raise ResourceUnavailableError(message, diagnostic=f"whisper-server: {error}")
             raw_text = body.get("text", "")
             text = "".join(raw_text.splitlines()).strip()
             no_speech_prob = (

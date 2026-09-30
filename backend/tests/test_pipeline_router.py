@@ -1,5 +1,4 @@
-"""Pipeline router — /pipeline/process-file's ``language`` query-param
-default and its upload-content validation.
+"""Pipeline router — what /pipeline/dictate forwards and how it answers.
 
 Dedicated router-test file, split from the service-level `test_pipeline.py`
 the same way `test_preferences_router.py` is split from `test_user_settings.py`
@@ -10,6 +9,7 @@ what the router forwards to `process_audio`.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 from pathlib import Path
@@ -24,19 +24,18 @@ from app.audio.session import SessionMismatchError
 from app.core.errors import ConfigurationError, NotReadyError, ResourceUnavailableError
 from app.main import app
 from app.pipeline import router as pipeline_router
+from app.pipeline.jobs import dictation_gate
 from app.pipeline.router import DictateResponse
 from app.pipeline.service import ProcessingResult
 
 
 def _wav_bytes(payload_size: int = 1024) -> bytes:
-    """Synthesise a minimal RIFF/WAVE header + payload (mirrors
-    test_audio_formats.py's helper — validate_audio_upload() requires a
-    real-looking WAV container, not arbitrary bytes)."""
+    """A minimal RIFF/WAVE header + payload, standing in for a recording."""
     return b"RIFF" + (b"\x00" * 4) + b"WAVE" + (b"\x00" * 4) + (b"\x00" * payload_size)
 
 
 def _fake_result() -> SimpleNamespace:
-    """Stand-in for ProcessingResult — process_file() does
+    """Stand-in for ProcessingResult — dictate() does
     `DictateResponse(**result.__dict__)`, so this needs the same fields."""
     return SimpleNamespace(
         text="hello",
@@ -59,107 +58,8 @@ async def client(tmp_path, monkeypatch):
         yield ac
 
 
-@pytest.mark.anyio
-async def test_process_file_defaults_to_auto_language_when_query_param_omitted(client):
-    """The new default (spec 019): dropping a file with no ``language``
-    query param must route through as ``language="auto"``."""
-    mock_process_audio = AsyncMock(return_value=_fake_result())
-    with patch("app.pipeline.router.process_audio", mock_process_audio):
-        resp = await client.post(
-            "/pipeline/process-file",
-            files={"file": ("speech.wav", _wav_bytes(), "audio/wav")},
-        )
-
-    assert resp.status_code == 200
-    assert mock_process_audio.call_args.kwargs["language"] == "auto"
-
-
-@pytest.mark.anyio
-async def test_process_file_forwards_explicit_language_code_unchanged(client):
-    """Regression: an explicit ``language`` query param must still reach
-    process_audio() verbatim — the new "auto" default doesn't shadow it."""
-    mock_process_audio = AsyncMock(return_value=_fake_result())
-    with patch("app.pipeline.router.process_audio", mock_process_audio):
-        resp = await client.post(
-            "/pipeline/process-file?language=uk",
-            files={"file": ("speech.wav", _wav_bytes(), "audio/wav")},
-        )
-
-    assert resp.status_code == 200
-    assert mock_process_audio.call_args.kwargs["language"] == "uk"
-
-
-@pytest.mark.anyio
-async def test_process_file_records_the_upload_as_a_file_under_its_name(client):
-    mock_process_audio = AsyncMock(return_value=_fake_result())
-    with patch("app.pipeline.router.process_audio", mock_process_audio):
-        resp = await client.post(
-            "/pipeline/process-file",
-            files={"file": ("standup notes.wav", _wav_bytes(), "audio/wav")},
-        )
-
-    assert resp.status_code == 200
-    assert mock_process_audio.call_args.kwargs["source"] == "file"
-    assert mock_process_audio.call_args.kwargs["source_name"] == "standup notes.wav"
-
-
-
-
-@pytest.mark.anyio
-async def test_process_file_rejects_extension_content_mismatch(client):
-    """`.wav` filename with non-WAV bytes is rejected at the validator boundary,
-    not handed off to the STT provider where it would 500 deep inside soundfile."""
-    fake_payload = b"MZ" + (b"\x00" * 64)
-    with patch("app.pipeline.router.process_audio", AsyncMock(return_value=_fake_result())):
-        resp = await client.post(
-            "/pipeline/process-file",
-            files={"file": ("evil.wav", fake_payload, "audio/wav")},
-        )
-
-    assert resp.status_code == 400
-    assert "does not match" in resp.json()["detail"].lower()
-
-
-@pytest.mark.anyio
-async def test_process_file_rejects_empty_file(client):
-    with patch("app.pipeline.router.process_audio", AsyncMock(return_value=_fake_result())):
-        resp = await client.post(
-            "/pipeline/process-file",
-            files={"file": ("speech.wav", b"", "audio/wav")},
-        )
-
-    assert resp.status_code == 400
-    assert "too small" in resp.json()["detail"].lower()
-
-
 def _refuse_to_unlink(self, missing_ok: bool = False):
     raise OSError("the file is in use by another process")
-
-
-@pytest.mark.anyio
-async def test_process_file_returns_the_transcription_when_the_scratch_delete_fails(
-    client, monkeypatch, caplog
-):
-    """The scratch delete sits in a ``finally``. Unguarded, an ``OSError`` there
-    replaced the response that was about to be returned: a completed
-    transcription — already copied to the clipboard and saved to history —
-    reached the widget as a bare 500, which `src/widget/error-label.ts` renders
-    as "Failed".
-    """
-    monkeypatch.setattr(Path, "unlink", _refuse_to_unlink)
-
-    with (
-        patch("app.pipeline.router.process_audio", AsyncMock(return_value=_fake_result())),
-        caplog.at_level(logging.WARNING, logger="app.pipeline.router"),
-    ):
-        resp = await client.post(
-            "/pipeline/process-file",
-            files={"file": ("speech.wav", _wav_bytes(), "audio/wav")},
-        )
-
-    assert resp.status_code == 200
-    assert resp.json()["text"] == "hello"
-    assert [r for r in caplog.records if r.name == "app.pipeline.router" and r.exc_info]
 
 
 @pytest.mark.anyio
@@ -181,30 +81,15 @@ async def test_dictate_returns_the_transcription_when_the_recording_delete_fails
 
     with (
         patch("app.pipeline.router.process_audio", AsyncMock(return_value=_fake_result())),
-        caplog.at_level(logging.WARNING, logger="app.pipeline.router"),
+        caplog.at_level(logging.WARNING, logger="app.core.scratch"),
     ):
         resp = await client.post("/pipeline/dictate")
 
     assert resp.status_code == 200
     assert resp.json()["text"] == "hello"
-    assert [r for r in caplog.records if r.name == "app.pipeline.router" and r.exc_info]
+    assert [r for r in caplog.records if r.name == "app.core.scratch" and r.exc_info]
 
 
-@pytest.mark.anyio
-async def test_process_file_removes_its_scratch_file_on_the_success_path(client):
-    """The guard must not turn the delete into a no-op — the temp directory
-    still empties after a successful upload."""
-    mock_process_audio = AsyncMock(return_value=_fake_result())
-
-    with patch("app.pipeline.router.process_audio", mock_process_audio):
-        resp = await client.post(
-            "/pipeline/process-file",
-            files={"file": ("speech.wav", _wav_bytes(), "audio/wav")},
-        )
-
-    assert resp.status_code == 200
-    scratch_path = mock_process_audio.call_args.args[0]
-    assert not scratch_path.exists()
 _DICTATE_SESSION_ID = "0123456789abcdef0123456789abcdef"
 
 
@@ -277,6 +162,29 @@ async def test_dictate_records_a_dictation(client, tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_a_file_job_waits_while_a_dictation_is_being_processed(client, tmp_path, monkeypatch):
+    recording = tmp_path / "rec.wav"
+    recording.write_bytes(_wav_bytes())
+    app.dependency_overrides[get_recorder] = lambda: _stopping_recorder(recording)
+    monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: None)
+    job_waited = []
+
+    async def transcribe_while_a_job_asks(*args, **kwargs):
+        try:
+            await asyncio.wait_for(dictation_gate.wait_for_none(), timeout=0.2)
+        except asyncio.TimeoutError:
+            job_waited.append(True)
+        return _fake_result()
+
+    with patch("app.pipeline.router.process_audio", transcribe_while_a_job_asks):
+        resp = await client.post("/pipeline/dictate")
+
+    assert resp.status_code == 200
+    assert job_waited == [True]
+    await asyncio.wait_for(dictation_gate.wait_for_none(), timeout=0.2)
+
+
+@pytest.mark.anyio
 async def test_a_refused_dictate_transcribes_nothing(client, tmp_path):
     """A 403 has to arrive before the pipeline runs, not after it.
 
@@ -311,25 +219,6 @@ async def test_dictate_answers_a_fixed_sentence_for_an_unclassified_crash(client
 
     with patch("app.pipeline.router.process_audio", AsyncMock(side_effect=KeyError("provider"))):
         resp = await client.post("/pipeline/dictate")
-
-    assert resp.status_code == 500
-    assert resp.json() == {"detail": pipeline_router._PIPELINE_CRASHED_DETAIL}
-    assert "KeyError" not in resp.text
-    assert "provider" not in resp.text
-
-
-@pytest.mark.anyio
-async def test_process_file_answers_a_fixed_sentence_for_an_unclassified_crash(client):
-    """The same body at the endpoint that renders `detail` verbatim.
-
-    `src/settings/tabs/transcribe.ts` puts this string on screen unchanged, so
-    it is the one place a leaked class name was read by a person directly.
-    """
-    with patch("app.pipeline.router.process_audio", AsyncMock(side_effect=KeyError("provider"))):
-        resp = await client.post(
-            "/pipeline/process-file",
-            files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
-        )
 
     assert resp.status_code == 500
     assert resp.json() == {"detail": pipeline_router._PIPELINE_CRASHED_DETAIL}
@@ -373,28 +262,10 @@ async def test_dictate_lets_a_refusal_answer_with_its_own_status(
     assert resp.json() == {"detail": "the provider said no", "code": expected_code}
 
 
-@pytest.mark.anyio
-async def test_process_file_lets_a_refusal_answer_with_its_own_status(client, monkeypatch):
-    """The uploaded-file path carries the same wrapper and needs the same guard."""
-    monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: None)
-
-    with patch(
-        "app.pipeline.router.process_audio",
-        AsyncMock(side_effect=ResourceUnavailableError("the local engine is not up")),
-    ):
-        resp = await client.post(
-            "/pipeline/process-file",
-            files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
-        )
-
-    assert resp.status_code == 503
-    assert resp.json() == {"detail": "the local engine is not up", "code": "resource_unavailable"}
-
-
 def test_the_dictate_response_carries_every_processing_result_field() -> None:
     """The wire shape and the domain model must list the same field names.
 
-    ``process_file`` and ``dictate`` both build the response as
+    ``dictate`` builds the response as
     ``DictateResponse(**result.__dict__)``, and ``DictateResponse.model_config``
     is empty, so pydantic 2's default ``extra="ignore"`` applies: a field added
     to ProcessingResult alone is dropped on the wire with no error raised

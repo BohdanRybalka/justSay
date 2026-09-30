@@ -28,6 +28,7 @@ try:
     from app.api.router import router as api_router
     from app.audio.router import router as audio_router
     from app.audio.scratch_router import router as scratch_router
+    from app.pipeline.jobs_router import router as jobs_router
     from app.pipeline.router import router as pipeline_router
     from app.preferences.router import router as settings_router
     from app.stt.router import router as stt_router
@@ -120,6 +121,13 @@ async def lifespan(app: FastAPI):
     )
     if meeting_recorder is not None:
         app.state.meeting_recorder = meeting_recorder
+    from app.pipeline.jobs import JobQueue, remove_leftover_files
+    _run_optional_step(
+        "startup",
+        "removing files of jobs cut short by the last quit",
+        lambda: remove_leftover_files(settings.audio.temp_dir),
+    )
+    app.state.jobs = JobQueue(settings.audio.temp_dir)
     yield
     log.info("Backend shutdown: draining background tasks")
     from app.stt.local_setup import peek_active_load
@@ -177,6 +185,7 @@ app.include_router(words_router)
 app.include_router(stt_router, prefix="/stt", tags=["STT"])
 app.include_router(audio_router, prefix="/audio", tags=["Audio"])
 app.include_router(pipeline_router, prefix="/pipeline", tags=["Pipeline"])
+app.include_router(jobs_router, prefix="/jobs", tags=["Jobs"])
 
 
 def _report_selftest(check: Callable[[], tuple[bool, str]]) -> NoReturn:

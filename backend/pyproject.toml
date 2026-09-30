@@ -81,7 +81,7 @@ ignore_decorators = ["@router.*"]
 ignore_names = [
     "time_info", "frame_count",
     "size_bytes",
-    "copied_to_clipboard", "discarded_reason",
+    "copied_to_clipboard",
     "temp_size_bytes", "freed_bytes", "gemini_key_set", "groq_key_set",
     "shortcut", "theme", "display_name", "paste_at_cursor", "previous_language", "package_installed", "model_loaded", "model_ram_mb",
     "model_downloaded", "model_bytes",

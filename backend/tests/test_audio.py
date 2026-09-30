@@ -644,7 +644,7 @@ def test_analyze_silence_returns_none_for_corrupt_file(tmp_path):
 
 
 def test_analyze_silence_returns_none_for_m4a_container_stub(tmp_path):
-    """AC-4 (the load-bearing fail-open case): /pipeline/process-file
+    """AC-4 (the load-bearing fail-open case): /jobs/file
     accepts .m4a/.webm, which libsndfile cannot open at all. A guard that
     treated "can't decode" as "silent" would silently break that tab."""
     path = tmp_path / "clip.m4a"
