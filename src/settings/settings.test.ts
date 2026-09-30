@@ -52,18 +52,11 @@ vi.mock("./tabs/dictation-mode", () => ({
   }),
 }));
 
-const wordsTab = {
+const insightsTab = {
   destroy: vi.fn(),
   releaseResources: vi.fn(),
   resumeResources: vi.fn(),
 };
-
-vi.mock("./tabs/words", () => ({
-  renderWords: vi.fn((container: HTMLElement) => {
-    container.innerHTML = '<div id="words-tab-body"></div>';
-    return wordsTab;
-  }),
-}));
 
 const insightsViewers: { name: string; shortcut: string }[] = [];
 
@@ -71,7 +64,7 @@ vi.mock("./tabs/insights", () => ({
   renderInsights: vi.fn((container: HTMLElement, viewer: { name: string; shortcut: string }) => {
     insightsViewers.push(viewer);
     container.insertAdjacentHTML("beforeend", '<div id="insights-body"></div>');
-    return { destroy: vi.fn() };
+    return insightsTab;
   }),
 }));
 
@@ -178,7 +171,7 @@ async function openSettingsWindow(): Promise<void> {
 /** Waits for the settings to load into the panel the window opens on, then
  *  opens `panel`, checking it drew the element only it has. */
 async function openLoadedPanel(panel: "settings" | "dictation", drawn: string): Promise<void> {
-  await vi.waitFor(() => expect(document.getElementById("words-tab-body")).not.toBeNull());
+  await vi.waitFor(() => expect(document.getElementById("insights-body")).not.toBeNull());
   document.querySelector<HTMLButtonElement>(`[data-panel="${panel}"]`)!.click();
   expect(document.querySelector(drawn)).not.toBeNull();
 }
@@ -292,7 +285,7 @@ describe("the sidebar", () => {
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
     await import("./settings");
-    await vi.waitFor(() => expect(document.getElementById("words-tab-body")).not.toBeNull());
+    await vi.waitFor(() => expect(document.getElementById("insights-body")).not.toBeNull());
   }
 
   const openPanel = (name: string) =>
@@ -303,10 +296,11 @@ describe("the sidebar", () => {
       (item) => item.dataset.panel,
     );
 
-  it("opens the window on Insights, hosting the old Words tab in a legacy-tab", async () => {
+  it("opens the window on Insights with nothing old hosted in it", async () => {
     await bootWithSettingsLoaded();
 
-    expect(document.querySelector("#pane > .panel > .legacy-tab > #words-tab-body")).not.toBeNull();
+    expect(document.querySelector("#pane > .panel > #insights-body")).not.toBeNull();
+    expect(document.querySelectorAll("#pane .legacy-tab")).toHaveLength(0);
     expect(currentPanels()).toEqual(["insights"]);
   });
 
@@ -317,8 +311,8 @@ describe("the sidebar", () => {
 
     expect(currentPanels()).toEqual(["dictation"]);
     expect(document.getElementById("dictation-mode-body")).not.toBeNull();
-    expect(document.getElementById("words-tab-body")).toBeNull();
-    expect(wordsTab.destroy).toHaveBeenCalledOnce();
+    expect(document.getElementById("insights-body")).toBeNull();
+    expect(insightsTab.destroy).toHaveBeenCalledOnce();
   });
 
   it("hosts the old Transcribe tab between History's heading and its timeline, and lets go of both on leaving", async () => {
@@ -862,7 +856,7 @@ describe("backend unreachable from the first poll", () => {
     await vi.advanceTimersByTimeAsync(5000);
 
     expect(
-      document.getElementById("words-tab-body"),
+      document.getElementById("insights-body"),
       "the poll already learns the backend came up, so a window that still waits for a " +
         "click is waiting for something it does not need",
     ).not.toBeNull();
@@ -896,7 +890,7 @@ describe("backend unreachable from the first poll", () => {
     await vi.waitFor(() => {
       expect(pane.textContent).not.toContain("Cannot load settings");
     });
-    expect(document.getElementById("words-tab-body")).not.toBeNull();
+    expect(document.getElementById("insights-body")).not.toBeNull();
     expect(backendStatusEl().className).toBe("sidebar-status sidebar-status--ready");
 
     consoleError.mockRestore();
@@ -1044,7 +1038,7 @@ describe("a settings load that fails without the backend having answered it", ()
     await vi.advanceTimersByTimeAsync(5000);
 
     expect(
-      document.getElementById("words-tab-body"),
+      document.getElementById("insights-body"),
       "a dropped socket is the opposite of an answer, so a window that gives up on one " +
         "waits for a click it should never have needed",
     ).not.toBeNull();
@@ -1139,7 +1133,7 @@ describe("the Try again button while the window is still starting", () => {
       "/settings can answer while /health does not, and a window with no way to ask " +
         "reports a failure nothing ever attempted",
     ).toHaveBeenCalledTimes(1);
-    expect(document.getElementById("words-tab-body")).not.toBeNull();
+    expect(document.getElementById("insights-body")).not.toBeNull();
 
     vi.useRealTimers();
   });
@@ -1179,7 +1173,7 @@ describe("the Try again button while the window is still starting", () => {
 
     release(buildSettings());
     await vi.advanceTimersByTimeAsync(0);
-    expect(document.getElementById("words-tab-body")).not.toBeNull();
+    expect(document.getElementById("insights-body")).not.toBeNull();
 
     vi.useRealTimers();
     consoleError.mockRestore();

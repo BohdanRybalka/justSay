@@ -1,4 +1,4 @@
-"""Phase 1 tests — word stats, tokeniser, stop-words."""
+"""Favourite words: the tokeniser, the stop-words, dictations only, the cache."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ def test_stopwords_filtered_code_switching():
     """`the кіт sat на the килим` → only content words survive in both
     languages (UK + EN merged filter, always applied)."""
     history.save_entry(text="the кіт sat на the килим", duration_ms=1, language="uk")
-    out = words.top_words(lang="all", limit=10)
+    out = words.top_words(limit=10)
     surviving = {item.word for item in out.items}
     assert "кіт" in surviving
     assert "килим" in surviving
@@ -72,12 +72,11 @@ def test_stopword_lists_disjoint_in_intent():
 def test_top_words_round_trip():
     history.save_entry(text="cat dog cat fish", duration_ms=1, language="en")
     history.save_entry(text="cat house", duration_ms=1, language="en")
-    out = words.top_words(lang="all", limit=10)
+    out = words.top_words(limit=10)
     by_word = {i.word: i.count for i in out.items}
     assert by_word.get("cat") == 3
     assert by_word.get("dog") == 1
     assert by_word.get("fish") == 1
-    assert out.scanned == 2
 
 
 def test_top_words_delete_removes_tokens():
@@ -87,30 +86,10 @@ def test_top_words_delete_removes_tokens():
     history.save_entry(text="banana banana", duration_ms=1)
     history.delete_entry(e1.id)
 
-    out = words.top_words(lang="all", limit=10)
+    out = words.top_words(limit=10)
     by_word = {i.word: i.count for i in out.items}
     assert by_word.get("apple") is None
     assert by_word.get("banana") == 2
-
-
-def test_top_words_lang_filter_uk():
-    history.save_entry(text="кіт пес рибка", duration_ms=1, language="uk")
-    history.save_entry(text="cat dog fish", duration_ms=1, language="en")
-    out = words.top_words(lang="uk", limit=10)
-    assert out.scanned == 1
-    surviving = {i.word for i in out.items}
-    assert "кіт" in surviving
-    assert "cat" not in surviving
-
-
-def test_top_words_lang_filter_en():
-    history.save_entry(text="кіт пес рибка", duration_ms=1, language="uk")
-    history.save_entry(text="cat dog fish", duration_ms=1, language="en")
-    out = words.top_words(lang="en", limit=10)
-    assert out.scanned == 1
-    surviving = {i.word for i in out.items}
-    assert "cat" in surviving
-    assert "кіт" not in surviving
 
 
 def test_top_words_limit_clamped_to_max():
@@ -118,14 +97,21 @@ def test_top_words_limit_clamped_to_max():
     than 500 items even if requested."""
     for i in range(10):
         history.save_entry(text=f"word{i} word{i}", duration_ms=1)
-    out = words.top_words(lang="all", limit=99999)
+    out = words.top_words(limit=99999)
     assert len(out.items) <= words.TOP_LIMIT_MAX
 
 
 def test_top_words_empty_db_returns_empty():
-    out = words.top_words(lang="all", limit=10)
-    assert out.items == []
-    assert out.scanned == 0
+    assert words.top_words(limit=10).items == []
+
+
+def test_files_and_meetings_carry_other_voices_and_count_nowhere():
+    history.save_entry(text="кіт кіт", duration_ms=1)
+    history.save_entry(text="podcast podcast podcast", duration_ms=1, source="file")
+    history.save_entry(text="colleague colleague colleague", duration_ms=1, source="meeting")
+
+    assert [(i.word, i.count) for i in words.top_words(limit=10).items] == [("кіт", 2)]
+    assert set(words.dictation_tokens().counts) == {"кіт"}
 
 
 
@@ -135,7 +121,6 @@ async def test_words_top_endpoint_smoke(client):
     resp = await client.get("/words/top?limit=5")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["scanned"] == 1
     words_list = {i["word"]: i["count"] for i in data["items"]}
     assert words_list.get("apple") == 2
 
@@ -161,9 +146,8 @@ def _seed_history(count: int) -> None:
 @pytest.mark.asyncio
 async def test_words_top_leaves_the_event_loop_free(monkeypatch):
     """`top_words` reads every row of `entries` and regex-tokenises each one,
-    and `src/settings/tabs/words.ts:186` asks for it every five seconds for as
-    long as the Words tab is open — on the loop that also serves `/health` and
-    the widget poll.
+    and the Insights panel asks for it each time the window comes back — on the
+    loop that also serves `/health` and the widget poll.
 
     The tokeniser, not the whole function, carries the known interval, so the
     blocking is the seeded rows' own scan lengthened rather than a sleep
@@ -195,10 +179,9 @@ async def test_words_top_leaves_the_event_loop_free(monkeypatch):
             await asyncio.sleep(0)
 
     race = asyncio.ensure_future(competitor())
-    response = await words_router.words_top(lang="all", limit=50)
+    response = await words_router.words_top(limit=50)
     race.cancel()
 
-    assert response.scanned == rows
     assert response.items
     assert ticks > 100, (
         f"the loop ticked {ticks} times while /words/top tokenised {rows} rows at "
@@ -207,9 +190,8 @@ async def test_words_top_leaves_the_event_loop_free(monkeypatch):
 
 
 def test_top_words_does_not_rescan_an_unchanged_history(monkeypatch):
-    """The Words tab asks every five seconds. Without a cache the whole table is
-    read and re-tokenised on every tick — the gap `compute_stats` already closes
-    for the cheaper half of the same poll."""
+    """Insights reads the words and the vocabulary on every open. Without a cache
+    the whole table is read and re-tokenised on every read."""
     _seed_history(20)
 
     scans = 0
@@ -222,35 +204,56 @@ def test_top_words_does_not_rescan_an_unchanged_history(monkeypatch):
 
     monkeypatch.setattr(words, "tokenize", counting_tokenize)
 
-    first = words.top_words(lang="all", limit=5)
+    first = words.top_words(limit=5)
     after_first = scans
-    second = words.top_words(lang="all", limit=5)
+    second = words.top_words(limit=5)
 
     assert after_first == 20
     assert scans == after_first
     assert second.items == first.items
-    assert second.scanned == first.scanned
+
+
+def test_readers_that_miss_together_share_one_scan(monkeypatch):
+    """Insights and the favourite words are read together after every dictation;
+    two scans of the whole history for one answer doubles the wait."""
+    import threading
+
+    _seed_history(5)
+    scans = 0
+    real_tokenize = words.tokenize
+
+    def slow_tokenize(text):
+        nonlocal scans
+        scans += 1
+        time.sleep(0.01)
+        return real_tokenize(text)
+
+    monkeypatch.setattr(words, "tokenize", slow_tokenize)
+    readers = [threading.Thread(target=words.dictation_tokens) for _ in range(2)]
+    for reader in readers:
+        reader.start()
+    for reader in readers:
+        reader.join()
+
+    assert scans == 5
 
 
 def test_a_new_entry_invalidates_the_word_counts(monkeypatch):
     """A cache that outlives a write would report yesterday's counts forever."""
     history.save_entry(text="кіт кіт кіт", duration_ms=1, language="uk")
-    before = words.top_words(lang="all", limit=5)
+    before = words.top_words(limit=5)
 
     history.save_entry(text="пес пес пес пес", duration_ms=1, language="uk")
-    after = words.top_words(lang="all", limit=5)
+    after = words.top_words(limit=5)
 
-    assert before.scanned == 1
-    assert after.scanned == 2
+    assert [i.word for i in before.items] == ["кіт"]
     assert [i.word for i in after.items][0] == "пес"
 
 
 def test_a_cleared_history_invalidates_the_word_counts():
     history.save_entry(text="кіт кіт кіт", duration_ms=1, language="uk")
-    assert words.top_words(lang="all", limit=5).items
+    assert words.top_words(limit=5).items
 
     history.clear_all()
 
-    empty = words.top_words(lang="all", limit=5)
-    assert empty.items == []
-    assert empty.scanned == 0
+    assert words.top_words(limit=5).items == []

@@ -23,7 +23,6 @@ async def client(tmp_path, monkeypatch):
     monkeypatch.setattr(user_settings, "_settings", None)
     monkeypatch.setattr(history, "_output_dir", settings_dir)
     monkeypatch.setattr(history, "_conn", None)
-    monkeypatch.setattr(history, "_stats_cache", None)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac

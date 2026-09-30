@@ -1,6 +1,6 @@
 """SQLite-specific tests for the v1 history store.
 
-Covers schema/PRAGMA, stats cache TTL+invalidation, explicit transactions,
+Covers schema/PRAGMA, explicit transactions,
 ISO ↔ epoch ms round-trip, ``OperationalError`` → 503 mapping at the router,
 relocate branches, concurrent saves.
 """
@@ -32,7 +32,6 @@ def isolated_storage(tmp_path, monkeypatch):
     file's tests don't depend on conftest.py's exact reset shape."""
     monkeypatch.setattr(history, "_output_dir", tmp_path)
     monkeypatch.setattr(history, "_conn", None)
-    monkeypatch.setattr(history, "_stats_cache", None)
     monkeypatch.setattr(history, "_page_total_cache", None)
 
     yield {"tmp_path": tmp_path}
@@ -95,12 +94,11 @@ def test_delete_nonexistent_id_returns_false(isolated_storage, tmp_path):
     target = tmp_path / "target"
     history.bootstrap(target)
     history.save_entry(text="x", duration_ms=1, word_count=5)
-    history.compute_stats()
-    cache_before = history._stats_cache
+    generation_before = history._derived_generation
 
     assert history.delete_entry("does-not-exist") is False
 
-    assert history._stats_cache is cache_before
+    assert history._derived_generation == generation_before
 
 
 def test_clear_all_returns_count_and_empties(isolated_storage, tmp_path):
@@ -110,90 +108,6 @@ def test_clear_all_returns_count_and_empties(isolated_storage, tmp_path):
         history.save_entry(text="x", duration_ms=1)
     assert history.clear_all() == 3
     assert history.get_page().total == 0
-
-
-
-def test_stats_cache_invalidated_on_save(isolated_storage, tmp_path):
-    target = tmp_path / "target"
-    history.bootstrap(target)
-    assert history.compute_stats().total_entries == 0
-    history.save_entry(text="x", duration_ms=1, word_count=5)
-    assert history.compute_stats().total_entries == 1
-    assert history.compute_stats().total_words == 5
-
-
-def test_stats_cache_invalidated_on_delete(isolated_storage, tmp_path):
-    target = tmp_path / "target"
-    history.bootstrap(target)
-    e = history.save_entry(text="x", duration_ms=1, word_count=5)
-    assert history.compute_stats().total_entries == 1
-    history.delete_entry(e.id)
-    assert history.compute_stats().total_entries == 0
-
-
-def test_stats_cache_invalidated_on_clear(isolated_storage, tmp_path):
-    target = tmp_path / "target"
-    history.bootstrap(target)
-    history.save_entry(text="x", duration_ms=1, word_count=5)
-    assert history.compute_stats().total_entries == 1
-    history.clear_all()
-    assert history.compute_stats().total_entries == 0
-
-
-def test_stats_cache_invalidated_on_relocate(isolated_storage, tmp_path):
-    target = tmp_path / "target"
-    history.bootstrap(target)
-    history.save_entry(text="x", duration_ms=1, word_count=5)
-    s1 = history.compute_stats()
-    assert s1.total_entries == 1
-
-    new_dir = tmp_path / "new"
-    relocation.relocate(new_dir)
-    s2 = history.compute_stats()
-    assert s2.total_entries == 1
-
-
-def test_stats_cache_ttl_returns_cached_value(isolated_storage, tmp_path):
-    """Within 5 s of a non-mutating second call, the cached value is returned."""
-    target = tmp_path / "target"
-    history.bootstrap(target)
-    history.save_entry(text="x", duration_ms=1, word_count=5)
-
-    s1 = history.compute_stats()
-    with history._lock:
-        conn = history._ensure_conn_locked()
-        conn.execute(
-            "INSERT INTO entries(id, ts, language, raw_text, "
-            "cleaned_text, duration_ms, word_count) "
-            "VALUES ('zzz', 0, 'uk', '', '', 0, 99)"
-        )
-    s2 = history.compute_stats()
-    assert s2.total_entries == s1.total_entries
-
-
-def test_compute_stats_empty_db_zero_counts(isolated_storage, tmp_path):
-    target = tmp_path / "target"
-    history.bootstrap(target)
-    s = history.compute_stats()
-    assert s.total_entries == 0
-    assert s.total_words == 0
-    assert s.total_audio_seconds == 0.0
-    assert s.today_words == 0
-    assert s.week_words == 0
-    assert s.by_language == {}
-    assert s.by_model == {}
-
-
-def test_compute_stats_excludes_null_model_name(isolated_storage, tmp_path):
-    """Entries with NULL model_name must NOT appear as a ``None`` key in by_model."""
-    target = tmp_path / "target"
-    history.bootstrap(target)
-    history.save_entry(text="x", duration_ms=1, word_count=10, model_name=None)
-    history.save_entry(text="y", duration_ms=1, word_count=20, model_name="gemini/flash")
-    s = history.compute_stats()
-    assert None not in s.by_model
-    assert s.by_model == {"gemini/flash": 20}
-    assert s.total_words == 30
 
 
 
@@ -353,10 +267,10 @@ def test_operational_error_mapped_to_503(isolated_storage, tmp_path):
 
     with TestClient(app) as client:
         with patch(
-            "app.transcripts.history_router.compute_stats",
+            "app.transcripts.history_router.get_page",
             side_effect=sqlite3.OperationalError("database is locked"),
         ):
-            resp = client.get("/history/stats")
+            resp = client.get("/history")
             assert resp.status_code == 503
             assert resp.headers.get("Retry-After") == "1"
             assert resp.json() == {
@@ -1144,7 +1058,6 @@ def test_a_relocate_that_raises_mid_copy_leaves_a_working_store_behind(
         relocation.shutil, "copy2", MagicMock(side_effect=OSError("disk full"))
     )
 
-    history.compute_stats()
     generation_before = history._derived_generation
 
     outcome, reason = relocation.relocate(tmp_path / "new")
@@ -1152,7 +1065,6 @@ def test_a_relocate_that_raises_mid_copy_leaves_a_working_store_behind(
     assert outcome == relocation.RelocateOutcome.FAILED
     assert reason and "disk full" in reason
     assert history._resolve_output_dir() == old_dir
-    assert history._stats_cache is None
     assert history._derived_generation != generation_before
     history.save_entry(text="after the failure", duration_ms=1)
     assert [e.text for e in history.get_page().entries] == [
@@ -2065,26 +1977,6 @@ async def test_the_shipped_embedding_backfill_read_keeps_its_ordering_index(
         plan = _plan_of(statement)
         assert any("entries_ts_id_idx" in step for step in plan), (statement, plan)
         assert not any("TEMP B-TREE" in step for step in plan), (statement, plan)
-
-
-def test_the_shipped_stats_aggregate_plan_is_unchanged_by_the_index_swap(
-    isolated_storage, tmp_path
-):
-    """``compute_stats`` reads every row to sum them, so it never used
-    ``entries_ts_idx`` and does not use its replacement either. Pinned so the swap
-    is on record as having left it alone."""
-    _seed(tmp_path / "target", 40, lambda index: 1_700_000_000_000 + index)
-
-    reads = [
-        s
-        for s in _statements_from(history.compute_stats)
-        if _reads_entries(s) and "CASE WHEN ts >=" in s
-    ]
-    assert len(reads) == 1, reads
-
-    plan = _plan_of(reads[0])
-    assert any("SCAN" in step and "entries" in step for step in plan), (reads[0], plan)
-    assert not any("entries_ts_id_idx" in step for step in plan), (reads[0], plan)
 
 
 def _the_has_more_probe(action):

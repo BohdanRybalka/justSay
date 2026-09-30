@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Insights } from "../../api";
+import type { Insights, WordCount } from "../../api";
 
-const { apiMock } = vi.hoisted(() => ({ apiMock: { insights: vi.fn() } }));
+const { apiMock } = vi.hoisted(() => ({ apiMock: { insights: vi.fn(), wordsTop: vi.fn() } }));
 
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
@@ -21,6 +21,7 @@ function buildInsights(overrides: {
   streak?: Partial<Insights["streak"]>;
   days?: Insights["days"];
   previous_period_words?: number;
+  meetings_week?: Insights["meetings_week"];
 } = {}): Insights {
   return {
     days: overrides.days ?? spokenDays([...Array(28).fill(100), 300]),
@@ -35,14 +36,23 @@ function buildInsights(overrides: {
       ...overrides.month,
     },
     streak: { current_days: 8, longest_days: 8, ...overrides.streak },
+    vocabulary: 2140,
+    peak_hour: { hour: 18, share: 0.31 },
+    longest: { seconds: 393, words: 715 },
+    meetings_week: overrides.meetings_week ?? { count: 3, seconds: 7860 },
   };
 }
+
+const FAVOURITES: WordCount[] = ["or", "by", "so", "mean", "example", "like", "which", "will", "just", "overall"].map(
+  (word, index) => ({ word, count: 50 - index * 4 }),
+);
 
 const viewer = { name: "Bohdan Rybalka", shortcut: "Ctrl+Alt+KeyV" };
 let container: HTMLElement;
 
-async function mount(figures: Insights, windowHidden = false) {
+async function mount(figures: Insights, windowHidden = false, favourites: WordCount[] = FAVOURITES) {
   apiMock.insights.mockResolvedValue(figures);
+  apiMock.wordsTop.mockResolvedValue({ items: favourites });
   const tab = renderInsights(container, viewer, windowHidden);
   await vi.advanceTimersByTimeAsync(0);
   return tab;
@@ -245,6 +255,7 @@ describe("the Insights panel", () => {
 
   it("greets without a name when none is known", async () => {
     apiMock.insights.mockResolvedValue(buildInsights());
+    apiMock.wordsTop.mockResolvedValue({ items: FAVOURITES });
     renderInsights(container, { ...viewer, name: " " }, false);
 
     expect(text(".panel-title")).toBe("Good evening");
@@ -274,7 +285,73 @@ describe("the Insights panel", () => {
     expect(apiMock.insights).not.toHaveBeenCalled();
   });
 
+  it("tells four facts about your voice under the chart", async () => {
+    await mount(buildInsights());
+
+    const facts = [...container.querySelectorAll(".fact-card")].map((card) => card.textContent!.replace(/\s+/g, " ").trim());
+    expect(facts).toEqual([
+      "2,140 different wordsAcross everything you've said so far.",
+      "You talk most at 6 PMAlmost a third of everything you dictate happens between 5 and 7.",
+      "6:33Your longest run without stopping. It became 715 words.",
+      "3 meetingscaptured this week — 2 h 11 m of talk turned into notes you can search.",
+    ]);
+    expect(container.querySelector(".chart")!.compareDocumentPosition(container.querySelector(".fact-grid")!)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
+  it("puts the three favourite words on a podium and ranks the next seven as bars", async () => {
+    apiMock.wordsTop.mockClear();
+    await mount(buildInsights());
+
+    expect(apiMock.wordsTop).toHaveBeenCalledWith(10);
+    const podium = [...container.querySelectorAll(".podium-item")].map((item) => item.textContent!.replace(/\s+/g, " ").trim());
+    expect(podium).toEqual(["1 or 50 times", "2 by 46 times", "3 so 42 times"]);
+    const rows = [...container.querySelectorAll(".word-row")].map((row) => row.textContent!.replace(/\s+/g, " ").trim());
+    expect(rows[0]).toBe("4 mean 38");
+    expect(rows).toHaveLength(7);
+    expect(container.querySelector(".fact-grid")!.compareDocumentPosition(container.querySelector(".favourite-words")!)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
+  it("grows each bar from zero to its count against the most said word", async () => {
+    await mount(buildInsights());
+    const fills = () => [...container.querySelectorAll<HTMLElement>(".word-row-track i")].map((fill) => fill.style.width);
+
+    expect(new Set(fills())).toEqual(new Set(["0px"]));
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(fills()[0]).toBe("76%");
+    expect(fills()[6]).toBe("28%");
+  });
+
+  it("leaves out the meetings card without meetings, and the words before any", async () => {
+    await mount(buildInsights({ meetings_week: { count: 0, seconds: 0 } }), false, []);
+
+    expect(container.querySelectorAll(".fact-card")).toHaveLength(3);
+    expect(container.querySelector(".favourite-words")).toBeNull();
+  });
+
+  it("shows the voice and the words of someone who spoke before this chart began", async () => {
+    await mount(buildInsights({ month: { recordings: 0 }, days: spokenDays(Array(30).fill(0)), previous_period_words: 0 }));
+
+    expect(container.querySelector(".chart")).toBeNull();
+    expect(container.querySelectorAll(".fact-card")).toHaveLength(4);
+    expect(container.querySelectorAll(".podium-item")).toHaveLength(3);
+  });
+
+  it("offers Try again when the words cannot be read", async () => {
+    apiMock.wordsTop.mockRejectedValueOnce(new Error("HTTP 503"));
+    apiMock.insights.mockResolvedValue(buildInsights());
+    renderInsights(container, viewer, false);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(text(".panel-error")).toBe("Insights could not be read. Try again");
+  });
+
   it("offers Try again on a failed read, and the retry fills the panel", async () => {
+    apiMock.wordsTop.mockResolvedValue({ items: FAVOURITES });
     apiMock.insights.mockRejectedValueOnce(new Error("HTTP 503"));
     renderInsights(container, viewer, false);
     await vi.advanceTimersByTimeAsync(0);

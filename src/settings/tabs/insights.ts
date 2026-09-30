@@ -1,8 +1,9 @@
 /**
  * The Insights panel: a greeting with today's dictation, the clay card of the time
- * talking saved this month, then the words-per-day chart. The backend computes every
- * figure; this panel formats them, and reads them again each time the window comes
- * back on screen. The chart's 7d / 30d switch reads again and redraws the chart alone.
+ * talking saved this month, the words-per-day chart, facts about your voice and your
+ * favourite words. The backend computes every figure; this panel formats them, and reads
+ * them again each time the window comes back on screen. The chart's 7d / 30d switch
+ * reads again and redraws the chart alone.
  */
 import { api, type ChartSpan, type Insights } from "../../api";
 import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
@@ -10,6 +11,8 @@ import { formatCoarseDuration, formatHoursClock, wholeMinutes } from "../../form
 import { escapeHtml } from "../html";
 import type { TabLifecycle } from "../settings";
 import { mountWordsChart, type WordsChart } from "./insights-chart";
+import { voiceFacts } from "./insights-voice";
+import { FAVOURITE_WORDS, mountFavouriteWords } from "./insights-words";
 
 export interface InsightsViewer {
   name: string;
@@ -77,22 +80,27 @@ export function renderInsights(
     const greeting = greetingFor(new Date().getHours());
     title.textContent = firstName ? `${greeting}, ${firstName}` : greeting;
     try {
-      const figures = await api.insights(requested);
+      const [figures, favourites] = await Promise.all([api.insights(requested), api.wordsTop(FAVOURITE_WORDS)]);
       if (token !== latestRead) return;
       today.innerHTML = todayLine(figures.today, shortcut);
       const chartShown = chart !== null;
       body.innerHTML = figures.month.recordings > 0 ? savedCard(figures) : "";
       chart = null;
-      if (!chartShown && !hasSpoken(figures)) return;
-      const host = document.createElement("div");
-      body.append(host);
-      chart = mountWordsChart(host, span, (next) => void switchSpan(next));
-      if (requested === span) chart.draw(figures, span);
-      else void switchSpan(span);
+      if (chartShown || hasSpoken(figures)) mountChart(figures, requested);
+      body.insertAdjacentHTML("beforeend", voiceFacts(figures));
+      mountFavouriteWords(body, favourites.items);
     } catch (e) {
       if (token !== latestRead) return;
       showFailure(e);
     }
+  }
+
+  function mountChart(figures: Insights, requested: ChartSpan): void {
+    const host = document.createElement("div");
+    body.append(host);
+    chart = mountWordsChart(host, span, (next) => void switchSpan(next));
+    if (requested === span) chart.draw(figures, span);
+    else void switchSpan(span);
   }
 
   async function switchSpan(next: ChartSpan): Promise<void> {

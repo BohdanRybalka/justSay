@@ -616,16 +616,6 @@ export interface LocalSTTStatus {
   last_error: string | null;
 }
 
-export interface HistoryStats {
-  total_entries: number;
-  total_words: number;
-  total_audio_seconds: number;
-  today_words: number;
-  week_words: number;
-  by_language: Record<string, number>;
-  by_model: Record<string, number>;
-}
-
 /** The Insights panel's figures, over dictations only (`GET /insights`). */
 export interface Insights {
   today: { words: number; recordings: number };
@@ -643,6 +633,15 @@ export interface Insights {
    *  `previous_period_words` sums the same number of days just before. */
   days: { date: string; words: number }[];
   previous_period_words: number;
+  /** Distinct words across every dictation, stop-words included. */
+  vocabulary: number;
+  /** The local hour with most words over the last 30 days, and the share of those words
+   *  said from the hour before it through the hour after; null without any. */
+  peak_hour: { hour: number; share: number } | null;
+  /** The dictation with the longest known audio; null before one. */
+  longest: { seconds: number; words: number } | null;
+  /** Meetings over the last seven local days. The one figure that is not dictations. */
+  meetings_week: { count: number; seconds: number };
 }
 
 export type ChartSpan = 7 | 30;
@@ -813,7 +812,6 @@ export interface WordCount {
 
 export interface TopWordsResponse {
   items: WordCount[];
-  scanned: number;
 }
 
 
@@ -901,13 +899,12 @@ export const api = {
       "newest_cursor",
     ),
 
-  historyStats: () => request<HistoryStats>("GET", "/history/stats", undefined, REREADABLE),
-
   insights: (days: ChartSpan = 30) =>
     request<Insights>("GET", `/insights?days=${days}`, undefined, REREADABLE),
 
-  wordsTop: (lang: "all" | "uk" | "en" = "all", limit = 50) =>
-    request<TopWordsResponse>("GET", `/words/top?lang=${lang}&limit=${limit}`, undefined, REREADABLE),
+  /** The most said dictation words, stop-words left out, most said first. */
+  wordsTop: (limit: number) =>
+    request<TopWordsResponse>("GET", `/words/top?limit=${limit}`, undefined, REREADABLE),
 
   /** A read, and still `UNRECONCILED`: `_semantic_lane` falls back to full-text
    *  search when the embedding provider is slow (ADR 010), and a slow provider

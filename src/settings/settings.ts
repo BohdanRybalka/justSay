@@ -31,7 +31,6 @@ import { renderDictationMode } from "./tabs/dictation-mode";
 import { renderDictationMeetings, type MeetingsGroup } from "./tabs/dictation-meetings";
 import { renderDictionary } from "./tabs/dictionary";
 import { renderHistory, renderHistoryHeading } from "./tabs/history";
-import { renderWords } from "./tabs/words";
 import { renderInsights } from "./tabs/insights";
 import { renderTranscribe } from "./tabs/transcribe";
 import { renderAccount } from "./tabs/account";
@@ -129,8 +128,7 @@ function hostLegacyTabs(
 const panels: Record<PanelName, PanelRenderer> = {
   insights: (container, loaded, windowHidden) => {
     const viewer = { name: displayName(loaded.display_name, osAccountName), shortcut: loaded.shortcut };
-    const insights = renderInsights(container, viewer, windowHidden);
-    return combineLifecycles([insights, hostLegacyTabs(container, [(tab) => renderWords(tab, windowHidden)])]);
+    return renderInsights(container, viewer, windowHidden);
   },
   history: (container, loaded) => {
     renderHistoryHeading(container);

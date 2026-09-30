@@ -17,7 +17,6 @@ from app.transcripts import history, schema
 def store(tmp_path, monkeypatch):
     monkeypatch.setattr(history, "_output_dir", tmp_path)
     monkeypatch.setattr(history, "_conn", None)
-    monkeypatch.setattr(history, "_stats_cache", None)
     monkeypatch.setattr(history, "_page_total_cache", None)
     history.bootstrap(tmp_path)
     yield

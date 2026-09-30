@@ -16,7 +16,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Literal
 
@@ -41,7 +41,6 @@ ROW_VALUE_MIN_SQLITE_VERSION = (3, 15)
 _lock = threading.Lock()
 _output_dir: Path | None = None
 _conn: sqlite3.Connection | None = None
-_stats_cache: tuple[float, HistoryStats] | None = None
 _page_total_cache: tuple[float, int, sqlite3.Connection, int] | None = None
 _derived_generation = 0
 
@@ -106,17 +105,6 @@ class HistoryPage(BaseModel):
     next_cursor: HistoryCursor | None = None
     newest_cursor: HistoryCursor | None = None
     days: list[HistoryDay] = []
-
-
-class HistoryStats(BaseModel):
-    total_entries: int
-    total_words: int
-    total_audio_seconds: float
-    today_words: int
-    week_words: int
-    by_language: dict[str, int]
-    by_model: dict[str, int]
-
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -613,72 +601,13 @@ def clear_all() -> int:
     return count
 
 
-def compute_stats(now: datetime | None = None) -> HistoryStats:
-    """Aggregate via SQL with a 5 s in-memory cache (invalidated by all mutators)."""
-    global _stats_cache
-    if now is None:
-        now = datetime.now(timezone.utc).astimezone()
-
-    today = now.date()
-    week_cutoff = now - timedelta(days=7)
-    today_start = datetime(today.year, today.month, today.day, tzinfo=now.tzinfo)
-    today_start_ms = int(round(today_start.timestamp() * 1000))
-    week_cutoff_ms = int(round(week_cutoff.timestamp() * 1000))
-
-    with _lock:
-        cached = _stats_cache
-        if cached is not None and (time.monotonic() - cached[0]) < STATS_TTL_SECONDS:
-            return cached[1]
-
-        conn = _ensure_conn_locked()
-        agg = conn.execute(
-            "SELECT COUNT(*), "
-            "COALESCE(SUM(word_count), 0), "
-            "COALESCE(SUM(audio_duration_seconds), 0.0), "
-            "COALESCE(SUM(CASE WHEN ts >= ? THEN word_count ELSE 0 END), 0), "
-            "COALESCE(SUM(CASE WHEN ts >= ? THEN word_count ELSE 0 END), 0) "
-            "FROM entries",
-            (today_start_ms, week_cutoff_ms),
-        ).fetchone()
-        total_entries, total_words, total_audio, today_words, week_words = agg
-
-        by_language = {
-            row[0]: row[1]
-            for row in conn.execute(
-                "SELECT language, COALESCE(SUM(word_count), 0) FROM entries "
-                "WHERE language IS NOT NULL GROUP BY language"
-            ).fetchall()
-        }
-        by_model = {
-            row[0]: row[1]
-            for row in conn.execute(
-                "SELECT model_name, COALESCE(SUM(word_count), 0) FROM entries "
-                "WHERE model_name IS NOT NULL GROUP BY model_name"
-            ).fetchall()
-        }
-
-        stats = HistoryStats(
-            total_entries=total_entries,
-            total_words=total_words,
-            total_audio_seconds=round(total_audio, 1),
-            today_words=today_words,
-            week_words=week_words,
-            by_language=by_language,
-            by_model=by_model,
-        )
-        _stats_cache = (time.monotonic(), stats)
-        return stats
-
-
-
 def invalidate_derived_caches_locked() -> None:
     """Drop every cache derived from ``entries``. Caller MUST hold ``_lock``.
 
-    Clears the stats cache and bumps ``derived_generation_locked``; the page-total
-    and word-frequency caches read that counter, so the bump is the invalidation.
+    Bumps ``derived_generation_locked``; the page-total, insights and word-frequency
+    caches read that counter, so the bump is the invalidation.
     """
-    global _stats_cache, _derived_generation
-    _stats_cache = None
+    global _derived_generation
     _derived_generation += 1
 
 
