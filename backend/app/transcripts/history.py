@@ -544,6 +544,22 @@ def get_page(
     )
 
 
+def processing_speeds(model_name: str, limit: int) -> list[float]:
+    """Audio seconds per millisecond of work for the newest ``limit`` rows ``model_name`` wrote.
+
+    Rows without a measured audio length or work time are skipped, newest first.
+    """
+    with _lock:
+        conn = _ensure_conn_locked()
+        rows = conn.execute(
+            "SELECT audio_duration_seconds / duration_ms FROM entries "
+            "WHERE model_name = ? AND audio_duration_seconds > 0 AND duration_ms > 0 "
+            "ORDER BY ts DESC, id DESC LIMIT ?",
+            (model_name, _clamp_limit(limit)),
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
 def set_starred(entry_id: str, starred: bool) -> bool:
     """Stars or unstars one entry; ``False`` when no entry has that id.
 

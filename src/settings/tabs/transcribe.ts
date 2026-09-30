@@ -1,14 +1,15 @@
-import { api, type DictateResponse } from "../../api";
-import { copyToClipboard } from "../../clipboard";
+import { api } from "../../api";
 import { ACCEPTED_AUDIO_EXTENSIONS, MAX_UPLOAD_BYTES } from "../../contracts";
 
 const ACCEPT_ATTR = ACCEPTED_AUDIO_EXTENSIONS.join(",");
 const BYTES_PER_MB = 1024 * 1024;
 const MAX_MB = MAX_UPLOAD_BYTES / BYTES_PER_MB;
 
-type TranscribeUiState = "idle" | "loading" | "transcribing" | "done" | "error";
+type TranscribeUiState = "idle" | "loading" | "error";
 
-export function renderTranscribe(container: HTMLElement): () => void {
+/** The drop zone above History. A picked or dropped file is sent off as a job, `onStarted`
+ *  runs, and History shows it from there; only reading and sending failures show here. */
+export function renderTranscribe(container: HTMLElement, onStarted: () => void): () => void {
   container.innerHTML = `
     <h2 class="tab-title">Transcribe File</h2>
 
@@ -32,14 +33,8 @@ export function renderTranscribe(container: HTMLElement): () => void {
     </div>
 
     <div class="setting-group" id="result-group" style="display:none;">
-      <div class="setting-label">Result</div>
       <div class="transcribe-result" id="result-card">
         <div class="result-status" id="result-status"></div>
-        <div class="result-text" id="result-text"></div>
-        <div class="result-actions">
-          <button class="btn btn-secondary btn-sm" id="btn-copy">Copy</button>
-          <button class="btn btn-secondary btn-sm" id="btn-reset">Clear</button>
-        </div>
       </div>
     </div>
   `;
@@ -49,9 +44,6 @@ export function renderTranscribe(container: HTMLElement): () => void {
   const pickBtn = container.querySelector<HTMLButtonElement>("#btn-pick")!;
   const resultGroup = container.querySelector<HTMLElement>("#result-group")!;
   const resultStatus = container.querySelector<HTMLElement>("#result-status")!;
-  const resultText = container.querySelector<HTMLElement>("#result-text")!;
-  const copyBtn = container.querySelector<HTMLButtonElement>("#btn-copy")!;
-  const resetBtn = container.querySelector<HTMLButtonElement>("#btn-reset")!;
 
   let busy = false;
   let destroyed = false;
@@ -108,46 +100,12 @@ export function renderTranscribe(container: HTMLElement): () => void {
     }
   });
 
-  copyBtn.addEventListener("click", async () => {
-    const copied = await copyToClipboard(resultText.textContent || "");
-    copyBtn.textContent = copied ? "Copied!" : "Copy failed";
-    setTimeout(() => (copyBtn.textContent = "Copy"), 1200);
-  });
-  resetBtn.addEventListener("click", () => {
-    renderUiState("idle");
-    resultGroup.style.display = "none";
-  });
-
-  function renderUiState(state: TranscribeUiState, message?: string) {
-    dropzone.classList.toggle("busy", state === "loading" || state === "transcribing");
-    busy = state === "loading" || state === "transcribing";
-
-    switch (state) {
-      case "loading":
-        resultGroup.style.display = "block";
-        resultStatus.textContent = message || "Reading file...";
-        resultStatus.className = "result-status pending";
-        resultText.textContent = "";
-        break;
-      case "transcribing":
-        resultGroup.style.display = "block";
-        resultStatus.textContent = message || "Transcribing...";
-        resultStatus.className = "result-status pending";
-        break;
-      case "done":
-        resultStatus.textContent = message || "Done";
-        resultStatus.className = "result-status ok";
-        break;
-      case "error":
-        resultGroup.style.display = "block";
-        resultStatus.textContent = message || "Failed";
-        resultStatus.className = "result-status error";
-        break;
-      case "idle":
-        resultStatus.textContent = "";
-        resultText.textContent = "";
-        break;
-    }
+  function renderUiState(state: TranscribeUiState, message = "") {
+    dropzone.classList.toggle("busy", state === "loading");
+    busy = state === "loading";
+    resultGroup.style.display = state === "idle" ? "none" : "block";
+    resultStatus.textContent = message;
+    resultStatus.className = `result-status ${state === "error" ? "error" : "pending"}`;
   }
 
   function renderError(msg: string) {
@@ -179,26 +137,16 @@ export function renderTranscribe(container: HTMLElement): () => void {
     }
     if (destroyed) return;
 
-    await transcribe(buf, file.name);
-  }
-
-  async function transcribe(bytes: ArrayBuffer, filename: string) {
-    if (destroyed) return;
-    renderUiState("transcribing", `Transcribing ${filename}...`);
     try {
-      const result: DictateResponse = await api.processFile(bytes, filename);
-      if (destroyed) return;
-      const text = result.text || "";
-      const copied = text.trim() !== "" && (await copyToClipboard(text));
-      if (destroyed) return;
-      resultText.textContent = text || "(empty result)";
-      const seconds = (result.duration_ms / 1000).toFixed(2);
-      const copiedNote = copied ? " · copied to clipboard" : "";
-      renderUiState("done", `Done in ${seconds}s${copiedNote}`);
+      await api.startFileJob(buf, file.name);
     } catch (e) {
       if (destroyed) return;
       renderError((e as Error).message);
+      return;
     }
+    if (destroyed) return;
+    renderUiState("idle");
+    onStarted();
   }
 
   return () => {

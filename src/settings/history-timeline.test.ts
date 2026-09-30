@@ -184,6 +184,64 @@ describe("createTimelineRows — day groups", () => {
   });
 });
 
+describe("createTimelineRows — cards for work under way", () => {
+  function pendingCard(id: string): HTMLElement {
+    const card = document.createElement("article");
+    card.className = "entry entry--job";
+    card.dataset.id = id;
+    return card;
+  }
+
+  it("keeps them at the top of today above its recordings, counted in none of its totals", () => {
+    const container = document.createElement("div");
+    const rows = createTimelineRows(container, () => NOW);
+    rows.replace([row("a", at(1, 10))], []);
+
+    rows.setPending([pendingCard("job")]);
+    rows.prepend([row("b", at(1, 11))], []);
+
+    expect(layout(container)).toEqual([{ head: "Today·2 recordings·8 words", ids: ["job", "b", "a"] }]);
+  });
+
+  it("opens today for them above older days, and closes it again when they go", () => {
+    const container = document.createElement("div");
+    const rows = createTimelineRows(container, () => NOW);
+    rows.replace([row("old", at(0, 10))], []);
+
+    rows.setPending([pendingCard("job")]);
+    expect(layout(container).map((group) => group.ids)).toEqual([["job"], ["old"]]);
+
+    rows.setPending([]);
+    expect(layout(container).map((group) => group.ids)).toEqual([["old"]]);
+  });
+
+  it("outlive a reload, stay while today's last card is deleted, and hide under another lane", () => {
+    const container = document.createElement("div");
+    const rows = createTimelineRows(container, () => NOW);
+    const a = row("a", at(1, 10));
+    rows.setPending([pendingCard("job")]);
+    rows.replace([a], []);
+    expect(layout(container).map((group) => group.ids)).toEqual([["job", "a"]]);
+
+    rows.rowRemoved(a.element);
+    expect(layout(container).map((group) => group.ids)).toEqual([["job"]]);
+
+    rows.replaceWith([document.createElement("p")]);
+    expect(container.querySelector(".entry--job")).toBeNull();
+  });
+
+  it("come back after an empty page wiped the container", () => {
+    const container = document.createElement("div");
+    const rows = createTimelineRows(container, () => NOW);
+    rows.setPending([pendingCard("job")]);
+    container.innerHTML = "<p>Nothing here yet.</p>";
+
+    rows.setPending([pendingCard("job2")]);
+
+    expect(layout(container).map((group) => group.ids)).toEqual([["job2"]]);
+  });
+});
+
 const JULY_28 = new Date(2026, 6, 28, 9).toISOString();
 
 describe("matchDayGroups — search results by day", () => {

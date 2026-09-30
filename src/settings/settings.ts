@@ -30,7 +30,7 @@ import { renderDictation } from "./tabs/dictation";
 import { renderDictationMode } from "./tabs/dictation-mode";
 import { renderDictationMeetings, type MeetingsGroup } from "./tabs/dictation-meetings";
 import { renderDictionary } from "./tabs/dictionary";
-import { renderHistory, renderHistoryHeading } from "./tabs/history";
+import { renderHistory, renderHistoryHeading, type HistoryPanel } from "./tabs/history";
 import { renderInsights } from "./tabs/insights";
 import { renderTranscribe } from "./tabs/transcribe";
 import { renderAccount } from "./tabs/account";
@@ -132,8 +132,10 @@ const panels: Record<PanelName, PanelRenderer> = {
   },
   history: (container, loaded) => {
     renderHistoryHeading(container);
-    const transcribe = hostLegacyTabs(container, [renderTranscribe]);
-    return combineLifecycles([transcribe, renderHistory(container, loaded)]);
+    let history: HistoryPanel | null = null;
+    const transcribe = hostLegacyTabs(container, [(tab) => renderTranscribe(tab, () => history?.jobStarted())]);
+    history = renderHistory(container, loaded);
+    return combineLifecycles([transcribe, history]);
   },
   dictation: (container, loaded, windowHidden) => {
     const everyday = renderDictation(container, loaded);

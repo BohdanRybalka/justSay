@@ -564,7 +564,7 @@ _WEB_FRAMEWORK_FREE_PACKAGES = {
     "audio": {"router.py", "dependencies.py", "scratch_router.py"},
     "core": set(),
     "embeddings": set(),
-    "pipeline": {"router.py", "service.py", "upload_validation.py"},
+    "pipeline": {"jobs_router.py", "router.py", "service.py", "upload_validation.py"},
     "preferences": {"router.py"},
     "stt": {"router.py"},
     "transcripts": {"history_router.py", "insights_router.py", "words_router.py"},

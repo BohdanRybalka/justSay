@@ -24,6 +24,7 @@ import {
   formatDuration,
   matchDayGroups,
 } from "../history-timeline";
+import { createJobCards } from "../history-jobs";
 import { escapeHtml } from "../html";
 import type { TabLifecycle } from "../settings";
 
@@ -110,9 +111,15 @@ function metaLine(entry: HistoryEntry): string {
   return parts.map((part) => `<span>${part}</span>`).join(metaSeparator());
 }
 
-/** History as a day-grouped timeline under the old search box, paging as it scrolls and
- *  picking up new recordings every few seconds while the window is on screen. */
-export function renderHistory(container: HTMLElement, settings: UserSettings): TabLifecycle {
+export interface HistoryPanel extends TabLifecycle {
+  /** A file job was just queued elsewhere on the page; its card should appear now. */
+  jobStarted(): void;
+}
+
+/** History as a day-grouped timeline under the old search box, paging as it scrolls,
+ *  picking up new recordings every few seconds while the window is on screen, and showing
+ *  files still being transcribed at the top of today. */
+export function renderHistory(container: HTMLElement, settings: UserSettings): HistoryPanel {
   const section = document.createElement("div");
   section.className = "history";
   section.innerHTML = `
@@ -382,6 +389,11 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
     return el;
   }
 
+  const jobs = createJobCards(
+    (jobCards) => timeline.setPending(jobCards),
+    () => list.loadNewer(),
+  );
+
   function startPolling(): void {
     if (pollTimer === null) pollTimer = window.setInterval(() => void list.loadNewer(), NEWER_POLL_MS);
   }
@@ -392,6 +404,7 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
   }
 
   void list.load();
+  void jobs.refresh();
   startPolling();
 
   return {
@@ -399,14 +412,20 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): T
       destroyed = true;
       closeMenu();
       stopPolling();
+      jobs.pause();
       list.disconnect();
       textFit.disconnect();
       if (debounceTimer !== null) window.clearTimeout(debounceTimer);
     },
-    releaseResources: stopPolling,
+    releaseResources() {
+      stopPolling();
+      jobs.pause();
+    },
     resumeResources() {
       void list.loadNewer();
+      void jobs.refresh();
       startPolling();
     },
+    jobStarted: () => void jobs.refresh(),
   };
 }

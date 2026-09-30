@@ -90,24 +90,16 @@ describe("token injection when a backend token is available", () => {
     expect(headerOf(0)["X-JustSay-Token"]).toBe("secret-token");
   });
 
-  it("processFile() attaches X-JustSay-Token", async () => {
+  it("startFileJob() posts the file as a job with X-JustSay-Token", async () => {
     const { api } = await import("./api");
-    fetchMock.mockResolvedValue(okJson({ text: "hi" }));
+    fetchMock.mockResolvedValue(okJson({ id: "job-1" }));
 
-    await api.processFile(new ArrayBuffer(4), "clip.wav");
+    await expect(api.startFileJob(new ArrayBuffer(4), "clip.wav")).resolves.toEqual({ id: "job-1" });
 
+    expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:9377/jobs/file");
     expect(headerOf(0)["X-JustSay-Token"]).toBe("secret-token");
-  });
-
-  it("processFile() never asks the backend to write the clipboard", async () => {
-    const { api } = await import("./api");
-    fetchMock.mockResolvedValue(okJson({ text: "hi" }));
-
-    await api.processFile(new ArrayBuffer(4), "clip.wav");
-
-    expect(fetchMock.mock.calls[0][0]).toBe(
-      "http://127.0.0.1:9377/pipeline/process-file?language=auto&copy_to_clipboard=false",
-    );
+    const body = (fetchMock.mock.calls[0][1] as RequestInit).body as FormData;
+    expect((body.get("file") as File).name).toBe("clip.wav");
   });
 
   it("levelStream() attaches X-JustSay-Token", async () => {
@@ -491,12 +483,12 @@ describe("401 handling", () => {
     expect(error.diagnosis).toEqual({ kind: "bridge-missing" });
   });
 
-  it("processFile() throws ApiAuthError on 401 too", async () => {
+  it("startFileJob() throws ApiAuthError on 401 too", async () => {
     const { api, ApiAuthError } = await import("./api");
     invokeMock.mockResolvedValue("secret-token");
     fetchMock.mockResolvedValue(errJson(401, "Missing or invalid API token"));
 
-    await expect(api.processFile(new ArrayBuffer(4), "clip.wav")).rejects.toBeInstanceOf(
+    await expect(api.startFileJob(new ArrayBuffer(4), "clip.wav")).rejects.toBeInstanceOf(
       ApiAuthError,
     );
   });
@@ -628,7 +620,8 @@ describe("a backend that accepts a request and never answers", () => {
     ["startMeetingRecording", (a: Api) => a.startMeetingRecording()],
     ["stopMeetingRecording", (a: Api) => a.stopMeetingRecording()],
     ["dictate", (a: Api) => a.dictate(SESSION_ID, "uk")],
-    ["processFile", (a: Api) => a.processFile(new ArrayBuffer(8), "call.wav")],
+    ["startFileJob", (a: Api) => a.startFileJob(new ArrayBuffer(8), "call.wav")],
+    ["removeJob", (a: Api) => a.removeJob("job-1")],
     ["updateSettings", (a: Api) => a.updateSettings({ language: "uk" })],
     ["setSttMode", (a: Api) => a.setSttMode("local")],
     ["sttLocalLoad", (a: Api) => a.sttLocalLoad()],

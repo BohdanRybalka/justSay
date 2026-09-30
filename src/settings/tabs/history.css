@@ -141,6 +141,56 @@
   border-left: 3px solid var(--blue);
 }
 
+.entry--job {
+  border-style: dashed;
+  border-color: var(--orange-mute);
+  background: var(--orange-soft);
+}
+
+.entry--job .entry-dot {
+  background: var(--warm);
+  color: #fff;
+}
+
+.entry-job-name {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 560;
+  line-height: 1.55;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.entry-progress {
+  height: 5px;
+  margin-top: 9px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--orange) 16%, transparent);
+  overflow: hidden;
+}
+
+.entry-progress i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--bar);
+  transition: width .4s;
+}
+
+.entry--job-failed .entry-progress {
+  display: none;
+}
+
+.entry--job .entry-meta {
+  margin-top: 9px;
+}
+
+.entry--job .entry-actions > button {
+  opacity: 1;
+}
+
 .entry-body {
   position: relative;
   margin-bottom: 9px;

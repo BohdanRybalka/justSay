@@ -3,24 +3,20 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_UPLOAD_BYTES } from "../../contracts";
 
 const apiMock = {
-  processFile: vi.fn(),
+  startFileJob: vi.fn(),
 };
 
 vi.mock("../../api", () => ({
   api: apiMock,
 }));
 
-const copyToClipboardMock = vi.fn();
-
-vi.mock("../../clipboard", () => ({
-  copyToClipboard: copyToClipboardMock,
-}));
-
 const { renderTranscribe } = await import("./transcribe");
+
+const onStarted = vi.fn();
 
 function render(): { container: HTMLElement; teardown: () => void } {
   const container = document.createElement("div");
-  const teardown = renderTranscribe(container);
+  const teardown = renderTranscribe(container, onStarted);
   return { container, teardown };
 }
 
@@ -43,13 +39,9 @@ function status(container: HTMLElement): HTMLElement {
   return container.querySelector<HTMLElement>("#result-status")!;
 }
 
-function resultText(container: HTMLElement): HTMLElement {
-  return container.querySelector<HTMLElement>("#result-text")!;
-}
-
 beforeEach(() => {
   vi.clearAllMocks();
-  copyToClipboardMock.mockResolvedValue(true);
+  apiMock.startFileJob.mockResolvedValue({ id: "job-1" });
 });
 
 describe("renderTranscribe — the buttons the markup declares", () => {
@@ -62,68 +54,6 @@ describe("renderTranscribe — the buttons the markup declares", () => {
 
     expect(click).toHaveBeenCalledTimes(1);
   });
-
-  it("btn-copy puts the transcript on the clipboard and says so", async () => {
-    apiMock.processFile.mockResolvedValue({
-      text: "hello there",
-      duration_ms: 1500,
-      copied_to_clipboard: false,
-    });
-    const { container } = render();
-    dropFile(container, buildFile("note.wav", 2048));
-    await vi.waitFor(() => {
-      expect(resultText(container).textContent).toBe("hello there");
-    });
-
-    copyToClipboardMock.mockClear();
-
-    container.querySelector<HTMLButtonElement>("#btn-copy")!.click();
-
-    await vi.waitFor(() => {
-      expect(container.querySelector("#btn-copy")!.textContent).toBe("Copied!");
-    });
-    expect(copyToClipboardMock).toHaveBeenCalledExactlyOnceWith("hello there");
-  });
-
-  it("btn-copy says Copy failed when the clipboard command fails", async () => {
-    apiMock.processFile.mockResolvedValue({
-      text: "hello there",
-      duration_ms: 1500,
-      copied_to_clipboard: false,
-    });
-    const { container } = render();
-    dropFile(container, buildFile("note.wav", 2048));
-    await vi.waitFor(() => {
-      expect(resultText(container).textContent).toBe("hello there");
-    });
-    copyToClipboardMock.mockResolvedValue(false);
-
-    container.querySelector<HTMLButtonElement>("#btn-copy")!.click();
-
-    await vi.waitFor(() => {
-      expect(container.querySelector("#btn-copy")!.textContent).toBe("Copy failed");
-    });
-  });
-
-  it("btn-reset hides the result panel and empties it", async () => {
-    apiMock.processFile.mockResolvedValue({
-      text: "hello there",
-      duration_ms: 1500,
-      copied_to_clipboard: false,
-    });
-    const { container } = render();
-    dropFile(container, buildFile("note.wav", 2048));
-    await vi.waitFor(() => {
-      expect(resultText(container).textContent).toBe("hello there");
-    });
-
-    container.querySelector<HTMLButtonElement>("#btn-reset")!.click();
-
-    const group = container.querySelector<HTMLElement>("#result-group")!;
-    expect(group.style.display).toBe("none");
-    expect(resultText(container).textContent).toBe("");
-    expect(status(container).textContent).toBe("");
-  });
 });
 
 describe("renderTranscribe — a file is refused before it is uploaded", () => {
@@ -135,7 +65,7 @@ describe("renderTranscribe — a file is refused before it is uploaded", () => {
     await vi.waitFor(() => {
       expect(status(container).textContent).toBe("Unsupported format: txt");
     });
-    expect(apiMock.processFile).not.toHaveBeenCalled();
+    expect(apiMock.startFileJob).not.toHaveBeenCalled();
   });
 
   it("an empty file is refused", async () => {
@@ -146,7 +76,7 @@ describe("renderTranscribe — a file is refused before it is uploaded", () => {
     await vi.waitFor(() => {
       expect(status(container).textContent).toBe("Empty file");
     });
-    expect(apiMock.processFile).not.toHaveBeenCalled();
+    expect(apiMock.startFileJob).not.toHaveBeenCalled();
   });
 
   it("a file over the upload ceiling names the ceiling", async () => {
@@ -158,65 +88,25 @@ describe("renderTranscribe — a file is refused before it is uploaded", () => {
       expect(status(container).textContent).toContain("File too large");
     });
     expect(status(container).textContent).toContain("25 MB limit");
-    expect(apiMock.processFile).not.toHaveBeenCalled();
+    expect(apiMock.startFileJob).not.toHaveBeenCalled();
   });
 });
 
-describe("renderTranscribe — the result panel", () => {
-  it("a transcript goes to the clipboard and arrives with its elapsed time and the clipboard note", async () => {
-    apiMock.processFile.mockResolvedValue({
-      text: "hello there",
-      duration_ms: 1500,
-      copied_to_clipboard: false,
-    });
+describe("renderTranscribe — sending the file off", () => {
+  it("a file is started as a job, History is told, and the zone goes quiet", async () => {
     const { container } = render();
 
     dropFile(container, buildFile("note.wav", 2048));
 
     await vi.waitFor(() => {
-      expect(status(container).textContent).toBe("Done in 1.50s · copied to clipboard");
+      expect(onStarted).toHaveBeenCalledTimes(1);
     });
-    expect(copyToClipboardMock).toHaveBeenCalledExactlyOnceWith("hello there");
-    expect(resultText(container).textContent).toBe("hello there");
-    expect(status(container).className).toBe("result-status ok");
+    expect(apiMock.startFileJob.mock.calls[0][1]).toBe("note.wav");
+    expect(container.querySelector<HTMLElement>("#result-group")!.style.display).toBe("none");
   });
 
-  it("a transcript the clipboard refused arrives without the clipboard note", async () => {
-    apiMock.processFile.mockResolvedValue({
-      text: "hello there",
-      duration_ms: 1500,
-      copied_to_clipboard: false,
-    });
-    copyToClipboardMock.mockResolvedValue(false);
-    const { container } = render();
-
-    dropFile(container, buildFile("note.wav", 2048));
-
-    await vi.waitFor(() => {
-      expect(status(container).textContent).toBe("Done in 1.50s");
-    });
-    expect(resultText(container).textContent).toBe("hello there");
-  });
-
-  it("an empty transcript is labelled instead of left blank", async () => {
-    apiMock.processFile.mockResolvedValue({
-      text: "",
-      duration_ms: 900,
-      copied_to_clipboard: false,
-    });
-    const { container } = render();
-
-    dropFile(container, buildFile("silence.wav", 2048));
-
-    await vi.waitFor(() => {
-      expect(resultText(container).textContent).toBe("(empty result)");
-    });
-    expect(status(container).textContent).toBe("Done in 0.90s");
-    expect(copyToClipboardMock).not.toHaveBeenCalled();
-  });
-
-  it("a failed transcription shows the backend's message as an error", async () => {
-    apiMock.processFile.mockRejectedValue(new Error("Backend is not running"));
+  it("a refused upload shows the backend's message as an error and tells History nothing", async () => {
+    apiMock.startFileJob.mockRejectedValue(new Error("Backend is not running"));
     const { container } = render();
 
     dropFile(container, buildFile("note.wav", 2048));
@@ -225,6 +115,7 @@ describe("renderTranscribe — the result panel", () => {
       expect(status(container).textContent).toBe("Backend is not running");
     });
     expect(status(container).className).toBe("result-status error");
+    expect(onStarted).not.toHaveBeenCalled();
   });
 });
 
@@ -257,11 +148,6 @@ describe("renderTranscribe — the drop zone", () => {
   });
 
   it("a drop it handles never reaches the window, which would swallow it", async () => {
-    apiMock.processFile.mockResolvedValue({
-      text: "hello there",
-      duration_ms: 1000,
-      copied_to_clipboard: false,
-    });
     const { container } = render();
     document.body.appendChild(container);
     const reachedTheWindow = vi.fn();
@@ -269,7 +155,7 @@ describe("renderTranscribe — the drop zone", () => {
 
     dropFile(container, buildFile("note.wav", 2048));
     await vi.waitFor(() => {
-      expect(apiMock.processFile).toHaveBeenCalledTimes(1);
+      expect(apiMock.startFileJob).toHaveBeenCalledTimes(1);
     });
     window.removeEventListener("drop", reachedTheWindow);
     container.remove();
@@ -294,87 +180,54 @@ describe("renderTranscribe — the drop zone", () => {
         "That drag carried text, not a file. Drop an audio file or use the picker.",
       );
     });
-    expect(apiMock.processFile).not.toHaveBeenCalled();
+    expect(apiMock.startFileJob).not.toHaveBeenCalled();
   });
 
   it("the zone keeps the webview from navigating to the file it was handed", async () => {
-    apiMock.processFile.mockResolvedValue({
-      text: "hello there",
-      duration_ms: 1000,
-      copied_to_clipboard: false,
-    });
     const { container } = render();
 
     const event = dropFile(container, buildFile("note.wav", 2048));
 
     await vi.waitFor(() => {
-      expect(apiMock.processFile).toHaveBeenCalledTimes(1);
+      expect(apiMock.startFileJob).toHaveBeenCalledTimes(1);
     });
-    expect(apiMock.processFile.mock.calls[0][1]).toBe("note.wav");
+    expect(apiMock.startFileJob.mock.calls[0][1]).toBe("note.wav");
     expect(
       event.defaultPrevented,
       "an unprevented drop is a browser navigation to the file, which replaces the UI",
     ).toBe(true);
   });
 
-  it("a transcription already in flight at teardown writes nothing back", async () => {
+  it("an upload still in flight at teardown tells History nothing", async () => {
     let finish!: (result: unknown) => void;
-    apiMock.processFile.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    apiMock.startFileJob.mockReturnValue(new Promise((resolve) => (finish = resolve)));
     const { container, teardown } = render();
 
     dropFile(container, buildFile("inflight.wav", 2048));
     await vi.waitFor(() => {
-      expect(apiMock.processFile).toHaveBeenCalledTimes(1);
+      expect(apiMock.startFileJob).toHaveBeenCalledTimes(1);
     });
 
     teardown();
-    finish({ text: "landed after teardown", duration_ms: 1000, copied_to_clipboard: true });
+    finish({ id: "job-1" });
     await new Promise((resolve) => setTimeout(resolve, 25));
 
-    expect(resultText(container).textContent).not.toBe("landed after teardown");
-    expect(copyToClipboardMock).not.toHaveBeenCalled();
-  });
-
-  it("a transcript whose copy finishes after teardown writes nothing", async () => {
-    apiMock.processFile.mockResolvedValue({
-      text: "copied after teardown",
-      duration_ms: 1000,
-      copied_to_clipboard: false,
-    });
-    let finishCopy: (copied: boolean) => void = () => {};
-    copyToClipboardMock.mockReturnValue(new Promise((resolve) => (finishCopy = resolve)));
-    const { container, teardown } = render();
-
-    dropFile(container, buildFile("slowcopy.wav", 2048));
-    await vi.waitFor(() => {
-      expect(copyToClipboardMock).toHaveBeenCalledTimes(1);
-    });
-
-    teardown();
-    finishCopy(true);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-
-    expect(resultText(container).textContent).not.toBe("copied after teardown");
+    expect(onStarted).not.toHaveBeenCalled();
   });
 
   it("a drop delivered after teardown transcribes nothing", async () => {
-    apiMock.processFile.mockResolvedValue({
-      text: "before",
-      duration_ms: 1000,
-      copied_to_clipboard: true,
-    });
     const { container, teardown } = render();
 
     dropFile(container, buildFile("before.wav", 2048));
     await vi.waitFor(() => {
-      expect(apiMock.processFile).toHaveBeenCalledTimes(1);
+      expect(apiMock.startFileJob).toHaveBeenCalledTimes(1);
     });
 
     teardown();
     dropFile(container, buildFile("after.wav", 2048));
     await new Promise((resolve) => setTimeout(resolve, 25));
 
-    expect(apiMock.processFile).toHaveBeenCalledTimes(1);
-    expect(apiMock.processFile.mock.calls[0][1]).toBe("before.wav");
+    expect(apiMock.startFileJob).toHaveBeenCalledTimes(1);
+    expect(apiMock.startFileJob.mock.calls[0][1]).toBe("before.wav");
   });
 });
