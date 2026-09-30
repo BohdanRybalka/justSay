@@ -808,10 +808,24 @@ function checkedHistoryFields<T extends HistoryListResponse>(
 export interface WordCount {
   word: string;
   count: number;
+  is_filler: boolean;
 }
+
+/** The most said filler, the speaking minutes between two of it, and how many
+ *  of the `top_size` most said words are fillers. */
+export interface FillerNote {
+  word: string;
+  count: number;
+  minutes_between: number | null;
+  fillers_in_top: number;
+  top_size: number;
+}
+
+export type WordFilter = "all" | "fillers";
 
 export interface TopWordsResponse {
   items: WordCount[];
+  note: FillerNote | null;
 }
 
 
@@ -902,9 +916,10 @@ export const api = {
   insights: (days: ChartSpan = 30) =>
     request<Insights>("GET", `/insights?days=${days}`, undefined, REREADABLE),
 
-  /** The most said dictation words, stop-words left out, most said first. */
-  wordsTop: (limit: number) =>
-    request<TopWordsResponse>("GET", `/words/top?limit=${limit}`, undefined, REREADABLE),
+  /** The most said dictation words, or fillers only, stop-words left out unless
+   *  they are fillers, most said first, with the filler note. */
+  wordsTop: (limit: number, filter: WordFilter) =>
+    request<TopWordsResponse>("GET", `/words/top?limit=${limit}&filter=${filter}`, undefined, REREADABLE),
 
   /** A read, and still `UNRECONCILED`: `_semantic_lane` falls back to full-text
    *  search when the embedding provider is slow (ADR 010), and a slow provider

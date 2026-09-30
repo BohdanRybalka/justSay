@@ -87,7 +87,7 @@ ignore_names = [
     "model_downloaded", "model_bytes",
     "highlighted_text", "newest_cursor",
     "typing_seconds", "pace_wpm", "streak", "current_days", "longest_days", "previous_period_words", "WEEK",
-    "vocabulary", "peak_hour", "share", "meetings_week",
+    "vocabulary", "peak_hour", "share", "meetings_week", "is_filler", "minutes_between", "fillers_in_top", "top_size",
     "row_factory", "LimitFlags", "settings_customise_sources",
     "log_file_path", "_reset_library_cache", "_meetings_start_as_acknowledged",
 ]

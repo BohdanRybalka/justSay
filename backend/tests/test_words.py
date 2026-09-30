@@ -1,4 +1,4 @@
-"""Favourite words: the tokeniser, the stop-words, dictations only, the cache."""
+"""Favourite words: the tokeniser, the stop-words, fillers, dictations only, the cache."""
 
 from __future__ import annotations
 
@@ -115,6 +115,86 @@ def test_files_and_meetings_carry_other_voices_and_count_nowhere():
 
 
 
+def _counts(response: words.TopWordsResponse) -> dict[str, tuple[int, bool]]:
+    return {item.word: (item.count, item.is_filler) for item in response.items}
+
+
+def test_a_filler_of_several_words_counts_once_and_its_words_not_again():
+    history.save_entry(text="I mean the plan, I mean it. You mean well", duration_ms=1)
+    history.save_entry(text="це так би мовити план, в принципі", duration_ms=1)
+
+    counts = _counts(words.top_words(limit=20))
+
+    assert counts["I mean"] == (2, True)
+    assert counts["mean"] == (1, False)
+    assert counts["так би мовити"] == (1, True)
+    assert counts["в принципі"] == (1, True)
+    assert "принципі" not in counts
+    assert "мовити" not in counts
+
+
+def test_the_longest_filler_wins_where_two_start_together(monkeypatch):
+    monkeypatch.setattr(
+        words,
+        "_PHRASES",
+        {("kind", "of"): "kind of", ("kind", "of", "like"): "kind of like"},
+    )
+    monkeypatch.setattr(words, "_LONGEST_PHRASE", 3)
+
+    said = list(words.said_words(words.tokenize("kind of like this, kind of that")))
+
+    assert said == ["kind of like", "this", "kind of", "that"]
+
+
+def test_fillers_a_stopword_list_holds_are_still_counted():
+    assert {"so", "just", "ну", "от"} <= STOPWORDS_EN | STOPWORDS_UK
+    history.save_entry(text="so so just ну от the", duration_ms=1)
+
+    counts = _counts(words.top_words(limit=10))
+
+    assert counts == {"so": (2, True), "just": (1, True), "ну": (1, True), "от": (1, True)}
+
+
+def test_the_fillers_filter_keeps_only_fillers_in_their_own_order():
+    history.save_entry(text="plan plan plan plan like like basically", duration_ms=1)
+
+    fillers = words.top_words(limit=10, word_filter="fillers")
+
+    assert [(i.word, i.count) for i in fillers.items] == [("like", 2), ("basically", 1)]
+
+
+def test_the_note_names_the_top_filler_and_the_minutes_between_two_of_it():
+    history.save_entry(
+        text="like plan like idea like plan", duration_ms=1, audio_duration_seconds=450.0
+    )
+    history.save_entry(text="like just", duration_ms=1, audio_duration_seconds=150.0)
+    history.save_entry(text="podcast like like like", duration_ms=1, source="file",
+                       audio_duration_seconds=999.0)
+
+    note = words.top_words(limit=3).note
+
+    assert note == words.FillerNote(
+        word="like", count=4, minutes_between=2.5, fillers_in_top=1, top_size=3
+    )
+
+
+def test_the_note_counts_the_fillers_among_the_top_words_it_was_asked_for():
+    history.save_entry(text="like like like so so plan idea", duration_ms=1)
+
+    assert words.top_words(limit=2).note.fillers_in_top == 2
+    assert words.top_words(limit=4).note.fillers_in_top == 2
+    assert words.top_words(limit=4).note.top_size == 4
+
+
+def test_the_note_has_no_pace_without_speaking_time_and_is_absent_without_fillers():
+    history.save_entry(text="like plan", duration_ms=1)
+    assert words.top_words(limit=5).note.minutes_between is None
+
+    history.clear_all()
+    history.save_entry(text="plan idea", duration_ms=1, audio_duration_seconds=60.0)
+    assert words.top_words(limit=5).note is None
+
+
 @pytest.mark.asyncio
 async def test_words_top_endpoint_smoke(client):
     history.save_entry(text="apple banana apple", duration_ms=1)
@@ -123,6 +203,17 @@ async def test_words_top_endpoint_smoke(client):
     data = resp.json()
     words_list = {i["word"]: i["count"] for i in data["items"]}
     assert words_list.get("apple") == 2
+
+
+@pytest.mark.asyncio
+async def test_words_top_endpoint_filters_to_fillers(client):
+    history.save_entry(text="apple like like", duration_ms=1)
+    resp = await client.get("/words/top?limit=5&filter=fillers")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["items"] == [{"word": "like", "count": 2, "is_filler": True}]
+    assert data["note"]["word"] == "like"
+    assert (await client.get("/words/top?filter=stopwords")).status_code == 422
 
 
 @pytest.mark.asyncio
