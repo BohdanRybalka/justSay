@@ -337,6 +337,10 @@
   padding-bottom: 12px;
 }
 
+.favourite-words:has(.words-note) {
+  padding-bottom: 0;
+}
+
 .podium {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -380,6 +384,10 @@
   font-weight: 660;
 }
 
+.podium-item--filler {
+  background: var(--orange-soft);
+}
+
 .word-list {
   padding: 8px 0 4px;
 }
@@ -404,6 +412,9 @@
 }
 
 .word-row-word {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   width: 96px;
   font-size: 12.5px;
   font-weight: 545;
@@ -426,9 +437,48 @@
   transition: width .5s cubic-bezier(.2,.9,.3,1);
 }
 
+.word-row-track i.word-row-fill--filler {
+  background: var(--bar);
+}
+
 .word-row-count {
   width: 36px;
   text-align: right;
   font-size: 12px;
   color: var(--text-2);
+}
+
+.words-filter {
+  margin-left: auto;
+  letter-spacing: normal;
+  font-weight: 400;
+}
+
+.words-note {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 18px 16px;
+  padding: 12px 14px;
+  border-radius: 11px;
+  background: var(--orange-soft);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.words-note .icon {
+  flex: none;
+  color: var(--orange);
+}
+
+.share-month {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.share-month-status {
+  font-size: 12.5px;
+  color: var(--muted);
 }

@@ -1,15 +1,20 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Insights, WordCount } from "../../api";
+import type { FillerNote, Insights, TopWordsResponse, WordCount } from "../../api";
 
-const { apiMock } = vi.hoisted(() => ({ apiMock: { insights: vi.fn(), wordsTop: vi.fn() } }));
+const { apiMock, imageMock } = vi.hoisted(() => ({
+  apiMock: { insights: vi.fn(), wordsTop: vi.fn() },
+  imageMock: { savedCardPng: vi.fn(), copyImage: vi.fn(), saveImage: vi.fn() },
+}));
 
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
   return { ...actual, api: apiMock };
 });
 
-import { greetingFor, paceLine, renderInsights, savedPhrase } from "./insights";
+vi.mock("./insights-image", () => imageMock);
+
+import { greetingFor, imageName, paceLine, renderInsights, savedCardView, savedPhrase } from "./insights";
 
 function spokenDays(words: number[]): Insights["days"] {
   return words.map((value, index) => ({ date: `2026-09-${String(index + 30 - words.length).padStart(2, "0")}`, words: value }));
@@ -43,16 +48,22 @@ function buildInsights(overrides: {
   };
 }
 
+const FILLER_WORDS = new Set(["so", "like", "just"]);
 const FAVOURITES: WordCount[] = ["or", "by", "so", "mean", "example", "like", "which", "will", "just", "overall"].map(
-  (word, index) => ({ word, count: 50 - index * 4 }),
+  (word, index) => ({ word, count: 50 - index * 4, is_filler: FILLER_WORDS.has(word) }),
 );
+const NOTE: FillerNote = { word: "so", count: 42, minutes_between: 2.5, fillers_in_top: 3, top_size: 10 };
+const FILLERS_ONLY: TopWordsResponse = {
+  items: FAVOURITES.filter((item) => item.is_filler),
+  note: NOTE,
+};
 
 const viewer = { name: "Bohdan Rybalka", shortcut: "Ctrl+Alt+KeyV" };
 let container: HTMLElement;
 
 async function mount(figures: Insights, windowHidden = false, favourites: WordCount[] = FAVOURITES) {
   apiMock.insights.mockResolvedValue(figures);
-  apiMock.wordsTop.mockResolvedValue({ items: favourites });
+  apiMock.wordsTop.mockResolvedValue({ items: favourites, note: favourites.some((item) => item.is_filler) ? NOTE : null });
   const tab = renderInsights(container, viewer, windowHidden);
   await vi.advanceTimersByTimeAsync(0);
   return tab;
@@ -255,7 +266,7 @@ describe("the Insights panel", () => {
 
   it("greets without a name when none is known", async () => {
     apiMock.insights.mockResolvedValue(buildInsights());
-    apiMock.wordsTop.mockResolvedValue({ items: FAVOURITES });
+    apiMock.wordsTop.mockResolvedValue({ items: FAVOURITES, note: NOTE });
     renderInsights(container, { ...viewer, name: " " }, false);
 
     expect(text(".panel-title")).toBe("Good evening");
@@ -304,9 +315,9 @@ describe("the Insights panel", () => {
     apiMock.wordsTop.mockClear();
     await mount(buildInsights());
 
-    expect(apiMock.wordsTop).toHaveBeenCalledWith(10);
+    expect(apiMock.wordsTop).toHaveBeenCalledWith(10, "all");
     const podium = [...container.querySelectorAll(".podium-item")].map((item) => item.textContent!.replace(/\s+/g, " ").trim());
-    expect(podium).toEqual(["1 or 50 times", "2 by 46 times", "3 so 42 times"]);
+    expect(podium).toEqual(["1 or 50 times", "2 by 46 times", "3 so 42 times · filler"]);
     const rows = [...container.querySelectorAll(".word-row")].map((row) => row.textContent!.replace(/\s+/g, " ").trim());
     expect(rows[0]).toBe("4 mean 38");
     expect(rows).toHaveLength(7);
@@ -351,7 +362,7 @@ describe("the Insights panel", () => {
   });
 
   it("offers Try again on a failed read, and the retry fills the panel", async () => {
-    apiMock.wordsTop.mockResolvedValue({ items: FAVOURITES });
+    apiMock.wordsTop.mockResolvedValue({ items: FAVOURITES, note: NOTE });
     apiMock.insights.mockRejectedValueOnce(new Error("HTTP 503"));
     renderInsights(container, viewer, false);
     await vi.advanceTimersByTimeAsync(0);
@@ -363,4 +374,123 @@ describe("the Insights panel", () => {
 
     expect(text(".saved-card-value")).toBe("2 h 57 m");
   });
+
+  it("flags fillers in clay and says how often you say the top one", async () => {
+    await mount(buildInsights());
+
+    expect([...container.querySelectorAll(".podium-item--filler .podium-word")].map((word) => word.textContent)).toEqual(["so"]);
+    const flagged = [...container.querySelectorAll(".word-row")].filter((row) => row.querySelector(".chip"));
+    expect(flagged.map((row) => row.querySelector(".word-row-word")!.textContent!.replace(/\s+/g, " ").trim())).toEqual([
+      "like filler",
+      "just filler",
+    ]);
+    expect(container.querySelectorAll(".word-row-fill--filler")).toHaveLength(2);
+    expect(text(".words-note")).toBe(
+      "You said so 42 times — about once every two and a half minutes. Three of your top ten are filler words.",
+    );
+  });
+
+  it("filters the podium and the list to fillers and back, leaving the rest of the panel", async () => {
+    await mount(buildInsights());
+    const chart = container.querySelector(".chart");
+    apiMock.wordsTop.mockResolvedValue(FILLERS_ONLY);
+
+    container.querySelectorAll<HTMLButtonElement>(".words-filter button")[1].click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(apiMock.wordsTop).toHaveBeenLastCalledWith(10, "fillers");
+    expect([...container.querySelectorAll(".podium-word")].map((word) => word.textContent)).toEqual(["so", "like", "just"]);
+    expect(container.querySelector(".word-list")).toBeNull();
+    expect(container.querySelector(".chart")).toBe(chart);
+    expect(text(".words-note")).toContain("You said so 42 times");
+
+    apiMock.wordsTop.mockResolvedValue({ items: FAVOURITES, note: NOTE });
+    container.querySelectorAll<HTMLButtonElement>(".words-filter button")[0].click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(apiMock.wordsTop).toHaveBeenLastCalledWith(10, "all");
+    expect(container.querySelectorAll(".podium-item")).toHaveLength(3);
+    expect(container.querySelectorAll(".word-row")).toHaveLength(7);
+  });
+
+  it("keeps the fillers filter across reads, and falls back to all once no filler is left", async () => {
+    const tab = await mount(buildInsights());
+    apiMock.wordsTop.mockResolvedValue(FILLERS_ONLY);
+    container.querySelectorAll<HTMLButtonElement>(".words-filter button")[1].click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    tab.resumeResources!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(apiMock.wordsTop).toHaveBeenLastCalledWith(10, "fillers");
+    expect(container.querySelector(".words-filter [aria-pressed=true]")!.textContent).toBe("Fillers");
+
+    const plain = FAVOURITES.filter((item) => !item.is_filler);
+    apiMock.wordsTop.mockImplementation(async (_limit: number, filter: string) =>
+      filter === "fillers" ? { items: [], note: null } : { items: plain, note: null },
+    );
+    tab.resumeResources!();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(apiMock.wordsTop).toHaveBeenLastCalledWith(10, "all");
+    expect(container.querySelectorAll(".podium-item")).toHaveLength(3);
+    expect(container.querySelector(".words-filter button")).toBeNull();
+    expect(container.querySelector(".words-note")).toBeNull();
+  });
+
+  it("copies the card as an image and says so", async () => {
+    await mount(buildInsights());
+    const png = new Uint8Array([137, 80]);
+    imageMock.savedCardPng.mockResolvedValue(png);
+    imageMock.copyImage.mockResolvedValue(undefined);
+
+    container.querySelector<HTMLButtonElement>(".share-month .btn-primary")!.click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(imageMock.savedCardPng).toHaveBeenCalledWith(savedCardView(buildInsights()));
+    expect(imageMock.copyImage).toHaveBeenCalledWith(png);
+    expect(text(".share-month-status")).toBe("Image copied — paste it anywhere");
+  });
+
+  it("saves the card under this month's name, and says when copying failed", async () => {
+    await mount(buildInsights());
+    const png = new Uint8Array([137, 80]);
+    imageMock.savedCardPng.mockResolvedValue(png);
+    imageMock.saveImage.mockResolvedValue(false);
+    const [share, download] = container.querySelectorAll<HTMLButtonElement>(".share-month button");
+
+    download.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(imageMock.saveImage).toHaveBeenCalledWith(png, "JustSay-September-2026.png");
+    expect(text(".share-month-status")).toBe("");
+
+    imageMock.copyImage.mockRejectedValue(new Error("the clipboard stayed busy"));
+    share.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(text(".share-month-status")).toBe("Couldn't copy the image. Try again");
+    expect(share.disabled).toBe(false);
+  });
+
+  it("offers no image before a first recording this month", async () => {
+    await mount(buildInsights({ month: { recordings: 0 } }));
+
+    expect(container.querySelector(".share-month")).toBeNull();
+  });
 });
+
+describe("the saved card as data", () => {
+  it("holds what the card shows, bars measured against the longer time", () => {
+    const view = savedCardView(buildInsights());
+
+    expect(view.value).toBe("2 h 57 m");
+    expect(view.compare.map(({ label, fraction, dim }) => [label, fraction, dim])).toEqual([
+      ["Typing", 1, true],
+      ["Speaking", 90 / 267, false],
+    ]);
+    expect(view.figures.map((figure) => figure.label)).toEqual(["words in 116 recordings", "streak · your longest", "three times your typing"]);
+  });
+
+  it("names the image after the month", () => {
+    expect(imageName(new Date(2026, 0, 3))).toBe("JustSay-January-2026.png");
+  });
+});
+

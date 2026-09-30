@@ -10,6 +10,7 @@ use tauri::{
 mod account;
 mod backend;
 mod clipboard;
+mod image_export;
 mod paste;
 mod ring_window;
 mod scratch_folder;
@@ -354,6 +355,8 @@ pub fn run() {
             set_meetings_enabled,
             show_settings_window,
             clipboard::write_clipboard_text,
+            image_export::copy_image,
+            image_export::save_image,
             paste::paste_text,
             paste::paste_permission_granted,
             paste::open_accessibility_settings,

@@ -1,18 +1,21 @@
 /**
  * The Insights panel: a greeting with today's dictation, the clay card of the time
  * talking saved this month, the words-per-day chart, facts about your voice and your
- * favourite words. The backend computes every figure; this panel formats them, and reads
- * them again each time the window comes back on screen. The chart's 7d / 30d switch
- * reads again and redraws the chart alone.
+ * favourite words, then the card shared or saved as an image. The backend computes every
+ * figure; this panel formats them, and reads them again each time the window comes back
+ * on screen. The chart's 7d / 30d switch and the words' All / Fillers switch each read
+ * again and redraw their own card alone.
  */
-import { api, type ChartSpan, type Insights } from "../../api";
+import { api, type ChartSpan, type Insights, type TopWordsResponse, type WordFilter } from "../../api";
 import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
 import { formatCoarseDuration, formatHoursClock, wholeMinutes } from "../../format";
+import { icon } from "../../ui/icons";
 import { escapeHtml } from "../html";
 import type { TabLifecycle } from "../settings";
 import { mountWordsChart, type WordsChart } from "./insights-chart";
+import { copyImage, saveImage, savedCardPng, type SavedCardView } from "./insights-image";
 import { voiceFacts } from "./insights-voice";
-import { FAVOURITE_WORDS, mountFavouriteWords } from "./insights-words";
+import { FAVOURITE_WORDS, mountFavouriteWords, type FavouriteWords } from "./insights-words";
 
 export interface InsightsViewer {
   name: string;
@@ -70,29 +73,91 @@ export function renderInsights(
 
   let latestRead = 0;
   let latestChartRead = 0;
+  let latestWordsRead = 0;
   let span: ChartSpan = 30;
+  let wordFilter: WordFilter = "all";
   let chart: WordsChart | null = null;
+  let favouriteWords: FavouriteWords | null = null;
 
   async function read(): Promise<void> {
     const token = ++latestRead;
     latestChartRead += 1;
+    latestWordsRead += 1;
     const requested = span;
     const greeting = greetingFor(new Date().getHours());
     title.textContent = firstName ? `${greeting}, ${firstName}` : greeting;
     try {
-      const [figures, favourites] = await Promise.all([api.insights(requested), api.wordsTop(FAVOURITE_WORDS)]);
+      const [figures, favourites] = await Promise.all([api.insights(requested), readWords()]);
       if (token !== latestRead) return;
       today.innerHTML = todayLine(figures.today, shortcut);
       const chartShown = chart !== null;
-      body.innerHTML = figures.month.recordings > 0 ? savedCard(figures) : "";
+      const card = figures.month.recordings > 0 ? savedCardView(figures) : null;
+      body.innerHTML = card === null ? "" : savedCard(card);
       chart = null;
       if (chartShown || hasSpoken(figures)) mountChart(figures, requested);
       body.insertAdjacentHTML("beforeend", voiceFacts(figures));
-      mountFavouriteWords(body, favourites.items);
+      const wordsHost = document.createElement("div");
+      body.append(wordsHost);
+      favouriteWords = mountFavouriteWords(wordsHost, favourites, wordFilter, (next) => void switchWords(next));
+      if (card !== null) mountShare(card);
     } catch (e) {
       if (token !== latestRead) return;
       showFailure(e);
     }
+  }
+
+  async function readWords(): Promise<TopWordsResponse> {
+    const top = await api.wordsTop(FAVOURITE_WORDS, wordFilter);
+    if (top.note !== null || wordFilter === "all") return top;
+    wordFilter = "all";
+    return api.wordsTop(FAVOURITE_WORDS, wordFilter);
+  }
+
+  async function switchWords(next: WordFilter): Promise<void> {
+    wordFilter = next;
+    const token = ++latestWordsRead;
+    try {
+      const top = await api.wordsTop(FAVOURITE_WORDS, next);
+      if (token !== latestWordsRead) return;
+      favouriteWords?.draw(top);
+    } catch (e) {
+      if (token !== latestWordsRead) return;
+      showFailure(e);
+    }
+  }
+
+  function mountShare(card: SavedCardView): void {
+    const row = document.createElement("div");
+    row.className = "share-month";
+    row.innerHTML = `
+      <button type="button" class="btn btn-primary">${icon("share", "small")}Share this month</button>
+      <button type="button" class="btn">Download as image</button>
+      <span class="share-month-status" role="status"></span>
+    `;
+    body.append(row);
+    const [share, download] = row.querySelectorAll("button");
+    const status = row.querySelector<HTMLElement>(".share-month-status")!;
+    const act = async (work: (png: Uint8Array) => Promise<string>, failure: string): Promise<void> => {
+      share.disabled = download.disabled = true;
+      status.textContent = "";
+      try {
+        status.textContent = await work(await savedCardPng(card));
+      } catch (e) {
+        console.error(`${failure}:`, e);
+        status.textContent = `${failure}. Try again`;
+      } finally {
+        share.disabled = download.disabled = false;
+      }
+    };
+    share.addEventListener("click", () =>
+      void act(async (png) => {
+        await copyImage(png);
+        return "Image copied — paste it anywhere";
+      }, "Couldn't copy the image"),
+    );
+    download.addEventListener("click", () =>
+      void act(async (png) => ((await saveImage(png, imageName(new Date()))) ? "Image saved" : ""), "Couldn't save the image"),
+    );
   }
 
   function mountChart(figures: Insights, requested: ChartSpan): void {
@@ -126,6 +191,7 @@ export function renderInsights(
   const disown = () => {
     latestRead += 1;
     latestChartRead += 1;
+    latestWordsRead += 1;
   };
 
   if (!windowHidden) void read();
@@ -142,31 +208,51 @@ function todayLine(today: Insights["today"], shortcut: string): string {
   return `${count(today.words, "word")} today across ${count(today.recordings, "recording")}. Hold ${keys} anywhere to add more.`;
 }
 
-function savedCard({ month, streak }: Insights): string {
+export function savedCardView({ month, streak }: Insights): SavedCardView {
   const typing = wholeMinutes(month.typing_seconds);
   const speaking = wholeMinutes(month.speaking_seconds);
   const saved = Math.max(0, typing - speaking);
+  const longer = Math.max(typing, speaking, 1);
   const longest = streak.current_days > 1 && streak.current_days === streak.longest_days;
+  const bar = (label: string, minutes: number, dim: boolean) => ({
+    label,
+    fraction: minutes / longer,
+    time: formatHoursClock(minutes * 60),
+    dim,
+  });
+  return {
+    value: formatCoarseDuration(saved * 60),
+    note: `That's what typing these words by hand would have cost you. ${savedPhrase(saved)}`,
+    compare: month.speaking_seconds >= COMPARE_FROM_SECONDS ? [bar("Typing", typing, true), bar("Speaking", speaking, false)] : [],
+    figures: [
+      { value: number(month.words), label: `words in ${count(month.recordings, "recording", false)}` },
+      { value: count(streak.current_days, "day", false), label: `streak${longest ? " · your longest" : ""}` },
+      ...(month.pace_wpm === null
+        ? []
+        : [{ value: `${month.pace_wpm} wpm`, label: paceLine(month.typing_seconds / month.speaking_seconds) }]),
+    ],
+  };
+}
+
+/** The file name offered when saving the card, after the month it shows. */
+export function imageName(now: Date): string {
+  return `JustSay-${now.toLocaleString("en-US", { month: "long" })}-${now.getFullYear()}.png`;
+}
+
+function savedCard({ value, note, compare, figures }: SavedCardView): string {
+  const row = ({ label, fraction, time, dim }: SavedCardView["compare"][number]) => `
+    <div class="saved-compare-row"><span>${label}</span><span class="saved-compare-track${dim ? " saved-compare-track--dim" : ""}"><i style="width:${(fraction * 100).toFixed(1)}%"></i></span><b class="num">${time}</b></div>`;
   return `
     <section class="saved-card" aria-label="Time saved this month">
       <div class="saved-card-label">YOU SAVED THIS MONTH</div>
-      <div class="saved-card-value num">${formatCoarseDuration(saved * 60)}</div>
-      <p class="saved-card-note">That's what typing these words by hand would have cost you. ${savedPhrase(saved)}</p>
-      ${month.speaking_seconds >= COMPARE_FROM_SECONDS ? compareBars(typing, speaking) : ""}
+      <div class="saved-card-value num">${value}</div>
+      <p class="saved-card-note">${note}</p>
+      ${compare.length === 0 ? "" : `<div class="saved-compare">${compare.map(row).join("")}</div>`}
       <div class="saved-figures">
-        <div><b class="num">${number(month.words)}</b><span>words in ${count(month.recordings, "recording", false)}</span></div>
-        <div><b class="num">${count(streak.current_days, "day", false)}</b><span>streak${longest ? " · your longest" : ""}</span></div>
-        ${month.pace_wpm === null ? "" : `<div><b class="num">${month.pace_wpm} wpm</b><span>${paceLine(month.typing_seconds / month.speaking_seconds)}</span></div>`}
+        ${figures.map((figure) => `<div><b class="num">${figure.value}</b><span>${figure.label}</span></div>`).join("")}
       </div>
     </section>
   `;
-}
-
-function compareBars(typing: number, speaking: number): string {
-  const longer = Math.max(typing, speaking, 1);
-  const row = (label: string, minutes: number, dim: boolean) => `
-    <div class="saved-compare-row"><span>${label}</span><span class="saved-compare-track${dim ? " saved-compare-track--dim" : ""}"><i style="width:${((minutes / longer) * 100).toFixed(1)}%"></i></span><b class="num">${formatHoursClock(minutes * 60)}</b></div>`;
-  return `<div class="saved-compare">${row("Typing", typing, true)}${row("Speaking", speaking, false)}</div>`;
 }
 
 function number(value: number): string {
