@@ -213,6 +213,31 @@ def test_top_words_does_not_rescan_an_unchanged_history(monkeypatch):
     assert second.items == first.items
 
 
+def test_readers_that_miss_together_share_one_scan(monkeypatch):
+    """Insights and the favourite words are read together after every dictation;
+    two scans of the whole history for one answer doubles the wait."""
+    import threading
+
+    _seed_history(5)
+    scans = 0
+    real_tokenize = words.tokenize
+
+    def slow_tokenize(text):
+        nonlocal scans
+        scans += 1
+        time.sleep(0.01)
+        return real_tokenize(text)
+
+    monkeypatch.setattr(words, "tokenize", slow_tokenize)
+    readers = [threading.Thread(target=words.dictation_tokens) for _ in range(2)]
+    for reader in readers:
+        reader.start()
+    for reader in readers:
+        reader.join()
+
+    assert scans == 5
+
+
 def test_a_new_entry_invalidates_the_word_counts(monkeypatch):
     """A cache that outlives a write would report yesterday's counts forever."""
     history.save_entry(text="кіт кіт кіт", duration_ms=1, language="uk")

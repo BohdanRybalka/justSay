@@ -10,6 +10,7 @@ Searching transcripts lives in ``app.transcripts.search``.
 from __future__ import annotations
 
 import re
+import threading
 from collections import Counter
 from typing import NamedTuple
 
@@ -34,6 +35,7 @@ class DictationTokens(NamedTuple):
 
 
 _tokens_cache: DictationTokens | None = None
+_scan_lock = threading.Lock()
 
 
 def tokenize(text: str) -> list[str]:
@@ -48,21 +50,23 @@ def tokenize(text: str) -> list[str]:
 def dictation_tokens() -> DictationTokens:
     """Every token of every dictation, counted, as of ``generation``.
 
-    A miss reads and tokenises every dictation, so run it off the event loop.
+    A miss reads and tokenises every dictation, so run it off the event loop. Readers
+    that miss together wait for one scan rather than each running their own.
     """
     global _tokens_cache
-    with history._lock:
-        generation = history.derived_generation_locked()
-        if _tokens_cache is not None and _tokens_cache.generation == generation:
-            return _tokens_cache
-        rows = history._ensure_conn_locked().execute(_DICTATIONS_SQL).fetchall()
-    tokens = DictationTokens(
-        generation, Counter(token for row in rows for token in tokenize(row["cleaned_text"]))
-    )
-    with history._lock:
-        if history.derived_generation_locked() == generation:
-            _tokens_cache = tokens
-    return tokens
+    with _scan_lock:
+        with history._lock:
+            generation = history.derived_generation_locked()
+            if _tokens_cache is not None and _tokens_cache.generation == generation:
+                return _tokens_cache
+            rows = history._ensure_conn_locked().execute(_DICTATIONS_SQL).fetchall()
+        tokens = DictationTokens(
+            generation, Counter(token for row in rows for token in tokenize(row["cleaned_text"]))
+        )
+        with history._lock:
+            if history.derived_generation_locked() == generation:
+                _tokens_cache = tokens
+        return tokens
 
 
 class WordCount(BaseModel):

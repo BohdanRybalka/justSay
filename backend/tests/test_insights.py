@@ -6,6 +6,8 @@ Every timestamp is built from a naive local ``datetime``, the rule SQLite's
 
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import datetime
 
 import pytest
@@ -299,6 +301,38 @@ async def test_insights_endpoint_answers_with_the_figures(client):
     assert data["peak_hour"]["share"] == 1.0
     assert data["longest"] == {"seconds": 30.0, "words": 42}
     assert data["meetings_week"] == {"count": 0, "seconds": 0.0}
+
+
+@pytest.mark.asyncio
+async def test_insights_leave_the_event_loop_free(monkeypatch):
+    """A miss tokenises every dictation for the vocabulary, on the loop that also
+    serves ``/health`` and the widget poll unless it runs in a thread."""
+    from app.transcripts import insights_router, words
+
+    rows = 100
+    for index in range(rows):
+        _save(datetime(2026, 8, 20, 9, 0), 5, text=f"word {index}")
+    real_tokenize = words.tokenize
+
+    def slow_tokenize(text):
+        time.sleep(0.001)
+        return real_tokenize(text)
+
+    monkeypatch.setattr(words, "tokenize", slow_tokenize)
+    ticks = 0
+
+    async def competitor():
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    race = asyncio.ensure_future(competitor())
+    figures = await insights_router.get_insights()
+    race.cancel()
+
+    assert figures.vocabulary == rows + 1
+    assert ticks > 50, f"the loop ticked {ticks} times while /insights tokenised {rows} rows"
 
 
 @pytest.mark.asyncio
