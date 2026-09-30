@@ -81,13 +81,13 @@ async def test_dictate_returns_the_transcription_when_the_recording_delete_fails
 
     with (
         patch("app.pipeline.router.process_audio", AsyncMock(return_value=_fake_result())),
-        caplog.at_level(logging.WARNING, logger="app.pipeline.router"),
+        caplog.at_level(logging.WARNING, logger="app.core.scratch"),
     ):
         resp = await client.post("/pipeline/dictate")
 
     assert resp.status_code == 200
     assert resp.json()["text"] == "hello"
-    assert [r for r in caplog.records if r.name == "app.pipeline.router" and r.exc_info]
+    assert [r for r in caplog.records if r.name == "app.core.scratch" and r.exc_info]
 
 
 _DICTATE_SESSION_ID = "0123456789abcdef0123456789abcdef"

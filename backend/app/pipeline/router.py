@@ -1,7 +1,6 @@
 """Pipeline endpoints — unified audio-to-text flows."""
 
 import logging
-from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
@@ -10,6 +9,7 @@ from app.audio.dependencies import get_recorder
 from app.audio.recorder import MicrophoneRecorder
 from app.audio.session import SessionRef
 from app.core.errors import JustSayError
+from app.core.scratch import discard_scratch_file
 from app.pipeline.jobs import dictation_gate
 from app.pipeline.service import process_audio
 
@@ -19,18 +19,6 @@ router = APIRouter()
 _PIPELINE_CRASHED_DETAIL = (
     "The transcription pipeline failed unexpectedly. Check the backend log."
 )
-
-
-def _discard_scratch_file(path: Path) -> None:
-    """Delete a scratch file without letting the delete replace the response.
-
-    The call site sits in a ``finally``, where an ``OSError`` would turn an
-    already-built response into a bare 500.
-    """
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        log.warning("Could not remove scratch file %s", path, exc_info=True)
 
 
 class DictateResponse(BaseModel):
@@ -86,4 +74,4 @@ async def dictate(
             detail=_PIPELINE_CRASHED_DETAIL,
         )
     finally:
-        _discard_scratch_file(audio_path)
+        discard_scratch_file(audio_path)

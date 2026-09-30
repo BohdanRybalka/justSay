@@ -392,20 +392,26 @@ async def test_transcribe_spawns_server_at_most_once_across_two_calls(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_an_ogg_opus_voice_note_is_sent_as_wav_and_the_copy_removed(monkeypatch, tmp_path):
-    """whisper-server's decoder has no Opus: a WhatsApp voice note reached it as-is, came back as
-    ``{"error": "failed to read audio data"}`` with a 200, and was saved as an empty entry."""
+async def test_an_ogg_opus_voice_note_is_sent_as_16k_mono_wav_and_the_copy_removed(
+    monkeypatch, tmp_path
+):
+    """A format whisper-server cannot decode (Ogg Opus, WhatsApp's voice notes) reaches it as a
+    16 kHz mono WAV made on this machine, and the copy is gone once the answer is in."""
+    import io
+
     import numpy as np
     import soundfile as sf
 
     provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
     audio_path = tmp_path / "job_voice.ogg"
-    sf.write(str(audio_path), np.zeros(48000, dtype="float32"), 48000, format="OGG", subtype="OPUS")
+    stereo = np.zeros((48000, 2), dtype="float32")
+    sf.write(str(audio_path), stereo, 48000, format="OGG", subtype="OPUS")
     sent = []
 
     def post_impl(url, data, files):
         name, handle, _mime = files["file"]
-        sent.append((name, handle.read(4)))
+        info = sf.info(io.BytesIO(handle.read()))
+        sent.append((name, info.format, info.samplerate, info.channels))
         return _FakeResponse(200, {"text": "hello\n"})
 
     _install_fake_httpx(monkeypatch, post_impl=post_impl)
@@ -414,7 +420,7 @@ async def test_an_ogg_opus_voice_note_is_sent_as_wav_and_the_copy_removed(monkey
     result = await provider.transcribe(audio_path, language="uk")
 
     assert result.text == "hello"
-    assert sent == [("job_voice-pcm.wav", b"RIFF")]
+    assert sent == [("job_voice-pcm.wav", "WAV", 16000, 1)]
     assert sorted(p.name for p in tmp_path.glob("job_voice*")) == ["job_voice.ogg"]
 
 
@@ -434,22 +440,27 @@ async def test_a_format_nothing_here_can_decode_fails_in_plain_words_unsent(monk
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "says_unreadable"),
+    [("failed to read audio data", True), ("failed to process audio", False)],
+)
 async def test_an_error_answer_from_whisper_server_is_a_failure_not_empty_text(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, error, says_unreadable
 ):
+    """whisper-server answers 200 with an ``error`` field; only its unreadable-audio answer may
+    tell the user the format is the problem."""
     provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
     audio_path = tmp_path / "sample.wav"
     audio_path.write_bytes(b"RIFF....WAVEfmt ")
-    post_impl = lambda url, data, files: _FakeResponse(  # noqa: E731
-        200, {"error": "failed to read audio data"}
-    )
+    post_impl = lambda url, data, files: _FakeResponse(200, {"error": error})  # noqa: E731
     _install_fake_httpx(monkeypatch, post_impl=post_impl)
     _install_fake_popen(monkeypatch)
 
     with pytest.raises(ResourceUnavailableError) as refused:
         await provider.transcribe(audio_path, language="uk")
 
-    assert refused.value.diagnostic == "whisper-server: failed to read audio data"
+    assert refused.value.diagnostic == f"whisper-server: {error}"
+    assert (refused.value.message == UNREADABLE_HERE) is says_unreadable
 
 
 @pytest.mark.asyncio

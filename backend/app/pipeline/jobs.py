@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from app.core import tasks
 from app.core.audio_formats import UNREADABLE_HERE
 from app.core.errors import ConfigurationError, JustSayError, NotReadyError
+from app.core.scratch import discard_scratch_file
 from app.pipeline.service import process_audio
 from app.transcripts import history
 
@@ -141,14 +142,7 @@ async def _expected_seconds(model_name: str, audio_duration: float | None) -> fl
 def remove_leftover_files(temp_dir: Path) -> None:
     """Delete the scratch files of jobs that were running when the app last quit."""
     for path in temp_dir.glob(f"{JOB_FILE_PREFIX}*"):
-        _discard(path)
-
-
-def _discard(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        log.warning("Could not remove job file %s", path, exc_info=True)
+        discard_scratch_file(path)
 
 
 class JobQueue:
@@ -263,7 +257,7 @@ class JobQueue:
             log.exception("File job %s crashed", job.id)
             self._fail(job, FAILED_REASON)
         finally:
-            _discard(job.path)
+            discard_scratch_file(job.path)
 
     def _fail(self, job: _Job, reason: str) -> None:
         if job.stage == "cancelled":
