@@ -425,6 +425,29 @@ async def test_an_ogg_opus_voice_note_is_sent_as_16k_mono_wav_and_the_copy_remov
 
 
 @pytest.mark.asyncio
+async def test_a_copy_that_fails_midway_is_removed_and_not_called_unreadable(monkeypatch, tmp_path):
+    import numpy as np
+    import soundfile as sf
+    import soxr
+
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    audio_path = tmp_path / "job_voice.ogg"
+    sf.write(str(audio_path), np.zeros(48000, dtype="float32"), 48000, format="OGG", subtype="OPUS")
+
+    def disk_full(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(soxr, "ResampleStream", disk_full)
+    _install_fake_httpx(monkeypatch, post_impl=None)
+    _install_fake_popen(monkeypatch)
+
+    with pytest.raises(OSError):
+        await provider.transcribe(audio_path, language="uk")
+
+    assert [p.name for p in tmp_path.glob("job_voice*")] == ["job_voice.ogg"]
+
+
+@pytest.mark.asyncio
 async def test_a_format_nothing_here_can_decode_fails_in_plain_words_unsent(monkeypatch, tmp_path):
     provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
     audio_path = tmp_path / "memo.m4a"
