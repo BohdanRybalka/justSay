@@ -17,6 +17,7 @@ import soundfile as sf
 from httpx import ASGITransport, AsyncClient
 
 from app.config import settings
+from app.core.audio_formats import UNREADABLE_HERE
 from app.core.errors import ConfigurationError, NotReadyError, ResourceUnavailableError
 from app.core.types import ProviderMode
 from app.main import app
@@ -288,6 +289,7 @@ async def test_a_finished_job_shows_for_a_minute_and_a_failed_one_until_dismisse
         ("unsaved", jobs.FAILED_REASON),
         (ConfigurationError("Groq API key is missing."), jobs.NO_KEY_REASON),
         (ResourceUnavailableError("Gemini returned no transcription"), jobs.FAILED_REASON),
+        (ResourceUnavailableError(UNREADABLE_HERE), UNREADABLE_HERE),
         (KeyError("provider"), jobs.FAILED_REASON),
     ],
 )

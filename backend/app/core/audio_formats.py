@@ -28,6 +28,8 @@ MIME_BY_AUDIO_EXTENSION: dict[str, str] = {
 
 ALLOWED_AUDIO_EXTENSIONS: frozenset[str] = frozenset(MIME_BY_AUDIO_EXTENSION)
 
+UNREADABLE_HERE = "This kind of file can't be read on this computer. Cloud mode can transcribe it"
+
 DETECTED_MIME_TO_EXTENSIONS: dict[str, frozenset[str]] = {
     "audio/wav": frozenset({".wav"}),
     "audio/mpeg": frozenset({".mp3"}),

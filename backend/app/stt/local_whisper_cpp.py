@@ -20,6 +20,7 @@ from pathlib import Path
 
 import httpx
 
+from app.core.audio_formats import UNREADABLE_HERE
 from app.core.errors import ResourceUnavailableError
 from app.stt.base import (
     STTProvider,
@@ -55,6 +56,9 @@ _GRACE_POLL_MAX_ATTEMPTS = 30
 _port_lock = threading.Lock()
 
 _download_lock = threading.Lock()
+
+_SERVER_DECODES = frozenset({".wav", ".mp3", ".flac", ".aiff", ".aif"})
+_DECODE_BLOCK_FRAMES = 65536
 
 _HF_MODEL_URL_TEMPLATE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{size}.bin"
 _DOWNLOAD_CHUNK_SIZE = 1024 * 1024
@@ -236,6 +240,38 @@ def _assign_to_job_object(process: subprocess.Popen) -> None:
             "Object -- falling back to atexit-only orphan reaping.",
             getattr(process, "pid", "?"), exc_info=True,
         )
+
+
+def _readable_by_server(audio_path: Path) -> Path:
+    """``audio_path`` when whisper-server decodes its format, else a 16-bit WAV copy beside it.
+
+    whisper-server reads WAV, MP3, FLAC, AIFF and Ogg Vorbis but not Ogg Opus (WhatsApp voice
+    notes); anything soundfile cannot open either raises ``ResourceUnavailableError``.
+    """
+    if audio_path.suffix.lower() in _SERVER_DECODES:
+        return audio_path
+    import soundfile as sf
+
+    target = audio_path.with_name(f"{audio_path.stem}-pcm.wav")
+    try:
+        with sf.SoundFile(str(audio_path)) as source, sf.SoundFile(
+            str(target), "w", samplerate=source.samplerate, channels=source.channels,
+            format="WAV", subtype="PCM_16",
+        ) as sink:
+            for block in source.blocks(blocksize=_DECODE_BLOCK_FRAMES):
+                sink.write(block)
+    except (RuntimeError, OSError) as exc:
+        _discard(target)
+        diagnostic = f"{audio_path.suffix}: {exc}"
+        raise ResourceUnavailableError(UNREADABLE_HERE, diagnostic=diagnostic) from exc
+    return target
+
+
+def _discard(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        log.warning("Could not remove decoded audio %s", path, exc_info=True)
 
 
 class WhisperCppServerSTTProvider(STTProvider):
@@ -429,12 +465,20 @@ class WhisperCppServerSTTProvider(STTProvider):
         )
 
         def _post() -> tuple[str, str | None, float | None]:
-            with open(audio_path, "rb") as f:
-                files = {"file": (audio_path.name, f, "audio/wav")}
-                with httpx.Client(timeout=_INFERENCE_TIMEOUT) as client:
-                    resp = client.post(url, data=data, files=files)
+            sendable = _readable_by_server(audio_path)
+            try:
+                with open(sendable, "rb") as f:
+                    files = {"file": (sendable.name, f, "audio/wav")}
+                    with httpx.Client(timeout=_INFERENCE_TIMEOUT) as client:
+                        resp = client.post(url, data=data, files=files)
+            finally:
+                if sendable != audio_path:
+                    _discard(sendable)
             resp.raise_for_status()
             body = resp.json()
+            if "error" in body:
+                diagnostic = f"whisper-server: {body['error']}"
+                raise ResourceUnavailableError(UNREADABLE_HERE, diagnostic=diagnostic)
             raw_text = body.get("text", "")
             text = "".join(raw_text.splitlines()).strip()
             no_speech_prob = (

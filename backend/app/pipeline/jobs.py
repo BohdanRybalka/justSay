@@ -22,6 +22,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from app.core import tasks
+from app.core.audio_formats import UNREADABLE_HERE
 from app.core.errors import ConfigurationError, JustSayError, NotReadyError
 from app.pipeline.service import process_audio
 from app.transcripts import history
@@ -256,7 +257,8 @@ class JobQueue:
             self._fail(job, NO_KEY_REASON)
         except JustSayError as refusal:
             log.warning("File job %s refused: %s", job.id, refusal.diagnostic or refusal.message)
-            self._fail(job, FAILED_REASON)
+            plain = refusal.message == UNREADABLE_HERE
+            self._fail(job, UNREADABLE_HERE if plain else FAILED_REASON)
         except Exception:
             log.exception("File job %s crashed", job.id)
             self._fail(job, FAILED_REASON)
