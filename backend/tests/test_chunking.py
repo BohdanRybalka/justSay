@@ -325,6 +325,15 @@ async def test_of_two_broken_answers_a_loop_never_beats_a_short_real_one(tmp_pat
     assert result.text == real.text
 
 
+async def test_of_two_answers_too_short_to_tell_apart_the_longer_is_kept(tmp_path):
+    path = _audio(tmp_path, 5.0)
+    provider = _Provider([TranscriptionResult(""), TranscriptionResult("Yes")])
+
+    result = await _run(provider, path)
+
+    assert result.text == "Yes"
+
+
 async def test_when_asking_again_fails_the_first_answer_is_kept(tmp_path):
     path = _audio(tmp_path, 60.0)
     provider = _Provider([
