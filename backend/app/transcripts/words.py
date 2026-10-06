@@ -2,9 +2,10 @@
 
 Derived from ``entries`` on demand and cached on ``history.derived_generation_locked``;
 tokenisation runs in Python, outside the store lock. Files and meetings carry other
-voices, so only rows whose ``source`` is ``dictation`` count. Both stop-word lists always
-apply to the favourite words, because real dictations code-switch (ADR 016); filler words
-are flagged instead, and stay even where a stop-word list holds them.
+voices, so only rows whose ``source`` is ``dictation`` count, read from ``raw_text`` so the
+fillers a cleanup removed still count. Both stop-word lists always apply to the favourite
+words, because real dictations code-switch (ADR 016); filler words are flagged instead, and
+stay even where a stop-word list holds them.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ WordFilter = Literal["all", "fillers"]
 _TOKEN_RE = re.compile(r"[\wЀ-ӿ]+(?:['’][\wЀ-ӿ]+)*", re.UNICODE)
 
 _DICTATIONS_SQL = (
-    "SELECT cleaned_text, audio_duration_seconds FROM entries WHERE source = 'dictation'"
+    "SELECT raw_text, audio_duration_seconds FROM entries WHERE source = 'dictation'"
 )
 
 
@@ -96,7 +97,7 @@ def dictation_tokens() -> DictationTokens:
         counts: Counter[str] = Counter()
         said: Counter[str] = Counter()
         for row in rows:
-            row_tokens = tokenize(row["cleaned_text"])
+            row_tokens = tokenize(row["raw_text"])
             counts.update(row_tokens)
             said.update(said_words(row_tokens))
         speaking = sum(row["audio_duration_seconds"] or 0.0 for row in rows)

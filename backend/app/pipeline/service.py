@@ -1,7 +1,8 @@
-"""Audio processing pipeline: Audio -> smart-routed STT -> Clipboard.
+"""Audio processing pipeline: Audio -> smart-routed STT -> cleanup -> Clipboard.
 
 Long audio and the formats Groq can't accept go to Gemini;
 short audio goes through Groq Whisper for minimum latency.
+A Cloud-mode dictation is cleaned of fillers before the clipboard; history keeps both texts.
 """
 
 import asyncio
@@ -18,6 +19,7 @@ from app.audio.analysis import analyze_silence
 from app.audio.config import audio_settings
 from app.audio.vad import analyze_vad
 from app.pipeline.chunking import PiecePacer, transcribe_in_pieces
+from app.pipeline.cleanup import clean_dictation
 from app.pipeline.utils import detect_duration
 from app.stt.config import stt_settings
 from app.stt.routing import get_routed_provider, is_local_provider
@@ -169,7 +171,10 @@ async def process_audio(
             discarded_reason="silence",
         )
 
-    text = result.text
+    raw_text = result.text
+    text = raw_text
+    if source == "dictation" and not is_local_provider(stt):
+        text = await clean_dictation(raw_text, stt_settings)
 
     log.info(
         "Pipeline result: %s produced %d chars in %dms",
@@ -187,7 +192,7 @@ async def process_audio(
             log.warning("Copying the transcript to the clipboard failed", exc_info=True)
 
     duration_ms = int((time.perf_counter() - start) * 1000)
-    word_count = len(text.split()) if text else 0
+    word_count = len(raw_text.split()) if raw_text else 0
 
     effective_language = language
     if language == "auto" and result.detected_language:
@@ -199,6 +204,7 @@ async def process_audio(
     try:
         entry = save_entry(
             text=text,
+            raw_text=raw_text,
             duration_ms=duration_ms,
             language=effective_language,
             model_name=stt.model_name,

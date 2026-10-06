@@ -220,6 +220,49 @@ async def test_pipeline_forwards_the_source_to_history(
 
 
 @pytest.mark.asyncio
+async def test_a_cloud_dictation_reaches_the_clipboard_cleaned_and_history_keeps_both(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    copy_mock, save_mock = _isolate_side_effects
+    stt = _make_stt_mock("ну е звіт до четверга")
+    clean = AsyncMock(return_value="Звіт до четверга.")
+
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)), patch(
+        "app.pipeline.service.clean_dictation", clean
+    ):
+        result = await process_audio(sample_wav, source="dictation")
+
+    assert result.text == "Звіт до четверга."
+    copy_mock.assert_called_once_with("Звіт до четверга.")
+    saved = save_mock.call_args.kwargs
+    assert (saved["text"], saved["raw_text"]) == ("Звіт до четверга.", "ну е звіт до четверга")
+    assert saved["word_count"] == 5
+    assert clean.call_args.args[0] == "ну е звіт до четверга"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source, is_local", [("file", False), ("meeting", False), ("dictation", True)]
+)
+async def test_files_meetings_and_local_dictations_are_not_cleaned(
+    sample_wav, cloud_mode, _isolate_side_effects, source, is_local
+):
+    copy_mock, save_mock = _isolate_side_effects
+    stt = _make_stt_mock("ну е звіт")
+    stt.is_local = is_local
+    clean = AsyncMock(return_value="Звіт.")
+
+    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)), patch(
+        "app.pipeline.service.clean_dictation", clean
+    ), patch("app.stt.local_setup.await_local_ready", AsyncMock()):
+        result = await process_audio(sample_wav, source=source)
+
+    clean.assert_not_called()
+    assert result.text == "ну е звіт"
+    assert save_mock.call_args.kwargs["raw_text"] == "ну е звіт"
+
+
+@pytest.mark.asyncio
 async def test_pipeline_respects_explicit_audio_duration(
     sample_wav, cloud_mode, _isolate_side_effects
 ):

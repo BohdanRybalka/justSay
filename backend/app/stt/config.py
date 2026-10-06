@@ -23,6 +23,7 @@ class STTSettings(PackageSettings):
 
     groq_api_key: str = ""
     groq_whisper_model: str = "whisper-large-v3-turbo"
+    groq_cleanup_model: str = "openai/gpt-oss-20b"
 
     engine: STTEngine = "auto"
 

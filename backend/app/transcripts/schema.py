@@ -41,7 +41,7 @@ ENTRY_COLUMNS = (
     "starred",
 )
 
-ENTRY_READ_COLUMNS = tuple(c for c in ENTRY_COLUMNS if c != "cleaned_text")
+ENTRY_READ_COLUMNS = tuple(c for c in ENTRY_COLUMNS if c != "raw_text")
 
 
 def columns_sql(columns: Sequence[str], alias: str = "") -> str:

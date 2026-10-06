@@ -983,6 +983,26 @@ def _no_background_indexer_by_default(monkeypatch, request):
 
 
 
+class DictationCleanupReachedTheNetworkError(RuntimeError):
+    """A test let the dictation cleanup build a real Groq client."""
+
+
+@pytest.fixture(autouse=True)
+def _dictation_cleanup_never_reaches_groq(monkeypatch, request):
+    """Any test that gets as far as a real Groq chat client fails that call instead.
+
+    `backend/.env` may hold a real Groq key that `STTSettings` reads, so an unpatched
+    dictation would otherwise send its transcript to Groq. The cleanup keeps the
+    transcript on a failed call, so tests that are not about the cleanup are unaffected.
+    """
+    from app.pipeline import cleanup
+
+    def _refuse(api_key: str):
+        raise DictationCleanupReachedTheNetworkError(request.node.nodeid)
+
+    monkeypatch.setattr(cleanup, "_client", _refuse)
+
+
 @pytest.fixture(autouse=True)
 def _no_real_package_installs(monkeypatch, request):
     """Fail any test that tries to spawn a package installer, naming the test.
