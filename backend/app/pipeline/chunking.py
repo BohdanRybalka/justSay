@@ -90,7 +90,8 @@ def join_at_seam(left: str, right: str) -> str:
 
     The overlap is marked by a run of at least three equal words that can sit inside it (see
     ``_overlap_run``); each side is cut at its middle, so a word one piece added beside it does
-    not hide it. Without such a run, as when the overlap held no speech, nothing is cut.
+    not hide it. Without such a run nothing is cut; a phrase repeated close to the seam on both
+    sides of a speechless overlap can still be taken for it.
     """
     left_tokens, right_tokens = _TOKEN.findall(left), _TOKEN.findall(right)
     tail_start = max(0, len(left_tokens) - MAX_OVERLAP_WORDS)
