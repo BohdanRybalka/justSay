@@ -91,6 +91,21 @@ def test_a_lost_negation_is_caught(raw, answer):
     assert not is_faithful_cleanup(raw, answer)
 
 
+@pytest.mark.parametrize(
+    "raw, answer",
+    [
+        ("Завтра, ні, післязавтра", "Післязавтра."),
+        ("о п'ятій, ні, о шостій", "О шостій."),
+        ("я не не знаю що сказати", "Я не знаю, що сказати."),
+        ("я не можу, ой, я можу прийти завтра", "Я можу прийти завтра."),
+        ("I do not think so", "I don’t think so."),
+        ("нема часу", "Немає часу."),
+    ],
+)
+def test_short_corrections_and_reworded_negations_pass(raw, answer):
+    assert is_faithful_cleanup(raw, answer)
+
+
 def test_scattered_deletions_that_summarise_are_caught():
     raw = (
         "сьогодні зранку я поїхав на роботу потім зустрівся з командою обговорили план "

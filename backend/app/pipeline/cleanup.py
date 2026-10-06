@@ -29,7 +29,14 @@ ADDED_SHARE_LIMIT = 0.1
 ADDED_FLOOR = 3
 
 _HESITATION = re.compile(r"е+м*|м+|а{2,}|у{2,}|um+|uh+|e+r+m*|h+m+|a+h+|e+h+")
-_NEGATIONS = frozenset({"не", "ніколи", "немає", "нема", "not", "never", "don't", "doesn't"})
+_CORRECTION_MARKERS = frozenset({"ні", "ой", "тобто", "вірніше", "sorry"})
+_NEGATIONS = (
+    frozenset({"не"}),
+    frozenset({"ніколи"}),
+    frozenset({"нема", "немає"}),
+    frozenset({"never"}),
+    frozenset({"not", "don't", "doesn't", "didn't", "isn't", "aren't", "wasn't", "can't", "won't"}),
+)
 _FILLER_PHRASES = tuple(
     sorted({tuple(tokenize(filler)) for filler in FILLERS}, key=len, reverse=True)
 )
@@ -55,16 +62,35 @@ def system_prompt(glossary: str | None) -> str:
 
 
 def _explained_positions(tokens: list[str]) -> set[int]:
-    """Positions a cleanup may drop: hesitations, fillers, and a word said twice in a row."""
+    """Positions a cleanup may drop: hesitations, fillers, correction markers, a repeated word."""
     explained: set[int] = set()
     for index, token in enumerate(tokens):
-        if _HESITATION.fullmatch(token) or (index and tokens[index - 1] == token):
+        if (
+            _HESITATION.fullmatch(token)
+            or token in _CORRECTION_MARKERS
+            or (index and tokens[index - 1] == token)
+        ):
             explained.add(index)
         for phrase in _FILLER_PHRASES:
             if tuple(tokens[index : index + len(phrase)]) == phrase:
                 explained.update(range(index, index + len(phrase)))
                 break
     return explained
+
+
+def _tokens(text: str) -> list[str]:
+    return tokenize(text.replace("’", "'"))
+
+
+def _loses_a_negation(raw: list[str], cleaned: list[str], explained: set[int]) -> bool:
+    """Whether ``cleaned`` says a negation fewer times than ``raw`` without a self-correction."""
+    if _CORRECTION_MARKERS.intersection(raw):
+        return False
+    return any(
+        sum(token in group for token in cleaned)
+        < sum(token in group for index, token in enumerate(raw) if index not in explained)
+        for group in _NEGATIONS
+    )
 
 
 def is_faithful_cleanup(raw: str, cleaned: str) -> bool:
@@ -74,11 +100,11 @@ def is_faithful_cleanup(raw: str, cleaned: str) -> bool:
     share of the other words above `DROPPED_SHARE_LIMIT`, fewer of them surviving than
     `SURVIVING_SHARE_MINIMUM`, a lost negation, or more added words than rewording explains.
     """
-    raw_tokens = tokenize(raw)
-    cleaned_tokens = tokenize(cleaned)
-    if any(cleaned_tokens.count(word) < raw_tokens.count(word) for word in _NEGATIONS):
-        return False
+    raw_tokens = _tokens(raw)
+    cleaned_tokens = _tokens(cleaned)
     explained = _explained_positions(raw_tokens)
+    if _loses_a_negation(raw_tokens, cleaned_tokens, explained):
+        return False
     matcher = difflib.SequenceMatcher(None, raw_tokens, cleaned_tokens, autojunk=False)
     dropped = 0
     added = 0
