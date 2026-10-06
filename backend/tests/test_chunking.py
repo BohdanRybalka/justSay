@@ -139,6 +139,19 @@ def test_words_heard_in_the_overlap_are_kept_once(left, right, joined):
     assert join_at_seam(left, right) == joined
 
 
+def test_an_overlap_without_shared_speech_is_joined_whole_not_cut_at_a_chance_match():
+    left = (
+        "Сідай. Заводься. І погнали. Так, мені отуди. І ось там щось є, наче якісь дерева і там "
+        "щось теж типу сміттєзвалища якогось. Хм."
+    )
+    right = (
+        "Так, тихенько-тихенько. Ні, то скеля. А мені здалося, що там якийсь будинок на скелі "
+        "побудований. І тут нічого. Мені здалось... О, чекайте, а там що?"
+    )
+
+    assert join_at_seam(left, right) == f"{left} {right}"
+
+
 async def test_a_long_recording_goes_as_flac_pieces_joined_at_the_seams(tmp_path, short_pieces):
     path = _audio(tmp_path, 70.0)
     provider = _Provider([

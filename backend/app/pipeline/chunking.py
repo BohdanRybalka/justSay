@@ -31,6 +31,7 @@ MAX_PAUSE_SECONDS = 300.0
 MAX_PAUSES_PER_PIECE = 5
 SEAM_WINDOW_WORDS = 80
 MIN_SEAM_MATCHES = 2
+MIN_SEAM_AGREEMENT = 0.5
 
 _TOKEN = re.compile(r"\S+\s*")
 
@@ -61,8 +62,9 @@ def _normalised(token: str) -> str:
 def join_at_seam(left: str, right: str) -> str:
     """``left`` then ``right``, with the words both heard in the overlap kept once.
 
-    Slides the head of ``right`` over the tail of ``left`` and keeps the best alignment with at
-    least two equal words, cutting each side at the middle of it (Groq's audio-chunking cookbook).
+    Slides the head of ``right`` over the tail of ``left`` and keeps the best alignment where at
+    least two words and half of those paired agree, cutting each side at its middle (Groq's
+    audio-chunking cookbook). Without one, as when the overlap held no speech, nothing is cut.
     """
     left_tokens, right_tokens = _TOKEN.findall(left), _TOKEN.findall(right)
     tail_start = max(0, len(left_tokens) - SEAM_WINDOW_WORDS)
@@ -78,7 +80,8 @@ def join_at_seam(left: str, right: str) -> str:
         pairs = zip(tail[tail_from:tail_to], head[head_from:head_to])
         matches = sum(1 for a, b in pairs if a and a == b)
         score = matches / offset + offset / 10000
-        if matches >= MIN_SEAM_MATCHES and score > best_score:
+        agreed = matches >= MIN_SEAM_MATCHES and matches / offset >= MIN_SEAM_AGREEMENT
+        if agreed and score > best_score:
             best_score = score
             best = (tail_start + (tail_from + tail_to) // 2, (head_from + head_to) // 2)
     if best is None:
