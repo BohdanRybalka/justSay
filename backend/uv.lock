@@ -832,6 +832,8 @@ dependencies = [
 
 [package.optional-dependencies]
 audio = [
+    { name = "av", version = "17.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "av", version = "18.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -865,6 +867,7 @@ local-llm = [
 
 [package.metadata]
 requires-dist = [
+    { name = "av", marker = "extra == 'audio'", specifier = ">=17.0.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "faster-whisper", marker = "extra == 'local'", specifier = ">=1.1.0" },
     { name = "google-genai", marker = "extra == 'cloud'", specifier = ">=1.0.0" },

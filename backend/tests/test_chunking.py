@@ -6,16 +6,19 @@ synthetic and real, so cutting and encoding run for real.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 import soundfile as sf
 
+from app.core.audio_formats import ffmpeg_selftest
 from app.core.errors import ResourceUnavailableError
 from app.pipeline import chunking
 from app.pipeline.chunking import join_at_seam, piece_spans, transcribe_in_pieces
 from app.stt.base import STTProvider, TranscriptionResult
+from tests.conftest import write_aac_m4a
 
 GROQ_FILE_LIMIT = 25 * 1000 * 1000
 THRESHOLD = 0.6
@@ -270,7 +273,17 @@ async def test_a_refusal_without_a_short_wait_ends_the_work(tmp_path, answers):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["job_x.wav"]
 
 
-async def test_a_format_it_cannot_cut_goes_whole_in_one_request(tmp_path):
+async def test_an_m4a_is_cut_into_pieces_like_any_other_recording(tmp_path, short_pieces):
+    path = write_aac_m4a(tmp_path / "job_x.m4a", 70.0)
+    provider = _Provider([TranscriptionResult("a")] * 3)
+
+    await _run(provider, path)
+
+    assert [round(s["seconds"]) for s in provider.sent] == [27, 27, 27]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["job_x.m4a"]
+
+
+async def test_a_file_nothing_here_can_decode_goes_whole_in_one_request(tmp_path):
     path = tmp_path / "job_x.m4a"
     path.write_bytes(b"\x00\x00\x00\x20ftypM4A " + b"\x00" * 64)
     provider = _Provider([TranscriptionResult("whole", no_speech_prob=0.2)])
@@ -282,3 +295,13 @@ async def test_a_format_it_cannot_cut_goes_whole_in_one_request(tmp_path):
     assert [(s["path"], s["language"]) for s in provider.sent] == [(path, "en")]
     assert pacer.events == [("before", 0, 1), ("done", 1, 1)]
     assert sorted(p.name for p in tmp_path.iterdir()) == ["job_x.m4a"]
+
+
+def test_the_ffmpeg_selftest_passes_here_and_fails_without_pyav(monkeypatch):
+    assert ffmpeg_selftest() == (True, "ok")
+
+    monkeypatch.setitem(sys.modules, "av", None)
+    ok, message = ffmpeg_selftest()
+
+    assert ok is False
+    assert message.startswith("decoding an AAC M4A raised: ")

@@ -21,6 +21,7 @@ from app.stt.base import LOAD_FAILED_WITHOUT_A_MESSAGE
 from app.stt.config import STTSettings
 from app.stt.glossary import WHISPER_PROMPT_CHAR_BUDGET
 from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
+from tests.conftest import write_aac_m4a
 
 _requires_windows = pytest.mark.skipif(
     sys.platform != "win32",
@@ -392,20 +393,24 @@ async def test_transcribe_spawns_server_at_most_once_across_two_calls(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_an_ogg_opus_voice_note_is_sent_as_16k_mono_wav_and_the_copy_removed(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize("suffix", [".ogg", ".m4a"])
+async def test_a_voice_note_the_server_cannot_read_is_sent_as_16k_mono_wav_and_the_copy_removed(
+    monkeypatch, tmp_path, suffix
 ):
-    """A format whisper-server cannot decode (Ogg Opus, WhatsApp's voice notes) reaches it as a
-    16 kHz mono WAV made on this machine, and the copy is gone once the answer is in."""
+    """A format whisper-server cannot decode (Ogg Opus from WhatsApp, AAC in M4A from a phone)
+    reaches it as a 16 kHz mono WAV made on this machine, and the copy is gone afterwards."""
     import io
 
     import numpy as np
     import soundfile as sf
 
     provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
-    audio_path = tmp_path / "job_voice.ogg"
-    stereo = np.zeros((48000, 2), dtype="float32")
-    sf.write(str(audio_path), stereo, 48000, format="OGG", subtype="OPUS")
+    audio_path = tmp_path / f"job_voice{suffix}"
+    if suffix == ".m4a":
+        write_aac_m4a(audio_path, 1.0, rate=48000)
+    else:
+        stereo = np.zeros((48000, 2), dtype="float32")
+        sf.write(str(audio_path), stereo, 48000, format="OGG", subtype="OPUS")
     sent = []
 
     def post_impl(url, data, files):
@@ -421,7 +426,7 @@ async def test_an_ogg_opus_voice_note_is_sent_as_16k_mono_wav_and_the_copy_remov
 
     assert result.text == "hello"
     assert sent == [("job_voice-pcm.wav", "WAV", 16000, 1)]
-    assert sorted(p.name for p in tmp_path.glob("job_voice*")) == ["job_voice.ogg"]
+    assert sorted(p.name for p in tmp_path.glob("job_voice*")) == [audio_path.name]
 
 
 @pytest.mark.asyncio
