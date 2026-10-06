@@ -8,9 +8,10 @@ import asyncio
 import logging
 from pathlib import Path
 
-from app.core.constants import GROQ_TIMEOUT_SECONDS
+from app.core.constants import GROQ_TIMEOUT_SECONDS, RATE_LIMIT_RETRY_SECONDS
 from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.stt.base import (
+    WHISPER_WINDOW_SECONDS,
     STTProvider,
     TranscriptionResult,
     clean_transcript_text,
@@ -23,12 +24,21 @@ from app.stt.glossary import glossary_summary, whisper_glossary
 log = logging.getLogger(__name__)
 
 
+def _retry_after(error: Exception) -> str:
+    """The seconds Groq's ``retry-after`` header asks for, or the app's default without one."""
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None) or {}
+    return str(headers.get("retry-after") or RATE_LIMIT_RETRY_SECONDS)
+
+
 class GroqWhisperSTTProvider(STTProvider):
     """Groq-hosted Whisper (whisper-large-v3-turbo) for fast short-audio transcription.
 
     Free-tier file size limit 25 MB, enforced upstream. Accepts WAV, MP3, FLAC
     and OGG, not .webm. The SDK call times out at `GROQ_TIMEOUT_SECONDS`.
     """
+
+    longest_piece_seconds = WHISPER_WINDOW_SECONDS
 
     def __init__(self, settings: STTSettings):
         self._settings = settings
@@ -115,7 +125,13 @@ class GroqWhisperSTTProvider(STTProvider):
             msg = str(e)
             if "429" in msg or "rate_limit" in msg.lower():
                 raise ResourceUnavailableError(
-                    "Groq rate limit exceeded. Try again later or switch STT to Gemini."
+                    "Groq rate limit exceeded. Try again later or switch STT to Gemini.",
+                    headers={"Retry-After": _retry_after(e)},
+                ) from e
+            if getattr(e, "status_code", None) == 503:
+                raise ResourceUnavailableError(
+                    "Groq is overloaded right now. Try again later.",
+                    headers={"Retry-After": _retry_after(e)},
                 ) from e
             raise
 

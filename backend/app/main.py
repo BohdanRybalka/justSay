@@ -246,7 +246,21 @@ def _cli() -> None:
             "(ADR 088)."
         ),
     )
+    parser.add_argument(
+        "--selftest-ffmpeg",
+        action="store_true",
+        help=(
+            "Verify FFmpeg (PyAV) is live in this build — that an AAC M4A made "
+            "on the spot decodes to a 16 kHz mono WAV, the path every M4A, AAC "
+            "and WebM file takes to be cut into pieces — then exit."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.selftest_ffmpeg:
+        from app.core.audio_formats import ffmpeg_selftest
+
+        _report_selftest(ffmpeg_selftest)
 
     if args.selftest_ten_vad:
         from app.audio import vad

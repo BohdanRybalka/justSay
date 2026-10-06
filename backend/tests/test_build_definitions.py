@@ -76,6 +76,7 @@ _SELFTEST_FLAG_CHECKS = {
     "--selftest-sqlite-vec": "app.transcripts.vector_store.selftest",
     "--selftest-ten-vad": "app.audio.vad.selftest",
     "--selftest-psutil": "app.stt.local_setup.psutil_selftest",
+    "--selftest-ffmpeg": "app.core.audio_formats.ffmpeg_selftest",
 }
 
 
@@ -575,6 +576,17 @@ def test_the_frozen_sidecar_selftest_runs_the_psutil_flag():
     block = _step_named("Verify the frozen sidecar can read its own memory through psutil")
 
     assert _SELFTEST_FLAG.findall(block) == ["--selftest-psutil"]
+    assert _STEP_GATE.search(block) is None
+    assert _failure_swallowing_constructs(block) == []
+
+
+def test_the_frozen_sidecar_selftest_runs_the_ffmpeg_flag():
+    """Without FFmpeg an M4A goes to the provider whole, and an hour of it comes
+    back looping; PyAV's native libraries are relocated by PyInstaller, so only
+    the shipped artifact can say they still decode."""
+    block = _step_named("Verify the frozen sidecar decodes M4A through FFmpeg")
+
+    assert _SELFTEST_FLAG.findall(block) == ["--selftest-ffmpeg"]
     assert _STEP_GATE.search(block) is None
     assert _failure_swallowing_constructs(block) == []
 

@@ -1,4 +1,4 @@
-"""Audio container formats — the extension/MIME table and the magic-bytes detector.
+"""Audio container formats — the extension/MIME table, the magic-bytes detector, the decoder.
 
 Deliberately free of ``fastapi``, so a provider can look up a Content-Type
 without acquiring a web-framework dependency.
@@ -9,6 +9,8 @@ MIME to serve it.
 """
 
 from pathlib import Path
+
+from app.core.scratch import discard_scratch_file
 
 MIME_BY_AUDIO_EXTENSION: dict[str, str] = {
     ".wav": "audio/wav",
@@ -44,6 +46,12 @@ DETECTED_MIME_TO_EXTENSIONS: dict[str, frozenset[str]] = {
 TRUSTED_EXTENSIONS: frozenset[str] = frozenset({".aac"})
 
 MIN_MAGIC_BYTES: int = 16
+
+DECODE_BLOCK_FRAMES: int = 65536
+
+
+class UndecodableAudioError(Exception):
+    """Neither soundfile nor FFmpeg can open this file: it is damaged or not audio at all."""
 
 
 def detect_audio_mime(content: bytes) -> str | None:
@@ -92,3 +100,99 @@ def mime_for_extension(filename: str | None) -> str:
     """
     ext = Path(filename).suffix.lower() if filename else ""
     return MIME_BY_AUDIO_EXTENSION.get(ext, "audio/wav")
+
+
+def decode_to_mono_wav(source: Path, target: Path, rate: int) -> None:
+    """Write ``source`` to ``target`` as a 16-bit mono WAV at ``rate``, a block at a time.
+
+    soundfile reads what libsndfile knows; FFmpeg (PyAV) the rest, such as M4A, AAC and WebM.
+    Raises ``UndecodableAudioError`` when neither can open ``source``; any later failure removes
+    ``target`` and propagates.
+    """
+    import soundfile as sf
+
+    try:
+        reader = sf.SoundFile(str(source))
+        write = _write_from_soundfile
+    except RuntimeError:
+        reader = _open_with_ffmpeg(source)
+        write = _write_from_ffmpeg
+
+    try:
+        with reader, sf.SoundFile(
+            str(target), "w", samplerate=rate, channels=1, format="WAV", subtype="PCM_16"
+        ) as sink:
+            write(reader, sink, rate)
+    except Exception:
+        discard_scratch_file(target)
+        raise
+
+
+def _write_from_soundfile(reader, sink, rate: int) -> None:
+    import numpy as np
+    import soxr
+
+    stream = soxr.ResampleStream(reader.samplerate, rate, 1, dtype="float32")
+    for block in reader.blocks(DECODE_BLOCK_FRAMES, dtype="float32", always_2d=True):
+        sink.write(stream.resample_chunk(block.mean(axis=1), last=False))
+    sink.write(stream.resample_chunk(np.zeros(0, dtype=np.float32), last=True))
+
+
+def _open_with_ffmpeg(source: Path):
+    import av
+
+    try:
+        container = av.open(str(source))
+    except av.FFmpegError as exc:
+        raise UndecodableAudioError(f"{source.suffix}: {exc}") from exc
+    if not container.streams.audio:
+        container.close()
+        raise UndecodableAudioError(f"{source.suffix}: no audio stream")
+    return container
+
+
+def _write_from_ffmpeg(container, sink, rate: int) -> None:
+    import av
+
+    resampler = av.AudioResampler(format="s16", layout="mono", rate=rate)
+    for frame in container.decode(audio=0):
+        for resampled in resampler.resample(frame):
+            sink.write(resampled.to_ndarray().reshape(-1))
+    for resampled in resampler.resample(None):
+        sink.write(resampled.to_ndarray().reshape(-1))
+
+
+def encode_aac_m4a(path: Path, samples, rate: int) -> None:
+    """Write planar stereo float32 ``samples`` (shape 2 x n) to ``path`` as AAC in an M4A."""
+    import av
+    import numpy as np
+
+    with av.open(str(path), "w", format="mp4") as container:
+        stream = container.add_stream("aac", rate=rate, layout="stereo")
+        for start in range(0, samples.shape[1], 1024):
+            block = np.ascontiguousarray(samples[:, start:start + 1024], dtype=np.float32)
+            frame = av.AudioFrame.from_ndarray(block, format="fltp", layout="stereo")
+            frame.rate = rate
+            container.mux(stream.encode(frame))
+        container.mux(stream.encode(None))
+
+
+def ffmpeg_selftest() -> tuple[bool, str]:
+    """``--selftest-ffmpeg`` backend: an AAC M4A made here decodes to 16 kHz mono. Never raises."""
+    import tempfile
+
+    import numpy as np
+    import soundfile as sf
+
+    try:
+        tone = 0.3 * np.sin(2.0 * np.pi * 220.0 * np.arange(44100) / 44100)
+        with tempfile.TemporaryDirectory() as probe_dir:
+            source, target = Path(probe_dir) / "probe.m4a", Path(probe_dir) / "probe.wav"
+            encode_aac_m4a(source, np.vstack([tone, tone]), 44100)
+            decode_to_mono_wav(source, target, 16000)
+            info = sf.info(str(target))
+    except Exception as e:
+        return False, f"decoding an AAC M4A raised: {e}"
+    if (info.samplerate, info.channels) != (16000, 1) or abs(info.duration - 1.0) > 0.1:
+        return False, f"decoded to {info.samplerate} Hz x {info.channels}, {info.duration:.2f}s"
+    return True, "ok"

@@ -20,10 +20,11 @@ from pathlib import Path
 
 import httpx
 
-from app.core.audio_formats import UNREADABLE_HERE
+from app.core.audio_formats import UNREADABLE_HERE, UndecodableAudioError, decode_to_mono_wav
 from app.core.errors import ResourceUnavailableError
 from app.core.scratch import discard_scratch_file
 from app.stt.base import (
+    WHISPER_WINDOW_SECONDS,
     STTProvider,
     TranscriptionResult,
     latched_load_error,
@@ -59,7 +60,6 @@ _port_lock = threading.Lock()
 _download_lock = threading.Lock()
 
 _SERVER_DECODES = frozenset({".wav", ".mp3", ".flac", ".aiff", ".aif"})
-_DECODE_BLOCK_FRAMES = 65536
 _SERVER_RATE = 16000
 _SERVER_CANNOT_READ = "failed to read audio data"
 _SERVER_FAILED = "The local engine could not turn this audio into text"
@@ -250,33 +250,17 @@ def _readable_by_server(audio_path: Path) -> Path:
     """``audio_path`` when whisper-server decodes its format, else a 16 kHz mono WAV copy beside it.
 
     whisper-server reads WAV, MP3, FLAC, AIFF and Ogg Vorbis but not Ogg Opus (WhatsApp voice
-    notes) and converts everything to 16 kHz mono itself. A file soundfile cannot open either
-    raises ``ResourceUnavailableError(UNREADABLE_HERE)``; any later failure removes the copy.
+    notes) or AAC in M4A, and converts everything to 16 kHz mono itself. A file neither soundfile
+    nor FFmpeg opens raises ``ResourceUnavailableError(UNREADABLE_HERE)``; a later failure removes
+    the copy.
     """
     if audio_path.suffix.lower() in _SERVER_DECODES:
         return audio_path
-    import numpy as np
-    import soundfile as sf
-    import soxr
-
-    try:
-        source = sf.SoundFile(str(audio_path))
-    except RuntimeError as exc:
-        diagnostic = f"{audio_path.suffix}: {exc}"
-        raise ResourceUnavailableError(UNREADABLE_HERE, diagnostic=diagnostic) from exc
     target = audio_path.with_name(f"{audio_path.stem}-pcm.wav")
     try:
-        with source, sf.SoundFile(
-            str(target), "w", samplerate=_SERVER_RATE, channels=1, format="WAV", subtype="PCM_16"
-        ) as sink:
-            stream = soxr.ResampleStream(source.samplerate, _SERVER_RATE, 1, dtype="float32")
-            blocks = source.blocks(_DECODE_BLOCK_FRAMES, dtype="float32", always_2d=True)
-            for block in blocks:
-                sink.write(stream.resample_chunk(block.mean(axis=1), last=False))
-            sink.write(stream.resample_chunk(np.zeros(0, dtype=np.float32), last=True))
-    except Exception:
-        discard_scratch_file(target)
-        raise
+        decode_to_mono_wav(audio_path, target, _SERVER_RATE)
+    except UndecodableAudioError as exc:
+        raise ResourceUnavailableError(UNREADABLE_HERE, diagnostic=str(exc)) from exc
     return target
 
 
@@ -287,6 +271,7 @@ class WhisperCppServerSTTProvider(STTProvider):
     """
 
     is_local = True
+    longest_piece_seconds = WHISPER_WINDOW_SECONDS
 
     def __init__(self, settings: STTSettings):
         self._settings = settings

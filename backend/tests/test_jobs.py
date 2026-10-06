@@ -16,6 +16,7 @@ import pytest
 import soundfile as sf
 from httpx import ASGITransport, AsyncClient
 
+from app.audio.vad import VadAnalysis
 from app.config import settings
 from app.core.audio_formats import UNREADABLE_HERE
 from app.core.errors import ConfigurationError, NotReadyError, ResourceUnavailableError
@@ -40,9 +41,20 @@ class _Clock:
 class _FakePipeline:
     """Stands in for `process_audio`; each call waits for `release` before it answers."""
 
-    def __init__(self, *, duration: float | None = 60.0, outcome: object = "saved") -> None:
+    def __init__(
+        self,
+        *,
+        duration: float | None = 60.0,
+        outcome: object = "saved",
+        pieces: int = 1,
+        pause: float | None = None,
+    ) -> None:
         self.duration = duration
+        self.pause = pause
         self.outcome = outcome
+        self.pieces = pieces
+        self.piece = -1
+        self.next_piece = asyncio.Event()
         self.release = asyncio.Event()
         self.transcribing = asyncio.Event()
         self.calls: list[dict] = []
@@ -51,8 +63,18 @@ class _FakePipeline:
         self.calls.append({"path": path, **kwargs})
         observer = kwargs["observer"]
         await observer.before_transcribe("mock/model", self.duration)
-        self.transcribing.set()
-        await self.release.wait()
+        for index in range(self.pieces):
+            await observer.before_piece(index, self.pieces)
+            self.piece = index
+            if self.pause is not None:
+                await observer.pause(self.pause)
+            self.transcribing.set()
+            if index + 1 < self.pieces:
+                await self.next_piece.wait()
+                self.next_piece.clear()
+            else:
+                await self.release.wait()
+            observer.piece_done(index + 1, self.pieces)
         if isinstance(self.outcome, BaseException):
             raise self.outcome
         if self.outcome == "silence":
@@ -173,6 +195,113 @@ async def test_no_percentage_without_past_speeds_or_a_known_length(
     await _settle(queue, job_id)
 
 
+async def _until(condition) -> None:
+    for _ in range(100):
+        if condition():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("never happened")
+
+
+@pytest.mark.parametrize(
+    ("known", "first", "second"), [([], 0.0, 0.25), ([0.01, 0.02, 0.5], 0.125, 0.375)]
+)
+async def test_progress_counts_finished_pieces_plus_the_estimate_inside_one(
+    queue, clock, speeds, fakes, known, first, second
+):
+    speeds.extend(known)
+    pipeline = _FakePipeline(duration=60.0, pieces=4)
+    job_id = _start(queue, fakes, pipeline)
+    await asyncio.wait_for(pipeline.transcribing.wait(), 1)
+
+    clock.now += 0.375
+    assert _view(queue, job_id).progress == pytest.approx(first)
+    pipeline.next_piece.set()
+    await _until(lambda: pipeline.piece == 1)
+    clock.now += 0.375
+    assert _view(queue, job_id).progress == pytest.approx(second)
+
+    for piece in (2, 3):
+        pipeline.next_piece.set()
+        await _until(lambda piece=piece: pipeline.piece == piece)
+    pipeline.release.set()
+    await _settle(queue, job_id)
+    assert _view(queue, job_id).progress == 1.0
+
+
+async def test_a_job_waits_for_a_dictation_before_each_piece(queue, gate, fakes):
+    pipeline = _FakePipeline(pieces=2)
+    job_id = _start(queue, fakes, pipeline)
+    await asyncio.wait_for(pipeline.transcribing.wait(), 1)
+
+    with gate.dictating():
+        pipeline.next_piece.set()
+        await asyncio.sleep(0.2)
+        assert pipeline.piece == 0
+    await _until(lambda: pipeline.piece == 1)
+    pipeline.release.set()
+    await _settle(queue, job_id)
+    assert _view(queue, job_id).stage == "done"
+
+
+async def test_a_paused_job_resumes_after_the_wait_it_was_given(queue, fakes):
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    queue.sleep = sleep
+    pipeline = _FakePipeline(pause=12.0)
+    job_id = _start(queue, fakes, pipeline)
+    await asyncio.wait_for(pipeline.transcribing.wait(), 1)
+
+    assert slept == [12.0]
+    assert queue._jobs[job_id].paused is False
+    pipeline.release.set()
+    await _settle(queue, job_id)
+    assert _view(queue, job_id).stage == "done"
+
+
+async def test_a_job_cancelled_during_a_piece_never_starts_the_pause_it_is_asked_for(
+    queue, fakes
+):
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    queue.sleep = sleep
+    pipeline = _FakePipeline()
+    job_id = _start(queue, fakes, pipeline)
+    await asyncio.wait_for(pipeline.transcribing.wait(), 1)
+    queue.cancel_or_dismiss(job_id)
+
+    with pytest.raises(jobs._JobCancelledError):
+        await jobs._JobObserver(queue, queue._jobs[job_id]).pause(300.0)
+    assert slept == []
+    pipeline.release.set()
+    await _settle(queue, job_id)
+
+
+async def test_a_paused_job_stops_at_once_when_cancelled(queue, fakes):
+    never = asyncio.Event()
+
+    async def sleep(seconds: float) -> None:
+        await never.wait()
+
+    queue.sleep = sleep
+    paused, after = _FakePipeline(pause=3600.0), _FakePipeline()
+    job_id = _start(queue, fakes, paused)
+    _start(queue, fakes, after)
+    await _until(lambda: queue._jobs[job_id].paused)
+
+    assert queue.cancel_or_dismiss(job_id) == "cancelled"
+    await asyncio.wait_for(after.transcribing.wait(), 1)
+    assert _view(queue, job_id).stage == "cancelled"
+    assert not paused.calls[0]["path"].exists()
+    after.release.set()
+
+
 async def test_jobs_transcribe_one_at_a_time_oldest_first(queue, fakes):
     first, second = _FakePipeline(), _FakePipeline()
     first_id = _start(queue, fakes, first)
@@ -290,6 +419,11 @@ async def test_a_finished_job_shows_for_a_minute_and_a_failed_one_until_dismisse
         (ConfigurationError("Groq API key is missing."), jobs.NO_KEY_REASON),
         (ResourceUnavailableError("Gemini returned no transcription"), jobs.FAILED_REASON),
         (ResourceUnavailableError(UNREADABLE_HERE), UNREADABLE_HERE),
+        (ResourceUnavailableError("rate limit", headers={"Retry-After": "30"}), jobs.BUSY_REASON),
+        (
+            ResourceUnavailableError("daily quota", headers={"Retry-After": "42188"}),
+            jobs.LIMIT_REACHED_REASON,
+        ),
         (KeyError("provider"), jobs.FAILED_REASON),
     ],
 )
@@ -310,7 +444,7 @@ async def test_a_job_holds_its_audio_back_while_a_dictation_is_processed(queue, 
         job_id = _start(queue, fakes, pipeline)
         await asyncio.sleep(0.2)
         assert not pipeline.transcribing.is_set()
-        assert queue._jobs[job_id].started_at is None
+        assert queue._jobs[job_id].piece_started_at is None
 
     await asyncio.wait_for(pipeline.transcribing.wait(), 1)
     pipeline.release.set()
@@ -367,7 +501,7 @@ async def test_a_dropped_file_is_saved_as_a_file_entry_and_never_copied(
     monkeypatch.setattr(history, "_output_dir", tmp_path)
     monkeypatch.setattr(history, "_conn", None)
     history.bootstrap(tmp_path)
-    stt = MagicMock(model_name="mock/provider", is_local=False)
+    stt = MagicMock(model_name="mock/provider", is_local=False, longest_piece_seconds=600.0)
     stt.transcribe = AsyncMock(return_value=TranscriptionResult(text="from the file"))
     monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
     monkeypatch.setattr(jobs, "process_audio", service.process_audio)
@@ -387,10 +521,36 @@ async def test_a_dropped_file_is_saved_as_a_file_entry_and_never_copied(
         assert listed[0]["entry_id"] == entry.id
         assert (entry.source, entry.source_name) == ("file", "standup.wav")
         assert entry.text == "from the file"
+        assert stt.transcribe.call_args.args[0].suffix == ".flac"
         copy.assert_not_called()
     finally:
         with history._lock:
             history._close_conn_locked()
+
+
+async def test_a_file_whose_every_piece_is_silent_is_never_sent(
+    client, queue, tmp_path, monkeypatch
+):
+    stt = MagicMock(model_name="mock/provider", is_local=False, longest_piece_seconds=600.0)
+    stt.transcribe = AsyncMock(return_value=TranscriptionResult(text="Thank you."))
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
+    monkeypatch.setattr(service.audio_settings, "silence_vad_enabled", True)
+    monkeypatch.setattr(jobs, "process_audio", service.process_audio)
+
+    def vad(path: Path, _settings) -> VadAnalysis:
+        return VadAnalysis(1, 10, 0.2, is_silent="piece" in path.name)
+
+    with (
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+        patch("app.pipeline.service.analyze_vad", side_effect=vad),
+    ):
+        upload = {"file": ("quiet.wav", _wav(tmp_path), "audio/wav")}
+        job_id = (await client.post("/jobs/file", files=upload)).json()["id"]
+        await _settle(queue, job_id)
+
+    view = _view(queue, job_id)
+    assert (view.stage, view.error) == ("failed", jobs.NO_SPEECH_REASON)
+    stt.transcribe.assert_not_called()
 
 
 @pytest.mark.parametrize(

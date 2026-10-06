@@ -1061,6 +1061,17 @@ def fake_genai_modules(client_class) -> dict[str, ModuleType]:
     }
 
 
+def write_aac_m4a(path: Path, seconds: float, rate: int = 44100) -> Path:
+    """An M4A of stereo AAC noise, the kind of file only FFmpeg decodes here."""
+    import numpy as np
+
+    from app.core.audio_formats import encode_aac_m4a
+
+    noise = np.random.default_rng(0).uniform(-0.1, 0.1, (2, int(seconds * rate)))
+    encode_aac_m4a(path, noise, rate)
+    return path
+
+
 def drop_frames(error: BaseException) -> BaseException:
     """Clears `error`'s traceback, context and cause in place, and returns it.
 

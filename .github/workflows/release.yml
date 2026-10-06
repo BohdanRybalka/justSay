@@ -226,6 +226,22 @@ jobs:
           fi
           "$BIN" --selftest-psutil
 
+      # M4A, AAC, WMA and WebM reach the pieces only through FFmpeg (PyAV);
+      # without it they fall back to one whole request, which on an hour of
+      # audio comes back as a transcript stuck in a loop. PyAV is imported
+      # inside a function and ships native libraries PyInstaller relocates
+      # (and on macOS re-signs), so only running the shipped artifact proves
+      # it decodes. Ungated by runner.os — both legs bundle it.
+      - name: Verify the frozen sidecar decodes M4A through FFmpeg
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN="backend/dist/justsay-backend/justsay-backend.exe"
+          else
+            BIN="backend/dist/justsay-backend/justsay-backend"
+          fi
+          "$BIN" --selftest-ffmpeg
+
       - name: Copy onedir bundle to Tauri resources
         shell: bash
         run: |

@@ -186,6 +186,56 @@ async def test_cloud_stt_tokens_used(sample_wav):
     assert mock_call.call_args.args[4] == "audio/wav"
 
 
+class _GeminiRefusalError(Exception):
+    def __init__(self, code: int, details: object) -> None:
+        super().__init__(f"{code}")
+        self.code = code
+        self.details = details
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("details", "retry_after"),
+    [
+        ({"error": {"details": [{"@type": "x.QuotaFailure"}, {"retryDelay": "37.2s"}]}}, "38"),
+        ({"error": {"message": "quota"}}, "30"),
+    ],
+)
+async def test_a_gemini_rate_limit_says_how_long_to_wait(sample_wav, details, retry_after):
+    provider = GeminiSTTProvider(STTSettings(mode=ProviderMode.CLOUD, gemini_api_key="k"))
+    provider._client = MagicMock()
+
+    refusal = _GeminiRefusalError(429, details)
+    with patch.object(GeminiSTTProvider, "_call_gemini", side_effect=refusal):
+        with pytest.raises(ResourceUnavailableError, match="rate limit") as raised:
+            await provider.transcribe(sample_wav)
+
+    assert raised.value.headers == {"Retry-After": retry_after}
+
+
+@pytest.mark.asyncio
+async def test_an_overloaded_gemini_says_to_wait_and_try_again(sample_wav):
+    provider = GeminiSTTProvider(STTSettings(mode=ProviderMode.CLOUD, gemini_api_key="k"))
+    provider._client = MagicMock()
+
+    overloaded = _GeminiRefusalError(503, {"error": {"status": "UNAVAILABLE"}})
+    with patch.object(GeminiSTTProvider, "_call_gemini", side_effect=overloaded):
+        with pytest.raises(ResourceUnavailableError, match="overloaded") as raised:
+            await provider.transcribe(sample_wav)
+
+    assert raised.value.headers == {"Retry-After": "30"}
+
+
+@pytest.mark.asyncio
+async def test_other_gemini_errors_carry_no_retry_hint(sample_wav):
+    provider = GeminiSTTProvider(STTSettings(mode=ProviderMode.CLOUD, gemini_api_key="k"))
+    provider._client = MagicMock()
+
+    with patch.object(GeminiSTTProvider, "_call_gemini", side_effect=_GeminiRefusalError(400, {})):
+        with pytest.raises(_GeminiRefusalError):
+            await provider.transcribe(sample_wav)
+
+
 @pytest.mark.asyncio
 async def test_cloud_stt_empty_response(sample_wav):
     settings = STTSettings(mode=ProviderMode.CLOUD, gemini_api_key="test-key")

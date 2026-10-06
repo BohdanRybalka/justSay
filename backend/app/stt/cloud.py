@@ -6,10 +6,11 @@ Groq Whisper can't accept.
 
 import asyncio
 import logging
+import math
 from pathlib import Path
 
 from app.core.audio_formats import mime_for_extension
-from app.core.constants import GEMINI_TIMEOUT_SECONDS
+from app.core.constants import GEMINI_TIMEOUT_SECONDS, RATE_LIMIT_RETRY_SECONDS
 from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.stt.base import STTProvider, TranscriptionResult, clean_transcript_text
 from app.stt.config import STTSettings
@@ -17,6 +18,20 @@ from app.stt.glossary import glossary_summary, glossary_text
 from app.stt.languages import LANGUAGE_NAMES
 
 log = logging.getLogger(__name__)
+
+
+def _retry_after(error: Exception) -> str:
+    """The seconds a 429's ``RetryInfo.retryDelay`` asks for, or the app's default without one."""
+    body = getattr(error, "details", None)
+    error_body = body.get("error") if isinstance(body, dict) else None
+    details = error_body.get("details") if isinstance(error_body, dict) else None
+    for detail in details if isinstance(details, list) else []:
+        delay = detail.get("retryDelay") if isinstance(detail, dict) else None
+        try:
+            return str(math.ceil(float(str(delay).removesuffix("s"))))
+        except ValueError:
+            continue
+    return str(RATE_LIMIT_RETRY_SECONDS)
 
 
 class GeminiSTTProvider(STTProvider):
@@ -80,8 +95,18 @@ class GeminiSTTProvider(STTProvider):
                 prompt,
                 mime_type,
             )
-        except Exception:
+        except Exception as exc:
             log.exception("Gemini call failed")
+            if getattr(exc, "code", None) == 429:
+                raise ResourceUnavailableError(
+                    "Gemini rate limit exceeded. Try again later.",
+                    headers={"Retry-After": _retry_after(exc)},
+                ) from exc
+            if getattr(exc, "code", None) == 503:
+                raise ResourceUnavailableError(
+                    "Gemini is overloaded right now. Try again later.",
+                    headers={"Retry-After": str(RATE_LIMIT_RETRY_SECONDS)},
+                ) from exc
             raise
 
         return TranscriptionResult(
