@@ -8,6 +8,7 @@ one request. A refusal carrying ``Retry-After`` pauses the work and retries the 
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import math
 import re
@@ -30,8 +31,7 @@ OVERLAP_SECONDS = 10.0
 MAX_PAUSE_SECONDS = 300.0
 MAX_PAUSES_PER_PIECE = 5
 SEAM_WINDOW_WORDS = 80
-MIN_SEAM_MATCHES = 2
-MIN_SEAM_AGREEMENT = 0.5
+MIN_SEAM_RUN = 3
 
 _TOKEN = re.compile(r"\S+\s*")
 
@@ -59,35 +59,28 @@ def _normalised(token: str) -> str:
     return "".join(ch for ch in token.casefold() if ch.isalnum())
 
 
+def _seam_words(tokens: list[str]) -> list[object]:
+    return [_normalised(token) or object() for token in tokens]
+
+
 def join_at_seam(left: str, right: str) -> str:
     """``left`` then ``right``, with the words both heard in the overlap kept once.
 
-    Slides the head of ``right`` over the tail of ``left`` and keeps the best alignment where at
-    least two words and half of those paired agree, cutting each side at its middle (Groq's
-    audio-chunking cookbook). Without one, as when the overlap held no speech, nothing is cut.
+    The longest run of at least three equal words shared by the tail of ``left`` and the head of
+    ``right`` marks the overlap; each side is cut at its middle, so a word one piece added beside
+    it cannot hide it. Without such a run, as when the overlap held no speech, nothing is cut.
     """
     left_tokens, right_tokens = _TOKEN.findall(left), _TOKEN.findall(right)
     tail_start = max(0, len(left_tokens) - SEAM_WINDOW_WORDS)
-    tail = [_normalised(t) for t in left_tokens[tail_start:]]
-    head = [_normalised(t) for t in right_tokens[:SEAM_WINDOW_WORDS]]
-    best: tuple[int, int] | None = None
-    best_score = 0.0
-    for offset in range(1, len(tail) + len(head) + 1):
-        tail_from = max(0, len(tail) - offset)
-        tail_to = min(len(tail), len(tail) + len(head) - offset)
-        head_from = max(0, offset - len(tail))
-        head_to = min(len(head), offset)
-        pairs = zip(tail[tail_from:tail_to], head[head_from:head_to])
-        matches = sum(1 for a, b in pairs if a and a == b)
-        score = matches / offset + offset / 10000
-        agreed = matches >= MIN_SEAM_MATCHES and matches / offset >= MIN_SEAM_AGREEMENT
-        if agreed and score > best_score:
-            best_score = score
-            best = (tail_start + (tail_from + tail_to) // 2, (head_from + head_to) // 2)
-    if best is None:
+    tail = _seam_words(left_tokens[tail_start:])
+    head = _seam_words(right_tokens[:SEAM_WINDOW_WORDS])
+    run = difflib.SequenceMatcher(None, tail, head, autojunk=False).find_longest_match(
+        0, len(tail), 0, len(head)
+    )
+    if run.size < MIN_SEAM_RUN:
         return f"{left.rstrip()} {right.lstrip()}".strip()
-    left_cut, right_cut = best
-    return "".join(left_tokens[:left_cut] + right_tokens[right_cut:]).strip()
+    half = run.size // 2
+    return "".join(left_tokens[: tail_start + run.a + half] + right_tokens[run.b + half :]).strip()
 
 
 def _write_piece(mono: Path, piece: Path, start: float, end: float) -> None:

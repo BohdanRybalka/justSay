@@ -118,8 +118,13 @@ def test_spans_are_equal_overlap_and_cover_the_whole_recording(duration, count):
         ),
         (
             "Привіт, це тест. Ми говоримо про нарізку",
-            "про нарізку довгих записів",
+            "говоримо про нарізку довгих записів",
             "Привіт, це тест. Ми говоримо про нарізку довгих записів",
+        ),
+        (
+            "so the plan is that we take the long road and then",
+            "the plan is that, well, we take the long road and then rest",
+            "so the plan is that we take the long road and then rest",
         ),
         (
             "and so we decided to go.",
@@ -132,7 +137,9 @@ def test_spans_are_equal_overlap_and_cover_the_whole_recording(duration, count):
             "and the budget was fine",
             "we talked about the plan and the budget was fine",
         ),
-        ("Line one.\nLine two", "Line two and three", "Line one.\nLine two and three"),
+        ("Line one.\nLine two is", "Line two is and three", "Line one.\nLine two is and three"),
+        ("so yes", "oh well um so yes then more", "so yes oh well um so yes then more"),
+        ("we stop — … —", "— … — and go on", "we stop — … — — … — and go on"),
     ],
 )
 def test_words_heard_in_the_overlap_are_kept_once(left, right, joined):
@@ -156,8 +163,8 @@ async def test_a_long_recording_goes_as_flac_pieces_joined_at_the_seams(tmp_path
     path = _audio(tmp_path, 70.0)
     provider = _Provider([
         TranscriptionResult("one two three four five six", detected_language="uk"),
-        TranscriptionResult("five six seven eight nine"),
-        TranscriptionResult("eight nine ten"),
+        TranscriptionResult("four five six seven eight nine"),
+        TranscriptionResult("seven eight nine ten"),
     ])
     pacer = _Pacer()
 
