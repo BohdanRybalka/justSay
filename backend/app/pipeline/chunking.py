@@ -35,6 +35,7 @@ MAX_PAUSES_PER_PIECE = 5
 MAX_OVERLAP_WORDS = 45
 MIN_SEAM_RUN = 3
 LOOP_NGRAM_CHARS = 32
+VARIETY_NGRAM_CHARS = 4
 LOOP_REPEATED_SHARE = 0.3
 MIN_CHARS_PER_MINUTE = 60
 
@@ -87,8 +88,7 @@ def _normalised(token: str) -> str:
     return "".join(ch for ch in token.casefold() if ch.isalnum())
 
 
-def _distinct_stretches(letters: str) -> int:
-    size = LOOP_NGRAM_CHARS
+def _distinct_stretches(letters: str, size: int = LOOP_NGRAM_CHARS) -> int:
     return len({letters[i : i + size] for i in range(len(letters) - size + 1)})
 
 
@@ -222,7 +222,10 @@ async def _transcribe_checked(
         return first
     kept = max(
         (first, second),
-        key=lambda r: (not looks_broken(r.text, seconds), len(_normalised(r.text))),
+        key=lambda r: (
+            not looks_broken(r.text, seconds),
+            _distinct_stretches(_normalised(r.text), VARIETY_NGRAM_CHARS),
+        ),
     )
     spent = [r.tokens_used for r in (first, second) if r.tokens_used is not None]
     return replace(kept, tokens_used=sum(spent) if spent else None)

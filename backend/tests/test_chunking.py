@@ -313,6 +313,18 @@ async def test_of_two_broken_answers_the_one_with_more_words_is_kept(tmp_path):
     assert result.text == "only this and that"
 
 
+@pytest.mark.parametrize("loop_first", [True, False])
+async def test_of_two_broken_answers_a_loop_never_beats_a_short_real_one(tmp_path, loop_first):
+    path = _audio(tmp_path, 600.0, rate=16000, channels=1)
+    real = TranscriptionResult("Okay, let us wait for the others. Anna is late again.")
+    loop = TranscriptionResult("Thank you. " * 3000)
+    provider = _Provider([loop, real] if loop_first else [real, loop])
+
+    result = await _run(provider, path)
+
+    assert result.text == real.text
+
+
 async def test_when_asking_again_fails_the_first_answer_is_kept(tmp_path):
     path = _audio(tmp_path, 60.0)
     provider = _Provider([
