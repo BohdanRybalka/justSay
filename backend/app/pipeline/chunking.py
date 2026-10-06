@@ -38,6 +38,7 @@ LOOP_NGRAM_CHARS = 32
 VARIETY_NGRAM_CHARS = 4
 LOOP_REPEATED_SHARE = 0.3
 MIN_CHARS_PER_MINUTE = 60
+SPARSE_CHECK_FROM_SECONDS = 120.0
 
 _TOKEN = re.compile(r"\S+\s*")
 
@@ -68,6 +69,8 @@ def plan_pieces(
     (10 s at least), never leaving less than that for the last one. Without a pause the piece ends
     there and the next starts up to ``OVERLAP_SECONDS`` earlier.
     """
+    if piece_seconds < 2 * MIN_PAUSE_SEARCH_SECONDS:
+        raise ValueError(f"A piece of {piece_seconds}s leaves no room to search for a pause")
     pieces: list[Piece] = []
     search = max(piece_seconds * PAUSE_SEARCH_SHARE, MIN_PAUSE_SEARCH_SECONDS)
     overlap = min(OVERLAP_SECONDS, piece_seconds * OVERLAP_SHARE)
@@ -96,10 +99,14 @@ def _distinct_stretches(letters: str, size: int = LOOP_NGRAM_CHARS) -> int:
 def looks_broken(text: str, seconds: float) -> bool:
     """Too little text for ``seconds`` of audio with speech in it, or the same text over and over.
 
-    Counted in letters, not words, so languages written without spaces are measured alike.
+    Counted in letters, so languages written without spaces are measured alike. An empty answer
+    always is; below ``SPARSE_CHECK_FROM_SECONDS`` a piece may hold one word and is not sparse.
     """
     letters = _normalised(text)
-    if len(letters) < MIN_CHARS_PER_MINUTE * seconds / 60:
+    if not letters:
+        return True
+    sparse_possible = seconds >= SPARSE_CHECK_FROM_SECONDS
+    if sparse_possible and len(letters) < MIN_CHARS_PER_MINUTE * seconds / 60:
         return True
     stretches = len(letters) - LOOP_NGRAM_CHARS + 1
     return stretches > 0 and 1 - _distinct_stretches(letters) / stretches > LOOP_REPEATED_SHARE

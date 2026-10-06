@@ -137,6 +137,11 @@ def test_a_short_piece_still_searches_ten_seconds_for_its_pause():
     assert [round(end - start, 6) for start, end in asked] == [10.0, 10.0]
 
 
+def test_a_piece_too_short_to_search_for_a_pause_is_refused_not_looped():
+    with pytest.raises(ValueError):
+        chunking.plan_pieces(12.0, 10.0, lambda start, end: None)
+
+
 def test_without_a_pause_pieces_overlap_and_are_marked_for_the_seam():
     pieces = chunking.plan_pieces(1300.0, 600.0, lambda start, end: None)
 
@@ -156,6 +161,8 @@ def test_without_a_pause_pieces_overlap_and_are_marked_for_the_seam():
         ("".join(chr(0x4E00 + i) for i in range(20)) * 30, 300.0, True),
         ("Тихо, тихо, тихо, тихо, тихо. " + " ".join(f"w{i}" for i in range(200)), 600, False),
         (" ".join(["we go to the cave with the scorpions now"] * 40), 600.0, True),
+        ("Mm-hmm. Yeah.", 30.0, False),
+        ("Mm-hmm. Yeah.", 120.0, True),
     ],
 )
 def test_a_transcript_too_sparse_or_looping_looks_broken(text, seconds, broken):
@@ -258,12 +265,12 @@ async def test_a_long_recording_goes_as_flac_pieces_joined_at_the_seams(tmp_path
 
 
 async def test_each_provider_gets_pieces_no_longer_than_it_reads_whole(tmp_path, short_pieces):
-    path = _audio(tmp_path, 40.0)
-    provider = _Provider([TranscriptionResult("a")] * 3, longest=15.0)
+    path = _audio(tmp_path, 60.0)
+    provider = _Provider([TranscriptionResult("a")] * 3, longest=25.0)
 
     await _run(provider, path)
 
-    assert [round(s["seconds"], 1) for s in provider.sent] == [15.0, 15.0, 15.0]
+    assert [round(s["seconds"], 1) for s in provider.sent] == [25.0, 25.0, 18.3]
 
 
 def test_whisper_providers_take_its_30_second_window_and_gemini_ten_minutes():
@@ -307,7 +314,7 @@ async def test_pieces_are_cut_in_the_pauses_of_the_recording_and_joined_whole(
 
 
 async def test_a_looping_answer_is_asked_for_again_and_the_sound_one_kept(tmp_path):
-    path = _audio(tmp_path, 60.0)
+    path = _audio(tmp_path, 120.0, rate=16000, channels=1)
     loop = TranscriptionResult(" ".join(["we go to the cave with the scorpions now"] * 40))
     sound = TranscriptionResult(" ".join(f"word{i}" for i in range(60)))
     provider = _Provider([loop, sound])
@@ -321,7 +328,7 @@ async def test_a_looping_answer_is_asked_for_again_and_the_sound_one_kept(tmp_pa
 
 
 async def test_of_two_broken_answers_the_one_with_more_words_is_kept(tmp_path):
-    path = _audio(tmp_path, 60.0)
+    path = _audio(tmp_path, 120.0, rate=16000, channels=1)
     provider = _Provider([
         TranscriptionResult("only this"),
         TranscriptionResult("only this and that"),
@@ -354,7 +361,7 @@ async def test_of_two_answers_too_short_to_tell_apart_the_longer_is_kept(tmp_pat
 
 
 async def test_when_asking_again_fails_the_first_answer_is_kept(tmp_path):
-    path = _audio(tmp_path, 60.0)
+    path = _audio(tmp_path, 120.0, rate=16000, channels=1)
     provider = _Provider([
         TranscriptionResult("only this"),
         ResourceUnavailableError("daily quota", headers={"Retry-After": "42188"}),
@@ -366,7 +373,7 @@ async def test_when_asking_again_fails_the_first_answer_is_kept(tmp_path):
 
 
 async def test_the_tokens_of_both_answers_are_counted(tmp_path):
-    path = _audio(tmp_path, 60.0)
+    path = _audio(tmp_path, 120.0, rate=16000, channels=1)
     provider = _Provider([
         TranscriptionResult("only this", tokens_used=100),
         TranscriptionResult(" ".join(f"word{i}" for i in range(60)), tokens_used=300),
@@ -378,7 +385,7 @@ async def test_the_tokens_of_both_answers_are_counted(tmp_path):
 
 
 async def test_an_answer_the_provider_calls_silent_is_not_asked_for_again(tmp_path):
-    path = _audio(tmp_path, 60.0)
+    path = _audio(tmp_path, 120.0, rate=16000, channels=1)
     provider = _Provider([TranscriptionResult("Thank you.", no_speech_prob=0.9)])
 
     result = await _run(provider, path)
@@ -386,7 +393,7 @@ async def test_an_answer_the_provider_calls_silent_is_not_asked_for_again(tmp_pa
     assert (result.text, result.no_speech_prob, len(provider.sent)) == ("", 1.0, 1)
 
 
-def test_the_longest_piece_fits_groq_even_when_it_cannot_compress(tmp_path):
+def test_a_ten_minute_piece_fits_one_request_even_when_it_cannot_compress(tmp_path):
     mono = tmp_path / "mono.wav"
     seconds = STTProvider.longest_piece_seconds
     noise = np.random.default_rng(1).integers(-32768, 32767, int(seconds * 16000), dtype=np.int16)
