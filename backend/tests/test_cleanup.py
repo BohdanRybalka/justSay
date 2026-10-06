@@ -4,9 +4,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.core.types import ProviderMode
 from app.pipeline import cleanup
 from app.pipeline.cleanup import clean_dictation, is_faithful_cleanup, system_prompt
 from app.stt.config import STTSettings
+
+UNPATCHED_CLIENT = cleanup._client
 
 SELF_CORRECTION = (
     "Ну е треба зробити, ну, звіт до п'ятниці, ні, до четверга, і еее надіслати його Олені, "
@@ -28,7 +31,7 @@ LONG_DICTATION_SENTENCE_DELETED = (
 
 
 def _settings(**overrides) -> STTSettings:
-    values = dict(groq_api_key="test-key", initial_prompt="")
+    values = dict(groq_api_key="test-key", initial_prompt="", mode=ProviderMode.CLOUD)
     values.update(overrides)
     return STTSettings(**values)
 
@@ -62,6 +65,29 @@ def test_an_answer_to_the_dictation_is_caught():
         "Шановний начальнику, прошу надати мені щорічну відпустку з першого по чотирнадцяте "
         "число наступного місяця. З повагою, ваш працівник."
     )
+    assert not is_faithful_cleanup(raw, answer)
+
+
+@pytest.mark.parametrize(
+    "raw, answer",
+    [
+        ("Поясни цю помилку", "Будь ласка, надайте текст помилки."),
+        ("Яка столиця Франції", "Париж."),
+        ("Переклади привіт англійською", "Hello."),
+    ],
+)
+def test_a_short_dictation_answered_instead_of_cleaned_is_caught(raw, answer):
+    assert not is_faithful_cleanup(raw, answer)
+
+
+@pytest.mark.parametrize(
+    "raw, answer",
+    [
+        ("я не хочу йти на зустріч", "Я хочу йти на зустріч."),
+        ("Do not delete the production database", "Delete the production database."),
+    ],
+)
+def test_a_lost_negation_is_caught(raw, answer):
     assert not is_faithful_cleanup(raw, answer)
 
 
@@ -108,6 +134,23 @@ async def test_the_transcript_comes_back_unchanged(effect):
 async def test_an_empty_answer_keeps_even_a_transcript_of_fillers_alone():
     with patch.object(cleanup, "_call_groq", return_value=""):
         assert await clean_dictation("Ну е", _settings()) == "Ну е"
+
+
+async def test_local_mode_makes_no_call():
+    with patch.object(cleanup, "_call_groq") as call:
+        text = await clean_dictation(SELF_CORRECTION, _settings(mode=ProviderMode.LOCAL))
+    assert text == SELF_CORRECTION
+    call.assert_not_called()
+
+
+def test_the_client_gives_up_quickly_and_never_retries():
+    with patch("groq.Groq") as groq:
+        UNPATCHED_CLIENT.__wrapped__("key")
+
+    groq.assert_called_once_with(
+        api_key="key", timeout=cleanup.CLEANUP_TIMEOUT_SECONDS, max_retries=0
+    )
+    assert cleanup.CLEANUP_TIMEOUT_SECONDS <= 5
 
 
 async def test_no_groq_key_makes_no_call():

@@ -13,6 +13,7 @@ import logging
 import re
 import time
 
+from app.core.types import ProviderMode
 from app.stt.config import STTSettings
 from app.stt.glossary import glossary_text
 from app.transcripts.words import FILLERS, tokenize
@@ -23,10 +24,12 @@ CLEANUP_TIMEOUT_SECONDS = 4.0
 LONGEST_DROPPED_RUN = 6
 DROPPED_SHARE_LIMIT = 0.3
 DROPPED_SHARE_FLOOR = 4
+SURVIVING_SHARE_MINIMUM = 0.5
 ADDED_SHARE_LIMIT = 0.1
 ADDED_FLOOR = 3
 
 _HESITATION = re.compile(r"е+м*|м+|а{2,}|у{2,}|um+|uh+|e+r+m*|h+m+|a+h+|e+h+")
+_NEGATIONS = frozenset({"не", "ніколи", "немає", "нема", "not", "never", "don't", "doesn't"})
 _FILLER_PHRASES = tuple(
     sorted({tuple(tokenize(filler)) for filler in FILLERS}, key=len, reverse=True)
 )
@@ -68,11 +71,13 @@ def is_faithful_cleanup(raw: str, cleaned: str) -> bool:
     """Whether ``cleaned`` only removed what a cleanup may remove from ``raw``.
 
     Rejected: a run of more than `LONGEST_DROPPED_RUN` dropped words that are not fillers, a dropped
-    share of the other words above `DROPPED_SHARE_LIMIT`, or more added words than rewording
-    explains.
+    share of the other words above `DROPPED_SHARE_LIMIT`, fewer of them surviving than
+    `SURVIVING_SHARE_MINIMUM`, a lost negation, or more added words than rewording explains.
     """
     raw_tokens = tokenize(raw)
     cleaned_tokens = tokenize(cleaned)
+    if any(cleaned_tokens.count(word) < raw_tokens.count(word) for word in _NEGATIONS):
+        return False
     explained = _explained_positions(raw_tokens)
     matcher = difflib.SequenceMatcher(None, raw_tokens, cleaned_tokens, autojunk=False)
     dropped = 0
@@ -87,6 +92,8 @@ def is_faithful_cleanup(raw: str, cleaned: str) -> bool:
         added += max(0, (cleaned_end - cleaned_start) - (raw_end - raw_start))
     kept_words = len(raw_tokens) - len(explained)
     if dropped > max(DROPPED_SHARE_FLOOR, kept_words * DROPPED_SHARE_LIMIT):
+        return False
+    if kept_words - dropped < kept_words * SURVIVING_SHARE_MINIMUM:
         return False
     return added <= max(ADDED_FLOOR, len(raw_tokens) * ADDED_SHARE_LIMIT)
 
@@ -115,10 +122,10 @@ def _call_groq(api_key: str, model: str, system: str, transcript: str) -> str:
 async def clean_dictation(transcript: str, settings: STTSettings) -> str:
     """``transcript`` without hesitations, filler words and self-corrections, or unchanged.
 
-    Needs a Groq key; without one, for an empty transcript, on any failure of the call and for an
-    answer `is_faithful_cleanup` rejects, the transcript comes back as it was.
+    Needs Cloud mode and a Groq key; otherwise, for an empty transcript, on any failure of the call
+    and for an answer `is_faithful_cleanup` rejects, the transcript comes back as it was.
     """
-    if not transcript or not settings.groq_api_key:
+    if not transcript or settings.mode != ProviderMode.CLOUD or not settings.groq_api_key:
         return transcript
     system = system_prompt(glossary_text(settings.initial_prompt))
     start = time.perf_counter()
