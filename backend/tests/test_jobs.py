@@ -420,6 +420,10 @@ async def test_a_finished_job_shows_for_a_minute_and_a_failed_one_until_dismisse
         (ResourceUnavailableError("Gemini returned no transcription"), jobs.FAILED_REASON),
         (ResourceUnavailableError(UNREADABLE_HERE), UNREADABLE_HERE),
         (ResourceUnavailableError("rate limit", headers={"Retry-After": "30"}), jobs.BUSY_REASON),
+        (
+            ResourceUnavailableError("daily quota", headers={"Retry-After": "42188"}),
+            jobs.LIMIT_REACHED_REASON,
+        ),
         (KeyError("provider"), jobs.FAILED_REASON),
     ],
 )

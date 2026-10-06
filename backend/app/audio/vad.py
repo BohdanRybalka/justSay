@@ -221,6 +221,36 @@ def _to_mono_16k(block: np.ndarray, samplerate: int) -> np.ndarray:
     return np.interp(x_target, x_orig, mono).astype(np.float32)
 
 
+HOP_SECONDS = _HOP_SAMPLES / _VAD_SAMPLE_RATE
+
+
+def speech_probabilities(samples: np.ndarray, settings: AudioSettings) -> np.ndarray | None:
+    """TEN VAD's speech probability for each 16 ms hop of 16 kHz mono float ``samples``.
+
+    ``None`` when the library is not there or fails: the caller decides without it.
+    """
+    library = _get_library()
+    if library is None:
+        return None
+    hops = samples[: samples.size // _HOP_SAMPLES * _HOP_SAMPLES].reshape(-1, _HOP_SAMPLES)
+    pcm = np.ascontiguousarray(np.clip(hops, -1.0, 1.0) * 32767.0, dtype=np.int16)
+    probabilities = np.empty(len(pcm), dtype=np.float32)
+    try:
+        with _ten_vad_api_lock:
+            handle = library.create(float(settings.silence_vad_probability))
+        try:
+            for index, hop in enumerate(pcm):
+                with _ten_vad_api_lock:
+                    probabilities[index] = library.process(handle, hop)
+        finally:
+            with _ten_vad_api_lock:
+                library.destroy(handle)
+    except Exception as e:
+        log.warning("Neural VAD could not rate the hops — the energy floor decides: %s", e)
+        return None
+    return probabilities
+
+
 def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None:
     """Stream ``audio_path`` through TEN VAD and decide whether it is silent.
 

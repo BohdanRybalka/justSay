@@ -1,20 +1,22 @@
-"""Long audio as overlapping pieces every provider accepts, joined back into one transcript.
+"""Long audio as pieces every provider accepts, cut in pauses and joined back into one transcript.
 
-Audio soundfile decodes becomes 16 kHz mono FLAC pieces (Groq's recommended input) overlapping by
-``OVERLAP_SECONDS``; the words both pieces heard are kept once. A format it cannot decode goes as
-one request. A refusal carrying ``Retry-After`` pauses the work and retries the same piece.
+Decodable audio becomes 16 kHz mono FLAC pieces (Groq's recommended input), each ending in a pause;
+where none is found, pieces overlap and the words both heard are kept once. A transcript stuck in a
+loop or far too sparse is asked for again. ``Retry-After`` pauses the work; undecodable goes whole.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from app.audio.config import audio_settings
+from app.audio.pauses import longest_pause
 from app.core.audio_formats import UndecodableAudioError, decode_to_mono_wav
 from app.core.errors import ResourceUnavailableError
 from app.core.scratch import discard_scratch_file
@@ -26,11 +28,15 @@ log = logging.getLogger(__name__)
 PIECE_RATE = 16000
 CLOUD_PIECE_SECONDS = 600.0
 LOCAL_PIECE_SECONDS = 120.0
+PAUSE_SEARCH_SHARE = 0.1
 OVERLAP_SECONDS = 10.0
 MAX_PAUSE_SECONDS = 300.0
 MAX_PAUSES_PER_PIECE = 5
 MAX_OVERLAP_WORDS = 45
 MIN_SEAM_RUN = 3
+LOOP_NGRAM_WORDS = 8
+LOOP_REPEATED_SHARE = 0.3
+MIN_WORDS_PER_MINUTE = 15
 
 _TOKEN = re.compile(r"\S+\s*")
 
@@ -45,17 +51,48 @@ class PiecePacer(Protocol):
     def piece_done(self, done: int, total: int) -> None: ...
 
 
-def piece_spans(duration: float, piece_seconds: float) -> list[tuple[float, float]]:
-    """Equal ``(start, end)`` spans covering ``duration``, none longer than ``piece_seconds``."""
-    if duration <= piece_seconds:
-        return [(0.0, duration)]
-    count = math.ceil((duration - OVERLAP_SECONDS) / (piece_seconds - OVERLAP_SECONDS))
-    step = (duration - OVERLAP_SECONDS) / count
-    return [(i * step, min(duration, i * step + step + OVERLAP_SECONDS)) for i in range(count)]
+@dataclass(frozen=True)
+class Piece:
+    start: float
+    end: float
+    overlaps_previous: bool
+
+
+def plan_pieces(
+    duration: float, piece_seconds: float, find_pause: Callable[[float, float], float | None]
+) -> list[Piece]:
+    """Pieces covering ``duration``, none longer than ``piece_seconds``, each ending in a pause.
+
+    ``find_pause(start, end)`` answers the time of the quietest pause in the last tenth of a piece.
+    Without one the piece ends at its limit and the next starts ``OVERLAP_SECONDS`` earlier.
+    """
+    pieces: list[Piece] = []
+    start, overlaps = 0.0, False
+    while duration - start > piece_seconds:
+        limit = start + piece_seconds
+        pause = find_pause(limit - piece_seconds * PAUSE_SEARCH_SHARE, limit)
+        if pause is None:
+            pieces.append(Piece(start, limit, overlaps))
+            start, overlaps = limit - OVERLAP_SECONDS, True
+        else:
+            pieces.append(Piece(start, pause, overlaps))
+            start, overlaps = pause, False
+    pieces.append(Piece(start, duration, overlaps))
+    return pieces
 
 
 def _normalised(token: str) -> str:
     return "".join(ch for ch in token.casefold() if ch.isalnum())
+
+
+def looks_broken(text: str, seconds: float) -> bool:
+    """Too few words for ``seconds`` of audio with speech in it, or the same words over and over."""
+    words = [_normalised(word) for word in text.split()]
+    if len(words) < MIN_WORDS_PER_MINUTE * seconds / 60:
+        return True
+    size = LOOP_NGRAM_WORDS
+    grams = [tuple(words[i : i + size]) for i in range(len(words) - size + 1)]
+    return bool(grams) and 1 - len(set(grams)) / len(grams) > LOOP_REPEATED_SHARE
 
 
 def _seam_words(tokens: list[str]) -> list[object]:
@@ -121,6 +158,15 @@ def _frames(mono: Path) -> int:
     return sf.info(str(mono)).frames
 
 
+def _pause_in(mono: Path, start: float, end: float) -> float | None:
+    import soundfile as sf
+
+    first, last = round(start * PIECE_RATE), round(end * PIECE_RATE)
+    samples, _rate = sf.read(str(mono), start=first, stop=last, dtype="float32")
+    offset = longest_pause(samples, audio_settings)
+    return None if offset is None else start + offset
+
+
 def _retry_after(refusal: ResourceUnavailableError) -> float | None:
     value = (refusal.headers or {}).get("Retry-After")
     try:
@@ -143,6 +189,28 @@ async def _transcribe_with_pauses(
                 raise
             log.info("%s asked to wait %.0fs; pausing (pause %d)", stt.model_name, wait, pauses)
             await pacer.pause(wait)
+
+
+async def _transcribe_checked(
+    stt: STTProvider,
+    piece: Path,
+    language: str,
+    seconds: float,
+    no_speech_threshold: float,
+    pacer: PiecePacer,
+    turn: Callable[[], Awaitable[None]],
+) -> TranscriptionResult:
+    first = await _transcribe_with_pauses(stt, piece, language, seconds, pacer)
+    prob = first.no_speech_prob
+    if (prob is not None and prob > no_speech_threshold) or not looks_broken(first.text, seconds):
+        return first
+    log.warning("%s: a %.0fs piece looked looping or sparse; again", stt.model_name, seconds)
+    await turn()
+    second = await _transcribe_with_pauses(stt, piece, language, seconds, pacer)
+    return max(
+        (first, second),
+        key=lambda result: (not looks_broken(result.text, seconds), len(set(result.text.split()))),
+    )
 
 
 async def transcribe_in_pieces(
@@ -174,24 +242,32 @@ async def transcribe_in_pieces(
     try:
         local = routing.is_local_provider(stt)
         piece_seconds = LOCAL_PIECE_SECONDS if local else CLOUD_PIECE_SECONDS
-        spans = piece_spans(await asyncio.to_thread(_frames, mono) / PIECE_RATE, piece_seconds)
-        texts: list[str] = []
+        total = await asyncio.to_thread(_frames, mono) / PIECE_RATE
+        pieces = await asyncio.to_thread(
+            plan_pieces, total, piece_seconds, lambda start, end: _pause_in(mono, start, end)
+        )
+        texts: list[tuple[str, bool]] = []
         silent = 0
         tokens: list[int] = []
-        for index, (start, end) in enumerate(spans):
-            await pacer.before_piece(index, len(spans))
+        for index, planned in enumerate(pieces):
+
+            async def turn(index: int = index) -> None:
+                await pacer.before_piece(index, len(pieces))
+
+            await turn()
             piece = audio_path.with_name(f"{audio_path.stem}-piece{index}.flac")
+            seconds = planned.end - planned.start
             try:
-                await asyncio.to_thread(_write_piece, mono, piece, start, end)
+                await asyncio.to_thread(_write_piece, mono, piece, planned.start, planned.end)
                 if await asyncio.to_thread(holds_no_speech, piece):
                     result = None
                 else:
-                    result = await _transcribe_with_pauses(
-                        stt, piece, language, end - start, pacer
+                    result = await _transcribe_checked(
+                        stt, piece, language, seconds, no_speech_threshold, pacer, turn
                     )
             finally:
                 discard_scratch_file(piece)
-            pacer.piece_done(index + 1, len(spans))
+            pacer.piece_done(index + 1, len(pieces))
             if result is None:
                 silent += 1
                 continue
@@ -204,16 +280,16 @@ async def transcribe_in_pieces(
             if language == "auto" and result.detected_language:
                 language = result.detected_language
             if result.text:
-                texts.append(result.text)
+                texts.append((result.text, planned.overlaps_previous))
     finally:
         discard_scratch_file(mono)
 
-    text = texts[0] if texts else ""
-    for following in texts[1:]:
-        text = join_at_seam(text, following)
+    text = texts[0][0] if texts else ""
+    for following, overlaps in texts[1:]:
+        text = join_at_seam(text, following) if overlaps else f"{text} {following}"
     return TranscriptionResult(
         text=text,
         tokens_used=sum(tokens) if tokens else None,
         detected_language=None if language == "auto" else language,
-        no_speech_prob=1.0 if silent == len(spans) else None,
+        no_speech_prob=1.0 if silent == len(pieces) else None,
     )

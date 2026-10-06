@@ -13,10 +13,11 @@ import numpy as np
 import pytest
 import soundfile as sf
 
+from app.audio import vad
 from app.core.audio_formats import ffmpeg_selftest
 from app.core.errors import ResourceUnavailableError
 from app.pipeline import chunking
-from app.pipeline.chunking import join_at_seam, piece_spans, transcribe_in_pieces
+from app.pipeline.chunking import join_at_seam, transcribe_in_pieces
 from app.stt.base import STTProvider, TranscriptionResult
 from tests.conftest import write_aac_m4a
 
@@ -91,21 +92,62 @@ async def _run(
 
 @pytest.fixture
 def short_pieces(monkeypatch):
+    """Pieces of 30 s (15 s local) with no pause to cut in, answered by one-line transcripts."""
     monkeypatch.setattr(chunking, "CLOUD_PIECE_SECONDS", 30.0)
     monkeypatch.setattr(chunking, "LOCAL_PIECE_SECONDS", 15.0)
     monkeypatch.setattr(chunking, "OVERLAP_SECONDS", 5.0)
+    monkeypatch.setattr(chunking, "MIN_WORDS_PER_MINUTE", 0)
+    monkeypatch.setattr(chunking, "_pause_in", lambda mono, start, end: None)
+
+
+def _pause_before(gap: float):
+    asked: list[tuple[float, float]] = []
+
+    def find_pause(start: float, end: float) -> float:
+        asked.append((start, end))
+        return end - gap
+
+    return find_pause, asked
 
 
 @pytest.mark.parametrize(("duration", "count"), [(20.0, 1), (600.0, 1), (601.0, 2), (3600.0, 7)])
-def test_spans_are_equal_overlap_and_cover_the_whole_recording(duration, count):
-    spans = piece_spans(duration, 600.0)
+def test_each_piece_ends_in_the_pause_found_in_its_last_tenth(duration, count):
+    find_pause, asked = _pause_before(20.0)
 
-    assert len(spans) == count
-    assert spans[0][0] == 0.0
-    assert spans[-1][1] == pytest.approx(duration)
-    assert all(end - start <= 600.0 + 1e-9 for start, end in spans)
-    for (_, end), (start, _) in zip(spans, spans[1:]):
-        assert end - start == pytest.approx(chunking.OVERLAP_SECONDS)
+    pieces = chunking.plan_pieces(duration, 600.0, find_pause)
+
+    assert len(pieces) == count
+    assert pieces[0].start == 0.0
+    assert pieces[-1].end == pytest.approx(duration)
+    assert all(p.end - p.start <= 600.0 for p in pieces)
+    assert all(not p.overlaps_previous for p in pieces)
+    for before, after in zip(pieces, pieces[1:]):
+        assert after.start == before.end
+    assert all(end - start == pytest.approx(60.0) for start, end in asked)
+    assert [round(end) for _, end in asked] == [round(p.start + 600.0) for p in pieces[:-1]]
+
+
+def test_without_a_pause_pieces_overlap_and_are_marked_for_the_seam():
+    pieces = chunking.plan_pieces(1300.0, 600.0, lambda start, end: None)
+
+    assert [(p.start, p.end, p.overlaps_previous) for p in pieces] == [
+        (0.0, 600.0, False),
+        (590.0, 1190.0, True),
+        (1180.0, 1300.0, True),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "seconds", "broken"),
+    [
+        (" ".join(f"word{i}" for i in range(150)), 600.0, False),
+        (" ".join(f"word{i}" for i in range(149)), 600.0, True),
+        ("Тихо, тихо, тихо, тихо, тихо. " + " ".join(f"w{i}" for i in range(200)), 600, False),
+        (" ".join(["we go to the cave with the scorpions now"] * 40), 600.0, True),
+    ],
+)
+def test_a_transcript_too_sparse_or_looping_looks_broken(text, seconds, broken):
+    assert chunking.looks_broken(text, seconds) is broken
 
 
 @pytest.mark.parametrize(
@@ -194,7 +236,7 @@ async def test_a_long_recording_goes_as_flac_pieces_joined_at_the_seams(tmp_path
     assert result.detected_language == "uk"
     assert [s["language"] for s in provider.sent] == ["auto", "uk", "uk"]
     assert all(s["path"].suffix == ".flac" for s in provider.sent)
-    assert [round(s["seconds"], 2) for s in provider.sent] == [pytest.approx(26.67, abs=0.01)] * 3
+    assert [round(s["seconds"]) for s in provider.sent] == [30, 30, 20]
     assert pacer.events == [
         ("before", 0, 3), ("done", 1, 3),
         ("before", 1, 3), ("done", 2, 3),
@@ -210,6 +252,70 @@ async def test_a_local_engine_gets_shorter_pieces(tmp_path, short_pieces):
     await _run(provider, path)
 
     assert len(provider.sent) == 4
+
+
+def _speech_with_pauses(tmp_path: Path, seconds: float, pauses: list[float]) -> Path:
+    rate = 16000
+    noise = np.random.default_rng(0).uniform(-0.3, 0.3, int(seconds * rate)).astype(np.float32)
+    for at in pauses:
+        noise[int(at * rate) : int((at + 0.6) * rate)] = 0.0
+    path = tmp_path / "job_x.wav"
+    sf.write(str(path), noise, rate)
+    return path
+
+
+async def test_pieces_are_cut_in_the_pauses_of_the_recording_and_joined_whole(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(chunking, "CLOUD_PIECE_SECONDS", 30.0)
+    monkeypatch.setattr(chunking, "MIN_WORDS_PER_MINUTE", 0)
+    monkeypatch.setattr(vad, "speech_probabilities", lambda samples, settings: None)
+    path = _speech_with_pauses(tmp_path, 70.0, [28.0, 56.0])
+    provider = _Provider([
+        TranscriptionResult("we went to the cave"),
+        TranscriptionResult("to the cave with scorpions"),
+        TranscriptionResult("and drove away"),
+    ])
+
+    result = await _run(provider, path)
+
+    assert [round(s["seconds"], 1) for s in provider.sent] == [28.3, 28.0, 13.7]
+    assert result.text == "we went to the cave to the cave with scorpions and drove away"
+
+
+async def test_a_looping_answer_is_asked_for_again_and_the_sound_one_kept(tmp_path):
+    path = _audio(tmp_path, 60.0)
+    loop = TranscriptionResult(" ".join(["we go to the cave with the scorpions now"] * 40))
+    sound = TranscriptionResult(" ".join(f"word{i}" for i in range(60)))
+    provider = _Provider([loop, sound])
+    pacer = _Pacer()
+
+    result = await _run(provider, path, pacer)
+
+    assert result.text == sound.text
+    assert len(provider.sent) == 2
+    assert pacer.events == [("before", 0, 1), ("before", 0, 1), ("done", 1, 1)]
+
+
+async def test_of_two_broken_answers_the_one_with_more_words_is_kept(tmp_path):
+    path = _audio(tmp_path, 60.0)
+    provider = _Provider([
+        TranscriptionResult("only this"),
+        TranscriptionResult("only this and that"),
+    ])
+
+    result = await _run(provider, path)
+
+    assert result.text == "only this and that"
+
+
+async def test_an_answer_the_provider_calls_silent_is_not_asked_for_again(tmp_path):
+    path = _audio(tmp_path, 60.0)
+    provider = _Provider([TranscriptionResult("Thank you.", no_speech_prob=0.9)])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob, len(provider.sent)) == ("", 1.0, 1)
 
 
 def test_the_longest_cloud_piece_fits_groq_even_when_it_cannot_compress(tmp_path):
@@ -319,7 +425,7 @@ async def test_an_m4a_is_cut_into_pieces_like_any_other_recording(tmp_path, shor
 
     await _run(provider, path)
 
-    assert [round(s["seconds"]) for s in provider.sent] == [27, 27, 27]
+    assert [round(s["seconds"]) for s in provider.sent] == [30, 30, 20]
     assert sorted(p.name for p in tmp_path.iterdir()) == ["job_x.m4a"]
 
 

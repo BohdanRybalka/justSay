@@ -51,6 +51,8 @@ NO_SPEECH_REASON = "We didn't hear any speech in this file"
 NO_KEY_REASON = "Add an API key in Settings"
 FAILED_REASON = "Couldn't turn this file into text. Try again"
 BUSY_REASON = "The transcription service is busy. Try again in a few minutes"
+LIMIT_REACHED_REASON = "Your API key has used up its limit for now. Try again in a few hours"
+LIMIT_REACHED_SECONDS = 3600.0
 
 _CANCELLABLE: frozenset[JobStage] = frozenset({"queued", "transcribing"})
 _EXPIRING: frozenset[JobStage] = frozenset({"done", "cancelled"})
@@ -168,9 +170,14 @@ async def _expected_seconds(model_name: str, audio_duration: float | None) -> fl
 def _reason_for_unavailable(refusal: ResourceUnavailableError) -> str:
     if refusal.message == UNREADABLE_HERE:
         return UNREADABLE_HERE
-    if refusal.headers and "Retry-After" in refusal.headers:
+    retry_after = (refusal.headers or {}).get("Retry-After")
+    if retry_after is None:
+        return FAILED_REASON
+    try:
+        wait = float(retry_after)
+    except ValueError:
         return BUSY_REASON
-    return FAILED_REASON
+    return LIMIT_REACHED_REASON if wait >= LIMIT_REACHED_SECONDS else BUSY_REASON
 
 
 def remove_leftover_files(temp_dir: Path) -> None:
