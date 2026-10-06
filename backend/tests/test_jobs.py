@@ -501,7 +501,7 @@ async def test_a_dropped_file_is_saved_as_a_file_entry_and_never_copied(
     monkeypatch.setattr(history, "_output_dir", tmp_path)
     monkeypatch.setattr(history, "_conn", None)
     history.bootstrap(tmp_path)
-    stt = MagicMock(model_name="mock/provider", is_local=False)
+    stt = MagicMock(model_name="mock/provider", is_local=False, longest_piece_seconds=600.0)
     stt.transcribe = AsyncMock(return_value=TranscriptionResult(text="from the file"))
     monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
     monkeypatch.setattr(jobs, "process_audio", service.process_audio)
@@ -531,7 +531,7 @@ async def test_a_dropped_file_is_saved_as_a_file_entry_and_never_copied(
 async def test_a_file_whose_every_piece_is_silent_is_never_sent(
     client, queue, tmp_path, monkeypatch
 ):
-    stt = MagicMock(model_name="mock/provider", is_local=False)
+    stt = MagicMock(model_name="mock/provider", is_local=False, longest_piece_seconds=600.0)
     stt.transcribe = AsyncMock(return_value=TranscriptionResult(text="Thank you."))
     monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
     monkeypatch.setattr(service.audio_settings, "silence_vad_enabled", True)

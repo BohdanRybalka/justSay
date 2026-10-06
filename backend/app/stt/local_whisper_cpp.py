@@ -24,6 +24,7 @@ from app.core.audio_formats import UNREADABLE_HERE, UndecodableAudioError, decod
 from app.core.errors import ResourceUnavailableError
 from app.core.scratch import discard_scratch_file
 from app.stt.base import (
+    WHISPER_WINDOW_SECONDS,
     STTProvider,
     TranscriptionResult,
     latched_load_error,
@@ -270,6 +271,7 @@ class WhisperCppServerSTTProvider(STTProvider):
     """
 
     is_local = True
+    longest_piece_seconds = WHISPER_WINDOW_SECONDS
 
     def __init__(self, settings: STTSettings):
         self._settings = settings

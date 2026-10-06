@@ -93,6 +93,20 @@ def test_a_rate_limit_says_how_long_to_wait(tmp_path, headers, retry_after):
     assert raised.value.headers == {"Retry-After": retry_after}
 
 
+def test_an_overloaded_groq_says_to_wait_and_try_again(tmp_path):
+    provider = GroqWhisperSTTProvider(_settings())
+    client = MagicMock()
+    overloaded = Exception("Error code: 503 - over capacity")
+    overloaded.status_code = 503
+    overloaded.response = MagicMock(headers={})
+    client.audio.transcriptions.create.side_effect = overloaded
+
+    with pytest.raises(ResourceUnavailableError, match="overloaded") as raised:
+        provider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None)
+
+    assert raised.value.headers == {"Retry-After": "30"}
+
+
 def test_other_errors_bubble_up_unchanged(tmp_path):
     """Non-429 SDK errors must propagate as-is so callers see the root cause."""
     provider = GroqWhisperSTTProvider(_settings())

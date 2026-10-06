@@ -214,6 +214,19 @@ async def test_a_gemini_rate_limit_says_how_long_to_wait(sample_wav, details, re
 
 
 @pytest.mark.asyncio
+async def test_an_overloaded_gemini_says_to_wait_and_try_again(sample_wav):
+    provider = GeminiSTTProvider(STTSettings(mode=ProviderMode.CLOUD, gemini_api_key="k"))
+    provider._client = MagicMock()
+
+    overloaded = _GeminiRefusalError(503, {"error": {"status": "UNAVAILABLE"}})
+    with patch.object(GeminiSTTProvider, "_call_gemini", side_effect=overloaded):
+        with pytest.raises(ResourceUnavailableError, match="overloaded") as raised:
+            await provider.transcribe(sample_wav)
+
+    assert raised.value.headers == {"Retry-After": "30"}
+
+
+@pytest.mark.asyncio
 async def test_other_gemini_errors_carry_no_retry_hint(sample_wav):
     provider = GeminiSTTProvider(STTSettings(mode=ProviderMode.CLOUD, gemini_api_key="k"))
     provider._client = MagicMock()

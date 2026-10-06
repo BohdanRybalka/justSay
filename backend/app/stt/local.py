@@ -14,6 +14,7 @@ import threading
 from pathlib import Path
 
 from app.stt.base import (
+    WHISPER_WINDOW_SECONDS,
     STTProvider,
     TranscriptionResult,
     coerce_no_speech_prob,
@@ -36,6 +37,7 @@ class LocalSTTProvider(STTProvider):
     """
 
     is_local = True
+    longest_piece_seconds = WHISPER_WINDOW_SECONDS
 
     def __init__(self, settings: STTSettings):
         self._settings = settings

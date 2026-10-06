@@ -28,9 +28,10 @@ THRESHOLD = 0.6
 class _Provider(STTProvider):
     """Answers each call with the next scripted result or raises it; records what it was sent."""
 
-    def __init__(self, answers: list[object], *, is_local: bool = False) -> None:
+    def __init__(self, answers: list[object], *, longest: float | None = None) -> None:
         self.answers = list(answers)
-        self.is_local = is_local
+        if longest is not None:
+            self.longest_piece_seconds = longest
         self.sent: list[dict] = []
 
     @property
@@ -92,9 +93,8 @@ async def _run(
 
 @pytest.fixture
 def short_pieces(monkeypatch):
-    """Pieces of 30 s (15 s local) with no pause to cut in, answered by one-line transcripts."""
-    monkeypatch.setattr(chunking, "CLOUD_PIECE_SECONDS", 30.0)
-    monkeypatch.setattr(chunking, "LOCAL_PIECE_SECONDS", 15.0)
+    """Pieces of 30 s with no pause to cut in, answered by one-line transcripts."""
+    monkeypatch.setattr(_Provider, "longest_piece_seconds", 30.0)
     monkeypatch.setattr(chunking, "OVERLAP_SECONDS", 5.0)
     monkeypatch.setattr(chunking, "MIN_CHARS_PER_MINUTE", 0)
     monkeypatch.setattr(chunking, "_pause_in", lambda mono, start, end: None)
@@ -127,6 +127,14 @@ def test_each_piece_ends_in_the_pause_found_in_its_last_tenth(duration, count):
     limits = [min(p.start + 600.0, duration - 60.0) for p in pieces[:-1]]
     assert [round(end) for _, end in asked] == [round(limit) for limit in limits]
     assert pieces[-1].end - pieces[-1].start >= 60.0 or count == 1
+
+
+def test_a_short_piece_still_searches_ten_seconds_for_its_pause():
+    find_pause, asked = _pause_before(2.0)
+
+    chunking.plan_pieces(70.0, 30.0, find_pause)
+
+    assert [round(end - start, 6) for start, end in asked] == [10.0, 10.0]
 
 
 def test_without_a_pause_pieces_overlap_and_are_marked_for_the_seam():
@@ -249,13 +257,24 @@ async def test_a_long_recording_goes_as_flac_pieces_joined_at_the_seams(tmp_path
     assert sorted(p.name for p in tmp_path.iterdir()) == ["job_x.wav"]
 
 
-async def test_a_local_engine_gets_shorter_pieces(tmp_path, short_pieces):
+async def test_each_provider_gets_pieces_no_longer_than_it_reads_whole(tmp_path, short_pieces):
     path = _audio(tmp_path, 40.0)
-    provider = _Provider([TranscriptionResult("a")] * 4, is_local=True)
+    provider = _Provider([TranscriptionResult("a")] * 3, longest=15.0)
 
     await _run(provider, path)
 
-    assert len(provider.sent) == 4
+    assert [round(s["seconds"], 1) for s in provider.sent] == [15.0, 15.0, 15.0]
+
+
+def test_whisper_providers_take_its_30_second_window_and_gemini_ten_minutes():
+    from app.stt.cloud import GeminiSTTProvider
+    from app.stt.groq_whisper import GroqWhisperSTTProvider
+    from app.stt.local import LocalSTTProvider
+    from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
+
+    whisper = (GroqWhisperSTTProvider, LocalSTTProvider, WhisperCppServerSTTProvider)
+    assert {cls.longest_piece_seconds for cls in whisper} == {30.0}
+    assert GeminiSTTProvider.longest_piece_seconds == 600.0
 
 
 def _speech_with_pauses(tmp_path: Path, seconds: float, pauses: list[float]) -> Path:
@@ -271,7 +290,7 @@ def _speech_with_pauses(tmp_path: Path, seconds: float, pauses: list[float]) -> 
 async def test_pieces_are_cut_in_the_pauses_of_the_recording_and_joined_whole(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(chunking, "CLOUD_PIECE_SECONDS", 30.0)
+    monkeypatch.setattr(_Provider, "longest_piece_seconds", 30.0)
     monkeypatch.setattr(chunking, "MIN_CHARS_PER_MINUTE", 0)
     monkeypatch.setattr(vad, "speech_probabilities", lambda samples, settings: None)
     path = _speech_with_pauses(tmp_path, 70.0, [28.0, 56.0])
@@ -367,9 +386,9 @@ async def test_an_answer_the_provider_calls_silent_is_not_asked_for_again(tmp_pa
     assert (result.text, result.no_speech_prob, len(provider.sent)) == ("", 1.0, 1)
 
 
-def test_the_longest_cloud_piece_fits_groq_even_when_it_cannot_compress(tmp_path):
+def test_the_longest_piece_fits_groq_even_when_it_cannot_compress(tmp_path):
     mono = tmp_path / "mono.wav"
-    seconds = chunking.CLOUD_PIECE_SECONDS
+    seconds = STTProvider.longest_piece_seconds
     noise = np.random.default_rng(1).integers(-32768, 32767, int(seconds * 16000), dtype=np.int16)
     sf.write(str(mono), noise, 16000, subtype="PCM_16")
     piece = tmp_path / "piece.flac"

@@ -14,6 +14,8 @@ class TranscriptionResult:
     no_speech_prob: float | None = field(default=None)
 
 
+WHISPER_WINDOW_SECONDS = 30.0
+
 LOAD_FAILED_WITHOUT_A_MESSAGE = "The local engine failed to load and gave no reason."
 
 
@@ -99,11 +101,13 @@ def min_no_speech_prob(segments) -> float | None:
 class STTProvider(ABC):
     """Contract: Audio file in -> transcribed text out.
 
+    ``longest_piece_seconds`` is the longest audio one request transcribes without dropping text.
     A local provider owes the further members that the factory enforces through
     :data:`app.stt.local_factory.LOCAL_STATUS_CONTRACT` (ADR 075).
     """
 
     is_local: ClassVar[bool] = False
+    longest_piece_seconds: ClassVar[float] = 600.0
 
     @property
     @abstractmethod

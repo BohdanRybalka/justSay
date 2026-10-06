@@ -1,8 +1,9 @@
 """Long audio as pieces every provider accepts, cut in pauses and joined back into one transcript.
 
-Decodable audio becomes 16 kHz mono FLAC pieces (Groq's recommended input), each ending in a pause;
-where none is found, pieces overlap and the words both heard are kept once. A transcript stuck in a
-loop or far too sparse is asked for again. ``Retry-After`` pauses the work; undecodable goes whole.
+Decodable audio becomes 16 kHz mono FLAC pieces no longer than the provider's
+``longest_piece_seconds``, each ending in a pause; where none is found, pieces overlap and the
+words both heard are kept once. A transcript stuck in a loop or far too sparse is asked for again.
+``Retry-After`` pauses the work; audio nothing here decodes goes whole.
 """
 
 from __future__ import annotations
@@ -20,16 +21,15 @@ from app.audio.pauses import longest_pause
 from app.core.audio_formats import UndecodableAudioError, decode_to_mono_wav
 from app.core.errors import ResourceUnavailableError
 from app.core.scratch import discard_scratch_file
-from app.stt import routing
 from app.stt.base import STTProvider, TranscriptionResult
 
 log = logging.getLogger(__name__)
 
 PIECE_RATE = 16000
-CLOUD_PIECE_SECONDS = 600.0
-LOCAL_PIECE_SECONDS = 120.0
 PAUSE_SEARCH_SHARE = 0.1
+MIN_PAUSE_SEARCH_SECONDS = 10.0
 OVERLAP_SECONDS = 10.0
+OVERLAP_SHARE = 1 / 6
 MAX_PAUSE_SECONDS = 300.0
 MAX_PAUSES_PER_PIECE = 5
 MAX_OVERLAP_WORDS = 45
@@ -64,19 +64,20 @@ def plan_pieces(
 ) -> list[Piece]:
     """Pieces covering ``duration``, none longer than ``piece_seconds``, each ending in a pause.
 
-    ``find_pause(start, end)`` answers the time of the longest pause in the last tenth of a piece,
-    which never leaves less than a tenth for the last one. Without a pause the piece ends there
-    and the next starts ``OVERLAP_SECONDS`` earlier.
+    ``find_pause(start, end)`` answers the time of the longest pause in the last tenth of a piece
+    (10 s at least), never leaving less than that for the last one. Without a pause the piece ends
+    there and the next starts up to ``OVERLAP_SECONDS`` earlier.
     """
     pieces: list[Piece] = []
-    search = piece_seconds * PAUSE_SEARCH_SHARE
+    search = max(piece_seconds * PAUSE_SEARCH_SHARE, MIN_PAUSE_SEARCH_SECONDS)
+    overlap = min(OVERLAP_SECONDS, piece_seconds * OVERLAP_SHARE)
     start, overlaps = 0.0, False
     while duration - start > piece_seconds:
         limit = min(start + piece_seconds, duration - search)
         pause = find_pause(limit - search, limit)
         if pause is None:
             pieces.append(Piece(start, limit, overlaps))
-            start, overlaps = limit - OVERLAP_SECONDS, True
+            start, overlaps = limit - overlap, True
         else:
             pieces.append(Piece(start, pause, overlaps))
             start, overlaps = pause, False
@@ -259,11 +260,12 @@ async def transcribe_in_pieces(
         return result
 
     try:
-        local = routing.is_local_provider(stt)
-        piece_seconds = LOCAL_PIECE_SECONDS if local else CLOUD_PIECE_SECONDS
         total = await asyncio.to_thread(_frames, mono) / PIECE_RATE
         pieces = await asyncio.to_thread(
-            plan_pieces, total, piece_seconds, lambda start, end: _pause_in(mono, start, end)
+            plan_pieces,
+            total,
+            stt.longest_piece_seconds,
+            lambda start, end: _pause_in(mono, start, end),
         )
         texts: list[tuple[str, bool]] = []
         silent = 0

@@ -102,6 +102,11 @@ class GeminiSTTProvider(STTProvider):
                     "Gemini rate limit exceeded. Try again later.",
                     headers={"Retry-After": _retry_after(exc)},
                 ) from exc
+            if getattr(exc, "code", None) == 503:
+                raise ResourceUnavailableError(
+                    "Gemini is overloaded right now. Try again later.",
+                    headers={"Retry-After": str(RATE_LIMIT_RETRY_SECONDS)},
+                ) from exc
             raise
 
         return TranscriptionResult(
