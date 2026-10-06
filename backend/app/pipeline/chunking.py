@@ -8,7 +8,6 @@ one request. A refusal carrying ``Retry-After`` pauses the work and retries the 
 from __future__ import annotations
 
 import asyncio
-import difflib
 import logging
 import math
 import re
@@ -30,7 +29,7 @@ LOCAL_PIECE_SECONDS = 120.0
 OVERLAP_SECONDS = 10.0
 MAX_PAUSE_SECONDS = 300.0
 MAX_PAUSES_PER_PIECE = 5
-SEAM_WINDOW_WORDS = 80
+MAX_OVERLAP_WORDS = 45
 MIN_SEAM_RUN = 3
 
 _TOKEN = re.compile(r"\S+\s*")
@@ -63,24 +62,46 @@ def _seam_words(tokens: list[str]) -> list[object]:
     return [_normalised(token) or object() for token in tokens]
 
 
+def _overlap_run(tail: list[object], head: list[object]) -> tuple[int, int, int] | None:
+    """``(a, b, size)``: the longest shared run of ``tail`` and ``head`` that fits the overlap.
+
+    A run fits when it, the words after it in ``tail`` and those before it in ``head`` add up to
+    at most ``MAX_OVERLAP_WORDS``; among equally long runs the one nearest the seam wins.
+    """
+    best: tuple[tuple[int, int], int, int, int] | None = None
+    previous = [0] * (len(head) + 1)
+    for i in range(1, len(tail) + 1):
+        current = [0] * (len(head) + 1)
+        for j in range(1, len(head) + 1):
+            if tail[i - 1] != head[j - 1]:
+                continue
+            size = current[j] = previous[j - 1] + 1
+            span = (len(tail) - i) + size + (j - size)
+            if size >= MIN_SEAM_RUN and span <= MAX_OVERLAP_WORDS:
+                rank = (size, -span)
+                if best is None or rank > best[0]:
+                    best = (rank, i - size, j - size, size)
+        previous = current
+    return None if best is None else best[1:]
+
+
 def join_at_seam(left: str, right: str) -> str:
     """``left`` then ``right``, with the words both heard in the overlap kept once.
 
-    The longest run of at least three equal words shared by the tail of ``left`` and the head of
-    ``right`` marks the overlap; each side is cut at its middle, so a word one piece added beside
-    it cannot hide it. Without such a run, as when the overlap held no speech, nothing is cut.
+    The overlap is marked by a run of at least three equal words that can sit inside it (see
+    ``_overlap_run``); each side is cut at its middle, so a word one piece added beside it does
+    not hide it. Without such a run, as when the overlap held no speech, nothing is cut.
     """
     left_tokens, right_tokens = _TOKEN.findall(left), _TOKEN.findall(right)
-    tail_start = max(0, len(left_tokens) - SEAM_WINDOW_WORDS)
-    tail = _seam_words(left_tokens[tail_start:])
-    head = _seam_words(right_tokens[:SEAM_WINDOW_WORDS])
-    run = difflib.SequenceMatcher(None, tail, head, autojunk=False).find_longest_match(
-        0, len(tail), 0, len(head)
+    tail_start = max(0, len(left_tokens) - MAX_OVERLAP_WORDS)
+    run = _overlap_run(
+        _seam_words(left_tokens[tail_start:]), _seam_words(right_tokens[:MAX_OVERLAP_WORDS])
     )
-    if run.size < MIN_SEAM_RUN:
+    if run is None:
         return f"{left.rstrip()} {right.lstrip()}".strip()
-    half = run.size // 2
-    return "".join(left_tokens[: tail_start + run.a + half] + right_tokens[run.b + half :]).strip()
+    a, b, size = run
+    half = size // 2
+    return "".join(left_tokens[: tail_start + a + half] + right_tokens[b + half :]).strip()
 
 
 def _write_piece(mono: Path, piece: Path, start: float, end: float) -> None:

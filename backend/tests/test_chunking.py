@@ -159,6 +159,26 @@ def test_an_overlap_without_shared_speech_is_joined_whole_not_cut_at_a_chance_ma
     assert join_at_seam(left, right) == f"{left} {right}"
 
 
+@pytest.mark.parametrize("distance", [25, 60])
+def test_a_phrase_repeated_far_from_the_seam_is_not_taken_for_the_overlap(distance):
+    before = " ".join(f"left{i}" for i in range(distance))
+    after = " ".join(f"right{i}" for i in range(distance))
+    left = f"{before} I don't know {before}"
+    right = f"{after} I don't know {after}"
+
+    assert join_at_seam(left, right) == f"{left} {right}"
+
+
+def test_of_two_equal_runs_the_one_at_the_seam_wins():
+    middle = " ".join(f"word{i}" for i in range(30))
+    left = f"so I think that is great {middle} and I think that is fine"
+    right = "I think that was fine and more"
+
+    joined = join_at_seam(left, right)
+
+    assert joined == f"so I think that is great {middle} and I think that was fine and more"
+
+
 async def test_a_long_recording_goes_as_flac_pieces_joined_at_the_seams(tmp_path, short_pieces):
     path = _audio(tmp_path, 70.0)
     provider = _Provider([
