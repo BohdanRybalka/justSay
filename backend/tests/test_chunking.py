@@ -96,7 +96,7 @@ def short_pieces(monkeypatch):
     monkeypatch.setattr(chunking, "CLOUD_PIECE_SECONDS", 30.0)
     monkeypatch.setattr(chunking, "LOCAL_PIECE_SECONDS", 15.0)
     monkeypatch.setattr(chunking, "OVERLAP_SECONDS", 5.0)
-    monkeypatch.setattr(chunking, "MIN_WORDS_PER_MINUTE", 0)
+    monkeypatch.setattr(chunking, "MIN_CHARS_PER_MINUTE", 0)
     monkeypatch.setattr(chunking, "_pause_in", lambda mono, start, end: None)
 
 
@@ -124,7 +124,9 @@ def test_each_piece_ends_in_the_pause_found_in_its_last_tenth(duration, count):
     for before, after in zip(pieces, pieces[1:]):
         assert after.start == before.end
     assert all(end - start == pytest.approx(60.0) for start, end in asked)
-    assert [round(end) for _, end in asked] == [round(p.start + 600.0) for p in pieces[:-1]]
+    limits = [min(p.start + 600.0, duration - 60.0) for p in pieces[:-1]]
+    assert [round(end) for _, end in asked] == [round(limit) for limit in limits]
+    assert pieces[-1].end - pieces[-1].start >= 60.0 or count == 1
 
 
 def test_without_a_pause_pieces_overlap_and_are_marked_for_the_seam():
@@ -140,8 +142,10 @@ def test_without_a_pause_pieces_overlap_and_are_marked_for_the_seam():
 @pytest.mark.parametrize(
     ("text", "seconds", "broken"),
     [
-        (" ".join(f"word{i}" for i in range(150)), 600.0, False),
-        (" ".join(f"word{i}" for i in range(149)), 600.0, True),
+        (" ".join(f"w{i:04d}" for i in range(120)), 600.0, False),
+        (" ".join(f"w{i:04d}" for i in range(119)) + " abcd", 600.0, True),
+        ("".join(chr(0x4E00 + i) for i in range(300)), 300.0, False),
+        ("".join(chr(0x4E00 + i) for i in range(20)) * 30, 300.0, True),
         ("Тихо, тихо, тихо, тихо, тихо. " + " ".join(f"w{i}" for i in range(200)), 600, False),
         (" ".join(["we go to the cave with the scorpions now"] * 40), 600.0, True),
     ],
@@ -268,7 +272,7 @@ async def test_pieces_are_cut_in_the_pauses_of_the_recording_and_joined_whole(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(chunking, "CLOUD_PIECE_SECONDS", 30.0)
-    monkeypatch.setattr(chunking, "MIN_WORDS_PER_MINUTE", 0)
+    monkeypatch.setattr(chunking, "MIN_CHARS_PER_MINUTE", 0)
     monkeypatch.setattr(vad, "speech_probabilities", lambda samples, settings: None)
     path = _speech_with_pauses(tmp_path, 70.0, [28.0, 56.0])
     provider = _Provider([
@@ -307,6 +311,30 @@ async def test_of_two_broken_answers_the_one_with_more_words_is_kept(tmp_path):
     result = await _run(provider, path)
 
     assert result.text == "only this and that"
+
+
+async def test_when_asking_again_fails_the_first_answer_is_kept(tmp_path):
+    path = _audio(tmp_path, 60.0)
+    provider = _Provider([
+        TranscriptionResult("only this"),
+        ResourceUnavailableError("daily quota", headers={"Retry-After": "42188"}),
+    ])
+
+    result = await _run(provider, path)
+
+    assert result.text == "only this"
+
+
+async def test_the_tokens_of_both_answers_are_counted(tmp_path):
+    path = _audio(tmp_path, 60.0)
+    provider = _Provider([
+        TranscriptionResult("only this", tokens_used=100),
+        TranscriptionResult(" ".join(f"word{i}" for i in range(60)), tokens_used=300),
+    ])
+
+    result = await _run(provider, path)
+
+    assert result.tokens_used == 400
 
 
 async def test_an_answer_the_provider_calls_silent_is_not_asked_for_again(tmp_path):

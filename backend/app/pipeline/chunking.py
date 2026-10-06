@@ -11,7 +11,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -34,9 +34,9 @@ MAX_PAUSE_SECONDS = 300.0
 MAX_PAUSES_PER_PIECE = 5
 MAX_OVERLAP_WORDS = 45
 MIN_SEAM_RUN = 3
-LOOP_NGRAM_WORDS = 8
+LOOP_NGRAM_CHARS = 32
 LOOP_REPEATED_SHARE = 0.3
-MIN_WORDS_PER_MINUTE = 15
+MIN_CHARS_PER_MINUTE = 60
 
 _TOKEN = re.compile(r"\S+\s*")
 
@@ -63,14 +63,16 @@ def plan_pieces(
 ) -> list[Piece]:
     """Pieces covering ``duration``, none longer than ``piece_seconds``, each ending in a pause.
 
-    ``find_pause(start, end)`` answers the time of the quietest pause in the last tenth of a piece.
-    Without one the piece ends at its limit and the next starts ``OVERLAP_SECONDS`` earlier.
+    ``find_pause(start, end)`` answers the time of the longest pause in the last tenth of a piece,
+    which never leaves less than a tenth for the last one. Without a pause the piece ends there
+    and the next starts ``OVERLAP_SECONDS`` earlier.
     """
     pieces: list[Piece] = []
+    search = piece_seconds * PAUSE_SEARCH_SHARE
     start, overlaps = 0.0, False
     while duration - start > piece_seconds:
-        limit = start + piece_seconds
-        pause = find_pause(limit - piece_seconds * PAUSE_SEARCH_SHARE, limit)
+        limit = min(start + piece_seconds, duration - search)
+        pause = find_pause(limit - search, limit)
         if pause is None:
             pieces.append(Piece(start, limit, overlaps))
             start, overlaps = limit - OVERLAP_SECONDS, True
@@ -85,14 +87,21 @@ def _normalised(token: str) -> str:
     return "".join(ch for ch in token.casefold() if ch.isalnum())
 
 
+def _distinct_stretches(letters: str) -> int:
+    size = LOOP_NGRAM_CHARS
+    return len({letters[i : i + size] for i in range(len(letters) - size + 1)})
+
+
 def looks_broken(text: str, seconds: float) -> bool:
-    """Too few words for ``seconds`` of audio with speech in it, or the same words over and over."""
-    words = [_normalised(word) for word in text.split()]
-    if len(words) < MIN_WORDS_PER_MINUTE * seconds / 60:
+    """Too little text for ``seconds`` of audio with speech in it, or the same text over and over.
+
+    Counted in letters, not words, so languages written without spaces are measured alike.
+    """
+    letters = _normalised(text)
+    if len(letters) < MIN_CHARS_PER_MINUTE * seconds / 60:
         return True
-    size = LOOP_NGRAM_WORDS
-    grams = [tuple(words[i : i + size]) for i in range(len(words) - size + 1)]
-    return bool(grams) and 1 - len(set(grams)) / len(grams) > LOOP_REPEATED_SHARE
+    stretches = len(letters) - LOOP_NGRAM_CHARS + 1
+    return stretches > 0 and 1 - _distinct_stretches(letters) / stretches > LOOP_REPEATED_SHARE
 
 
 def _seam_words(tokens: list[str]) -> list[object]:
@@ -206,11 +215,17 @@ async def _transcribe_checked(
         return first
     log.warning("%s: a %.0fs piece looked looping or sparse; again", stt.model_name, seconds)
     await turn()
-    second = await _transcribe_with_pauses(stt, piece, language, seconds, pacer)
-    return max(
+    try:
+        second = await _transcribe_with_pauses(stt, piece, language, seconds, pacer)
+    except Exception:
+        log.warning("Asking again failed; keeping the first answer", exc_info=True)
+        return first
+    kept = max(
         (first, second),
-        key=lambda result: (not looks_broken(result.text, seconds), len(set(result.text.split()))),
+        key=lambda r: (not looks_broken(r.text, seconds), len(_normalised(r.text))),
     )
+    spent = [r.tokens_used for r in (first, second) if r.tokens_used is not None]
+    return replace(kept, tokens_used=sum(spent) if spent else None)
 
 
 async def transcribe_in_pieces(
