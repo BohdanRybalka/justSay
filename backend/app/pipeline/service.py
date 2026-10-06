@@ -48,6 +48,35 @@ class PipelineObserver(PiecePacer, Protocol):
     def saved(self, entry_id: str) -> None: ...
 
 
+def _silence_note(audio_path: Path) -> tuple[str, tuple] | None:
+    """Why ``audio_path`` holds no speech, as a log format and its arguments; ``None`` if it does.
+
+    The VAD decides when it can run; the energy check only when it cannot.
+    """
+    vad = analyze_vad(audio_path, audio_settings) if audio_settings.silence_vad_enabled else None
+    if vad is not None:
+        if not vad.is_silent:
+            return None
+        return (
+            "Discarding no-speech audio (layer=vad): speech_hops=%d/%d, max_prob=%.3f",
+            (vad.speech_hop_count, vad.total_hop_count, vad.max_probability),
+        )
+    analysis = analyze_silence(audio_path, audio_settings)
+    if analysis is None or not analysis.is_silent:
+        return None
+    return (
+        "Discarding silent audio (layer=energy): peak=%.1f dBFS, speech_frames=%d/%d",
+        (analysis.peak_dbfs, analysis.speech_frame_count, analysis.total_frame_count),
+    )
+
+
+def _holds_no_speech(audio_path: Path) -> bool:
+    note = _silence_note(audio_path)
+    if note is not None:
+        log.info(note[0], *note[1])
+    return note is not None
+
+
 async def process_audio(
     audio_path: Path,
     language: str = "uk",
@@ -71,26 +100,7 @@ async def process_audio(
     if duration is None:
         duration = detect_duration(audio_path)
 
-    vad = None
-    if audio_settings.silence_vad_enabled:
-        vad = await asyncio.to_thread(analyze_vad, audio_path, audio_settings)
-
-    analysis = None
-    if vad is None:
-        analysis = await asyncio.to_thread(analyze_silence, audio_path, audio_settings)
-
-    discard_log: tuple[str, tuple] | None = None
-    if vad is not None and vad.is_silent:
-        discard_log = (
-            "Discarding no-speech audio (layer=vad): speech_hops=%d/%d, max_prob=%.3f",
-            (vad.speech_hop_count, vad.total_hop_count, vad.max_probability),
-        )
-    elif analysis is not None and analysis.is_silent:
-        discard_log = (
-            "Discarding silent audio (layer=energy): peak=%.1f dBFS, speech_frames=%d/%d",
-            (analysis.peak_dbfs, analysis.speech_frame_count, analysis.total_frame_count),
-        )
-
+    discard_log = await asyncio.to_thread(_silence_note, audio_path)
     if discard_log is not None:
         log.warning(discard_log[0], *discard_log[1])
         return ProcessingResult(
@@ -133,6 +143,7 @@ async def process_audio(
                 language=language,
                 duration=duration,
                 no_speech_threshold=stt_settings.no_speech_prob_threshold,
+                holds_no_speech=_holds_no_speech,
                 pacer=observer,
             )
     except Exception:

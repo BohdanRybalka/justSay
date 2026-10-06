@@ -65,13 +65,23 @@ def _audio(tmp_path: Path, seconds: float, rate: int = 44100, channels: int = 2)
     return path
 
 
-async def _run(provider: _Provider, path: Path, pacer: _Pacer | None = None, language="auto"):
+async def _run(
+    provider: _Provider,
+    path: Path,
+    pacer: _Pacer | None = None,
+    language: str = "auto",
+    silent_pieces: frozenset[int] = frozenset(),
+):
+    def holds_no_speech(piece: Path) -> bool:
+        return int(piece.stem.rsplit("piece", 1)[1]) in silent_pieces
+
     return await transcribe_in_pieces(
         provider,
         path,
         language=language,
         duration=None,
         no_speech_threshold=THRESHOLD,
+        holds_no_speech=holds_no_speech,
         pacer=pacer or _Pacer(),
     )
 
@@ -194,7 +204,34 @@ async def test_all_silent_pieces_hand_back_a_result_the_pipeline_discards(tmp_pa
 
     result = await _run(provider, path)
 
-    assert (result.text, result.no_speech_prob) == ("", 0.7)
+    assert (result.text, result.no_speech_prob) == ("", 1.0)
+
+
+async def test_a_piece_the_vad_finds_silent_is_never_sent(tmp_path, short_pieces):
+    path = _audio(tmp_path, 70.0)
+    provider = _Provider([
+        TranscriptionResult("добрий день", detected_language="uk"),
+        TranscriptionResult("до побачення"),
+    ])
+    pacer = _Pacer()
+
+    result = await _run(provider, path, pacer, silent_pieces=frozenset({1}))
+
+    assert (result.text, result.no_speech_prob) == ("добрий день до побачення", None)
+    assert [s["path"].stem[-1] for s in provider.sent] == ["0", "2"]
+    assert [e for e in pacer.events if e[0] == "done"] == [("done", n, 3) for n in (1, 2, 3)]
+
+
+async def test_no_piece_with_speech_hands_back_certain_silence(tmp_path, short_pieces):
+    path = _audio(tmp_path, 50.0)
+    provider = _Provider([TranscriptionResult("Thank you.", no_speech_prob=0.2)])
+
+    result = await _run(provider, path, silent_pieces=frozenset({1}))
+    assert result.no_speech_prob is None
+
+    provider = _Provider([])
+    result = await _run(provider, path, silent_pieces=frozenset({0, 1}))
+    assert (result.text, result.no_speech_prob, provider.sent) == ("", 1.0, [])
 
 
 def _busy(seconds: str | None) -> ResourceUnavailableError:

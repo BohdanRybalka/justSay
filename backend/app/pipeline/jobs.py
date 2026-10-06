@@ -127,6 +127,7 @@ class _JobObserver:
         self._job.piece_started_at = self._queue.clock()
 
     async def pause(self, seconds: float) -> None:
+        self._stop_if_cancelled()
         self._job.paused = True
         try:
             await self._queue.sleep(seconds)

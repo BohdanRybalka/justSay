@@ -11,6 +11,7 @@ import asyncio
 import logging
 import math
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -133,13 +134,14 @@ async def transcribe_in_pieces(
     language: str,
     duration: float | None,
     no_speech_threshold: float,
+    holds_no_speech: Callable[[Path], bool],
     pacer: PiecePacer,
 ) -> TranscriptionResult:
     """Transcribe ``audio_path`` piece by piece; scratch files sit beside it and are removed.
 
-    The first piece with speech fixes ``"auto"`` for the rest; a piece whose ``no_speech_prob``
-    exceeds ``no_speech_threshold`` adds no text, and when every piece does the result carries
-    the lowest of them so the caller discards it.
+    A piece ``holds_no_speech`` judges silent is never sent; one whose ``no_speech_prob`` exceeds
+    ``no_speech_threshold`` adds no text. The first piece with speech fixes ``"auto"`` for the
+    rest. With no speech in any piece, ``no_speech_prob`` is 1.0, so the caller discards it.
     """
     mono = audio_path.with_name(f"{audio_path.stem}-16k.wav")
     try:
@@ -156,22 +158,30 @@ async def transcribe_in_pieces(
         piece_seconds = LOCAL_PIECE_SECONDS if local else CLOUD_PIECE_SECONDS
         spans = piece_spans(await asyncio.to_thread(_frames, mono) / PIECE_RATE, piece_seconds)
         texts: list[str] = []
-        silent_probs: list[float] = []
+        silent = 0
         tokens: list[int] = []
         for index, (start, end) in enumerate(spans):
             await pacer.before_piece(index, len(spans))
             piece = audio_path.with_name(f"{audio_path.stem}-piece{index}.flac")
             try:
                 await asyncio.to_thread(_write_piece, mono, piece, start, end)
-                result = await _transcribe_with_pauses(stt, piece, language, end - start, pacer)
+                if await asyncio.to_thread(holds_no_speech, piece):
+                    result = None
+                else:
+                    result = await _transcribe_with_pauses(
+                        stt, piece, language, end - start, pacer
+                    )
             finally:
                 discard_scratch_file(piece)
             pacer.piece_done(index + 1, len(spans))
+            if result is None:
+                silent += 1
+                continue
             if result.tokens_used is not None:
                 tokens.append(result.tokens_used)
             prob = result.no_speech_prob
             if prob is not None and prob > no_speech_threshold:
-                silent_probs.append(prob)
+                silent += 1
                 continue
             if language == "auto" and result.detected_language:
                 language = result.detected_language
@@ -187,5 +197,5 @@ async def transcribe_in_pieces(
         text=text,
         tokens_used=sum(tokens) if tokens else None,
         detected_language=None if language == "auto" else language,
-        no_speech_prob=min(silent_probs) if len(silent_probs) == len(spans) else None,
+        no_speech_prob=1.0 if silent == len(spans) else None,
     )

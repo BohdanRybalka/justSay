@@ -16,6 +16,7 @@ import pytest
 import soundfile as sf
 from httpx import ASGITransport, AsyncClient
 
+from app.audio.vad import VadAnalysis
 from app.config import settings
 from app.core.audio_formats import UNREADABLE_HERE
 from app.core.errors import ConfigurationError, NotReadyError, ResourceUnavailableError
@@ -261,6 +262,27 @@ async def test_a_paused_job_resumes_after_the_wait_it_was_given(queue, fakes):
     assert _view(queue, job_id).stage == "done"
 
 
+async def test_a_job_cancelled_during_a_piece_never_starts_the_pause_it_is_asked_for(
+    queue, fakes
+):
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    queue.sleep = sleep
+    pipeline = _FakePipeline()
+    job_id = _start(queue, fakes, pipeline)
+    await asyncio.wait_for(pipeline.transcribing.wait(), 1)
+    queue.cancel_or_dismiss(job_id)
+
+    with pytest.raises(jobs._JobCancelledError):
+        await jobs._JobObserver(queue, queue._jobs[job_id]).pause(300.0)
+    assert slept == []
+    pipeline.release.set()
+    await _settle(queue, job_id)
+
+
 async def test_a_paused_job_stops_at_once_when_cancelled(queue, fakes):
     never = asyncio.Event()
 
@@ -500,6 +522,31 @@ async def test_a_dropped_file_is_saved_as_a_file_entry_and_never_copied(
     finally:
         with history._lock:
             history._close_conn_locked()
+
+
+async def test_a_file_whose_every_piece_is_silent_is_never_sent(
+    client, queue, tmp_path, monkeypatch
+):
+    stt = MagicMock(model_name="mock/provider", is_local=False)
+    stt.transcribe = AsyncMock(return_value=TranscriptionResult(text="Thank you."))
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
+    monkeypatch.setattr(service.audio_settings, "silence_vad_enabled", True)
+    monkeypatch.setattr(jobs, "process_audio", service.process_audio)
+
+    def vad(path: Path, _settings) -> VadAnalysis:
+        return VadAnalysis(1, 10, 0.2, is_silent="piece" in path.name)
+
+    with (
+        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+        patch("app.pipeline.service.analyze_vad", side_effect=vad),
+    ):
+        upload = {"file": ("quiet.wav", _wav(tmp_path), "audio/wav")}
+        job_id = (await client.post("/jobs/file", files=upload)).json()["id"]
+        await _settle(queue, job_id)
+
+    view = _view(queue, job_id)
+    assert (view.stage, view.error) == ("failed", jobs.NO_SPEECH_REASON)
+    stt.transcribe.assert_not_called()
 
 
 @pytest.mark.parametrize(
