@@ -249,8 +249,9 @@ def _readable_by_server(audio_path: Path) -> Path:
     """``audio_path`` when whisper-server decodes its format, else a 16 kHz mono WAV copy beside it.
 
     whisper-server reads WAV, MP3, FLAC, AIFF and Ogg Vorbis but not Ogg Opus (WhatsApp voice
-    notes) and converts everything to 16 kHz mono itself. A file soundfile cannot open either
-    raises ``ResourceUnavailableError(UNREADABLE_HERE)``; any later failure removes the copy.
+    notes) or AAC in M4A, and converts everything to 16 kHz mono itself. A file neither soundfile
+    nor FFmpeg opens raises ``ResourceUnavailableError(UNREADABLE_HERE)``; a later failure removes
+    the copy.
     """
     if audio_path.suffix.lower() in _SERVER_DECODES:
         return audio_path

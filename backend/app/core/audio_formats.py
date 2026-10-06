@@ -113,21 +113,16 @@ def decode_to_mono_wav(source: Path, target: Path, rate: int) -> None:
 
     try:
         reader = sf.SoundFile(str(source))
+        write = _write_from_soundfile
     except RuntimeError:
-        container = _open_with_ffmpeg(source)
-
-        def write(sink) -> None:
-            _write_from_ffmpeg(container, sink, rate)
-    else:
-
-        def write(sink) -> None:
-            _write_from_soundfile(reader, sink, rate)
+        reader = _open_with_ffmpeg(source)
+        write = _write_from_ffmpeg
 
     try:
-        with sf.SoundFile(
+        with reader, sf.SoundFile(
             str(target), "w", samplerate=rate, channels=1, format="WAV", subtype="PCM_16"
         ) as sink:
-            write(sink)
+            write(reader, sink, rate)
     except Exception:
         discard_scratch_file(target)
         raise
@@ -137,11 +132,10 @@ def _write_from_soundfile(reader, sink, rate: int) -> None:
     import numpy as np
     import soxr
 
-    with reader:
-        stream = soxr.ResampleStream(reader.samplerate, rate, 1, dtype="float32")
-        for block in reader.blocks(DECODE_BLOCK_FRAMES, dtype="float32", always_2d=True):
-            sink.write(stream.resample_chunk(block.mean(axis=1), last=False))
-        sink.write(stream.resample_chunk(np.zeros(0, dtype=np.float32), last=True))
+    stream = soxr.ResampleStream(reader.samplerate, rate, 1, dtype="float32")
+    for block in reader.blocks(DECODE_BLOCK_FRAMES, dtype="float32", always_2d=True):
+        sink.write(stream.resample_chunk(block.mean(axis=1), last=False))
+    sink.write(stream.resample_chunk(np.zeros(0, dtype=np.float32), last=True))
 
 
 def _open_with_ffmpeg(source: Path):
@@ -161,12 +155,11 @@ def _write_from_ffmpeg(container, sink, rate: int) -> None:
     import av
 
     resampler = av.AudioResampler(format="s16", layout="mono", rate=rate)
-    with container:
-        for frame in container.decode(audio=0):
-            for resampled in resampler.resample(frame):
-                sink.write(resampled.to_ndarray().reshape(-1))
-        for resampled in resampler.resample(None):
+    for frame in container.decode(audio=0):
+        for resampled in resampler.resample(frame):
             sink.write(resampled.to_ndarray().reshape(-1))
+    for resampled in resampler.resample(None):
+        sink.write(resampled.to_ndarray().reshape(-1))
 
 
 def encode_aac_m4a(path: Path, samples, rate: int) -> None:
