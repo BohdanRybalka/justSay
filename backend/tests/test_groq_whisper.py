@@ -75,6 +75,24 @@ def test_rate_limit_raises_a_resource_unavailable_error(tmp_path):
         provider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None)
 
 
+class _GroqRefusalError(Exception):
+    def __init__(self, headers: dict[str, str]) -> None:
+        super().__init__("Error code: 429 - rate_limit_exceeded")
+        self.response = MagicMock(headers=headers)
+
+
+@pytest.mark.parametrize(("headers", "retry_after"), [({"retry-after": "12"}, "12"), ({}, "30")])
+def test_a_rate_limit_says_how_long_to_wait(tmp_path, headers, retry_after):
+    provider = GroqWhisperSTTProvider(_settings())
+    client = MagicMock()
+    client.audio.transcriptions.create.side_effect = _GroqRefusalError(headers)
+
+    with pytest.raises(ResourceUnavailableError) as raised:
+        provider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None)
+
+    assert raised.value.headers == {"Retry-After": retry_after}
+
+
 def test_other_errors_bubble_up_unchanged(tmp_path):
     """Non-429 SDK errors must propagate as-is so callers see the root cause."""
     provider = GroqWhisperSTTProvider(_settings())

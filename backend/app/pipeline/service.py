@@ -17,6 +17,7 @@ from fastapi import BackgroundTasks
 from app.audio.analysis import analyze_silence
 from app.audio.config import audio_settings
 from app.audio.vad import analyze_vad
+from app.pipeline.chunking import PiecePacer, transcribe_in_pieces
 from app.pipeline.utils import detect_duration
 from app.stt.config import stt_settings
 from app.stt.routing import get_routed_provider, is_local_provider
@@ -37,8 +38,8 @@ class ProcessingResult:
     discarded_reason: str | None = None
 
 
-class PipelineObserver(Protocol):
-    """What a caller showing progress hears from ``process_audio``, in this order."""
+class PipelineObserver(PiecePacer, Protocol):
+    """What a caller showing progress hears: the route, each piece, then the save."""
 
     async def before_transcribe(self, model_name: str, audio_duration: float | None) -> None: ...
 
@@ -62,7 +63,7 @@ async def process_audio(
 
     ``background_tasks``, when provided, schedules embedding generation to run
     after the response is sent. ``source`` and ``source_name`` say where the
-    history entry came from; ``observer`` hears the route, the save and its id.
+    history entry came from; with an ``observer`` the audio goes in pieces it paces.
     """
     start = time.perf_counter()
 
@@ -123,11 +124,17 @@ async def process_audio(
         await observer.before_transcribe(stt.model_name, duration)
 
     try:
-        result = await stt.transcribe(
-            audio_path,
-            language=language,
-            audio_duration=duration,
-        )
+        if observer is None:
+            result = await stt.transcribe(audio_path, language=language, audio_duration=duration)
+        else:
+            result = await transcribe_in_pieces(
+                stt,
+                audio_path,
+                language=language,
+                duration=duration,
+                no_speech_threshold=stt_settings.no_speech_prob_threshold,
+                pacer=observer,
+            )
     except Exception:
         log.exception("STT transcribe failed (%s)", stt.model_name)
         raise

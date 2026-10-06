@@ -1,8 +1,9 @@
 """Background transcription jobs, kept in memory and run one at a time, oldest first.
 
-A job never touches the clipboard, waits while a dictation is being processed, and estimates its
-progress from this machine's own speed for the routed model, capped below done. Jobs die with the
-app; ``remove_leftover_files`` deletes their scratch files at the next start.
+A job never touches the clipboard and goes in pieces, each held back while a dictation is being
+processed. Progress counts finished pieces, plus an estimate inside the current one from this
+machine's own speed for the routed model. Jobs die with the app; ``remove_leftover_files``
+deletes their scratch files at the next start.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import sqlite3
 import statistics
 import time
 import uuid
-from collections.abc import Callable, Generator
+from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +24,12 @@ from pydantic import BaseModel
 
 from app.core import tasks
 from app.core.audio_formats import UNREADABLE_HERE
-from app.core.errors import ConfigurationError, JustSayError, NotReadyError
+from app.core.errors import (
+    ConfigurationError,
+    JustSayError,
+    NotReadyError,
+    ResourceUnavailableError,
+)
 from app.core.scratch import discard_scratch_file
 from app.pipeline.service import process_audio
 from app.transcripts import history
@@ -44,6 +50,7 @@ FILE_LANGUAGE = "auto"
 NO_SPEECH_REASON = "We didn't hear any speech in this file"
 NO_KEY_REASON = "Add an API key in Settings"
 FAILED_REASON = "Couldn't turn this file into text. Try again"
+BUSY_REASON = "The transcription service is busy. Try again in a few minutes"
 
 _CANCELLABLE: frozenset[JobStage] = frozenset({"queued", "transcribing"})
 _EXPIRING: frozenset[JobStage] = frozenset({"done", "cancelled"})
@@ -92,7 +99,10 @@ class _Job:
     stage: JobStage = "queued"
     error: str | None = None
     entry_id: str | None = None
-    started_at: float | None = None
+    piece_started_at: float | None = None
+    pieces_done: int = 0
+    pieces_total: int = 1
+    paused: bool = False
     expected_seconds: float | None = None
     finished_at: float | None = None
     task: asyncio.Task | None = None
@@ -109,9 +119,24 @@ class _JobObserver:
 
     async def before_transcribe(self, model_name: str, audio_duration: float | None) -> None:
         self._job.expected_seconds = await _expected_seconds(model_name, audio_duration)
+
+    async def before_piece(self, index: int, total: int) -> None:
         await self._queue.gate.wait_for_none()
         self._stop_if_cancelled()
-        self._job.started_at = self._queue.clock()
+        self._job.pieces_total = total
+        self._job.piece_started_at = self._queue.clock()
+
+    async def pause(self, seconds: float) -> None:
+        self._job.paused = True
+        try:
+            await self._queue.sleep(seconds)
+        finally:
+            self._job.paused = False
+        await self._queue.gate.wait_for_none()
+        self._stop_if_cancelled()
+
+    def piece_done(self, done: int, total: int) -> None:
+        self._job.pieces_done = done
 
     def before_save(self) -> None:
         self._stop_if_cancelled()
@@ -139,6 +164,14 @@ async def _expected_seconds(model_name: str, audio_duration: float | None) -> fl
     return audio_duration / statistics.median(speeds) / 1000
 
 
+def _reason_for_unavailable(refusal: ResourceUnavailableError) -> str:
+    if refusal.message == UNREADABLE_HERE:
+        return UNREADABLE_HERE
+    if refusal.headers and "Retry-After" in refusal.headers:
+        return BUSY_REASON
+    return FAILED_REASON
+
+
 def remove_leftover_files(temp_dir: Path) -> None:
     """Delete the scratch files of jobs that were running when the app last quit."""
     for path in temp_dir.glob(f"{JOB_FILE_PREFIX}*"):
@@ -153,12 +186,14 @@ class JobQueue:
         temp_dir: Path,
         gate: DictationGate = dictation_gate,
         clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._temp_dir = temp_dir
         self._jobs: dict[str, _Job] = {}
         self._turn = asyncio.Lock()
         self.gate = gate
         self.clock = clock
+        self.sleep = sleep
 
     def add_file(self, content: bytes, name: str) -> str:
         """Keep ``content`` in a scratch file and queue it for transcription; answer the job id."""
@@ -184,8 +219,9 @@ class JobQueue:
     def cancel_or_dismiss(self, job_id: str) -> RemovalOutcome | None:
         """Cancel a queued or transcribing job, forget a finished one; ``None`` for an unknown id.
 
-        A transcribing job's request cannot be recalled, so it keeps its turn until the answer
-        comes and is then thrown away unsaved. Raises ``NotReadyError`` while saving.
+        A piece already sent cannot be recalled, so a transcribing job keeps its turn until that
+        answer comes and then stops unsaved; a paused one stops at once. ``NotReadyError`` while
+        saving.
         """
         job = self._jobs.get(job_id)
         if job is None:
@@ -193,7 +229,7 @@ class JobQueue:
         if job.stage == "saving":
             raise NotReadyError("This file is already being saved to History")
         if job.stage in _CANCELLABLE:
-            if job.stage == "queued" and job.task is not None:
+            if (job.stage == "queued" or job.paused) and job.task is not None:
                 job.task.cancel()
             job.stage = "cancelled"
             job.finished_at = self.clock()
@@ -217,9 +253,15 @@ class JobQueue:
     def _progress(job: _Job, now: float) -> float | None:
         if job.stage == "done":
             return 1.0
-        if job.stage != "transcribing" or job.started_at is None or not job.expected_seconds:
+        if job.stage != "transcribing" or job.piece_started_at is None:
             return None
-        return min(ESTIMATE_CAP, (now - job.started_at) / job.expected_seconds)
+        within = 0.0
+        if job.expected_seconds:
+            per_piece = job.expected_seconds / job.pieces_total
+            within = min(ESTIMATE_CAP, (now - job.piece_started_at) / per_piece)
+        elif job.pieces_total == 1:
+            return None
+        return min(ESTIMATE_CAP, (job.pieces_done + within) / job.pieces_total)
 
     async def _run(self, job: _Job) -> None:
         try:
@@ -249,10 +291,12 @@ class JobQueue:
             log.info("File job %s cancelled; its answer was not saved", job.id)
         except ConfigurationError:
             self._fail(job, NO_KEY_REASON)
+        except ResourceUnavailableError as refusal:
+            log.warning("File job %s refused: %s", job.id, refusal.diagnostic or refusal.message)
+            self._fail(job, _reason_for_unavailable(refusal))
         except JustSayError as refusal:
             log.warning("File job %s refused: %s", job.id, refusal.diagnostic or refusal.message)
-            plain = refusal.message == UNREADABLE_HERE
-            self._fail(job, UNREADABLE_HERE if plain else FAILED_REASON)
+            self._fail(job, FAILED_REASON)
         except Exception:
             log.exception("File job %s crashed", job.id)
             self._fail(job, FAILED_REASON)

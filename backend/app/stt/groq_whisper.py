@@ -8,7 +8,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from app.core.constants import GROQ_TIMEOUT_SECONDS
+from app.core.constants import GROQ_TIMEOUT_SECONDS, RATE_LIMIT_RETRY_SECONDS
 from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.stt.base import (
     STTProvider,
@@ -21,6 +21,13 @@ from app.stt.config import STTSettings
 from app.stt.glossary import glossary_summary, whisper_glossary
 
 log = logging.getLogger(__name__)
+
+
+def _retry_after(error: Exception) -> str:
+    """The seconds Groq's ``retry-after`` header asks for, or the app's default without one."""
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None) or {}
+    return str(headers.get("retry-after") or RATE_LIMIT_RETRY_SECONDS)
 
 
 class GroqWhisperSTTProvider(STTProvider):
@@ -115,7 +122,8 @@ class GroqWhisperSTTProvider(STTProvider):
             msg = str(e)
             if "429" in msg or "rate_limit" in msg.lower():
                 raise ResourceUnavailableError(
-                    "Groq rate limit exceeded. Try again later or switch STT to Gemini."
+                    "Groq rate limit exceeded. Try again later or switch STT to Gemini.",
+                    headers={"Retry-After": _retry_after(e)},
                 ) from e
             raise
 

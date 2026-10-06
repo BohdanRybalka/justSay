@@ -1,4 +1,4 @@
-"""Audio container formats — the extension/MIME table and the magic-bytes detector.
+"""Audio container formats — the extension/MIME table, the magic-bytes detector, the decoder.
 
 Deliberately free of ``fastapi``, so a provider can look up a Content-Type
 without acquiring a web-framework dependency.
@@ -9,6 +9,8 @@ MIME to serve it.
 """
 
 from pathlib import Path
+
+from app.core.scratch import discard_scratch_file
 
 MIME_BY_AUDIO_EXTENSION: dict[str, str] = {
     ".wav": "audio/wav",
@@ -44,6 +46,12 @@ DETECTED_MIME_TO_EXTENSIONS: dict[str, frozenset[str]] = {
 TRUSTED_EXTENSIONS: frozenset[str] = frozenset({".aac"})
 
 MIN_MAGIC_BYTES: int = 16
+
+DECODE_BLOCK_FRAMES: int = 65536
+
+
+class UndecodableAudioError(Exception):
+    """soundfile cannot open this file (M4A, MP4, AAC, WMA, WebM and anything damaged)."""
 
 
 def detect_audio_mime(content: bytes) -> str | None:
@@ -92,3 +100,30 @@ def mime_for_extension(filename: str | None) -> str:
     """
     ext = Path(filename).suffix.lower() if filename else ""
     return MIME_BY_AUDIO_EXTENSION.get(ext, "audio/wav")
+
+
+def decode_to_mono_wav(source: Path, target: Path, rate: int) -> None:
+    """Write ``source`` to ``target`` as a 16-bit mono WAV at ``rate``, a block at a time.
+
+    Raises ``UndecodableAudioError`` when soundfile cannot open ``source``; any later failure
+    removes ``target`` and propagates.
+    """
+    import numpy as np
+    import soundfile as sf
+    import soxr
+
+    try:
+        reader = sf.SoundFile(str(source))
+    except RuntimeError as exc:
+        raise UndecodableAudioError(f"{source.suffix}: {exc}") from exc
+    try:
+        with reader, sf.SoundFile(
+            str(target), "w", samplerate=rate, channels=1, format="WAV", subtype="PCM_16"
+        ) as sink:
+            stream = soxr.ResampleStream(reader.samplerate, rate, 1, dtype="float32")
+            for block in reader.blocks(DECODE_BLOCK_FRAMES, dtype="float32", always_2d=True):
+                sink.write(stream.resample_chunk(block.mean(axis=1), last=False))
+            sink.write(stream.resample_chunk(np.zeros(0, dtype=np.float32), last=True))
+    except Exception:
+        discard_scratch_file(target)
+        raise
