@@ -236,7 +236,7 @@ async def test_a_cloud_dictation_reaches_the_clipboard_cleaned_and_history_keeps
     copy_mock.assert_called_once_with("Звіт до четверга.")
     saved = save_mock.call_args.kwargs
     assert (saved["text"], saved["raw_text"]) == ("Звіт до четверга.", "ну е звіт до четверга")
-    assert saved["word_count"] == 5
+    assert saved["word_count"] == 3
     assert clean.call_args.args[0] == "ну е звіт до четверга"
 
 

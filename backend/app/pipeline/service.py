@@ -192,7 +192,7 @@ async def process_audio(
             log.warning("Copying the transcript to the clipboard failed", exc_info=True)
 
     duration_ms = int((time.perf_counter() - start) * 1000)
-    word_count = len(raw_text.split()) if raw_text else 0
+    word_count = len(text.split()) if text else 0
 
     effective_language = language
     if language == "auto" and result.detected_language:
