@@ -117,7 +117,7 @@ describe("shipped main window (src-tauri/tauri.<platform>.conf.json)", () => {
         platformMainWindow(platform)?.dragDropEnabled,
         "dragDropEnabled must be false — at Tauri's default of true the shell installs its own " +
           "drag-drop handler and the page never receives dragenter, dragover, dragleave or drop " +
-          "for an external file, which kills the Transcribe drop zone silently (ADR 087)",
+          "for an external file, which kills dropping a file on the window silently (ADR 087)",
       ).toBe(false);
     });
 

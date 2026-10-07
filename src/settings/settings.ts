@@ -25,6 +25,7 @@ import {
 import { loadEventApi } from "../event-api";
 import { TimedOutError, withTimeout } from "../timeout";
 import { isStaleStatusResponse } from "../stale-response";
+import { mountDropOverlay } from "./drop-overlay";
 import { nextTabAction } from "./tab-visibility";
 import { renderDictation } from "./tabs/dictation";
 import { renderDictationMode } from "./tabs/dictation-mode";
@@ -32,7 +33,6 @@ import { renderDictationMeetings, type MeetingsGroup } from "./tabs/dictation-me
 import { renderDictionary } from "./tabs/dictionary";
 import { renderHistory, renderHistoryHeading, type HistoryPanel } from "./tabs/history";
 import { renderInsights } from "./tabs/insights";
-import { renderTranscribe } from "./tabs/transcribe";
 import { renderAccount } from "./tabs/account";
 import { renderSettingsPanel } from "./tabs/settings-panel";
 import { applyAppTheme, applyThemePreference } from "../ui/theme";
@@ -54,6 +54,7 @@ let osAccountName = "";
 let settings: UserSettings | null = null;
 let cloudStatus: CloudKeyStatus | null = null;
 let activeTab: TabLifecycle | null = null;
+let historyPanel: HistoryPanel | null = null;
 let settingsError: string | null = null;
 let backendReachable = false;
 let settingsLoadInFlight = false;
@@ -108,23 +109,6 @@ function combineLifecycles(parts: TabLifecycle[]): TabLifecycle {
   };
 }
 
-/** Mount old tabs, whole, into a panel whose redesign has not landed yet.
- *  Each sits in its own `.legacy-tab`, the only place the old stylesheet
- *  reaches, and the panel answers for all of them as one. */
-function hostLegacyTabs(
-  container: HTMLElement,
-  mounts: ((tab: HTMLElement) => TabTeardown)[],
-): TabLifecycle {
-  return combineLifecycles(
-    mounts.flatMap((mount) => {
-      const tab = document.createElement("div");
-      tab.className = "legacy-tab";
-      container.append(tab);
-      return asLifecycle(mount(tab)) ?? [];
-    }),
-  );
-}
-
 const panels: Record<PanelName, PanelRenderer> = {
   insights: (container, loaded, windowHidden) => {
     const viewer = { name: displayName(loaded.display_name, osAccountName), shortcut: loaded.shortcut };
@@ -132,10 +116,8 @@ const panels: Record<PanelName, PanelRenderer> = {
   },
   history: (container, loaded) => {
     renderHistoryHeading(container);
-    let history: HistoryPanel | null = null;
-    const transcribe = hostLegacyTabs(container, [(tab) => renderTranscribe(tab, () => history?.jobStarted())]);
-    history = renderHistory(container, loaded);
-    return combineLifecycles([transcribe, history]);
+    historyPanel = renderHistory(container, loaded);
+    return historyPanel;
   },
   dictation: (container, loaded, windowHidden) => {
     const everyday = renderDictation(container, loaded);
@@ -505,18 +487,15 @@ sidebar.querySelectorAll<HTMLButtonElement>("[data-panel]").forEach((item) => {
 });
 
 
-/** Cancel a drag carrying files that no element in the page handled (ADR 087).
- *
- *  An unhandled file drop navigates the webview to the dropped file. A drag
- *  carrying anything else is left to its browser default. */
-function swallowUnhandledFileDrop(event: Event) {
-  const dragged = (event as DragEvent).dataTransfer;
-  if (!dragged || !Array.from(dragged.types).includes("Files")) return;
-  event.preventDefault();
+/** A file dropped on the window is now a job: show it at the top of History. */
+function showStartedJob() {
+  if (currentPanel === "history" && settings) {
+    pane.scrollTop = 0;
+    historyPanel?.jobStarted();
+    return;
+  }
+  switchPanel("history");
 }
-
-window.addEventListener("dragover", swallowUnhandledFileDrop);
-window.addEventListener("drop", swallowUnhandledFileDrop);
 
 
 /** Start the `/health` interval, or leave the running one alone. */
@@ -629,6 +608,7 @@ function init() {
   applyThemePreference("system");
   mountIconSprite(document);
   renderTitlebar(titlebar, detectShortcutPlatform(navigator));
+  mountDropOverlay(document.body, showStartedJob);
   void connectTitlebarToWindow();
   void initAppVersion();
   void initAccountName();

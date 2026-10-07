@@ -68,12 +68,12 @@ vi.mock("./tabs/insights", () => ({
   }),
 }));
 
-const transcribeTab = vi.fn();
+const dropOverlayMounts: { root: HTMLElement; onStarted: () => void }[] = [];
 
-vi.mock("./tabs/transcribe", () => ({
-  renderTranscribe: vi.fn((container: HTMLElement) => {
-    container.innerHTML = '<div id="transcribe-tab-body"></div>';
-    return transcribeTab;
+vi.mock("./drop-overlay", () => ({
+  mountDropOverlay: vi.fn((root: HTMLElement, onStarted: () => void) => {
+    dropOverlayMounts.push({ root, onStarted });
+    return () => {};
   }),
 }));
 
@@ -81,6 +81,7 @@ const historyTab = {
   destroy: vi.fn(),
   releaseResources: vi.fn(),
   resumeResources: vi.fn(),
+  jobStarted: vi.fn(),
 };
 
 vi.mock("./tabs/history", () => ({
@@ -315,22 +316,16 @@ describe("the sidebar", () => {
     expect(insightsTab.destroy).toHaveBeenCalledOnce();
   });
 
-  it("hosts the old Transcribe tab between History's heading and its timeline, and lets go of both on leaving", async () => {
+  it("draws History as its heading over its timeline, with no drop zone between, and lets go of it on leaving", async () => {
     await bootWithSettingsLoaded();
 
     openPanel("history");
 
-    const hosted = document.querySelectorAll("#pane .legacy-tab");
-    expect(hosted).toHaveLength(1);
-    expect(hosted[0].querySelector("#transcribe-tab-body")).not.toBeNull();
-    const order = Array.from(document.querySelector("#pane > .panel")!.children).map(
-      (child) => child.id || child.className,
-    );
-    expect(order).toEqual(["history-heading", "legacy-tab", "history-tab-body"]);
+    const order = Array.from(document.querySelector("#pane > .panel")!.children).map((child) => child.id);
+    expect(order).toEqual(["history-heading", "history-tab-body"]);
 
     openPanel("insights");
 
-    expect(transcribeTab).toHaveBeenCalledOnce();
     expect(historyTab.destroy).toHaveBeenCalledOnce();
   });
 
@@ -1504,56 +1499,51 @@ describe("the Settings window being dismissed", () => {
   });
 });
 
-describe("a file dropped where nothing in the page handles it", () => {
-  async function bootSettingsWindow(): Promise<void> {
+describe("a file dropped on the window", () => {
+  async function bootOn(panel: string): Promise<() => void> {
     apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.getSettings.mockResolvedValue(buildSettings());
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
+    dropOverlayMounts.length = 0;
     await import("./settings");
-    await openSettingsPanel();
+    await vi.waitFor(() => expect(document.getElementById("insights-body")).not.toBeNull());
+    document.querySelector<HTMLButtonElement>(`[data-panel="${panel}"]`)!.click();
+    expect(dropOverlayMounts).toHaveLength(1);
+    return dropOverlayMounts[0].onStarted;
   }
 
-  function dispatchOnTheNav(type: string, carried: string[]): Event {
-    const event = new Event(type, { bubbles: true, cancelable: true });
-    Object.defineProperty(event, "dataTransfer", { value: { types: carried } });
-    document.querySelector<HTMLButtonElement>('[data-panel="dictation"]')!.dispatchEvent(event);
-    return event;
-  }
+  const currentPanel = () =>
+    document.querySelector<HTMLElement>('[data-panel][aria-current="true"]')!.dataset.panel;
 
-  it("is swallowed, so the webview cannot navigate away from the Settings UI", async () => {
-    await bootSettingsWindow();
+  it("is caught over the whole window, not inside one panel", async () => {
+    await bootOn("insights");
 
-    const dragover = dispatchOnTheNav("dragover", ["Files"]);
-    const drop = dispatchOnTheNav("drop", ["Files"]);
-
-    expect(
-      dragover.defaultPrevented,
-      "without a prevented dragover the webview refuses the drag outright (ADR 087)",
-    ).toBe(true);
-    expect(
-      drop.defaultPrevented,
-      "an unprevented drop is a browser navigation to the dropped file, which replaces " +
-        "the whole Settings UI (ADR 087)",
-    ).toBe(true);
+    expect(dropOverlayMounts[0].root).toBe(document.body);
   });
 
-  it("leaves a text drag alone, so a dragged folder path still lands in a field", async () => {
-    await bootSettingsWindow();
+  it("opens History once its job has started", async () => {
+    const jobStarted = await bootOn("dictation");
 
-    const dragover = dispatchOnTheNav("dragover", ["text/plain"]);
-    const drop = dispatchOnTheNav("drop", ["text/plain"]);
+    jobStarted();
 
-    expect(
-      dragover.defaultPrevented,
-      "cancelling a text dragover shows a copy cursor over every tab that takes no file",
-    ).toBe(false);
-    expect(
-      drop.defaultPrevented,
-      "cancelling a text drop stops the browser inserting a folder path dragged from " +
-        "Explorer into a text field, and nothing puts it there instead",
-    ).toBe(false);
+    expect(currentPanel()).toBe("history");
+    expect(document.getElementById("history-tab-body")).not.toBeNull();
+  });
+
+  it("on History already, shows the new job at the top instead of drawing the panel again", async () => {
+    const jobStarted = await bootOn("history");
+    const pane = document.getElementById("pane")!;
+    pane.scrollTop = 400;
+    historyTab.jobStarted.mockClear();
+    historyTab.destroy.mockClear();
+
+    jobStarted();
+
+    expect(historyTab.jobStarted).toHaveBeenCalledOnce();
+    expect(historyTab.destroy).not.toHaveBeenCalled();
+    expect(pane.scrollTop).toBe(0);
   });
 });
 
