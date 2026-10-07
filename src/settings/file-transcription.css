@@ -12,6 +12,22 @@
   display: none;
 }
 
+.drop-overlay:not([hidden]) {
+  animation: drop-overlay-in 180ms ease-out;
+}
+
+.drop-overlay:not([hidden]) .drop-overlay-box {
+  animation: drop-overlay-box-in 260ms cubic-bezier(.2, 1.35, .4, 1);
+}
+
+@keyframes drop-overlay-in {
+  from { opacity: 0; }
+}
+
+@keyframes drop-overlay-box-in {
+  from { opacity: 0; transform: translateY(8px) scale(.94); }
+}
+
 .drop-overlay-box {
   padding: 34px 46px;
   border-radius: 20px;
