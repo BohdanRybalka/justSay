@@ -128,7 +128,7 @@
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 11px;
+  padding: 6px 10px;
   border: 1.5px dashed var(--border-2);
   border-radius: 10px;
   color: var(--text-2);
@@ -159,7 +159,7 @@
   display: block;
   font-size: 11px;
   color: var(--muted);
-  margin-top: 1px;
+  margin-top: 0;
 }
 
 .sidebar-transcribe + .sidebar-status {
