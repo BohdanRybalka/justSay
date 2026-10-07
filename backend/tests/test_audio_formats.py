@@ -22,7 +22,6 @@ from app.core.audio_formats import (
     DETECTED_MIME_TO_EXTENSIONS,
     TRUSTED_EXTENSIONS,
     detect_audio_mime,
-    mime_for_extension,
 )
 from app.core.constants import MAX_UPLOAD_SIZE
 from app.pipeline.upload_validation import read_upload_with_limit, validate_audio_upload
@@ -40,7 +39,7 @@ def test_every_allowed_extension_is_detectable_or_trusted():
 
 def test_detected_mime_map_names_only_allowed_extensions():
     """The reverse guard: a detector family naming an extension the MIME map
-    does not carry would accept a file `mime_for_extension` then mislabels."""
+    does not carry would accept a file the upload check then has no MIME for."""
     detectable = {ext for exts in DETECTED_MIME_TO_EXTENSIONS.values() for ext in exts}
     unknown = detectable - ALLOWED_AUDIO_EXTENSIONS
     assert unknown == set(), f"Detector names unknown extensions: {unknown}"
@@ -168,19 +167,6 @@ def test_validate_accepts_m4a_with_mp4_magic():
     m4a = (b"\x00" * 4) + b"ftyp" + b"M4A " + (b"\x00" * 16)
     assert validate_audio_upload(m4a, "voice.m4a") == "audio/mp4"
 
-
-
-def test_mime_for_extension_known_formats():
-    assert mime_for_extension("audio.wav") == "audio/wav"
-    assert mime_for_extension("audio.MP3") == "audio/mpeg"
-    assert mime_for_extension("audio.webm") == "audio/webm"
-
-
-def test_mime_for_extension_unknown_falls_back_to_wav():
-    """Defensive default — keeps Gemini calls non-broken if a new container
-    bypasses the validator."""
-    assert mime_for_extension("strange.xyz") == "audio/wav"
-    assert mime_for_extension(None) == "audio/wav"
 
 
 class _PayloadUpload:

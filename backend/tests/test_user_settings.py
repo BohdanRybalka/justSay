@@ -150,7 +150,6 @@ def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
     from app.core.types import ProviderMode
 
     runtime_settings.stt.mode = ProviderMode.CLOUD
-    runtime_settings.stt.engine = "auto"
     runtime_settings.stt.whisper_model_size = "large-v3-turbo"
     runtime_settings.stt.whisper_device = "auto"
     runtime_settings.stt.gemini_api_key = ""
@@ -183,7 +182,6 @@ def test_sync_to_runtime_ollama_host_change_invalidates_embeddings_cache(monkeyp
     from app.core.types import ProviderMode
 
     runtime_settings.stt.mode = ProviderMode.CLOUD
-    runtime_settings.stt.engine = "auto"
     runtime_settings.stt.whisper_model_size = "large-v3-turbo"
     runtime_settings.stt.whisper_device = "auto"
     runtime_settings.stt.initial_prompt = ""
@@ -213,7 +211,6 @@ def test_sync_to_runtime_propagates_initial_prompt_and_invalidates_cache(monkeyp
     from app.core.types import ProviderMode
 
     runtime_settings.stt.mode = ProviderMode.CLOUD
-    runtime_settings.stt.engine = "auto"
     runtime_settings.stt.whisper_model_size = "large-v3-turbo"
     runtime_settings.stt.whisper_device = "auto"
     runtime_settings.stt.initial_prompt = ""
@@ -649,11 +646,6 @@ def test_update_rejects_a_value_the_reload_would_refuse(isolated):
     assert not (isolated["settings_dir"] / "settings.json").exists()
 
 
-def test_update_rejects_a_non_positive_routing_threshold(isolated):
-    with pytest.raises(ValueError):
-        user_settings.update_user_settings({"cloud_routing_threshold": 0})
-
-
 def test_a_rejected_stored_field_does_not_reset_the_other_settings(isolated, monkeypatch):
     """One bad value costs that field, not the whole file (JS-94).
 
@@ -674,7 +666,7 @@ def test_a_rejected_stored_field_does_not_reset_the_other_settings(isolated, mon
 
     stored = json.loads((settings_dir / "settings.json").read_text(encoding="utf-8"))
     stored["initial_prompt"] = "x" * 5000
-    stored["cloud_routing_threshold"] = -5.0
+    stored["whisper_model_size"] = "../escape"
     (settings_dir / "settings.json").write_text(json.dumps(stored), encoding="utf-8")
 
     monkeypatch.setattr(user_settings, "_settings", None)
@@ -685,7 +677,28 @@ def test_a_rejected_stored_field_does_not_reset_the_other_settings(isolated, mon
     assert reloaded.gemini_api_key == "AIza-real-key"
     assert reloaded.groq_api_key == "gsk-real-key"
     assert reloaded.initial_prompt == ""
-    assert reloaded.cloud_routing_threshold == 30.0
+    assert reloaded.whisper_model_size == "large-v3-turbo"
+
+
+def test_a_stored_engine_choice_from_before_groq_only_is_ignored_and_dropped(isolated, monkeypatch):
+    """Settings written while Cloud had a Groq/Google choice still load: the
+    two retired fields cost nothing else and vanish on the next save."""
+    settings_dir = isolated["settings_dir"]
+    user_settings.update_user_settings({"language": "en", "groq_api_key": "gsk-real-key"})
+    stored = json.loads((settings_dir / "settings.json").read_text(encoding="utf-8"))
+    stored["stt_engine"] = "gemini"
+    stored["cloud_routing_threshold"] = 30.0
+    (settings_dir / "settings.json").write_text(json.dumps(stored), encoding="utf-8")
+
+    monkeypatch.setattr(user_settings, "_settings", None)
+    reloaded = user_settings.get_user_settings()
+    assert reloaded.language == "en"
+    assert reloaded.groq_api_key == "gsk-real-key"
+
+    user_settings.update_user_settings({"language": "uk"})
+    saved = json.loads((settings_dir / "settings.json").read_text(encoding="utf-8"))
+    assert "stt_engine" not in saved
+    assert "cloud_routing_threshold" not in saved
 
 
 def test_an_unreadable_settings_file_still_falls_back_to_defaults(isolated, monkeypatch):

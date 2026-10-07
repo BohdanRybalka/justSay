@@ -36,8 +36,6 @@ _SENTINELS: dict[tuple[str, str], object] = {
     ("stt", "mode"): "local",
     ("stt", "whisper_model_size"): "tiny",
     ("stt", "whisper_device"): "cpu",
-    ("stt", "cloud_routing_threshold"): 999.0,
-    ("stt", "engine"): "whisper_cpp",
     ("stt", "initial_prompt"): "sentinel glossary",
     ("stt", "gemini_api_key"): "sentinel-gemini-key",
     ("stt", "groq_api_key"): "sentinel-groq-key",

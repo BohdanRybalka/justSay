@@ -2,20 +2,13 @@ from unittest.mock import patch
 
 import pytest
 
-from app.core.audio_formats import ALLOWED_AUDIO_EXTENSIONS
 from app.core.types import ProviderMode
 from app.pipeline import service
-from app.stt.cloud import GeminiSTTProvider
 from app.stt.config import STTSettings
 from app.stt.groq_whisper import GroqWhisperSTTProvider
 from app.stt.local import LocalSTTProvider
 from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
-from app.stt.routing import (
-    GROQ_SUPPORTED_FORMATS,
-    _providers,
-    clear_cache,
-    get_routed_provider,
-)
+from app.stt.routing import _providers, clear_cache, get_provider
 
 
 @pytest.fixture(autouse=True)
@@ -26,71 +19,26 @@ def _clear_stt_cache():
 
 
 def _cloud_settings(**overrides) -> STTSettings:
-    defaults = dict(
-        mode=ProviderMode.CLOUD,
-        gemini_api_key="g",
-        groq_api_key="q",
-        cloud_routing_threshold=30.0,
-    )
+    defaults = dict(mode=ProviderMode.CLOUD, gemini_api_key="g", groq_api_key="q")
     defaults.update(overrides)
     return STTSettings(**defaults)
 
 
-def test_local_mode_always_returns_local():
+def test_local_mode_returns_local():
     """Proves only that LOCAL does not reach a cloud provider — see the marked
-    test at the end of this file for the platform-routing pin (JS-97)."""
+    test below for the platform-routing pin (JS-97)."""
     s = STTSettings(mode=ProviderMode.LOCAL)
-    p, fallback = get_routed_provider(s, audio_duration=5.0)
-    assert isinstance(p, LocalSTTProvider)
-    assert fallback is None
+    assert isinstance(get_provider(s.mode, s), LocalSTTProvider)
 
 
-def test_local_mode_reaches_no_cloud_provider_on_any_input():
-    """The zero-leak guarantee at the Local/Cloud decision point itself.
-
-    Sweeps every input ``get_routed_provider`` still accepts — 3 engine pins x
-    4 durations x 14 file extensions — and makes two different claims about
-    each: the returned provider declares ``is_local``, so the pipeline's
-    ``transcribe`` cannot be a cloud call; and the module cache holds no cloud
-    provider afterwards, so no cloud client was ever constructed and no API key
-    was ever read.
-
-    It is a statement about this function, not about the process: embedding
-    generation, settings sync and the update check are other paths.
-    """
-    durations = [None, 5.0, 30.0, 600.0]
-    extensions = [None, *sorted(ALLOWED_AUDIO_EXTENSIONS)]
-    combinations = 0
-    for engine in ("auto", "groq", "gemini"):
-        for duration in durations:
-            for extension in extensions:
-                clear_cache()
-                s = STTSettings(
-                    mode=ProviderMode.LOCAL,
-                    engine=engine,
-                    gemini_api_key="g",
-                    groq_api_key="q",
-                    cloud_routing_threshold=30.0,
-                )
-                provider, fallback = get_routed_provider(
-                    s, audio_duration=duration, file_extension=extension
-                )
-                combinations += 1
-                assert provider.is_local is True, (
-                    f"engine={engine} duration={duration} ext={extension} routed to "
-                    f"{type(provider).__name__}, which is not a local provider"
-                )
-                assert fallback is None
-                cloud_cached = [
-                    cls.__name__
-                    for cls in _providers
-                    if cls in (GeminiSTTProvider, GroqWhisperSTTProvider)
-                ]
-                assert not cloud_cached, (
-                    f"engine={engine} duration={duration} ext={extension} constructed "
-                    f"{cloud_cached} in Local mode"
-                )
-    assert combinations == 168
+def test_local_mode_constructs_no_cloud_provider_even_with_both_keys_set():
+    """The zero-leak guarantee at the Local/Cloud decision point itself: the
+    returned provider declares ``is_local`` and the cache holds no cloud client,
+    so no API key was read."""
+    s = STTSettings(mode=ProviderMode.LOCAL, gemini_api_key="g", groq_api_key="q")
+    provider = get_provider(s.mode, s)
+    assert provider.is_local is True
+    assert GroqWhisperSTTProvider not in _providers
 
 
 @pytest.mark.asyncio
@@ -98,75 +46,42 @@ async def test_the_mode_endpoint_routes_to_local_and_the_switch_back_reaches_clo
     client, monkeypatch
 ):
     """`PUT /stt/mode` and the binding the pipeline holds read one object, in
-    both directions.
-
-    Routing is asked through ``service.stt_settings`` — the module attribute
-    ``process_audio`` itself passes — rather than through a settings object this
-    test imports, so rebinding that name in the pipeline module reddens this
-    test instead of leaving it true by construction.
-
-    Switched to ``local``, the provider the pipeline is handed declares
-    ``is_local`` and neither cloud class was constructed during the exchange.
-    Switched back to ``cloud``, the routed provider is a cloud one — so a mode
-    stuck on the value written last fails here as surely as a leaked one. What
-    this rules out is the endpoint writing onto one settings object while the
-    pipeline reads another, which shows up as Local in the UI and a cloud call
-    on the wire.
+    both directions. Routing is asked through ``service.stt_settings`` — the
+    module attribute ``process_audio`` itself passes — so an endpoint writing
+    onto one settings object while the pipeline reads another reddens this test.
     """
     constructed: list[str] = []
-    for cls in (GeminiSTTProvider, GroqWhisperSTTProvider):
-        original = cls.__init__
+    original = GroqWhisperSTTProvider.__init__
 
-        def _record(self, *args, _original=original, **kwargs):
-            constructed.append(type(self).__name__)
-            _original(self, *args, **kwargs)
+    def _record(self, *args, **kwargs):
+        constructed.append(type(self).__name__)
+        original(self, *args, **kwargs)
 
-        monkeypatch.setattr(cls, "__init__", _record)
+    monkeypatch.setattr(GroqWhisperSTTProvider, "__init__", _record)
 
     switched_local = await client.put("/stt/mode", json={"mode": "local"})
     assert switched_local.status_code == 200
     assert switched_local.json()["stt_mode"] == ProviderMode.LOCAL.value
 
-    local_provider, fallback = get_routed_provider(
-        service.stt_settings, audio_duration=5.0, file_extension=".wav"
-    )
+    local_provider = get_provider(service.stt_settings.mode, service.stt_settings)
     assert local_provider.is_local is True, (
         f"the mode endpoint wrote local but routing returned {type(local_provider).__name__}"
     )
-    assert fallback is None
     assert constructed == [], f"Local mode constructed {constructed}"
-    cloud_cached = [
-        cls.__name__
-        for cls in _providers
-        if cls in (GeminiSTTProvider, GroqWhisperSTTProvider)
-    ]
-    assert not cloud_cached, (
-        f"Local mode left {cloud_cached} in the provider cache, so a cloud client "
-        "was built for a mode that must never reach one"
-    )
+    assert GroqWhisperSTTProvider not in _providers
 
     switched_cloud = await client.put("/stt/mode", json={"mode": "cloud"})
     assert switched_cloud.status_code == 200
     assert switched_cloud.json()["stt_mode"] == ProviderMode.CLOUD.value
+    assert switched_cloud.json()["model"] == "groq/whisper-large-v3-turbo"
 
-    cloud_provider, _reason = get_routed_provider(
-        service.stt_settings, audio_duration=5.0, file_extension=".wav"
-    )
-    assert cloud_provider.is_local is False, (
-        "the mode endpoint wrote cloud but routing still answered with a local provider"
-    )
-
-
-def test_local_mode_ignores_duration():
-    s = STTSettings(mode=ProviderMode.LOCAL)
-    p, _ = get_routed_provider(s, audio_duration=600.0)
-    assert isinstance(p, LocalSTTProvider)
+    cloud_provider = get_provider(service.stt_settings.mode, service.stt_settings)
+    assert isinstance(cloud_provider, GroqWhisperSTTProvider)
 
 
 @pytest.mark.no_factory_stub
-@pytest.mark.parametrize("duration", [5.0, 600.0])
-def test_local_mode_routes_to_this_platforms_local_provider(monkeypatch, duration):
-    """Neither unmarked sibling can say this: the autouse
+def test_local_mode_routes_to_this_platforms_local_provider(monkeypatch):
+    """The unmarked siblings cannot say this: the autouse
     `_force_faster_whisper_for_local` fixture pins the class they assert."""
     monkeypatch.setattr(
         "app.stt.local_factory.get_local_provider_class",
@@ -174,99 +89,19 @@ def test_local_mode_routes_to_this_platforms_local_provider(monkeypatch, duratio
     )
     clear_cache()
     s = STTSettings(mode=ProviderMode.LOCAL)
-    p, fallback = get_routed_provider(s, audio_duration=duration)
-    assert type(p) is WhisperCppServerSTTProvider
-    assert fallback is None
+    assert type(get_provider(s.mode, s)) is WhisperCppServerSTTProvider
 
 
-def test_short_normal_goes_to_groq():
-    s = _cloud_settings()
-    p, fallback = get_routed_provider(s, audio_duration=10.0)
-    assert isinstance(p, GroqWhisperSTTProvider)
-    assert fallback is None
-
-
-def test_threshold_boundary_exact_goes_to_groq():
-    s = _cloud_settings(cloud_routing_threshold=30.0)
-    p, _ = get_routed_provider(s, audio_duration=30.0)
-    assert isinstance(p, GroqWhisperSTTProvider)
-
-
-def test_cloud_split_follows_a_custom_threshold():
-    """The field still decides the one thing it names (ADR 073).
-
-    Its other reader was `LocalSTTProvider.transcribe`, where 45 seconds used
-    to mean "a 40-second local clip gets beam 1". That reader is gone, so this
-    is the only behaviour left to move: at 45, a 40-second cloud clip is short
-    and routes to Groq, where at the default 30 it would reach Gemini. The
-    local half of the same claim is
-    `test_local_beam_size_ignores_the_cloud_routing_threshold` in
-    `test_stt.py`, on the same duration and the same threshold.
-    """
-    s = _cloud_settings(cloud_routing_threshold=45.0)
-    p, _ = get_routed_provider(s, audio_duration=40.0)
-    assert isinstance(p, GroqWhisperSTTProvider)
-
-
-def test_long_normal_goes_to_gemini():
-    s = _cloud_settings()
-    p, _ = get_routed_provider(s, audio_duration=60.0)
-    assert isinstance(p, GeminiSTTProvider)
-
-
-def test_unknown_duration_falls_back_to_gemini():
-    s = _cloud_settings()
-    p, _ = get_routed_provider(s, audio_duration=None)
-    assert isinstance(p, GeminiSTTProvider)
-
-
-def test_webm_short_normal_falls_back_to_gemini():
-    """Groq can't handle .webm — router must degrade to Gemini."""
-    s = _cloud_settings()
-    p, _ = get_routed_provider(s, audio_duration=5.0, file_extension=".webm")
-    assert isinstance(p, GeminiSTTProvider)
-
-
-def test_wav_short_normal_uses_groq():
-    s = _cloud_settings()
-    p, _ = get_routed_provider(s, audio_duration=5.0, file_extension=".wav")
-    assert isinstance(p, GroqWhisperSTTProvider)
-
-
-def test_groq_advertises_no_extension_the_upload_allowlist_rejects():
-    """Groq's table is the routing input, and it can only narrow the allowlist.
-
-    A provider advertising an extension the upload validator rejects is a
-    routing decision that can never be reached: ``upload_validation`` refuses
-    the file before ``get_routed_provider`` is consulted.
-
-    Mutation-checked: adding ".mkv" to GROQ_SUPPORTED_FORMATS fails this test
-    naming .mkv as an extension the upload allowlist does not accept.
-    """
-    assert ".wav" in GROQ_SUPPORTED_FORMATS
-    assert ".webm" not in GROQ_SUPPORTED_FORMATS
-    assert ".webm" in ALLOWED_AUDIO_EXTENSIONS
-    unaccepted = GROQ_SUPPORTED_FORMATS - ALLOWED_AUDIO_EXTENSIONS
-    assert not unaccepted, (
-        "GROQ_SUPPORTED_FORMATS advertises extensions the upload allowlist does not "
-        f"accept, so routing to Groq could never be reached for them: {sorted(unaccepted)}"
-    )
+def test_cloud_mode_transcribes_on_groq_even_without_a_groq_key():
+    """Cloud has one engine. A Google key alone does not reroute: the Groq
+    provider is returned and raises its own key-missing message on use."""
+    s = _cloud_settings(groq_api_key="")
+    assert isinstance(get_provider(s.mode, s), GroqWhisperSTTProvider)
 
 
 def test_same_provider_is_cached_across_calls():
     s = _cloud_settings()
-    p1, _ = get_routed_provider(s, audio_duration=5.0)
-    p2, _ = get_routed_provider(s, audio_duration=10.0)
-    assert p1 is p2
-
-
-def test_different_providers_coexist_in_cache():
-    s = _cloud_settings()
-    groq, _ = get_routed_provider(s, audio_duration=5.0)
-    gemini, _ = get_routed_provider(s, audio_duration=100.0)
-    assert isinstance(groq, GroqWhisperSTTProvider)
-    assert isinstance(gemini, GeminiSTTProvider)
-    assert groq is not gemini
+    assert get_provider(s.mode, s) is get_provider(s.mode, s)
 
 
 def test_the_status_reads_raise_on_a_provider_that_declares_neither_member():
@@ -307,45 +142,15 @@ def test_the_status_reads_raise_on_a_provider_that_declares_neither_member():
 
 
 def test_clear_cache_triggers_cleanup_on_all():
-    s = _cloud_settings()
-    groq, _ = get_routed_provider(s, audio_duration=5.0)
-    gemini, _ = get_routed_provider(s, audio_duration=100.0)
+    cloud = _cloud_settings()
+    local = STTSettings(mode=ProviderMode.LOCAL)
+    groq = get_provider(cloud.mode, cloud)
+    whisper = get_provider(local.mode, local)
 
-    with patch.object(groq, "cleanup") as gc_mock, patch.object(gemini, "cleanup") as gm_mock:
+    with patch.object(groq, "cleanup") as groq_mock, patch.object(whisper, "cleanup") as local_mock:
         clear_cache()
-        gc_mock.assert_called_once()
-        gm_mock.assert_called_once()
-
-
-def test_engine_pin_groq_overrides_long_audio():
-    s = _cloud_settings(engine="groq")
-    p, fallback = get_routed_provider(s, audio_duration=600.0)
-    assert isinstance(p, GroqWhisperSTTProvider)
-    assert fallback is None
-
-
-def test_engine_pin_groq_falls_back_for_unsupported_format():
-    s = _cloud_settings(engine="groq")
-    p, fallback = get_routed_provider(
-        s, audio_duration=5.0, file_extension=".webm"
-    )
-    assert isinstance(p, GeminiSTTProvider)
-    assert fallback and ".webm" in fallback
-
-
-def test_engine_pin_gemini_overrides_short_audio():
-    s = _cloud_settings(engine="gemini")
-    p, fallback = get_routed_provider(s, audio_duration=2.0)
-    assert isinstance(p, GeminiSTTProvider)
-    assert fallback is None
-
-
-def test_cloud_routing_threshold_must_be_positive():
-    with pytest.raises(ValueError):
-        STTSettings(cloud_routing_threshold=0)
-
-    with pytest.raises(ValueError):
-        STTSettings(cloud_routing_threshold=-5)
+        groq_mock.assert_called_once()
+        local_mock.assert_called_once()
 
 
 def test_detect_duration_returns_none_for_missing_file(tmp_path):

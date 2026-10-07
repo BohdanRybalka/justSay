@@ -507,7 +507,7 @@ async def test_a_dropped_file_is_saved_as_a_file_entry_and_never_copied(
     monkeypatch.setattr(jobs, "process_audio", service.process_audio)
     try:
         with (
-            patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+            patch("app.pipeline.service.get_provider", return_value=stt),
             patch("app.pipeline.service.analyze_vad", return_value=None),
             patch("app.pipeline.service.pyperclip.copy") as copy,
         ):
@@ -541,7 +541,7 @@ async def test_a_file_whose_every_piece_is_silent_is_never_sent(
         return VadAnalysis(1, 10, 0.2, is_silent="piece" in path.name)
 
     with (
-        patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)),
+        patch("app.pipeline.service.get_provider", return_value=stt),
         patch("app.pipeline.service.analyze_vad", side_effect=vad),
     ):
         upload = {"file": ("quiet.wav", _wav(tmp_path), "audio/wav")}

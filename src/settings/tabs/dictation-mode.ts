@@ -1,6 +1,6 @@
 /**
  * WHAT TURNS IT INTO TEXT: the Cloud and Local model radio rows. Cloud says
- * whether the route in use has its key; Local draws the local engine's state,
+ * whether the Groq key is set; Local draws the local engine's state,
  * read every 3 s while the window is shown. Picking a row switches the mode.
  */
 import { api, type CloudKeyStatus, type LocalSTTStatus, type UserSettings } from "../../api";
@@ -11,7 +11,6 @@ import { computeIndicatorState, onIndicatorStateChange } from "../../status-indi
 import { icon } from "../../ui/icons";
 
 type Mode = UserSettings["stt_mode"];
-type Engine = UserSettings["stt_engine"];
 
 /** The last status read: `null` before the first answer, `"failed"` when the read got none. */
 export type LocalRead = LocalSTTStatus | "failed" | null;
@@ -25,18 +24,12 @@ export type LocalRow =
   | { state: "failed"; reason: string };
 
 const CLOUD_HINT = "Your API keys · fastest and most accurate";
-const CLOUD_KEY_MISSING = "Add an API key in Settings";
+const CLOUD_KEY_MISSING = "Add a Groq key in Settings";
 const READ_FAILED = "Couldn't load this";
 
-const KEYS_BY_ENGINE: Readonly<Record<Engine, readonly (keyof CloudKeyStatus)[]>> = {
-  auto: ["groq_key_set", "gemini_key_set"],
-  groq: ["groq_key_set"],
-  gemini: ["gemini_key_set"],
-};
-
-/** Whether a service `engine` sends recordings to has no key; an unread key status is not missing. */
-export function cloudKeyMissing(engine: Engine, cloud: CloudKeyStatus | null): boolean {
-  return cloud !== null && KEYS_BY_ENGINE[engine].some((key) => !cloud[key]);
+/** Whether Cloud's only engine, Groq, has no key; an unread key status is not missing. */
+export function cloudKeyMissing(cloud: CloudKeyStatus | null): boolean {
+  return cloud !== null && !cloud.groq_key_set;
 }
 
 /** Binary units, as the file manager shows the model file. */
@@ -149,7 +142,7 @@ export function renderDictationMode(
 
   const cloudRow = container.querySelector<HTMLButtonElement>("#mode-cloud")!;
   const localRowEl = container.querySelector<HTMLButtonElement>("#mode-local")!;
-  const keyMissing = cloudKeyMissing(settings.stt_engine, getCloudKeyStatus());
+  const keyMissing = cloudKeyMissing(getCloudKeyStatus());
 
   let currentMode: Mode = settings.stt_mode;
   let lastRead: LocalRead = null;

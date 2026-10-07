@@ -588,7 +588,6 @@ _MAY_DEFER_AN_STT_IMPORT = {
     "app/stt/local_factory.py": {"app.stt.local", "app.stt.local_whisper_cpp"},
     "app/stt/router.py": {"app.stt.local_setup"},
     "app/stt/routing.py": {
-        "app.stt.cloud",
         "app.stt.groq_whisper",
         "app.stt.local_factory",
     },
@@ -597,7 +596,7 @@ _MAY_DEFER_AN_STT_IMPORT = {
 _MAY_REACH_THE_ROUTING_LAYER_THROUGH_THE_PACKAGE = frozenset()
 
 _MAY_HOLD_A_ROUTING_NAME = {
-    "app/pipeline/service.py": {"get_routed_provider", "is_local_provider"},
+    "app/pipeline/service.py": {"get_provider", "is_local_provider"},
     "app/stt/router.py": {"clear_cache", "get_provider"},
 }
 

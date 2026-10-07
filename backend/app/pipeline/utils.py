@@ -9,8 +9,8 @@ log = logging.getLogger(__name__)
 def detect_duration(audio_path: Path) -> float | None:
     """Return duration in seconds, or None if the file can't be inspected.
 
-    ``None`` is a valid result — callers route unknown-length audio to Gemini
-    (the safe default that handles everything).
+    ``None`` is a valid result — the local engine then treats the clip as long,
+    and cutting into pieces measures the decoded audio itself.
     """
     try:
         import soundfile as sf

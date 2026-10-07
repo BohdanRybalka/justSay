@@ -1,42 +1,26 @@
 /**
- * The API keys fold: one row per cloud key and the row that picks where
- * recordings go. A key row is stored, env, unset, unknown or editing, and is
- * redrawn alone; each key's subtitle follows the routing choice, and in Local
- * mode says the key is not used.
+ * The API keys fold: one row per cloud key. A row is stored, env, unset,
+ * unknown or editing, and is redrawn alone; its subtitle says what the key is
+ * used for, and in Local mode that it is not used.
  */
 import { type CloudKeyStatus, type UserSettings } from "../../api";
 import { MASKED_API_KEY } from "../../contracts";
-import { notifyError } from "../../notify";
-import { renderSegmented, type SegmentedOption } from "../../ui/controls";
 import { saveSettings, getCloudKeyStatus } from "../settings";
 
 type KeyField = "gemini_api_key" | "groq_api_key";
 type KeyRowState = "stored" | "env" | "unset" | "unknown" | "editing";
-type Engine = UserSettings["stt_engine"];
-type Provider = Exclude<Engine, "auto">;
 
 interface KeyRowSpec {
   field: KeyField;
-  provider: Provider;
+  provider: "groq" | "gemini";
   label: string;
+  use: string;
 }
 
 const ROWS: readonly KeyRowSpec[] = [
-  { field: "groq_api_key", provider: "groq", label: "Groq" },
-  { field: "gemini_api_key", provider: "gemini", label: "Google" },
+  { field: "groq_api_key", provider: "groq", label: "Groq", use: "Turns your recordings into text" },
+  { field: "gemini_api_key", provider: "gemini", label: "Google", use: "Used for History search" },
 ];
-
-const ENGINES: readonly SegmentedOption<Engine>[] = [
-  { value: "auto", label: "Automatic" },
-  { value: "groq", label: "Groq" },
-  { value: "gemini", label: "Google" },
-];
-
-const ROUTE_HINTS: Readonly<Record<Engine, Readonly<Record<Provider, string>>>> = {
-  auto: { groq: "Used for short recordings", gemini: "Used for long recordings" },
-  groq: { groq: "Used for all recordings", gemini: "Used for files Groq can't read" },
-  gemini: { groq: "Not used for recordings", gemini: "Used for all recordings" },
-};
 
 const LOCAL_HINT = "Not used while Local is on";
 
@@ -61,8 +45,8 @@ function rowState(settings: UserSettings, field: KeyField, cloud: CloudKeyStatus
   return cloudFlag(cloud, field) ? "env" : "unset";
 }
 
-function routeHint(settings: UserSettings, engine: Engine, provider: Provider): string {
-  return settings.stt_mode === "local" ? LOCAL_HINT : ROUTE_HINTS[engine][provider];
+function useHint(settings: UserSettings, spec: KeyRowSpec): string {
+  return settings.stt_mode === "local" ? LOCAL_HINT : spec.use;
 }
 
 function keyControls(spec: KeyRowSpec, state: KeyRowState): string {
@@ -83,29 +67,15 @@ function keyControls(spec: KeyRowSpec, state: KeyRowState): string {
   `;
 }
 
-/**
- * Fills `container` with the Groq, Google and "Recordings go to" rows. Save
- * and the routing choice go through `saveSettings`; a routing save that fails
- * puts the stored choice back and says so, unless a newer choice was made since.
- */
+/** Fills `container` with the Groq and Google rows; Save goes through `saveSettings`. */
 export function renderKeys(container: HTMLElement, settings: UserSettings, cloud: CloudKeyStatus | null): void {
   let current = settings;
   let knownCloud = cloud;
   container.innerHTML = `
     ${ROWS.map((spec) => `<div class="setting-row key-row" data-provider="${spec.provider}"></div>`).join("")}
-    <div class="setting-row">
-      <div class="setting-row-text"><div class="setting-row-title">Recordings go to</div></div>
-      <div class="setting-row-controls"><div class="route-choice" aria-label="Recordings go to"></div></div>
-    </div>
   `;
   const rowOf = (spec: KeyRowSpec): HTMLElement =>
     container.querySelector<HTMLElement>(`.key-row[data-provider="${spec.provider}"]`)!;
-
-  const showRoutes = (engine: Engine): void => {
-    for (const spec of ROWS) {
-      rowOf(spec).querySelector<HTMLElement>(".route-hint")!.textContent = routeHint(current, engine, spec.provider);
-    }
-  };
 
   const draw = (spec: KeyRowSpec, state: KeyRowState, refocus?: boolean): void => {
     const row = rowOf(spec);
@@ -113,7 +83,7 @@ export function renderKeys(container: HTMLElement, settings: UserSettings, cloud
     row.innerHTML = `
       <div class="setting-row-text">
         <div class="setting-row-title">${spec.label}</div>
-        <div class="setting-row-hint route-hint">${routeHint(current, current.stt_engine, spec.provider)}</div>
+        <div class="setting-row-hint use-hint">${useHint(current, spec)}</div>
         <div class="setting-row-hint key-status" id="${spec.provider}-status" aria-live="polite">${STATE_HINTS[state] ?? ""}</div>
       </div>
       <div class="setting-row-controls">${keyControls(spec, state)}</div>
@@ -159,24 +129,5 @@ export function renderKeys(container: HTMLElement, settings: UserSettings, cloud
     });
   };
 
-  const choice = container.querySelector<HTMLElement>(".route-choice")!;
-  const showChoice = (engine: Engine): void =>
-    renderSegmented(choice, ENGINES, engine, (next) => void chooseEngine(next));
-  let latestChoice = 0;
-  const chooseEngine = async (engine: Engine): Promise<void> => {
-    const token = ++latestChoice;
-    showRoutes(engine);
-    try {
-      const { settings: fresh } = await saveSettings({ stt_engine: engine });
-      if (token === latestChoice) current = fresh;
-    } catch (e) {
-      if (token !== latestChoice) return;
-      showChoice(current.stt_engine);
-      showRoutes(current.stt_engine);
-      void notifyError(`Could not save where recordings go: ${describeFailure(e)}`);
-    }
-  };
-
   for (const spec of ROWS) draw(spec, rowState(current, spec.field, knownCloud));
-  showChoice(current.stt_engine);
 }

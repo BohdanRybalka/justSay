@@ -530,7 +530,6 @@ export interface DictateResponse {
   duration_ms: number;
   copied_to_clipboard: boolean;
   model_name?: string;
-  fallback_reason?: string | null;
   /** Set (currently only to "silence") when the backend's silence guard
    *  short-circuited before any provider ran — no STT call, no clipboard
    *  write, no History row. Not an error: dictationResultView renders it as
@@ -562,16 +561,12 @@ export interface UserSettings {
   shortcut: string;
   output_dir: string;
   stt_mode: "cloud" | "local";
-  stt_engine: "auto" | "groq" | "gemini";
   whisper_model_size: string;
   whisper_device: string;
   ollama_host: string;
-  /** Audio duration (seconds) at or below which the pipeline picks Groq Whisper
-   *  in CLOUD mode; longer clips route to Gemini. */
-  cloud_routing_threshold: number;
-  /** Custom vocabulary / glossary, plumbed into all four STT providers. Stored
+  /** Custom vocabulary / glossary, plumbed into all three STT providers. Stored
    *  whole under a backend-enforced 500-character ceiling and never truncated on
-   *  disk. Gemini receives the stored value whole; the Whisper-family engines
+   *  disk. The dictation cleanup receives the stored value whole; the Whisper-family engines
    *  (faster-whisper, whisper.cpp, Groq) receive it unchanged when it fits their
    *  send-time budget, and otherwise whole terms, then whole words, then a
    *  character cut only inside a run with no boundary in it. */

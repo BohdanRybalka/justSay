@@ -1,7 +1,6 @@
-"""Audio processing pipeline: Audio -> smart-routed STT -> cleanup -> Clipboard.
+"""Audio processing pipeline: Audio -> STT -> cleanup -> Clipboard.
 
-Long audio and the formats Groq can't accept go to Gemini;
-short audio goes through Groq Whisper for minimum latency.
+Cloud mode transcribes on Groq Whisper, Local mode on this machine's engine.
 A Cloud-mode dictation is cleaned of fillers before the clipboard; history keeps both texts.
 """
 
@@ -22,7 +21,7 @@ from app.pipeline.chunking import PiecePacer, transcribe_in_pieces
 from app.pipeline.cleanup import clean_dictation
 from app.pipeline.utils import detect_duration
 from app.stt.config import stt_settings
-from app.stt.routing import get_routed_provider, is_local_provider
+from app.stt.routing import get_provider, is_local_provider
 from app.transcripts.history import EntrySource, save_entry
 
 log = logging.getLogger(__name__)
@@ -36,7 +35,6 @@ class ProcessingResult:
     duration_ms: int
     copied_to_clipboard: bool
     model_name: str = ""
-    fallback_reason: str | None = None
     discarded_reason: str | None = None
 
 
@@ -90,7 +88,7 @@ async def process_audio(
     source_name: str | None = None,
     observer: PipelineObserver | None = None,
 ) -> ProcessingResult:
-    """Full pipeline: route STT by duration+format -> transcribe -> clipboard.
+    """Full pipeline: transcribe on the mode's provider -> clipboard.
 
     ``background_tasks``, when provided, schedules embedding generation to run
     after the response is sent. ``source`` and ``source_name`` say where the
@@ -112,19 +110,12 @@ async def process_audio(
             discarded_reason="silence",
         )
 
-    file_ext = audio_path.suffix.lower() if audio_path.suffix else None
-    stt, fallback_reason = get_routed_provider(
-        stt_settings,
-        audio_duration=duration,
-        file_extension=file_ext,
-    )
+    stt = get_provider(stt_settings.mode, stt_settings)
 
     log.info(
-        "Pipeline route: %s, duration=%.2fs, ext=%s, fallback=%s",
+        "Pipeline route: %s, duration=%.2fs",
         stt.model_name,
         duration if duration is not None else -1.0,
-        file_ext,
-        fallback_reason or "no",
     )
 
     if is_local_provider(stt):
@@ -229,5 +220,4 @@ async def process_audio(
         duration_ms=duration_ms,
         copied_to_clipboard=copied,
         model_name=stt.model_name,
-        fallback_reason=fallback_reason,
     )

@@ -18,11 +18,6 @@ vi.mock("../settings", () => ({
   getCloudKeyStatus: getCloudKeyStatusMock,
 }));
 
-const notifyErrorMock = vi.fn();
-vi.mock("../../notify", () => ({
-  notifyError: notifyErrorMock,
-}));
-
 const { renderKeys } = await import("./keys");
 
 function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
@@ -31,11 +26,9 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     shortcut: "Ctrl+Alt+KeyV",
     output_dir: "C:/fake",
     stt_mode: "cloud",
-    stt_engine: "auto",
     whisper_model_size: "large-v3-turbo",
     whisper_device: "auto",
     ollama_host: "http://localhost:11434",
-    cloud_routing_threshold: 30,
     initial_prompt: "",
     gemini_api_key: "",
     groq_api_key: "",
@@ -58,23 +51,13 @@ function render(settings: UserSettings, cloud: CloudKeyStatus | null = NO_KEYS):
   return container;
 }
 
-function routeHints(container: HTMLElement): Record<string, string | null> {
+function useHints(container: HTMLElement): Record<string, string | null> {
   return Object.fromEntries(
     [...container.querySelectorAll<HTMLElement>(".key-row")].map((row) => [
       row.querySelector(".setting-row-title")!.textContent,
-      row.querySelector(".route-hint")!.textContent,
+      row.querySelector(".use-hint")!.textContent,
     ]),
   );
-}
-
-function routeButton(container: HTMLElement, label: string): HTMLButtonElement {
-  return [...container.querySelectorAll<HTMLButtonElement>(".route-choice button")].find(
-    (button) => button.textContent === label,
-  )!;
-}
-
-function pressedRoute(container: HTMLElement): string | null | undefined {
-  return container.querySelector('.route-choice [aria-pressed="true"]')?.textContent;
 }
 
 beforeEach(() => {
@@ -196,94 +179,43 @@ describe("renderKeys — Save routes through saveSettings (Bug 2)", () => {
   });
 });
 
-describe("Recordings go to", () => {
-  it("offers Automatic, Groq and Google with the stored choice pressed", () => {
-    const container = render(buildSettings({ stt_engine: "groq" }));
+describe("What each key is for", () => {
+  it("shows only the two key rows, with no choice of where recordings go", () => {
+    const container = render(buildSettings());
 
-    const labels = [...container.querySelectorAll(".route-choice button")].map((b) => b.textContent);
-    expect(labels).toEqual(["Automatic", "Groq", "Google"]);
-    expect(pressedRoute(container)).toBe("Groq");
+    const titles = [...container.querySelectorAll(".setting-row-title")].map((t) => t.textContent);
+    expect(titles).toEqual(["Groq", "Google"]);
+    expect(container.querySelector(".route-choice")).toBeNull();
   });
 
-  it.each([
-    ["auto", { Groq: "Used for short recordings", Google: "Used for long recordings" }],
-    ["groq", { Groq: "Used for all recordings", Google: "Used for files Groq can't read" }],
-    ["gemini", { Groq: "Not used for recordings", Google: "Used for all recordings" }],
-  ] as const)("with %s stored, each key's subtitle says what it is used for", (engine, hints) => {
-    const container = render(buildSettings({ stt_engine: engine }));
+  it("says Groq turns recordings into text and Google serves History search", () => {
+    const container = render(buildSettings());
 
-    expect(routeHints(container)).toEqual(hints);
-  });
-
-  it("saves a new choice and the subtitles follow it", async () => {
-    saveSettingsMock.mockResolvedValue({ settings: buildSettings({ stt_engine: "gemini" }), warning: null });
-    const container = render(buildSettings({ stt_engine: "auto" }));
-
-    routeButton(container, "Google").click();
-
-    expect(saveSettingsMock).toHaveBeenCalledWith({ stt_engine: "gemini" });
-    expect(routeHints(container)).toEqual({
-      Groq: "Not used for recordings",
-      Google: "Used for all recordings",
+    expect(useHints(container)).toEqual({
+      Groq: "Turns your recordings into text",
+      Google: "Used for History search",
     });
-    expect(pressedRoute(container)).toBe("Google");
   });
 
-  it("goes back to the stored choice and says so when saving fails", async () => {
-    saveSettingsMock.mockRejectedValue(new Error("backend down"));
-    const container = render(buildSettings({ stt_engine: "groq" }));
+  it("in Local mode each key says it is not used", () => {
+    const container = render(buildSettings({ stt_mode: "local" }));
 
-    routeButton(container, "Automatic").click();
-
-    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalled());
-    expect(notifyErrorMock.mock.calls[0][0]).toContain("backend down");
-    expect(pressedRoute(container)).toBe("Groq");
-    expect(routeHints(container).Groq).toBe("Used for all recordings");
-  });
-
-  it("a key row redrawn after a routing change keeps the new subtitle", async () => {
-    saveSettingsMock.mockResolvedValue({
-      settings: buildSettings({ stt_engine: "groq", groq_api_key: "***" }),
-      warning: null,
-    });
-    const container = render(buildSettings({ stt_engine: "auto", groq_api_key: "***" }));
-
-    routeButton(container, "Groq").click();
-    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalled());
-    await Promise.resolve();
-    container.querySelector<HTMLButtonElement>("#groq-replace")!.click();
-
-    expect(routeHints(container).Groq).toBe("Used for all recordings");
-  });
-
-  it("in Local mode each key says it is not used, whatever the routing choice", () => {
-    const container = render(buildSettings({ stt_mode: "local", stt_engine: "groq" }));
-
-    expect(routeHints(container)).toEqual({
+    expect(useHints(container)).toEqual({
       Groq: "Not used while Local is on",
       Google: "Not used while Local is on",
     });
-
-    routeButton(container, "Automatic").click();
-
-    expect(routeHints(container).Groq).toBe("Not used while Local is on");
   });
 
-  it("a failed save overtaken by a newer choice leaves the newer choice on screen", async () => {
-    let failFirst!: (e: Error) => void;
-    saveSettingsMock
-      .mockImplementationOnce(() => new Promise((_, reject) => (failFirst = reject)))
-      .mockResolvedValueOnce({ settings: buildSettings({ stt_engine: "gemini" }), warning: null });
-    const container = render(buildSettings({ stt_engine: "groq" }));
+  it("a key row redrawn after a save keeps its subtitle", async () => {
+    saveSettingsMock.mockResolvedValue({ settings: buildSettings({ groq_api_key: "***" }), warning: null });
+    const container = render(buildSettings());
 
-    routeButton(container, "Automatic").click();
-    routeButton(container, "Google").click();
-    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledTimes(2));
-    failFirst(new Error("backend down"));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    const input = container.querySelector<HTMLInputElement>("#groq-key-input")!;
+    input.value = "gsk-new";
+    input.dispatchEvent(new Event("input"));
+    container.querySelector<HTMLButtonElement>("#groq-save")!.click();
 
-    expect(pressedRoute(container)).toBe("Google");
-    expect(routeHints(container).Google).toBe("Used for all recordings");
-    expect(notifyErrorMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(container.querySelector("#groq-replace")).not.toBeNull());
+    expect(useHints(container).Groq).toBe("Turns your recordings into text");
   });
 });

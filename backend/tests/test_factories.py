@@ -3,17 +3,17 @@ import pytest
 from app.core.types import ProviderMode
 from app.stt import clear_cache as clear_stt_cache
 from app.stt import get_provider
-from app.stt.cloud import GeminiSTTProvider
 from app.stt.config import STTSettings
+from app.stt.groq_whisper import GroqWhisperSTTProvider
 from app.stt.local import LocalSTTProvider
 from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
 
 
-def test_stt_factory_returns_cloud_provider():
+def test_stt_factory_returns_groq_in_cloud_mode():
     clear_stt_cache()
     settings = STTSettings(mode=ProviderMode.CLOUD)
     provider = get_provider(settings.mode, settings)
-    assert isinstance(provider, GeminiSTTProvider)
+    assert isinstance(provider, GroqWhisperSTTProvider)
 
 
 def test_stt_factory_returns_local_provider():

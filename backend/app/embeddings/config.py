@@ -2,8 +2,8 @@
 
 No ``mode`` field: eligibility is derived from ``STTSettings.mode`` by
 ``resolve_embedding_provider``, never a toggle of its own. No API key field:
-cloud embeddings reuse ``settings.stt.gemini_api_key``, already present for
-cloud STT. ``ollama_host`` lives here because the local embedding provider is
+cloud embeddings read ``settings.stt.gemini_api_key``, the Google key the user
+adds under API keys. ``ollama_host`` lives here because the local embedding provider is
 the only code that reads it. See ADR 071 and ADR 001.
 """
 
