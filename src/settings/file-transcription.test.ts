@@ -10,9 +10,11 @@ vi.mock("../api", () => ({
   api: apiMock,
 }));
 
-const { mountFileTranscription, refusalOf, DROP_HINT, REFUSAL_SHOWN_MS } = await import("./file-transcription");
+const { mountFileTranscription, refusalOf, transformOnto, DROP_HINT, REFUSAL_SHOWN_MS } = await import("./file-transcription");
 
 const onStarted = vi.fn();
+const animate = vi.fn();
+let reducedMotion = false;
 let teardown: () => void = () => {};
 
 function buildFile(name: string, size: number): File {
@@ -51,6 +53,9 @@ function shownText(): string {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  reducedMotion = false;
+  HTMLElement.prototype.animate = animate;
+  window.matchMedia = vi.fn((query: string) => ({ matches: reducedMotion && query.includes("reduce") }) as MediaQueryList);
   apiMock.startFileJob.mockResolvedValue({ id: "job-1" });
   document.body.innerHTML = `<button id="transcribe-file"></button><main id="pane"><div id="child"><span id="grandchild"></span></div></main>`;
   teardown = mountFileTranscription(document.body, pickButton(), onStarted);
@@ -223,6 +228,50 @@ describe("picking a file with the button", () => {
 
     await vi.waitFor(() => expect(shownText()).toBe("That's not an audio file"));
     expect(apiMock.startFileJob).not.toHaveBeenCalled();
+  });
+});
+
+describe("the drop box growing out of the sidebar button", () => {
+  const BUTTON = new DOMRect(12, 610, 190, 50);
+  const BOX = new DOMRect(336, 268, 372, 186);
+
+  function placeOnScreen(): void {
+    vi.spyOn(pickButton(), "getBoundingClientRect").mockReturnValue(BUTTON);
+    vi.spyOn(overlay().querySelector<HTMLElement>(".drop-overlay-box")!, "getBoundingClientRect").mockReturnValue(BOX);
+  }
+
+  it("the starting transform lays the box exactly over the button", () => {
+    expect(transformOnto(BUTTON, BOX)).toBe(`translate(-415px, 274px) scale(${190 / 372}, ${50 / 186})`);
+  });
+
+  it("starts from the button and ends in place when a file is dragged in", () => {
+    placeOnScreen();
+
+    drag("dragenter", document.body, ["Files"]);
+
+    expect(animate).toHaveBeenCalledOnce();
+    const [frames] = animate.mock.calls[0];
+    expect(frames[0].transform).toBe(transformOnto(BUTTON, BOX));
+    expect(frames.at(-1).transform).toBe("none");
+  });
+
+  it("does not grow from the button to explain a refusal", async () => {
+    placeOnScreen();
+
+    drag("drop", document.body, ["Files"], [buildFile("notes.txt", 2048)]);
+    await vi.waitFor(() => expect(shownText()).toBe("That's not an audio file"));
+
+    expect(animate).not.toHaveBeenCalled();
+  });
+
+  it("appears without moving when the system asks for reduced motion", () => {
+    reducedMotion = true;
+    placeOnScreen();
+
+    drag("dragenter", document.body, ["Files"]);
+
+    expect(overlay().hidden).toBe(false);
+    expect(animate).not.toHaveBeenCalled();
   });
 });
 

@@ -16,12 +16,12 @@
   animation: drop-overlay-in 180ms ease-out;
 }
 
-.drop-overlay:not([hidden]) .drop-overlay-box {
+.drop-overlay--refused:not([hidden]) .drop-overlay-box {
   animation: drop-overlay-box-in 260ms cubic-bezier(.2, 1.35, .4, 1);
 }
 
 @keyframes drop-overlay-in {
-  from { opacity: 0; }
+  from { background-color: transparent; backdrop-filter: blur(0); }
 }
 
 @keyframes drop-overlay-box-in {

@@ -3,6 +3,7 @@ import { ACCEPTED_AUDIO_EXTENSIONS, MAX_UPLOAD_BYTES } from "../contracts";
 import { icon } from "../ui/icons";
 
 export const REFUSAL_SHOWN_MS = 4000;
+export const GROW_MS = 420;
 
 const MAX_MB = MAX_UPLOAD_BYTES / (1024 * 1024);
 export const DROP_HINT = `mp3, wav, m4a, mp4 and 7 more · up to ${MAX_MB} MB`;
@@ -15,6 +16,13 @@ export function refusalOf(file: File): string | null {
   if (file.size === 0) return "This file is empty";
   if (file.size > MAX_UPLOAD_BYTES) return `This file is over ${MAX_MB} MB`;
   return null;
+}
+
+/** The transform that puts `box` exactly over `from`: where the drop box starts growing. */
+export function transformOnto(from: DOMRect, box: DOMRect): string {
+  const dx = from.left + from.width / 2 - (box.left + box.width / 2);
+  const dy = from.top + from.height / 2 - (box.top + box.height / 2);
+  return `translate(${dx}px, ${dy}px) scale(${from.width / box.width}, ${from.height / box.height})`;
 }
 
 function carriesFiles(event: DragEvent): boolean {
@@ -42,6 +50,7 @@ export function mountFileTranscription(
       <span class="drop-overlay-hint"></span>
     </div>
   `;
+  const box = overlay.querySelector<HTMLElement>(".drop-overlay-box")!;
   const title = overlay.querySelector<HTMLElement>(".drop-overlay-title")!;
   const hint = overlay.querySelector<HTMLElement>(".drop-overlay-hint")!;
   const picker = document.createElement("input");
@@ -60,6 +69,16 @@ export function mountFileTranscription(
     hint.textContent = DROP_HINT;
     overlay.classList.toggle("drop-overlay--refused", refused);
     overlay.hidden = false;
+    if (!refused) growFromButton();
+  }
+
+  function growFromButton(): void {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const start = transformOnto(pickButton.getBoundingClientRect(), box.getBoundingClientRect());
+    box.animate(
+      [{ transform: start, opacity: 0 }, { opacity: 1, offset: 0.3 }, { transform: "none", opacity: 1 }],
+      { duration: GROW_MS, easing: "cubic-bezier(.3, .8, .25, 1)" },
+    );
   }
 
   function hide(): void {
