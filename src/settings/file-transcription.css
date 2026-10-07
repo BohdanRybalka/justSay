@@ -1,0 +1,67 @@
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--canvas) 80%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+.drop-overlay[hidden] {
+  display: none;
+}
+
+.drop-overlay:not([hidden]) {
+  animation: drop-overlay-in 180ms ease-out;
+}
+
+.drop-overlay--refused:not([hidden]) .drop-overlay-box {
+  animation: drop-overlay-box-in 260ms cubic-bezier(.2, 1.35, .4, 1);
+}
+
+@keyframes drop-overlay-in {
+  from { background-color: transparent; backdrop-filter: blur(0); }
+}
+
+@keyframes drop-overlay-box-in {
+  from { opacity: 0; transform: translateY(8px) scale(.94); }
+}
+
+.drop-overlay-box {
+  padding: 34px 46px;
+  border-radius: 20px;
+  border: 2px dashed var(--orange);
+  background: var(--surface);
+  box-shadow: var(--sh-2);
+  text-align: center;
+}
+
+.drop-overlay-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  background: var(--warm);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  margin: 0 auto 14px;
+  box-shadow: var(--sh-warm);
+}
+
+.drop-overlay-title {
+  font-size: 16px;
+  font-weight: 640;
+}
+
+.drop-overlay-hint {
+  display: block;
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 5px;
+}
+
+.drop-overlay--refused .drop-overlay-box {
+  border-style: solid;
+  border-color: var(--border-2);
+}
