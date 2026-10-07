@@ -348,3 +348,12 @@ def test_a_cleared_history_invalidates_the_word_counts():
     history.clear_all()
 
     assert words.top_words(limit=5).items == []
+
+
+def test_fillers_a_cleanup_removed_still_count_from_the_transcript():
+    history.save_entry(text="Звіт до четверга.", raw_text="ну звіт ну до четверга", duration_ms=1)
+
+    counts = _counts(words.top_words(limit=10))
+
+    assert counts["ну"] == (2, True)
+    assert words.dictation_tokens().counts["ну"] == 2

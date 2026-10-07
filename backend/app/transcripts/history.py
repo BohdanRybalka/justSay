@@ -244,8 +244,10 @@ def save_entry(
     word_count: int | None = None,
     source: EntrySource = "dictation",
     source_name: str | None = None,
+    raw_text: str | None = None,
 ) -> HistoryEntry:
-    """Append a new entry. ``text`` is written to both legacy columns for compat.
+    """Append a new entry: ``text`` is what the user got, ``raw_text`` the transcript before
+    cleanup, ``text`` itself when omitted.
 
     ``source_name`` is stored as its last path component, cut to
     ``schema.SOURCE_NAME_MAX`` characters; blank is stored as ``None``.
@@ -277,7 +279,7 @@ def save_entry(
                     "id": entry.id,
                     "ts": ts_ms,
                     "language": entry.language,
-                    "raw_text": entry.text,
+                    "raw_text": entry.text if raw_text is None else raw_text,
                     "cleaned_text": entry.text,
                     "duration_ms": entry.duration_ms,
                     "audio_duration_seconds": entry.audio_duration_seconds,
@@ -428,7 +430,7 @@ def _has_more_locked(
 
 
 _CURSOR_SEEK_PLAN_SHAPES = (
-    ("page read", "id, raw_text", False),
+    ("page read", "id, cleaned_text", False),
     ("has-more probe", "1", True),
 )
 
@@ -443,7 +445,7 @@ def cursor_seek_plan_failure() -> str | None:
     try:
         conn.execute(
             "CREATE TABLE entries "
-            "(id TEXT PRIMARY KEY, ts INTEGER NOT NULL, raw_text TEXT NOT NULL)"
+            "(id TEXT PRIMARY KEY, ts INTEGER NOT NULL, cleaned_text TEXT NOT NULL)"
         )
         conn.executescript(schema._REPLACE_TS_INDEX_WITH_TS_ID_INDEX)
         plans = [
@@ -637,7 +639,7 @@ def _row_to_entry(row: sqlite3.Row) -> HistoryEntry:
         id=row["id"],
         timestamp=_epoch_ms_to_iso(row["ts"]),
         language=row["language"],
-        text=row["raw_text"],
+        text=row["cleaned_text"],
         duration_ms=row["duration_ms"],
         audio_duration_seconds=row["audio_duration_seconds"],
         word_count=row["word_count"],

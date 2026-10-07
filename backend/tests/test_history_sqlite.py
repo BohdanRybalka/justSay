@@ -949,7 +949,7 @@ def test_entry_read_columns_are_exactly_what_row_to_entry_reads(
     finally:
         conn.close()
 
-    assert set(schema.ENTRY_READ_COLUMNS) == schema_columns - {"cleaned_text"}
+    assert set(schema.ENTRY_READ_COLUMNS) == schema_columns - {"raw_text"}
     assert len(entries) == 1
     assert entries[0].text == "hello world"
 
@@ -1878,7 +1878,7 @@ def _plan_of(statement):
 
 def _the_page_read(action):
     """The one statement that fetches rows, as opposed to the total beside it."""
-    reads = [s for s in _statements_from(action) if _reads_entries(s) and "raw_text" in s]
+    reads = [s for s in _statements_from(action) if _reads_entries(s) and "cleaned_text" in s]
     assert len(reads) == 1, reads
     return reads[0]
 
@@ -1985,7 +1985,7 @@ def _the_has_more_probe(action):
         statement
         for statement in _statements_from(action)
         if _reads_entries(statement)
-        and "raw_text" not in statement
+        and "cleaned_text" not in statement
         and "COUNT(*)" not in statement.upper()
     ]
 
@@ -2002,7 +2002,7 @@ def test_a_full_page_reads_exactly_the_rows_it_returns(isolated_storage, tmp_pat
     reads = [
         statement
         for statement in _statements_from(lambda: history.get_page(limit=30))
-        if _reads_entries(statement) and "raw_text" in statement
+        if _reads_entries(statement) and "cleaned_text" in statement
     ]
 
     assert len(reads) == 1, reads
@@ -2326,7 +2326,7 @@ def test_the_plan_probe_reports_every_condition_one_shape_failed(isolated_storag
     broken = covering[0]
 
     projection_that_scans_and_reaches_the_table = (
-        "raw_text, (SELECT COUNT(raw_text) FROM entries)"
+        "cleaned_text, (SELECT COUNT(cleaned_text) FROM entries)"
     )
     patched = tuple(
         (
@@ -2506,11 +2506,11 @@ def test_reading_the_last_page_costs_the_same_at_2000_rows_and_at_8000(isolated_
     large_cursor, large_offset, _ = _last_page_probe(8_000, tmp_path, "large")
 
     assert len(small_reads) == 4, small_reads
-    assert any("raw_text" in statement for statement in small_reads), small_reads
+    assert any("cleaned_text" in statement for statement in small_reads), small_reads
     assert any("COUNT(*)" in statement.upper() for statement in small_reads), small_reads
     assert any("localtime" in statement for statement in small_reads), small_reads
     assert any(
-        "raw_text" not in statement and "COUNT(*)" not in statement.upper()
+        "cleaned_text" not in statement and "COUNT(*)" not in statement.upper()
         for statement in small_reads
     ), small_reads
 
@@ -3599,3 +3599,28 @@ def test_a_merge_that_could_not_carry_every_row_says_so(
     assert any("Merge carried" in record.message for record in caplog.records), (
         "a source row that could not be written has to be said out loud"
     )
+
+
+def test_an_entry_reads_back_as_the_cleaned_text_and_keeps_its_transcript():
+    saved = history.save_entry(
+        text="Звіт до четверга.", raw_text="ну е звіт до четверга", duration_ms=1
+    )
+
+    [entry] = history.get_page(limit=10).entries
+
+    assert saved.text == entry.text == "Звіт до четверга."
+    with history._lock:
+        stored = history._ensure_conn_locked().execute(
+            "SELECT raw_text, cleaned_text FROM entries WHERE id = ?", (entry.id,)
+        ).fetchone()
+    assert tuple(stored) == ("ну е звіт до четверга", "Звіт до четверга.")
+
+
+def test_an_entry_saved_without_a_transcript_stores_its_text_in_both_columns():
+    entry = history.save_entry(text="Привіт.", duration_ms=1)
+
+    with history._lock:
+        stored = history._ensure_conn_locked().execute(
+            "SELECT raw_text, cleaned_text FROM entries WHERE id = ?", (entry.id,)
+        ).fetchone()
+    assert tuple(stored) == ("Привіт.", "Привіт.")
