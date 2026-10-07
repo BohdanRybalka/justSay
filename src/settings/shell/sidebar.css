@@ -82,6 +82,12 @@
   margin: 0 -12px 12px;
 }
 
+.sidebar-action {
+  width: 100%;
+  justify-content: center;
+  margin-bottom: 14px;
+}
+
 .nav-item {
   display: flex;
   align-items: center;

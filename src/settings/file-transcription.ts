@@ -22,12 +22,16 @@ function carriesFiles(event: DragEvent): boolean {
 }
 
 /**
- * The window-wide drop target (ADR 087): a drag carrying files dims the window under
- * "Drop to transcribe", and the dropped file is sent off as a job before `onStarted` runs.
- * A file it refuses, or one the backend refuses, is explained in the same place.
- * Drags carrying anything else are left to the page. Returns the teardown.
+ * The two ways to transcribe a file from the window: `pickButton` opens the system file
+ * dialog, and a drag carrying files anywhere on it dims it under "Drop to transcribe"
+ * (ADR 087). The file is sent off as a job before `onStarted` runs; a refusal is explained
+ * on the overlay. Drags carrying anything else are left to the page. Returns the teardown.
  */
-export function mountDropOverlay(root: HTMLElement, onStarted: () => void): () => void {
+export function mountFileTranscription(
+  root: HTMLElement,
+  pickButton: HTMLButtonElement,
+  onStarted: () => void,
+): () => void {
   const overlay = document.createElement("div");
   overlay.className = "drop-overlay";
   overlay.hidden = true;
@@ -40,7 +44,11 @@ export function mountDropOverlay(root: HTMLElement, onStarted: () => void): () =
   `;
   const title = overlay.querySelector<HTMLElement>(".drop-overlay-title")!;
   const hint = overlay.querySelector<HTMLElement>(".drop-overlay-hint")!;
-  root.append(overlay);
+  const picker = document.createElement("input");
+  picker.type = "file";
+  picker.accept = ACCEPTED_AUDIO_EXTENSIONS.join(",");
+  picker.hidden = true;
+  root.append(overlay, picker);
 
   let depth = 0;
   let refusalTimer: number | null = null;
@@ -103,6 +111,15 @@ export function mountDropOverlay(root: HTMLElement, onStarted: () => void): () =
     if (file) void send(file);
   };
 
+  const onPick = () => picker.click();
+  const onPicked = () => {
+    const file = picker.files?.[0];
+    picker.value = "";
+    if (file) void send(file);
+  };
+
+  pickButton.addEventListener("click", onPick);
+  picker.addEventListener("change", onPicked);
   window.addEventListener("dragenter", onEnter);
   window.addEventListener("dragover", onOver);
   window.addEventListener("dragleave", onLeave);
@@ -115,6 +132,8 @@ export function mountDropOverlay(root: HTMLElement, onStarted: () => void): () =
     window.removeEventListener("dragover", onOver);
     window.removeEventListener("dragleave", onLeave);
     window.removeEventListener("drop", onDrop);
+    pickButton.removeEventListener("click", onPick);
     overlay.remove();
+    picker.remove();
   };
 }

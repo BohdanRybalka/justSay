@@ -25,7 +25,7 @@ import {
 import { loadEventApi } from "../event-api";
 import { TimedOutError, withTimeout } from "../timeout";
 import { isStaleStatusResponse } from "../stale-response";
-import { mountDropOverlay } from "./drop-overlay";
+import { mountFileTranscription } from "./file-transcription";
 import { nextTabAction } from "./tab-visibility";
 import { renderDictation } from "./tabs/dictation";
 import { renderDictationMode } from "./tabs/dictation-mode";
@@ -487,7 +487,7 @@ sidebar.querySelectorAll<HTMLButtonElement>("[data-panel]").forEach((item) => {
 });
 
 
-/** A file dropped on the window is now a job: show it at the top of History. */
+/** A file picked or dropped on the window is now a job: show it at the top of History. */
 function showStartedJob() {
   if (currentPanel === "history" && settings) {
     pane.scrollTop = 0;
@@ -608,7 +608,7 @@ function init() {
   applyThemePreference("system");
   mountIconSprite(document);
   renderTitlebar(titlebar, detectShortcutPlatform(navigator));
-  mountDropOverlay(document.body, showStartedJob);
+  mountFileTranscription(document.body, document.querySelector<HTMLButtonElement>("#transcribe-file")!, showStartedJob);
   void connectTitlebarToWindow();
   void initAppVersion();
   void initAccountName();

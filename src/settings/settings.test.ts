@@ -68,11 +68,11 @@ vi.mock("./tabs/insights", () => ({
   }),
 }));
 
-const dropOverlayMounts: { root: HTMLElement; onStarted: () => void }[] = [];
+const fileTranscriptionMounts: { root: HTMLElement; pickButton: HTMLButtonElement; onStarted: () => void }[] = [];
 
-vi.mock("./drop-overlay", () => ({
-  mountDropOverlay: vi.fn((root: HTMLElement, onStarted: () => void) => {
-    dropOverlayMounts.push({ root, onStarted });
+vi.mock("./file-transcription", () => ({
+  mountFileTranscription: vi.fn((root: HTMLElement, pickButton: HTMLButtonElement, onStarted: () => void) => {
+    fileTranscriptionMounts.push({ root, pickButton, onStarted });
     return () => {};
   }),
 }));
@@ -227,6 +227,7 @@ beforeEach(() => {
       <button class="account-row" data-panel="account" aria-current="false">
         <span class="avatar"></span><span class="account-row-name">Account</span>
       </button>
+      <button id="transcribe-file">Transcribe a file</button>
       <button class="nav-item" data-panel="insights" aria-current="true">Insights</button>
       <button class="nav-item" data-panel="history" aria-current="false">History</button>
       <button class="nav-item" data-panel="dictation" aria-current="false">Dictation</button>
@@ -1499,28 +1500,29 @@ describe("the Settings window being dismissed", () => {
   });
 });
 
-describe("a file dropped on the window", () => {
+describe("a file picked or dropped on the window", () => {
   async function bootOn(panel: string): Promise<() => void> {
     apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.getSettings.mockResolvedValue(buildSettings());
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
     apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
 
-    dropOverlayMounts.length = 0;
+    fileTranscriptionMounts.length = 0;
     await import("./settings");
     await vi.waitFor(() => expect(document.getElementById("insights-body")).not.toBeNull());
     document.querySelector<HTMLButtonElement>(`[data-panel="${panel}"]`)!.click();
-    expect(dropOverlayMounts).toHaveLength(1);
-    return dropOverlayMounts[0].onStarted;
+    expect(fileTranscriptionMounts).toHaveLength(1);
+    return fileTranscriptionMounts[0].onStarted;
   }
 
   const currentPanel = () =>
     document.querySelector<HTMLElement>('[data-panel][aria-current="true"]')!.dataset.panel;
 
-  it("is caught over the whole window, not inside one panel", async () => {
+  it("is caught over the whole window and picked with the sidebar's button, not inside one panel", async () => {
     await bootOn("insights");
 
-    expect(dropOverlayMounts[0].root).toBe(document.body);
+    expect(fileTranscriptionMounts[0].root).toBe(document.body);
+    expect(fileTranscriptionMounts[0].pickButton).toBe(document.getElementById("transcribe-file"));
   });
 
   it("opens History once its job has started", async () => {

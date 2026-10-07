@@ -10,7 +10,7 @@ vi.mock("../api", () => ({
   api: apiMock,
 }));
 
-const { mountDropOverlay, refusalOf, DROP_HINT, REFUSAL_SHOWN_MS } = await import("./drop-overlay");
+const { mountFileTranscription, refusalOf, DROP_HINT, REFUSAL_SHOWN_MS } = await import("./file-transcription");
 
 const onStarted = vi.fn();
 let teardown: () => void = () => {};
@@ -28,6 +28,19 @@ function drag(type: string, target: EventTarget, carried: string[], files: File[
   return event;
 }
 
+function pickButton(): HTMLButtonElement {
+  return document.querySelector<HTMLButtonElement>("#transcribe-file")!;
+}
+
+function picker(): HTMLInputElement {
+  return document.querySelector<HTMLInputElement>('input[type="file"]')!;
+}
+
+function pick(file: File): void {
+  Object.defineProperty(picker(), "files", { value: [file], configurable: true });
+  picker().dispatchEvent(new Event("change"));
+}
+
 function overlay(): HTMLElement {
   return document.querySelector<HTMLElement>(".drop-overlay")!;
 }
@@ -39,8 +52,8 @@ function shownText(): string {
 beforeEach(() => {
   vi.clearAllMocks();
   apiMock.startFileJob.mockResolvedValue({ id: "job-1" });
-  document.body.innerHTML = `<main id="pane"><div id="child"><span id="grandchild"></span></div></main>`;
-  teardown = mountDropOverlay(document.body, onStarted);
+  document.body.innerHTML = `<button id="transcribe-file"></button><main id="pane"><div id="child"><span id="grandchild"></span></div></main>`;
+  teardown = mountFileTranscription(document.body, pickButton(), onStarted);
 });
 
 afterEach(() => {
@@ -187,14 +200,45 @@ describe("dropping a file", () => {
   });
 });
 
+describe("picking a file with the button", () => {
+  it("opens the system file dialog, offering audio files", () => {
+    const opened = vi.spyOn(picker(), "click").mockImplementation(() => {});
+
+    pickButton().click();
+
+    expect(opened).toHaveBeenCalledOnce();
+    expect(picker().accept).toContain(".m4a");
+  });
+
+  it("sends the picked file off as a job and reports the start", async () => {
+    pick(buildFile("interview.m4a", 2048));
+
+    await vi.waitFor(() => expect(onStarted).toHaveBeenCalledOnce());
+    expect(apiMock.startFileJob.mock.calls[0][1]).toBe("interview.m4a");
+    expect(overlay().hidden).toBe(true);
+  });
+
+  it("explains a picked file it refuses, the way it explains a dropped one", async () => {
+    pick(buildFile("notes.txt", 2048));
+
+    await vi.waitFor(() => expect(shownText()).toBe("That's not an audio file"));
+    expect(apiMock.startFileJob).not.toHaveBeenCalled();
+  });
+});
+
 describe("teardown", () => {
-  it("removes the overlay and stops listening to the window", () => {
+  it("removes the overlay and the dialog, and stops listening to the window and the button", () => {
     teardown();
     teardown = () => {};
 
     const enter = drag("dragenter", document.body, ["Files"]);
 
     expect(document.querySelector(".drop-overlay")).toBeNull();
+    expect(document.querySelector('input[type="file"]')).toBeNull();
     expect(enter.defaultPrevented).toBe(false);
+    const opened = vi.spyOn(HTMLInputElement.prototype, "click");
+    pickButton().click();
+    expect(opened).not.toHaveBeenCalled();
+    opened.mockRestore();
   });
 });
