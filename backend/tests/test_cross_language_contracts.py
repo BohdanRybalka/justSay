@@ -56,6 +56,7 @@ FROZEN_BUILD_PY = REPO_ROOT / "backend" / "app" / "core" / "frozen_build.py"
 CONTRACTS_TS = REPO_ROOT / "src" / "contracts.ts"
 LIB_RS = REPO_ROOT / "src-tauri" / "src" / "lib.rs"
 BACKEND_RS = REPO_ROOT / "src-tauri" / "src" / "backend.rs"
+PICKED_FILE_RS = REPO_ROOT / "src-tauri" / "src" / "picked_file.rs"
 BUILD_SIDECAR_SPEC = REPO_ROOT / "backend" / "build_sidecar.spec"
 TAURI_CONF_JSON = REPO_ROOT / "src-tauri" / "tauri.conf.json"
 TAURI_MACOS_CONF_JSON = REPO_ROOT / "src-tauri" / "tauri.macos.conf.json"
@@ -488,10 +489,11 @@ def _extensions_in(path: Path, opening: str, closing: str) -> set[str]:
 
 
 def test_the_upload_allowlist_and_cap_agree_across_languages() -> None:
-    """The accepted audio extensions and the upload cap exist in both languages.
+    """The accepted audio extensions agree in all three languages, the cap in two.
 
-    Mutation-checked: deleting one entry from MIME_BY_AUDIO_EXTENSION fails this
-    test naming that extension and both sides.
+    The shell's list is the system file dialog's filter. Mutation-checked:
+    deleting one entry from MIME_BY_AUDIO_EXTENSION fails this test naming that
+    extension and both sides, and so does deleting one from AUDIO_EXTENSIONS.
     """
     python_extensions = _extensions_in(
         AUDIO_FORMATS_PY, "MIME_BY_AUDIO_EXTENSION: dict[str, str] = {", "}"
@@ -503,6 +505,12 @@ def test_the_upload_allowlist_and_cap_agree_across_languages() -> None:
         f"the accepted audio extensions disagree: only in {AUDIO_FORMATS_PY.name}: "
         f"{sorted(python_extensions - typescript_extensions)}; only in "
         f"{CONTRACTS_TS.name}: {sorted(typescript_extensions - python_extensions)}"
+    )
+    rust_extensions = _extensions_in(PICKED_FILE_RS, "const AUDIO_EXTENSIONS: [&str; ", "];")
+    assert rust_extensions == typescript_extensions, (
+        f"the file dialog's filter disagrees with the upload allowlist: only in "
+        f"{PICKED_FILE_RS.name}: {sorted(rust_extensions - typescript_extensions)}; only in "
+        f"{CONTRACTS_TS.name}: {sorted(typescript_extensions - rust_extensions)}"
     )
 
     python_cap = _product(_extract(CONSTANTS_PY, r"^MAX_UPLOAD_SIZE: int = ([\d *]+)$")[0])

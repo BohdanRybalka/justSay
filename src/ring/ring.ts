@@ -19,10 +19,7 @@ let state: RingState = UNREAD_RING_STATE;
 
 mountIconSprite(document);
 applyThemePreference("system");
-mountRing(ring, (action) => {
-  void askShellToClose();
-  void carryOut(action);
-});
+mountRing(ring, (action) => void askShellToClose().then(() => carryOut(action)));
 renderPetalLabels(ring, (action) => petalLabel(action, state));
 document.addEventListener("contextmenu", (event) => event.preventDefault());
 
@@ -54,6 +51,9 @@ async function carryOut(action: RingAction) {
     if (step.kind === "toggle-meeting") {
       const { emit } = await import("@tauri-apps/api/event");
       await emit(EVENT_MEETING_TOGGLE);
+    } else if (step.kind === "pick-file") {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("pick_audio_file");
     } else if (step.kind === "switch-language") {
       await switchLanguage(step.language);
     } else {

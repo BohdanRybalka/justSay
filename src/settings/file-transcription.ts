@@ -1,5 +1,6 @@
 import { api } from "../api";
-import { ACCEPTED_AUDIO_EXTENSIONS, MAX_UPLOAD_BYTES } from "../contracts";
+import { ACCEPTED_AUDIO_EXTENSIONS, EVENT_FILE_PICKED, MAX_UPLOAD_BYTES } from "../contracts";
+import { loadEventApi } from "../event-api";
 import { icon } from "../ui/icons";
 
 export const REFUSAL_SHOWN_MS = 4000;
@@ -8,8 +9,36 @@ export const GROW_MS = 420;
 const MAX_MB = MAX_UPLOAD_BYTES / (1024 * 1024);
 export const DROP_HINT = `mp3, wav, m4a, mp4 and 7 more · up to ${MAX_MB} MB`;
 
+/** A file picked in the system dialog the ring or the tray opened; `token` fetches its bytes once. */
+export interface ShellPickedFile {
+  token: string;
+  name: string;
+  size: number;
+}
+
+interface AudioToSend {
+  name: string;
+  size: number;
+  bytes: () => Promise<ArrayBuffer>;
+}
+
+function fromPage(file: File): AudioToSend {
+  return { name: file.name, size: file.size, bytes: () => file.arrayBuffer() };
+}
+
+function fromShell(picked: ShellPickedFile): AudioToSend {
+  return {
+    name: picked.name,
+    size: picked.size,
+    bytes: async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      return invoke<ArrayBuffer>("take_picked_file", { token: picked.token });
+    },
+  };
+}
+
 /** Why this file cannot be transcribed, in the words the overlay shows, or `null` when it can. */
-export function refusalOf(file: File): string | null {
+export function refusalOf(file: Pick<File, "name" | "size">): string | null {
   const dot = file.name.lastIndexOf(".");
   const ext = dot < 0 ? "" : file.name.slice(dot).toLowerCase();
   if (!ACCEPTED_AUDIO_EXTENSIONS.includes(ext)) return "That's not an audio file";
@@ -30,10 +59,10 @@ function carriesFiles(event: DragEvent): boolean {
 }
 
 /**
- * The two ways to transcribe a file from the window: `pickButton` opens the system file
- * dialog, and a drag carrying files anywhere on it dims it under "Drop to transcribe"
- * (ADR 087). The file is sent off as a job before `onStarted` runs; a refusal is explained
- * on the overlay. Drags carrying anything else are left to the page. Returns the teardown.
+ * Every way a file reaches the window: `pickButton` opens the system file dialog, a drag
+ * carrying files dims the window under "Drop to transcribe" (ADR 087), and the shell hands
+ * over a file picked from the ring or the tray. The file is sent off as a job before
+ * `onStarted` runs; a refusal is explained on the overlay. Returns the teardown.
  */
 export function mountFileTranscription(
   root: HTMLElement,
@@ -92,16 +121,16 @@ export function mountFileTranscription(
     refusalTimer = window.setTimeout(hide, REFUSAL_SHOWN_MS);
   }
 
-  async function send(file: File): Promise<void> {
-    const reason = refusalOf(file);
+  async function send(audio: AudioToSend): Promise<void> {
+    const reason = refusalOf(audio);
     if (reason) {
       refuse(reason);
       return;
     }
     try {
-      await api.startFileJob(await file.arrayBuffer(), file.name);
+      await api.startFileJob(await audio.bytes(), audio.name);
     } catch (err) {
-      refuse((err as Error).message);
+      refuse(err instanceof Error ? err.message : String(err));
       return;
     }
     onStarted();
@@ -127,15 +156,29 @@ export function mountFileTranscription(
     depth = 0;
     hide();
     const file = event.dataTransfer?.files?.[0];
-    if (file) void send(file);
+    if (file) void send(fromPage(file));
   };
 
   const onPick = () => picker.click();
   const onPicked = () => {
     const file = picker.files?.[0];
     picker.value = "";
-    if (file) void send(file);
+    if (file) void send(fromPage(file));
   };
+
+  let stopHearingShell: (() => void) | null = null;
+  let tornDown = false;
+  void hearShell();
+
+  async function hearShell(): Promise<void> {
+    try {
+      const { listen } = await loadEventApi();
+      const stop = await listen<ShellPickedFile>(EVENT_FILE_PICKED, ({ payload }) => void send(fromShell(payload)));
+      if (tornDown) stop();
+      else stopHearingShell = stop;
+    } catch {
+    }
+  }
 
   pickButton.addEventListener("click", onPick);
   picker.addEventListener("change", onPicked);
@@ -146,6 +189,8 @@ export function mountFileTranscription(
   overlay.addEventListener("click", hide);
 
   return () => {
+    tornDown = true;
+    stopHearingShell?.();
     hide();
     window.removeEventListener("dragenter", onEnter);
     window.removeEventListener("dragover", onOver);

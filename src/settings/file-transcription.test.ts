@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MAX_UPLOAD_BYTES } from "../contracts";
+import { EVENT_FILE_PICKED, MAX_UPLOAD_BYTES } from "../contracts";
 
 const apiMock = {
   startFileJob: vi.fn(),
@@ -8,6 +8,19 @@ const apiMock = {
 
 vi.mock("../api", () => ({
   api: apiMock,
+}));
+
+const { invokeMock, shellListeners, stopHearing } = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
+  shellListeners: new Map<string, (event: { payload: unknown }) => unknown>(),
+  stopHearing: vi.fn(),
+}));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (event: string, handler: (event: { payload: unknown }) => unknown) => {
+    shellListeners.set(event, handler);
+    return stopHearing;
+  }),
 }));
 
 const { mountFileTranscription, refusalOf, transformOnto, DROP_HINT, REFUSAL_SHOWN_MS } = await import("./file-transcription");
@@ -228,6 +241,50 @@ describe("picking a file with the button", () => {
 
     await vi.waitFor(() => expect(shownText()).toBe("That's not an audio file"));
     expect(apiMock.startFileJob).not.toHaveBeenCalled();
+  });
+});
+
+describe("a file picked from the ring or the tray", () => {
+  async function shellPicks(name: string, size: number): Promise<void> {
+    await vi.waitFor(() => expect(shellListeners.get(EVENT_FILE_PICKED)).toBeTypeOf("function"));
+    shellListeners.get(EVENT_FILE_PICKED)!({ payload: { token: "token-1", name, size } });
+  }
+
+  it("fetches the bytes from the shell by token and sends them off as a job", async () => {
+    const bytes = new ArrayBuffer(4);
+    invokeMock.mockResolvedValue(bytes);
+
+    await shellPicks("Interview 3.m4a", 2048);
+
+    await vi.waitFor(() => expect(onStarted).toHaveBeenCalledOnce());
+    expect(invokeMock).toHaveBeenCalledWith("take_picked_file", { token: "token-1" });
+    expect(apiMock.startFileJob).toHaveBeenCalledWith(bytes, "Interview 3.m4a");
+  });
+
+  it("refuses a file over the cap in the drop's words without reading it", async () => {
+    await shellPicks("All hands.m4a", MAX_UPLOAD_BYTES + 1);
+
+    await vi.waitFor(() => expect(shownText()).toBe("This file is over 25 MB"));
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(apiMock.startFileJob).not.toHaveBeenCalled();
+  });
+
+  it("shows the shell's reason when the file cannot be read, and reports no start", async () => {
+    invokeMock.mockRejectedValue("This file can't be read");
+
+    await shellPicks("Interview 3.m4a", 2048);
+
+    await vi.waitFor(() => expect(shownText()).toBe("This file can't be read"));
+    expect(onStarted).not.toHaveBeenCalled();
+  });
+
+  it("stops hearing the shell on teardown", async () => {
+    await vi.waitFor(() => expect(shellListeners.get(EVENT_FILE_PICKED)).toBeTypeOf("function"));
+
+    teardown();
+    teardown = () => {};
+
+    expect(stopHearing).toHaveBeenCalledOnce();
   });
 });
 
