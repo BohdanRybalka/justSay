@@ -59,6 +59,11 @@ export const EVENT_RING_POINTER = "ring-pointer";
  *  `section` when one is named. The asker shows the window itself. */
 export const EVENT_NAVIGATE_PANEL = "navigate-panel";
 
+/** The user picked an audio file in the system dialog the ring or the tray
+ *  opened. The shell has already shown the main window; the payload names the
+ *  file and the token that fetches its bytes (ADR 087). */
+export const EVENT_FILE_PICKED = "file-picked";
+
 /** The Settings window was dismissed. The shell intercepts `CloseRequested`,
  *  prevents it and hides the window, so the webview stays mounted and no tab's
  *  teardown ever runs — a microphone the Dictation panel holds outlives the window

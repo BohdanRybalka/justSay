@@ -20,6 +20,7 @@ export interface RingState {
 
 export type RingStep =
   | { kind: "toggle-meeting" }
+  | { kind: "pick-file" }
   | { kind: "switch-language"; language: string }
   | { kind: "open-panel"; target: NavigatePanel };
 
@@ -49,7 +50,7 @@ export function stepFor(action: RingAction, state: RingState): RingStep {
       }
       return { kind: "open-panel", target: { panel: "dictation", section: "meetings" } };
     case "file":
-      return { kind: "open-panel", target: { panel: "history", section: null } };
+      return { kind: "pick-file" };
     case "language": {
       const previous = state.settings?.previous_language;
       if (previous && previous !== state.settings?.language) {

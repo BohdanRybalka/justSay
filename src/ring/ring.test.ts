@@ -180,13 +180,17 @@ describe("the ring window", () => {
     expect(updateSettingsMock).toHaveBeenCalledWith({ language: "en" });
   });
 
-  it("opens the main window on History for a file and on Settings for Settings", async () => {
+  it("asks the shell to open the file dialog for a file", async () => {
     const ring = await loadRing();
 
     petal(ring, 1).click();
-    await vi.waitFor(() =>
-      expect(emitMock).toHaveBeenCalledWith(EVENT_NAVIGATE_PANEL, { panel: "history", section: null }),
-    );
+
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("pick_audio_file"));
+    expect(emitMock).not.toHaveBeenCalledWith(EVENT_NAVIGATE_PANEL, expect.anything());
+  });
+
+  it("opens the main window on Settings for Settings", async () => {
+    const ring = await loadRing();
 
     petal(ring, 3).click();
     await vi.waitFor(() =>

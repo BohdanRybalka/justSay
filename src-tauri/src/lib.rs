@@ -12,6 +12,7 @@ mod backend;
 mod clipboard;
 mod image_export;
 mod paste;
+mod picked_file;
 mod ring_window;
 mod scratch_folder;
 mod widget_window;
@@ -296,8 +297,11 @@ pub fn run() {
                 MenuItem::with_id(app, "settings", "Open JustSay", true, None::<&str>)?;
             let meeting_item =
                 MenuItem::with_id(app, "meeting", "Record a meeting", true, None::<&str>)?;
+            let transcribe_item =
+                MenuItem::with_id(app, "transcribe", "Transcribe a file…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit JustSay", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&settings_item, &quit])?;
+            let menu = Menu::with_items(app, &[&settings_item, &transcribe_item, &quit])?;
+            app.manage(picked_file::PickedFiles::default());
             app.manage(MeetingTray {
                 menu: menu.clone(),
                 item: meeting_item,
@@ -321,6 +325,9 @@ pub fn run() {
                     }
                     "meeting" => {
                         let _ = app_handle.emit("meeting-toggle", ());
+                    }
+                    "transcribe" => {
+                        picked_file::pick(&app_handle);
                     }
                     _ => {}
                 })
@@ -358,6 +365,8 @@ pub fn run() {
             image_export::copy_image,
             image_export::save_image,
             paste::paste_text,
+            picked_file::pick_audio_file,
+            picked_file::take_picked_file,
             paste::paste_permission_granted,
             paste::open_accessibility_settings,
             account::os_display_name,

@@ -75,8 +75,12 @@ describe("what a petal does", () => {
     expect(stepFor("language", UNREAD_RING_STATE)).toEqual(opened);
   });
 
-  it("opens History for a file and Settings for Settings", () => {
-    expect(stepFor("file", read())).toEqual({ kind: "open-panel", target: { panel: "history", section: null } });
+  it("asks the shell for a file, whatever was read", () => {
+    expect(stepFor("file", read())).toEqual({ kind: "pick-file" });
+    expect(stepFor("file", UNREAD_RING_STATE)).toEqual({ kind: "pick-file" });
+  });
+
+  it("opens Settings for Settings", () => {
     expect(stepFor("settings", read())).toEqual({
       kind: "open-panel",
       target: { panel: "settings", section: null },
