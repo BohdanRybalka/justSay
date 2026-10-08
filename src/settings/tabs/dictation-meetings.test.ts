@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { UserSettings } from "../../api";
+import { DICTATION_LANGUAGES } from "../../languages";
 
 const saveSettingsMock = vi.fn();
 vi.mock("../settings", () => ({
@@ -34,6 +35,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     meeting_consent_acknowledged: false,
     meetings_enabled: false,
     meetings_engine: "local",
+    meetings_language: "uk",
     theme: "system",
     display_name: "",
     paste_at_cursor: true,
@@ -167,6 +169,50 @@ describe("renderDictationMeetings — where a meeting becomes text", () => {
     await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("backend down"));
     expect(view.hint.textContent).toBe(meetingsHint("local"));
     expect(engineButton(view.container, "On this computer").getAttribute("aria-pressed")).toBe("true");
+  });
+});
+
+describe("renderDictationMeetings — the language a meeting is heard in", () => {
+  function languageSelect(container: HTMLElement): HTMLSelectElement {
+    return container.querySelector<HTMLSelectElement>("#meetings-language")!;
+  }
+
+  function choose(select: HTMLSelectElement, value: string) {
+    select.value = value;
+    select.dispatchEvent(new Event("change"));
+  }
+
+  it("offers the dictation languages and detecting each part, showing the saved one", () => {
+    const select = languageSelect(render({ meetings_language: "auto" }).container);
+
+    expect([...select.options].map((o) => o.textContent)).toEqual([
+      ...DICTATION_LANGUAGES.map((l) => l.label),
+      "Detect for each part",
+    ]);
+    expect(select.value).toBe("auto");
+  });
+
+  it("saves a new language and goes back to it, not the first one, after a failed save", async () => {
+    const select = languageSelect(render({ meetings_language: "uk" }).container);
+
+    choose(select, "en");
+    await vi.waitFor(() => expect(emitSettingsChangedMock).toHaveBeenCalled());
+    saveSettingsMock.mockRejectedValue(new Error("backend down"));
+    choose(select, "auto");
+
+    expect(saveSettingsMock).toHaveBeenCalledWith({ meetings_language: "en" });
+    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("backend down"));
+    expect(select.value).toBe("en");
+  });
+
+  it("goes back to the saved language when the new one could not be saved", async () => {
+    saveSettingsMock.mockRejectedValue(new Error("backend down"));
+    const select = languageSelect(render({ meetings_language: "uk" }).container);
+
+    choose(select, "auto");
+
+    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("backend down"));
+    expect(select.value).toBe("uk");
   });
 });
 

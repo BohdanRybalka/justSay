@@ -1,9 +1,9 @@
 """Long audio as pieces every provider accepts, cut in pauses and joined back into one transcript.
 
 Decodable audio becomes 16 kHz mono FLAC pieces no longer than the provider's
-``longest_piece_seconds``, each ending in a pause; where none is found, pieces overlap and the
-words both heard are kept once. A transcript stuck in a loop or far too sparse is asked for again.
-``Retry-After`` pauses the work; audio nothing here decodes goes whole.
+``longest_piece_seconds``, each ending in a pause and holding only its speech; where no pause
+is found, pieces overlap and the words both heard are kept once. A transcript stuck in a loop or
+far too sparse is asked for again. ``Retry-After`` pauses the work; undecodable audio goes whole.
 """
 
 from __future__ import annotations
@@ -11,13 +11,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
+import numpy as np
+
 from app.audio.config import audio_settings
-from app.audio.pauses import longest_pause
+from app.audio.pauses import longest_pause, speech_spans
 from app.core.audio_formats import UndecodableAudioError, decode_to_mono_wav
 from app.core.errors import ResourceUnavailableError
 from app.core.scratch import discard_scratch_file
@@ -159,6 +162,16 @@ def join_at_seam(left: str, right: str) -> str:
     return "".join(left_tokens[: tail_start + a + half] + right_tokens[b + half :]).strip()
 
 
+def _speech_only(samples: np.ndarray) -> np.ndarray:
+    """``samples`` without their non-speech stretches; whole when no speech is heard in them."""
+    spans = speech_spans(samples.astype(np.float32) / 32768.0, audio_settings)
+    if not spans:
+        return samples
+    return np.concatenate(
+        [samples[round(start * PIECE_RATE) : round(end * PIECE_RATE)] for start, end in spans]
+    )
+
+
 def _write_piece(mono: Path, piece: Path, start: float, end: float) -> None:
     import soundfile as sf
 
@@ -166,7 +179,7 @@ def _write_piece(mono: Path, piece: Path, start: float, end: float) -> None:
         first = round(start * PIECE_RATE)
         source.seek(first)
         samples = source.read(round(end * PIECE_RATE) - first, dtype="int16")
-    sf.write(str(piece), samples, PIECE_RATE, format="FLAC", subtype="PCM_16")
+    sf.write(str(piece), _speech_only(samples), PIECE_RATE, format="FLAC", subtype="PCM_16")
 
 
 def _frames(mono: Path) -> int:
@@ -240,6 +253,12 @@ async def _transcribe_checked(
     return replace(kept, tokens_used=sum(spent) if spent else None)
 
 
+def _reported_language(asked: str, heard: Counter[str]) -> str | None:
+    if asked != "auto":
+        return asked
+    return heard.most_common(1)[0][0] if heard else None
+
+
 async def transcribe_in_pieces(
     stt: STTProvider,
     audio_path: Path,
@@ -253,8 +272,9 @@ async def transcribe_in_pieces(
     """Transcribe ``audio_path`` piece by piece; scratch files sit beside it and are removed.
 
     A piece ``holds_no_speech`` judges silent is never sent; one whose ``no_speech_prob`` exceeds
-    ``no_speech_threshold`` adds no text. The first piece with speech fixes ``"auto"`` for the
-    rest. With no speech in any piece, ``no_speech_prob`` is 1.0, so the caller discards it.
+    ``no_speech_threshold`` adds no text. ``"auto"`` is detected in every piece apart, and the
+    language most pieces were heard in is reported. With no speech in any piece, ``no_speech_prob``
+    is 1.0, so the caller discards it.
     """
     mono = audio_path.with_name(f"{audio_path.stem}-16k.wav")
     try:
@@ -275,6 +295,7 @@ async def transcribe_in_pieces(
             lambda start, end: _pause_in(mono, start, end),
         )
         texts: list[tuple[str, bool]] = []
+        heard: Counter[str] = Counter()
         silent = 0
         tokens: list[int] = []
         for index, planned in enumerate(pieces):
@@ -305,8 +326,8 @@ async def transcribe_in_pieces(
             if prob is not None and prob > no_speech_threshold:
                 silent += 1
                 continue
-            if language == "auto" and result.detected_language:
-                language = result.detected_language
+            if result.detected_language:
+                heard[result.detected_language] += 1
             if result.text:
                 texts.append((result.text, planned.overlaps_previous))
     finally:
@@ -318,6 +339,6 @@ async def transcribe_in_pieces(
     return TranscriptionResult(
         text=text,
         tokens_used=sum(tokens) if tokens else None,
-        detected_language=None if language == "auto" else language,
+        detected_language=_reported_language(language, heard),
         no_speech_prob=1.0 if silent == len(pieces) else None,
     )

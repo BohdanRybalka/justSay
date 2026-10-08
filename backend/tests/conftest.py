@@ -400,6 +400,7 @@ RUNTIME_SETTINGS_FIELDS_WRITTEN_BY_SYNC: dict[str, tuple[str, ...]] = {
     "stt": (
         "mode",
         "meetings_mode",
+        "meetings_language",
         "whisper_model_size",
         "whisper_device",
         "initial_prompt",

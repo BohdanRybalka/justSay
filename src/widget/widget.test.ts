@@ -577,6 +577,28 @@ describe("a meeting that goes wrong while nobody is looking", () => {
     expect(root.classList.contains("meeting")).toBe(false);
   });
 
+  it("raises no alarm when the poll lands while its own stop is still finishing", async () => {
+    await startAMeeting();
+    let finishStop!: (value: unknown) => void;
+    apiMock.stopMeetingRecording.mockReturnValue(new Promise((resolve) => (finishStop = resolve)));
+    apiMock.getMeetingStatus.mockResolvedValue({
+      is_recording: false,
+      duration_seconds: 0,
+      level_db: -60,
+      system_endpoint: null,
+      system_level_db: -60,
+      capture_incident: null,
+    });
+
+    void listeners.get(EVENT_MEETING_TOGGLE)!({});
+    await vi.advanceTimersByTimeAsync(2_000);
+    finishStop({ filename: "meeting_x.wav", duration_seconds: 5, capture_incident: null, job_id: "job-1" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(apiMock.getMeetingStatus).toHaveBeenCalled();
+    expect(notifyErrorMock).not.toHaveBeenCalled();
+  });
+
   it("keeps the degraded marker when a dictation's auto-revert fires under it", async () => {
     await loadWidget();
     apiMock.audioStart.mockResolvedValue(recordingStatus());

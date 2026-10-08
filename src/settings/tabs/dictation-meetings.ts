@@ -2,14 +2,16 @@
  * MEETINGS: the Record meetings switch. The first time it is turned on, the
  * meeting disclosure (ADR 040 obligation 3) opens under the row and the switch
  * stays off until "I understand". Below it, where a stopped meeting becomes
- * text, chosen apart from dictation; the hint names it.
+ * text, chosen apart from dictation (the hint names it), and the language it
+ * is heard in.
  */
 import { meetingsTurnedOn, type UserSettings } from "../../api";
 import { saveSettings, type TabLifecycle } from "../settings";
 import { emitSettingsChanged } from "./dictation";
 import { notifyError } from "../../notify";
-import { renderSegmented, renderToggle, type SegmentedOption } from "../../ui/controls";
+import { renderSegmented, renderSelect, renderToggle, type SegmentedOption } from "../../ui/controls";
 import { icon } from "../../ui/icons";
+import { DICTATION_LANGUAGES } from "../../languages";
 
 type Engine = UserSettings["meetings_engine"];
 
@@ -22,6 +24,11 @@ const ENGINES: readonly SegmentedOption<Engine>[] = [
   { value: "local", label: "On this computer" },
   { value: "cloud", label: "In the cloud" },
 ];
+
+export const MEETING_LANGUAGES = [
+  ...DICTATION_LANGUAGES,
+  { code: "auto", label: "Detect for each part" },
+] as const;
 
 export function meetingsHint(engine: Engine): string {
   return `Right-click the widget and pick Record a meeting · turned into text ${WHERE_IT_BECOMES_TEXT[engine]}`;
@@ -65,6 +72,19 @@ export function renderDictationMeetings(container: HTMLElement, settings: UserSe
           <div id="meetings-engine" aria-label="Turn meetings into text"></div>
         </div>
       </div>
+      <div class="setting-row">
+        <div class="setting-row-text">
+          <div class="setting-row-title">Meeting language</div>
+        </div>
+        <div class="setting-row-controls">
+          <select id="meetings-language" aria-label="Meeting language">
+            ${MEETING_LANGUAGES.map(
+              (l) =>
+                `<option value="${l.code}" ${l.code === settings.meetings_language ? "selected" : ""}>${l.label}</option>`,
+            ).join("")}
+          </select>
+        </div>
+      </div>
     </div>
   `,
   );
@@ -74,6 +94,7 @@ export function renderDictationMeetings(container: HTMLElement, settings: UserSe
   const disclosure = container.querySelector<HTMLElement>("#meeting-disclosure")!;
   const consentButton = container.querySelector<HTMLButtonElement>("#btn-meeting-consent")!;
   const engineChoice = container.querySelector<HTMLElement>("#meetings-engine")!;
+  const languageSelect = container.querySelector<HTMLSelectElement>("#meetings-language")!;
 
   let acknowledged = settings.meeting_consent_acknowledged;
   let on = meetingsTurnedOn(settings);
@@ -140,6 +161,16 @@ export function renderDictationMeetings(container: HTMLElement, settings: UserSe
   }
 
   showEngine();
+
+  let language = settings.meetings_language;
+  renderSelect(languageSelect);
+  languageSelect.addEventListener("change", async () => {
+    const next = languageSelect.value;
+    const saved = await save({ meetings_language: next });
+    if (destroyed) return;
+    if (saved) language = next;
+    languageSelect.value = language;
+  });
 
   return {
     destroy: () => {

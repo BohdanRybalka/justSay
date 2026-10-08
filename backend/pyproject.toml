@@ -91,4 +91,5 @@ ignore_names = [
     "vocabulary", "peak_hour", "share", "meetings_week", "is_filler", "minutes_between", "fillers_in_top", "top_size",
     "row_factory", "LimitFlags", "settings_customise_sources",
     "log_file_path", "_reset_library_cache", "_meetings_start_as_acknowledged",
+    "_meetings_start_in_the_dictation_language",
 ]

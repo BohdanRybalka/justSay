@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from app.audio import vad
+from app.audio import pauses, vad
 from app.core.audio_formats import ffmpeg_selftest
 from app.core.errors import ResourceUnavailableError
 from app.pipeline import chunking
@@ -88,6 +88,14 @@ async def _run(
         no_speech_threshold=THRESHOLD,
         holds_no_speech=holds_no_speech,
         pacer=pacer or _Pacer(),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _noise_is_speech(monkeypatch):
+    """The synthetic noise stands for speech, so every piece keeps all of it."""
+    monkeypatch.setattr(
+        chunking, "speech_spans", lambda samples, settings: [(0.0, samples.size / 16000)]
     )
 
 
@@ -253,7 +261,7 @@ async def test_a_long_recording_goes_as_flac_pieces_joined_at_the_seams(tmp_path
 
     assert result.text == "one two three four five six seven eight nine ten"
     assert result.detected_language == "uk"
-    assert [s["language"] for s in provider.sent] == ["auto", "uk", "uk"]
+    assert [s["language"] for s in provider.sent] == ["auto", "auto", "auto"]
     assert all(s["path"].suffix == ".flac" for s in provider.sent)
     assert [round(s["seconds"]) for s in provider.sent] == [30, 30, 20]
     assert pacer.events == [
@@ -524,3 +532,52 @@ def test_the_ffmpeg_selftest_passes_here_and_fails_without_pyav(monkeypatch):
 
     assert ok is False
     assert message.startswith("decoding an AAC M4A raised: ")
+
+
+async def test_each_piece_is_heard_in_its_own_language_and_the_most_heard_is_reported(
+    tmp_path, short_pieces
+):
+    path = _audio(tmp_path, 70.0)
+    provider = _Provider([
+        TranscriptionResult("BIG BOMBAK", detected_language="en"),
+        TranscriptionResult("добрий день", detected_language="uk"),
+        TranscriptionResult("до побачення", detected_language="uk"),
+    ])
+
+    result = await _run(provider, path)
+
+    assert [s["language"] for s in provider.sent] == ["auto", "auto", "auto"]
+    assert result.detected_language == "uk"
+
+
+async def test_a_chosen_language_goes_to_every_piece(tmp_path, short_pieces):
+    path = _audio(tmp_path, 50.0)
+    provider = _Provider([
+        TranscriptionResult("добрий день", detected_language="en"),
+        TranscriptionResult("до побачення"),
+    ])
+
+    result = await _run(provider, path, language="uk")
+
+    assert [s["language"] for s in provider.sent] == ["uk", "uk"]
+    assert result.detected_language == "uk"
+
+
+async def test_a_piece_reaches_the_engine_without_its_silent_stretches(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 20.0)
+
+    def speech_from_8_to_12_seconds(samples, settings):
+        hops = samples.size // vad._HOP_SAMPLES
+        seconds = np.arange(hops) * vad.HOP_SECONDS
+        return np.where((seconds >= 8.0) & (seconds < 12.0), 0.9, 0.1).astype(np.float32)
+
+    monkeypatch.setattr(vad, "speech_probabilities", speech_from_8_to_12_seconds)
+    monkeypatch.setattr(chunking, "speech_spans", pauses.speech_spans)
+    provider = _Provider([TranscriptionResult("добрий день", detected_language="uk")])
+
+    await _run(provider, path)
+
+    expected = 4.0 + 2 * pauses.SPEECH_PAD_SECONDS
+    assert provider.sent[0]["seconds"] == pytest.approx(expected, abs=0.05)
