@@ -1,10 +1,8 @@
 """Provider routing and cache on top of the STT provider classes.
 
-:func:`get_routed_provider` picks a provider from the mode, the engine pin,
-the audio duration and the file format; :func:`get_provider` answers the
-mode-level question alone, for callers holding no audio. Local mode defers
-to :func:`app.stt.local_factory.get_local_provider_class`; Cloud mode routes
-short audio to Groq and everything else, including unknown length, to Gemini.
+:func:`get_provider` picks a provider from the mode alone. Local mode defers
+to :func:`app.stt.local_factory.get_local_provider_class`; Cloud mode sends
+every recording, short or long, to Groq Whisper.
 """
 
 import logging
@@ -15,11 +13,6 @@ from app.stt.base import STTProvider
 from app.stt.config import STTSettings
 
 log = logging.getLogger(__name__)
-
-
-GROQ_SUPPORTED_FORMATS: frozenset[str] = frozenset(
-    {".wav", ".mp3", ".flac", ".ogg", ".oga", ".m4a", ".mp4"}
-)
 
 
 _cache_lock = threading.Lock()
@@ -37,11 +30,6 @@ def _get_or_create(cls, stt_settings: STTSettings) -> STTProvider:
         return provider
 
 
-def _get_gemini(stt_settings: STTSettings) -> STTProvider:
-    from app.stt.cloud import GeminiSTTProvider
-    return _get_or_create(GeminiSTTProvider, stt_settings)
-
-
 def _get_groq(stt_settings: STTSettings) -> STTProvider:
     from app.stt.groq_whisper import GroqWhisperSTTProvider
     return _get_or_create(GroqWhisperSTTProvider, stt_settings)
@@ -54,50 +42,10 @@ def _get_local(stt_settings: STTSettings) -> STTProvider:
 
 
 def get_provider(mode: ProviderMode, stt_settings: STTSettings) -> STTProvider:
-    """Mode-level provider lookup, no routing heuristics.
-
-    For callers with no audio in hand. Cloud mode always returns Gemini; the
-    engine pin and duration routing live in :func:`get_routed_provider`.
-    """
+    """The provider that transcribes in ``mode``: this machine's local engine, else Groq."""
     if mode == ProviderMode.LOCAL:
         return _get_local(stt_settings)
-    return _get_gemini(stt_settings)
-
-
-def get_routed_provider(
-    stt_settings: STTSettings,
-    audio_duration: float | None = None,
-    file_extension: str | None = None,
-) -> tuple[STTProvider, str | None]:
-    """Select a provider from the engine pin, mode, audio duration and format.
-
-    Returns ``(provider, fallback_reason)``; the reason is a sentence for the
-    UI when the requested engine had to be overridden, else ``None``.
-    """
-    if stt_settings.mode == ProviderMode.LOCAL:
-        return _get_local(stt_settings), None
-
-    ext = file_extension.lower() if file_extension else None
-    engine = stt_settings.engine
-
-    if engine == "gemini":
-        return _get_gemini(stt_settings), None
-
-    if engine == "groq":
-        if ext is not None and ext not in GROQ_SUPPORTED_FORMATS:
-            return _get_gemini(stt_settings), f"Groq doesn't support {ext}"
-        return _get_groq(stt_settings), None
-
-    duration_short = (
-        audio_duration is not None and audio_duration <= stt_settings.cloud_routing_threshold
-    )
-
-    if duration_short:
-        if ext is None or ext in GROQ_SUPPORTED_FORMATS:
-            return _get_groq(stt_settings), None
-        return _get_gemini(stt_settings), None
-
-    return _get_gemini(stt_settings), None
+    return _get_groq(stt_settings)
 
 
 def get_local_load_error(stt_settings: STTSettings) -> str | None:

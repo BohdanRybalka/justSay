@@ -584,7 +584,7 @@ async def test_averted_energy_false_positive_is_not_discarded_end_to_end(tmp_pat
     stt.model_name = "mock/provider"
     stt.is_local = False
 
-    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)), \
+    with patch("app.pipeline.service.get_provider", return_value=stt), \
             patch("app.pipeline.service.pyperclip.copy"), \
             patch("app.pipeline.service.save_entry"):
         result = await process_audio(path, language="uk", source="dictation")
@@ -882,7 +882,7 @@ async def _median_gate_ms(path: Path, duration: float, runs: int = 5) -> float:
     stt.is_local = False
 
     samples: list[float] = []
-    with patch("app.pipeline.service.get_routed_provider", return_value=(stt, None)), \
+    with patch("app.pipeline.service.get_provider", return_value=stt), \
             patch("app.pipeline.service.pyperclip.copy"), \
             patch("app.pipeline.service.save_entry"):
         await process_audio(path, language="uk", audio_duration=duration, source="dictation")

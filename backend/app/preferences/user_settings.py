@@ -51,27 +51,12 @@ class UserSettings(BaseModel):
 
     stt_mode: Literal["cloud", "local"] = "cloud"
 
-    stt_engine: Literal["auto", "groq", "gemini"] = "auto"
-
     whisper_model_size: str = Field(
         default="large-v3-turbo", pattern=_WHISPER_MODEL_SIZE_PATTERN
     )
     whisper_device: str = "auto"
 
     ollama_host: str = "http://localhost:11434"
-
-    cloud_routing_threshold: float = Field(
-        default=30.0,
-        gt=0,
-        description=(
-            "Seconds of audio that decide Cloud mode's automatic engine choice: a "
-            "recording at or below this length goes to Groq, a longer one to Gemini, "
-            "and one in a format Groq cannot read goes to Gemini whatever its length. "
-            "Read only while the Cloud engine is left on automatic -- pinning it to "
-            "Groq or to Gemini ignores this field, and so does Local mode, whose own "
-            "short-clip boundary is a separate fixed number."
-        ),
-    )
 
     initial_prompt: str = Field(default="", max_length=500)
 
@@ -369,7 +354,6 @@ def sync_to_runtime(us: UserSettings) -> bool:
         stt_settings.mode != stt_mode
         or stt_settings.whisper_model_size != us.whisper_model_size
         or stt_settings.whisper_device != us.whisper_device
-        or stt_settings.engine != us.stt_engine
         or stt_settings.initial_prompt != us.initial_prompt
         or (us.gemini_api_key and stt_settings.gemini_api_key != us.gemini_api_key)
         or (us.groq_api_key and stt_settings.groq_api_key != us.groq_api_key)
@@ -379,8 +363,6 @@ def sync_to_runtime(us: UserSettings) -> bool:
     stt_settings.mode = stt_mode
     stt_settings.whisper_model_size = us.whisper_model_size
     stt_settings.whisper_device = us.whisper_device
-    stt_settings.cloud_routing_threshold = us.cloud_routing_threshold
-    stt_settings.engine = us.stt_engine
     stt_settings.initial_prompt = us.initial_prompt
     if us.gemini_api_key:
         stt_settings.gemini_api_key = us.gemini_api_key

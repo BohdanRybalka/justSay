@@ -1,7 +1,6 @@
 """Cloud STT provider — Groq Whisper (whisper-large-v3-turbo).
 
-Used for short audio clips (<= cloud_routing_threshold seconds).
-Long audio goes to Gemini.
+Cloud mode's only transcription engine: dictation whole, files and meetings in pieces.
 """
 
 import asyncio
@@ -32,7 +31,7 @@ def _retry_after(error: Exception) -> str:
 
 
 class GroqWhisperSTTProvider(STTProvider):
-    """Groq-hosted Whisper (whisper-large-v3-turbo) for fast short-audio transcription.
+    """Groq-hosted Whisper (whisper-large-v3-turbo), Cloud mode's transcription engine.
 
     Free-tier file size limit 25 MB, enforced upstream. Accepts WAV, MP3, FLAC
     and OGG, not .webm. The SDK call times out at `GROQ_TIMEOUT_SECONDS`.
@@ -125,7 +124,7 @@ class GroqWhisperSTTProvider(STTProvider):
             msg = str(e)
             if "429" in msg or "rate_limit" in msg.lower():
                 raise ResourceUnavailableError(
-                    "Groq rate limit exceeded. Try again later or switch STT to Gemini.",
+                    "Groq rate limit exceeded. Try again later.",
                     headers={"Retry-After": _retry_after(e)},
                 ) from e
             if getattr(e, "status_code", None) == 503:

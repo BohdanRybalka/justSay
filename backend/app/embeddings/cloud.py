@@ -1,7 +1,7 @@
 """Cloud embedding provider — Gemini embeddings via google-genai.
 
-Reuses ``settings.stt.gemini_api_key``, the key already present for cloud STT;
-there is no separate embeddings key (ADR 001).
+Reads ``settings.stt.gemini_api_key``, the Google key the user adds under API
+keys; there is no separate embeddings key (ADR 001).
 
 The SDK call shape: ``client.models.embed_content(model=..., contents=text)``
 returns an ``EmbedContentResponse`` with ``.embeddings: list[ContentEmbedding]``,

@@ -1,7 +1,7 @@
 """Audio container formats — the extension/MIME table, the magic-bytes detector, the decoder.
 
-Deliberately free of ``fastapi``, so a provider can look up a Content-Type
-without acquiring a web-framework dependency.
+Deliberately free of ``fastapi``, so the pipeline can decode audio without
+acquiring a web-framework dependency.
 
 ``ALLOWED_AUDIO_EXTENSIONS`` is derived from the MIME table rather than
 written out a second time, so an extension can never be accepted without a
@@ -90,16 +90,6 @@ def detect_audio_mime(content: bytes) -> str | None:
         return "audio/x-ms-wma"
 
     return None
-
-
-def mime_for_extension(filename: str | None) -> str:
-    """Return the MIME for an audio file based on its extension only.
-
-    For a provider that needs a Content-Type after upload validation has accepted the file. An
-    unknown or absent extension falls back to ``audio/wav`` rather than raising.
-    """
-    ext = Path(filename).suffix.lower() if filename else ""
-    return MIME_BY_AUDIO_EXTENSION.get(ext, "audio/wav")
 
 
 def decode_to_mono_wav(source: Path, target: Path, rate: int) -> None:

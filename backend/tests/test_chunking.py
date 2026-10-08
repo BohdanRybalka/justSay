@@ -273,15 +273,13 @@ async def test_each_provider_gets_pieces_no_longer_than_it_reads_whole(tmp_path,
     assert [round(s["seconds"], 1) for s in provider.sent] == [25.0, 25.0, 18.3]
 
 
-def test_whisper_providers_take_its_30_second_window_and_gemini_ten_minutes():
-    from app.stt.cloud import GeminiSTTProvider
+def test_every_provider_takes_whisper_s_30_second_window():
     from app.stt.groq_whisper import GroqWhisperSTTProvider
     from app.stt.local import LocalSTTProvider
     from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
 
     whisper = (GroqWhisperSTTProvider, LocalSTTProvider, WhisperCppServerSTTProvider)
     assert {cls.longest_piece_seconds for cls in whisper} == {30.0}
-    assert GeminiSTTProvider.longest_piece_seconds == 600.0
 
 
 def _speech_with_pauses(tmp_path: Path, seconds: float, pauses: list[float]) -> Path:

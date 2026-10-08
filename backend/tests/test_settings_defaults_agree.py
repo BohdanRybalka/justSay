@@ -28,11 +28,9 @@ _STT = "stt"
 _EMBEDDINGS = "embeddings"
 
 _SHARED_FIELDS = [
-    ("stt_engine", _STT, "engine"),
     ("whisper_model_size", _STT, "whisper_model_size"),
     ("whisper_device", _STT, "whisper_device"),
     ("initial_prompt", _STT, "initial_prompt"),
-    ("cloud_routing_threshold", _STT, "cloud_routing_threshold"),
     ("gemini_api_key", _STT, "gemini_api_key"),
     ("groq_api_key", _STT, "groq_api_key"),
     ("ollama_host", _EMBEDDINGS, "ollama_host"),
@@ -41,11 +39,9 @@ _SHARED_FIELDS = [
 _RUNTIME_MODELS = {_STT: STTSettings, _EMBEDDINGS: EmbeddingSettings}
 
 _NON_DEFAULT_VALUES = {
-    "stt_engine": "groq",
     "whisper_model_size": "small.en",
     "whisper_device": "cuda",
     "initial_prompt": "JustSay, Tauri, whisper.cpp",
-    "cloud_routing_threshold": 12.5,
     "gemini_api_key": "AIza-sync-probe",
     "groq_api_key": "gsk-sync-probe",
     "ollama_host": "http://ollama.internal",
@@ -92,9 +88,9 @@ def test_the_stored_default_matches_the_runtime_default(stored_name, package, ru
 def test_the_stored_constraints_match_the_runtime_constraints(stored_name, package, runtime_name):
     """A constraint on one side only is the shape the bug took.
 
-    ``cloud_routing_threshold`` was ``30.0`` in both places with ``gt=0`` in
-    the runtime copy alone, so the two disagreed about what counted as valid
-    while looking identical in a diff.
+    A field once read ``30.0`` in both places with ``gt=0`` in the runtime
+    copy alone, so the two disagreed about what counted as valid while
+    looking identical in a diff.
     """
     stored = UserSettings.model_fields[stored_name]
     runtime = _RUNTIME_MODELS[package].model_fields[runtime_name]
@@ -128,9 +124,8 @@ def test_the_shared_field_list_is_the_whole_overlap():
 
     A field added to both models under the same name but not to
     ``_SHARED_FIELDS`` would be unpinned while every test in this file still
-    passed. A pair spelled differently on each side -- ``stt_engine`` against
-    ``engine`` is the one that exists today -- is not caught here and cannot
-    be, since nothing declares that the two names mean each other.
+    passed. A pair spelled differently on each side is not caught here and
+    cannot be, since nothing declares that the two names mean each other.
     """
     stored_names = set(UserSettings.model_fields)
     listed = {stored for stored, _, _ in _SHARED_FIELDS}

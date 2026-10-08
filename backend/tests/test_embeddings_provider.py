@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core.constants import GEMINI_EMBEDDING_TIMEOUT_SECONDS, GEMINI_TIMEOUT_SECONDS
+from app.core.constants import GEMINI_EMBEDDING_TIMEOUT_SECONDS
 from app.core.errors import ConfigurationError
 from app.core.types import ProviderMode
 from app.embeddings import LOCAL_MISSING_MODEL_REASON, clear_cache, resolve_embedding_provider
@@ -437,10 +437,6 @@ def test_cloud_embedding_client_carries_a_timeout_in_milliseconds():
     http_options = client_class.call_args.kwargs["http_options"]
     assert http_options.timeout == int(GEMINI_EMBEDDING_TIMEOUT_SECONDS * 1000)
     assert GEMINI_EMBEDDING_TIMEOUT_SECONDS == 30.0
-    assert GEMINI_EMBEDDING_TIMEOUT_SECONDS < GEMINI_TIMEOUT_SECONDS, (
-        "an embedding is one short string, so it must not inherit the budget "
-        "sized for uploading a whole recording"
-    )
 
 
 def test_an_embedding_request_that_is_never_answered_raises_a_timeout():

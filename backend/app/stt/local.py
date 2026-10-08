@@ -122,8 +122,7 @@ class LocalSTTProvider(STTProvider):
     ) -> TranscriptionResult:
         """Transcribe locally. ``audio_duration`` (kwarg, seconds) picks beam 1
         without cross-segment context at or below `SHORT_CLIP_SECONDS`, beam 5
-        with it otherwise -- never `cloud_routing_threshold` (ADR 073). An unknown
-        duration takes the long path.
+        with it otherwise. An unknown duration takes the long path.
         """
         model = await asyncio.to_thread(self._get_model)
         audio_duration = kwargs.get("audio_duration")

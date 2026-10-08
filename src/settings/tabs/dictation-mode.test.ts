@@ -40,11 +40,9 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     shortcut: "Ctrl+Alt+KeyV",
     output_dir: "C:/fake",
     stt_mode: "local",
-    stt_engine: "auto",
     whisper_model_size: "large-v3-turbo",
     whisper_device: "auto",
     ollama_host: "http://localhost:11434",
-    cloud_routing_threshold: 30,
     initial_prompt: "",
     gemini_api_key: "",
     groq_api_key: "",
@@ -552,19 +550,16 @@ describe("renderDictationMode — the two rows", () => {
   });
 
   it.each([
-    ["auto", { groq_key_set: true, gemini_key_set: true }, false],
-    ["auto", { groq_key_set: true, gemini_key_set: false }, true],
-    ["auto", { groq_key_set: false, gemini_key_set: true }, true],
-    ["groq", { groq_key_set: true, gemini_key_set: false }, false],
-    ["groq", { groq_key_set: false, gemini_key_set: true }, true],
-    ["gemini", { groq_key_set: false, gemini_key_set: true }, false],
-    ["gemini", { groq_key_set: true, gemini_key_set: false }, true],
-  ] as const)("with recordings going to %s and keys %o, asks for a key: %s", async (engine, keys, missing) => {
+    [{ groq_key_set: true, gemini_key_set: true }, false],
+    [{ groq_key_set: true, gemini_key_set: false }, false],
+    [{ groq_key_set: false, gemini_key_set: true }, true],
+    [{ groq_key_set: false, gemini_key_set: false }, true],
+  ] as const)("with keys %o, asks for a Groq key: %s", async (keys, missing) => {
     cloudStatusMock.mockReturnValueOnce(keys);
-    const container = await render(buildStatus(), { stt_engine: engine });
+    const container = await render(buildStatus());
 
     expect(hint(container, "cloud").textContent).toBe(
-      missing ? "Add an API key in Settings" : "Your API keys · fastest and most accurate",
+      missing ? "Add a Groq key in Settings" : "Your API keys · fastest and most accurate",
     );
     expect(hint(container, "cloud").classList.contains("mode-row-alert")).toBe(missing);
   });

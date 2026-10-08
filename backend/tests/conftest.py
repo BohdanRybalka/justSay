@@ -401,8 +401,6 @@ RUNTIME_SETTINGS_FIELDS_WRITTEN_BY_SYNC: dict[str, tuple[str, ...]] = {
         "mode",
         "whisper_model_size",
         "whisper_device",
-        "cloud_routing_threshold",
-        "engine",
         "initial_prompt",
         "gemini_api_key",
         "groq_api_key",

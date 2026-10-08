@@ -221,9 +221,9 @@ def test_the_walk_finds_the_acronym_family_it_is_meant_to_check():
     """
     names = {name for _, name in _declared_type_names()}
     assert {"STTProvider", "STTSettings", "LocalSTTProvider", "LocalSTTStatus"} <= names
-    assert "STTEngine" in names, (
-        "the alias half of the walk went blind -- a class-only walk is what let "
-        "SttEngine sit two lines above STTSettings while the family read clean"
+    assert "EntrySource" in names, (
+        "the alias half of the walk went blind -- a class-only walk is what once let "
+        "an alias spelled SttEngine sit two lines above STTSettings unchecked"
     )
 
 

@@ -1145,7 +1145,6 @@ def _transcription_the_provider_would_have_returned() -> SimpleNamespace:
         duration_ms=100,
         copied_to_clipboard=True,
         model_name="mock/provider",
-        fallback_reason=None,
     )
 
 

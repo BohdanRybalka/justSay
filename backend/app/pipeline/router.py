@@ -27,7 +27,6 @@ class DictateResponse(BaseModel):
     duration_ms: int
     copied_to_clipboard: bool
     model_name: str = ""
-    fallback_reason: str | None = None
     discarded_reason: str | None = None
 
 
