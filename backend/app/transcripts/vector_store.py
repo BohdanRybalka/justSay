@@ -18,6 +18,7 @@ import sqlite_vec
 from pydantic import BaseModel
 
 from app.core.errors import ResourceUnavailableError
+from app.core.types import ProviderMode
 from app.stt.config import stt_settings
 from app.transcripts import history
 
@@ -189,6 +190,19 @@ async def embed_entry_background(entry_id: str, text: str) -> None:
         log.warning("Background embedding failed for entry %s", entry_id, exc_info=True)
 
 
+_UNEMBEDDED = (
+    "id NOT IN (SELECT entry_id FROM entry_embeddings) AND NOT (source = 'meeting' AND ?)"
+)
+
+
+def _meetings_stay_here() -> bool:
+    """A meeting transcribed on this computer is never sent to a cloud embedder."""
+    return (
+        stt_settings.mode == ProviderMode.CLOUD
+        and stt_settings.meetings_mode == ProviderMode.LOCAL
+    )
+
+
 async def backfill_batch(batch_size: int) -> BackfillResult:
     """Embed up to ``batch_size`` (clamped to ``[1, BACKFILL_BATCH_MAX]``)
     not-yet-embedded entries, oldest first. Resumable: "already has an
@@ -200,10 +214,9 @@ async def backfill_batch(batch_size: int) -> BackfillResult:
     with history._lock:
         conn = history._ensure_conn_locked()
         rows = conn.execute(
-            "SELECT rowid, id, cleaned_text FROM entries "
-            "WHERE id NOT IN (SELECT entry_id FROM entry_embeddings) "
+            f"SELECT rowid, id, cleaned_text FROM entries WHERE {_UNEMBEDDED} "
             "ORDER BY ts ASC LIMIT ?",
-            (clamped,),
+            (_meetings_stay_here(), clamped),
         ).fetchall()
 
     processed = 0
@@ -230,7 +243,7 @@ async def backfill_batch(batch_size: int) -> BackfillResult:
     with history._lock:
         conn = history._ensure_conn_locked()
         remaining = conn.execute(
-            "SELECT COUNT(*) FROM entries WHERE id NOT IN (SELECT entry_id FROM entry_embeddings)"
+            f"SELECT COUNT(*) FROM entries WHERE {_UNEMBEDDED}", (_meetings_stay_here(),)
         ).fetchone()[0]
 
     return BackfillResult(processed=processed, remaining=remaining)

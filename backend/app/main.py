@@ -127,11 +127,7 @@ async def lifespan(app: FastAPI):
         "removing files of jobs cut short by the last quit",
         lambda: remove_leftover_files(settings.audio.temp_dir),
     )
-    from app.core.types import ProviderMode
-    app.state.jobs = JobQueue(
-        settings.audio.temp_dir,
-        meeting_mode=lambda: ProviderMode(get_user_settings().meetings_engine),
-    )
+    app.state.jobs = JobQueue(settings.audio.temp_dir)
     _run_optional_step(
         "startup",
         "listing meetings the last run did not turn into text",

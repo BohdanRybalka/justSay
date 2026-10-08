@@ -399,6 +399,7 @@ def _snapshot_real_roots_backstop(_real_app_data_roots):
 RUNTIME_SETTINGS_FIELDS_WRITTEN_BY_SYNC: dict[str, tuple[str, ...]] = {
     "stt": (
         "mode",
+        "meetings_mode",
         "whisper_model_size",
         "whisper_device",
         "initial_prompt",

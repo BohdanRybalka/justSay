@@ -13,6 +13,7 @@ class STTSettings(PackageSettings):
     """
 
     mode: ProviderMode = ProviderMode.CLOUD
+    meetings_mode: ProviderMode = ProviderMode.LOCAL
 
     gemini_api_key: str = ""
 

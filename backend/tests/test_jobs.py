@@ -126,15 +126,8 @@ def speeds(monkeypatch) -> list[float]:
 
 
 @pytest.fixture
-def meetings_engine() -> list[ProviderMode]:
-    return [ProviderMode.LOCAL]
-
-
-@pytest.fixture
-async def queue(tmp_path, clock, gate, speeds, meetings_engine):
-    built = JobQueue(
-        tmp_path / "tmp", meeting_mode=lambda: meetings_engine[0], gate=gate, clock=clock
-    )
+async def queue(tmp_path, clock, gate, speeds):
+    built = JobQueue(tmp_path / "tmp", gate=gate, clock=clock)
     yield built
     for job in list(built._jobs.values()):
         if job.task is not None and not job.task.done():
@@ -601,9 +594,9 @@ async def test_cancel_answers_404_for_an_unknown_job_and_409_while_saving(client
 
 @pytest.mark.parametrize("engine", [ProviderMode.LOCAL, ProviderMode.CLOUD])
 async def test_a_stopped_meeting_becomes_a_meeting_entry_on_the_meetings_engine(
-    queue, fakes, tmp_path, meetings_engine, engine
+    queue, fakes, tmp_path, monkeypatch, engine
 ):
-    meetings_engine[0] = engine
+    monkeypatch.setattr(settings.stt, "meetings_mode", engine)
     pipeline = _FakePipeline()
     recording = _recording(tmp_path, fakes, pipeline)
 
@@ -627,9 +620,9 @@ async def test_a_stopped_meeting_becomes_a_meeting_entry_on_the_meetings_engine(
     ],
 )
 async def test_a_failed_meeting_keeps_its_recording_until_a_retry_saves_it(
-    queue, fakes, tmp_path, meetings_engine, engine, reason
+    queue, fakes, tmp_path, monkeypatch, engine, reason
 ):
-    meetings_engine[0] = engine
+    monkeypatch.setattr(settings.stt, "meetings_mode", engine)
     failing = _FakePipeline(outcome=ResourceUnavailableError("engine down"))
     recording = _recording(tmp_path, fakes, failing)
     job_id = queue.add_meeting(recording)
@@ -741,6 +734,7 @@ async def test_a_meeting_runs_the_real_pipeline_on_its_own_engine(
     stt = MagicMock(model_name="mock/local", is_local=True, longest_piece_seconds=600.0)
     stt.transcribe = AsyncMock(return_value=TranscriptionResult(text="from the call"))
     monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
+    monkeypatch.setattr(settings.stt, "meetings_mode", ProviderMode.LOCAL)
     monkeypatch.setattr(jobs, "process_audio", service.process_audio)
     recording = tmp_path / "meeting_0123456789ab.wav"
     recording.write_bytes(_wav(tmp_path))

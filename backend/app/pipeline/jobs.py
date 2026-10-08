@@ -34,6 +34,7 @@ from app.core.errors import (
 from app.core.scratch import discard_scratch_file
 from app.core.types import ProviderMode
 from app.pipeline.service import process_audio
+from app.stt.config import stt_settings
 from app.transcripts import history
 
 log = logging.getLogger(__name__)
@@ -209,20 +210,17 @@ def remove_leftover_files(temp_dir: Path) -> None:
 class JobQueue:
     """Jobs by id; a failed one stays until dismissed, a done or cancelled one a minute.
 
-    A meeting runs on the engine ``meeting_mode`` answers when its turn comes; a file follows the
-    user's mode.
+    A meeting runs on the meetings engine set when its turn comes; a file follows the user's mode.
     """
 
     def __init__(
         self,
         temp_dir: Path,
-        meeting_mode: Callable[[], ProviderMode],
         gate: DictationGate = dictation_gate,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._temp_dir = temp_dir
-        self._meeting_mode = meeting_mode
         self._jobs: dict[str, _Job] = {}
         self._turn = asyncio.Lock()
         self.gate = gate
@@ -355,7 +353,7 @@ class JobQueue:
         try:
             async with self._turn:
                 job.stage = "transcribing"
-                job.mode = self._meeting_mode() if meeting else None
+                job.mode = stt_settings.meetings_mode if meeting else None
                 result = await process_audio(
                     job.path,
                     language=JOB_LANGUAGE,
