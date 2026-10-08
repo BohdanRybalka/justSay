@@ -79,6 +79,11 @@ class _FakeSystemAudioSource:
         self.on_failure(reason)
 
 
+@pytest.fixture(autouse=True)
+def _recording_queue(recording_queue):
+    return recording_queue
+
+
 @pytest.fixture
 def settings(tmp_path):
     return AudioSettings(sample_rate=16000, channels=1, temp_dir=tmp_path / "tmp")

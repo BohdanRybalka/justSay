@@ -622,6 +622,7 @@ describe("a backend that accepts a request and never answers", () => {
     ["dictate", (a: Api) => a.dictate(SESSION_ID, "uk")],
     ["startFileJob", (a: Api) => a.startFileJob(new ArrayBuffer(8), "call.wav")],
     ["removeJob", (a: Api) => a.removeJob("job-1")],
+    ["retryJob", (a: Api) => a.retryJob("job-1")],
     ["updateSettings", (a: Api) => a.updateSettings({ language: "uk" })],
     ["setSttMode", (a: Api) => a.setSttMode("local")],
     ["sttLocalLoad", (a: Api) => a.sttLocalLoad()],

@@ -4,17 +4,20 @@ Mounted at the same ``/settings`` prefix the preferences router uses, so the
 two paths are one surface on the wire. It lives in ``app.audio``, the package
 owning ``temp_dir`` and every producer writing into it (ADR 091). The walk and
 the deletions run off the event loop, so a large scratch directory cannot stall
-the audio-level stream.
+the audio-level stream. A meeting recording a job still needs is neither counted
+nor reaped.
 """
 
 import asyncio
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.audio.config import audio_settings
+from app.audio.dependencies import get_recording_queue
+from app.audio.recording_queue import RecordingQueue
 
 log = logging.getLogger(__name__)
 
@@ -31,8 +34,8 @@ class CleanupResult(BaseModel):
     freed_bytes: int
 
 
-def _scratch_files(tmp_dir: Path) -> list[Path]:
-    """Files in the scratch directory that this app wrote (ADR 033).
+def _scratch_files(tmp_dir: Path, kept: frozenset[str]) -> list[Path]:
+    """Files in the scratch directory that this app wrote (ADR 033), except the ``kept`` names.
 
     ``rec_*`` from the microphone recorder, ``pipeline_*`` from the upload path, ``meeting_*`` from
     the meeting recorder. Deletion is scoped by ownership, so anything else found there survives.
@@ -42,13 +45,13 @@ def _scratch_files(tmp_dir: Path) -> list[Path]:
     return [
         entry
         for entry in tmp_dir.iterdir()
-        if entry.is_file() and entry.name.startswith(_SCRATCH_PREFIXES)
+        if entry.is_file() and entry.name.startswith(_SCRATCH_PREFIXES) and entry.name not in kept
     ]
 
 
-def _scratch_size(tmp_dir: Path) -> int:
+def _scratch_size(tmp_dir: Path, kept: frozenset[str]) -> int:
     total = 0
-    for entry in _scratch_files(tmp_dir):
+    for entry in _scratch_files(tmp_dir, kept):
         try:
             total += entry.stat().st_size
         except OSError:
@@ -56,14 +59,14 @@ def _scratch_size(tmp_dir: Path) -> int:
     return total
 
 
-def _reap_scratch_files(tmp_dir: Path) -> int:
+def _reap_scratch_files(tmp_dir: Path, kept: frozenset[str]) -> int:
     """Delete every scratch file in ``tmp_dir`` and answer the bytes freed.
 
     A file that cannot be removed is logged and skipped, so one locked entry
     does not abandon the rest.
     """
     freed = 0
-    for entry in _scratch_files(tmp_dir):
+    for entry in _scratch_files(tmp_dir, kept):
         try:
             size = entry.stat().st_size
             entry.unlink()
@@ -75,12 +78,14 @@ def _reap_scratch_files(tmp_dir: Path) -> int:
 
 
 @router.get("/storage", response_model=StorageInfo)
-async def get_storage_info():
-    size = await asyncio.to_thread(_scratch_size, audio_settings.temp_dir)
+async def get_storage_info(queue: RecordingQueue = Depends(get_recording_queue)):
+    kept = queue.kept_recording_names()
+    size = await asyncio.to_thread(_scratch_size, audio_settings.temp_dir, kept)
     return StorageInfo(temp_size_bytes=size)
 
 
 @router.post("/cleanup", response_model=CleanupResult)
-async def cleanup_temp():
-    freed = await asyncio.to_thread(_reap_scratch_files, audio_settings.temp_dir)
+async def cleanup_temp(queue: RecordingQueue = Depends(get_recording_queue)):
+    kept = queue.kept_recording_names()
+    freed = await asyncio.to_thread(_reap_scratch_files, audio_settings.temp_dir, kept)
     return CleanupResult(freed_bytes=freed)

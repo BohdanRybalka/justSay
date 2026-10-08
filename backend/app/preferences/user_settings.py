@@ -65,6 +65,7 @@ class UserSettings(BaseModel):
 
     meeting_consent_acknowledged: bool = False
     meetings_enabled: bool = False
+    meetings_engine: Literal["cloud", "local"] = "local"
 
     theme: Literal["system", "light", "dark"] = "system"
 

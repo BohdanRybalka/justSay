@@ -111,7 +111,7 @@ async def lifespan(app: FastAPI):
     tasks.spawn_background_task(_warm_gpu_probe_cache(), name="gpu-probe-warmup")
     from app.transcripts import vector_store
     tasks.spawn_background_task(vector_store.run_background_indexer(), name="vector-store-indexer")
-    from app.audio.meeting_recorder import MeetingRecorder
+    from app.audio.meeting_recorder import MeetingRecorder, leftover_recordings
     from app.audio.recorder import MicrophoneRecorder
     app.state.recorder = MicrophoneRecorder(settings.audio)
     meeting_recorder = _run_optional_step(
@@ -127,7 +127,16 @@ async def lifespan(app: FastAPI):
         "removing files of jobs cut short by the last quit",
         lambda: remove_leftover_files(settings.audio.temp_dir),
     )
-    app.state.jobs = JobQueue(settings.audio.temp_dir)
+    from app.core.types import ProviderMode
+    app.state.jobs = JobQueue(
+        settings.audio.temp_dir,
+        meeting_mode=lambda: ProviderMode(get_user_settings().meetings_engine),
+    )
+    _run_optional_step(
+        "startup",
+        "listing meetings the last run did not turn into text",
+        lambda: app.state.jobs.add_leftover_meetings(leftover_recordings(settings.audio.temp_dir)),
+    )
     yield
     log.info("Backend shutdown: draining background tasks")
     from app.stt.local_setup import peek_active_load

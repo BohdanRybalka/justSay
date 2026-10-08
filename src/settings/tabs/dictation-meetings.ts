@@ -1,34 +1,35 @@
 /**
  * MEETINGS: the Record meetings switch. The first time it is turned on, the
  * meeting disclosure (ADR 040 obligation 3) opens under the row and the switch
- * stays off until "I understand". The hint names where a meeting becomes text,
- * following the Cloud / Local choice.
+ * stays off until "I understand". Below it, where a stopped meeting becomes
+ * text, chosen apart from dictation; the hint names it.
  */
 import { meetingsTurnedOn, type UserSettings } from "../../api";
 import { saveSettings, type TabLifecycle } from "../settings";
 import { emitSettingsChanged } from "./dictation";
 import { notifyError } from "../../notify";
-import { renderToggle } from "../../ui/controls";
+import { renderSegmented, renderToggle, type SegmentedOption } from "../../ui/controls";
 import { icon } from "../../ui/icons";
 
-type Mode = UserSettings["stt_mode"];
+type Engine = UserSettings["meetings_engine"];
 
-const WHERE_IT_BECOMES_TEXT: Readonly<Record<Mode, string>> = {
+const WHERE_IT_BECOMES_TEXT: Readonly<Record<Engine, string>> = {
   cloud: "in the cloud",
   local: "on this computer",
 };
 
-export function meetingsHint(mode: Mode): string {
-  return `Right-click the widget and pick Record a meeting · turned into text ${WHERE_IT_BECOMES_TEXT[mode]}`;
-}
+const ENGINES: readonly SegmentedOption<Engine>[] = [
+  { value: "local", label: "On this computer" },
+  { value: "cloud", label: "In the cloud" },
+];
 
-export interface MeetingsGroup extends TabLifecycle {
-  showMode: (mode: Mode) => void;
+export function meetingsHint(engine: Engine): string {
+  return `Right-click the widget and pick Record a meeting · turned into text ${WHERE_IT_BECOMES_TEXT[engine]}`;
 }
 
 /** Adds the MEETINGS group to the end of `container`, the switch showing
  *  whether the backend will start a meeting recording. */
-export function renderDictationMeetings(container: HTMLElement, settings: UserSettings): MeetingsGroup {
+export function renderDictationMeetings(container: HTMLElement, settings: UserSettings): TabLifecycle {
   container.insertAdjacentHTML(
     "beforeend",
     `
@@ -50,11 +51,19 @@ export function renderDictationMeetings(container: HTMLElement, settings: UserSe
           jurisdiction and your employer require before you start one.
         </p>
         <p id="meeting-consent-cloud">
-          In Cloud mode the other participants' audio is sent to the transcription provider
-          you configured, along with your own. Switch to Local mode if none of it may leave
-          this machine.
+          When meetings are turned into text in the cloud, the other participants' audio is
+          sent to the transcription provider you configured, along with your own. Keep them on
+          this computer if none of it may leave this machine.
         </p>
         <button type="button" class="btn btn-primary btn-small" id="btn-meeting-consent">I understand</button>
+      </div>
+      <div class="setting-row">
+        <div class="setting-row-text">
+          <div class="setting-row-title">Turn meetings into text</div>
+        </div>
+        <div class="setting-row-controls">
+          <div id="meetings-engine" aria-label="Turn meetings into text"></div>
+        </div>
       </div>
     </div>
   `,
@@ -64,6 +73,7 @@ export function renderDictationMeetings(container: HTMLElement, settings: UserSe
   const toggle = container.querySelector<HTMLButtonElement>("#meetings-toggle")!;
   const disclosure = container.querySelector<HTMLElement>("#meeting-disclosure")!;
   const consentButton = container.querySelector<HTMLButtonElement>("#btn-meeting-consent")!;
+  const engineChoice = container.querySelector<HTMLElement>("#meetings-engine")!;
 
   let acknowledged = settings.meeting_consent_acknowledged;
   let on = meetingsTurnedOn(settings);
@@ -114,16 +124,26 @@ export function renderDictationMeetings(container: HTMLElement, settings: UserSe
     drawSwitch();
   });
 
-  function showMode(mode: Mode) {
-    hint.textContent = meetingsHint(mode);
+  let engine = settings.meetings_engine;
+
+  function showEngine() {
+    hint.textContent = meetingsHint(engine);
+    renderSegmented(engineChoice, ENGINES, engine, (next) => void chooseEngine(next));
   }
 
-  showMode(settings.stt_mode);
+  async function chooseEngine(next: Engine) {
+    hint.textContent = meetingsHint(next);
+    const saved = await save({ meetings_engine: next });
+    if (destroyed) return;
+    if (saved) engine = next;
+    showEngine();
+  }
+
+  showEngine();
 
   return {
     destroy: () => {
       destroyed = true;
     },
-    showMode,
   };
 }

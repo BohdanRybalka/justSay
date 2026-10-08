@@ -15,6 +15,7 @@ import functools
 import itertools
 import logging
 import queue
+import re
 import threading
 import time
 import uuid
@@ -48,6 +49,16 @@ from app.core.errors import NotReadyError, ResourceUnavailableError
 log = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+_RECORDING_NAME = re.compile(r"meeting_[0-9a-f]{12}\.wav")
+
+
+def leftover_recordings(temp_dir: Path) -> list[Path]:
+    """The meeting recordings in ``temp_dir``, oldest first; spill and mix files are not ones."""
+    if not temp_dir.is_dir():
+        return []
+    found = [entry for entry in temp_dir.iterdir() if _RECORDING_NAME.fullmatch(entry.name)]
+    return sorted(found, key=lambda entry: entry.stat().st_mtime)
 
 
 def _drop_outcome(pending: asyncio.Future[object]) -> None:

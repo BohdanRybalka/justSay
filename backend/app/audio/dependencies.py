@@ -13,6 +13,7 @@ from fastapi import Request
 
 from app.audio.meeting_recorder import MeetingRecorder
 from app.audio.recorder import MicrophoneRecorder
+from app.audio.recording_queue import RecordingQueue
 
 Recorder = TypeVar("Recorder")
 
@@ -69,3 +70,8 @@ def get_active_meeting_recorder(request: Request) -> MeetingRecorder | None:
     endpoints to refuse starting while a meeting is being recorded.
     """
     return getattr(request.app.state, "meeting_recorder", None)
+
+
+def get_recording_queue(request: Request) -> RecordingQueue:
+    """FastAPI dependency — the app-lifetime job queue built in lifespan startup."""
+    return request.app.state.jobs

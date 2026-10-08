@@ -1,4 +1,4 @@
-"""Background file jobs — lifecycle, estimate, cancel, failure reasons, dictation first.
+"""Background jobs — lifecycle, estimate, cancel, failure reasons, dictation first, meetings.
 
 Most tests drive `JobQueue` with a stand-in for `process_audio` that makes the observer calls a
 real run makes, when the test releases it. One runs the real pipeline over a fake provider to
@@ -8,6 +8,7 @@ prove the saved row and the clipboard.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,10 +17,15 @@ import pytest
 import soundfile as sf
 from httpx import ASGITransport, AsyncClient
 
+from app.audio.meeting_recorder import leftover_recordings
 from app.audio.vad import VadAnalysis
 from app.config import settings
 from app.core.audio_formats import UNREADABLE_HERE
-from app.core.errors import ConfigurationError, NotReadyError, ResourceUnavailableError
+from app.core.errors import (
+    ConfigurationError,
+    NotReadyError,
+    ResourceUnavailableError,
+)
 from app.core.types import ProviderMode
 from app.main import app
 from app.pipeline import jobs, service
@@ -92,11 +98,11 @@ def _no_indexer(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def fakes(monkeypatch) -> dict[str, _FakePipeline]:
-    """Each file name's stand-in pipeline; an unregistered name fails rather than transcribing."""
+    """Each file's or recording's stand-in pipeline; an unregistered name fails instead."""
     by_name: dict[str, _FakePipeline] = {}
 
     async def dispatch(path: Path, **kwargs) -> ProcessingResult:
-        return await by_name[kwargs["source_name"]](path, **kwargs)
+        return await by_name[kwargs["source_name"] or path.name](path, **kwargs)
 
     monkeypatch.setattr(jobs, "process_audio", dispatch)
     return by_name
@@ -120,8 +126,15 @@ def speeds(monkeypatch) -> list[float]:
 
 
 @pytest.fixture
-async def queue(tmp_path, clock, gate, speeds):
-    built = JobQueue(tmp_path / "tmp", gate=gate, clock=clock)
+def meetings_engine() -> list[ProviderMode]:
+    return [ProviderMode.LOCAL]
+
+
+@pytest.fixture
+async def queue(tmp_path, clock, gate, speeds, meetings_engine):
+    built = JobQueue(
+        tmp_path / "tmp", meeting_mode=lambda: meetings_engine[0], gate=gate, clock=clock
+    )
     yield built
     for job in list(built._jobs.values()):
         if job.task is not None and not job.task.done():
@@ -137,6 +150,13 @@ def _start(queue: JobQueue, fakes: dict[str, _FakePipeline], pipeline: _FakePipe
     name = f"file-{len(fakes)}.wav"
     fakes[name] = pipeline
     return queue.add_file(b"RIFF....WAVE....", name)
+
+
+def _recording(tmp_path: Path, fakes: dict[str, _FakePipeline], pipeline: _FakePipeline) -> Path:
+    path = tmp_path / f"meeting_{len(fakes):012x}.wav"
+    path.write_bytes(b"RIFF....WAVE....")
+    fakes[path.name] = pipeline
+    return path
 
 
 async def _settle(queue: JobQueue, job_id: str) -> None:
@@ -577,3 +597,178 @@ async def test_cancel_answers_404_for_an_unknown_job_and_409_while_saving(client
     assert (cancelled.status_code, cancelled.json()) == (200, {"outcome": "cancelled"})
     pipeline.release.set()
     await _settle(queue, job_id)
+
+
+@pytest.mark.parametrize("engine", [ProviderMode.LOCAL, ProviderMode.CLOUD])
+async def test_a_stopped_meeting_becomes_a_meeting_entry_on_the_meetings_engine(
+    queue, fakes, tmp_path, meetings_engine, engine
+):
+    meetings_engine[0] = engine
+    pipeline = _FakePipeline()
+    recording = _recording(tmp_path, fakes, pipeline)
+
+    job_id = queue.add_meeting(recording)
+    assert _view(queue, job_id).kind == "meeting"
+    assert _view(queue, job_id).name.startswith("Meeting · ")
+    pipeline.release.set()
+    await _settle(queue, job_id)
+
+    assert _view(queue, job_id).stage == "done"
+    call = pipeline.calls[0]
+    assert (call["source"], call["source_name"], call["mode"]) == ("meeting", None, engine)
+    assert not recording.exists()
+
+
+@pytest.mark.parametrize(
+    ("engine", "reason"),
+    [
+        (ProviderMode.LOCAL, jobs.MEETING_FAILED_HERE_REASON),
+        (ProviderMode.CLOUD, jobs.MEETING_FAILED_REASON),
+    ],
+)
+async def test_a_failed_meeting_keeps_its_recording_until_a_retry_saves_it(
+    queue, fakes, tmp_path, meetings_engine, engine, reason
+):
+    meetings_engine[0] = engine
+    failing = _FakePipeline(outcome=ResourceUnavailableError("engine down"))
+    recording = _recording(tmp_path, fakes, failing)
+    job_id = queue.add_meeting(recording)
+    failing.release.set()
+    await _settle(queue, job_id)
+
+    assert (_view(queue, job_id).stage, _view(queue, job_id).error) == ("failed", reason)
+    assert recording.exists()
+    assert queue.kept_recording_names() == {recording.name}
+
+    working = _FakePipeline(duration=60.0)
+    fakes[recording.name] = working
+    assert queue.retry(job_id) is True
+    assert (_view(queue, job_id).stage, _view(queue, job_id).error) == ("queued", None)
+    working.release.set()
+    await _settle(queue, job_id)
+
+    assert _view(queue, job_id).stage == "done"
+    assert not recording.exists()
+    assert queue.kept_recording_names() == frozenset()
+
+
+async def test_a_silent_meeting_says_so_and_keeps_its_recording(queue, fakes, tmp_path):
+    pipeline = _FakePipeline(outcome="silence")
+    recording = _recording(tmp_path, fakes, pipeline)
+    job_id = queue.add_meeting(recording)
+    pipeline.release.set()
+    await _settle(queue, job_id)
+
+    assert _view(queue, job_id).error == jobs.MEETING_NO_SPEECH_REASON
+    assert recording.exists()
+
+
+async def test_only_a_failed_meeting_can_be_tried_again(queue, fakes, tmp_path):
+    assert queue.retry("nope") is False
+
+    failed_file = _FakePipeline(outcome="unsaved")
+    file_id = _start(queue, fakes, failed_file)
+    failed_file.release.set()
+    await _settle(queue, file_id)
+    with pytest.raises(NotReadyError):
+        queue.retry(file_id)
+
+    running = _FakePipeline()
+    meeting_id = queue.add_meeting(_recording(tmp_path, fakes, running))
+    await asyncio.wait_for(running.transcribing.wait(), 1)
+    with pytest.raises(NotReadyError):
+        queue.retry(meeting_id)
+    running.release.set()
+    await _settle(queue, meeting_id)
+
+
+async def test_removing_a_meeting_card_deletes_its_recording(queue, fakes, tmp_path):
+    failing = _FakePipeline(outcome="unsaved")
+    failed = _recording(tmp_path, fakes, failing)
+    failed_id = queue.add_meeting(failed)
+    failing.release.set()
+    await _settle(queue, failed_id)
+    blocker = _FakePipeline()
+    blocker_id = queue.add_meeting(_recording(tmp_path, fakes, blocker))
+    await asyncio.wait_for(blocker.transcribing.wait(), 1)
+    queued = _recording(tmp_path, fakes, _FakePipeline())
+    queued_id = queue.add_meeting(queued)
+
+    assert queue.cancel_or_dismiss(failed_id) == "dismissed"
+    assert queue.cancel_or_dismiss(queued_id) == "cancelled"
+    await _settle(queue, queued_id)
+
+    assert not failed.exists()
+    assert not queued.exists()
+    blocker.release.set()
+    await _settle(queue, blocker_id)
+
+
+async def test_leftover_meetings_are_listed_failed_and_can_be_tried_again(
+    queue, fakes, tmp_path
+):
+    temp_dir = tmp_path / "leftovers"
+    temp_dir.mkdir()
+    older = temp_dir / "meeting_00000000000a.wav"
+    newer = temp_dir / "meeting_00000000000b.wav"
+    for path, written in ((older, 1_000_000), (newer, 2_000_000)):
+        path.write_bytes(b"RIFF....WAVE....")
+        os.utime(path, (written, written))
+    for name in ("meeting_spill_00000000000a_mic.f32", "meeting_mix_00000000000a.f32", "rec_a.wav"):
+        (temp_dir / name).write_bytes(b"x")
+
+    queue.add_leftover_meetings(leftover_recordings(temp_dir))
+
+    views = queue.views()
+    assert [(v.kind, v.stage, v.error) for v in views] == [
+        ("meeting", "failed", jobs.MEETING_FAILED_REASON)
+    ] * 2
+    assert queue.kept_recording_names() == {older.name, newer.name}
+    pipeline = _FakePipeline()
+    fakes[newer.name] = pipeline
+    queue.retry(views[0].id)
+    pipeline.release.set()
+    await _settle(queue, views[0].id)
+    assert not newer.exists()
+
+
+async def test_a_meeting_runs_the_real_pipeline_on_its_own_engine(
+    client, queue, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(history, "_output_dir", tmp_path)
+    monkeypatch.setattr(history, "_conn", None)
+    history.bootstrap(tmp_path)
+    stt = MagicMock(model_name="mock/local", is_local=True, longest_piece_seconds=600.0)
+    stt.transcribe = AsyncMock(return_value=TranscriptionResult(text="from the call"))
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
+    monkeypatch.setattr(jobs, "process_audio", service.process_audio)
+    recording = tmp_path / "meeting_0123456789ab.wav"
+    recording.write_bytes(_wav(tmp_path))
+    try:
+        with (
+            patch("app.pipeline.service.get_provider", return_value=stt) as route,
+            patch("app.pipeline.service.analyze_vad", return_value=None),
+            patch("app.stt.local_setup.await_local_ready", new=AsyncMock()) as ready,
+        ):
+            job_id = queue.add_meeting(recording)
+            await _settle(queue, job_id)
+
+        assert route.call_args.args[0] == ProviderMode.LOCAL
+        assert ready.await_args.args[0].mode == ProviderMode.LOCAL
+        assert settings.stt.mode == ProviderMode.CLOUD
+        entry = history.get_page(limit=5).entries[0]
+        assert (entry.source, entry.source_name, entry.text) == ("meeting", None, "from the call")
+        assert (await client.get("/jobs")).json()[0]["entry_id"] == entry.id
+    finally:
+        with history._lock:
+            history._close_conn_locked()
+
+
+async def test_retry_answers_404_for_an_unknown_job_and_409_for_a_file(client, queue, fakes):
+    assert (await client.post("/jobs/nope/retry")).status_code == 404
+
+    pipeline = _FakePipeline(outcome="unsaved")
+    job_id = _start(queue, fakes, pipeline)
+    pipeline.release.set()
+    await _settle(queue, job_id)
+    assert (await client.post(f"/jobs/{job_id}/retry")).status_code == 409

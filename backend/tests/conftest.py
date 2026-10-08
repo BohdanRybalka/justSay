@@ -455,6 +455,30 @@ def _reset_settings():
     clear_gpu_probe_cache()
 
 
+class StubRecordingQueue:
+    """Stands in for the job queue the audio endpoints hand meeting recordings to."""
+
+    def __init__(self) -> None:
+        self.added: list[Path] = []
+        self.kept: frozenset[str] = frozenset()
+
+    def add_meeting(self, recording: Path) -> str:
+        self.added.append(recording)
+        return f"job-{len(self.added)}"
+
+    def kept_recording_names(self) -> frozenset[str]:
+        return self.kept
+
+
+@pytest.fixture
+def recording_queue() -> StubRecordingQueue:
+    from app.audio.dependencies import get_recording_queue
+
+    stub = StubRecordingQueue()
+    app.dependency_overrides[get_recording_queue] = lambda: stub
+    return stub
+
+
 @pytest.fixture(autouse=True)
 def _clear_dependency_overrides():
     """Clear app.dependency_overrides after every test so an override set in

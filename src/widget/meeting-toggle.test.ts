@@ -14,6 +14,7 @@ function actions(overrides: Partial<MeetingToggleActions> = {}) {
       filename: "meeting.wav",
       duration_seconds: 12,
       capture_incident: null as string | null,
+      job_id: "job-1",
     })),
     showIndicator: vi.fn(),
     hideIndicator: vi.fn(),
@@ -56,6 +57,7 @@ describe("the meeting recording toggle", () => {
         filename: "meeting.wav",
         duration_seconds: 3600,
         capture_incident: "storage_low" as string | null,
+        job_id: "job-1",
       })),
     });
 
