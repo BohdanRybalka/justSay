@@ -4,6 +4,7 @@ import {
   type HistoryCursor,
   type HistoryDay,
   type HistoryEntry,
+  type HistoryFilter,
   type HistoryPageResponse,
 } from "../api";
 import { isStaleStatusResponse } from "../stale-response";
@@ -57,7 +58,7 @@ export interface HistoryListOptions {
   isDestroyed: () => boolean;
   /** Read on every request. Until a reload under a new filter lands, paging waits and
    *  the newer-rows turn retries that reload instead. */
-  starredOnly: () => boolean;
+  filter: () => HistoryFilter;
 }
 
 export const SENTINEL_READING = "timeline-more--reading";
@@ -140,7 +141,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     createRow,
     renderEmptyState,
     isDestroyed,
-    starredOnly,
+    filter,
   } = options;
 
   let cursor: HistoryCursor | null = null;
@@ -151,12 +152,17 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
   let latestClaim: HistoryRowsClaim | null = null;
   let rowsAreOwnPage = false;
   let pagingHeld = false;
-  let paintedStarredOnly = false;
+  let paintedFilter: HistoryFilter | null = null;
 
   const observer = new IntersectionObserver((records) => {
     if (records.some((record) => record.isIntersecting)) void loadOlder();
   });
   observer.observe(elements.sentinel);
+
+  function filterChanged(): boolean {
+    const now = filter();
+    return paintedFilter?.source !== now.source || paintedFilter.starred !== now.starred;
+  }
 
   /**
    * Observing again is what makes the observer report where the sentinel is
@@ -228,9 +234,9 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     if (append && cursor === null) return;
     const claim = issueClaim();
     elements.sentinel.classList.add(SENTINEL_READING);
-    const askedStarredOnly = starredOnly();
+    const askedFilter = filter();
     try {
-      const response = await api.getHistory(pageSize, append ? cursor : null, askedStarredOnly);
+      const response = await api.getHistory(pageSize, append ? cursor : null, askedFilter);
       if (!claim.isCurrent()) return;
 
       const built = build(response.entries);
@@ -245,7 +251,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
       } else {
         rows.replace(built, response.days);
         newest = response.newest_cursor;
-        paintedStarredOnly = askedStarredOnly;
+        paintedFilter = askedFilter;
       }
       renderEmptyState(response.entries.length === 0 && !append);
 
@@ -266,7 +272,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
   }
 
   function loadOlder(): Promise<void> {
-    if (pagingHeld || !rowsAreOwnPage || starredOnly() !== paintedStarredOnly) {
+    if (pagingHeld || !rowsAreOwnPage || filterChanged()) {
       return Promise.resolve();
     }
     return loadPage(true);
@@ -274,11 +280,11 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
   async function loadNewer(): Promise<void> {
     if (isDestroyed() || pagingHeld || !rowsAreOwnPage) return;
-    if (newest === null || starredOnly() !== paintedStarredOnly) return loadPage(false);
+    if (newest === null || filterChanged()) return loadPage(false);
     const claim = issueClaim();
     let page: HistoryPageResponse | null = null;
     try {
-      page = await api.getNewerHistory(pageSize, newest, starredOnly());
+      page = await api.getNewerHistory(pageSize, newest, filter());
       if (!claim.isCurrent()) return;
       const built = build([...page.entries].reverse());
       total = page.total;

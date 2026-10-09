@@ -64,6 +64,7 @@ export function createJobCards(
     const card = document.createElement("article");
     card.className = "entry entry--job";
     card.dataset.job = job.id;
+    card.dataset.kind = job.kind;
     card.innerHTML = `
       <span class="entry-dot">${icon(KIND_ICONS[job.kind], "small")}</span>
       <p class="entry-job-name num">${escapeHtml(job.name)}</p>

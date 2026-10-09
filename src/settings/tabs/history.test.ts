@@ -141,11 +141,19 @@ function starOf(card: HTMLElement): HTMLButtonElement {
   return card.querySelector<HTMLButtonElement>('[data-action="star"]')!;
 }
 
-async function showStarred(container: HTMLElement): Promise<void> {
-  const starred = Array.from(container.querySelectorAll<HTMLButtonElement>("#history-filter button")).find(
-    (button) => button.textContent === "Starred"
+function chip(container: HTMLElement, label: string): HTMLButtonElement {
+  return Array.from(container.querySelectorAll<HTMLButtonElement>(".history-filter button")).find(
+    (button) => button.textContent === label
   )!;
-  starred.click();
+}
+
+async function showStarred(container: HTMLElement): Promise<void> {
+  chip(container, "Starred").click();
+  await flush();
+}
+
+async function showKind(container: HTMLElement, label: string): Promise<void> {
+  chip(container, label).click();
   await flush();
 }
 
@@ -191,7 +199,7 @@ describe("renderHistory — paging as the end scrolls into view", () => {
   it("asks for 30 recordings on the first paint and keeps the sentinel up", async () => {
     const container = await renderPaged(40);
 
-    expect(apiMock.getHistory.mock.calls[0]).toEqual([30, null, false]);
+    expect(apiMock.getHistory.mock.calls[0]).toEqual([30, null, { source: null, starred: false }]);
     expect(cards(container)).toHaveLength(30);
     expect(sentinel(container).hidden).toBe(false);
   });
@@ -202,7 +210,7 @@ describe("renderHistory — paging as the end scrolls into view", () => {
     cross();
 
     await vi.waitFor(() => expect(cards(container)).toHaveLength(40));
-    expect(apiMock.getHistory.mock.calls[1]).toEqual([30, { ts: 30, id: "30" }, false]);
+    expect(apiMock.getHistory.mock.calls[1]).toEqual([30, { ts: 30, id: "30" }, { source: null, starred: false }]);
     expect(sentinel(container).hidden).toBe(true);
   });
 
@@ -559,6 +567,23 @@ describe("renderHistory — files being transcribed", () => {
     expect(container.querySelector(".entry--job")).toBeNull();
   });
 
+  it("hides a card of another kind while one kind is shown, and lets it go once it is done", async () => {
+    apiMock.getHistory.mockResolvedValue(pageOf([], 0, null, { newest_cursor: null }));
+    apiMock.jobs.mockResolvedValue([running]);
+    const { container } = mount();
+    await vi.waitFor(() => expect(container.querySelector(".entry--job")).not.toBeNull());
+
+    await showKind(container, "Meetings");
+    expect(container.querySelector(".entry--job")).toBeNull();
+    await showKind(container, "Files");
+    expect(container.querySelector(".entry--job")).not.toBeNull();
+
+    apiMock.jobs.mockResolvedValue([{ ...running, stage: "done", progress: 1, entry_id: "new" }]);
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS);
+
+    expect(container.querySelector(".entry--job")).toBeNull();
+  });
+
   it("shows a meeting stopped elsewhere while History is already open", async () => {
     apiMock.getHistory.mockResolvedValue(pageOf([], 0, null, { newest_cursor: null }));
     const { container } = mount();
@@ -666,38 +691,105 @@ describe("renderHistory — Star", () => {
   });
 });
 
-describe("renderHistory — All / Starred", () => {
+describe("renderHistory — the kind and Starred chips", () => {
+  it("draws All, Dictation, Meetings, Files and Starred under the search, All pressed", async () => {
+    const container = await renderWith(1);
+
+    const labels = ["All", "Dictation", "Meetings", "Files", "Starred"];
+    expect(
+      Array.from(container.querySelectorAll(".history-filter button"), (button) => button.textContent)
+    ).toEqual(labels);
+    expect(labels.map((label) => chip(container, label).getAttribute("aria-pressed"))).toEqual([
+      "true",
+      "false",
+      "false",
+      "false",
+      "false",
+    ]);
+    expect(container.querySelector(".search-box button")).toBeNull();
+  });
+
   it("reloads with starred entries only, and says so when there are none", async () => {
     const container = await renderWith(2);
     apiMock.getHistory.mockResolvedValue(pageOf([], 0, null));
 
     await showStarred(container);
 
-    expect(apiMock.getHistory).toHaveBeenLastCalledWith(30, null, true);
+    expect(apiMock.getHistory).toHaveBeenLastCalledWith(30, null, { source: null, starred: true });
+    expect(chip(container, "Starred").getAttribute("aria-pressed")).toBe("true");
     await vi.waitFor(() =>
       expect(container.querySelector(".history-empty")!.textContent).toBe("Nothing starred yet.")
     );
   });
 
-  it("keeps a search to starred entries once Starred is on", async () => {
+  it.each([
+    ["Meetings", "meeting", "No meetings yet."],
+    ["Files", "file", "No files yet."],
+  ])("reloads with %s only, and names the kind when there are none", async (label, source, empty) => {
+    const container = await renderWith(2);
+    apiMock.getHistory.mockResolvedValue(pageOf([], 0, null));
+
+    await showKind(container, label);
+
+    expect(apiMock.getHistory).toHaveBeenLastCalledWith(30, null, { source, starred: false });
+    expect(chip(container, label).getAttribute("aria-pressed")).toBe("true");
+    expect(chip(container, "All").getAttribute("aria-pressed")).toBe("false");
+    await vi.waitFor(() =>
+      expect(container.querySelector(".history-empty")!.textContent).toBe(empty)
+    );
+  });
+
+  it("keeps Starred pressed while the kind changes, and the kind while Starred goes off", async () => {
+    const container = await renderWith(1);
+
+    await showStarred(container);
+    await showKind(container, "Meetings");
+    expect(apiMock.getHistory).toHaveBeenLastCalledWith(30, null, { source: "meeting", starred: true });
+    await showKind(container, "Dictation");
+    expect(apiMock.getHistory).toHaveBeenLastCalledWith(30, null, { source: "dictation", starred: true });
+    expect(chip(container, "Starred").getAttribute("aria-pressed")).toBe("true");
+
+    await showStarred(container);
+    expect(apiMock.getHistory).toHaveBeenLastCalledWith(30, null, { source: "dictation", starred: false });
+    expect(chip(container, "Dictation").getAttribute("aria-pressed")).toBe("true");
+    await showKind(container, "All");
+    expect(apiMock.getHistory).toHaveBeenLastCalledWith(30, null, { source: null, starred: false });
+  });
+
+  it("moves between kinds with the arrow keys", async () => {
+    const container = await renderWith(1);
+
+    chip(container, "All").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await flush();
+
+    expect(apiMock.getHistory).toHaveBeenLastCalledWith(30, null, { source: "dictation", starred: false });
+    expect(document.activeElement).toBe(chip(container, "Dictation"));
+  });
+
+  it("keeps a search to the chosen kind and to starred entries", async () => {
     const container = await renderWith(1);
     apiMock.searchHistory.mockResolvedValue({ entries: [], total: 0 });
 
+    await showKind(container, "Files");
     await typeQuery(container, "budget");
-    expect(apiMock.searchHistory).toHaveBeenLastCalledWith("budget", 30, false);
+    expect(apiMock.searchHistory).toHaveBeenLastCalledWith("budget", 30, { source: "file", starred: false });
 
     await showStarred(container);
-    expect(apiMock.searchHistory).toHaveBeenLastCalledWith("budget", 30, true);
+    expect(apiMock.searchHistory).toHaveBeenLastCalledWith("budget", 30, { source: "file", starred: true });
   });
 
-  it("asks the poll for starred entries only while Starred is on", async () => {
+  it("asks the poll for the chosen kind and starred entries only", async () => {
     const container = await renderWith(1);
     apiMock.getHistory.mockResolvedValue(pageOf([buildEntry("s")], 1, null));
+    await showKind(container, "Meetings");
     await showStarred(container);
 
     await vi.advanceTimersByTimeAsync(NEWER_POLL_MS);
 
-    expect(apiMock.getNewerHistory).toHaveBeenLastCalledWith(30, expect.anything(), true);
+    expect(apiMock.getNewerHistory).toHaveBeenLastCalledWith(30, expect.anything(), {
+      source: "meeting",
+      starred: true,
+    });
   });
 });
 

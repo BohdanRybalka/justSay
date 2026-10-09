@@ -8,6 +8,16 @@
 .segmented button[aria-pressed="true"]{background:var(--surface);color:var(--text);font-weight:570;
   box-shadow:var(--sh-1),var(--bevel)}
 
+.chips,.chip-group{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.chip-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;border:1px solid var(--border);
+  background:var(--surface);font:inherit;font-size:12.5px;font-weight:550;color:var(--text-2);box-shadow:var(--bevel);
+  cursor:pointer;white-space:nowrap;transition:.16s}
+.chip-btn .icon{width:13px;height:13px}
+.chip-btn[aria-pressed="true"]{background:var(--blue-soft);border-color:var(--blue-mute);color:var(--blue)}
+.chip-btn--star[aria-pressed="true"]{background:var(--orange-soft);border-color:var(--orange-mute);color:var(--orange)}
+.chip-btn--star[aria-pressed="true"] .icon{fill:currentColor}
+.chips-sep{width:1px;height:20px;background:var(--border);margin:0 3px}
+
 .group-label{display:flex;align-items:center;gap:8px;font-size:10.5px;letter-spacing:.1em;color:var(--muted);
   font-weight:700;margin:26px 0 10px}
 .group-label .icon{width:13px;height:13px;stroke-width:2.2;color:var(--orange)}

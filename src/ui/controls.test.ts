@@ -119,6 +119,28 @@ describe("renderSegmented", () => {
     expect(pressedLabels(root)).toEqual([]);
     expect(buttons.map((b) => b.tabIndex)).toEqual([0, -1, -1]);
   });
+
+  it("draws separate chips, each with its icon before its label, when asked for chips", () => {
+    const root = document.createElement("div");
+    renderSegmented(
+      root,
+      [
+        { value: "all", label: "All" },
+        { value: "meeting", label: "Meetings", icon: "users" },
+      ],
+      "all",
+      vi.fn(),
+      "chips",
+    );
+    const buttons = [...root.querySelectorAll("button")];
+
+    expect(root.classList.contains("chip-group")).toBe(true);
+    expect(root.classList.contains("segmented")).toBe(false);
+    expect(buttons.map((b) => b.className)).toEqual(["chip-btn", "chip-btn"]);
+    expect(buttons[0].querySelector("svg")).toBeNull();
+    expect(buttons[1].querySelector("use")!.getAttribute("href")).toBe("#users");
+    expect(buttons[1].textContent).toBe("Meetings");
+  });
 });
 
 describe("renderToggle", () => {

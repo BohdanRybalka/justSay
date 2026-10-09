@@ -240,7 +240,7 @@ def _escape_like(t: str) -> str:
 def _substring_page_locked(
     conn,
     like_sql: str,
-    like_params: dict[str, str],
+    like_params: dict[str, object],
     before: tuple[int, str] | None,
     chunk: int,
 ):
@@ -262,7 +262,7 @@ def _substring_page_locked(
 
 
 def _substring_lane(
-    tokens: list[str], exclude_ids: set[str], wanted: int, starred_only: bool
+    tokens: list[str], exclude_ids: set[str], wanted: int, shown: history.HistoryFilter
 ) -> list[sqlite3.Row]:
     """The mid-word substring lane, walked in bounded pages, in ``ts DESC, id DESC``.
 
@@ -274,9 +274,12 @@ def _substring_lane(
 
     like_sql = " AND ".join(
         [f"cleaned_text LIKE :like_{i} ESCAPE '\\'" for i in range(len(tokens))]
-        + ([history._STARRED] if starred_only else [])
+        + shown.conditions()
     )
-    like_params = {f"like_{i}": f"%{_escape_like(t)}%" for i, t in enumerate(tokens)}
+    like_params: dict[str, object] = {
+        f"like_{i}": f"%{_escape_like(t)}%" for i, t in enumerate(tokens)
+    }
+    like_params["source"] = shown.source
 
     collected: list[str] = []
     before: tuple[int, str] | None = None
@@ -310,7 +313,7 @@ def _substring_lane(
     return [by_id[i] for i in collected if i in by_id]
 
 
-def _fts_rows(expression: str, limit: int, starred_only: bool) -> list[sqlite3.Row]:
+def _fts_rows(expression: str, limit: int, shown: history.HistoryFilter) -> list[sqlite3.Row]:
     """Up to ``limit`` rows matching the FTS5 ``expression``, best BM25 rank first."""
     with history._lock:
         conn = history._ensure_conn_locked()
@@ -318,15 +321,14 @@ def _fts_rows(expression: str, limit: int, starred_only: bool) -> list[sqlite3.R
             f"SELECT {schema.columns_sql(schema.ENTRY_COLUMNS, alias='e')}, "
             "bm25(entry_fts) AS rank "
             "FROM entry_fts JOIN entries e ON e.rowid = entry_fts.rowid "
-            "WHERE entry_fts MATCH ? "
-            f"{f'AND e.{history._STARRED} ' if starred_only else ''}"
-            "ORDER BY rank ASC LIMIT ?",
-            (expression, limit),
+            f"WHERE {' AND '.join(['entry_fts MATCH :expression', *shown.conditions('e')])} "
+            "ORDER BY rank ASC LIMIT :row_limit",
+            {"expression": expression, "row_limit": limit, "source": shown.source},
         ).fetchall()
 
 
 def search_history(
-    q: str, limit: int = 20, starred_only: bool = False
+    q: str, limit: int = 20, shown: history.HistoryFilter = history.EVERY_ENTRY
 ) -> list[HistorySearchHit]:
     """Three lanes, each filling what the one before left: FTS5 BM25 prefix match,
     the same widened by typo terms, then a ``LIKE`` substring walk. They do not read
@@ -339,16 +341,16 @@ def search_history(
     if not tokens:
         return []
 
-    rows = _fts_rows(_fts_expression(tokens, {}), clamped_limit, starred_only)
+    rows = _fts_rows(_fts_expression(tokens, {}), clamped_limit, shown)
     typo_terms = _typo_terms(tokens) if len(rows) < clamped_limit else {}
     if typo_terms:
         seen = {r["id"] for r in rows}
-        widened = _fts_rows(_fts_expression(tokens, typo_terms), clamped_limit, starred_only)
+        widened = _fts_rows(_fts_expression(tokens, typo_terms), clamped_limit, shown)
         rows.extend(r for r in widened if r["id"] not in seen)
     rows = rows[:clamped_limit]
     rows.extend(
         _substring_lane(
-            tokens, {r["id"] for r in rows}, clamped_limit - len(rows), starred_only
+            tokens, {r["id"] for r in rows}, clamped_limit - len(rows), shown
         )
     )
 
@@ -440,23 +442,22 @@ def _rrf_fuse(
 
 
 async def search_history_hybrid(
-    q: str, limit: int = 20, starred_only: bool = False
+    q: str, limit: int = 20, shown: history.HistoryFilter = history.EVERY_ENTRY
 ) -> list[HistorySearchHit]:
     """Run the FTS/LIKE lane and the semantic lane concurrently and fuse with RRF.
 
     Answers exact hits, then close word hits, then at most ``SEMANTIC_ONLY_MAX``
     hits only the semantic lane found, each group in fused order. Both lanes fetch
-    ``SEARCH_LIMIT_MAX`` candidates concurrently; ``starred_only`` filters both.
+    ``SEARCH_LIMIT_MAX`` candidates concurrently; ``shown`` filters both.
     """
     clamped_limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
     if not q or not q.strip():
         return []
     fts_hits, semantic_hits = await asyncio.gather(
-        asyncio.to_thread(search_history, q, SEARCH_LIMIT_MAX, starred_only),
+        asyncio.to_thread(search_history, q, SEARCH_LIMIT_MAX, shown),
         _semantic_lane(q, SEARCH_LIMIT_MAX),
     )
-    if starred_only:
-        semantic_hits = [hit for hit in semantic_hits if hit.starred]
+    semantic_hits = [hit for hit in semantic_hits if shown.keeps(hit)]
     fused = _rrf_fuse(fts_hits, semantic_hits, len(fts_hits) + len(semantic_hits))
     worded = {hit.id for hit in fts_hits}
     exact = [hit for hit in fused if hit.match == "exact"]

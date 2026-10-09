@@ -1,13 +1,16 @@
 import {
   api,
+  EVERY_ENTRY,
   MalformedResponseError,
   SidecarTooOldError,
+  type EntrySource,
   type HistoryEntry,
+  type HistoryFilter,
   type UserSettings,
 } from "../../api";
 import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
 import { copyToClipboard } from "../../clipboard";
-import { renderSegmented } from "../../ui/controls";
+import { renderSegmented, type SegmentedOption } from "../../ui/controls";
 import { icon, type IconName } from "../../ui/icons";
 import {
   createHistoryList,
@@ -40,12 +43,19 @@ const SOURCE_ICONS: Record<HistoryEntry["source"], IconName> = {
   meeting: "users",
 };
 
-type HistoryFilter = "all" | "starred";
+type KindChip = "all" | EntrySource;
 
-const FILTER_OPTIONS = [
+const KIND_CHIPS: readonly SegmentedOption<KindChip>[] = [
   { value: "all", label: "All" },
-  { value: "starred", label: "Starred" },
-] as const;
+  { value: "dictation", label: "Dictation", icon: SOURCE_ICONS.dictation },
+  { value: "meeting", label: "Meetings", icon: SOURCE_ICONS.meeting },
+  { value: "file", label: "Files", icon: SOURCE_ICONS.file },
+];
+
+const EMPTY_KIND: Partial<Record<EntrySource, string>> = {
+  meeting: "No meetings yet.",
+  file: "No files yet.",
+};
 
 const SKELETON_CARD = `<div class="entry entry--skeleton" aria-hidden="true"><span class="entry-dot"></span><i></i><i></i></div>`;
 
@@ -116,14 +126,15 @@ export interface HistoryPanel extends TabLifecycle {
   jobStarted(): void;
 }
 
-/** History as a day-grouped timeline under the old search box, paging as it scrolls,
- *  picking up new recordings every few seconds while the window is on screen, and showing
- *  files still being transcribed at the top of today. */
+/** History as a day-grouped timeline under the search box and the kind and Starred chips,
+ *  paging as it scrolls, picking up new recordings every few seconds while the window is on
+ *  screen, and showing files and meetings still being transcribed at the top of today. */
 export function renderHistory(container: HTMLElement, settings: UserSettings): HistoryPanel {
   const section = document.createElement("div");
   section.className = "history";
   section.innerHTML = `
-    <div class="search-box">${icon("search")}<input type="search" id="history-search" placeholder="Search what you said" aria-label="Search" /><div id="history-filter" aria-label="Show"></div></div>
+    <div class="search-box">${icon("search")}<input type="search" id="history-search" placeholder="Search what you said" aria-label="Search" /></div>
+    <div class="chips history-filter"><div id="history-kind" aria-label="Show"></div><span class="chips-sep"></span><button type="button" class="chip-btn chip-btn--star" id="history-starred" aria-pressed="false">${icon("star")}Starred</button></div>
     <div class="history-search-hint" id="history-search-hint"></div>
     <div class="history-count" id="history-count">Loading...</div>
     <div class="timeline">
@@ -144,7 +155,8 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
   let debounceTimer: number | null = null;
   let pollTimer: number | null = null;
   let destroyed = false;
-  let starredOnly = false;
+  let filter: HistoryFilter = EVERY_ENTRY;
+  let jobCards: readonly HTMLElement[] = [];
   let openMenu: { menu: HTMLElement; trigger: HTMLButtonElement } | null = null;
 
   const list = createHistoryList({
@@ -159,15 +171,16 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
     createRow: createEntryElement,
     renderEmptyState: (isEmpty) => {
       if (!isEmpty) return;
+      const named = filter.starred ? "Nothing starred yet." : filter.source && EMPTY_KIND[filter.source];
       daysEl.insertAdjacentHTML(
         "beforeend",
-        starredOnly
-          ? `<p class="history-empty">Nothing starred yet.</p>`
+        named
+          ? `<p class="history-empty">${named}</p>`
           : `<p class="history-empty">Nothing here yet. Hold <b>${escapeHtml(shortcut)}</b> anywhere and talk.</p>`,
       );
     },
     isDestroyed: () => destroyed,
-    starredOnly: () => starredOnly,
+    filter: () => filter,
   });
 
   function showCurrentView(): void {
@@ -176,15 +189,31 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
     else void list.load();
   }
 
-  renderSegmented<HistoryFilter>(
-    section.querySelector<HTMLElement>("#history-filter")!,
-    FILTER_OPTIONS,
+  function showJobCards(): void {
+    timeline.setPending(
+      jobCards.filter((card) => filter.source === null || card.dataset.kind === filter.source),
+    );
+  }
+
+  function applyFilter(next: HistoryFilter): void {
+    filter = next;
+    showJobCards();
+    showCurrentView();
+  }
+
+  renderSegmented<KindChip>(
+    section.querySelector<HTMLElement>("#history-kind")!,
+    KIND_CHIPS,
     "all",
-    (filter) => {
-      starredOnly = filter === "starred";
-      showCurrentView();
-    },
+    (kind) => applyFilter({ ...filter, source: kind === "all" ? null : kind }),
+    "chips",
   );
+
+  const starredChip = section.querySelector<HTMLButtonElement>("#history-starred")!;
+  starredChip.addEventListener("click", () => {
+    starredChip.setAttribute("aria-pressed", String(!filter.starred));
+    applyFilter({ ...filter, starred: !filter.starred });
+  });
 
   function noMatchesElement(): HTMLElement {
     const el = document.createElement("p");
@@ -221,7 +250,7 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
     searchClaim = claim;
     searchHint.textContent = "Searching...";
     try {
-      const resp = await api.searchHistory(q, PAGE_SIZE, starredOnly);
+      const resp = await api.searchHistory(q, PAGE_SIZE, filter);
       const built = resp.entries.map((entry) => ({ entry, element: createEntryElement(entry) }));
       claim.replaceRows(built.length === 0 ? [noMatchesElement()] : searchTiers(built));
       claim.renderCount(`${resp.total} match${resp.total !== 1 ? "es" : ""}`);
@@ -393,10 +422,14 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
   }
 
   const jobs = createJobCards(
-    (jobCards) => timeline.setPending(jobCards),
+    (cards) => {
+      jobCards = cards;
+      showJobCards();
+    },
     () => list.loadNewer(),
     (entryId) =>
-      starredOnly ||
+      filter.source !== null ||
+      filter.starred ||
       searchInput.value.trim() !== "" ||
       Array.from(daysEl.querySelectorAll<HTMLElement>(".entry")).some((el) => el.dataset.id === entryId),
   );

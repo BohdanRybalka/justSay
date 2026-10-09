@@ -1239,7 +1239,7 @@ describe("the history cursor on the wire", () => {
     expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:9377/history?limit=30");
   });
 
-  it("narrows every History read to starred entries only when asked", async () => {
+  it("narrows every History read to one kind and to starred entries when asked", async () => {
     const { api } = await import("./api");
     fetchMock.mockImplementation(() =>
       Promise.resolve(
@@ -1247,15 +1247,17 @@ describe("the history cursor on the wire", () => {
       ),
     );
 
-    await api.getHistory(30, { ts: 5, id: "x" }, true);
-    await api.getNewerHistory(30, { ts: 5, id: "x" }, true);
-    await api.searchHistory("note", 30, true);
+    await api.getHistory(30, { ts: 5, id: "x" }, { source: null, starred: true });
+    await api.getNewerHistory(30, { ts: 5, id: "x" }, { source: "meeting", starred: true });
+    await api.searchHistory("note", 30, { source: "file", starred: false });
+    await api.getHistory(30, null, { source: "dictation", starred: false });
     await api.getHistory(30);
 
     expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
       "http://127.0.0.1:9377/history?limit=30&before_ts=5&before_id=x&starred=true",
-      "http://127.0.0.1:9377/history?limit=30&after_ts=5&after_id=x&starred=true",
-      "http://127.0.0.1:9377/history/search?q=note&limit=30&starred=true",
+      "http://127.0.0.1:9377/history?limit=30&after_ts=5&after_id=x&source=meeting&starred=true",
+      "http://127.0.0.1:9377/history/search?q=note&limit=30&source=file",
+      "http://127.0.0.1:9377/history?limit=30&source=dictation",
       "http://127.0.0.1:9377/history?limit=30",
     ]);
   });
