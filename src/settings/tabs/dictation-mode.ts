@@ -121,13 +121,11 @@ function modeRowHtml(id: string, iconName: "cloud" | "chip", title: string): str
 let prevLastError: string | null = null;
 
 /** Adds the WHAT TURNS IT INTO TEXT group to the end of `container`. Nothing is
- *  read while `windowHidden`; the returned lifecycle stops and restarts the poll.
- *  `onModeChange` hears every mode the backend accepted. */
+ *  read while `windowHidden`; the returned lifecycle stops and restarts the poll. */
 export function renderDictationMode(
   container: HTMLElement,
   settings: UserSettings,
   windowHidden = false,
-  onModeChange: (mode: Mode) => void = () => {},
 ): TabLifecycle {
   container.insertAdjacentHTML(
     "beforeend",
@@ -195,7 +193,6 @@ export function renderDictationMode(
       notifyError(e instanceof Error ? e.message : String(e));
       return;
     }
-    onModeChange(mode);
     await loadSettings().catch(() => {});
     void refreshStatus();
   }

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { FileJob, HistoryEntry, HistoryPageResponse, UserSettings } from "../../api";
+import type { TranscriptionJob, HistoryEntry, HistoryPageResponse, UserSettings } from "../../api";
 import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
 import {
   buildEntry,
@@ -506,7 +506,7 @@ describe("renderHistory — new recordings appear while it is open", () => {
 });
 
 describe("renderHistory — files being transcribed", () => {
-  const running: FileJob = {
+  const running: TranscriptionJob = {
     id: "j1",
     kind: "file",
     name: "interview.m4a",
@@ -557,6 +557,18 @@ describe("renderHistory — files being transcribed", () => {
     await vi.advanceTimersByTimeAsync(JOBS_POLL_MS);
 
     expect(container.querySelector(".entry--job")).toBeNull();
+  });
+
+  it("shows a meeting stopped elsewhere while History is already open", async () => {
+    apiMock.getHistory.mockResolvedValue(pageOf([], 0, null, { newest_cursor: null }));
+    const { container } = mount();
+    await flush();
+    expect(container.querySelector(".entry--job")).toBeNull();
+
+    apiMock.jobs.mockResolvedValue([{ ...running, kind: "meeting", name: "Meeting · 8 Oct 14:32" }]);
+    await vi.advanceTimersByTimeAsync(NEWER_POLL_MS);
+
+    expect(container.querySelector(".entry--job .entry-job-name")!.textContent).toBe("Meeting · 8 Oct 14:32");
   });
 
   it("reads the jobs when one is started, and stops reading while the window is hidden", async () => {

@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { FileJob } from "../api";
+import type { TranscriptionJob } from "../api";
 
 const apiMock = {
   jobs: vi.fn(),
   removeJob: vi.fn(),
+  retryJob: vi.fn(),
 };
 
 vi.mock("../api", async (importOriginal) => {
@@ -13,8 +14,9 @@ vi.mock("../api", async (importOriginal) => {
 });
 
 const { createJobCards, jobStatusText, JOBS_POLL_MS } = await import("./history-jobs");
+const { icon } = await import("../ui/icons");
 
-function job(overrides: Partial<FileJob> = {}): FileJob {
+function job(overrides: Partial<TranscriptionJob> = {}): TranscriptionJob {
   return {
     id: "j1",
     kind: "file",
@@ -169,7 +171,7 @@ describe("createJobCards", () => {
     apiMock.jobs.mockResolvedValue([job()]);
     const cards = createJobCards(show, entrySaved, entryShown);
     await cards.refresh();
-    const button = shown[0].querySelector<HTMLButtonElement>("button")!;
+    const button = shown[0].querySelector<HTMLButtonElement>('[data-action="remove"]')!;
     expect(button.getAttribute("aria-label")).toBe("Cancel");
 
     button.click();
@@ -189,7 +191,7 @@ describe("createJobCards", () => {
     const cards = createJobCards(show, entrySaved, entryShown);
     await cards.refresh();
 
-    shown[0].querySelector<HTMLButtonElement>("button")!.click();
+    shown[0].querySelector<HTMLButtonElement>('[data-action="remove"]')!.click();
     await vi.advanceTimersByTimeAsync(0);
 
     expect(shown).toHaveLength(1);
@@ -212,8 +214,53 @@ describe("createJobCards", () => {
     expect(apiMock.jobs).toHaveBeenCalledTimes(1);
   });
 
+  it("offers a failed meeting Try again, which queues it and reads the jobs again", async () => {
+    const failed = job({ kind: "meeting", name: "Meeting · 8 Oct 14:32", stage: "failed", progress: null, error: "Couldn't turn this meeting into text" });
+    apiMock.jobs.mockResolvedValue([failed]);
+    apiMock.retryJob.mockResolvedValue({ id: "j1" });
+    const cards = createJobCards(show, entrySaved, entryShown);
+    await cards.refresh();
+
+    const card = shown[0];
+    const retry = card.querySelector<HTMLButtonElement>('[data-action="retry"]')!;
+    expect(retry.hidden).toBe(false);
+    expect(card.querySelector('[data-action="remove"]')!.getAttribute("aria-label")).toBe("Delete this recording");
+    const meetingIcon = document.createElement("span");
+    meetingIcon.innerHTML = icon("users", "small");
+    expect(card.querySelector(".entry-dot")!.innerHTML).toBe(meetingIcon.innerHTML);
+
+    apiMock.jobs.mockResolvedValue([{ ...failed, stage: "queued", error: null }]);
+    retry.click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(apiMock.retryJob).toHaveBeenCalledWith("j1");
+    expect(status(shown[0])).toBe("Waiting");
+    expect(retry.hidden).toBe(true);
+  });
+
+  it("offers no Try again on a failed file, whose audio is already gone", async () => {
+    apiMock.jobs.mockResolvedValue([job({ stage: "failed", progress: null, error: "Add an API key in Settings" })]);
+    const cards = createJobCards(show, entrySaved, entryShown);
+    await cards.refresh();
+
+    expect(shown[0].querySelector<HTMLButtonElement>('[data-action="retry"]')!.hidden).toBe(true);
+  });
+
+  it("empties the bar of a meeting queued again after it failed part way", async () => {
+    apiMock.jobs.mockResolvedValue([job({ kind: "meeting", progress: 0.5 })]);
+    const cards = createJobCards(show, entrySaved, entryShown);
+    await cards.refresh();
+    const bar = shown[0].querySelector<HTMLElement>(".entry-progress i")!;
+    expect(bar.style.width).toBe("50%");
+
+    apiMock.jobs.mockResolvedValue([job({ kind: "meeting", stage: "queued", progress: null })]);
+    await cards.refresh();
+
+    expect(bar.style.width).toBe("0px");
+  });
+
   it("drops what a read left in flight when the page paused", async () => {
-    let answer!: (jobs: FileJob[]) => void;
+    let answer!: (jobs: TranscriptionJob[]) => void;
     apiMock.jobs.mockReturnValue(new Promise((resolve) => (answer = resolve)));
     const cards = createJobCards(show, entrySaved, entryShown);
 

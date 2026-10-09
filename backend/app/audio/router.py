@@ -20,9 +20,11 @@ from app.audio.dependencies import (
     get_active_recorder,
     get_meeting_recorder,
     get_recorder,
+    get_recording_queue,
 )
 from app.audio.meeting_recorder import MEETING_BUSY_DETAIL, MeetingRecorder
 from app.audio.recorder import MicrophoneRecorder, default_input_name
+from app.audio.recording_queue import RecordingQueue
 from app.audio.session import SessionRef
 from app.core.utils import sse_event
 from app.preferences.user_settings import get_user_settings
@@ -80,12 +82,14 @@ class MeetingStopResponse(BaseModel):
     """Deliberately separate from StopResponse.
 
     The meeting path reports what dictation does not: whether anything went
-    wrong during the capture, named by a `CaptureIncident` token, or `null`.
+    wrong during the capture, named by a `CaptureIncident` token, or `null`,
+    and the job turning the recording into text.
     """
 
     filename: str
     duration_seconds: float
     capture_incident: str | None
+    job_id: str
 
 
 class MeetingStatus(BaseModel):
@@ -228,8 +232,11 @@ async def start_meeting_recording(
 
 
 @router.post("/meeting/stop", response_model=MeetingStopResponse)
-async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting_recorder)):
-    """End the recording and return the written file.
+async def stop_meeting_recording(
+    recorder: MeetingRecorder = Depends(get_meeting_recorder),
+    queue: RecordingQueue = Depends(get_recording_queue),
+):
+    """End the recording, queue it to become text, and return the written file and the job.
 
     Guarded on `is_busy`, not `is_recording`, so a stop arriving while the
     devices are still opening is answered after that open. Every 409, the 410
@@ -244,6 +251,7 @@ async def stop_meeting_recording(recorder: MeetingRecorder = Depends(get_meeting
         capture_incident=(
             None if recording.incident is None else recording.incident.value
         ),
+        job_id=queue.add_meeting(recording.path),
     )
 
 

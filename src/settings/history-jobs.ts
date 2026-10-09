@@ -1,22 +1,28 @@
-import { api, type FileJob } from "../api";
+import { api, type TranscriptionJob } from "../api";
 import { icon, type IconName } from "../ui/icons";
 import { escapeHtml } from "./html";
 
 export const JOBS_POLL_MS = 1000;
 
-const KIND_ICONS: Record<FileJob["kind"], IconName> = { file: "file" };
+const KIND_ICONS: Record<TranscriptionJob["kind"], IconName> = { file: "file", meeting: "users" };
 
-const RUNNING: ReadonlySet<FileJob["stage"]> = new Set(["queued", "transcribing", "saving"]);
+const RUNNING: ReadonlySet<TranscriptionJob["stage"]> = new Set(["queued", "transcribing", "saving"]);
+
+/** What the card's × says it does: a meeting's recording goes with its card, a file's copy is already gone. */
+export function removeLabel(job: TranscriptionJob): string {
+  if (job.kind === "meeting") return "Delete this recording";
+  return job.stage === "failed" ? "Dismiss" : "Cancel";
+}
 
 /** What the card says under its bar: the stage, the percentage when it can be told, or why it failed. */
-export function jobStatusText(job: FileJob): string {
+export function jobStatusText(job: TranscriptionJob): string {
   switch (job.stage) {
     case "queued":
       return "Waiting";
     case "saving":
       return "Saving";
     case "failed":
-      return job.error ?? "Couldn't turn this file into text";
+      return job.error ?? `Couldn't turn this ${job.kind} into text`;
     default:
       return job.progress === null ? "Transcribing" : `Transcribing · ${Math.round(job.progress * 100)}%`;
   }
@@ -30,8 +36,8 @@ export interface JobCards {
 }
 
 /**
- * The cards of files being transcribed. `show` receives them newest first whenever the set
- * changes. A finished job's card stays, asking `entrySaved` to paint its row, until
+ * The cards of files and meetings being transcribed. `show` receives them newest first whenever
+ * the set changes. A failed meeting offers Try again. A finished job's card stays, asking `entrySaved` to paint its row, until
  * `entryShown` finds that row, so the card turns into the entry where it stood. A job this
  * page removed is never painted again; a failed read is tried again a second later.
  */
@@ -54,7 +60,7 @@ export function createJobCards(
     if (cards.delete(id)) publish();
   }
 
-  function createCard(job: FileJob): HTMLElement {
+  function createCard(job: TranscriptionJob): HTMLElement {
     const card = document.createElement("article");
     card.className = "entry entry--job";
     card.dataset.job = job.id;
@@ -63,10 +69,11 @@ export function createJobCards(
       <p class="entry-job-name num">${escapeHtml(job.name)}</p>
       <div class="entry-progress"><i></i></div>
       <div class="entry-meta"><span class="entry-job-status" role="status"></span><span class="entry-actions">
+        <button type="button" class="entry-retry" data-action="retry" hidden>Try again</button>
         <button type="button" data-action="remove">${icon("x", "small")}</button>
       </span></div>
     `;
-    card.querySelector("button")!.addEventListener("click", async () => {
+    card.querySelector('[data-action="remove"]')!.addEventListener("click", async () => {
       try {
         await api.removeJob(job.id);
         removeCard(job.id);
@@ -74,19 +81,32 @@ export function createJobCards(
         console.error(err);
       }
     });
+    card.querySelector('[data-action="retry"]')!.addEventListener("click", async () => {
+      try {
+        await api.retryJob(job.id);
+      } catch (err) {
+        console.error(err);
+      }
+      await refresh();
+    });
     return card;
   }
 
-  function paint(card: HTMLElement, job: FileJob): void {
+  function paint(card: HTMLElement, job: TranscriptionJob): void {
     card.classList.toggle("entry--job-failed", job.stage === "failed");
     card.querySelector(".entry-job-status")!.textContent = jobStatusText(job);
-    card.querySelector("button")!.setAttribute("aria-label", job.stage === "failed" ? "Dismiss" : "Cancel");
+    card.querySelector<HTMLElement>('[data-action="retry"]')!.hidden =
+      job.kind !== "meeting" || job.stage !== "failed";
+    card.querySelector('[data-action="remove"]')!.setAttribute("aria-label", removeLabel(job));
+    const bar = card.querySelector<HTMLElement>(".entry-progress i")!;
     if (job.progress !== null) {
-      card.querySelector<HTMLElement>(".entry-progress i")!.style.width = `${job.progress * 100}%`;
+      bar.style.width = `${job.progress * 100}%`;
+    } else if (job.stage === "queued") {
+      bar.style.width = "0";
     }
   }
 
-  function lingers(job: FileJob, card: HTMLElement | undefined): card is HTMLElement {
+  function lingers(job: TranscriptionJob, card: HTMLElement | undefined): card is HTMLElement {
     const entryId = job.entry_id;
     if (job.stage !== "done" || card === undefined || entryId === null) {
       gone.add(job.id);
@@ -106,7 +126,7 @@ export function createJobCards(
   async function refresh(): Promise<void> {
     pause();
     const current = generation;
-    let jobs: FileJob[];
+    let jobs: TranscriptionJob[];
     try {
       jobs = await api.jobs();
     } catch (err) {

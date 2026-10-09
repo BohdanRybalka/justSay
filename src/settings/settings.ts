@@ -29,7 +29,7 @@ import { mountFileTranscription } from "./file-transcription";
 import { nextTabAction } from "./tab-visibility";
 import { renderDictation } from "./tabs/dictation";
 import { renderDictationMode } from "./tabs/dictation-mode";
-import { renderDictationMeetings, type MeetingsGroup } from "./tabs/dictation-meetings";
+import { renderDictationMeetings } from "./tabs/dictation-meetings";
 import { renderDictionary } from "./tabs/dictionary";
 import { renderHistory, renderHistoryHeading, type HistoryPanel } from "./tabs/history";
 import { renderInsights } from "./tabs/insights";
@@ -121,9 +121,8 @@ const panels: Record<PanelName, PanelRenderer> = {
   },
   dictation: (container, loaded, windowHidden) => {
     const everyday = renderDictation(container, loaded);
-    let meetings: MeetingsGroup | null = null;
-    const mode = renderDictationMode(container, loaded, windowHidden, (chosen) => meetings?.showMode(chosen));
-    meetings = renderDictationMeetings(container, loaded);
+    const mode = renderDictationMode(container, loaded, windowHidden);
+    const meetings = renderDictationMeetings(container, loaded);
     const dictionary = renderDictionary(container, loaded);
     return combineLifecycles([everyday, mode, meetings, dictionary]);
   },

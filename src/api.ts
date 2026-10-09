@@ -523,6 +523,8 @@ export interface MeetingStopResponse {
   filename: string;
   duration_seconds: number;
   capture_incident: string | null;
+  /** The job turning this recording into text. */
+  job_id: string;
 }
 
 export interface DictateResponse {
@@ -537,14 +539,14 @@ export interface DictateResponse {
   discarded_reason?: string | null;
 }
 
-export type FileJobStage = "queued" | "transcribing" | "saving" | "done" | "failed" | "cancelled";
+export type TranscriptionJobStage = "queued" | "transcribing" | "saving" | "done" | "failed" | "cancelled";
 
-/** A file being turned into text in the background, as `GET /jobs` lists it. */
-export interface FileJob {
+/** A file or a stopped meeting being turned into text in the background, as `GET /jobs` lists it. */
+export interface TranscriptionJob {
   id: string;
-  kind: "file";
+  kind: "file" | "meeting";
   name: string;
-  stage: FileJobStage;
+  stage: TranscriptionJobStage;
   /** 0–1, estimated from this machine's past speed; null while it cannot be told. */
   progress: number | null;
   /** Why a failed job failed, in plain words. */
@@ -581,6 +583,8 @@ export interface UserSettings {
   /** The Record meetings switch. `POST /audio/meeting/start` answers `403`
    *  unless this and the acknowledgement are both true. */
   meetings_enabled: boolean;
+  /** Where a stopped meeting becomes text, apart from `stt_mode`. */
+  meetings_engine: "cloud" | "local";
   theme: ThemePreference;
   /** The name the main window greets the user by; empty means the OS
    *  account's name. At most `DISPLAY_NAME_MAX_LENGTH` characters. */
@@ -1048,9 +1052,13 @@ export const api = {
   },
 
   /** Running jobs, failed ones until dismissed, and those finished in the last minute, newest first. */
-  jobs: () => request<FileJob[]>("GET", "/jobs", undefined, REREADABLE),
+  jobs: () => request<TranscriptionJob[]>("GET", "/jobs", undefined, REREADABLE),
 
-  /** Cancels a queued or transcribing job, or dismisses a finished one. */
+  /** Queues a failed meeting again; its recording was kept for this. */
+  retryJob: (id: string) =>
+    request<{ id: string }>("POST", `/jobs/${encodeURIComponent(id)}/retry`, undefined, UNRECONCILED),
+
+  /** Cancels a queued or transcribing job, or dismisses a finished one; a meeting's recording goes with it. */
   removeJob: (id: string) =>
     request<{ outcome: "cancelled" | "dismissed" }>(
       "DELETE",

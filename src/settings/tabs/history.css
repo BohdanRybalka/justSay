@@ -187,6 +187,19 @@
   opacity: 1;
 }
 
+.entry-actions .entry-retry {
+  width: auto;
+  padding: 0 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 560;
+  color: var(--text);
+}
+
+.entry-actions .entry-retry[hidden] {
+  display: none;
+}
+
 .entry-body {
   position: relative;
   margin-bottom: 9px;

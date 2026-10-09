@@ -64,6 +64,11 @@ feeding one would report a stalled microphone on every block a test delivers.
 """
 
 
+@pytest.fixture(autouse=True)
+def _recording_queue(recording_queue):
+    return recording_queue
+
+
 @pytest.fixture
 def audio_settings(tmp_path):
     return AudioSettings(sample_rate=16000, channels=1, temp_dir=tmp_path / "tmp")
@@ -1363,7 +1368,9 @@ async def test_meeting_level_stream_ends_at_once_when_nothing_is_recording(clien
 
 
 @pytest.mark.anyio
-async def test_meeting_stop_reports_the_filename_and_the_incident(client, tmp_path):
+async def test_meeting_stop_reports_the_filename_and_the_incident(
+    client, tmp_path, recording_queue
+):
     class _Stopping(_FakeRecorder):
         async def stop(self):
             self.is_recording = False
@@ -1383,6 +1390,8 @@ async def test_meeting_stop_reports_the_filename_and_the_incident(client, tmp_pa
     body = resp.json()
     assert body["filename"] == "meeting_abc123.wav"
     assert body["capture_incident"] == "storage_low"
+    assert body["job_id"] == "job-1"
+    assert recording_queue.added == [tmp_path / "meeting_abc123.wav"]
 
 
 @pytest.mark.anyio

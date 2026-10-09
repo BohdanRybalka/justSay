@@ -65,6 +65,7 @@ class UserSettings(BaseModel):
 
     meeting_consent_acknowledged: bool = False
     meetings_enabled: bool = False
+    meetings_engine: Literal["cloud", "local"] = "local"
 
     theme: Literal["system", "light", "dark"] = "system"
 
@@ -361,6 +362,7 @@ def sync_to_runtime(us: UserSettings) -> bool:
     changed_embeddings = embedding_settings.ollama_host != us.ollama_host
 
     stt_settings.mode = stt_mode
+    stt_settings.meetings_mode = ProviderMode(us.meetings_engine)
     stt_settings.whisper_model_size = us.whisper_model_size
     stt_settings.whisper_device = us.whisper_device
     stt_settings.initial_prompt = us.initial_prompt

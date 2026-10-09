@@ -48,6 +48,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     groq_api_key: "",
     meeting_consent_acknowledged: false,
     meetings_enabled: false,
+    meetings_engine: "local",
     theme: "system",
     display_name: "",
     paste_at_cursor: true,
@@ -503,23 +504,6 @@ describe("renderDictationMode — the two rows", () => {
 
     await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("Backend said no"));
     expect(row(container, "cloud").getAttribute("aria-checked")).toBe("true");
-  });
-
-  it("tells the page about a mode only once the backend accepted it", async () => {
-    const heard: string[] = [];
-    apiMock.sttLocalStatus.mockResolvedValue(buildStatus());
-    const { renderDictationMode } = await import("./dictation-mode");
-    const container = document.createElement("div");
-    cleanups.push(renderDictationMode(container, buildSettings({ stt_mode: "cloud" }), false, (mode) => heard.push(mode)));
-    await vi.waitFor(() => expect(action(container)).toBe("Ready"));
-
-    apiMock.setSttMode.mockRejectedValueOnce(new Error("Backend said no"));
-    row(container, "local").click();
-    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalled());
-    expect(heard).toEqual([]);
-
-    row(container, "local").click();
-    await vi.waitFor(() => expect(heard).toEqual(["local"]));
   });
 
   it("retries the engine load on Try again", async () => {

@@ -402,7 +402,12 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
   );
 
   function startPolling(): void {
-    if (pollTimer === null) pollTimer = window.setInterval(() => void list.loadNewer(), NEWER_POLL_MS);
+    if (pollTimer === null) {
+      pollTimer = window.setInterval(() => {
+        void list.loadNewer();
+        void jobs.refresh();
+      }, NEWER_POLL_MS);
+    }
   }
 
   function stopPolling(): void {

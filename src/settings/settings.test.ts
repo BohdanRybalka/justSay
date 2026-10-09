@@ -36,17 +36,14 @@ const modeTab = {
 };
 
 const modeMountedHidden: boolean[] = [];
-let modeChangeListener: ((mode: "cloud" | "local") => void) | null = null;
 
 vi.mock("./tabs/dictation-mode", () => ({
   renderDictationMode: vi.fn((
     container: HTMLElement,
     _settings: unknown,
     windowHidden: boolean,
-    onModeChange: (mode: "cloud" | "local") => void,
   ) => {
     modeMountedHidden.push(windowHidden);
-    modeChangeListener = onModeChange;
     container.insertAdjacentHTML("beforeend", '<div id="dictation-mode-body"></div>');
     return modeTab;
   }),
@@ -194,6 +191,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     groq_api_key: "",
     meeting_consent_acknowledged: false,
     meetings_enabled: false,
+    meetings_engine: "local",
     theme: "system",
     display_name: "",
     paste_at_cursor: true,
@@ -358,15 +356,6 @@ describe("the sidebar", () => {
     expect(modeRows.compareDocumentPosition(meetings) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const dictionary = panel.querySelector("#dictionary-input")!;
     expect(meetings.compareDocumentPosition(dictionary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  });
-
-  it("names where a meeting becomes text after a new mode is picked", async () => {
-    await bootWithSettingsLoaded();
-    openPanel("dictation");
-
-    modeChangeListener!("local");
-
-    expect(document.querySelector("#meetings-hint")!.textContent).toMatch(/on this computer$/);
   });
 
   it("shows the name this computer knows the user by, with its initials", async () => {

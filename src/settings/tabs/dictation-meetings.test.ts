@@ -33,6 +33,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     groq_api_key: "",
     meeting_consent_acknowledged: false,
     meetings_enabled: false,
+    meetings_engine: "local",
     theme: "system",
     display_name: "",
     paste_at_cursor: true,
@@ -43,13 +44,13 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
 
 function render(overrides: Partial<UserSettings> = {}) {
   const container = document.createElement("div");
-  const group = renderDictationMeetings(container, buildSettings(overrides));
+  renderDictationMeetings(container, buildSettings(overrides));
   const toggle = container.querySelector<HTMLButtonElement>("#meetings-toggle")!;
   const disclosure = container.querySelector<HTMLElement>("#meeting-disclosure")!;
   const consent = container.querySelector<HTMLButtonElement>("#btn-meeting-consent")!;
   const hint = container.querySelector<HTMLElement>("#meetings-hint")!;
   const isOn = () => toggle.getAttribute("aria-checked") === "true";
-  return { container, group, toggle, disclosure, consent, hint, isOn };
+  return { container, toggle, disclosure, consent, hint, isOn };
 }
 
 const ACKNOWLEDGED_ON = { meeting_consent_acknowledged: true, meetings_enabled: true };
@@ -131,21 +132,41 @@ describe("renderDictationMeetings — the switch", () => {
 });
 
 describe("renderDictationMeetings — where a meeting becomes text", () => {
-  it("follows the Cloud / Local choice", () => {
-    expect(render({ stt_mode: "cloud" }).hint.textContent).toBe(
-      "Right-click the widget and pick Record a meeting · turned into text in the cloud",
-    );
-    expect(render({ stt_mode: "local" }).hint.textContent).toBe(
+  function engineButton(container: HTMLElement, label: string): HTMLButtonElement {
+    return [...container.querySelectorAll<HTMLButtonElement>("#meetings-engine button")].find(
+      (button) => button.textContent === label,
+    )!;
+  }
+
+  it("names the meetings choice, not the dictation mode", () => {
+    const view = render({ stt_mode: "cloud", meetings_engine: "local" });
+
+    expect(view.hint.textContent).toBe(
       "Right-click the widget and pick Record a meeting · turned into text on this computer",
     );
+    expect(engineButton(view.container, "On this computer").getAttribute("aria-pressed")).toBe("true");
+    expect(render({ stt_mode: "local", meetings_engine: "cloud" }).hint.textContent).toBe(meetingsHint("cloud"));
   });
 
-  it("changes when another mode is picked", () => {
-    const view = render({ stt_mode: "cloud" });
+  it("saves a new choice and names it", async () => {
+    const view = render({ meetings_engine: "local" });
 
-    view.group.showMode("local");
+    engineButton(view.container, "In the cloud").click();
 
+    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledWith({ meetings_engine: "cloud" }));
+    expect(view.hint.textContent).toBe(meetingsHint("cloud"));
+    expect(engineButton(view.container, "In the cloud").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("goes back to the saved choice when the new one could not be saved", async () => {
+    saveSettingsMock.mockRejectedValue(new Error("backend down"));
+    const view = render({ meetings_engine: "local" });
+
+    engineButton(view.container, "In the cloud").click();
+
+    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("backend down"));
     expect(view.hint.textContent).toBe(meetingsHint("local"));
+    expect(engineButton(view.container, "On this computer").getAttribute("aria-pressed")).toBe("true");
   });
 });
 
@@ -157,7 +178,7 @@ describe("renderDictationMeetings — the disclosure (ADR 040 obligation 3)", ()
     expect(text).toMatch(/consent/i);
   });
 
-  it("states that Cloud mode sends the other participants' audio to the provider", () => {
+  it("states that the cloud sends the other participants' audio to the provider", () => {
     const text = render().container.querySelector("#meeting-consent-cloud")!.textContent!;
 
     expect(text).toMatch(/cloud/i);

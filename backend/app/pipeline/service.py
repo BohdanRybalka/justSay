@@ -17,6 +17,7 @@ from fastapi import BackgroundTasks
 from app.audio.analysis import analyze_silence
 from app.audio.config import audio_settings
 from app.audio.vad import analyze_vad
+from app.core.types import ProviderMode
 from app.pipeline.chunking import PiecePacer, transcribe_in_pieces
 from app.pipeline.cleanup import clean_dictation
 from app.pipeline.utils import detect_duration
@@ -87,12 +88,13 @@ async def process_audio(
     source: EntrySource,
     source_name: str | None = None,
     observer: PipelineObserver | None = None,
+    mode: ProviderMode | None = None,
 ) -> ProcessingResult:
-    """Full pipeline: transcribe on the mode's provider -> clipboard.
+    """Full pipeline: transcribe -> clipboard, on ``mode``'s provider, else the user's mode.
 
-    ``background_tasks``, when provided, schedules embedding generation to run
-    after the response is sent. ``source`` and ``source_name`` say where the
-    history entry came from; with an ``observer`` the audio goes in pieces it paces.
+    ``background_tasks`` schedules embedding generation after the response is sent. ``source``
+    and ``source_name`` say where the history entry came from; with an ``observer`` the audio
+    goes in pieces it paces.
     """
     start = time.perf_counter()
 
@@ -110,7 +112,10 @@ async def process_audio(
             discarded_reason="silence",
         )
 
-    stt = get_provider(stt_settings.mode, stt_settings)
+    route_settings = stt_settings
+    if mode is not None:
+        route_settings = stt_settings.model_copy(update={"mode": mode})
+    stt = get_provider(route_settings.mode, stt_settings)
 
     log.info(
         "Pipeline route: %s, duration=%.2fs",
@@ -121,7 +126,7 @@ async def process_audio(
     if is_local_provider(stt):
         from app.stt.local_setup import await_local_ready
 
-        await await_local_ready(stt_settings)
+        await await_local_ready(route_settings)
 
     if observer is not None:
         await observer.before_transcribe(stt.model_name, duration)

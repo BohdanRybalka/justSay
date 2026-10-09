@@ -399,6 +399,7 @@ def _snapshot_real_roots_backstop(_real_app_data_roots):
 RUNTIME_SETTINGS_FIELDS_WRITTEN_BY_SYNC: dict[str, tuple[str, ...]] = {
     "stt": (
         "mode",
+        "meetings_mode",
         "whisper_model_size",
         "whisper_device",
         "initial_prompt",
@@ -453,6 +454,30 @@ def _reset_settings():
     restore_runtime_settings(snapshot)
     clear_stt_cache()
     clear_gpu_probe_cache()
+
+
+class StubRecordingQueue:
+    """Stands in for the job queue the audio endpoints hand meeting recordings to."""
+
+    def __init__(self) -> None:
+        self.added: list[Path] = []
+        self.kept: frozenset[str] = frozenset()
+
+    def add_meeting(self, recording: Path) -> str:
+        self.added.append(recording)
+        return f"job-{len(self.added)}"
+
+    def kept_recording_names(self) -> frozenset[str]:
+        return self.kept
+
+
+@pytest.fixture
+def recording_queue() -> StubRecordingQueue:
+    from app.audio.dependencies import get_recording_queue
+
+    stub = StubRecordingQueue()
+    app.dependency_overrides[get_recording_queue] = lambda: stub
+    return stub
 
 
 @pytest.fixture(autouse=True)

@@ -15,6 +15,11 @@ from app.audio import scratch_router
 from app.audio.config import audio_settings
 
 
+@pytest.fixture(autouse=True)
+def _recording_queue(recording_queue):
+    return recording_queue
+
+
 @pytest.fixture
 def isolated_temp_dir(tmp_path, monkeypatch):
     temp_dir = tmp_path / "audio-tmp"
@@ -119,9 +124,9 @@ async def test_both_endpoints_walk_the_directory_off_the_event_loop_thread(
     for name in ("_scratch_size", "_reap_scratch_files"):
         original = getattr(scratch_router, name)
 
-        def _record(tmp_dir, _name=name, _original=original):
+        def _record(tmp_dir, kept, _name=name, _original=original):
             ran_on[_name] = threading.get_ident()
-            return _original(tmp_dir)
+            return _original(tmp_dir, kept)
 
         monkeypatch.setattr(scratch_router, name, _record)
 
@@ -151,3 +156,21 @@ async def test_asyncio_is_what_moves_the_walk_rather_than_the_helpers_themselves
     assert not asyncio.iscoroutinefunction(scratch_router._reap_scratch_files)
     assert asyncio.iscoroutinefunction(scratch_router.get_storage_info)
     assert asyncio.iscoroutinefunction(scratch_router.cleanup_temp)
+
+
+@pytest.mark.anyio
+async def test_a_recording_a_job_still_needs_is_neither_counted_nor_cleared(
+    client, isolated_temp_dir, recording_queue
+):
+    """A meeting waiting to be tried again must survive Clear, and the size shown must be what
+    Clear frees."""
+    kept = isolated_temp_dir / "meeting_0123456789ab.wav"
+    kept.write_bytes(b"k" * 700)
+    (isolated_temp_dir / "meeting_ba9876543210.wav").write_bytes(b"d" * 300)
+    recording_queue.kept = frozenset({kept.name})
+
+    assert (await client.get("/settings/storage")).json()["temp_size_bytes"] == 300
+    assert (await client.post("/settings/cleanup")).json()["freed_bytes"] == 300
+
+    assert kept.exists()
+    assert not (isolated_temp_dir / "meeting_ba9876543210.wav").exists()

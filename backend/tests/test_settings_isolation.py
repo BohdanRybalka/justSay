@@ -34,6 +34,7 @@ from tests.conftest import (
 
 _SENTINELS: dict[tuple[str, str], object] = {
     ("stt", "mode"): "local",
+    ("stt", "meetings_mode"): "cloud",
     ("stt", "whisper_model_size"): "tiny",
     ("stt", "whisper_device"): "cpu",
     ("stt", "initial_prompt"): "sentinel glossary",
