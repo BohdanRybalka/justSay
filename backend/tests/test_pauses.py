@@ -1,4 +1,4 @@
-"""Where long audio is cut — the middle of its longest pause, by TEN VAD or by level."""
+"""Where long audio is cut and where its speech is — by TEN VAD or by level."""
 
 from __future__ import annotations
 
@@ -74,3 +74,21 @@ def test_speech_probabilities_abstain_without_the_library(monkeypatch):
     monkeypatch.setattr(vad, "_get_library", lambda: None)
 
     assert vad.speech_probabilities(np.zeros(4096, np.float32), SETTINGS) is None
+
+
+def test_speech_spans_merge_short_gaps_split_long_ones_and_keep_a_pad(monkeypatch):
+    samples = _probabilities(monkeypatch, [(0.0, 2.0), (3.0, 4.0), (5.0, 8.0)])
+
+    spans = pauses.speech_spans(samples, SETTINGS)
+
+    pad = pauses.SPEECH_PAD_SECONDS
+    expected = [(2.0 - pad, 5.0 + pad), (8.0 - pad, 10.0)]
+    assert len(spans) == len(expected)
+    for got, want in zip(spans, expected):
+        assert got == pytest.approx(want, abs=0.02)
+
+
+def test_no_speech_heard_is_no_span(monkeypatch):
+    samples = _probabilities(monkeypatch, [(0.0, 10.0)])
+
+    assert pauses.speech_spans(samples, SETTINGS) == []

@@ -11,7 +11,7 @@ import pytest
 
 from app.core.errors import ConfigurationError
 from app.preferences import user_settings
-from app.stt.config import STTSettings
+from app.stt.config import STTSettings, stt_settings
 from app.transcripts import history, relocation
 
 
@@ -367,6 +367,26 @@ def test_record_meetings_starts_as_the_stored_acknowledgement(isolated, acknowle
     user_settings._settings = None
 
     assert user_settings.get_user_settings().meetings_enabled is acknowledged
+
+
+@pytest.mark.parametrize(("stored", "meetings"), [({"language": "en"}, "en"), ({}, "uk")])
+def test_a_file_without_a_meeting_language_starts_at_the_dictation_one(isolated, stored, meetings):
+    settings_path = isolated["settings_dir"] / "settings.json"
+    settings_path.write_text(json.dumps(stored), encoding="utf-8")
+    user_settings._settings = None
+
+    assert user_settings.get_user_settings().meetings_language == meetings
+
+
+def test_a_chosen_meeting_language_reaches_the_meeting_jobs(isolated):
+    user_settings.update_user_settings({"language": "en", "meetings_language": "auto"})
+
+    user_settings._settings = None
+    loaded = user_settings.get_user_settings()
+    user_settings.sync_to_runtime(loaded)
+
+    assert (loaded.language, loaded.meetings_language) == ("en", "auto")
+    assert stt_settings.meetings_language == "auto"
 
 
 def test_record_meetings_turned_off_stays_off_after_a_reload(isolated):

@@ -1,14 +1,16 @@
 /**
- * WHAT TURNS IT INTO TEXT: the Cloud and Local model radio rows. Cloud says
- * whether the Groq key is set; Local draws the local engine's state,
- * read every 3 s while the window is shown. Picking a row switches the mode.
+ * PUSH-TO-TALK MODEL: the Cloud and Local model radio rows, which files you
+ * transcribe follow too. Cloud says whether the Groq key is set; Local draws the
+ * local engine's state, read every 3 s while the window is shown. Picking a row
+ * switches the mode.
  */
-import { api, type CloudKeyStatus, type LocalSTTStatus, type UserSettings } from "../../api";
+import { api, type LocalSTTStatus, type UserSettings } from "../../api";
 import { getCloudKeyStatus, loadSettings, type TabLifecycle } from "../settings";
 import { displayableError, notifyError } from "../../notify";
 import { isStaleStatusResponse } from "../../stale-response";
 import { computeIndicatorState, onIndicatorStateChange } from "../../status-indicator";
 import { icon } from "../../ui/icons";
+import { CLOUD_KEY_MISSING, cloudKeyMissing, drawRow, modeRowHtml, type RowView } from "./mode-rows";
 
 type Mode = UserSettings["stt_mode"];
 
@@ -24,13 +26,7 @@ export type LocalRow =
   | { state: "failed"; reason: string };
 
 const CLOUD_HINT = "Your API keys · fastest and most accurate";
-const CLOUD_KEY_MISSING = "Add a Groq key in Settings";
 const READ_FAILED = "Couldn't load this";
-
-/** Whether Cloud's only engine, Groq, has no key; an unread key status is not missing. */
-export function cloudKeyMissing(cloud: CloudKeyStatus | null): boolean {
-  return cloud !== null && !cloud.groq_key_set;
-}
 
 /** Binary units, as the file manager shows the model file. */
 export function formatModelSize(bytes: number): string {
@@ -52,14 +48,6 @@ export function localRow(read: LocalRead, selected: boolean): LocalRow {
     return { state: "not-installed", bytes: read.model_bytes };
   }
   return { state: "installed" };
-}
-
-interface RowView {
-  hint: string;
-  alert: boolean;
-  locked: boolean;
-  disabled: boolean;
-  action: string;
 }
 
 function localView(row: LocalRow): RowView {
@@ -97,30 +85,9 @@ function localView(row: LocalRow): RowView {
   }
 }
 
-function drawRow(row: HTMLButtonElement, checked: boolean, view: RowView): void {
-  row.setAttribute("aria-checked", String(checked));
-  row.classList.toggle("mode-row--locked", view.locked);
-  if (view.disabled) row.setAttribute("aria-disabled", "true");
-  else row.removeAttribute("aria-disabled");
-  const hint = row.querySelector<HTMLElement>(".mode-row-hint")!;
-  hint.textContent = view.hint;
-  hint.classList.toggle("mode-row-alert", view.alert);
-  row.querySelector<HTMLElement>(".mode-row-action")!.innerHTML = view.action;
-}
-
-function modeRowHtml(id: string, iconName: "cloud" | "chip", title: string): string {
-  return `
-    <button type="button" class="mode-row" id="${id}" role="radio" aria-checked="false">
-      <span class="mode-row-radio"><i></i></span>
-      <span class="mode-row-icon">${icon(iconName, "large")}</span>
-      <span class="mode-row-text"><b>${title}</b><small class="mode-row-hint"></small></span>
-      <span class="setting-row-controls mode-row-action"></span>
-    </button>`;
-}
-
 let prevLastError: string | null = null;
 
-/** Adds the WHAT TURNS IT INTO TEXT group to the end of `container`. Nothing is
+/** Adds the PUSH-TO-TALK MODEL group to the end of `container`. Nothing is
  *  read while `windowHidden`; the returned lifecycle stops and restarts the poll. */
 export function renderDictationMode(
   container: HTMLElement,
@@ -130,11 +97,12 @@ export function renderDictationMode(
   container.insertAdjacentHTML(
     "beforeend",
     `
-    <div class="group-label">${icon("chip")}WHAT TURNS IT INTO TEXT</div>
-    <div class="card" role="radiogroup" aria-label="What turns it into text">
+    <div class="group-label">${icon("chip")}PUSH-TO-TALK MODEL</div>
+    <div class="card" role="radiogroup" aria-label="Push-to-talk model">
       ${modeRowHtml("mode-cloud", "cloud", "Cloud")}
       ${modeRowHtml("mode-local", "chip", "Local model")}
     </div>
+    <p class="group-note">Files you transcribe use this model too</p>
   `,
   );
 

@@ -14,6 +14,7 @@ class STTSettings(PackageSettings):
 
     mode: ProviderMode = ProviderMode.CLOUD
     meetings_mode: ProviderMode = ProviderMode.LOCAL
+    meetings_language: str = "uk"
 
     gemini_api_key: str = ""
 

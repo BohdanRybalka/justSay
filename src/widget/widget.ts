@@ -413,7 +413,8 @@ function endMeetingIndicator() {
 /** Act on one poll of the meeting status. A failed poll is ignored on purpose:
  *  an unreachable backend is not evidence the capture ended, and taking the
  *  marker down on it would break ADR 040 obligation 2 while a recording may
- *  still be running. */
+ *  still be running. A poll answered while this widget's own start or stop is
+ *  running is ignored too: that request reports how it ended. */
 async function pollMeetingHealth() {
   let status;
   try {
@@ -422,6 +423,7 @@ async function pollMeetingHealth() {
     console.warn("Could not read the meeting recording status:", e);
     return;
   }
+  if (meetingBusy) return;
   const action = decideMeetingHealth(status, meetingActive);
   if (action.kind === "keep") return;
   if (action.kind === "end") {

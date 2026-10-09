@@ -66,6 +66,7 @@ class UserSettings(BaseModel):
     meeting_consent_acknowledged: bool = False
     meetings_enabled: bool = False
     meetings_engine: Literal["cloud", "local"] = "local"
+    meetings_language: str = "uk"
 
     theme: Literal["system", "light", "dark"] = "system"
 
@@ -79,6 +80,14 @@ class UserSettings(BaseModel):
         """A file from before the switch has it on exactly when the disclosure was acknowledged."""
         if isinstance(data, dict) and "meetings_enabled" not in data:
             return {**data, "meetings_enabled": data.get("meeting_consent_acknowledged", False)}
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _meetings_start_in_the_dictation_language(cls, data: object) -> object:
+        """A file without a meeting language starts it at the dictation language."""
+        if isinstance(data, dict) and "meetings_language" not in data and "language" in data:
+            return {**data, "meetings_language": data["language"]}
         return data
 
 
@@ -363,6 +372,7 @@ def sync_to_runtime(us: UserSettings) -> bool:
 
     stt_settings.mode = stt_mode
     stt_settings.meetings_mode = ProviderMode(us.meetings_engine)
+    stt_settings.meetings_language = us.meetings_language
     stt_settings.whisper_model_size = us.whisper_model_size
     stt_settings.whisper_device = us.whisper_device
     stt_settings.initial_prompt = us.initial_prompt

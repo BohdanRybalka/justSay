@@ -171,6 +171,7 @@ async def test_a_job_moves_through_its_stages_and_ends_on_its_entry(queue, fakes
     assert (done.stage, done.progress, done.entry_id) == ("done", 1.0, "entry-1")
     call = pipeline.calls[0]
     assert (call["source"], call["source_name"]) == ("file", "talk.wav")
+    assert call["language"] == "auto"
     assert call["copy_to_clipboard"] is False
     assert not call["path"].exists()
 
@@ -597,6 +598,7 @@ async def test_a_stopped_meeting_becomes_a_meeting_entry_on_the_meetings_engine(
     queue, fakes, tmp_path, monkeypatch, engine
 ):
     monkeypatch.setattr(settings.stt, "meetings_mode", engine)
+    monkeypatch.setattr(settings.stt, "meetings_language", "pl")
     pipeline = _FakePipeline()
     recording = _recording(tmp_path, fakes, pipeline)
 
@@ -609,6 +611,7 @@ async def test_a_stopped_meeting_becomes_a_meeting_entry_on_the_meetings_engine(
     assert _view(queue, job_id).stage == "done"
     call = pipeline.calls[0]
     assert (call["source"], call["source_name"], call["mode"]) == ("meeting", None, engine)
+    assert call["language"] == "pl"
     assert not recording.exists()
 
 
