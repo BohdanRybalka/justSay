@@ -353,6 +353,8 @@ _CURSOR_PAGE_ORDER = "ORDER BY ts DESC, id DESC LIMIT :row_limit"
 _NEWER_PAGE_ORDER = "ORDER BY ts ASC, id ASC LIMIT :row_limit"
 _LOCAL_DAY = "date(ts / 1000, 'unixepoch', 'localtime')"
 _KNOWN_TS = f"ts > {schema.UNKNOWN_TS} AND ts <= {schema.STORED_TS_MAX}"
+
+
 def _where(*conditions: str | None) -> str:
     kept = [condition for condition in conditions if condition]
     return f"WHERE {' AND '.join(kept)} " if kept else ""

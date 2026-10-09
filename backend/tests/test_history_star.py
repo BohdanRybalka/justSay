@@ -190,6 +190,19 @@ async def test_a_kind_pages_with_its_cursor_and_reads_newer_rows_of_that_kind_on
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["source=meeting", "starred=true"])
+async def test_a_full_page_says_no_more_when_only_other_rows_lie_past_it(client, query):
+    _save_at(0, source="file")
+    for minute in (2, 4):
+        history.set_starred(_save_at(minute, source="meeting"), True)
+
+    page = (await client.get(f"/history?limit=2&{query}")).json()
+
+    assert len(page["entries"]) == 2
+    assert page["next_cursor"] is None
+
+
+@pytest.mark.asyncio
 async def test_search_under_a_kind_finds_only_that_kind_in_every_lane(client):
     ids = _one_of_each()
     _save_at(3, text="mid-sentence subbudget meeting", source="meeting")
