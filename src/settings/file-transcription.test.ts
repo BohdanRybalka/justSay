@@ -90,7 +90,7 @@ describe("refusalOf — why a file cannot be transcribed", () => {
   });
 
   it("names the ceiling a file is over", () => {
-    expect(refusalOf(buildFile("long.mp3", MAX_UPLOAD_BYTES + 1))).toBe("This file is over 25 MB");
+    expect(refusalOf(buildFile("long.mp3", MAX_UPLOAD_BYTES + 1))).toBe("This file is over 500 MB");
     expect(refusalOf(buildFile("edge.mp3", MAX_UPLOAD_BYTES))).toBeNull();
   });
 
@@ -110,7 +110,7 @@ describe("the overlay while a file is dragged over the window", () => {
     expect(overlay().hidden).toBe(false);
     expect(shownText()).toBe("Drop to transcribe");
     expect(overlay().querySelector(".drop-overlay-hint")!.textContent).toBe(DROP_HINT);
-    expect(DROP_HINT).toBe("mp3, wav, m4a, mp4 and 7 more · up to 25 MB");
+    expect(DROP_HINT).toBe("mp3, wav, m4a, mp4 and 7 more · up to 500 MB");
     expect(enter.defaultPrevented, "the webview refuses a drag whose enter is not cancelled").toBe(true);
   });
 
@@ -199,7 +199,7 @@ describe("dropping a file", () => {
 
   it("a new drag after a refusal shows the drop hint again", async () => {
     drag("drop", document.body, ["Files"], [buildFile("big.wav", MAX_UPLOAD_BYTES + 1)]);
-    await vi.waitFor(() => expect(shownText()).toBe("This file is over 25 MB"));
+    await vi.waitFor(() => expect(shownText()).toBe("This file is over 500 MB"));
 
     drag("dragenter", document.body, ["Files"]);
 
@@ -264,7 +264,7 @@ describe("a file picked from the ring or the tray", () => {
   it("refuses a file over the cap in the drop's words without reading it", async () => {
     await shellPicks("All hands.m4a", MAX_UPLOAD_BYTES + 1);
 
-    await vi.waitFor(() => expect(shownText()).toBe("This file is over 25 MB"));
+    await vi.waitFor(() => expect(shownText()).toBe("This file is over 500 MB"));
     expect(invokeMock).not.toHaveBeenCalled();
     expect(apiMock.startFileJob).not.toHaveBeenCalled();
   });
