@@ -270,7 +270,7 @@ class _OversizedUpload:
     ("max_size", "expected_detail"),
     [
         (512 * 1024, "File too large (max 0.5MB)"),
-        (MAX_UPLOAD_SIZE, "File too large (max 25MB)"),
+        (MAX_UPLOAD_SIZE, "File too large (max 500MB)"),
         (1024 * 1024 * 1024, "File too large (max 1024MB)"),
     ],
 )
