@@ -27,7 +27,7 @@ export const BACKEND_BASE_URL = `http://127.0.0.1:${BACKEND_PORT}`;
  *  back on a PUT is a no-op, so it doubles as "leave this key alone". */
 export const MASKED_API_KEY = "***";
 
-export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+export const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 
 export const ACCEPTED_AUDIO_EXTENSIONS: readonly string[] = [
   ".wav", ".mp3", ".ogg", ".oga", ".webm", ".flac",
