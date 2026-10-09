@@ -48,7 +48,7 @@ SPEED_SAMPLE_ROWS = 50
 FINISHED_SHOWN_SECONDS = 60.0
 DICTATION_POLL_SECONDS = 0.05
 JOB_FILE_PREFIX = "job_"
-JOB_LANGUAGE = "auto"
+FILE_LANGUAGE = "auto"
 
 NO_SPEECH_REASON = "We didn't hear any speech in this file"
 NO_KEY_REASON = "Add an API key in Settings"
