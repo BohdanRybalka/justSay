@@ -166,10 +166,16 @@ def _speech_only(samples: np.ndarray) -> np.ndarray:
     """``samples`` without their non-speech stretches; whole when no speech is heard in them."""
     spans = speech_spans(samples.astype(np.float32) / 32768.0, audio_settings)
     if not spans:
+        log.info("No speech heard in a %.1fs piece; sending it whole", samples.size / PIECE_RATE)
         return samples
-    return np.concatenate(
+    speech = np.concatenate(
         [samples[round(start * PIECE_RATE) : round(end * PIECE_RATE)] for start, end in spans]
     )
+    log.info(
+        "A %.1fs piece keeps %.1fs of speech in %d stretches",
+        samples.size / PIECE_RATE, speech.size / PIECE_RATE, len(spans),
+    )
+    return speech
 
 
 def _write_piece(mono: Path, piece: Path, start: float, end: float) -> None:

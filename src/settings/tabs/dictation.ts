@@ -21,6 +21,7 @@ import { DICTATION_LANGUAGES } from "../../languages";
 import { loadEventApi } from "../../event-api";
 import { TimedOutError } from "../../timeout";
 import { renderSelect } from "../../ui/controls";
+import { icon } from "../../ui/icons";
 import { PASTE_ROW, wirePasteRow } from "./dictation-paste";
 
 /** A discard that could not be delivered states what is known and promises
@@ -55,6 +56,7 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
     `
     <h2 class="panel-title">Dictation</h2>
     <p class="panel-subtitle">How talking turns into text.</p>
+    <div class="group-label">${icon("mic")}PUSH TO TALK</div>
     <div class="card">
       <div class="setting-row">
         <div class="setting-row-text">

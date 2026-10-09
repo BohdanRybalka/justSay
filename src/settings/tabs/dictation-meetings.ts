@@ -1,42 +1,41 @@
 /**
  * MEETINGS: the Record meetings switch. The first time it is turned on, the
  * meeting disclosure (ADR 040 obligation 3) opens under the row and the switch
- * stays off until "I understand". Below it, where a stopped meeting becomes
- * text, chosen apart from dictation (the hint names it), and the language it
- * is heard in.
+ * stays off until "I understand". Below it, the language a meeting is heard in:
+ * detected for each part, or one picked from the list. MEETING MODEL then picks
+ * where a stopped meeting becomes text, apart from dictation (the hint names it).
  */
 import { meetingsTurnedOn, type UserSettings } from "../../api";
-import { saveSettings, type TabLifecycle } from "../settings";
+import { getCloudKeyStatus, saveSettings, type TabLifecycle } from "../settings";
 import { emitSettingsChanged } from "./dictation";
+import { CLOUD_KEY_MISSING, cloudKeyMissing, drawRow, modeRowHtml } from "./mode-rows";
 import { notifyError } from "../../notify";
-import { renderSegmented, renderSelect, renderToggle, type SegmentedOption } from "../../ui/controls";
+import { renderSelect, renderToggle } from "../../ui/controls";
 import { icon } from "../../ui/icons";
 import { DICTATION_LANGUAGES } from "../../languages";
 
 type Engine = UserSettings["meetings_engine"];
+
+const DETECT = "auto";
 
 const WHERE_IT_BECOMES_TEXT: Readonly<Record<Engine, string>> = {
   cloud: "in the cloud",
   local: "on this computer",
 };
 
-const ENGINES: readonly SegmentedOption<Engine>[] = [
-  { value: "local", label: "On this computer" },
-  { value: "cloud", label: "In the cloud" },
-];
-
-export const MEETING_LANGUAGES = [
-  ...DICTATION_LANGUAGES,
-  { code: "auto", label: "Detect for each part" },
-] as const;
+const CLOUD_HINT = "Everyone's voices go to your cloud provider";
+const LOCAL_HINT = "Stays on this computer";
 
 export function meetingsHint(engine: Engine): string {
   return `Right-click the widget and pick Record a meeting · turned into text ${WHERE_IT_BECOMES_TEXT[engine]}`;
 }
 
-/** Adds the MEETINGS group to the end of `container`, the switch showing
- *  whether the backend will start a meeting recording. */
+/** Adds the MEETINGS and MEETING MODEL groups to the end of `container`, the
+ *  switch showing whether the backend will start a meeting recording. */
 export function renderDictationMeetings(container: HTMLElement, settings: UserSettings): TabLifecycle {
+  let language = settings.meetings_language;
+  let picked = language === DETECT ? settings.language : language;
+
   container.insertAdjacentHTML(
     "beforeend",
     `
@@ -66,25 +65,30 @@ export function renderDictationMeetings(container: HTMLElement, settings: UserSe
       </div>
       <div class="setting-row">
         <div class="setting-row-text">
-          <div class="setting-row-title">Turn meetings into text</div>
+          <div class="setting-row-title">Detect the language</div>
+          <div class="setting-row-hint">For calls in several languages</div>
         </div>
         <div class="setting-row-controls">
-          <div id="meetings-engine" aria-label="Turn meetings into text"></div>
+          <button id="meetings-detect" aria-label="Detect the language"></button>
         </div>
       </div>
-      <div class="setting-row">
+      <div class="setting-row" id="meetings-language-row">
         <div class="setting-row-text">
           <div class="setting-row-title">Meeting language</div>
         </div>
         <div class="setting-row-controls">
           <select id="meetings-language" aria-label="Meeting language">
-            ${MEETING_LANGUAGES.map(
-              (l) =>
-                `<option value="${l.code}" ${l.code === settings.meetings_language ? "selected" : ""}>${l.label}</option>`,
+            ${DICTATION_LANGUAGES.map(
+              (l) => `<option value="${l.code}" ${l.code === picked ? "selected" : ""}>${l.label}</option>`,
             ).join("")}
           </select>
         </div>
       </div>
+    </div>
+    <div class="group-label">${icon("chip")}MEETING MODEL</div>
+    <div class="card" role="radiogroup" aria-label="Meeting model">
+      ${modeRowHtml("meetings-cloud", "cloud", "Cloud")}
+      ${modeRowHtml("meetings-local", "chip", "Local model")}
     </div>
   `,
   );
@@ -93,8 +97,12 @@ export function renderDictationMeetings(container: HTMLElement, settings: UserSe
   const toggle = container.querySelector<HTMLButtonElement>("#meetings-toggle")!;
   const disclosure = container.querySelector<HTMLElement>("#meeting-disclosure")!;
   const consentButton = container.querySelector<HTMLButtonElement>("#btn-meeting-consent")!;
-  const engineChoice = container.querySelector<HTMLElement>("#meetings-engine")!;
+  const detectToggle = container.querySelector<HTMLButtonElement>("#meetings-detect")!;
+  const languageRow = container.querySelector<HTMLElement>("#meetings-language-row")!;
   const languageSelect = container.querySelector<HTMLSelectElement>("#meetings-language")!;
+  const cloudRow = container.querySelector<HTMLButtonElement>("#meetings-cloud")!;
+  const localRow = container.querySelector<HTMLButtonElement>("#meetings-local")!;
+  const keyMissing = cloudKeyMissing(getCloudKeyStatus());
 
   let acknowledged = settings.meeting_consent_acknowledged;
   let on = meetingsTurnedOn(settings);
@@ -145,32 +153,54 @@ export function renderDictationMeetings(container: HTMLElement, settings: UserSe
     drawSwitch();
   });
 
+  function showLanguage() {
+    detectToggle.setAttribute("aria-checked", String(language === DETECT));
+    languageRow.hidden = language === DETECT;
+    languageSelect.value = picked;
+  }
+
+  async function chooseLanguage(next: string) {
+    languageRow.hidden = next === DETECT;
+    const saved = await save({ meetings_language: next });
+    if (destroyed) return;
+    if (saved) {
+      language = next;
+      if (next !== DETECT) picked = next;
+    }
+    showLanguage();
+  }
+
+  renderToggle(detectToggle, language === DETECT, (detect) => void chooseLanguage(detect ? DETECT : picked));
+  renderSelect(languageSelect);
+  languageSelect.addEventListener("change", () => void chooseLanguage(languageSelect.value));
+  showLanguage();
+
   let engine = settings.meetings_engine;
 
-  function showEngine() {
-    hint.textContent = meetingsHint(engine);
-    renderSegmented(engineChoice, ENGINES, engine, (next) => void chooseEngine(next));
+  function showEngine(shown: Engine) {
+    hint.textContent = meetingsHint(shown);
+    drawRow(cloudRow, shown === "cloud", {
+      hint: keyMissing ? CLOUD_KEY_MISSING : CLOUD_HINT,
+      alert: keyMissing,
+      locked: false,
+      disabled: false,
+      action: "",
+    });
+    drawRow(localRow, shown === "local", { hint: LOCAL_HINT, alert: false, locked: false, disabled: false, action: "" });
   }
 
   async function chooseEngine(next: Engine) {
-    hint.textContent = meetingsHint(next);
+    if (next === engine) return;
+    showEngine(next);
     const saved = await save({ meetings_engine: next });
     if (destroyed) return;
     if (saved) engine = next;
-    showEngine();
+    showEngine(engine);
   }
 
-  showEngine();
-
-  let language = settings.meetings_language;
-  renderSelect(languageSelect);
-  languageSelect.addEventListener("change", async () => {
-    const next = languageSelect.value;
-    const saved = await save({ meetings_language: next });
-    if (destroyed) return;
-    if (saved) language = next;
-    languageSelect.value = language;
-  });
+  cloudRow.addEventListener("click", () => void chooseEngine("cloud"));
+  localRow.addEventListener("click", () => void chooseEngine("local"));
+  showEngine(engine);
 
   return {
     destroy: () => {

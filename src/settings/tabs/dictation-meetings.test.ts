@@ -4,8 +4,10 @@ import type { UserSettings } from "../../api";
 import { DICTATION_LANGUAGES } from "../../languages";
 
 const saveSettingsMock = vi.fn();
+const getCloudKeyStatusMock = vi.fn();
 vi.mock("../settings", () => ({
   saveSettings: saveSettingsMock,
+  getCloudKeyStatus: getCloudKeyStatusMock,
 }));
 
 const emitSettingsChangedMock = vi.fn();
@@ -60,6 +62,7 @@ const ACKNOWLEDGED_ON = { meeting_consent_acknowledged: true, meetings_enabled: 
 beforeEach(() => {
   vi.clearAllMocks();
   saveSettingsMock.mockResolvedValue({ settings: buildSettings(), warning: null });
+  getCloudKeyStatusMock.mockReturnValue({ groq_key_set: true });
 });
 
 describe("renderDictationMeetings — the switch", () => {
@@ -134,10 +137,14 @@ describe("renderDictationMeetings — the switch", () => {
 });
 
 describe("renderDictationMeetings — where a meeting becomes text", () => {
-  function engineButton(container: HTMLElement, label: string): HTMLButtonElement {
-    return [...container.querySelectorAll<HTMLButtonElement>("#meetings-engine button")].find(
-      (button) => button.textContent === label,
-    )!;
+  function picked(container: HTMLElement): string[] {
+    return [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Meeting model"] .mode-row')]
+      .filter((row) => row.getAttribute("aria-checked") === "true")
+      .map((row) => row.id);
+  }
+
+  function rowHint(container: HTMLElement, id: string): HTMLElement {
+    return container.querySelector<HTMLElement>(`#${id} .mode-row-hint`)!;
   }
 
   it("names the meetings choice, not the dictation mode", () => {
@@ -146,35 +153,57 @@ describe("renderDictationMeetings — where a meeting becomes text", () => {
     expect(view.hint.textContent).toBe(
       "Right-click the widget and pick Record a meeting · turned into text on this computer",
     );
-    expect(engineButton(view.container, "On this computer").getAttribute("aria-pressed")).toBe("true");
+    expect(picked(view.container)).toEqual(["meetings-local"]);
+    expect(rowHint(view.container, "meetings-local").textContent).toBe("Stays on this computer");
+    expect(rowHint(view.container, "meetings-cloud").textContent).toBe("Everyone's voices go to your cloud provider");
     expect(render({ stt_mode: "local", meetings_engine: "cloud" }).hint.textContent).toBe(meetingsHint("cloud"));
+  });
+
+  it("asks for the Groq key on the Cloud row when there is none", () => {
+    getCloudKeyStatusMock.mockReturnValue({ groq_key_set: false });
+    const hint = rowHint(render().container, "meetings-cloud");
+
+    expect(hint.textContent).toBe("Add a Groq key in Settings");
+    expect(hint.classList.contains("mode-row-alert")).toBe(true);
   });
 
   it("saves a new choice and names it", async () => {
     const view = render({ meetings_engine: "local" });
 
-    engineButton(view.container, "In the cloud").click();
+    view.container.querySelector<HTMLButtonElement>("#meetings-cloud")!.click();
 
     await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledWith({ meetings_engine: "cloud" }));
+    await vi.waitFor(() => expect(emitSettingsChangedMock).toHaveBeenCalled());
     expect(view.hint.textContent).toBe(meetingsHint("cloud"));
-    expect(engineButton(view.container, "In the cloud").getAttribute("aria-pressed")).toBe("true");
+    expect(picked(view.container)).toEqual(["meetings-cloud"]);
   });
 
   it("goes back to the saved choice when the new one could not be saved", async () => {
     saveSettingsMock.mockRejectedValue(new Error("backend down"));
     const view = render({ meetings_engine: "local" });
 
-    engineButton(view.container, "In the cloud").click();
+    view.container.querySelector<HTMLButtonElement>("#meetings-cloud")!.click();
 
     await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("backend down"));
     expect(view.hint.textContent).toBe(meetingsHint("local"));
-    expect(engineButton(view.container, "On this computer").getAttribute("aria-pressed")).toBe("true");
+    expect(picked(view.container)).toEqual(["meetings-local"]);
+  });
+
+  it("saves nothing when the chosen row is picked again", () => {
+    render({ meetings_engine: "local" }).container.querySelector<HTMLButtonElement>("#meetings-local")!.click();
+
+    expect(saveSettingsMock).not.toHaveBeenCalled();
   });
 });
 
 describe("renderDictationMeetings — the language a meeting is heard in", () => {
-  function languageSelect(container: HTMLElement): HTMLSelectElement {
-    return container.querySelector<HTMLSelectElement>("#meetings-language")!;
+  function languageView(overrides: Partial<UserSettings>) {
+    const { container } = render(overrides);
+    const detect = container.querySelector<HTMLButtonElement>("#meetings-detect")!;
+    const row = container.querySelector<HTMLElement>("#meetings-language-row")!;
+    const select = container.querySelector<HTMLSelectElement>("#meetings-language")!;
+    const detecting = () => detect.getAttribute("aria-checked") === "true";
+    return { detect, row, select, detecting };
   }
 
   function choose(select: HTMLSelectElement, value: string) {
@@ -182,37 +211,61 @@ describe("renderDictationMeetings — the language a meeting is heard in", () =>
     select.dispatchEvent(new Event("change"));
   }
 
-  it("offers the dictation languages and detecting each part, showing the saved one", () => {
-    const select = languageSelect(render({ meetings_language: "auto" }).container);
+  it("lists only languages, showing the saved one with detection off", () => {
+    const view = languageView({ meetings_language: "pl" });
 
-    expect([...select.options].map((o) => o.textContent)).toEqual([
-      ...DICTATION_LANGUAGES.map((l) => l.label),
-      "Detect for each part",
-    ]);
-    expect(select.value).toBe("auto");
+    expect([...view.select.options].map((o) => o.textContent)).toEqual(DICTATION_LANGUAGES.map((l) => l.label));
+    expect(view.select.value).toBe("pl");
+    expect(view.detecting()).toBe(false);
+    expect(view.row.hidden).toBe(false);
+  });
+
+  it("hides the list while detecting, keeping the dictation language ready in it", () => {
+    const view = languageView({ meetings_language: "auto", language: "en" });
+
+    expect(view.detecting()).toBe(true);
+    expect(view.row.hidden).toBe(true);
+    expect(view.select.value).toBe("en");
+  });
+
+  it("turns detection on and off, coming back to the language picked before", async () => {
+    const view = languageView({ meetings_language: "pl" });
+
+    view.detect.click();
+    expect(view.row.hidden).toBe(true);
+    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledWith({ meetings_language: "auto" }));
+    await vi.waitFor(() => expect(emitSettingsChangedMock).toHaveBeenCalledTimes(1));
+    view.detect.click();
+
+    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenLastCalledWith({ meetings_language: "pl" }));
+    await vi.waitFor(() => expect(emitSettingsChangedMock).toHaveBeenCalledTimes(2));
+    expect(view.detecting()).toBe(false);
+    expect(view.row.hidden).toBe(false);
   });
 
   it("saves a new language and goes back to it, not the first one, after a failed save", async () => {
-    const select = languageSelect(render({ meetings_language: "uk" }).container);
+    const view = languageView({ meetings_language: "uk" });
 
-    choose(select, "en");
+    choose(view.select, "en");
     await vi.waitFor(() => expect(emitSettingsChangedMock).toHaveBeenCalled());
     saveSettingsMock.mockRejectedValue(new Error("backend down"));
-    choose(select, "auto");
+    choose(view.select, "de");
 
     expect(saveSettingsMock).toHaveBeenCalledWith({ meetings_language: "en" });
     await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("backend down"));
-    expect(select.value).toBe("en");
+    expect(view.select.value).toBe("en");
   });
 
-  it("goes back to the saved language when the new one could not be saved", async () => {
+  it("stays on the saved language when detection could not be turned on", async () => {
     saveSettingsMock.mockRejectedValue(new Error("backend down"));
-    const select = languageSelect(render({ meetings_language: "uk" }).container);
+    const view = languageView({ meetings_language: "uk" });
 
-    choose(select, "auto");
+    view.detect.click();
 
     await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("backend down"));
-    expect(select.value).toBe("uk");
+    expect(view.detecting()).toBe(false);
+    expect(view.row.hidden).toBe(false);
+    expect(view.select.value).toBe("uk");
   });
 });
 
