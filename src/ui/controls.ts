@@ -5,30 +5,35 @@
  * Everything else about a control is plain markup with the stylesheet's classes.
  */
 
-import { icon } from "./icons";
+import { icon, type IconName } from "./icons";
 
 export interface SegmentedOption<T extends string> {
   value: T;
   label: string;
+  icon?: IconName;
 }
 
 const ARROW_STEP: Readonly<Record<string, number>> = { ArrowLeft: -1, ArrowRight: 1 };
 
 /**
- * Fills `root` with one pressed-state button per option, `value` pressed.
- * A click or an arrow key presses another and calls `onChange`; only the
- * pressed button is in the tab order. Calling it again redraws the buttons.
+ * Fills `root` with one pressed-state button per option, `value` pressed, drawn as one
+ * segmented bar or as separate `chip-btn` pills. A click or an arrow key presses another
+ * and calls `onChange`; only the pressed button is in the tab order. Calling it again
+ * redraws the buttons.
  */
 export function renderSegmented<T extends string>(
   root: HTMLElement,
   options: readonly SegmentedOption<T>[],
   value: T,
   onChange: (value: T) => void,
+  look: "segmented" | "chips" = "segmented",
 ): void {
-  const buttons = options.map(({ label }) => {
+  const buttons = options.map(({ label, icon: iconName }) => {
     const button = root.ownerDocument.createElement("button");
     button.type = "button";
-    button.textContent = label;
+    if (look === "chips") button.className = "chip-btn";
+    button.innerHTML = iconName === undefined ? "" : icon(iconName);
+    button.append(label);
     return button;
   });
   let pressed = options.findIndex((option) => option.value === value);
@@ -55,7 +60,7 @@ export function renderSegmented<T extends string>(
       root.querySelectorAll<HTMLButtonElement>(":scope > button")[next]?.focus();
     });
   });
-  root.classList.add("segmented");
+  root.classList.add(look === "chips" ? "chip-group" : "segmented");
   root.setAttribute("role", "group");
   root.replaceChildren(...buttons);
   press(pressed);

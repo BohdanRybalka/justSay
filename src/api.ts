@@ -678,6 +678,15 @@ export interface CleanupResult {
 
 export type EntrySource = "dictation" | "file" | "meeting";
 
+/** Which entries a History read keeps: one kind (`null` keeps every kind), and only
+ *  starred ones when `starred`. The two combine. */
+export interface HistoryFilter {
+  source: EntrySource | null;
+  starred: boolean;
+}
+
+export const EVERY_ENTRY: HistoryFilter = { source: null, starred: false };
+
 export interface HistoryEntry {
   id: string;
   /** ISO 8601, or `null` when the stored recording time could not be
@@ -797,9 +806,10 @@ async function historyPage(path: string, presence: "next_cursor" | "newest_curso
   };
 }
 
-/** The filter both History reads accept; absent means every entry. */
-function starredQuery(starredOnly: boolean): string {
-  return starredOnly ? "&starred=true" : "";
+/** The filter both History reads accept; a field left out keeps every entry. */
+function filterQuery(filter: HistoryFilter): string {
+  const source = filter.source === null ? "" : `&source=${filter.source}`;
+  return `${source}${filter.starred ? "&starred=true" : ""}`;
 }
 
 /** The two fields `/history` and `/history/search` both promise. A 200 carrying
@@ -912,11 +922,11 @@ export const api = {
    *  an entry malformed in a way no check here anticipated fails over an intact
    *  list. A validator here would have to know every field each tab's row
    *  reads to make the same promise. */
-  getHistory: (limit = 50, cursor: HistoryCursor | null = null, starredOnly = false) =>
+  getHistory: (limit = 50, cursor: HistoryCursor | null = null, filter = EVERY_ENTRY) =>
     historyPage(
       cursor === null
-        ? `/history?limit=${limit}${starredQuery(starredOnly)}`
-        : `/history?limit=${limit}&before_ts=${cursor.ts}&before_id=${encodeURIComponent(cursor.id)}${starredQuery(starredOnly)}`,
+        ? `/history?limit=${limit}${filterQuery(filter)}`
+        : `/history?limit=${limit}&before_ts=${cursor.ts}&before_id=${encodeURIComponent(cursor.id)}${filterQuery(filter)}`,
       "next_cursor",
     ),
 
@@ -924,9 +934,9 @@ export const api = {
    *  back — oldest first. A backend predating this read ignores `after_*` and
    *  answers the first page, which would repaint rows already on screen, so a
    *  body without `newest_cursor` is version skew rather than a page. */
-  getNewerHistory: (limit: number, after: HistoryCursor, starredOnly = false) =>
+  getNewerHistory: (limit: number, after: HistoryCursor, filter = EVERY_ENTRY) =>
     historyPage(
-      `/history?limit=${limit}&after_ts=${after.ts}&after_id=${encodeURIComponent(after.id)}${starredQuery(starredOnly)}`,
+      `/history?limit=${limit}&after_ts=${after.ts}&after_id=${encodeURIComponent(after.id)}${filterQuery(filter)}`,
       "newest_cursor",
     ),
 
@@ -954,12 +964,12 @@ export const api = {
    *  failed check never travels through the version-skew catch: a malformed 200
    *  is neither a `404` nor a `405`, but reporting it as skew would be the kind
    *  of mistake a catch this wide invites. */
-  searchHistory: async (q: string, limit = 30, starredOnly = false) => {
+  searchHistory: async (q: string, limit = 30, filter = EVERY_ENTRY) => {
     let body: unknown;
     try {
       body = await request<unknown>(
         "GET",
-        `/history/search?q=${encodeURIComponent(q)}&limit=${limit}${starredQuery(starredOnly)}`,
+        `/history/search?q=${encodeURIComponent(q)}&limit=${limit}${filterQuery(filter)}`,
         undefined,
         UNRECONCILED,
       );

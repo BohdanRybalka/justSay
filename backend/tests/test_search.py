@@ -579,7 +579,7 @@ async def test_search_history_hybrid_runs_lanes_concurrently():
     fts_delay = 0.25
     semantic_delay = 0.5
 
-    def slow_search_history(q, limit, starred_only):
+    def slow_search_history(q, limit, shown):
         time.sleep(fts_delay)
         return []
 

@@ -10,7 +10,9 @@ from app.transcripts.history import (
     CURSOR_TS_MAX,
     CURSOR_TS_MIN,
     HISTORY_LIMIT_MAX,
+    EntrySource,
     HistoryCursor,
+    HistoryFilter,
     HistoryPage,
     clear_all,
     delete_entry,
@@ -65,20 +67,26 @@ async def list_history(
     before_id: str | None = Query(None),
     after_ts: int | None = Query(None, ge=CURSOR_TS_MIN, le=CURSOR_TS_MAX),
     after_id: str | None = Query(None),
+    source: EntrySource | None = Query(None),
     starred: bool = Query(False),
 ):
     """One page of history: older than ``before_*`` newest first, or newer than ``after_*``.
 
     No cursor asks for the first page. Half a cursor, or both cursors, is 422
     (ADR 053). The newer rows come oldest first; both ``*_ts`` are bounded.
-    ``starred=true`` pages over starred entries only.
+    ``source`` keeps one kind, ``starred=true`` starred entries only; the two combine.
     """
     before = _cursor("before", before_ts, before_id)
     after = _cursor("after", after_ts, after_id)
     if before is not None and after is not None:
         raise HTTPException(status_code=422, detail="send before_* or after_*, not both")
     with store_busy_as_503():
-        return get_page(limit=limit, before=before, after=after, starred_only=starred)
+        return get_page(
+            limit=limit,
+            before=before,
+            after=after,
+            shown=HistoryFilter(source=source, starred=starred),
+        )
 
 
 def _cursor(side: str, ts: int | None, entry_id: str | None) -> HistoryCursor | None:
@@ -97,16 +105,20 @@ async def history_search(
         max_length=500,
     ),
     limit: int = Query(20, ge=1, le=search.SEARCH_LIMIT_MAX),
+    source: EntrySource | None = Query(None),
     starred: bool = Query(False),
 ):
     """Hybrid search: the FTS5/BM25 + LIKE lane and the semantic lane, fused by RRF.
 
     Empty, whitespace or fully-sanitized-out ``q`` returns 200 and an empty list. A
     storage lock is 503, an FTS5 syntax error 400, a semantic failure silent (ADR 010).
+    ``source`` and ``starred`` narrow both lanes as they narrow ``GET /history``.
     """
     try:
         with store_busy_as_503():
-            entries = await search.search_history_hybrid(q, limit=limit, starred_only=starred)
+            entries = await search.search_history_hybrid(
+                q, limit=limit, shown=HistoryFilter(source=source, starred=starred)
+            )
     except sqlite3.OperationalError as e:
         if _is_fts_syntax_error(e):
             raise HTTPException(status_code=400, detail="Invalid search query") from e

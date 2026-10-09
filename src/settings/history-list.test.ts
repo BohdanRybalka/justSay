@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryCursor, HistoryDay, HistoryEntry, HistoryPageResponse } from "../api";
+import type {
+  HistoryCursor,
+  HistoryDay,
+  HistoryEntry,
+  HistoryFilter,
+  HistoryPageResponse,
+} from "../api";
 import type { BuiltRow, HistoryRows } from "./history-list";
 import {
   buildEntry,
@@ -25,7 +31,7 @@ vi.mock("../api", async (importOriginal) => {
   return { ...actual, api: apiMock };
 });
 
-const { SidecarTooOldError } = await import("../api");
+const { EVERY_ENTRY, SidecarTooOldError } = await import("../api");
 const { api: unmockedApi } = await vi.importActual<typeof import("../api")>("../api");
 const { createHistoryList, formatEntryCount, sidecarTooOldText, SENTINEL_READING } = await import(
   "./history-list"
@@ -105,7 +111,7 @@ function listOver(
   pageSize = 2,
   isDestroyed: () => boolean = () => false,
   createRow: (entry: HistoryEntry) => HTMLElement = defaultCreateRow,
-  starredOnly: () => boolean = () => false
+  filter: () => HistoryFilter = () => EVERY_ENTRY
 ) {
   return createHistoryList({
     pageSize,
@@ -116,7 +122,7 @@ function listOver(
     createRow,
     renderEmptyState: () => {},
     isDestroyed,
-    starredOnly,
+    filter,
   });
 }
 
@@ -187,7 +193,7 @@ describe("createHistoryList — the client echoes cursors and never builds one",
     await listOver(h).load();
 
     expect(apiMock.getHistory).toHaveBeenCalledTimes(1);
-    expect(apiMock.getHistory.mock.calls[0]).toEqual([2, null, false]);
+    expect(apiMock.getHistory.mock.calls[0]).toEqual([2, null, EVERY_ENTRY]);
   });
 
   it("sends the previous response's next_cursor back verbatim when the sentinel is crossed", async () => {
@@ -288,14 +294,17 @@ describe("createHistoryList — the client echoes cursors and never builds one",
 });
 
 describe("createHistoryList — a filter change whose reload failed", () => {
-  it("pages nothing onto rows read under the other filter, and the poll retries the reload", async () => {
+  it.each<HistoryFilter>([
+    { source: null, starred: true },
+    { source: "meeting", starred: false },
+  ])("pages nothing onto rows read under the other filter, and the poll retries the reload (%o)", async (next) => {
     const h = harness();
-    let starredOnly = false;
+    let filter = EVERY_ENTRY;
     queueResponses(pageOf(entries("a", "b"), 3, { ts: 1, id: "b" }));
-    const list = listOver(h, 2, () => false, defaultCreateRow, () => starredOnly);
+    const list = listOver(h, 2, () => false, defaultCreateRow, () => filter);
     await list.load();
 
-    starredOnly = true;
+    filter = next;
     apiMock.getHistory.mockRejectedValueOnce(new Error("busy"));
     await list.load();
     cross();
@@ -305,7 +314,7 @@ describe("createHistoryList — a filter change whose reload failed", () => {
     queueResponses(pageOf(entries("s"), 1, null));
     await list.loadNewer();
 
-    expect(apiMock.getHistory).toHaveBeenLastCalledWith(2, null, true);
+    expect(apiMock.getHistory).toHaveBeenLastCalledWith(2, null, next);
     expect(h.paintedIds()).toEqual(["s"]);
   });
 });
@@ -658,7 +667,7 @@ describe("createHistoryList — rows newer than the newest one painted", () => {
     store.unshift(buildEntry("d"), buildEntry("c"));
     await list.loadNewer();
 
-    expect(apiMock.getNewerHistory.mock.calls[0]).toEqual([5, positionOf(buildEntry("b")), false]);
+    expect(apiMock.getNewerHistory.mock.calls[0]).toEqual([5, positionOf(buildEntry("b")), EVERY_ENTRY]);
     expect(h.paintedIds()).toEqual(["d", "c", "b", "a"]);
     expect(h.countText()).toBe("4 transcripts");
   });
