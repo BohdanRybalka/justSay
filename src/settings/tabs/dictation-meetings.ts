@@ -177,23 +177,33 @@ export function renderDictationMeetings(container: HTMLElement, settings: UserSe
 
   let engine = settings.meetings_engine;
 
+  let savingEngine = false;
+
   function showEngine(shown: Engine) {
     hint.textContent = meetingsHint(shown);
     drawRow(cloudRow, shown === "cloud", {
       hint: keyMissing ? CLOUD_KEY_MISSING : CLOUD_HINT,
       alert: keyMissing,
       locked: false,
-      disabled: false,
+      disabled: savingEngine,
       action: "",
     });
-    drawRow(localRow, shown === "local", { hint: LOCAL_HINT, alert: false, locked: false, disabled: false, action: "" });
+    drawRow(localRow, shown === "local", {
+      hint: LOCAL_HINT,
+      alert: false,
+      locked: false,
+      disabled: savingEngine,
+      action: "",
+    });
   }
 
   async function chooseEngine(next: Engine) {
-    if (next === engine) return;
+    if (savingEngine || next === engine) return;
+    savingEngine = true;
     showEngine(next);
     const saved = await save({ meetings_engine: next });
     if (destroyed) return;
+    savingEngine = false;
     if (saved) engine = next;
     showEngine(engine);
   }

@@ -189,6 +189,22 @@ describe("renderDictationMeetings — where a meeting becomes text", () => {
     expect(picked(view.container)).toEqual(["meetings-local"]);
   });
 
+  it("takes no second choice while the first is still saving", async () => {
+    let finish: (value: unknown) => void = () => {};
+    saveSettingsMock.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    const view = render({ meetings_engine: "local" });
+    const cloud = view.container.querySelector<HTMLButtonElement>("#meetings-cloud")!;
+
+    cloud.click();
+    expect(cloud.getAttribute("aria-disabled")).toBe("true");
+    cloud.click();
+    finish({ settings: buildSettings(), warning: null });
+
+    await vi.waitFor(() => expect(cloud.hasAttribute("aria-disabled")).toBe(false));
+    expect(saveSettingsMock).toHaveBeenCalledTimes(1);
+    expect(picked(view.container)).toEqual(["meetings-cloud"]);
+  });
+
   it("saves nothing when the chosen row is picked again", () => {
     render({ meetings_engine: "local" }).container.querySelector<HTMLButtonElement>("#meetings-local")!.click();
 
