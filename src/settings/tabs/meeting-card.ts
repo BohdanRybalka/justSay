@@ -2,8 +2,8 @@
  * The card at the top of Meetings. It captures nothing itself: the widget owns
  * the capture, so a press goes to it as `EVENT_MEETING_TOGGLE`, and the card
  * shows what the backend reports once a second while the window is on screen.
- * Before the first start the card is the meeting disclosure (ADR 040
- * obligation 3); the toggle is sent only after "I understand" is saved.
+ * A first start turns the card into the meeting disclosure (ADR 040 obligation
+ * 3); the toggle is sent only after "I understand" is saved.
  */
 import { api, meetingLevelStream, type MeetingStatus, type UserSettings } from "../../api";
 import { EVENT_MEETING_TOGGLE } from "../../contracts";
@@ -20,6 +20,7 @@ type View = "start" | "disclosure" | "recording";
 
 const POLL_MS = 1000;
 const PRESS_SETTLE_MS = 5000;
+const CLOCK_DRIFT_MS = 2000;
 
 const WHERE_IT_BECOMES_TEXT: Readonly<Record<Engine, string>> = {
   cloud: "in the cloud",
@@ -55,6 +56,7 @@ export function mountMeetingCard(
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let levels: AbortController | null = null;
   let latestRead = 0;
+  let reading = false;
   let destroyed = false;
 
   function currentView(): View {
@@ -137,10 +139,17 @@ export function mountMeetingCard(
   }
 
   async function requestToggle() {
-    pressedWhileRecording = recording;
+    const shownAtPress = recording;
+    pressedWhileRecording = shownAtPress;
     if (pressTimer !== null) clearTimeout(pressTimer);
     pressTimer = setTimeout(releasePress, PRESS_SETTLE_MS);
     draw();
+    const current = await api.getMeetingStatus().catch(() => null);
+    if (current !== null && !destroyed) applyStatus(current);
+    if (recording !== shownAtPress) {
+      releasePress();
+      return;
+    }
     try {
       const { emit } = await loadEventApi();
       await emit(EVENT_MEETING_TOGGLE);
@@ -191,13 +200,18 @@ export function mountMeetingCard(
     if (levels) return;
     const stream: AbortController = meetingLevelStream(
       (data) => showLevels(stream, levelFromDb(data.mic_db), levelFromDb(data.system_db)),
-      () => showLevels(stream, 0, 0),
+      () => dropLevels(stream),
       (error) => {
         console.warn("The meeting level stream stopped:", error);
-        showLevels(stream, 0, 0);
+        dropLevels(stream);
       },
     );
     levels = stream;
+  }
+
+  function dropLevels(stream: AbortController) {
+    showLevels(stream, 0, 0);
+    if (levels === stream) levels = null;
   }
 
   function closeLevels() {
@@ -210,7 +224,10 @@ export function mountMeetingCard(
     const wasKnown = statusKnown;
     statusKnown = true;
     recording = status.is_recording;
-    if (recording && !wasRecording) startedAt = Date.now() - status.duration_seconds * 1000;
+    const elapsedMs = status.duration_seconds * 1000;
+    if (recording && (!wasRecording || Math.abs(Date.now() - startedAt - elapsedMs) > CLOCK_DRIFT_MS)) {
+      startedAt = Date.now() - elapsedMs;
+    }
     if (pressedWhileRecording !== null && recording !== pressedWhileRecording) {
       pressedWhileRecording = null;
       if (pressTimer !== null) clearTimeout(pressTimer);
@@ -225,8 +242,11 @@ export function mountMeetingCard(
   }
 
   async function read() {
-    const token = ++latestRead;
+    if (reading) return;
+    reading = true;
+    const token = latestRead;
     const status = await api.getMeetingStatus().catch(() => null);
+    reading = false;
     if (status === null || destroyed || token !== latestRead) return;
     applyStatus(status);
   }

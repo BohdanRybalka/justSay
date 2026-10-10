@@ -284,6 +284,28 @@ describe("a meeting that is recording", () => {
     expect(meetingLevelStreamMock).toHaveBeenCalledOnce();
   });
 
+  it("starts the clock again when another meeting began between two reads", async () => {
+    const { title } = await recording(2700);
+    expect(title()).toBe("Recording · 45:00");
+
+    getMeetingStatusMock.mockResolvedValue(status(true, 3));
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(title()).toBe("Recording · 0:04");
+  });
+
+  it("draws the voices again after the level stream broke", async () => {
+    const { card } = await recording();
+    levelStreams[0].onError("HTTP 503");
+    expect(card.querySelector<HTMLElement>("#meeting-level-mic")!.style.width).toBe("0%");
+
+    await vi.advanceTimersByTimeAsync(1000);
+    levelStreams[1].onLevel({ mic_db: -30, system_db: -30 });
+
+    expect(levelStreams).toHaveLength(2);
+    expect(card.querySelector<HTMLElement>("#meeting-level-mic")!.style.width).toBe("50%");
+  });
+
   it("keeps showing the meeting when a read fails", async () => {
     const { title } = await recording();
     getMeetingStatusMock.mockRejectedValue(new Error("backend busy"));
@@ -291,6 +313,59 @@ describe("a meeting that is recording", () => {
     await vi.advanceTimersByTimeAsync(3000);
 
     expect(title()).toMatch(/^Recording · /);
+  });
+});
+
+describe("a meeting changed from somewhere else", () => {
+  it("does not start a meeting when Stop is pressed after it was stopped elsewhere", async () => {
+    getMeetingStatusMock.mockResolvedValue(status(true, 20));
+    const { button, title } = await mountReady();
+    getMeetingStatusMock.mockResolvedValue(status(false));
+
+    button("meeting-stop").click();
+    await settle();
+
+    expect(emitMock).not.toHaveBeenCalled();
+    expect(title()).toBe("Record a meeting");
+    expect(button("meeting-start").disabled).toBe(false);
+  });
+
+  it("does not stop a meeting when Start is pressed after it was started elsewhere", async () => {
+    const { button, title } = await mountReady();
+    getMeetingStatusMock.mockResolvedValue(status(true, 4));
+
+    button("meeting-start").click();
+    await settle();
+
+    expect(emitMock).not.toHaveBeenCalled();
+    expect(title()).toBe("Recording · 0:04");
+  });
+
+  it("does not start a meeting when a read lands between Stop and its answer", async () => {
+    getMeetingStatusMock.mockResolvedValue(status(true, 20));
+    const { button, title } = await mountReady();
+    let answer: (value: unknown) => void = () => {};
+    getMeetingStatusMock.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+
+    button("meeting-stop").click();
+    getMeetingStatusMock.mockResolvedValue(status(false));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(title()).toBe("Record a meeting");
+    answer(status(false));
+    await settle();
+
+    expect(emitMock).not.toHaveBeenCalled();
+  });
+
+  it("shows a meeting even when the backend answers slower than a poll", async () => {
+    getMeetingStatusMock.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve(status(true, 5)), 1200)),
+    );
+    const { title } = mount();
+
+    await vi.advanceTimersByTimeAsync(1300);
+
+    expect(title()).toBe("Recording · 0:05");
   });
 });
 
