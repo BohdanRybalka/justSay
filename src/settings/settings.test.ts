@@ -65,12 +65,14 @@ vi.mock("./tabs/insights", () => ({
   }),
 }));
 
-const fileTranscriptionMounts: { root: HTMLElement; pickButton: HTMLButtonElement; onStarted: () => void }[] = [];
+const fileTranscriptionMounts: { root: HTMLElement; onStarted: () => void; pick: () => void }[] = [];
 
-vi.mock("./file-transcription", () => ({
-  mountFileTranscription: vi.fn((root: HTMLElement, pickButton: HTMLButtonElement, onStarted: () => void) => {
-    fileTranscriptionMounts.push({ root, pickButton, onStarted });
-    return () => {};
+vi.mock("./file-transcription", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./file-transcription")>()),
+  mountFileTranscription: vi.fn((root: HTMLElement, onStarted: () => void) => {
+    const pick = vi.fn();
+    fileTranscriptionMounts.push({ root, onStarted, pick });
+    return { pick, destroy: () => {} };
   }),
 }));
 
@@ -224,11 +226,11 @@ beforeEach(() => {
       <button class="account-row" data-panel="account" aria-current="false">
         <span class="avatar"></span><span class="account-row-name">Account</span>
       </button>
-      <button id="transcribe-file">Transcribe a file</button>
       <button class="nav-item" data-panel="insights" aria-current="true">Insights</button>
       <button class="nav-item" data-panel="history" aria-current="false">History</button>
       <button class="nav-item" data-panel="dictation" aria-current="false">Dictation</button>
       <button class="nav-item" data-panel="meetings" aria-current="false">Meetings</button>
+      <button class="nav-item" data-panel="files" aria-current="false">Files</button>
       <button class="nav-item" data-panel="settings" aria-current="false">Settings</button>
       <div id="sidebar-status" class="sidebar-status sidebar-status--starting">
         <span class="sidebar-status-text">Starting…</span><span id="sidebar-version">v…</span>
@@ -1544,11 +1546,19 @@ describe("a file picked or dropped on the window", () => {
   const currentPanel = () =>
     document.querySelector<HTMLElement>('[data-panel][aria-current="true"]')!.dataset.panel;
 
-  it("is caught over the whole window and picked with the sidebar's button, not inside one panel", async () => {
+  it("is caught over the whole window, not inside one panel", async () => {
     await bootOn("insights");
 
     expect(fileTranscriptionMounts[0].root).toBe(document.body);
-    expect(fileTranscriptionMounts[0].pickButton).toBe(document.getElementById("transcribe-file"));
+  });
+
+  it("is picked with Choose a file on the Files page, which the sidebar opens", async () => {
+    await bootOn("files");
+
+    expect(currentPanel()).toBe("files");
+    expect(document.querySelector(".panel-title")!.textContent).toBe("Files");
+    document.querySelector<HTMLButtonElement>("#files-choose")!.click();
+    expect(fileTranscriptionMounts[0].pick).toHaveBeenCalledOnce();
   });
 
   it("opens History once its job has started", async () => {

@@ -10,7 +10,7 @@ function sidebarMarkup(): HTMLElement {
 }
 
 describe("the sidebar markup", () => {
-  it("lists Insights, History, a RECORD group with Dictation and Meetings, a line, then Settings", () => {
+  it("lists Insights, History, a RECORD group with Dictation, Meetings and Files, a line, then Settings", () => {
     const rows = [...sidebarMarkup().children].flatMap((row) => {
       if (row.classList.contains("nav-label")) return [`label:${row.textContent}`];
       if (row.classList.contains("nav-gap")) return ["gap"];
@@ -18,15 +18,21 @@ describe("the sidebar markup", () => {
       return [];
     });
 
-    expect(rows).toEqual(["insights", "history", "label:RECORD", "dictation", "meetings", "gap", "settings"]);
+    expect(rows).toEqual(["insights", "history", "label:RECORD", "dictation", "meetings", "files", "gap", "settings"]);
   });
 
-  it("draws Dictation with the microphone and Meetings with the people icon", () => {
+  it("draws Dictation with the microphone, Meetings with the people icon and Files with the file icon", () => {
     const iconOf = (panel: string) =>
       sidebarMarkup().querySelector(`[data-panel="${panel}"] use`)!.getAttribute("href");
 
     expect(iconOf("dictation")).toBe("#mic");
     expect(iconOf("meetings")).toBe("#users");
+    expect(iconOf("files")).toBe("#file");
+  });
+
+  it("no longer carries the Transcribe a file box under the sections", () => {
+    expect(sidebarMarkup().querySelector("#transcribe-file")).toBeNull();
+    expect(sidebarMarkup().textContent).not.toContain("Transcribe a file");
   });
 
   it("marks Meetings, and only Meetings, as the open section", () => {

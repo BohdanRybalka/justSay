@@ -14,6 +14,7 @@
   <link rel="stylesheet" href="/src/settings/shell/sidebar.css" />
   <link rel="stylesheet" href="/src/settings/shell/pane.css" />
   <link rel="stylesheet" href="/src/settings/file-transcription.css" />
+  <link rel="stylesheet" href="/src/settings/tabs/files.css" />
   <link rel="stylesheet" href="/src/settings/tabs/settings-panel.css" />
   <link rel="stylesheet" href="/src/settings/tabs/history.css" />
   <link rel="stylesheet" href="/src/settings/tabs/insights.css" />
@@ -33,9 +34,9 @@
       <div class="nav-label">RECORD</div>
       <button type="button" class="nav-item" data-panel="dictation" aria-current="false"><svg class="icon" aria-hidden="true"><use href="#mic"/></svg>Dictation</button>
       <button type="button" class="nav-item" data-panel="meetings" aria-current="false"><svg class="icon" aria-hidden="true"><use href="#users"/></svg>Meetings</button>
+      <button type="button" class="nav-item" data-panel="files" aria-current="false"><svg class="icon" aria-hidden="true"><use href="#file"/></svg>Files</button>
       <div class="nav-gap"></div>
       <button type="button" class="nav-item" data-panel="settings" aria-current="false"><svg class="icon" aria-hidden="true"><use href="#cog"/></svg>Settings</button>
-      <button type="button" id="transcribe-file" class="sidebar-transcribe"><svg class="icon" aria-hidden="true"><use href="#upload"/></svg><span><b>Transcribe a file</b><small>or drop one anywhere</small></span></button>
       <div id="sidebar-status" class="sidebar-status sidebar-status--starting">
         <span class="sidebar-status-dot"></span>
         <span class="sidebar-status-text">Starting…</span>

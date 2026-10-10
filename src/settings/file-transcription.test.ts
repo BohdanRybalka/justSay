@@ -23,12 +23,10 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 
-const { mountFileTranscription, refusalOf, transformOnto, DROP_HINT, REFUSAL_SHOWN_MS } = await import("./file-transcription");
+const { mountFileTranscription, refusalOf, DROP_AREA_CLASS, DROP_HINT, REFUSAL_SHOWN_MS } = await import("./file-transcription");
 
 const onStarted = vi.fn();
-const animate = vi.fn();
-let reducedMotion = false;
-let teardown: () => void = () => {};
+let mounted: { pick: () => void; destroy: () => void } = { pick: () => {}, destroy: () => {} };
 
 function buildFile(name: string, size: number): File {
   const file = new File(["audio-bytes"], name, { type: "audio/wav" });
@@ -41,10 +39,6 @@ function drag(type: string, target: EventTarget, carried: string[], files: File[
   Object.defineProperty(event, "dataTransfer", { value: { types: carried, files } });
   target.dispatchEvent(event);
   return event;
-}
-
-function pickButton(): HTMLButtonElement {
-  return document.querySelector<HTMLButtonElement>("#transcribe-file")!;
 }
 
 function picker(): HTMLInputElement {
@@ -66,16 +60,13 @@ function shownText(): string {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  reducedMotion = false;
-  HTMLElement.prototype.animate = animate;
-  window.matchMedia = vi.fn((query: string) => ({ matches: reducedMotion && query.includes("reduce") }) as MediaQueryList);
   apiMock.startFileJob.mockResolvedValue({ id: "job-1" });
-  document.body.innerHTML = `<button id="transcribe-file"></button><main id="pane"><div id="child"><span id="grandchild"></span></div></main>`;
-  teardown = mountFileTranscription(document.body, pickButton(), onStarted);
+  document.body.innerHTML = `<main id="pane"><div id="child"><span id="grandchild"></span></div></main>`;
+  mounted = mountFileTranscription(document.body, onStarted);
 });
 
 afterEach(() => {
-  teardown();
+  mounted.destroy();
   vi.useRealTimers();
 });
 
@@ -218,11 +209,11 @@ describe("dropping a file", () => {
   });
 });
 
-describe("picking a file with the button", () => {
+describe("picking a file with pick()", () => {
   it("opens the system file dialog, offering audio files", () => {
     const opened = vi.spyOn(picker(), "click").mockImplementation(() => {});
 
-    pickButton().click();
+    mounted.pick();
 
     expect(opened).toHaveBeenCalledOnce();
     expect(picker().accept).toContain(".m4a");
@@ -281,70 +272,98 @@ describe("a file picked from the ring or the tray", () => {
   it("stops hearing the shell on teardown", async () => {
     await vi.waitFor(() => expect(shellListeners.get(EVENT_FILE_PICKED)).toBeTypeOf("function"));
 
-    teardown();
-    teardown = () => {};
+    mounted.destroy();
+    mounted = { pick: () => {}, destroy: () => {} };
 
     expect(stopHearing).toHaveBeenCalledOnce();
   });
 });
 
-describe("the drop box growing out of the sidebar button", () => {
-  const BUTTON = new DOMRect(12, 610, 190, 50);
-  const BOX = new DOMRect(336, 268, 372, 186);
-
-  function placeOnScreen(): void {
-    vi.spyOn(pickButton(), "getBoundingClientRect").mockReturnValue(BUTTON);
-    vi.spyOn(overlay().querySelector<HTMLElement>(".drop-overlay-box")!, "getBoundingClientRect").mockReturnValue(BOX);
+describe("a drop area on the page", () => {
+  function showDropArea(): void {
+    document.getElementById("pane")!.innerHTML = `<div class="${DROP_AREA_CLASS}"></div>`;
   }
 
-  it("the starting transform lays the box exactly over the button", () => {
-    expect(transformOnto(BUTTON, BOX)).toBe(`translate(-415px, 274px) scale(${190 / 372}, ${50 / 186})`);
+  const lit = () => document.body.classList.contains("dragging-file");
+
+  it("lights the drop area instead of dimming the window when a file is dragged in", () => {
+    showDropArea();
+
+    const enter = drag("dragenter", document.getElementById("pane")!, ["Files"]);
+
+    expect(lit()).toBe(true);
+    expect(overlay().hidden).toBe(true);
+    expect(enter.defaultPrevented).toBe(true);
   });
 
-  it("starts from the button and ends in place when a file is dragged in", () => {
-    placeOnScreen();
-
+  it("puts the drop area back when the drag leaves the window", () => {
+    showDropArea();
     drag("dragenter", document.body, ["Files"]);
 
-    expect(animate).toHaveBeenCalledOnce();
-    const [frames] = animate.mock.calls[0];
-    expect(frames[0].transform).toBe(transformOnto(BUTTON, BOX));
-    expect(frames.at(-1).transform).toBe("none");
+    drag("dragleave", document.body, ["Files"]);
+
+    expect(lit()).toBe(false);
   });
 
-  it("does not grow from the button to explain a refusal", async () => {
-    placeOnScreen();
+  it("starts the job of a file dropped anywhere and puts the drop area back", async () => {
+    showDropArea();
+    drag("dragenter", document.body, ["Files"]);
+
+    drag("drop", document.getElementById("pane")!, ["Files"], [buildFile("note.wav", 2048)]);
+
+    expect(lit()).toBe(false);
+    await vi.waitFor(() => expect(onStarted).toHaveBeenCalledOnce());
+  });
+
+  it("still explains a refusal on the overlay", async () => {
+    showDropArea();
+    drag("dragenter", document.body, ["Files"]);
 
     drag("drop", document.body, ["Files"], [buildFile("notes.txt", 2048)]);
-    await vi.waitFor(() => expect(shownText()).toBe("That's not an audio file"));
 
-    expect(animate).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(shownText()).toBe("That's not an audio file"));
+    expect(overlay().hidden).toBe(false);
   });
 
-  it("appears without moving when the system asks for reduced motion", () => {
-    reducedMotion = true;
-    placeOnScreen();
+  it("takes a refusal away when the next drag arrives", async () => {
+    showDropArea();
+    drag("drop", document.body, ["Files"], [buildFile("empty.wav", 0)]);
+    await vi.waitFor(() => expect(overlay().hidden).toBe(false));
 
     drag("dragenter", document.body, ["Files"]);
 
-    expect(overlay().hidden).toBe(false);
-    expect(animate).not.toHaveBeenCalled();
+    expect(overlay().hidden).toBe(true);
+    expect(lit()).toBe(true);
+  });
+
+  it("is not lit by a drag that carries no file", () => {
+    showDropArea();
+
+    drag("dragenter", document.body, ["text/plain"]);
+
+    expect(lit()).toBe(false);
   });
 });
 
 describe("teardown", () => {
-  it("removes the overlay and the dialog, and stops listening to the window and the button", () => {
-    teardown();
-    teardown = () => {};
+  it("removes the overlay and the dialog, and stops listening to the window", () => {
+    mounted.destroy();
+    mounted = { pick: () => {}, destroy: () => {} };
 
     const enter = drag("dragenter", document.body, ["Files"]);
 
     expect(document.querySelector(".drop-overlay")).toBeNull();
     expect(document.querySelector('input[type="file"]')).toBeNull();
     expect(enter.defaultPrevented).toBe(false);
-    const opened = vi.spyOn(HTMLInputElement.prototype, "click");
-    pickButton().click();
-    expect(opened).not.toHaveBeenCalled();
-    opened.mockRestore();
+  });
+
+  it("puts a lit drop area back", () => {
+    document.getElementById("pane")!.innerHTML = `<div class="${DROP_AREA_CLASS}"></div>`;
+    drag("dragenter", document.body, ["Files"]);
+
+    mounted.destroy();
+    mounted = { pick: () => {}, destroy: () => {} };
+
+    expect(document.body.classList.contains("dragging-file")).toBe(false);
   });
 });
