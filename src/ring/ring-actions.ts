@@ -39,16 +39,17 @@ export function petalLabel(action: RingAction, state: RingState): string {
   }
 }
 
-/** A meeting petal with meetings off opens their switch rather than asking the
- *  backend for a refusal; a stop is always sent. The language petal swaps back
- *  to the language used before, and opens Dictation when there is none. */
+/** A meeting petal with meetings off opens the Meetings page rather than
+ *  asking the backend for a refusal; a stop is always sent. The language petal
+ *  swaps back to the language used before, and opens Dictation when there is
+ *  none. */
 export function stepFor(action: RingAction, state: RingState): RingStep {
   switch (action) {
     case "meeting":
       if (state.meetingRecording || !state.settings || meetingsTurnedOn(state.settings)) {
         return { kind: "toggle-meeting" };
       }
-      return { kind: "open-panel", target: { panel: "dictation", section: "meetings" } };
+      return { kind: "open-panel", target: { panel: "meetings" } };
     case "file":
       return { kind: "pick-file" };
     case "language": {
@@ -56,9 +57,9 @@ export function stepFor(action: RingAction, state: RingState): RingStep {
       if (previous && previous !== state.settings?.language) {
         return { kind: "switch-language", language: previous };
       }
-      return { kind: "open-panel", target: { panel: "dictation", section: null } };
+      return { kind: "open-panel", target: { panel: "dictation" } };
     }
     case "settings":
-      return { kind: "open-panel", target: { panel: "settings", section: null } };
+      return { kind: "open-panel", target: { panel: "settings" } };
   }
 }

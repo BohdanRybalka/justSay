@@ -55,8 +55,8 @@ export const EVENT_RING_CLOSED = "ring-closed";
  *  told where the mouse is, and the ring never activates the app. */
 export const EVENT_RING_POINTER = "ring-pointer";
 
-/** Another window asks the main window to open one of its panels, scrolled to
- *  `section` when one is named. The asker shows the window itself. */
+/** Another window asks the main window to open one of its panels. The asker
+ *  shows the window itself. */
 export const EVENT_NAVIGATE_PANEL = "navigate-panel";
 
 /** The user picked an audio file in the system dialog the ring or the tray
@@ -116,7 +116,6 @@ export interface WidgetHover {
 /** Payload of `EVENT_NAVIGATE_PANEL`. */
 export interface NavigatePanel {
   panel: PanelName;
-  section: "meetings" | null;
 }
 
 /** Payload of `EVENT_RING_POINTER`: logical pixels from the ring's centre. */

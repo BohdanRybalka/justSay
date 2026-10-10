@@ -41,8 +41,8 @@ describe("what a petal does", () => {
     expect(stepFor("meeting", read())).toEqual({ kind: "toggle-meeting" });
   });
 
-  it("opens the meetings switch in Dictation while meetings are off", () => {
-    const opened = { kind: "open-panel", target: { panel: "dictation", section: "meetings" } };
+  it("opens the Meetings page while meetings are off", () => {
+    const opened = { kind: "open-panel", target: { panel: "meetings" } };
 
     expect(stepFor("meeting", read({ meetings_enabled: false }))).toEqual(opened);
     expect(stepFor("meeting", read({ meeting_consent_acknowledged: false }))).toEqual(opened);
@@ -68,7 +68,7 @@ describe("what a petal does", () => {
   });
 
   it("opens Dictation to pick a language when none was used before", () => {
-    const opened = { kind: "open-panel", target: { panel: "dictation", section: null } };
+    const opened = { kind: "open-panel", target: { panel: "dictation" } };
 
     expect(stepFor("language", read({ previous_language: "" }))).toEqual(opened);
     expect(stepFor("language", read({ language: "uk", previous_language: "uk" }))).toEqual(opened);
@@ -83,7 +83,7 @@ describe("what a petal does", () => {
   it("opens Settings for Settings", () => {
     expect(stepFor("settings", read())).toEqual({
       kind: "open-panel",
-      target: { panel: "settings", section: null },
+      target: { panel: "settings" },
     });
   });
 });

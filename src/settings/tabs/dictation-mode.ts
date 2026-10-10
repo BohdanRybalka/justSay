@@ -1,5 +1,5 @@
 /**
- * PUSH-TO-TALK MODEL: the Cloud and Local model radio rows, which files you
+ * MODEL on the Dictation page: the Cloud and Local model radio rows, which files you
  * transcribe follow too. Cloud says whether the Groq key is set; Local draws the
  * local engine's state, read every 3 s while the window is shown. Picking a row
  * switches the mode.
@@ -87,7 +87,7 @@ function localView(row: LocalRow): RowView {
 
 let prevLastError: string | null = null;
 
-/** Adds the PUSH-TO-TALK MODEL group to the end of `container`. Nothing is
+/** Adds the MODEL group to the end of `container`. Nothing is
  *  read while `windowHidden`; the returned lifecycle stops and restarts the poll. */
 export function renderDictationMode(
   container: HTMLElement,
@@ -97,7 +97,7 @@ export function renderDictationMode(
   container.insertAdjacentHTML(
     "beforeend",
     `
-    <div class="group-label">${icon("chip")}PUSH-TO-TALK MODEL</div>
+    <div class="group-label">${icon("chip")}MODEL</div>
     <div class="card" role="radiogroup" aria-label="Push-to-talk model">
       ${modeRowHtml("mode-cloud", "cloud", "Cloud")}
       ${modeRowHtml("mode-local", "chip", "Local model")}

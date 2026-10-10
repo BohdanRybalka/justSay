@@ -1,5 +1,43 @@
+// @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { backendStateOf } from "./sidebar";
+import { backendStateOf, renderPanelSelection } from "./sidebar";
+
+function sidebarMarkup(): HTMLElement {
+  const html = readFileSync(resolve(__dirname, "../../../index.html"), "utf-8");
+  return new DOMParser().parseFromString(html, "text/html").getElementById("sidebar")!;
+}
+
+describe("the sidebar markup", () => {
+  it("lists Insights, History, a RECORD group with Dictation and Meetings, a line, then Settings", () => {
+    const rows = [...sidebarMarkup().children].flatMap((row) => {
+      if (row.classList.contains("nav-label")) return [`label:${row.textContent}`];
+      if (row.classList.contains("nav-gap")) return ["gap"];
+      if (row instanceof HTMLElement && row.classList.contains("nav-item")) return [row.dataset.panel!];
+      return [];
+    });
+
+    expect(rows).toEqual(["insights", "history", "label:RECORD", "dictation", "meetings", "gap", "settings"]);
+  });
+
+  it("draws Dictation with the microphone and Meetings with the people icon", () => {
+    const iconOf = (panel: string) =>
+      sidebarMarkup().querySelector(`[data-panel="${panel}"] use`)!.getAttribute("href");
+
+    expect(iconOf("dictation")).toBe("#mic");
+    expect(iconOf("meetings")).toBe("#users");
+  });
+
+  it("marks Meetings, and only Meetings, as the open section", () => {
+    const sidebar = sidebarMarkup();
+
+    renderPanelSelection(sidebar, "meetings");
+
+    const current = [...sidebar.querySelectorAll<HTMLElement>('[data-panel][aria-current="true"]')];
+    expect(current.map((item) => item.dataset.panel)).toEqual(["meetings"]);
+  });
+});
 
 describe("backendStateOf", () => {
   it.each([

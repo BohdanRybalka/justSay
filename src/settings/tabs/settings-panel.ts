@@ -1,7 +1,7 @@
 /**
  * The Settings panel's own card — Appearance, Storage and Version — then the
- * folded API keys and Delete all history under it. Both deletions ask once,
- * inline, before anything is removed.
+ * dictionary, the folded API keys and Delete all history under it. Both
+ * deletions ask once, inline, before anything is removed.
  */
 import { api, type UserSettings } from "../../api";
 import { notifyError } from "../../notify";
@@ -10,6 +10,7 @@ import { icon } from "../../ui/icons";
 import { applyAppTheme, type ThemePreference } from "../../ui/theme";
 import { getCloudKeyStatus, saveSettings, type TabLifecycle } from "../settings";
 import { emitSettingsChanged } from "./dictation";
+import { renderDictionary } from "./dictionary";
 import { renderKeys } from "./keys";
 import { renderVersionRow } from "./version-row";
 
@@ -194,6 +195,7 @@ export function renderSettingsPanel(container: HTMLElement, settings: UserSettin
       <div class="setting-row storage-row"></div>
       <div class="setting-row version-row"></div>
     </div>
+    <div class="dictionary"></div>
     <details class="api-keys"><summary>API keys</summary><div class="api-keys-rows"></div></details>
     <div class="history-delete"></div>
   `,
@@ -201,12 +203,14 @@ export function renderSettingsPanel(container: HTMLElement, settings: UserSettin
   renderAppearance(container.querySelector<HTMLElement>(".theme-choice")!, settings);
   renderStorageRow(container.querySelector<HTMLElement>(".storage-row")!, isDestroyed);
   renderVersionRow(container.querySelector<HTMLElement>(".version-row")!, isDestroyed);
+  const dictionary = renderDictionary(container.querySelector<HTMLElement>(".dictionary")!, settings);
   renderFold(container.querySelector<HTMLDetailsElement>(".api-keys")!);
   renderKeys(container.querySelector<HTMLElement>(".api-keys-rows")!, settings, getCloudKeyStatus());
   renderDeleteHistory(container.querySelector<HTMLElement>(".history-delete")!, isDestroyed);
   return {
     destroy: () => {
       destroyed = true;
+      dictionary.destroy();
     },
   };
 }

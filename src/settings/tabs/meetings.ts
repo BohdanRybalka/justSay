@@ -1,9 +1,9 @@
 /**
- * MEETINGS: the Record meetings switch. The first time it is turned on, the
- * meeting disclosure (ADR 040 obligation 3) opens under the row and the switch
- * stays off until "I understand". Below it, the language a meeting is heard in:
- * detected for each part, or one picked from the list. MEETING MODEL then picks
- * where a stopped meeting becomes text, apart from dictation (the hint names it).
+ * The Meetings page: the Record meetings switch, whose first turn-on opens the
+ * meeting disclosure (ADR 040 obligation 3) under the row and keeps the switch
+ * off until "I understand". LANGUAGE is how a meeting is heard: detected for
+ * each part, or one picked from the list. MODEL picks where a stopped meeting
+ * becomes text, apart from dictation (the hint names it).
  */
 import { meetingsTurnedOn, type UserSettings } from "../../api";
 import { getCloudKeyStatus, saveSettings, type TabLifecycle } from "../settings";
@@ -30,16 +30,17 @@ export function meetingsHint(engine: Engine): string {
   return `Right-click the widget and pick Record a meeting · turned into text ${WHERE_IT_BECOMES_TEXT[engine]}`;
 }
 
-/** Adds the MEETINGS and MEETING MODEL groups to the end of `container`, the
- *  switch showing whether the backend will start a meeting recording. */
-export function renderDictationMeetings(container: HTMLElement, settings: UserSettings): TabLifecycle {
+/** Adds the Meetings page to the end of `container`, the switch showing
+ *  whether the backend will start a meeting recording. */
+export function renderMeetings(container: HTMLElement, settings: UserSettings): TabLifecycle {
   let language = settings.meetings_language;
   let picked = language === DETECT ? settings.language : language;
 
   container.insertAdjacentHTML(
     "beforeend",
     `
-    <div class="group-label">${icon("users")}MEETINGS</div>
+    <h2 class="panel-title">Meetings</h2>
+    <p class="panel-subtitle">Record a call in any app and get its text.</p>
     <div class="card">
       <div class="setting-row">
         <div class="setting-row-text">
@@ -63,6 +64,9 @@ export function renderDictationMeetings(container: HTMLElement, settings: UserSe
         </p>
         <button type="button" class="btn btn-primary btn-small" id="btn-meeting-consent">I understand</button>
       </div>
+    </div>
+    <div class="group-label">${icon("globe")}LANGUAGE</div>
+    <div class="card">
       <div class="setting-row">
         <div class="setting-row-text">
           <div class="setting-row-title">Detect the language</div>
@@ -85,7 +89,7 @@ export function renderDictationMeetings(container: HTMLElement, settings: UserSe
         </div>
       </div>
     </div>
-    <div class="group-label">${icon("chip")}MEETING MODEL</div>
+    <div class="group-label">${icon("chip")}MODEL</div>
     <div class="card" role="radiogroup" aria-label="Meeting model">
       ${modeRowHtml("meetings-cloud", "cloud", "Cloud")}
       ${modeRowHtml("meetings-local", "chip", "Local model")}

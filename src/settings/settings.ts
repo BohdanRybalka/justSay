@@ -29,8 +29,7 @@ import { mountFileTranscription } from "./file-transcription";
 import { nextTabAction } from "./tab-visibility";
 import { renderDictation } from "./tabs/dictation";
 import { renderDictationMode } from "./tabs/dictation-mode";
-import { renderDictationMeetings } from "./tabs/dictation-meetings";
-import { renderDictionary } from "./tabs/dictionary";
+import { renderMeetings } from "./tabs/meetings";
 import { renderHistory, renderHistoryHeading, type HistoryPanel } from "./tabs/history";
 import { renderInsights } from "./tabs/insights";
 import { renderAccount } from "./tabs/account";
@@ -122,10 +121,9 @@ const panels: Record<PanelName, PanelRenderer> = {
   dictation: (container, loaded, windowHidden) => {
     const everyday = renderDictation(container, loaded);
     const mode = renderDictationMode(container, loaded, windowHidden);
-    const meetings = renderDictationMeetings(container, loaded);
-    const dictionary = renderDictionary(container, loaded);
-    return combineLifecycles([everyday, mode, meetings, dictionary]);
+    return combineLifecycles([everyday, mode]);
   },
+  meetings: renderMeetings,
   settings: renderSettingsPanel,
   account: (container, loaded) =>
     renderAccount(container, { chosen: loaded.display_name, osName: osAccountName }, renameUser),
@@ -445,13 +443,9 @@ async function initAccountName() {
 }
 
 
-/** Open the panel another window asked for, scrolled to the section it names
- *  once the panel is drawn. */
+/** Open the panel another window asked for. */
 function navigateTo(target: NavigatePanel) {
   if (target.panel !== currentPanel || !settings) switchPanel(target.panel);
-  if (target.section === "meetings") {
-    pane.querySelector("#meetings-toggle")?.closest(".card")?.scrollIntoView({ block: "center" });
-  }
 }
 
 /** A language changed from the ring reaches this window's copy of the

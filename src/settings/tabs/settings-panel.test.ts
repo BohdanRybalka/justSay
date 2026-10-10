@@ -36,10 +36,10 @@ vi.mock("./keys", () => ({ renderKeys: renderKeysMock }));
 
 import { renderSettingsPanel } from "./settings-panel";
 
-function render(theme: UserSettings["theme"]): HTMLElement {
+function render(theme: UserSettings["theme"], initialPrompt = ""): HTMLElement {
   const container = document.createElement("div");
   document.body.replaceChildren(container);
-  renderSettingsPanel(container, { theme } as UserSettings);
+  renderSettingsPanel(container, { theme, initial_prompt: initialPrompt } as UserSettings);
   return container;
 }
 
@@ -220,15 +220,30 @@ describe("Delete all history", () => {
   });
 });
 
+describe("the dictionary", () => {
+  it("sits under the card, drawn from the stored words and saying where they are used", () => {
+    const container = render("system", "Tauri, n8n");
+
+    const dictionary = container.querySelector(".dictionary")!;
+    expect(dictionary.previousElementSibling!.classList.contains("card")).toBe(true);
+    expect(dictionary.querySelector(".group-label")!.textContent).toBe("YOUR DICTIONARY");
+    expect([...dictionary.querySelectorAll(".word-chip")].map((chip) => chip.textContent)).toEqual([
+      "Tauri",
+      "n8n",
+    ]);
+    expect(dictionary.textContent).toContain("Used for dictation, meetings and files");
+  });
+});
+
 describe("API keys", () => {
-  it("fold away, closed, between the card and Delete all history", () => {
+  it("fold away, closed, between the dictionary and Delete all history", () => {
     const container = render("system");
 
     const fold = container.querySelector<HTMLDetailsElement>("details.api-keys")!;
     expect(fold.open).toBe(false);
     expect(fold.classList.contains("fold")).toBe(true);
     expect(fold.querySelector("summary")!.textContent).toBe("API keys");
-    expect(fold.previousElementSibling!.classList.contains("card")).toBe(true);
+    expect(fold.previousElementSibling!.classList.contains("dictionary")).toBe(true);
     expect(fold.nextElementSibling!.classList.contains("history-delete")).toBe(true);
   });
 
@@ -236,6 +251,6 @@ describe("API keys", () => {
     const container = render("system");
 
     const rows = container.querySelector(".api-keys-rows");
-    expect(renderKeysMock).toHaveBeenCalledWith(rows, { theme: "system" }, CLOUD_STATUS);
+    expect(renderKeysMock).toHaveBeenCalledWith(rows, { theme: "system", initial_prompt: "" }, CLOUD_STATUS);
   });
 });
