@@ -235,6 +235,25 @@ describe("the dictionary", () => {
   });
 });
 
+describe("the dictionary's teardown", () => {
+  it("goes with the panel, so a save that fails afterwards draws nothing", async () => {
+    let refuse: (reason: Error) => void = () => {};
+    saveSettingsMock.mockImplementationOnce(() => new Promise((_, reject) => (refuse = reject)));
+    const container = document.createElement("div");
+    document.body.replaceChildren(container);
+    const panel = renderSettingsPanel(container, { theme: "system", initial_prompt: "" } as UserSettings);
+    container.querySelector<HTMLInputElement>("#dictionary-input")!.value = "Tauri";
+    container.querySelector<HTMLButtonElement>("#dictionary-add")!.click();
+    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledWith({ initial_prompt: "Tauri" }));
+
+    panel.destroy();
+    refuse(new Error("backend down"));
+
+    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("backend down"));
+    expect(container.querySelectorAll(".word-chip")).toHaveLength(1);
+  });
+});
+
 describe("API keys", () => {
   it("fold away, closed, between the dictionary and Delete all history", () => {
     const container = render("system");

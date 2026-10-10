@@ -523,6 +523,22 @@ describe("the sidebar", () => {
     await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#lang-select")!.value).toBe("en"));
   });
 
+  it("shows a language the ring switched to on the Meetings panel, where Detect the language starts from it", async () => {
+    await bootWithSettingsLoaded({ language: "uk", meetings_language: "auto" });
+    const { EVENT_SETTINGS_CHANGED } = await import("../contracts");
+    openPanel("meetings");
+    expect(document.querySelector<HTMLSelectElement>("#meetings-language")!.value).toBe("uk");
+
+    apiMock.getSettings.mockResolvedValue(
+      buildSettings({ language: "en", previous_language: "uk", meetings_language: "auto" }),
+    );
+    await fromAnotherWindow(EVENT_SETTINGS_CHANGED, {});
+
+    await vi.waitFor(() =>
+      expect(document.querySelector<HTMLSelectElement>("#meetings-language")!.value).toBe("en"),
+    );
+  });
+
   it("leaves the panel alone when a change elsewhere did not touch the language", async () => {
     await bootWithSettingsLoaded({ language: "uk" });
     const { EVENT_SETTINGS_CHANGED } = await import("../contracts");
