@@ -7,6 +7,7 @@ import {
   sawAuthFailure,
   type BridgeDiagnosis,
   type CloudKeyStatus,
+  type EntrySource,
   type UserSettings,
 } from "../api";
 import {
@@ -30,8 +31,9 @@ import { nextTabAction } from "./tab-visibility";
 import { renderDictation } from "./tabs/dictation";
 import { renderDictationMode } from "./tabs/dictation-mode";
 import { renderFiles } from "./tabs/files";
+import type { Recent } from "./recent";
 import { renderMeetings } from "./tabs/meetings";
-import { renderHistory, renderHistoryHeading, type HistoryPanel } from "./tabs/history";
+import { renderHistory, renderHistoryHeading } from "./tabs/history";
 import { renderInsights } from "./tabs/insights";
 import { renderAccount } from "./tabs/account";
 import { renderSettingsPanel } from "./tabs/settings-panel";
@@ -54,7 +56,8 @@ let osAccountName = "";
 let settings: UserSettings | null = null;
 let cloudStatus: CloudKeyStatus | null = null;
 let activeTab: TabLifecycle | null = null;
-let historyPanel: HistoryPanel | null = null;
+let filesPanel: Recent | null = null;
+let historySource: EntrySource | null = null;
 let fileTranscription: FileTranscription | null = null;
 let settingsError: string | null = null;
 let backendReachable = false;
@@ -95,10 +98,16 @@ function asLifecycle(teardown: TabTeardown): TabLifecycle | null {
   return typeof teardown === "function" ? { destroy: teardown } : teardown;
 }
 
+/** What a panel is opened with beyond the settings: History opens with this kind pressed. */
+interface PanelOptions {
+  source?: EntrySource;
+}
+
 type PanelRenderer = (
   container: HTMLElement,
   settings: UserSettings,
   windowHidden: boolean,
+  options: PanelOptions,
 ) => TabTeardown;
 
 /** Several parts of one panel answering as one. */
@@ -115,18 +124,21 @@ const panels: Record<PanelName, PanelRenderer> = {
     const viewer = { name: displayName(loaded.display_name, osAccountName), shortcut: loaded.shortcut };
     return renderInsights(container, viewer, windowHidden);
   },
-  history: (container, loaded) => {
+  history: (container, loaded, _windowHidden, options) => {
     renderHistoryHeading(container);
-    historyPanel = renderHistory(container, loaded);
-    return historyPanel;
+    return renderHistory(container, loaded, options.source ?? null);
   },
   dictation: (container, loaded, windowHidden) => {
     const everyday = renderDictation(container, loaded);
     const mode = renderDictationMode(container, loaded, windowHidden);
     return combineLifecycles([everyday, mode]);
   },
-  meetings: renderMeetings,
-  files: (container) => renderFiles(container, () => fileTranscription?.pick()),
+  meetings: (container, loaded, windowHidden) =>
+    renderMeetings(container, loaded, windowHidden, openHistoryOf),
+  files: (container) => {
+    filesPanel = renderFiles(container, () => fileTranscription?.pick(), openHistoryOf);
+    return filesPanel;
+  },
   settings: renderSettingsPanel,
   account: (container, loaded) =>
     renderAccount(container, { chosen: loaded.display_name, osName: osAccountName }, renameUser),
@@ -302,11 +314,17 @@ function refreshUnavailableScreen(screen: BackendStartupScreen) {
   renderSettingsUnavailable(pane, screen);
 }
 
-function switchPanel(panelName: PanelName) {
+function openHistoryOf(source: EntrySource) {
+  switchPanel("history", { source });
+}
+
+function switchPanel(panelName: PanelName, options: PanelOptions = {}) {
   if (activeTab) {
     activeTab.destroy();
     activeTab = null;
   }
+  filesPanel = null;
+  historySource = options.source ?? null;
 
   currentPanel = panelName;
   renderPanelSelection(sidebar, panelName);
@@ -317,7 +335,7 @@ function switchPanel(panelName: PanelName) {
   }
 
   const panel = renderEmptyPanel(pane);
-  activeTab = asLifecycle(panels[panelName](panel, settings, settingsWindowHidden));
+  activeTab = asLifecycle(panels[panelName](panel, settings, settingsWindowHidden, options));
   if (settingsWindowHidden) activeTab?.releaseResources?.();
 }
 
@@ -481,19 +499,20 @@ async function listenToOtherWindows() {
 sidebar.querySelectorAll<HTMLButtonElement>("[data-panel]").forEach((item) => {
   item.addEventListener("click", () => {
     const panel = item.dataset.panel as PanelName;
-    if (panel !== currentPanel || !settings) switchPanel(panel);
+    const presetHistory = panel === "history" && historySource !== null;
+    if (panel !== currentPanel || !settings || presetHistory) switchPanel(panel);
   });
 });
 
 
-/** A file picked or dropped on the window is now a job: show it at the top of History. */
+/** A file picked or dropped on the window is now a job: show its card on the Files page. */
 function showStartedJob() {
-  if (currentPanel === "history" && settings) {
+  if (currentPanel === "files" && settings) {
     pane.scrollTop = 0;
-    historyPanel?.jobStarted();
+    filesPanel?.jobStarted();
     return;
   }
-  switchPanel("history");
+  switchPanel("files");
 }
 
 

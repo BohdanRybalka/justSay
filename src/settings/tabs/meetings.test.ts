@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UserSettings } from "../../api";
 import { DICTATION_LANGUAGES } from "../../languages";
 
@@ -21,15 +21,18 @@ vi.mock("../../notify", () => ({
 }));
 
 const getMeetingStatusMock = vi.fn();
+const getHistoryMock = vi.fn();
+const jobsMock = vi.fn();
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
   return {
     ...actual,
-    api: { ...actual.api, getMeetingStatus: getMeetingStatusMock },
+    api: { ...actual.api, getMeetingStatus: getMeetingStatusMock, getHistory: getHistoryMock, jobs: jobsMock },
     meetingLevelStream: vi.fn(() => new AbortController()),
   };
 });
 
+const { buildEntry, FakeResizeObserver, pageOf } = await import("../history-page-stub.test-helper");
 const { renderMeetings } = await import("./meetings");
 const { meetingCardHint } = await import("./meeting-card");
 
@@ -56,18 +59,29 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
   };
 }
 
-function render(overrides: Partial<UserSettings> = {}, windowHidden = true) {
+const pages: { destroy: () => void }[] = [];
+
+function render(overrides: Partial<UserSettings> = {}, windowHidden = true, openHistory = vi.fn()) {
   const container = document.createElement("div");
-  const page = renderMeetings(container, buildSettings(overrides), windowHidden);
+  const page = renderMeetings(container, buildSettings(overrides), windowHidden, openHistory);
+  pages.push(page);
   const hint = container.querySelector<HTMLElement>("#meeting-hint")!;
   return { container, page, hint };
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+  getHistoryMock.mockResolvedValue(pageOf([], 0, null));
+  jobsMock.mockResolvedValue([]);
   getMeetingStatusMock.mockResolvedValue({ is_recording: false, duration_seconds: 0 });
   saveSettingsMock.mockResolvedValue({ settings: buildSettings(), warning: null });
   getCloudKeyStatusMock.mockReturnValue({ groq_key_set: true });
+});
+
+afterEach(() => {
+  pages.splice(0).forEach((page) => page.destroy());
+  vi.unstubAllGlobals();
 });
 
 describe("renderMeetings — the page", () => {
@@ -83,7 +97,56 @@ describe("renderMeetings — the page", () => {
       "Record a call in any app and get its text.",
     );
     expect(container.querySelector(":scope > .meeting-card #meeting-start")).not.toBeNull();
-    expect(container.querySelector(".meeting-card")!.nextElementSibling!.classList.contains("group-label")).toBe(true);
+    expect(container.querySelector(".meeting-card")!.nextElementSibling!.querySelector(".recent")).not.toBeNull();
+  });
+
+  it("lists the latest meetings under the card, and sends All in History to the meetings filter", async () => {
+    getHistoryMock.mockResolvedValue(pageOf([{ ...buildEntry("m1"), source: "meeting" }], 1, null));
+    const openHistory = vi.fn();
+    const { container } = render({}, true, openHistory);
+
+    await vi.waitFor(() => expect(container.querySelector(".recent .entry--meeting")).not.toBeNull());
+    expect(container.querySelector(".recent .group-label")!.textContent).toBe("RECENT MEETINGS");
+    expect(getHistoryMock).toHaveBeenCalledWith(3, null, { source: "meeting", starred: false });
+
+    container.querySelector<HTMLButtonElement>(".see-all")!.click();
+
+    expect(openHistory).toHaveBeenCalledExactlyOnceWith("meeting");
+  });
+
+  it("stops reading the latest meetings for good when the page is left", async () => {
+    vi.useFakeTimers();
+    try {
+      const { page } = render({}, false);
+      await vi.advanceTimersByTimeAsync(0);
+      const reads = getHistoryMock.mock.calls.length;
+
+      page.destroy();
+      await vi.advanceTimersByTimeAsync(20000);
+
+      expect(getHistoryMock).toHaveBeenCalledTimes(reads);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops reading the latest meetings while the window is hidden", async () => {
+    vi.useFakeTimers();
+    try {
+      const { page } = render({}, false);
+      await vi.advanceTimersByTimeAsync(0);
+      const reads = getHistoryMock.mock.calls.length;
+
+      page.releaseResources!();
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(getHistoryMock).toHaveBeenCalledTimes(reads);
+
+      page.resumeResources!();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getHistoryMock).toHaveBeenCalledTimes(reads + 1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("has no Record meetings switch", () => {
@@ -106,7 +169,7 @@ describe("renderMeetings — the page", () => {
   it("groups the rest as LANGUAGE and MODEL, in that order", () => {
     const { container } = render();
 
-    expect(groupLabels(container)).toEqual(["LANGUAGE", "MODEL"]);
+    expect(groupLabels(container)).toEqual(["RECENT MEETINGS", "LANGUAGE", "MODEL"]);
     const [language, model] = container.querySelectorAll(".group-label + .card");
     expect(language.querySelector("#meetings-detect")).not.toBeNull();
     expect(language.querySelector("#meetings-language")).not.toBeNull();

@@ -1,0 +1,33 @@
+.recent .timeline {
+  margin-top: 0;
+}
+
+.recent .entry-text {
+  -webkit-line-clamp: 1;
+}
+
+.group-head {
+  display: flex;
+  align-items: center;
+}
+
+.see-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 26px 0 10px auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--blue);
+  cursor: pointer;
+}
+
+.see-all .icon {
+  width: 13px;
+  height: 13px;
+  transform: rotate(-90deg);
+}
