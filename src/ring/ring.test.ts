@@ -160,7 +160,7 @@ describe("the ring window", () => {
     await vi.waitFor(() => expect(emitMock).toHaveBeenCalledWith(EVENT_MEETING_TOGGLE));
   });
 
-  it("opens the meetings switch in the main window while meetings are off", async () => {
+  it("opens the Meetings page in the main window while meetings are off", async () => {
     getSettingsMock.mockResolvedValue({ ...SETTINGS, meetings_enabled: false });
     const ring = await loadRing();
     await vi.waitFor(() => expect(petal(ring, 2).getAttribute("aria-label")).toBe("Language · Ukrainian"));
@@ -168,7 +168,7 @@ describe("the ring window", () => {
     petal(ring, 0).click();
 
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("show_settings_window"));
-    expect(emitMock).toHaveBeenCalledWith(EVENT_NAVIGATE_PANEL, { panel: "dictation", section: "meetings" });
+    expect(emitMock).toHaveBeenCalledWith(EVENT_NAVIGATE_PANEL, { panel: "meetings" });
     expect(emitMock).not.toHaveBeenCalledWith(EVENT_MEETING_TOGGLE);
   });
 
@@ -196,7 +196,7 @@ describe("the ring window", () => {
 
     petal(ring, 3).click();
     await vi.waitFor(() =>
-      expect(emitMock).toHaveBeenCalledWith(EVENT_NAVIGATE_PANEL, { panel: "settings", section: null }),
+      expect(emitMock).toHaveBeenCalledWith(EVENT_NAVIGATE_PANEL, { panel: "settings" }),
     );
     expect(invokeMock).toHaveBeenCalledWith("show_settings_window");
   });

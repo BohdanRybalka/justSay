@@ -1,11 +1,11 @@
 /**
- * The main window's sidebar: the account row, the four sections and the
+ * The main window's sidebar: the account row, the sections and the
  * status line pinned to its bottom. Which panel is open is decided by
  * `settings.ts`; this module draws it.
  */
 import { initialsOf } from "./account-name";
 
-export type PanelName = "insights" | "history" | "dictation" | "settings" | "account";
+export type PanelName = "insights" | "history" | "dictation" | "meetings" | "settings" | "account";
 
 export type BackendState = "ready" | "starting" | "offline" | "unauthorized";
 

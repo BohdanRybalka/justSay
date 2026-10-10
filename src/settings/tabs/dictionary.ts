@@ -73,6 +73,7 @@ export function renderDictionary(container: HTMLElement, settings: UserSettings)
         <input id="dictionary-input" aria-label="Add a word" maxlength="${DICTIONARY_CHAR_BUDGET}">
         <button type="button" class="btn btn-small" id="dictionary-add">Add</button>
       </div>
+      <div class="setting-row-hint">Used for dictation, meetings and files</div>
       <div class="setting-row-hint setting-row-hint--result" id="dictionary-hint" hidden>${FULL}</div>
     </div></div>
   `,

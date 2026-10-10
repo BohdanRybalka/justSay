@@ -228,6 +228,7 @@ beforeEach(() => {
       <button class="nav-item" data-panel="insights" aria-current="true">Insights</button>
       <button class="nav-item" data-panel="history" aria-current="false">History</button>
       <button class="nav-item" data-panel="dictation" aria-current="false">Dictation</button>
+      <button class="nav-item" data-panel="meetings" aria-current="false">Meetings</button>
       <button class="nav-item" data-panel="settings" aria-current="false">Settings</button>
       <div id="sidebar-status" class="sidebar-status sidebar-status--starting">
         <span class="sidebar-status-text">Starting…</span><span id="sidebar-version">v…</span>
@@ -340,7 +341,21 @@ describe("the sidebar", () => {
     expect(panel.querySelector("#btn-test-mic")).toBeNull();
   });
 
-  it("opens Dictation on its everyday card, with the mode rows, MEETINGS and then the dictionary under it", async () => {
+  it("puts the dictionary in Settings, between its card and the API keys", async () => {
+    await bootWithSettingsLoaded();
+
+    openPanel("settings");
+
+    const panel = document.querySelector("#pane > .panel")!;
+    const card = panel.querySelector(":scope > .card")!;
+    const dictionary = panel.querySelector("#dictionary-input")!;
+    const keys = panel.querySelector(".api-keys")!;
+    expect(card.compareDocumentPosition(dictionary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(dictionary.compareDocumentPosition(keys) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(panel.textContent).toContain("Used for dictation, meetings and files");
+  });
+
+  it("opens Dictation on its everyday card with the mode rows under it, and nothing of meetings or the dictionary", async () => {
     await bootWithSettingsLoaded();
 
     openPanel("dictation");
@@ -352,11 +367,23 @@ describe("the sidebar", () => {
     expect(card.querySelector("#btn-test-mic")).not.toBeNull();
     expect(panel.querySelectorAll(".legacy-tab")).toHaveLength(0);
     const modeRows = panel.querySelector(":scope > #dictation-mode-body")!;
-    const meetings = panel.querySelector("#meetings-toggle")!;
     expect(card.compareDocumentPosition(modeRows) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(modeRows.compareDocumentPosition(meetings) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    const dictionary = panel.querySelector("#dictionary-input")!;
-    expect(meetings.compareDocumentPosition(dictionary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(panel.querySelector("#meetings-toggle")).toBeNull();
+    expect(panel.querySelector("#dictionary-input")).toBeNull();
+  });
+
+  it("opens Meetings as a page of its own and lets go of the one it left", async () => {
+    await bootWithSettingsLoaded();
+    openPanel("dictation");
+
+    openPanel("meetings");
+
+    expect(currentPanels()).toEqual(["meetings"]);
+    const panel = document.querySelector("#pane > .panel")!;
+    expect(panel.querySelector("#meetings-toggle")).not.toBeNull();
+    expect(panel.querySelector("#meetings-detect")).not.toBeNull();
+    expect(panel.querySelector("#lang-select")).toBeNull();
+    expect(modeTab.destroy).toHaveBeenCalledOnce();
   });
 
   it("shows the name this computer knows the user by, with its initials", async () => {
@@ -468,25 +495,20 @@ describe("the sidebar", () => {
     eventListeners.get(event)!(delivered);
   }
 
-  it("opens the panel the ring asks for, at the meetings switch when it names them", async () => {
+  it("opens the panel the ring asks for, and leaves it alone when it is already open", async () => {
     await bootWithSettingsLoaded();
     const { EVENT_NAVIGATE_PANEL } = await import("../contracts");
-    const scrolledTo: Element[] = [];
-    Element.prototype.scrollIntoView = function (this: Element) {
-      scrolledTo.push(this);
-    };
 
-    await fromAnotherWindow(EVENT_NAVIGATE_PANEL, { payload: { panel: "history", section: null } });
+    await fromAnotherWindow(EVENT_NAVIGATE_PANEL, { payload: { panel: "history" } });
     expect(currentPanels()).toEqual(["history"]);
-    expect(scrolledTo).toEqual([]);
 
-    await fromAnotherWindow(EVENT_NAVIGATE_PANEL, { payload: { panel: "dictation", section: "meetings" } });
-    expect(currentPanels()).toEqual(["dictation"]);
-    expect(scrolledTo).toEqual([document.getElementById("meetings-toggle")!.closest(".card")]);
+    await fromAnotherWindow(EVENT_NAVIGATE_PANEL, { payload: { panel: "meetings" } });
+    expect(currentPanels()).toEqual(["meetings"]);
+    const toggle = document.getElementById("meetings-toggle")!;
+    expect(toggle).not.toBeNull();
 
-    await fromAnotherWindow(EVENT_NAVIGATE_PANEL, { payload: { panel: "dictation", section: "meetings" } });
-    expect(modeTab.destroy).not.toHaveBeenCalled();
-    expect(scrolledTo).toHaveLength(2);
+    await fromAnotherWindow(EVENT_NAVIGATE_PANEL, { payload: { panel: "meetings" } });
+    expect(document.getElementById("meetings-toggle")).toBe(toggle);
   });
 
   it("shows a language the ring switched to on the Dictation panel", async () => {
@@ -499,6 +521,22 @@ describe("the sidebar", () => {
     await fromAnotherWindow(EVENT_SETTINGS_CHANGED, {});
 
     await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#lang-select")!.value).toBe("en"));
+  });
+
+  it("shows a language the ring switched to on the Meetings panel, where Detect the language starts from it", async () => {
+    await bootWithSettingsLoaded({ language: "uk", meetings_language: "auto" });
+    const { EVENT_SETTINGS_CHANGED } = await import("../contracts");
+    openPanel("meetings");
+    expect(document.querySelector<HTMLSelectElement>("#meetings-language")!.value).toBe("uk");
+
+    apiMock.getSettings.mockResolvedValue(
+      buildSettings({ language: "en", previous_language: "uk", meetings_language: "auto" }),
+    );
+    await fromAnotherWindow(EVENT_SETTINGS_CHANGED, {});
+
+    await vi.waitFor(() =>
+      expect(document.querySelector<HTMLSelectElement>("#meetings-language")!.value).toBe("en"),
+    );
   });
 
   it("leaves the panel alone when a change elsewhere did not touch the language", async () => {

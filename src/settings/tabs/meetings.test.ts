@@ -20,7 +20,7 @@ vi.mock("../../notify", () => ({
   notifyError: notifyErrorMock,
 }));
 
-const { renderDictationMeetings, meetingsHint } = await import("./dictation-meetings");
+const { renderMeetings, meetingsHint } = await import("./meetings");
 
 function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
   return {
@@ -48,7 +48,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
 
 function render(overrides: Partial<UserSettings> = {}) {
   const container = document.createElement("div");
-  renderDictationMeetings(container, buildSettings(overrides));
+  renderMeetings(container, buildSettings(overrides));
   const toggle = container.querySelector<HTMLButtonElement>("#meetings-toggle")!;
   const disclosure = container.querySelector<HTMLElement>("#meeting-disclosure")!;
   const consent = container.querySelector<HTMLButtonElement>("#btn-meeting-consent")!;
@@ -65,7 +65,42 @@ beforeEach(() => {
   getCloudKeyStatusMock.mockReturnValue({ groq_key_set: true });
 });
 
-describe("renderDictationMeetings — the switch", () => {
+describe("renderMeetings — the page", () => {
+  function groupLabels(container: HTMLElement): string[] {
+    return [...container.querySelectorAll(".group-label")].map((label) => label.textContent);
+  }
+
+  it("is a page of its own, titled Meetings, with the Record meetings switch in its first card", () => {
+    const { container, toggle } = render();
+
+    expect(container.querySelector(".panel-title")!.textContent).toBe("Meetings");
+    expect(container.querySelector(".panel-subtitle")!.textContent).toBe(
+      "Record a call in any app and get its text.",
+    );
+    expect(container.querySelector(":scope > .card")!.contains(toggle)).toBe(true);
+  });
+
+  it("groups the rest as LANGUAGE and MODEL, in that order", () => {
+    const { container } = render();
+
+    expect(groupLabels(container)).toEqual(["LANGUAGE", "MODEL"]);
+    const [language, model] = container.querySelectorAll(".group-label + .card");
+    expect(language.querySelector("#meetings-detect")).not.toBeNull();
+    expect(language.querySelector("#meetings-language")).not.toBeNull();
+    expect(model.querySelector("#meetings-cloud")).not.toBeNull();
+    expect(model.querySelector("#meetings-local")).not.toBeNull();
+  });
+
+  it("holds nothing of the Dictation page", () => {
+    const { container } = render();
+
+    expect(container.querySelector("#lang-select")).toBeNull();
+    expect(container.querySelector("#btn-shortcut")).toBeNull();
+    expect(container.querySelector("#dictionary-input")).toBeNull();
+  });
+});
+
+describe("renderMeetings — the switch", () => {
   it("is on only when the disclosure is acknowledged and Record meetings is on", () => {
     expect(render(ACKNOWLEDGED_ON).isOn()).toBe(true);
     expect(render({ meeting_consent_acknowledged: true, meetings_enabled: false }).isOn()).toBe(false);
@@ -136,7 +171,7 @@ describe("renderDictationMeetings — the switch", () => {
   });
 });
 
-describe("renderDictationMeetings — where a meeting becomes text", () => {
+describe("renderMeetings — where a meeting becomes text", () => {
   function picked(container: HTMLElement): string[] {
     return [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Meeting model"] .mode-row')]
       .filter((row) => row.getAttribute("aria-checked") === "true")
@@ -212,7 +247,7 @@ describe("renderDictationMeetings — where a meeting becomes text", () => {
   });
 });
 
-describe("renderDictationMeetings — the language a meeting is heard in", () => {
+describe("renderMeetings — the language a meeting is heard in", () => {
   function languageView(overrides: Partial<UserSettings>) {
     const { container } = render(overrides);
     const detect = container.querySelector<HTMLButtonElement>("#meetings-detect")!;
@@ -285,7 +320,7 @@ describe("renderDictationMeetings — the language a meeting is heard in", () =>
   });
 });
 
-describe("renderDictationMeetings — the disclosure (ADR 040 obligation 3)", () => {
+describe("renderMeetings — the disclosure (ADR 040 obligation 3)", () => {
   it("states that the user carries the consent obligation", () => {
     const text = render().container.querySelector("#meeting-consent-responsibility")!.textContent!;
 
