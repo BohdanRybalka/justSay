@@ -39,7 +39,7 @@ vi.mock("../../api", async (importOriginal) => {
 
 const { SidecarTooOldError, MalformedResponseError } = await import("../../api");
 const { sidecarTooOldText } = await import("../history-list");
-const { renderHistory, NEWER_POLL_MS, matchExcerpt } = await import("./history");
+const { renderHistory, NEWER_POLL_MS } = await import("./history");
 const { JOBS_POLL_MS } = await import("../history-jobs");
 
 const SETTINGS = { shortcut: "Ctrl+Alt+KeyV" } as UserSettings;
@@ -177,22 +177,6 @@ afterEach(() => {
   document.body.replaceChildren();
   vi.useRealTimers();
   vi.unstubAllGlobals();
-});
-
-describe("matchExcerpt — the text around the first match", () => {
-  it("starts a few whole words before a match deep in the text, keeping the backend's markup", () => {
-    const excerpt = matchExcerpt(`${"alpha ".repeat(20)}R&amp;D <mark>test</mark> &lt;b&gt;`)!;
-
-    expect(excerpt).toMatch(/^…alpha /);
-    expect(excerpt).toContain("R&amp;D <mark>test</mark> &lt;b&gt;");
-    expect(excerpt.match(/alpha/g)!.length).toBeLessThan(20);
-  });
-
-  it("leaves a text alone when its first match is near the start or there is none", () => {
-    expect(matchExcerpt("a <mark>test</mark> here")).toBeNull();
-    expect(matchExcerpt("<mark>test</mark> here")).toBeNull();
-    expect(matchExcerpt("no mark ".repeat(20))).toBeNull();
-  });
 });
 
 describe("renderHistory — paging as the end scrolls into view", () => {
@@ -596,23 +580,19 @@ describe("renderHistory — files being transcribed", () => {
     expect(container.querySelector(".entry--job .entry-job-name")!.textContent).toBe("Meeting · 8 Oct 14:32");
   });
 
-  it("reads the jobs when one is started, and stops reading while the window is hidden", async () => {
+  it("stops reading the jobs while the window is hidden, and reads them again when it is shown", async () => {
     const { lifecycle } = await renderAndWait([buildEntry("a")]);
     await flush();
     expect(apiMock.jobs).toHaveBeenCalledTimes(1);
     apiMock.jobs.mockResolvedValue([running]);
 
-    lifecycle.jobStarted();
-    await flush();
-    expect(apiMock.jobs).toHaveBeenCalledTimes(2);
-
     lifecycle.releaseResources!();
     await vi.advanceTimersByTimeAsync(JOBS_POLL_MS * 3);
-    expect(apiMock.jobs).toHaveBeenCalledTimes(2);
+    expect(apiMock.jobs).toHaveBeenCalledTimes(1);
 
     lifecycle.resumeResources!();
     await flush();
-    expect(apiMock.jobs).toHaveBeenCalledTimes(3);
+    expect(apiMock.jobs).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -707,6 +687,33 @@ describe("renderHistory — the kind and Starred chips", () => {
       "false",
     ]);
     expect(container.querySelector(".search-box button")).toBeNull();
+  });
+
+  it("opens with the kind it was asked for pressed, and reads only that kind", async () => {
+    apiMock.getHistory.mockResolvedValue(pageOf([{ ...buildEntry("m"), source: "meeting" }], 1, null));
+    const container = document.createElement("div");
+    document.body.append(container);
+
+    renderHistory(container, SETTINGS, "meeting");
+    await flush();
+
+    expect(apiMock.getHistory).toHaveBeenCalledWith(30, null, { source: "meeting", starred: false });
+    expect(chip(container, "Meetings").getAttribute("aria-pressed")).toBe("true");
+    expect(chip(container, "All").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("opens on a kind without the cards of jobs of another kind", async () => {
+    apiMock.getHistory.mockResolvedValue(pageOf([], 0, null, { newest_cursor: null }));
+    apiMock.jobs.mockResolvedValue([
+      { id: "j1", kind: "file", name: "a.mp3", stage: "transcribing", progress: 0.2, error: null, entry_id: null },
+    ]);
+    const container = document.createElement("div");
+    document.body.append(container);
+
+    renderHistory(container, SETTINGS, "meeting");
+    await flush();
+
+    expect(container.querySelector(".entry--job")).toBeNull();
   });
 
   it("reloads with starred entries only, and says so when there are none", async () => {

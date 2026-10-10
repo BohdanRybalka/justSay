@@ -1,15 +1,39 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it, vi } from "vitest";
-import { DROP_AREA_CLASS, DROP_HINT } from "../file-transcription";
-import { renderFiles } from "./files";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { buildEntry, FakeResizeObserver, pageOf } from "../history-page-stub.test-helper";
+import type { Recent } from "../recent";
 
-function render(pick: () => void = () => {}) {
+const apiMock = { getHistory: vi.fn(), jobs: vi.fn() };
+
+vi.mock("../../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../api")>();
+  return { ...actual, api: apiMock };
+});
+
+const { DROP_AREA_CLASS, DROP_HINT } = await import("../file-transcription");
+const { renderFiles } = await import("./files");
+
+const mounted: Recent[] = [];
+
+function render(pick: () => void = () => {}, openHistory: (source: string) => void = () => {}) {
   const container = document.createElement("div");
-  renderFiles(container, pick);
+  mounted.push(renderFiles(container, pick, openHistory));
   return container;
 }
+
+beforeEach(() => {
+  vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+  apiMock.getHistory.mockResolvedValue(pageOf([], 0, null));
+  apiMock.jobs.mockResolvedValue([]);
+});
+
+afterEach(() => {
+  mounted.splice(0).forEach((page) => page.destroy());
+  vi.unstubAllGlobals();
+  vi.clearAllMocks();
+});
 
 describe("renderFiles — the page", () => {
   it("is a page of its own, titled Files, with the new subtitle", () => {
@@ -40,6 +64,23 @@ describe("renderFiles — the page", () => {
     choose.click();
 
     expect(pick).toHaveBeenCalledTimes(2);
+  });
+
+  it("lists the latest files under the drop area, and sends All in History to the files filter", async () => {
+    apiMock.getHistory.mockResolvedValue(
+      pageOf([{ ...buildEntry("f1"), source: "file", source_name: "memo.ogg" }], 1, null),
+    );
+    const openHistory = vi.fn();
+    const container = render(() => {}, openHistory);
+
+    await vi.waitFor(() => expect(container.querySelector(".recent .entry--file")).not.toBeNull());
+    expect(container.querySelector(`.${DROP_AREA_CLASS}`)!.nextElementSibling!.classList.contains("recent")).toBe(true);
+    expect(container.querySelector(".recent .group-label")!.textContent).toBe("RECENT FILES");
+    expect(apiMock.getHistory).toHaveBeenCalledWith(3, null, { source: "file", starred: false });
+
+    container.querySelector<HTMLButtonElement>(".see-all")!.click();
+
+    expect(openHistory).toHaveBeenCalledExactlyOnceWith("file");
   });
 });
 

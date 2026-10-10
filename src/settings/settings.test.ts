@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { BridgeDiagnosis, UserSettings } from "../api";
 
 const apiMock = {
@@ -80,7 +80,6 @@ const historyTab = {
   destroy: vi.fn(),
   releaseResources: vi.fn(),
   resumeResources: vi.fn(),
-  jobStarted: vi.fn(),
 };
 
 vi.mock("./tabs/history", () => ({
@@ -90,6 +89,21 @@ vi.mock("./tabs/history", () => ({
   renderHistory: vi.fn((container: HTMLElement) => {
     container.insertAdjacentHTML("beforeend", '<div id="history-tab-body"></div>');
     return historyTab;
+  }),
+}));
+
+const recentLists: {
+  kind: string;
+  openHistory: (source: string) => void;
+  tab: { destroy: Mock; releaseResources: Mock; resumeResources: Mock; jobStarted: Mock };
+}[] = [];
+
+vi.mock("./recent", () => ({
+  mountRecent: vi.fn((container: HTMLElement, kind: string, openHistory: (source: string) => void) => {
+    const tab = { destroy: vi.fn(), releaseResources: vi.fn(), resumeResources: vi.fn(), jobStarted: vi.fn() };
+    recentLists.push({ kind, openHistory, tab });
+    container.insertAdjacentHTML("beforeend", `<div class="recent-stub" data-kind="${kind}"></div>`);
+    return tab;
   }),
 }));
 
@@ -218,6 +232,7 @@ beforeEach(() => {
   holdVisibilityRead = false;
   releaseVisibilityRead = () => {};
   modeMountedHidden.length = 0;
+  recentLists.length = 0;
   insightsViewers.length = 0;
   document.body.innerHTML = `
     <header id="titlebar" class="titlebar"></header>
@@ -385,6 +400,32 @@ describe("the sidebar", () => {
     expect(panel.querySelector("#meetings-detect")).not.toBeNull();
     expect(panel.querySelector("#lang-select")).toBeNull();
     expect(modeTab.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("sends All in History from Meetings or Files to History with that kind pressed", async () => {
+    await bootWithSettingsLoaded();
+    const { renderHistory } = await import("./tabs/history");
+
+    openPanel("meetings");
+    recentLists.find((list) => list.kind === "meeting")!.openHistory("meeting");
+    expect(currentPanels()).toEqual(["history"]);
+    expect(renderHistory).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), "meeting");
+
+    openPanel("files");
+    recentLists.find((list) => list.kind === "file")!.openHistory("file");
+    expect(renderHistory).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), "file");
+  });
+
+  it("opens History from the sidebar with every kind shown, even after a preset", async () => {
+    await bootWithSettingsLoaded();
+    const { renderHistory } = await import("./tabs/history");
+    openPanel("meetings");
+    recentLists.find((list) => list.kind === "meeting")!.openHistory("meeting");
+
+    openPanel("insights");
+    openPanel("history");
+
+    expect(renderHistory).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), null);
   });
 
   it("shows the name this computer knows the user by, with its initials", async () => {
@@ -1560,26 +1601,33 @@ describe("a file picked or dropped on the window", () => {
     expect(fileTranscriptionMounts[0].pick).toHaveBeenCalledOnce();
   });
 
-  it("opens History once its job has started", async () => {
+  it("opens Files once its job has started", async () => {
     const jobStarted = await bootOn("dictation");
 
     jobStarted();
 
-    expect(currentPanel()).toBe("history");
-    expect(document.getElementById("history-tab-body")).not.toBeNull();
+    expect(currentPanel()).toBe("files");
+    expect(document.querySelector(".recent-stub[data-kind='file']")).not.toBeNull();
   });
 
-  it("on History already, shows the new job at the top instead of drawing the panel again", async () => {
-    const jobStarted = await bootOn("history");
-    const pane = document.getElementById("pane")!;
-    pane.scrollTop = 400;
-    historyTab.jobStarted.mockClear();
-    historyTab.destroy.mockClear();
+  it("opens Files from Meetings too, where its card is, not History", async () => {
+    const jobStarted = await bootOn("meetings");
 
     jobStarted();
 
-    expect(historyTab.jobStarted).toHaveBeenCalledOnce();
-    expect(historyTab.destroy).not.toHaveBeenCalled();
+    expect(currentPanel()).toBe("files");
+  });
+
+  it("on Files already, shows the new job at the top instead of drawing the panel again", async () => {
+    const jobStarted = await bootOn("files");
+    const pane = document.getElementById("pane")!;
+    pane.scrollTop = 400;
+    const files = recentLists.find((list) => list.kind === "file")!.tab;
+
+    jobStarted();
+
+    expect(files.jobStarted).toHaveBeenCalledOnce();
+    expect(files.destroy).not.toHaveBeenCalled();
     expect(pane.scrollTop).toBe(0);
   });
 });

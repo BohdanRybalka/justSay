@@ -9,9 +9,9 @@ import {
   type UserSettings,
 } from "../../api";
 import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
-import { copyToClipboard } from "../../clipboard";
 import { renderSegmented, type SegmentedOption } from "../../ui/controls";
-import { icon, type IconName } from "../../ui/icons";
+import { icon } from "../../ui/icons";
+import { createEntryCards, SOURCE_ICONS } from "../history-entry";
 import {
   createHistoryList,
   sidecarTooOldText,
@@ -19,14 +19,7 @@ import {
   type BuiltRow,
   type HistoryRowsClaim,
 } from "../history-list";
-import {
-  closeMatchesHeading,
-  countOf,
-  createTimelineRows,
-  formatClock,
-  formatDuration,
-  matchDayGroups,
-} from "../history-timeline";
+import { closeMatchesHeading, createTimelineRows, matchDayGroups } from "../history-timeline";
 import { createJobCards } from "../history-jobs";
 import { escapeHtml } from "../html";
 import type { TabLifecycle } from "../settings";
@@ -34,14 +27,6 @@ import type { TabLifecycle } from "../settings";
 const SEARCH_DEBOUNCE_MS = 300;
 export const NEWER_POLL_MS = 5000;
 const PAGE_SIZE = 30;
-const COPIED_FLASH_MS = 1500;
-const EXCERPT_LEAD_CHARS = 80;
-
-const SOURCE_ICONS: Record<HistoryEntry["source"], IconName> = {
-  dictation: "mic",
-  file: "file",
-  meeting: "users",
-};
 
 type KindChip = "all" | EntrySource;
 
@@ -68,68 +53,14 @@ export function renderHistoryHeading(container: HTMLElement): void {
   );
 }
 
-/** Marks a collapsed card whose text is cut off, which is what shows its "Show more".
- *  Each text is watched on its own, so a new card, a collapse and a resize are all measured;
- *  a text that has left the page is let go. */
-function markLongTexts(records: readonly ResizeObserverEntry[], observer: ResizeObserver): void {
-  for (const { target } of records) {
-    if (!target.isConnected) {
-      observer.unobserve(target);
-      continue;
-    }
-    const card = target.closest<HTMLElement>(".entry");
-    if (!card || card.classList.contains("entry--expanded")) continue;
-    const cutOff = target.scrollHeight > target.clientHeight + 1;
-    card.classList.toggle("entry--long", cutOff || card.classList.contains("entry--excerpt"));
-  }
-}
-
-/** The backend's marked text starting a few words before its first mark, or `null` when the
- *  first mark already sits near the start. Cut on the parsed nodes, so no entity is split. */
-export function matchExcerpt(highlighted: string): string | null {
-  const template = document.createElement("template");
-  template.innerHTML = highlighted;
-  const lead = template.content.firstChild;
-  if (lead?.nodeType !== Node.TEXT_NODE || lead.nextSibling?.nodeName !== "MARK") return null;
-  const text = lead.textContent ?? "";
-  if (text.length <= EXCERPT_LEAD_CHARS) return null;
-  const tail = text.slice(-EXCERPT_LEAD_CHARS);
-  lead.textContent = `…${tail.slice(tail.search(/\s/) + 1)}`;
-  return template.innerHTML;
-}
-
-function metaSeparator(): string {
-  return `<span class="entry-meta-sep">·</span>`;
-}
-
-function sourceBadge(entry: HistoryEntry): string {
-  if (entry.source === "file" && entry.source_name) {
-    return `<span class="entry-source">${icon("file", "small")}${escapeHtml(entry.source_name)}</span>`;
-  }
-  if (entry.source === "meeting") {
-    return `<span class="entry-source">${icon("users", "small")}meeting</span>`;
-  }
-  return "";
-}
-
-function metaLine(entry: HistoryEntry): string {
-  const parts = [entry.timestamp == null ? "—" : formatClock(new Date(entry.timestamp))];
-  if (entry.audio_duration_seconds != null) {
-    parts.push(`<span class="num">${formatDuration(entry.audio_duration_seconds)}</span>`);
-  }
-  if (entry.word_count != null) parts.push(countOf(entry.word_count, "word", "words"));
-  return parts.map((part) => `<span>${part}</span>`).join(metaSeparator());
-}
-
-export interface HistoryPanel extends TabLifecycle {
-  /** A file job was just queued elsewhere on the page; its card should appear now. */
-  jobStarted(): void;
-}
-
 /** History as a day-grouped timeline under the search box and the kind and Starred chips,
  *  paging as it scrolls, picking up new recordings every few seconds while the window is on
  *  screen, and showing files and meetings still being transcribed at the top of today. */
-export function renderHistory(container: HTMLElement, settings: UserSettings): HistoryPanel {
+export function renderHistory(
+  container: HTMLElement,
+  settings: UserSettings,
+  source: EntrySource | null = null,
+): TabLifecycle {
   const section = document.createElement("div");
   section.className = "history";
   section.innerHTML = `
@@ -148,16 +79,18 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
   const searchHint = section.querySelector<HTMLElement>("#history-search-hint")!;
   const daysEl = section.querySelector<HTMLElement>("#history-days")!;
   const timeline = createTimelineRows(daysEl);
-  const textFit = new ResizeObserver(markLongTexts);
+  const entryCards = createEntryCards((card) => {
+    timeline.rowRemoved(card);
+    list.entryRemoved();
+  });
   const shortcut = formatAccelerator(settings.shortcut, detectShortcutPlatform(navigator));
 
   let searchClaim: HistoryRowsClaim | null = null;
   let debounceTimer: number | null = null;
   let pollTimer: number | null = null;
   let destroyed = false;
-  let filter: HistoryFilter = EVERY_ENTRY;
+  let filter: HistoryFilter = { ...EVERY_ENTRY, source };
   let jobCards: readonly HTMLElement[] = [];
-  let openMenu: { menu: HTMLElement; trigger: HTMLButtonElement } | null = null;
 
   const list = createHistoryList({
     pageSize: PAGE_SIZE,
@@ -168,7 +101,7 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
       sentinel: section.querySelector<HTMLElement>("#history-more")!,
     },
     rows: timeline,
-    createRow: createEntryElement,
+    createRow: entryCards.create,
     renderEmptyState: (isEmpty) => {
       if (!isEmpty) return;
       const named = filter.starred ? "Nothing starred yet." : filter.source && EMPTY_KIND[filter.source];
@@ -204,7 +137,7 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
   renderSegmented<KindChip>(
     section.querySelector<HTMLElement>("#history-kind")!,
     KIND_CHIPS,
-    "all",
+    source ?? "all",
     (kind) => applyFilter({ ...filter, source: kind === "all" ? null : kind }),
     "chips",
   );
@@ -251,7 +184,7 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
     searchHint.textContent = "Searching...";
     try {
       const resp = await api.searchHistory(q, PAGE_SIZE, filter);
-      const built = resp.entries.map((entry) => ({ entry, element: createEntryElement(entry) }));
+      const built = resp.entries.map((entry) => ({ entry, element: entryCards.create(entry) }));
       claim.replaceRows(built.length === 0 ? [noMatchesElement()] : searchTiers(built));
       claim.renderCount(`${resp.total} match${resp.total !== 1 ? "es" : ""}`);
       claim.renderMore(false);
@@ -291,136 +224,6 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
     }, SEARCH_DEBOUNCE_MS);
   });
 
-  function closeMenu(returnFocus = false): void {
-    if (!openMenu) return;
-    const { menu, trigger } = openMenu;
-    openMenu = null;
-    menu.remove();
-    trigger.setAttribute("aria-expanded", "false");
-    trigger.closest(".entry")?.classList.remove("entry--menu-open");
-    document.removeEventListener("pointerdown", closeMenuOutside, true);
-    document.removeEventListener("keydown", closeMenuOnEscape, true);
-    if (returnFocus) trigger.focus();
-  }
-
-  function closeMenuOutside(event: Event): void {
-    const target = event.target as Node;
-    if (openMenu && !openMenu.menu.contains(target) && !openMenu.trigger.contains(target)) {
-      closeMenu();
-    }
-  }
-
-  function closeMenuOnEscape(event: KeyboardEvent): void {
-    if (event.key !== "Escape") return;
-    event.preventDefault();
-    closeMenu(true);
-  }
-
-  /** The card's "more" menu, under its trigger; one menu is open at a time. */
-  function toggleMenu(trigger: HTMLButtonElement): void {
-    const wasOpen = openMenu?.trigger === trigger;
-    closeMenu();
-    if (wasOpen) return;
-    const menu = document.createElement("div");
-    menu.className = "entry-menu";
-    menu.setAttribute("role", "menu");
-    menu.innerHTML = `<button type="button" role="menuitem" data-action="delete">${icon("x", "small")}Delete</button>`;
-    trigger.after(menu);
-    trigger.setAttribute("aria-expanded", "true");
-    trigger.closest(".entry")?.classList.add("entry--menu-open");
-    openMenu = { menu, trigger };
-    document.addEventListener("pointerdown", closeMenuOutside, true);
-    document.addEventListener("keydown", closeMenuOnEscape, true);
-    menu.querySelector("button")!.focus();
-  }
-
-  function paintStar(button: HTMLButtonElement, starred: boolean): void {
-    button.setAttribute("aria-pressed", String(starred));
-    button.classList.toggle("entry-star--on", starred);
-  }
-
-  function createEntryElement(entry: HistoryEntry): HTMLElement {
-    const el = document.createElement("article");
-    el.className = `entry entry--${entry.source}`;
-    el.tabIndex = 0;
-    el.dataset.id = entry.id;
-
-    const textHtml = entry.highlighted_text
-      ? entry.highlighted_text
-      : escapeHtml(entry.text).replace(/\n/g, "<br>");
-    const excerpt = entry.highlighted_text ? matchExcerpt(entry.highlighted_text) : null;
-    if (excerpt !== null) el.classList.add("entry--excerpt");
-    const shownHtml =
-      excerpt === null
-        ? textHtml
-        : `<span class="entry-full">${textHtml}</span><span class="entry-excerpt">${excerpt}</span>`;
-
-    el.innerHTML = `
-      <span class="entry-dot">${icon(SOURCE_ICONS[entry.source], "small")}</span>
-      <div class="entry-body">
-        <p class="entry-text">${shownHtml}<button type="button" class="entry-less" data-action="expand" aria-label="Show less">less</button></p>
-        <button type="button" class="entry-more" data-action="expand" aria-label="Show more">… more</button>
-      </div>
-      <div class="entry-meta">${metaLine(entry)}${sourceBadge(entry)}<span class="entry-actions">
-        <button type="button" data-action="copy" aria-label="Copy">${icon("copy", "small")}</button>
-        <button type="button" class="entry-star" data-action="star" aria-label="Star">${icon("star", "small")}</button>
-        <button type="button" data-action="more" aria-label="More" aria-haspopup="menu" aria-expanded="false">${icon("dots", "small")}</button>
-      </span></div>
-    `;
-
-    textFit.observe(el.querySelector(".entry-text")!);
-    let starred = entry.starred;
-    let starSaving = false;
-    paintStar(el.querySelector<HTMLButtonElement>('[data-action="star"]')!, starred);
-
-    el.addEventListener("click", async (e) => {
-      const target = e.target as HTMLElement;
-      const button = target.closest<HTMLButtonElement>("button[data-action]");
-      const onLongText = target.closest(".entry-text") && el.classList.contains("entry--long");
-      if (onLongText || button?.dataset.action === "expand") {
-        el.classList.toggle("entry--expanded");
-        return;
-      }
-      if (!button) return;
-
-      if (button.dataset.action === "more") {
-        toggleMenu(button);
-      } else if (button.dataset.action === "star") {
-        if (starSaving) return;
-        starSaving = true;
-        paintStar(button, !starred);
-        try {
-          await api.setHistoryStarred(entry.id, !starred);
-          starred = !starred;
-        } catch (err) {
-          paintStar(button, starred);
-          console.error(err);
-        } finally {
-          starSaving = false;
-        }
-      } else if (button.dataset.action === "copy") {
-        const copied = await copyToClipboard(entry.text);
-        button.innerHTML = icon(copied ? "check" : "alert", "small");
-        button.setAttribute("aria-label", copied ? "Copied" : "Copy failed");
-        window.setTimeout(() => {
-          button.innerHTML = icon("copy", "small");
-          button.setAttribute("aria-label", "Copy");
-        }, COPIED_FLASH_MS);
-      } else if (button.dataset.action === "delete") {
-        closeMenu();
-        try {
-          await api.deleteHistoryEntry(entry.id);
-          timeline.rowRemoved(el);
-          list.entryRemoved();
-        } catch (err) {
-          console.error(err);
-        }
-      }
-    });
-
-    return el;
-  }
-
   const jobs = createJobCards(
     (cards) => {
       jobCards = cards;
@@ -455,11 +258,10 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
   return {
     destroy() {
       destroyed = true;
-      closeMenu();
       stopPolling();
       jobs.pause();
       list.disconnect();
-      textFit.disconnect();
+      entryCards.destroy();
       if (debounceTimer !== null) window.clearTimeout(debounceTimer);
     },
     releaseResources() {
@@ -471,6 +273,5 @@ export function renderHistory(container: HTMLElement, settings: UserSettings): H
       void jobs.refresh();
       startPolling();
     },
-    jobStarted: () => void jobs.refresh(),
   };
 }
