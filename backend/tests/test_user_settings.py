@@ -357,16 +357,19 @@ def test_the_meeting_acknowledgement_defaults_to_not_given():
     assert user_settings.UserSettings().meeting_consent_acknowledged is False
 
 
-@pytest.mark.parametrize("acknowledged", [True, False])
-def test_record_meetings_starts_as_the_stored_acknowledgement(isolated, acknowledged):
-    """A file from before the switch existed keeps meetings on for whoever acknowledged."""
+@pytest.mark.parametrize("switch", [True, False])
+def test_a_file_from_the_record_meetings_switch_loads_and_drops_it(isolated, switch):
     settings_path = isolated["settings_dir"] / "settings.json"
     settings_path.write_text(
-        json.dumps({"meeting_consent_acknowledged": acknowledged}), encoding="utf-8"
+        json.dumps({"meeting_consent_acknowledged": True, "meetings_enabled": switch}),
+        encoding="utf-8",
     )
     user_settings._settings = None
 
-    assert user_settings.get_user_settings().meetings_enabled is acknowledged
+    assert user_settings.get_user_settings().meeting_consent_acknowledged is True
+    user_settings.update_user_settings({"theme": "dark"})
+
+    assert "meetings_enabled" not in json.loads(settings_path.read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize(("stored", "meetings"), [({"language": "en"}, "en"), ({}, "uk")])
@@ -387,22 +390,6 @@ def test_a_chosen_meeting_language_reaches_the_meeting_jobs(isolated):
 
     assert (loaded.language, loaded.meetings_language) == ("en", "auto")
     assert stt_settings.meetings_language == "auto"
-
-
-def test_record_meetings_turned_off_stays_off_after_a_reload(isolated):
-    user_settings.update_user_settings(
-        {"meeting_consent_acknowledged": True, "meetings_enabled": False}
-    )
-
-    user_settings._settings = None
-    loaded = user_settings.get_user_settings()
-
-    assert loaded.meeting_consent_acknowledged is True
-    assert loaded.meetings_enabled is False
-
-
-def test_record_meetings_is_off_by_default():
-    assert user_settings.UserSettings().meetings_enabled is False
 
 
 def test_the_theme_follows_the_system_until_one_is_chosen():

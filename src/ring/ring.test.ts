@@ -19,7 +19,6 @@ const SETTINGS = {
   language: "uk",
   previous_language: "en",
   meeting_consent_acknowledged: true,
-  meetings_enabled: true,
   meetings_engine: "local",
   meetings_language: "uk",
 };
@@ -160,8 +159,8 @@ describe("the ring window", () => {
     await vi.waitFor(() => expect(emitMock).toHaveBeenCalledWith(EVENT_MEETING_TOGGLE));
   });
 
-  it("opens the Meetings page in the main window while meetings are off", async () => {
-    getSettingsMock.mockResolvedValue({ ...SETTINGS, meetings_enabled: false });
+  it("opens the Meetings page in the main window until the disclosure is acknowledged", async () => {
+    getSettingsMock.mockResolvedValue({ ...SETTINGS, meeting_consent_acknowledged: false });
     const ring = await loadRing();
     await vi.waitFor(() => expect(petal(ring, 2).getAttribute("aria-label")).toBe("Language · Ukrainian"));
 

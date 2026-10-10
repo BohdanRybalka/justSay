@@ -4,17 +4,14 @@
  * backend; `ring.ts` carries out the step this module names.
  */
 
-import { meetingsTurnedOn, type UserSettings } from "../api";
+import type { UserSettings } from "../api";
 import type { NavigatePanel } from "../contracts";
 import { languageName } from "../languages";
 
 export type RingAction = "meeting" | "file" | "language" | "settings";
 
 export interface RingState {
-  settings: Pick<
-    UserSettings,
-    "language" | "previous_language" | "meeting_consent_acknowledged" | "meetings_enabled"
-  > | null;
+  settings: Pick<UserSettings, "language" | "previous_language" | "meeting_consent_acknowledged"> | null;
   meetingRecording: boolean;
 }
 
@@ -39,14 +36,15 @@ export function petalLabel(action: RingAction, state: RingState): string {
   }
 }
 
-/** A meeting petal with meetings off opens the Meetings page rather than
- *  asking the backend for a refusal; a stop is always sent. The language petal
+/** A meeting petal before the disclosure is acknowledged opens the Meetings
+ *  page, where the first start shows it, rather than asking the backend for a
+ *  refusal; a stop is always sent. The language petal
  *  swaps back to the language used before, and opens Dictation when there is
  *  none. */
 export function stepFor(action: RingAction, state: RingState): RingStep {
   switch (action) {
     case "meeting":
-      if (state.meetingRecording || !state.settings || meetingsTurnedOn(state.settings)) {
+      if (state.meetingRecording || !state.settings || state.settings.meeting_consent_acknowledged) {
         return { kind: "toggle-meeting" };
       }
       return { kind: "open-panel", target: { panel: "meetings" } };

@@ -192,7 +192,6 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     gemini_api_key: "",
     groq_api_key: "",
     meeting_consent_acknowledged: false,
-    meetings_enabled: false,
     meetings_engine: "local",
     meetings_language: "uk",
     theme: "system",
@@ -370,7 +369,7 @@ describe("the sidebar", () => {
     expect(panel.querySelectorAll(".legacy-tab")).toHaveLength(0);
     const modeRows = panel.querySelector(":scope > #dictation-mode-body")!;
     expect(card.compareDocumentPosition(modeRows) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(panel.querySelector("#meetings-toggle")).toBeNull();
+    expect(panel.querySelector("#meeting-card")).toBeNull();
     expect(panel.querySelector("#dictionary-input")).toBeNull();
   });
 
@@ -382,7 +381,7 @@ describe("the sidebar", () => {
 
     expect(currentPanels()).toEqual(["meetings"]);
     const panel = document.querySelector("#pane > .panel")!;
-    expect(panel.querySelector("#meetings-toggle")).not.toBeNull();
+    expect(panel.querySelector("#meeting-card")).not.toBeNull();
     expect(panel.querySelector("#meetings-detect")).not.toBeNull();
     expect(panel.querySelector("#lang-select")).toBeNull();
     expect(modeTab.destroy).toHaveBeenCalledOnce();
@@ -506,11 +505,11 @@ describe("the sidebar", () => {
 
     await fromAnotherWindow(EVENT_NAVIGATE_PANEL, { payload: { panel: "meetings" } });
     expect(currentPanels()).toEqual(["meetings"]);
-    const toggle = document.getElementById("meetings-toggle")!;
+    const toggle = document.getElementById("meeting-card")!;
     expect(toggle).not.toBeNull();
 
     await fromAnotherWindow(EVENT_NAVIGATE_PANEL, { payload: { panel: "meetings" } });
-    expect(document.getElementById("meetings-toggle")).toBe(toggle);
+    expect(document.getElementById("meeting-card")).toBe(toggle);
   });
 
   it("shows a language the ring switched to on the Dictation panel", async () => {

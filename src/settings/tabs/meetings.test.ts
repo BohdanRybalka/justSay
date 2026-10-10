@@ -20,7 +20,18 @@ vi.mock("../../notify", () => ({
   notifyError: notifyErrorMock,
 }));
 
-const { renderMeetings, meetingsHint } = await import("./meetings");
+const getMeetingStatusMock = vi.fn();
+vi.mock("../../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../api")>();
+  return {
+    ...actual,
+    api: { ...actual.api, getMeetingStatus: getMeetingStatusMock },
+    meetingLevelStream: vi.fn(() => new AbortController()),
+  };
+});
+
+const { renderMeetings } = await import("./meetings");
+const { meetingCardHint } = await import("./meeting-card");
 
 function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
   return {
@@ -35,7 +46,6 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     gemini_api_key: "",
     groq_api_key: "",
     meeting_consent_acknowledged: false,
-    meetings_enabled: false,
     meetings_engine: "local",
     meetings_language: "uk",
     theme: "system",
@@ -46,21 +56,16 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
   };
 }
 
-function render(overrides: Partial<UserSettings> = {}) {
+function render(overrides: Partial<UserSettings> = {}, windowHidden = true) {
   const container = document.createElement("div");
-  renderMeetings(container, buildSettings(overrides));
-  const toggle = container.querySelector<HTMLButtonElement>("#meetings-toggle")!;
-  const disclosure = container.querySelector<HTMLElement>("#meeting-disclosure")!;
-  const consent = container.querySelector<HTMLButtonElement>("#btn-meeting-consent")!;
-  const hint = container.querySelector<HTMLElement>("#meetings-hint")!;
-  const isOn = () => toggle.getAttribute("aria-checked") === "true";
-  return { container, toggle, disclosure, consent, hint, isOn };
+  const page = renderMeetings(container, buildSettings(overrides), windowHidden);
+  const hint = container.querySelector<HTMLElement>("#meeting-hint")!;
+  return { container, page, hint };
 }
-
-const ACKNOWLEDGED_ON = { meeting_consent_acknowledged: true, meetings_enabled: true };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getMeetingStatusMock.mockResolvedValue({ is_recording: false, duration_seconds: 0 });
   saveSettingsMock.mockResolvedValue({ settings: buildSettings(), warning: null });
   getCloudKeyStatusMock.mockReturnValue({ groq_key_set: true });
 });
@@ -70,14 +75,32 @@ describe("renderMeetings — the page", () => {
     return [...container.querySelectorAll(".group-label")].map((label) => label.textContent);
   }
 
-  it("is a page of its own, titled Meetings, with the Record meetings switch in its first card", () => {
-    const { container, toggle } = render();
+  it("is a page of its own, titled Meetings, with the meeting card first", () => {
+    const { container } = render();
 
     expect(container.querySelector(".panel-title")!.textContent).toBe("Meetings");
     expect(container.querySelector(".panel-subtitle")!.textContent).toBe(
       "Record a call in any app and get its text.",
     );
-    expect(container.querySelector(":scope > .card")!.contains(toggle)).toBe(true);
+    expect(container.querySelector(":scope > .meeting-card #meeting-start")).not.toBeNull();
+    expect(container.querySelector(".meeting-card")!.nextElementSibling!.classList.contains("group-label")).toBe(true);
+  });
+
+  it("has no Record meetings switch", () => {
+    const { container } = render({ meeting_consent_acknowledged: true });
+
+    expect(container.querySelector("#meetings-toggle")).toBeNull();
+    expect(container.textContent).not.toContain("Record meetings");
+  });
+
+  it("lets the card read the meeting only while the window is shown", async () => {
+    const { page } = render({}, true);
+    expect(getMeetingStatusMock).not.toHaveBeenCalled();
+
+    page.resumeResources!();
+    await vi.waitFor(() => expect(getMeetingStatusMock).toHaveBeenCalledTimes(1));
+    page.releaseResources!();
+    page.destroy();
   });
 
   it("groups the rest as LANGUAGE and MODEL, in that order", () => {
@@ -100,77 +123,6 @@ describe("renderMeetings — the page", () => {
   });
 });
 
-describe("renderMeetings — the switch", () => {
-  it("is on only when the disclosure is acknowledged and Record meetings is on", () => {
-    expect(render(ACKNOWLEDGED_ON).isOn()).toBe(true);
-    expect(render({ meeting_consent_acknowledged: true, meetings_enabled: false }).isOn()).toBe(false);
-    expect(render({ meeting_consent_acknowledged: false, meetings_enabled: true }).isOn()).toBe(false);
-  });
-
-  it("opens the disclosure instead of turning on the first time", () => {
-    const view = render();
-
-    expect(view.disclosure.hidden).toBe(true);
-    view.toggle.click();
-
-    expect(view.disclosure.hidden).toBe(false);
-    expect(view.isOn()).toBe(false);
-    expect(saveSettingsMock).not.toHaveBeenCalled();
-  });
-
-  it("turns on after I understand, saving both answers and telling the widget", async () => {
-    const view = render();
-    view.toggle.click();
-    view.consent.click();
-
-    await vi.waitFor(() => expect(view.isOn()).toBe(true));
-    expect(saveSettingsMock).toHaveBeenCalledWith(ACKNOWLEDGED_ON);
-    expect(view.disclosure.hidden).toBe(true);
-    expect(emitSettingsChangedMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("stays off with the disclosure open when I understand could not be saved", async () => {
-    saveSettingsMock.mockRejectedValue(new Error("backend down"));
-    const view = render();
-    view.toggle.click();
-    view.consent.click();
-
-    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("backend down"));
-    expect(view.isOn()).toBe(false);
-    expect(view.disclosure.hidden).toBe(false);
-    expect(view.consent.disabled).toBe(false);
-    expect(emitSettingsChangedMock).not.toHaveBeenCalled();
-  });
-
-  it("turns on straight away once the disclosure was acknowledged", async () => {
-    const view = render({ meeting_consent_acknowledged: true, meetings_enabled: false });
-    view.toggle.click();
-
-    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledWith({ meetings_enabled: true }));
-    expect(view.isOn()).toBe(true);
-    expect(view.disclosure.hidden).toBe(true);
-  });
-
-  it("turns off and tells the widget, which takes Record a meeting out of the tray", async () => {
-    const view = render(ACKNOWLEDGED_ON);
-    view.toggle.click();
-
-    await vi.waitFor(() => expect(emitSettingsChangedMock).toHaveBeenCalledTimes(1));
-    expect(saveSettingsMock).toHaveBeenCalledWith({ meetings_enabled: false });
-    expect(view.isOn()).toBe(false);
-    expect(view.toggle.disabled).toBe(false);
-  });
-
-  it("goes back on when turning it off could not be saved", async () => {
-    saveSettingsMock.mockRejectedValue(new Error("backend down"));
-    const view = render(ACKNOWLEDGED_ON);
-    view.toggle.click();
-
-    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("backend down"));
-    expect(view.isOn()).toBe(true);
-  });
-});
-
 describe("renderMeetings — where a meeting becomes text", () => {
   function picked(container: HTMLElement): string[] {
     return [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Meeting model"] .mode-row')]
@@ -186,12 +138,12 @@ describe("renderMeetings — where a meeting becomes text", () => {
     const view = render({ stt_mode: "cloud", meetings_engine: "local" });
 
     expect(view.hint.textContent).toBe(
-      "Right-click the widget and pick Record a meeting · turned into text on this computer",
+      "Your microphone and what this computer plays · turned into text on this computer",
     );
     expect(picked(view.container)).toEqual(["meetings-local"]);
     expect(rowHint(view.container, "meetings-local").textContent).toBe("Stays on this computer");
     expect(rowHint(view.container, "meetings-cloud").textContent).toBe("Everyone's voices go to your cloud provider");
-    expect(render({ stt_mode: "local", meetings_engine: "cloud" }).hint.textContent).toBe(meetingsHint("cloud"));
+    expect(render({ stt_mode: "local", meetings_engine: "cloud" }).hint.textContent).toBe(meetingCardHint("cloud"));
   });
 
   it("asks for the Groq key on the Cloud row when there is none", () => {
@@ -209,7 +161,7 @@ describe("renderMeetings — where a meeting becomes text", () => {
 
     await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledWith({ meetings_engine: "cloud" }));
     await vi.waitFor(() => expect(emitSettingsChangedMock).toHaveBeenCalled());
-    expect(view.hint.textContent).toBe(meetingsHint("cloud"));
+    expect(view.hint.textContent).toBe(meetingCardHint("cloud"));
     expect(picked(view.container)).toEqual(["meetings-cloud"]);
   });
 
@@ -220,7 +172,7 @@ describe("renderMeetings — where a meeting becomes text", () => {
     view.container.querySelector<HTMLButtonElement>("#meetings-cloud")!.click();
 
     await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("backend down"));
-    expect(view.hint.textContent).toBe(meetingsHint("local"));
+    expect(view.hint.textContent).toBe(meetingCardHint("local"));
     expect(picked(view.container)).toEqual(["meetings-local"]);
   });
 
@@ -317,22 +269,5 @@ describe("renderMeetings — the language a meeting is heard in", () => {
     expect(view.detecting()).toBe(false);
     expect(view.row.hidden).toBe(false);
     expect(view.select.value).toBe("uk");
-  });
-});
-
-describe("renderMeetings — the disclosure (ADR 040 obligation 3)", () => {
-  it("states that the user carries the consent obligation", () => {
-    const text = render().container.querySelector("#meeting-consent-responsibility")!.textContent!;
-
-    expect(text).toMatch(/responsible/i);
-    expect(text).toMatch(/consent/i);
-  });
-
-  it("states that the cloud sends the other participants' audio to the provider", () => {
-    const text = render().container.querySelector("#meeting-consent-cloud")!.textContent!;
-
-    expect(text).toMatch(/cloud/i);
-    expect(text).toMatch(/participants/i);
-    expect(text).toMatch(/provider/i);
   });
 });

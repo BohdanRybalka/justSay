@@ -70,7 +70,6 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     gemini_api_key: "",
     groq_api_key: "",
     meeting_consent_acknowledged: false,
-    meetings_enabled: false,
     meetings_engine: "local",
     meetings_language: "uk",
     theme: "system",

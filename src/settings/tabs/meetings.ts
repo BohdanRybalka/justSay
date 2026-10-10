@@ -1,15 +1,15 @@
 /**
- * The Meetings page: the Record meetings switch, whose first turn-on opens the
- * meeting disclosure (ADR 040 obligation 3) under the row and keeps the switch
- * off until "I understand". LANGUAGE is how a meeting is heard: detected for
- * each part, or one picked from the list. MODEL picks where a stopped meeting
- * becomes text, apart from dictation (the hint names it).
+ * The Meetings page: the card that starts and stops a meeting, then LANGUAGE
+ * (how a meeting is heard: detected for each part, or one picked from the
+ * list) and MODEL (where a stopped meeting becomes text, apart from dictation;
+ * the card's hint names it).
  */
-import { meetingsTurnedOn, type UserSettings } from "../../api";
+import type { UserSettings } from "../../api";
 import { getCloudKeyStatus, saveSettings, type TabLifecycle } from "../settings";
 import { emitSettingsChanged } from "./dictation";
 import { CLOUD_KEY_MISSING, cloudKeyMissing, drawRow, modeRowHtml } from "./mode-rows";
 import { notifyError } from "../../notify";
+import { mountMeetingCard } from "./meeting-card";
 import { renderSelect, renderToggle } from "../../ui/controls";
 import { icon } from "../../ui/icons";
 import { DICTATION_LANGUAGES } from "../../languages";
@@ -18,21 +18,16 @@ type Engine = UserSettings["meetings_engine"];
 
 const DETECT = "auto";
 
-const WHERE_IT_BECOMES_TEXT: Readonly<Record<Engine, string>> = {
-  cloud: "in the cloud",
-  local: "on this computer",
-};
-
 const CLOUD_HINT = "Everyone's voices go to your cloud provider";
 const LOCAL_HINT = "Stays on this computer";
 
-export function meetingsHint(engine: Engine): string {
-  return `Right-click the widget and pick Record a meeting · turned into text ${WHERE_IT_BECOMES_TEXT[engine]}`;
-}
-
-/** Adds the Meetings page to the end of `container`, the switch showing
- *  whether the backend will start a meeting recording. */
-export function renderMeetings(container: HTMLElement, settings: UserSettings): TabLifecycle {
+/** Adds the Meetings page to the end of `container`; `windowHidden` keeps the
+ *  card from polling until the window is shown. */
+export function renderMeetings(
+  container: HTMLElement,
+  settings: UserSettings,
+  windowHidden: boolean,
+): TabLifecycle {
   let language = settings.meetings_language;
   let picked = language === DETECT ? settings.language : language;
 
@@ -41,30 +36,7 @@ export function renderMeetings(container: HTMLElement, settings: UserSettings): 
     `
     <h2 class="panel-title">Meetings</h2>
     <p class="panel-subtitle">Record a call in any app and get its text.</p>
-    <div class="card">
-      <div class="setting-row">
-        <div class="setting-row-text">
-          <div class="setting-row-title">Record meetings<span class="chip">new</span></div>
-          <div class="setting-row-hint" id="meetings-hint"></div>
-        </div>
-        <div class="setting-row-controls">
-          <button id="meetings-toggle" aria-label="Record meetings"></button>
-        </div>
-      </div>
-      <div class="meeting-disclosure" id="meeting-disclosure" hidden>
-        <p id="meeting-consent-responsibility">
-          A meeting recording captures everyone on the call, including people who never
-          installed JustSay. You are responsible for obtaining whatever consent your
-          jurisdiction and your employer require before you start one.
-        </p>
-        <p id="meeting-consent-cloud">
-          When meetings are turned into text in the cloud, the other participants' audio is
-          sent to the transcription provider you configured, along with your own. Keep them on
-          this computer if none of it may leave this machine.
-        </p>
-        <button type="button" class="btn btn-primary btn-small" id="btn-meeting-consent">I understand</button>
-      </div>
-    </div>
+    <div id="meeting-card"></div>
     <div class="group-label">${icon("globe")}LANGUAGE</div>
     <div class="card">
       <div class="setting-row">
@@ -97,10 +69,11 @@ export function renderMeetings(container: HTMLElement, settings: UserSettings): 
   `,
   );
 
-  const hint = container.querySelector<HTMLElement>("#meetings-hint")!;
-  const toggle = container.querySelector<HTMLButtonElement>("#meetings-toggle")!;
-  const disclosure = container.querySelector<HTMLElement>("#meeting-disclosure")!;
-  const consentButton = container.querySelector<HTMLButtonElement>("#btn-meeting-consent")!;
+  const card = mountMeetingCard(
+    container.querySelector<HTMLElement>("#meeting-card")!,
+    settings,
+    windowHidden,
+  );
   const detectToggle = container.querySelector<HTMLButtonElement>("#meetings-detect")!;
   const languageRow = container.querySelector<HTMLElement>("#meetings-language-row")!;
   const languageSelect = container.querySelector<HTMLSelectElement>("#meetings-language")!;
@@ -108,13 +81,7 @@ export function renderMeetings(container: HTMLElement, settings: UserSettings): 
   const localRow = container.querySelector<HTMLButtonElement>("#meetings-local")!;
   const keyMissing = cloudKeyMissing(getCloudKeyStatus());
 
-  let acknowledged = settings.meeting_consent_acknowledged;
-  let on = meetingsTurnedOn(settings);
   let destroyed = false;
-
-  function drawSwitch() {
-    toggle.setAttribute("aria-checked", String(on));
-  }
 
   async function save(updates: Partial<UserSettings>): Promise<boolean> {
     try {
@@ -126,36 +93,6 @@ export function renderMeetings(container: HTMLElement, settings: UserSettings): 
     void emitSettingsChanged();
     return true;
   }
-
-  async function turn(next: boolean) {
-    toggle.disabled = true;
-    const saved = await save({ meetings_enabled: next });
-    if (destroyed) return;
-    toggle.disabled = false;
-    if (saved) on = next;
-    drawSwitch();
-  }
-
-  renderToggle(toggle, on, (next) => {
-    if (next && !acknowledged) {
-      drawSwitch();
-      disclosure.hidden = false;
-      return;
-    }
-    void turn(next);
-  });
-
-  consentButton.addEventListener("click", async () => {
-    consentButton.disabled = true;
-    const saved = await save({ meeting_consent_acknowledged: true, meetings_enabled: true });
-    if (destroyed) return;
-    consentButton.disabled = false;
-    if (!saved) return;
-    acknowledged = true;
-    on = true;
-    disclosure.hidden = true;
-    drawSwitch();
-  });
 
   function showLanguage() {
     detectToggle.setAttribute("aria-checked", String(language === DETECT));
@@ -184,7 +121,7 @@ export function renderMeetings(container: HTMLElement, settings: UserSettings): 
   let savingEngine = false;
 
   function showEngine(shown: Engine) {
-    hint.textContent = meetingsHint(shown);
+    card.setEngine(shown);
     drawRow(cloudRow, shown === "cloud", {
       hint: keyMissing ? CLOUD_KEY_MISSING : CLOUD_HINT,
       alert: keyMissing,
@@ -219,6 +156,9 @@ export function renderMeetings(container: HTMLElement, settings: UserSettings): 
   return {
     destroy: () => {
       destroyed = true;
+      card.destroy();
     },
+    releaseResources: card.releaseResources,
+    resumeResources: card.resumeResources,
   };
 }
