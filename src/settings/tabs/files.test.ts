@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { DROP_AREA_CLASS, DROP_HINT } from "../file-transcription";
 import { renderFiles } from "./files";
@@ -38,5 +40,16 @@ describe("renderFiles — the page", () => {
     choose.click();
 
     expect(pick).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("files.css", () => {
+  it("turns the drop area orange under the class the window carries while a file is dragged over it", () => {
+    const css = readFileSync(resolve(__dirname, "files.css"), "utf-8");
+
+    const rule = css.match(/\.dragging-file \.drop-area\s*\{([^}]*)\}/);
+
+    expect(rule, "no rule for a drop area while a file is dragged").not.toBeNull();
+    expect(rule![1]).toContain("border-color: var(--orange)");
   });
 });
