@@ -25,10 +25,11 @@ import {
 import { loadEventApi } from "../event-api";
 import { TimedOutError, withTimeout } from "../timeout";
 import { isStaleStatusResponse } from "../stale-response";
-import { mountFileTranscription } from "./file-transcription";
+import { mountFileTranscription, type FileTranscription } from "./file-transcription";
 import { nextTabAction } from "./tab-visibility";
 import { renderDictation } from "./tabs/dictation";
 import { renderDictationMode } from "./tabs/dictation-mode";
+import { renderFiles } from "./tabs/files";
 import { renderMeetings } from "./tabs/meetings";
 import { renderHistory, renderHistoryHeading, type HistoryPanel } from "./tabs/history";
 import { renderInsights } from "./tabs/insights";
@@ -54,6 +55,7 @@ let settings: UserSettings | null = null;
 let cloudStatus: CloudKeyStatus | null = null;
 let activeTab: TabLifecycle | null = null;
 let historyPanel: HistoryPanel | null = null;
+let fileTranscription: FileTranscription | null = null;
 let settingsError: string | null = null;
 let backendReachable = false;
 let settingsLoadInFlight = false;
@@ -124,6 +126,7 @@ const panels: Record<PanelName, PanelRenderer> = {
     return combineLifecycles([everyday, mode]);
   },
   meetings: renderMeetings,
+  files: (container) => renderFiles(container, () => fileTranscription?.pick()),
   settings: renderSettingsPanel,
   account: (container, loaded) =>
     renderAccount(container, { chosen: loaded.display_name, osName: osAccountName }, renameUser),
@@ -604,7 +607,7 @@ function init() {
   applyThemePreference("system");
   mountIconSprite(document);
   renderTitlebar(titlebar, detectShortcutPlatform(navigator));
-  mountFileTranscription(document.body, document.querySelector<HTMLButtonElement>("#transcribe-file")!, showStartedJob);
+  fileTranscription = mountFileTranscription(document.body, showStartedJob);
   void connectTitlebarToWindow();
   void initAppVersion();
   void initAccountName();

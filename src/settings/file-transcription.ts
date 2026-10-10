@@ -4,8 +4,9 @@ import { loadEventApi } from "../event-api";
 import { icon } from "../ui/icons";
 
 export const REFUSAL_SHOWN_MS = 4000;
-export const GROW_MS = 420;
+export const DROP_AREA_CLASS = "drop-area";
 
+const DRAGGING_FILE_CLASS = "dragging-file";
 const MAX_MB = MAX_UPLOAD_BYTES / (1024 * 1024);
 export const DROP_HINT = `mp3, wav, m4a, mp4 and 7 more · up to ${MAX_MB} MB`;
 
@@ -47,28 +48,23 @@ export function refusalOf(file: Pick<File, "name" | "size">): string | null {
   return null;
 }
 
-/** The transform that puts `box` exactly over `from`: where the drop box starts growing. */
-export function transformOnto(from: DOMRect, box: DOMRect): string {
-  const dx = from.left + from.width / 2 - (box.left + box.width / 2);
-  const dy = from.top + from.height / 2 - (box.top + box.height / 2);
-  return `translate(${dx}px, ${dy}px) scale(${from.width / box.width}, ${from.height / box.height})`;
-}
-
 function carriesFiles(event: DragEvent): boolean {
   return Array.from(event.dataTransfer?.types ?? []).includes("Files");
 }
 
+export interface FileTranscription {
+  pick: () => void;
+  destroy: () => void;
+}
+
 /**
- * Every way a file reaches the window: `pickButton` opens the system file dialog, a drag
- * carrying files dims the window under "Drop to transcribe" (ADR 087), and the shell hands
- * over a file picked from the ring or the tray. The file is sent off as a job before
- * `onStarted` runs; a refusal is explained on the overlay. Returns the teardown.
+ * Every way a file reaches the window: `pick` opens the system file dialog, a drag carrying
+ * files dims the window under "Drop to transcribe" (ADR 087) or, while a `.drop-area` is on
+ * screen, lights that area instead, and the shell hands over a file picked from the ring or
+ * the tray. The file is sent off as a job before `onStarted` runs; a refusal is explained on
+ * the overlay.
  */
-export function mountFileTranscription(
-  root: HTMLElement,
-  pickButton: HTMLButtonElement,
-  onStarted: () => void,
-): () => void {
+export function mountFileTranscription(root: HTMLElement, onStarted: () => void): FileTranscription {
   const overlay = document.createElement("div");
   overlay.className = "drop-overlay";
   overlay.hidden = true;
@@ -79,7 +75,6 @@ export function mountFileTranscription(
       <span class="drop-overlay-hint"></span>
     </div>
   `;
-  const box = overlay.querySelector<HTMLElement>(".drop-overlay-box")!;
   const title = overlay.querySelector<HTMLElement>(".drop-overlay-title")!;
   const hint = overlay.querySelector<HTMLElement>(".drop-overlay-hint")!;
   const picker = document.createElement("input");
@@ -98,16 +93,6 @@ export function mountFileTranscription(
     hint.textContent = DROP_HINT;
     overlay.classList.toggle("drop-overlay--refused", refused);
     overlay.hidden = false;
-    if (!refused) growFromButton();
-  }
-
-  function growFromButton(): void {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const start = transformOnto(pickButton.getBoundingClientRect(), box.getBoundingClientRect());
-    box.animate(
-      [{ transform: start, opacity: 0 }, { opacity: 1, offset: 0.3 }, { transform: "none", opacity: 1 }],
-      { duration: GROW_MS, easing: "cubic-bezier(.3, .8, .25, 1)" },
-    );
   }
 
   function hide(): void {
@@ -136,11 +121,25 @@ export function mountFileTranscription(
     onStarted();
   }
 
+  function dragStarted(): void {
+    if (root.querySelector(`.${DROP_AREA_CLASS}`)) {
+      hide();
+      root.classList.add(DRAGGING_FILE_CLASS);
+    } else {
+      show("Drop to transcribe", false);
+    }
+  }
+
+  function dragEnded(): void {
+    root.classList.remove(DRAGGING_FILE_CLASS);
+    hide();
+  }
+
   const onEnter = (event: DragEvent) => {
     if (!carriesFiles(event)) return;
     event.preventDefault();
     depth += 1;
-    if (depth === 1) show("Drop to transcribe", false);
+    if (depth === 1) dragStarted();
   };
   const onOver = (event: DragEvent) => {
     if (carriesFiles(event)) event.preventDefault();
@@ -148,18 +147,17 @@ export function mountFileTranscription(
   const onLeave = (event: DragEvent) => {
     if (!carriesFiles(event) || depth === 0) return;
     depth -= 1;
-    if (depth === 0) hide();
+    if (depth === 0) dragEnded();
   };
   const onDrop = (event: DragEvent) => {
     if (!carriesFiles(event)) return;
     event.preventDefault();
     depth = 0;
-    hide();
+    dragEnded();
     const file = event.dataTransfer?.files?.[0];
     if (file) void send(fromPage(file));
   };
 
-  const onPick = () => picker.click();
   const onPicked = () => {
     const file = picker.files?.[0];
     picker.value = "";
@@ -180,7 +178,6 @@ export function mountFileTranscription(
     }
   }
 
-  pickButton.addEventListener("click", onPick);
   picker.addEventListener("change", onPicked);
   window.addEventListener("dragenter", onEnter);
   window.addEventListener("dragover", onOver);
@@ -188,16 +185,18 @@ export function mountFileTranscription(
   window.addEventListener("drop", onDrop);
   overlay.addEventListener("click", hide);
 
-  return () => {
-    tornDown = true;
-    stopHearingShell?.();
-    hide();
-    window.removeEventListener("dragenter", onEnter);
-    window.removeEventListener("dragover", onOver);
-    window.removeEventListener("dragleave", onLeave);
-    window.removeEventListener("drop", onDrop);
-    pickButton.removeEventListener("click", onPick);
-    overlay.remove();
-    picker.remove();
+  return {
+    pick: () => picker.click(),
+    destroy: () => {
+      tornDown = true;
+      stopHearingShell?.();
+      dragEnded();
+      window.removeEventListener("dragenter", onEnter);
+      window.removeEventListener("dragover", onOver);
+      window.removeEventListener("dragleave", onLeave);
+      window.removeEventListener("drop", onDrop);
+      overlay.remove();
+      picker.remove();
+    },
   };
 }

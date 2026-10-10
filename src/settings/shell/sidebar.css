@@ -7,7 +7,7 @@
   min-height: 0;
 }
 
-:where(.account-row, .nav-item, .sidebar-transcribe) {
+:where(.account-row, .nav-item) {
   font: inherit;
   color: inherit;
   cursor: pointer;
@@ -133,51 +133,6 @@
   width: 3px;
   border-radius: 0 3px 3px 0;
   background: var(--blue);
-}
-
-.sidebar-transcribe {
-  margin-top: auto;
-  margin-bottom: 12px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 6px 10px;
-  border: 1.5px dashed var(--border-2);
-  border-radius: 10px;
-  color: var(--text-2);
-  transition: .15s;
-}
-
-.sidebar-transcribe:hover,
-.sidebar-transcribe:focus-visible {
-  border-color: var(--orange);
-  background: var(--orange-soft);
-}
-
-.sidebar-transcribe .icon {
-  width: 16px;
-  height: 16px;
-  color: var(--orange);
-  flex: none;
-}
-
-.sidebar-transcribe b {
-  display: block;
-  font-size: 12.5px;
-  font-weight: 575;
-  color: var(--text);
-}
-
-.sidebar-transcribe small {
-  display: block;
-  font-size: 11px;
-  color: var(--muted);
-  margin-top: 0;
-}
-
-.sidebar-transcribe + .sidebar-status {
-  margin-top: 0;
 }
 
 .sidebar-status {

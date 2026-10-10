@@ -5,7 +5,7 @@
  */
 import { initialsOf } from "./account-name";
 
-export type PanelName = "insights" | "history" | "dictation" | "meetings" | "settings" | "account";
+export type PanelName = "insights" | "history" | "dictation" | "meetings" | "files" | "settings" | "account";
 
 export type BackendState = "ready" | "starting" | "offline" | "unauthorized";
 
