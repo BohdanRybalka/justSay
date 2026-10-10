@@ -107,8 +107,8 @@ class MeetingStatus(BaseModel):
     capture_incident: str | None
 
 
-_MEETINGS_OFF_DETAIL = (
-    "Meeting recording is off — open Dictation and turn on Record meetings"
+_DISCLOSURE_NOT_ACKNOWLEDGED_DETAIL = (
+    "The meeting disclosure is not acknowledged — open Meetings and press Start recording"
 )
 
 
@@ -216,13 +216,12 @@ async def start_meeting_recording(
 ):
     """Begin capturing the microphone and the system output together.
 
-    Answers 403 unless the disclosure is acknowledged (ADR 040) and Record meetings
-    is on, 501 on a platform with no system-audio path. The `is_busy` guard only
-    refuses — the recorder re-checks on the thread that owns the answer.
+    Answers 403 unless the disclosure is acknowledged (ADR 040), 501 on a platform
+    with no system-audio path. The `is_busy` guard only refuses — the recorder
+    re-checks on the thread that owns the answer.
     """
-    settings = get_user_settings()
-    if not (settings.meeting_consent_acknowledged and settings.meetings_enabled):
-        raise HTTPException(status_code=403, detail=_MEETINGS_OFF_DETAIL)
+    if not get_user_settings().meeting_consent_acknowledged:
+        raise HTTPException(status_code=403, detail=_DISCLOSURE_NOT_ACKNOWLEDGED_DETAIL)
     if dictation_recorder is not None and dictation_recorder.is_recording:
         raise HTTPException(status_code=409, detail="A dictation recording is in progress")
     if recorder.is_busy:

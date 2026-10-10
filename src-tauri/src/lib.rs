@@ -64,7 +64,7 @@ const MEETING_ITEM_POSITION: usize = 1;
 
 #[derive(Default)]
 struct MeetingTrayState {
-    enabled: bool,
+    allowed: bool,
     recording: bool,
     shown: bool,
 }
@@ -79,11 +79,11 @@ struct MeetingTray {
     state: Mutex<MeetingTrayState>,
 }
 
-/// The item is in the tray while Record meetings is on, and also while a
-/// meeting is being recorded, so one running when the switch goes off can
-/// still be stopped from the tray.
-fn meeting_item_shown(enabled: bool, recording: bool) -> bool {
-    enabled || recording
+/// The item is in the tray once the meeting disclosure is acknowledged, and
+/// also while a meeting is being recorded, so one running can always be
+/// stopped from the tray.
+fn meeting_item_shown(allowed: bool, recording: bool) -> bool {
+    allowed || recording
 }
 
 impl MeetingTray {
@@ -96,7 +96,7 @@ impl MeetingTray {
             "Record a meeting"
         };
         let _ = self.item.set_text(label);
-        let shown = meeting_item_shown(state.enabled, state.recording);
+        let shown = meeting_item_shown(state.allowed, state.recording);
         if shown == state.shown {
             return;
         }
@@ -122,12 +122,12 @@ fn set_meeting_recording(app: AppHandle, active: bool) {
     }
 }
 
-/// Show or remove the tray's meeting item as the Record meetings switch
-/// changes; the widget sends it each time it reads the settings.
+/// Show or remove the tray's meeting item as the meeting disclosure is
+/// acknowledged; the widget sends it each time it reads the settings.
 #[tauri::command]
-fn set_meetings_enabled(app: AppHandle, enabled: bool) {
+fn set_meetings_allowed(app: AppHandle, allowed: bool) {
     if let Some(tray) = app.try_state::<MeetingTray>() {
-        tray.update(|state| state.enabled = enabled);
+        tray.update(|state| state.allowed = allowed);
     }
 }
 
@@ -245,8 +245,8 @@ fn hide_settings(app: &AppHandle) {
 }
 
 /// Bring the settings window up. Called when the backend refuses to start a
-/// meeting recording because Record meetings is off or its disclosure has not
-/// been acknowledged (docs/adr/040-recording-other-people-is-not-covered-by-zero-leak.md),
+/// meeting recording because its disclosure has not been acknowledged
+/// (docs/adr/040-recording-other-people-is-not-covered-by-zero-leak.md),
 /// and by the ring after it names the panel to open.
 #[tauri::command]
 fn show_settings_window(app: AppHandle) {
@@ -359,7 +359,7 @@ pub fn run() {
             ring_window::close_ring,
             get_backend_token,
             set_meeting_recording,
-            set_meetings_enabled,
+            set_meetings_allowed,
             show_settings_window,
             clipboard::write_clipboard_text,
             image_export::copy_image,
@@ -391,7 +391,7 @@ mod tests {
     use tauri::{PhysicalSize, WindowEvent};
 
     #[test]
-    fn the_meeting_item_leaves_the_tray_when_meetings_are_off_and_none_is_recording() {
+    fn the_meeting_item_is_in_the_tray_once_acknowledged_or_while_recording() {
         assert!(meeting_item_shown(true, false));
         assert!(meeting_item_shown(true, true));
         assert!(meeting_item_shown(false, true));

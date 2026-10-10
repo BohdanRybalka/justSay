@@ -7,7 +7,6 @@ function read(overrides: Partial<NonNullable<RingState["settings"]>> = {}, meeti
       language: "uk",
       previous_language: "en",
       meeting_consent_acknowledged: true,
-      meetings_enabled: true,
       ...overrides,
     },
     meetingRecording,
@@ -37,19 +36,20 @@ describe("the petal labels", () => {
 });
 
 describe("what a petal does", () => {
-  it("starts or stops a meeting while meetings are on", () => {
+  it("starts or stops a meeting once the disclosure is acknowledged", () => {
     expect(stepFor("meeting", read())).toEqual({ kind: "toggle-meeting" });
   });
 
-  it("opens the Meetings page while meetings are off", () => {
+  it("opens the Meetings page until the disclosure is acknowledged", () => {
     const opened = { kind: "open-panel", target: { panel: "meetings" } };
 
-    expect(stepFor("meeting", read({ meetings_enabled: false }))).toEqual(opened);
     expect(stepFor("meeting", read({ meeting_consent_acknowledged: false }))).toEqual(opened);
   });
 
-  it("stops a running meeting even when meetings read as off", () => {
-    expect(stepFor("meeting", read({ meetings_enabled: false }, true))).toEqual({ kind: "toggle-meeting" });
+  it("stops a running meeting even when the disclosure reads as not acknowledged", () => {
+    expect(stepFor("meeting", read({ meeting_consent_acknowledged: false }, true))).toEqual({
+      kind: "toggle-meeting",
+    });
   });
 
   it("leaves the meeting to the widget when the settings could not be read", () => {

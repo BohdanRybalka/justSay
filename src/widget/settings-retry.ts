@@ -56,7 +56,6 @@ export type WidgetSettings = Pick<
   | "shortcut"
   | "theme"
   | "meeting_consent_acknowledged"
-  | "meetings_enabled"
   | "paste_at_cursor"
 >;
 

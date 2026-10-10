@@ -5,15 +5,17 @@ import {
   shortcutFailureMessage,
   shouldReapplyShortcut,
 } from "../accelerator";
-import { api, levelStream, meetingLevelStream, meetingsTurnedOn, REQUEST_TIMEOUT_MS } from "../api";
+import { api, levelStream, meetingLevelStream, REQUEST_TIMEOUT_MS } from "../api";
 import { hasOutlastedStartupBudget } from "../backend-startup";
 import { deliverDictation } from "../clipboard";
 import {
   EVENT_MEETING_TOGGLE,
+  EVENT_NAVIGATE_PANEL,
   EVENT_SETTINGS_CHANGED,
   EVENT_SHORTCUT_APPLIED,
   EVENT_SHORTCUT_REQUESTED,
   EVENT_WIDGET_HOVER,
+  type NavigatePanel,
   type ShortcutApplied,
   type ShortcutRequested,
   type WidgetHover,
@@ -450,18 +452,27 @@ async function pollMeetingHealth() {
  *  is the same two steps against the same transport. */
 const SHELL_INVOKE_TIMEOUT_MS = 3000;
 
-async function invokeShell(command: string, args?: Record<string, unknown>) {
+async function withinShellBudget(what: string, work: () => Promise<void>) {
   try {
-    await withTimeout(
-      (async () => {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke(command, args);
-      })(),
-      SHELL_INVOKE_TIMEOUT_MS,
-    );
+    await withTimeout(work(), SHELL_INVOKE_TIMEOUT_MS);
   } catch (e) {
-    console.warn(`Shell command ${command} failed:`, e);
+    console.warn(`${what} failed:`, e);
   }
+}
+
+async function invokeShell(command: string, args?: Record<string, unknown>) {
+  await withinShellBudget(`Shell command ${command}`, async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke(command, args);
+  });
+}
+
+async function openMeetingsPage() {
+  await withinShellBudget("Naming the Meetings page", async () => {
+    const { emit } = await import("@tauri-apps/api/event");
+    await emit(EVENT_NAVIGATE_PANEL, { panel: "meetings" } satisfies NavigatePanel);
+  });
+  await invokeShell("show_settings_window");
 }
 
 const meetingToggleActions: MeetingToggleActions = {
@@ -471,7 +482,7 @@ const meetingToggleActions: MeetingToggleActions = {
   showIndicator: beginMeetingIndicator,
   hideIndicator: endMeetingIndicator,
   setTrayRecording: (active) => invokeShell("set_meeting_recording", { active }),
-  openSettings: () => invokeShell("show_settings_window"),
+  openMeetings: openMeetingsPage,
   reportError: (message) => {
     console.error("Meeting recording:", message);
     notifyError(message);
@@ -685,7 +696,7 @@ const settingsRetry = createSettingsRetry({
   fetchSettings: () => api.getSettings(),
   applySettings: async (settings) => {
     applyThemePreference(settings.theme);
-    void invokeShell("set_meetings_enabled", { enabled: meetingsTurnedOn(settings) });
+    void invokeShell("set_meetings_allowed", { allowed: settings.meeting_consent_acknowledged });
     currentLanguage = settings.language;
     pasteAtCursor = settings.paste_at_cursor;
     currentShortcut = settings.shortcut;

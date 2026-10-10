@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiRequestError } from "../api";
 import {
-  MEETINGS_OFF_MESSAGE,
+  DISCLOSURE_MISSING_MESSAGE,
   type MeetingToggleActions,
   runMeetingToggle,
 } from "./meeting-toggle";
@@ -19,7 +19,7 @@ function actions(overrides: Partial<MeetingToggleActions> = {}) {
     showIndicator: vi.fn(),
     hideIndicator: vi.fn(),
     setTrayRecording: vi.fn(async () => {}),
-    openSettings: vi.fn(async () => {}),
+    openMeetings: vi.fn(async () => {}),
     reportError: vi.fn(),
   };
   return Object.assign(spies, overrides);
@@ -221,17 +221,17 @@ describe("the meeting recording toggle", () => {
     expect(deps.reportError.mock.calls[0][0]).toContain("still being recorded");
   });
 
-  it("opens Settings when a start is refused because meetings are off", async () => {
+  it("opens Meetings when a start is refused because the disclosure is not acknowledged", async () => {
     const deps = actions({
       startRecording: vi.fn(async () => {
-        throw new ApiRequestError("Meeting recording is off", 403);
+        throw new ApiRequestError("The meeting disclosure is not acknowledged", 403);
       }),
     });
 
     await runMeetingToggle(deps);
 
-    expect(deps.openSettings).toHaveBeenCalledOnce();
-    expect(deps.reportError).toHaveBeenCalledWith(MEETINGS_OFF_MESSAGE);
+    expect(deps.openMeetings).toHaveBeenCalledOnce();
+    expect(deps.reportError).toHaveBeenCalledWith(DISCLOSURE_MISSING_MESSAGE);
     expect(deps.hideIndicator).toHaveBeenCalledOnce();
     expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
   });
@@ -249,7 +249,7 @@ describe("the meeting recording toggle", () => {
     expect(deps.showIndicator).toHaveBeenCalledOnce();
     expect(deps.setTrayRecording).toHaveBeenCalledWith(true);
     expect(deps.reportError.mock.calls[0][0]).toContain("already being recorded");
-    expect(deps.openSettings).not.toHaveBeenCalled();
+    expect(deps.openMeetings).not.toHaveBeenCalled();
   });
 
   it("leaves the indicator up and the toggle usable when a stop fails, so a second press stops again", async () => {

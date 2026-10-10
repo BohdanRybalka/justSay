@@ -6,6 +6,7 @@ import { DEFAULT_SHORTCUT, detectShortcutPlatform, formatAccelerator } from "../
 import { BACKEND_WAIT_BUDGET_MS } from "../backend-startup";
 import {
   EVENT_MEETING_TOGGLE,
+  EVENT_NAVIGATE_PANEL,
   EVENT_SETTINGS_CHANGED,
   EVENT_SHORTCUT_REQUESTED,
   EVENT_WIDGET_HOVER,
@@ -142,8 +143,9 @@ vi.mock("../notify", async (importOriginal) => {
   return { ...actual, notifyError: notifyErrorMock };
 });
 
-const { invokeMock } = vi.hoisted(() => ({
+const { invokeMock, emitMock } = vi.hoisted(() => ({
   invokeMock: vi.fn<(command: string, args?: unknown) => Promise<unknown>>(async () => {}),
+  emitMock: vi.fn<(event: string, payload?: unknown) => Promise<void>>(async () => {}),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -151,7 +153,7 @@ vi.mock("@tauri-apps/api/event", () => ({
     listeners.set(event, handler);
     return () => {};
   }),
-  emit: vi.fn(async () => {}),
+  emit: emitMock,
 }));
 vi.mock("@tauri-apps/plugin-global-shortcut", () => ({
   register: vi.fn(async () => {}),
@@ -279,18 +281,33 @@ describe("the widget window's shape", () => {
     await vi.waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
   });
 
-  it("shows Record a meeting in the tray only while meetings are turned on", async () => {
-    const turnedOn = { meeting_consent_acknowledged: true, meetings_enabled: true };
-    apiMock.getSettings.mockResolvedValue({ language: "uk", shortcut: DEFAULT_SHORTCUT, ...turnedOn } as never);
+  it("shows Record a meeting in the tray only once the disclosure is acknowledged", async () => {
+    apiMock.getSettings.mockResolvedValue(
+      { language: "uk", shortcut: DEFAULT_SHORTCUT, meeting_consent_acknowledged: false } as never,
+    );
     await loadWidget();
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_meetings_enabled", { enabled: true }));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_meetings_allowed", { allowed: false }));
 
     apiMock.getSettings.mockResolvedValue(
-      { language: "uk", shortcut: DEFAULT_SHORTCUT, ...turnedOn, meetings_enabled: false } as never,
+      { language: "uk", shortcut: DEFAULT_SHORTCUT, meeting_consent_acknowledged: true } as never,
     );
     await listeners.get(EVENT_SETTINGS_CHANGED)!({ payload: null });
 
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenLastCalledWith("set_meetings_enabled", { enabled: false }));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenLastCalledWith("set_meetings_allowed", { allowed: true }));
+  });
+
+  it("sends the user to the Meetings page when a start is refused for the missing disclosure", async () => {
+    await loadWidget();
+    await vi.waitFor(() => expect(listeners.get(EVENT_MEETING_TOGGLE)).toBeTypeOf("function"));
+    const { ApiRequestError } = await import("../api");
+    const { DISCLOSURE_MISSING_MESSAGE } = await import("./meeting-toggle");
+    apiMock.startMeetingRecording.mockRejectedValue(new ApiRequestError("not acknowledged", 403));
+
+    await listeners.get(EVENT_MEETING_TOGGLE)!({});
+
+    expect(emitMock).toHaveBeenCalledWith(EVENT_NAVIGATE_PANEL, { panel: "meetings" });
+    expect(invokeMock).toHaveBeenCalledWith("show_settings_window", undefined);
+    expect(notifyErrorMock).toHaveBeenCalledWith(DISCLOSURE_MISSING_MESSAGE);
   });
 
   it("offers the shortcut that works, even when saving it to the settings failed", async () => {

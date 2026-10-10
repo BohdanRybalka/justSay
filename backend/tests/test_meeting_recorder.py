@@ -1176,13 +1176,11 @@ def test_windows_source_releases_pyaudio_when_the_com_lookup_fails(
 
 @pytest.fixture(autouse=True)
 def _acknowledged_meeting_consent():
-    """The disclosure and the switch are a first-run gate, not the subject of
-    most of these tests — the ones that are unset them explicitly."""
+    """The disclosure is a first-run gate, not the subject of most of these
+    tests — the ones that are unset it explicitly."""
     from app.preferences import user_settings
 
-    user_settings.update_user_settings(
-        {"meeting_consent_acknowledged": True, "meetings_enabled": True}
-    )
+    user_settings.update_user_settings({"meeting_consent_acknowledged": True})
 
 
 class _FakeRecorder:
@@ -1488,23 +1486,6 @@ async def test_meeting_start_is_403_until_the_disclosure_is_acknowledged(client)
     from app.preferences import user_settings
 
     user_settings.update_user_settings({"meeting_consent_acknowledged": False})
-    recorder = _FakeRecorder()
-    app.dependency_overrides[get_meeting_recorder] = lambda: recorder
-
-    with patch("app.audio.meeting_recorder.create_system_audio_source") as factory:
-        resp = await client.post("/audio/meeting/start")
-
-    assert resp.status_code == 403
-    assert recorder.started is False
-    factory.assert_not_called()
-
-
-@pytest.mark.anyio
-async def test_meeting_start_is_403_while_record_meetings_is_off(client):
-    """The switch turned off after the disclosure was acknowledged still refuses."""
-    from app.preferences import user_settings
-
-    user_settings.update_user_settings({"meetings_enabled": False})
     recorder = _FakeRecorder()
     app.dependency_overrides[get_meeting_recorder] = lambda: recorder
 
