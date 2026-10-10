@@ -416,6 +416,30 @@ describe("the sidebar", () => {
     expect(renderHistory).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), "file");
   });
 
+  it("shows every kind again when History is pressed in the sidebar while a kind is preset", async () => {
+    await bootWithSettingsLoaded();
+    const { renderHistory } = await import("./tabs/history");
+    openPanel("meetings");
+    recentLists.find((list) => list.kind === "meeting")!.openHistory("meeting");
+    const drawn = vi.mocked(renderHistory).mock.calls.length;
+
+    openPanel("history");
+
+    expect(vi.mocked(renderHistory).mock.calls.length).toBe(drawn + 1);
+    expect(renderHistory).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), null);
+  });
+
+  it("leaves History alone when it is pressed in the sidebar and no kind was preset", async () => {
+    await bootWithSettingsLoaded();
+    const { renderHistory } = await import("./tabs/history");
+    openPanel("history");
+    const drawn = vi.mocked(renderHistory).mock.calls.length;
+
+    openPanel("history");
+
+    expect(vi.mocked(renderHistory).mock.calls.length).toBe(drawn);
+  });
+
   it("opens History from the sidebar with every kind shown, even after a preset", async () => {
     await bootWithSettingsLoaded();
     const { renderHistory } = await import("./tabs/history");

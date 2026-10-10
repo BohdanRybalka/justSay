@@ -4,18 +4,16 @@
  */
 import { api, type EntrySource, type HistoryEntry } from "../api";
 import { icon } from "../ui/icons";
-import { createEntryCards } from "./history-entry";
+import { createEntryCards, EMPTY_KIND, type SectionKind } from "./history-entry";
 import { createJobCards } from "./history-jobs";
 import type { TabLifecycle } from "./settings";
-
-export type RecentKind = Exclude<EntrySource, "dictation">;
 
 export const RECENT_POLL_MS = 5000;
 export const RECENT_SHOWN = 3;
 
-const WORDS: Record<RecentKind, { heading: string; empty: string }> = {
-  meeting: { heading: "RECENT MEETINGS", empty: "No meetings yet." },
-  file: { heading: "RECENT FILES", empty: "No files yet." },
+const HEADINGS: Record<SectionKind, string> = {
+  meeting: "RECENT MEETINGS",
+  file: "RECENT FILES",
 };
 
 export interface Recent extends Required<TabLifecycle> {
@@ -26,18 +24,18 @@ export interface Recent extends Required<TabLifecycle> {
 /** Adds the list to the end of `container` and keeps it current while the window is on screen. */
 export function mountRecent(
   container: HTMLElement,
-  kind: RecentKind,
+  kind: SectionKind,
   openHistory: (source: EntrySource) => void,
 ): Recent {
   const root = document.createElement("div");
   root.className = "recent";
   root.innerHTML = `
     <div class="group-head">
-      <div class="group-label">${icon("clock")}${WORDS[kind].heading}</div>
+      <div class="group-label">${icon("clock")}${HEADINGS[kind]}</div>
       <button type="button" class="see-all">All in History${icon("chev", "small")}</button>
     </div>
     <div class="timeline"></div>
-    <p class="history-empty" hidden>${WORDS[kind].empty}</p>
+    <p class="history-empty" hidden>${EMPTY_KIND[kind]}</p>
   `;
   container.append(root);
   const rows = root.querySelector<HTMLElement>(".timeline")!;
@@ -134,6 +132,8 @@ export function mountRecent(
       void jobs.refresh();
       startPolling();
     },
-    jobStarted: () => void jobs.refresh(),
+    jobStarted() {
+      if (!destroyed) void jobs.refresh();
+    },
   };
 }

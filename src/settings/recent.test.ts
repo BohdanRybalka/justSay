@@ -66,6 +66,7 @@ afterEach(() => {
   document.body.replaceChildren();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("mountRecent — what is listed", () => {
@@ -191,6 +192,31 @@ describe("mountRecent — a job becoming its entry", () => {
     await flush();
 
     expect(shown(container)).toEqual(["saved"]);
+  });
+
+  it("lets a finished card go once the newest are read, even when its entry is not among them", async () => {
+    apiMock.jobs.mockResolvedValue([jobOf("j1")]);
+    const { container } = mount("meeting");
+    await flush();
+
+    apiMock.getHistory.mockResolvedValue(pageOf([entryOf("c"), entryOf("b"), entryOf("a")], 4, null));
+    apiMock.jobs.mockResolvedValue([jobOf("j1", { stage: "done", progress: 1, entry_id: "older" })]);
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS);
+    await flush();
+
+    expect(shown(container)).toEqual(["c", "b", "a"]);
+  });
+
+  it("reads nothing more when a job is started after the list was destroyed", async () => {
+    const { recent } = mount("file");
+    await flush();
+    recent.destroy();
+    const reads = apiMock.jobs.mock.calls.length;
+
+    recent.jobStarted();
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS * 3);
+
+    expect(apiMock.jobs).toHaveBeenCalledTimes(reads);
   });
 
   it("reads the jobs at once when one is started elsewhere", async () => {

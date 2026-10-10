@@ -57,6 +57,7 @@ let settings: UserSettings | null = null;
 let cloudStatus: CloudKeyStatus | null = null;
 let activeTab: TabLifecycle | null = null;
 let filesPanel: Recent | null = null;
+let historySource: EntrySource | null = null;
 let fileTranscription: FileTranscription | null = null;
 let settingsError: string | null = null;
 let backendReachable = false;
@@ -323,6 +324,7 @@ function switchPanel(panelName: PanelName, options: PanelOptions = {}) {
     activeTab = null;
   }
   filesPanel = null;
+  historySource = options.source ?? null;
 
   currentPanel = panelName;
   renderPanelSelection(sidebar, panelName);
@@ -497,7 +499,8 @@ async function listenToOtherWindows() {
 sidebar.querySelectorAll<HTMLButtonElement>("[data-panel]").forEach((item) => {
   item.addEventListener("click", () => {
     const panel = item.dataset.panel as PanelName;
-    if (panel !== currentPanel || !settings) switchPanel(panel);
+    const presetHistory = panel === "history" && historySource !== null;
+    if (panel !== currentPanel || !settings || presetHistory) switchPanel(panel);
   });
 });
 

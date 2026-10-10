@@ -38,7 +38,7 @@ export interface JobCards {
 /**
  * The cards of files and meetings being transcribed. `show` receives them newest first whenever
  * the set changes. A failed meeting offers Try again. A finished job's card stays, asking `entrySaved` to paint its row, until
- * `entryShown` finds that row, so the card turns into the entry where it stood. A job this
+ * `entryShown` says the row is painted, so the card turns into the entry where it stood. A job this
  * page removed is never painted again; a failed read is tried again a second later.
  */
 export function createJobCards(

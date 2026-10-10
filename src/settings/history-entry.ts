@@ -17,6 +17,13 @@ export const SOURCE_ICONS: Record<HistoryEntry["source"], IconName> = {
   meeting: "users",
 };
 
+export type SectionKind = Exclude<HistoryEntry["source"], "dictation">;
+
+export const EMPTY_KIND: Record<SectionKind, string> = {
+  meeting: "No meetings yet.",
+  file: "No files yet.",
+};
+
 /** Marks a collapsed card whose text is cut off, which is what shows its "Show more".
  *  Each text is watched on its own, so a new card, a collapse and a resize are all measured;
  *  a text that has left the page is let go. */

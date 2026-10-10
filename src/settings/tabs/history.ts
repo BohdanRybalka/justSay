@@ -11,7 +11,7 @@ import {
 import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
 import { renderSegmented, type SegmentedOption } from "../../ui/controls";
 import { icon } from "../../ui/icons";
-import { createEntryCards, SOURCE_ICONS } from "../history-entry";
+import { createEntryCards, EMPTY_KIND, SOURCE_ICONS } from "../history-entry";
 import {
   createHistoryList,
   sidecarTooOldText,
@@ -36,11 +36,6 @@ const KIND_CHIPS: readonly SegmentedOption<KindChip>[] = [
   { value: "meeting", label: "Meetings", icon: SOURCE_ICONS.meeting },
   { value: "file", label: "Files", icon: SOURCE_ICONS.file },
 ];
-
-const EMPTY_KIND: Partial<Record<EntrySource, string>> = {
-  meeting: "No meetings yet.",
-  file: "No files yet.",
-};
 
 const SKELETON_CARD = `<div class="entry entry--skeleton" aria-hidden="true"><span class="entry-dot"></span><i></i><i></i></div>`;
 
@@ -104,7 +99,11 @@ export function renderHistory(
     createRow: entryCards.create,
     renderEmptyState: (isEmpty) => {
       if (!isEmpty) return;
-      const named = filter.starred ? "Nothing starred yet." : filter.source && EMPTY_KIND[filter.source];
+      const named = filter.starred
+        ? "Nothing starred yet."
+        : filter.source === null || filter.source === "dictation"
+          ? null
+          : EMPTY_KIND[filter.source];
       daysEl.insertAdjacentHTML(
         "beforeend",
         named
