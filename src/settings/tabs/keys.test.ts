@@ -200,11 +200,23 @@ describe("What each key is for", () => {
     });
   });
 
-  it("in Local mode each key says it is not used", () => {
-    const container = render(buildSettings({ stt_mode: "local" }));
+  it("with dictation, meetings and files all Local each key says it is not used", () => {
+    const container = render(buildSettings({ stt_mode: "local", meetings_engine: "local", files_engine: "local" }));
 
     expect(useHints(container)).toEqual({
       Groq: "Not used while Local is on",
+      Google: "Not used while Local is on",
+    });
+  });
+
+  it.each([
+    ["files", { files_engine: "cloud", meetings_engine: "local" }],
+    ["meetings", { files_engine: "local", meetings_engine: "cloud" }],
+  ] as const)("keeps the Groq key in use while dictation is Local but %s go to the cloud", (_kind, engines) => {
+    const container = render(buildSettings({ stt_mode: "local", ...engines }));
+
+    expect(useHints(container)).toEqual({
+      Groq: "Turns your recordings into text",
       Google: "Not used while Local is on",
     });
   });

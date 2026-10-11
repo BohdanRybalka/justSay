@@ -197,8 +197,8 @@ _UNEMBEDDED = (
 
 
 def _stay_here() -> tuple[bool, bool]:
-    """Whether meetings, then files, are kept from the cloud embedder (the order ``_UNEMBEDDED``
-    binds): what is transcribed on this computer is never sent to one."""
+    """Whether meetings, then files (the order ``_UNEMBEDDED`` binds), are now chosen to be
+    transcribed on this computer while the embedder is the cloud; such entries are held back."""
     cloud_embedder = stt_settings.mode == ProviderMode.CLOUD
     return (
         cloud_embedder and stt_settings.meetings_mode == ProviderMode.LOCAL,

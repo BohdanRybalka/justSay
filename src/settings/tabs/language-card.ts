@@ -1,7 +1,8 @@
 /**
  * LANGUAGE on a page that hears its own recordings (Meetings, Files): Detect the language, and
  * with it off the one language to hear them in. Detection is stored as "auto"; turning it off
- * comes back to the language picked last, which starts as the dictation language.
+ * comes back to the language picked on this page since it was drawn, which starts as the
+ * dictation language.
  */
 import type { UserSettings } from "../../api";
 import { DICTATION_LANGUAGES } from "../../languages";

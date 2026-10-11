@@ -1,7 +1,8 @@
 /**
  * The API keys fold: one row per cloud key. A row is stored, env, unset,
  * unknown or editing, and is redrawn alone; its subtitle says what the key is
- * used for, and in Local mode that it is not used.
+ * used for, and when everything it serves runs Local that it is not used: the Groq
+ * key serves dictation, meetings and files, the Google key History search.
  */
 import { type CloudKeyStatus, type UserSettings } from "../../api";
 import { MASKED_API_KEY } from "../../contracts";
@@ -45,8 +46,15 @@ function rowState(settings: UserSettings, field: KeyField, cloud: CloudKeyStatus
   return cloudFlag(cloud, field) ? "env" : "unset";
 }
 
+function keyUnused(settings: UserSettings, spec: KeyRowSpec): boolean {
+  if (spec.provider === "gemini") return settings.stt_mode === "local";
+  return [settings.stt_mode, settings.meetings_engine, settings.files_engine].every(
+    (engine) => engine === "local",
+  );
+}
+
 function useHint(settings: UserSettings, spec: KeyRowSpec): string {
-  return settings.stt_mode === "local" ? LOCAL_HINT : spec.use;
+  return keyUnused(settings, spec) ? LOCAL_HINT : spec.use;
 }
 
 function keyControls(spec: KeyRowSpec, state: KeyRowState): string {

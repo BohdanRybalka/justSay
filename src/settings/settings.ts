@@ -470,8 +470,8 @@ function navigateTo(target: NavigatePanel) {
 }
 
 /** A language changed from the ring reaches this window's copy of the
- *  settings, and a Dictation or Meetings panel on screen is drawn again to
- *  show it. */
+ *  settings, and a Dictation, Meetings or Files panel on screen is drawn again
+ *  to show it. */
 async function followSettingsChangedElsewhere() {
   if (!settings || settingsLoadInFlight) return;
   const shownLanguage = settings.language;
@@ -481,7 +481,8 @@ async function followSettingsChangedElsewhere() {
     console.warn("Could not re-read the settings after a change elsewhere:", e);
     return;
   }
-  if (settings.language !== shownLanguage && (currentPanel === "dictation" || currentPanel === "meetings")) {
+  const showsLanguage = currentPanel === "dictation" || currentPanel === "meetings" || currentPanel === "files";
+  if (settings.language !== shownLanguage && showsLanguage) {
     switchPanel(currentPanel);
   }
 }
