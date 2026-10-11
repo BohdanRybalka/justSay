@@ -648,6 +648,7 @@ describe("a backend that accepts a request and never answers", () => {
 
   it.each([
     ["sttLocalPrewarm", (a: Api) => a.sttLocalPrewarm(), "/stt/local/prewarm", 15_000],
+    ["sttLocalModelStart", (a: Api) => a.sttLocalModelStart(), "/stt/local/model", 15_000],
     ["audioStart", (a: Api) => a.audioStart(SESSION_ID), "/audio/start", 15_000],
     ["audioDiscard", (a: Api) => a.audioDiscard(SESSION_ID), "/audio/discard", 15_000],
   ])(

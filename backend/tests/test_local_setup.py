@@ -933,6 +933,22 @@ def test_check_status_whisper_cpp_server_kind_reports_device_and_compute_type(mo
     assert status.compute_type == "float16"
 
 
+def test_check_status_reports_the_download_through_the_model_endpoint_for_whisper_cpp(monkeypatch):
+    _stub_whisper_cpp_server_kind(monkeypatch)
+
+    with _apply(_patches(True, (False, "AMD Radeon RX 5700 XT", "amd"))):
+        status = check_status(STTSettings(whisper_model_size="large-v3-turbo"))
+
+    assert status.model_download_reported is True
+
+
+def test_check_status_reports_no_download_progress_for_faster_whisper():
+    with _apply(_patches(True, (False, None, "none"))):
+        status = check_status(STTSettings(whisper_model_size="large-v3-turbo"))
+
+    assert status.model_download_reported is False
+
+
 def test_check_status_whisper_cpp_server_kind_reports_gpu_available_true(monkeypatch):
     """Regression for Stage 3 review issue #2: a Vulkan-accelerated
     AMD/Intel session must not report the contradictory

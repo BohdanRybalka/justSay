@@ -23,6 +23,7 @@ import httpx
 from app.core.audio_formats import UNREADABLE_HERE, UndecodableAudioError, decode_to_mono_wav
 from app.core.errors import ResourceUnavailableError
 from app.core.scratch import discard_scratch_file
+from app.stt import model_download
 from app.stt.base import (
     WHISPER_WINDOW_SECONDS,
     STTProvider,
@@ -50,22 +51,16 @@ _HEALTH_POLL_INTERVAL = 0.5
 _HEALTH_POLL_MAX_ATTEMPTS = 240
 _HEALTH_REQUEST_TIMEOUT = httpx.Timeout(connect=1.0, read=2.0, write=2.0, pool=2.0)
 _INFERENCE_TIMEOUT = httpx.Timeout(connect=3.0, read=120.0, write=120.0, pool=120.0)
-_DOWNLOAD_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=60.0)
 
 _GRACE_POLL_INTERVAL = 0.1
 _GRACE_POLL_MAX_ATTEMPTS = 30
 
 _port_lock = threading.Lock()
 
-_download_lock = threading.Lock()
-
 _SERVER_DECODES = frozenset({".wav", ".mp3", ".flac", ".aiff", ".aif"})
 _SERVER_RATE = 16000
 _SERVER_CANNOT_READ = "failed to read audio data"
 _SERVER_FAILED = "The local engine could not turn this audio into text"
-
-_HF_MODEL_URL_TEMPLATE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{size}.bin"
-_DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 
@@ -332,32 +327,8 @@ class WhisperCppServerSTTProvider(STTProvider):
                 raise
 
     def _download_model(self, model_path: Path) -> None:
-        """Stream the GGML model to a `.part` file, renaming only on success.
-
-        Holds `_download_lock` throughout and re-checks the model file after
-        acquiring it, so a racing second instance skips the download entirely.
-        """
-        with _download_lock:
-            if model_path.is_file():
-                log.info(
-                    "GGML model already downloaded by a concurrent instance -- "
-                    "skipping redundant download: %s", model_path,
-                )
-                return
-
-            url = _HF_MODEL_URL_TEMPLATE.format(size=self._settings.whisper_model_size)
-            model_path.parent.mkdir(parents=True, exist_ok=True)
-            part_path = model_path.with_name(model_path.name + ".part")
-
-            log.info("Downloading GGML model: %s -> %s", url, model_path)
-            with httpx.Client(follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT) as client:
-                with client.stream("GET", url) as resp:
-                    resp.raise_for_status()
-                    with open(part_path, "wb") as f:
-                        for chunk in resp.iter_bytes(_DOWNLOAD_CHUNK_SIZE):
-                            f.write(chunk)
-            part_path.replace(model_path)
-            log.info("GGML model download complete: %s", model_path)
+        """Download the GGML model through the one shared, resumable transfer."""
+        model_download.download(self._settings.whisper_model_size, model_path)
 
     def _spawn_server(self, binary_path: Path, model_path: Path) -> None:
         argv = build_server_argv(binary_path, model_path, _HOST, _PORT)

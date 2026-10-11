@@ -1,95 +1,25 @@
 /**
  * MODEL on the Dictation page: the Cloud and Local model radio rows. Cloud says whether the
- * Groq key is set; Local draws the
- * local engine's state, read every 3 s while the window is shown. Picking a row
- * switches the mode.
+ * Groq key is set; Local draws the local engine's state while the window is shown, and its
+ * Install downloads the model. Picking an installed row switches the mode.
  */
 import { api, type LocalSTTStatus, type UserSettings } from "../../api";
 import { getCloudKeyStatus, loadSettings, type TabLifecycle } from "../settings";
 import { displayableError, notifyError } from "../../notify";
-import { isStaleStatusResponse } from "../../stale-response";
-import { computeIndicatorState, onIndicatorStateChange } from "../../status-indicator";
+import { onIndicatorStateChange } from "../../status-indicator";
 import { icon } from "../../ui/icons";
+import { watchLocalModel } from "./local-model";
 import {
   CLOUD_HINT,
   CLOUD_KEY_MISSING,
   cloudKeyMissing,
   drawRow,
+  localModeRowHtml,
+  localView,
   modeRowHtml,
-  type RowView,
 } from "./mode-rows";
 
 type Mode = UserSettings["stt_mode"];
-
-/** The last status read: `null` before the first answer, `"failed"` when the read got none. */
-export type LocalRead = LocalSTTStatus | "failed" | null;
-
-export type LocalRow =
-  | { state: "checking" }
-  | { state: "unavailable" }
-  | { state: "not-installed"; bytes: number | null }
-  | { state: "starting" }
-  | { state: "installed" }
-  | { state: "failed"; reason: string };
-
-const READ_FAILED = "Couldn't load this";
-
-/** Binary units, as the file manager shows the model file. */
-export function formatModelSize(bytes: number): string {
-  const gib = bytes / 2 ** 30;
-  return gib >= 1 ? `${gib.toFixed(1)} GB` : `${Math.round(bytes / 2 ** 20)} MB`;
-}
-
-/** The Local row for `read`. An engine failure counts only while Local is the
- *  mode (ADR 009); an engine this computer cannot run outranks it. */
-export function localRow(read: LocalRead, selected: boolean): LocalRow {
-  if (read === "failed") return { state: "failed", reason: READ_FAILED };
-  if (read === null) return { state: "checking" };
-  if (!read.available) return { state: "unavailable" };
-  const error = displayableError(read.last_error);
-  const indicator = computeIndicatorState({ active: selected, ready: read.model_loaded, error });
-  if (indicator === "error") return { state: "failed", reason: error! };
-  if (indicator === "loading") return { state: "starting" };
-  if (indicator === "idle" && !(read.package_installed && read.model_downloaded)) {
-    return { state: "not-installed", bytes: read.model_bytes };
-  }
-  return { state: "installed" };
-}
-
-function localView(row: LocalRow): RowView {
-  switch (row.state) {
-    case "checking":
-      return { hint: "…", alert: false, locked: false, disabled: false, action: "" };
-    case "unavailable":
-      return { hint: "Not available on this computer", alert: false, locked: true, disabled: true, action: "" };
-    case "not-installed":
-      return {
-        hint: row.bytes === null ? "Not installed" : `Not installed · ${formatModelSize(row.bytes)}`,
-        alert: false,
-        locked: true,
-        disabled: false,
-        action: '<span class="btn btn-blue btn-small">Install</span>',
-      };
-    case "starting":
-      return { hint: "Starting…", alert: false, locked: false, disabled: false, action: "" };
-    case "installed":
-      return {
-        hint: "Installed · runs on this computer",
-        alert: false,
-        locked: false,
-        disabled: false,
-        action: '<span class="chip">Ready</span>',
-      };
-    case "failed":
-      return {
-        hint: row.reason,
-        alert: true,
-        locked: false,
-        disabled: false,
-        action: '<span class="btn btn-small">Try again</span>',
-      };
-  }
-}
 
 let prevLastError: string | null = null;
 
@@ -106,7 +36,7 @@ export function renderDictationMode(
     <div class="group-label">${icon("chip")}MODEL</div>
     <div class="card" role="radiogroup" aria-label="Push-to-talk model">
       ${modeRowHtml("mode-cloud", "cloud", "Cloud")}
-      ${modeRowHtml("mode-local", "chip", "Local model")}
+      ${localModeRowHtml("mode-local")}
     </div>
   `,
   );
@@ -116,8 +46,6 @@ export function renderDictationMode(
   const keyMissing = cloudKeyMissing(getCloudKeyStatus());
 
   let currentMode: Mode = settings.stt_mode;
-  let lastRead: LocalRead = null;
-  let latestStatusToken = 0;
 
   function draw() {
     drawRow(cloudRow, currentMode === "cloud", {
@@ -127,7 +55,7 @@ export function renderDictationMode(
       disabled: false,
       action: "",
     });
-    drawRow(localRowEl, currentMode === "local", localView(localRow(lastRead, currentMode === "local")));
+    drawRow(localRowEl, currentMode === "local", localView(model.row(currentMode === "local")));
   }
 
   /** Only Local's reads count, so a failure already shown is not shown again
@@ -139,19 +67,7 @@ export function renderDictationMode(
     prevLastError = reported;
   }
 
-  async function refreshStatus() {
-    const token = ++latestStatusToken;
-    let read: LocalRead;
-    try {
-      read = await api.sttLocalStatus();
-    } catch {
-      read = "failed";
-    }
-    if (isStaleStatusResponse(token, latestStatusToken)) return;
-    lastRead = read;
-    if (read !== "failed") reportNewFailure(read);
-    draw();
-  }
+  const model = watchLocalModel({ onChange: draw, onStatus: reportNewFailure });
 
   async function switchMode(mode: Mode) {
     if (currentMode === mode) return;
@@ -167,59 +83,35 @@ export function renderDictationMode(
       return;
     }
     await loadSettings().catch(() => {});
-    void refreshStatus();
+    void model.refresh();
   }
 
   async function tryAgain() {
-    if (currentMode === "local" && lastRead !== "failed") {
+    if (currentMode === "local" && model.read() !== "failed") {
       try {
         await api.sttLocalPrewarm();
       } catch {}
     }
-    await refreshStatus();
+    await model.refresh();
   }
 
   cloudRow.addEventListener("click", () => void switchMode("cloud"));
   localRowEl.addEventListener("click", () => {
-    const row = localRow(lastRead, currentMode === "local");
-    if (row.state === "failed") void tryAgain();
+    const row = model.row(currentMode === "local");
+    if (row.state === "failed") void (row.cause === "download" ? model.install() : tryAgain());
+    else if (row.state === "not-installed" && row.tracked) void model.install();
     else if (row.state === "not-installed" || row.state === "installed") void switchMode("local");
   });
 
-  let pollInterval: ReturnType<typeof setInterval> | null = null;
-
-  /** Start the 3 s status poll, or leave the running one alone — a second
-   *  interval over the same handle would be unstoppable. */
-  function startPolling() {
-    if (pollInterval !== null) return;
-    pollInterval = setInterval(() => void refreshStatus(), 3000);
-  }
-
-  /** Stop reading the local engine while the window is gone, and disown the
-   *  read still in flight. The failure the row was last drawn from is kept,
-   *  so a still-broken engine raises no fresh toast on every re-open. */
-  function releaseResources() {
-    if (pollInterval !== null) clearInterval(pollInterval);
-    pollInterval = null;
-    latestStatusToken += 1;
-  }
-
-  /** Restart the interval and read once in this same tick, so the row a
-   *  returning user reads is one request old rather than one interval old. */
-  function resumeResources() {
-    startPolling();
-    void refreshStatus();
-  }
-
   draw();
-  if (!windowHidden) resumeResources();
+  if (!windowHidden) model.resume();
 
   return {
     destroy: () => {
-      releaseResources();
+      model.release();
       prevLastError = null;
     },
-    releaseResources,
-    resumeResources,
+    releaseResources: model.release,
+    resumeResources: model.resume,
   } satisfies TabLifecycle;
 }

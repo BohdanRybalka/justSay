@@ -12,6 +12,7 @@ import threading
 import time
 from ctypes import wintypes
 
+import httpx
 import pytest
 
 import app.stt.local_whisper_cpp as local_whisper_cpp_module
@@ -92,6 +93,7 @@ class _FakeStreamContext:
     def __init__(self, chunks, status_code=200):
         self._chunks = chunks
         self.status_code = status_code
+        self.headers = {}
 
     def __enter__(self):
         return self
@@ -101,7 +103,11 @@ class _FakeStreamContext:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
+            raise httpx.HTTPStatusError(
+                f"HTTP {self.status_code}",
+                request=httpx.Request("GET", "https://example.invalid/model"),
+                response=httpx.Response(self.status_code),
+            )
 
     def iter_bytes(self, size):
         yield from self._chunks
@@ -129,7 +135,7 @@ class _FakeHttpxClient:
             raise AssertionError("POST not expected in this test")
         return self._post_impl(url, data, files)
 
-    def stream(self, method, url):
+    def stream(self, method, url, headers=None):
         if self._stream_impl is None:
             raise AssertionError("stream() not expected in this test")
         return self._stream_impl(method, url)
@@ -295,7 +301,7 @@ def test_get_model_latches_error_on_download_failure(monkeypatch, tmp_path):
     _install_fake_httpx(monkeypatch, stream_impl=_stream_impl)
     _install_fake_popen(monkeypatch)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ResourceUnavailableError):
         provider._get_model()
 
     assert provider.is_loaded is False
@@ -939,6 +945,8 @@ class _BlockingStreamCtx:
         self._chunks = chunks
         self._started_event = started_event
         self._release_event = release_event
+        self.status_code = 200
+        self.headers = {}
 
     def __enter__(self):
         return self

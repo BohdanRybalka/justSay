@@ -85,7 +85,7 @@ ignore_names = [
     "copied_to_clipboard",
     "temp_size_bytes", "freed_bytes", "gemini_key_set", "groq_key_set",
     "shortcut", "theme", "display_name", "paste_at_cursor", "previous_language", "package_installed", "model_loaded", "model_ram_mb",
-    "model_downloaded", "model_bytes",
+    "model_downloaded", "model_bytes", "model_download_reported", "bytes_done", "bytes_total",
     "highlighted_text", "newest_cursor",
     "typing_seconds", "pace_wpm", "streak", "current_days", "longest_days", "previous_period_words", "WEEK",
     "vocabulary", "peak_hour", "share", "meetings_week", "is_filler", "minutes_between", "fillers_in_top", "top_size",

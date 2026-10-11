@@ -115,12 +115,14 @@ class LocalSTTStatus(BaseModel):
 
     ``model_bytes`` is the model's size on disk when ``model_downloaded``, else its
     expected download size, and ``None`` for a model size with no known size.
+    ``model_download_reported``: this engine's download runs through ``/stt/local/model``.
     """
 
     available: bool = False
     package_installed: bool = False
     model_downloaded: bool = False
     model_bytes: int | None = None
+    model_download_reported: bool = False
     model_loaded: bool = False
     model_name: str = ""
     model_ram_mb: int | None = None
@@ -176,6 +178,7 @@ def check_status(stt_settings: STTSettings) -> LocalSTTStatus:
         package_installed=installed,
         model_downloaded=on_disk is not None,
         model_bytes=expected if on_disk is None else on_disk,
+        model_download_reported=kind == LocalProviderKind.WHISPER_CPP_SERVER,
         model_loaded=model_is_loaded,
         model_name=stt_settings.whisper_model_size,
         model_ram_mb=_estimate_model_ram_mb() if model_is_loaded else None,

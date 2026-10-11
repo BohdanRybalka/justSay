@@ -7,7 +7,9 @@ from pydantic import BaseModel
 from app.core.errors import JustSayError
 from app.core.types import ProviderMode
 from app.preferences.user_settings import update_user_settings
+from app.stt import model_download
 from app.stt.config import stt_settings
+from app.stt.local_factory import LocalProviderKind, get_local_provider_kind
 from app.stt.local_setup import (
     LocalSTTStatus,
     install_local_packages,
@@ -15,9 +17,13 @@ from app.stt.local_setup import (
 from app.stt.local_setup import (
     check_status as check_local_status,
 )
+from app.stt.local_whisper_cpp_cmd import resolve_model_path
 from app.stt.routing import clear_cache, get_provider
 
 _LOCAL_LOAD_CRASHED_DETAIL = "Loading the local engine failed unexpectedly. Check the backend log."
+_MODEL_DOWNLOAD_NOT_REPORTED_DETAIL = (
+    "This computer's local engine downloads its model when it starts, without progress."
+)
 
 router = APIRouter()
 
@@ -81,6 +87,25 @@ async def stt_local_prewarm():
 
     maybe_prewarm_local(stt_settings)
     return {"started": True}
+
+
+@router.get("/local/model", response_model=model_download.ModelDownloadState)
+async def stt_local_model():
+    """Progress of the local model's download; ``idle`` until one has started."""
+    return model_download.snapshot()
+
+
+@router.post("/local/model", response_model=model_download.ModelDownloadState)
+async def stt_local_model_start():
+    """Start downloading the local model in the background and return its state.
+
+    A no-op while a download runs or the model is on disk; a failed one resumes.
+    """
+    kind = await asyncio.to_thread(get_local_provider_kind)
+    if kind != LocalProviderKind.WHISPER_CPP_SERVER:
+        raise HTTPException(status_code=400, detail=_MODEL_DOWNLOAD_NOT_REPORTED_DETAIL)
+    size = stt_settings.whisper_model_size
+    return model_download.start(size, resolve_model_path(size))
 
 
 @router.post("/local/install")

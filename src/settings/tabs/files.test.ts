@@ -5,9 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UserSettings } from "../../api";
 import { DICTATION_LANGUAGES } from "../../languages";
 import { buildEntry, FakeResizeObserver, pageOf } from "../history-page-stub.test-helper";
+import { buildDownload, buildLocalStatus } from "../local-status-stub.test-helper";
 import type { Recent } from "../recent";
 
-const apiMock = { getHistory: vi.fn(), jobs: vi.fn() };
+const apiMock = {
+  getHistory: vi.fn(),
+  jobs: vi.fn(),
+  sttLocalStatus: vi.fn(),
+  sttLocalModel: vi.fn(),
+  sttLocalModelStart: vi.fn(),
+};
 const saveSettingsMock = vi.fn();
 const getCloudKeyStatusMock = vi.fn();
 vi.mock("../settings", () => ({
@@ -21,9 +28,10 @@ vi.mock("./dictation", () => ({
 }));
 
 const notifyErrorMock = vi.fn();
-vi.mock("../../notify", () => ({
-  notifyError: notifyErrorMock,
-}));
+vi.mock("../../notify", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../notify")>();
+  return { ...actual, notifyError: notifyErrorMock };
+});
 
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
@@ -60,6 +68,14 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
   };
 }
 
+function localHint(container: HTMLElement): string | null {
+  return container.querySelector<HTMLElement>("#files-local .mode-row-hint")!.textContent;
+}
+
+async function localRowShown(container: HTMLElement) {
+  await vi.waitFor(() => expect(localHint(container)).toBe("Installed · runs on this computer"));
+}
+
 function render(
   pick: () => void = () => {},
   openHistory: (source: string) => void = () => {},
@@ -74,6 +90,8 @@ beforeEach(() => {
   vi.stubGlobal("ResizeObserver", FakeResizeObserver);
   apiMock.getHistory.mockResolvedValue(pageOf([], 0, null));
   apiMock.jobs.mockResolvedValue([]);
+  apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus());
+  apiMock.sttLocalModel.mockResolvedValue(buildDownload());
   saveSettingsMock.mockResolvedValue({ settings: buildSettings(), warning: null });
   getCloudKeyStatusMock.mockReturnValue({ groq_key_set: true });
 });
@@ -195,12 +213,13 @@ describe("renderFiles — the language and the model of a file", () => {
     ]);
   });
 
-  it("names the Cloud and Local rows and ticks the one the files use, not the dictation mode", () => {
+  it("names the Cloud and Local rows and ticks the one the files use, not the dictation mode", async () => {
     const container = render(undefined, undefined, { stt_mode: "local", files_engine: "cloud" });
+    await localRowShown(container);
 
     expect(picked(container)).toEqual(["files-cloud"]);
     expect(rowHint(container, "files-cloud").textContent).toBe("Your API keys · fastest and most accurate");
-    expect(rowHint(container, "files-local").textContent).toBe("Stays on this computer");
+    expect(rowHint(container, "files-local").textContent).toBe("Installed · runs on this computer");
   });
 
   it("asks for the Groq key on the Cloud row when there is none", () => {
@@ -213,6 +232,7 @@ describe("renderFiles — the language and the model of a file", () => {
 
   it("saves the files engine, never the meetings or dictation one", async () => {
     const container = render(undefined, undefined, { files_engine: "cloud" });
+    await localRowShown(container);
 
     container.querySelector<HTMLButtonElement>("#files-local")!.click();
 
@@ -224,11 +244,114 @@ describe("renderFiles — the language and the model of a file", () => {
   it("goes back to the saved engine when the new one could not be saved", async () => {
     saveSettingsMock.mockRejectedValue(new Error("backend down"));
     const container = render(undefined, undefined, { files_engine: "cloud" });
+    await localRowShown(container);
 
     container.querySelector<HTMLButtonElement>("#files-local")!.click();
 
     await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("backend down"));
     expect(picked(container)).toEqual(["files-cloud"]);
+  });
+});
+
+describe("renderFiles — the Local model row installs from here", () => {
+  const progressArea = (container: HTMLElement) =>
+    container.querySelector<HTMLElement>("#files-local + .mode-row-install")!;
+
+  it("offers Install with the download size when the model is not on this computer", async () => {
+    apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus({ model_downloaded: false }));
+    const container = render();
+
+    await vi.waitFor(() => expect(localHint(container)).toBe("Not installed · 1.5 GB"));
+    expect(container.querySelector("#files-local .btn")!.textContent).toBe("Install");
+    expect(progressArea(container).hidden).toBe(true);
+  });
+
+  it("starts the download on Install and does not choose Local for the files", async () => {
+    apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus({ model_downloaded: false }));
+    apiMock.sttLocalModelStart.mockResolvedValue(buildDownload({ stage: "downloading" }));
+    const container = render();
+    await vi.waitFor(() => expect(localHint(container)).toBe("Not installed · 1.5 GB"));
+
+    container.querySelector<HTMLButtonElement>("#files-local")!.click();
+
+    await vi.waitFor(() => expect(localHint(container)).toBe("Installing…"));
+    expect(apiMock.sttLocalModelStart).toHaveBeenCalledTimes(1);
+    expect(saveSettingsMock).not.toHaveBeenCalled();
+  });
+
+  it("shows the bar, the percentage and the step while the model downloads", async () => {
+    apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus({ model_downloaded: false }));
+    apiMock.sttLocalModel.mockResolvedValue(
+      buildDownload({ stage: "downloading", bytes_done: 250, bytes_total: 1000 }),
+    );
+    const container = render();
+
+    await vi.waitFor(() => expect(progressArea(container).hidden).toBe(false));
+    const area = progressArea(container);
+    expect(area.querySelector(".install-label")!.textContent).toBe("Downloading the model");
+    expect(area.querySelector(".install-percent")!.textContent).toBe("25%");
+    expect(area.querySelector<HTMLElement>(".install-bar>i")!.style.width).toBe("25%");
+  });
+
+  it("does not choose Local while the model downloads", async () => {
+    apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus({ model_downloaded: false }));
+    apiMock.sttLocalModel.mockResolvedValue(buildDownload({ stage: "downloading", bytes_total: 10 }));
+    const container = render();
+    await vi.waitFor(() => expect(localHint(container)).toBe("Installing…"));
+
+    container.querySelector<HTMLButtonElement>("#files-local")!.click();
+
+    expect(saveSettingsMock).not.toHaveBeenCalled();
+    expect(apiMock.sttLocalModelStart).not.toHaveBeenCalled();
+  });
+
+  it("says why a download failed and resumes it on Try again", async () => {
+    apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus({ model_downloaded: false }));
+    apiMock.sttLocalModel.mockResolvedValue(
+      buildDownload({ stage: "failed", error: "The download was interrupted." }),
+    );
+    apiMock.sttLocalModelStart.mockResolvedValue(buildDownload({ stage: "downloading" }));
+    const container = render();
+    await vi.waitFor(() => expect(localHint(container)).toBe("The download was interrupted."));
+    expect(container.querySelector("#files-local .btn")!.textContent).toBe("Try again");
+
+    container.querySelector<HTMLButtonElement>("#files-local")!.click();
+
+    await vi.waitFor(() => expect(apiMock.sttLocalModelStart).toHaveBeenCalledTimes(1));
+    expect(saveSettingsMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps choosing Local as before on an engine that reports no download progress", async () => {
+    apiMock.sttLocalStatus.mockResolvedValue(
+      buildLocalStatus({ model_downloaded: false, model_download_reported: false }),
+    );
+    const container = render(undefined, undefined, { files_engine: "cloud" });
+    await vi.waitFor(() => expect(localHint(container)).toBe("Not installed · 1.5 GB"));
+
+    container.querySelector<HTMLButtonElement>("#files-local")!.click();
+
+    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledWith({ files_engine: "local" }));
+    expect(apiMock.sttLocalModelStart).not.toHaveBeenCalled();
+  });
+
+  it("reads nothing while the window is hidden and reads again when it is shown", async () => {
+    vi.useFakeTimers();
+    try {
+      const page = renderFiles(document.createElement("div"), buildSettings(), () => {}, () => {}, true);
+      mounted.push(page);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(apiMock.sttLocalStatus).not.toHaveBeenCalled();
+
+      page.resumeResources();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(apiMock.sttLocalStatus).toHaveBeenCalledTimes(1);
+
+      page.releaseResources();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(apiMock.sttLocalStatus).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
