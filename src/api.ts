@@ -585,6 +585,10 @@ export interface UserSettings {
   meetings_engine: "cloud" | "local";
   /** A dictation language code, or "auto" to detect each part of a meeting apart. */
   meetings_language: string;
+  /** Where a file becomes text, apart from `stt_mode`; a settings file without it starts at `stt_mode`. */
+  files_engine: "cloud" | "local";
+  /** A dictation language code, or "auto" to detect each file's language. */
+  files_language: string;
   theme: ThemePreference;
   /** The name the main window greets the user by; empty means the OS
    *  account's name. At most `DISPLAY_NAME_MAX_LENGTH` characters. */

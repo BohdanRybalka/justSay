@@ -36,6 +36,8 @@ _SENTINELS: dict[tuple[str, str], object] = {
     ("stt", "mode"): "local",
     ("stt", "meetings_mode"): "cloud",
     ("stt", "meetings_language"): "ja",
+    ("stt", "files_mode"): "local",
+    ("stt", "files_language"): "ko",
     ("stt", "whisper_model_size"): "tiny",
     ("stt", "whisper_device"): "cpu",
     ("stt", "initial_prompt"): "sentinel glossary",

@@ -1,6 +1,6 @@
 /**
- * MODEL on the Dictation page: the Cloud and Local model radio rows, which files you
- * transcribe follow too. Cloud says whether the Groq key is set; Local draws the
+ * MODEL on the Dictation page: the Cloud and Local model radio rows. Cloud says whether the
+ * Groq key is set; Local draws the
  * local engine's state, read every 3 s while the window is shown. Picking a row
  * switches the mode.
  */
@@ -10,7 +10,14 @@ import { displayableError, notifyError } from "../../notify";
 import { isStaleStatusResponse } from "../../stale-response";
 import { computeIndicatorState, onIndicatorStateChange } from "../../status-indicator";
 import { icon } from "../../ui/icons";
-import { CLOUD_KEY_MISSING, cloudKeyMissing, drawRow, modeRowHtml, type RowView } from "./mode-rows";
+import {
+  CLOUD_HINT,
+  CLOUD_KEY_MISSING,
+  cloudKeyMissing,
+  drawRow,
+  modeRowHtml,
+  type RowView,
+} from "./mode-rows";
 
 type Mode = UserSettings["stt_mode"];
 
@@ -25,7 +32,6 @@ export type LocalRow =
   | { state: "installed" }
   | { state: "failed"; reason: string };
 
-const CLOUD_HINT = "Your API keys · fastest and most accurate";
 const READ_FAILED = "Couldn't load this";
 
 /** Binary units, as the file manager shows the model file. */
@@ -102,7 +108,6 @@ export function renderDictationMode(
       ${modeRowHtml("mode-cloud", "cloud", "Cloud")}
       ${modeRowHtml("mode-local", "chip", "Local model")}
     </div>
-    <p class="group-note">Files you transcribe use this model too</p>
   `,
   );
 

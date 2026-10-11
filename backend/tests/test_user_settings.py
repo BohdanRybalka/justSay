@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from app.core.errors import ConfigurationError
+from app.core.types import ProviderMode
 from app.preferences import user_settings
 from app.stt.config import STTSettings, stt_settings
 from app.transcripts import history, relocation
@@ -390,6 +391,52 @@ def test_a_chosen_meeting_language_reaches_the_meeting_jobs(isolated):
 
     assert (loaded.language, loaded.meetings_language) == ("en", "auto")
     assert stt_settings.meetings_language == "auto"
+
+
+@pytest.mark.parametrize(
+    ("stored", "files"),
+    [
+        ({"stt_mode": "local"}, "local"),
+        ({"stt_mode": "cloud"}, "cloud"),
+        ({"stt_mode": "local", "files_engine": "cloud"}, "cloud"),
+        ({}, "cloud"),
+    ],
+)
+def test_a_file_without_a_files_engine_starts_at_the_dictation_one(isolated, stored, files):
+    settings_path = isolated["settings_dir"] / "settings.json"
+    settings_path.write_text(json.dumps(stored), encoding="utf-8")
+    user_settings._settings = None
+
+    assert user_settings.get_user_settings().files_engine == files
+
+
+def test_the_files_engine_stays_put_when_dictation_changes_engine(isolated):
+    settings_path = isolated["settings_dir"] / "settings.json"
+    settings_path.write_text(json.dumps({"stt_mode": "local"}), encoding="utf-8")
+    user_settings._settings = None
+
+    user_settings.update_user_settings({"stt_mode": "cloud"})
+
+    user_settings._settings = None
+    loaded = user_settings.get_user_settings()
+    assert (loaded.stt_mode, loaded.files_engine) == ("cloud", "local")
+
+
+def test_files_are_detected_by_language_until_one_is_chosen(isolated):
+    assert user_settings.UserSettings(language="en").files_language == "auto"
+
+
+def test_a_chosen_files_engine_and_language_reach_the_file_jobs(isolated):
+    user_settings.update_user_settings(
+        {"language": "uk", "files_engine": "local", "files_language": "en"}
+    )
+
+    user_settings._settings = None
+    loaded = user_settings.get_user_settings()
+    user_settings.sync_to_runtime(loaded)
+
+    assert (stt_settings.files_mode, stt_settings.files_language) == (ProviderMode.LOCAL, "en")
+    assert stt_settings.mode == ProviderMode.CLOUD
 
 
 def test_the_theme_follows_the_system_until_one_is_chosen():

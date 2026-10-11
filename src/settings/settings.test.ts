@@ -208,6 +208,8 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     meeting_consent_acknowledged: false,
     meetings_engine: "local",
     meetings_language: "uk",
+    files_engine: "cloud",
+    files_language: "auto",
     theme: "system",
     display_name: "",
     paste_at_cursor: true,
