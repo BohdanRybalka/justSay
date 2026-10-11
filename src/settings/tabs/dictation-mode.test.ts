@@ -49,6 +49,8 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     meeting_consent_acknowledged: false,
     meetings_engine: "local",
     meetings_language: "uk",
+    files_engine: "cloud",
+    files_language: "auto",
     theme: "system",
     display_name: "",
     paste_at_cursor: true,
@@ -115,6 +117,15 @@ beforeEach(() => {
 afterEach(() => {
   for (const cleanup of cleanups) cleanup.destroy();
   cleanups = [];
+});
+
+describe("renderDictationMode — the model of push-to-talk alone", () => {
+  it("no longer says that files follow this model", async () => {
+    const container = await render(buildStatus());
+
+    expect(container.textContent).not.toContain("Files you transcribe");
+    expect(container.querySelector('[aria-label="Push-to-talk model"]')).not.toBeNull();
+  });
 });
 
 describe("renderDictationMode — a failed local load the user can read", () => {

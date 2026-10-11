@@ -21,6 +21,8 @@ const SETTINGS = {
   meeting_consent_acknowledged: true,
   meetings_engine: "local",
   meetings_language: "uk",
+  files_engine: "cloud",
+  files_language: "auto",
 };
 
 const { invokeMock, emitMock, getSettingsMock, getMeetingStatusMock, updateSettingsMock } = vi.hoisted(() => ({

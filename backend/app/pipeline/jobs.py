@@ -48,7 +48,6 @@ SPEED_SAMPLE_ROWS = 50
 FINISHED_SHOWN_SECONDS = 60.0
 DICTATION_POLL_SECONDS = 0.05
 JOB_FILE_PREFIX = "job_"
-FILE_LANGUAGE = "auto"
 
 NO_SPEECH_REASON = "We didn't hear any speech in this file"
 NO_KEY_REASON = "Add an API key in Settings"
@@ -210,7 +209,7 @@ def remove_leftover_files(temp_dir: Path) -> None:
 class JobQueue:
     """Jobs by id; a failed one stays until dismissed, a done or cancelled one a minute.
 
-    A meeting runs on the meetings engine set when its turn comes; a file follows the user's mode.
+    A meeting and a file each run on their own engine and language, read when their turn comes.
     """
 
     def __init__(
@@ -353,10 +352,12 @@ class JobQueue:
         try:
             async with self._turn:
                 job.stage = "transcribing"
-                job.mode = stt_settings.meetings_mode if meeting else None
+                job.mode = stt_settings.meetings_mode if meeting else stt_settings.files_mode
                 result = await process_audio(
                     job.path,
-                    language=stt_settings.meetings_language if meeting else FILE_LANGUAGE,
+                    language=(
+                        stt_settings.meetings_language if meeting else stt_settings.files_language
+                    ),
                     copy_to_clipboard=False,
                     source=job.kind,
                     source_name=None if meeting else job.name,

@@ -594,6 +594,44 @@ async def test_cancel_answers_404_for_an_unknown_job_and_409_while_saving(client
 
 
 @pytest.mark.parametrize("engine", [ProviderMode.LOCAL, ProviderMode.CLOUD])
+async def test_a_file_runs_on_the_files_engine_and_language_not_dictations_or_meetings(
+    queue, fakes, monkeypatch, engine
+):
+    other = ProviderMode.CLOUD if engine == ProviderMode.LOCAL else ProviderMode.LOCAL
+    monkeypatch.setattr(settings.stt, "files_mode", engine)
+    monkeypatch.setattr(settings.stt, "files_language", "en")
+    monkeypatch.setattr(settings.stt, "mode", other)
+    monkeypatch.setattr(settings.stt, "meetings_mode", other)
+    monkeypatch.setattr(settings.stt, "meetings_language", "pl")
+    pipeline = _FakePipeline()
+
+    job_id = _start(queue, fakes, pipeline)
+    pipeline.release.set()
+    await _settle(queue, job_id)
+
+    call = pipeline.calls[0]
+    assert (call["source"], call["mode"], call["language"]) == ("file", engine, "en")
+
+
+async def test_a_meeting_keeps_its_own_engine_and_language_beside_a_files_choice(
+    queue, fakes, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(settings.stt, "files_mode", ProviderMode.LOCAL)
+    monkeypatch.setattr(settings.stt, "files_language", "en")
+    monkeypatch.setattr(settings.stt, "meetings_mode", ProviderMode.CLOUD)
+    monkeypatch.setattr(settings.stt, "meetings_language", "pl")
+    pipeline = _FakePipeline()
+    recording = _recording(tmp_path, fakes, pipeline)
+
+    job_id = queue.add_meeting(recording)
+    pipeline.release.set()
+    await _settle(queue, job_id)
+
+    call = pipeline.calls[0]
+    assert (call["source"], call["mode"], call["language"]) == ("meeting", ProviderMode.CLOUD, "pl")
+
+
+@pytest.mark.parametrize("engine", [ProviderMode.LOCAL, ProviderMode.CLOUD])
 async def test_a_stopped_meeting_becomes_a_meeting_entry_on_the_meetings_engine(
     queue, fakes, tmp_path, monkeypatch, engine
 ):

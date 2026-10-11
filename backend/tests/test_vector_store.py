@@ -445,6 +445,51 @@ async def test_a_meeting_kept_on_this_computer_never_reaches_a_cloud_embedder(
     assert sources == embedded
 
 
+@pytest.mark.parametrize(
+    ("files_mode", "embedded"),
+    [(ProviderMode.LOCAL, {"dictation"}), (ProviderMode.CLOUD, {"dictation", "file"})],
+)
+async def test_a_file_kept_on_this_computer_never_reaches_a_cloud_embedder(
+    monkeypatch, files_mode, embedded
+):
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
+    monkeypatch.setattr(settings.stt, "meetings_mode", ProviderMode.CLOUD)
+    monkeypatch.setattr(settings.stt, "files_mode", files_mode)
+    history.save_entry(text="dictated", duration_ms=1)
+    history.save_entry(text="from a recording", duration_ms=1, source="file", source_name="a.wav")
+    fake = _FakeProvider("gemini/text-embedding-004", vector=[1.0, 2.0, 3.0])
+
+    with patch(
+        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+    ):
+        result = await vector_store.backfill_batch(10)
+
+    assert result.remaining == 0
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        sources = {
+            row[0]
+            for row in conn.execute(
+                "SELECT e.source FROM entries e JOIN entry_embeddings x ON x.entry_id = e.id"
+            )
+        }
+    assert sources == embedded
+
+
+async def test_a_local_dictation_mode_embeds_a_file_on_this_computer(monkeypatch):
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.LOCAL)
+    monkeypatch.setattr(settings.stt, "files_mode", ProviderMode.LOCAL)
+    history.save_entry(text="from a recording", duration_ms=1, source="file", source_name="a.wav")
+    fake = _FakeProvider("ollama/nomic-embed-text", vector=[1.0, 2.0, 3.0])
+
+    with patch(
+        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+    ):
+        result = await vector_store.backfill_batch(10)
+
+    assert (result.processed, result.remaining) == (1, 0)
+
+
 @pytest.mark.asyncio
 async def test_backfill_batch_size_clamped_to_200():
     for i in range(205):

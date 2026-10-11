@@ -208,6 +208,8 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     meeting_consent_acknowledged: false,
     meetings_engine: "local",
     meetings_language: "uk",
+    files_engine: "cloud",
+    files_language: "auto",
     theme: "system",
     display_name: "",
     paste_at_cursor: true,
@@ -603,6 +605,20 @@ describe("the sidebar", () => {
     await vi.waitFor(() =>
       expect(document.querySelector<HTMLSelectElement>("#meetings-language")!.value).toBe("en"),
     );
+  });
+
+  it("shows a language the ring switched to on the Files panel, where Detect the language starts from it", async () => {
+    await bootWithSettingsLoaded({ language: "uk", files_language: "auto" });
+    const { EVENT_SETTINGS_CHANGED } = await import("../contracts");
+    openPanel("files");
+    expect(document.querySelector<HTMLSelectElement>("#files-language")!.value).toBe("uk");
+
+    apiMock.getSettings.mockResolvedValue(
+      buildSettings({ language: "en", previous_language: "uk", files_language: "auto" }),
+    );
+    await fromAnotherWindow(EVENT_SETTINGS_CHANGED, {});
+
+    await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#files-language")!.value).toBe("en"));
   });
 
   it("leaves the panel alone when a change elsewhere did not touch the language", async () => {

@@ -191,15 +191,18 @@ async def embed_entry_background(entry_id: str, text: str) -> None:
 
 
 _UNEMBEDDED = (
-    "id NOT IN (SELECT entry_id FROM entry_embeddings) AND NOT (source = 'meeting' AND ?)"
+    "id NOT IN (SELECT entry_id FROM entry_embeddings) "
+    "AND NOT (source = 'meeting' AND ?) AND NOT (source = 'file' AND ?)"
 )
 
 
-def _meetings_stay_here() -> bool:
-    """A meeting transcribed on this computer is never sent to a cloud embedder."""
+def _stay_here() -> tuple[bool, bool]:
+    """Whether meetings, then files (the order ``_UNEMBEDDED`` binds), are now chosen to be
+    transcribed on this computer while the embedder is the cloud; such entries are held back."""
+    cloud_embedder = stt_settings.mode == ProviderMode.CLOUD
     return (
-        stt_settings.mode == ProviderMode.CLOUD
-        and stt_settings.meetings_mode == ProviderMode.LOCAL
+        cloud_embedder and stt_settings.meetings_mode == ProviderMode.LOCAL,
+        cloud_embedder and stt_settings.files_mode == ProviderMode.LOCAL,
     )
 
 
@@ -216,7 +219,7 @@ async def backfill_batch(batch_size: int) -> BackfillResult:
         rows = conn.execute(
             f"SELECT rowid, id, cleaned_text FROM entries WHERE {_UNEMBEDDED} "
             "ORDER BY ts ASC LIMIT ?",
-            (_meetings_stay_here(), clamped),
+            (*_stay_here(), clamped),
         ).fetchall()
 
     processed = 0
@@ -243,7 +246,7 @@ async def backfill_batch(batch_size: int) -> BackfillResult:
     with history._lock:
         conn = history._ensure_conn_locked()
         remaining = conn.execute(
-            f"SELECT COUNT(*) FROM entries WHERE {_UNEMBEDDED}", (_meetings_stay_here(),)
+            f"SELECT COUNT(*) FROM entries WHERE {_UNEMBEDDED}", _stay_here()
         ).fetchone()[0]
 
     return BackfillResult(processed=processed, remaining=remaining)

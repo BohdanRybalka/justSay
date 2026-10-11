@@ -3,6 +3,7 @@ import type { CloudKeyStatus } from "../../api";
 import { icon } from "../../ui/icons";
 
 export const CLOUD_KEY_MISSING = "Add a Groq key in Settings";
+export const CLOUD_HINT = "Your API keys · fastest and most accurate";
 
 /** Whether Cloud's only engine, Groq, has no key; an unread key status is not missing. */
 export function cloudKeyMissing(cloud: CloudKeyStatus | null): boolean {
