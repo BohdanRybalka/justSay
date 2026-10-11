@@ -151,6 +151,83 @@ describe("watchLocalModel — following a download", () => {
   });
 });
 
+describe("watchLocalModel — a press on the row", () => {
+  async function pressed(statusOverrides: object, download: ModelDownload, selected = false) {
+    apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus(statusOverrides));
+    apiMock.sttLocalModel.mockResolvedValue(download);
+    apiMock.sttLocalModelStart.mockResolvedValue(downloading(0));
+    const { model } = watch();
+    const actions = { choose: vi.fn(), retry: vi.fn() };
+    await model.refresh();
+    model.press(selected, actions);
+    await vi.advanceTimersByTimeAsync(0);
+    return { actions, model };
+  }
+
+  it("hands an installed model over to choose", async () => {
+    const { actions } = await pressed({}, buildDownload());
+
+    expect(actions.choose).toHaveBeenCalledOnce();
+    expect(apiMock.sttLocalModelStart).not.toHaveBeenCalled();
+  });
+
+  it("installs a missing model instead of choosing it", async () => {
+    const { actions } = await pressed(MISSING, buildDownload());
+
+    expect(apiMock.sttLocalModelStart).toHaveBeenCalledOnce();
+    expect(actions.choose).not.toHaveBeenCalled();
+  });
+
+  it("resumes a failed download instead of retrying the engine", async () => {
+    const { actions } = await pressed(MISSING, buildDownload({ stage: "failed", error: "Interrupted." }));
+
+    expect(apiMock.sttLocalModelStart).toHaveBeenCalledOnce();
+    expect(actions.retry).not.toHaveBeenCalled();
+  });
+
+  it("retries the engine when the engine itself failed", async () => {
+    const { actions } = await pressed({ last_error: "Out of memory." }, buildDownload(), true);
+
+    expect(actions.retry).toHaveBeenCalledOnce();
+    expect(apiMock.sttLocalModelStart).not.toHaveBeenCalled();
+  });
+
+  it("does nothing while the model downloads", async () => {
+    const { actions } = await pressed(MISSING, downloading(5));
+
+    expect(actions.choose).not.toHaveBeenCalled();
+    expect(actions.retry).not.toHaveBeenCalled();
+    expect(apiMock.sttLocalModelStart).not.toHaveBeenCalled();
+  });
+
+  it("hands a missing model on an engine without download progress to choose", async () => {
+    const { actions } = await pressed({ ...MISSING, model_download_reported: false }, buildDownload());
+
+    expect(actions.choose).toHaveBeenCalledOnce();
+    expect(apiMock.sttLocalModelStart).not.toHaveBeenCalled();
+  });
+});
+
+describe("watchLocalModel — an answer older than the press", () => {
+  it("does not take the row back to what it was before Install was pressed", async () => {
+    let answerOld: (download: ModelDownload) => void = () => {};
+    apiMock.sttLocalModel
+      .mockResolvedValueOnce(buildDownload())
+      .mockReturnValueOnce(new Promise((resolve) => (answerOld = resolve)));
+    const { model } = watch();
+    await model.refresh();
+    const slowRead = model.refresh();
+    await vi.advanceTimersByTimeAsync(0);
+    apiMock.sttLocalModelStart.mockResolvedValue(downloading(0));
+
+    await model.install();
+    answerOld(buildDownload());
+    await slowRead;
+
+    expect(model.row(false)).toEqual({ state: "downloading", percent: 0 });
+  });
+});
+
 describe("watchLocalModel — letting go", () => {
   it("stops every read on release, though the download goes on in the backend", async () => {
     apiMock.sttLocalModel.mockResolvedValue(downloading(30));

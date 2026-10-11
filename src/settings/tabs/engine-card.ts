@@ -89,10 +89,7 @@ export function mountEngineCard(
   cloudRow.addEventListener("click", () => void choose("cloud"));
   localRow.addEventListener("click", () => {
     if (saving) return;
-    const row = model.row(false);
-    if (row.state === "failed") void (row.cause === "download" ? model.install() : model.refresh());
-    else if (row.state === "not-installed" && row.tracked) void model.install();
-    else if (row.state === "not-installed" || row.state === "installed") void choose("local");
+    model.press(false, { choose: () => void choose("local"), retry: () => void model.refresh() });
   });
   show(engine);
   if (!windowHidden) model.resume();

@@ -24,6 +24,8 @@ export interface LocalModel {
   refresh: () => Promise<void>;
   /** Starts the download, or resumes a failed one; the backend ignores it while one runs. */
   install: () => Promise<void>;
+  /** What pressing the row does: install, retry, or hand over to `choose` once it is installed. */
+  press: (selected: boolean, actions: { choose: () => void; retry: () => void }) => void;
   resume: () => void;
   /** Stops reading and disowns an answer still in flight; a download keeps going. */
   release: () => void;
@@ -82,14 +84,24 @@ export function watchLocalModel(hooks: LocalModelHooks): LocalModel {
   }
 
   async function install() {
+    let started: ModelDownload;
     try {
-      download = await api.sttLocalModelStart();
+      started = await api.sttLocalModelStart();
     } catch (e) {
       notifyError(e instanceof Error ? e.message : String(e));
       return;
     }
+    latestToken += 1;
+    download = started;
     syncDownloadTimer();
     hooks.onChange();
+  }
+
+  function press(selected: boolean, actions: { choose: () => void; retry: () => void }) {
+    const row = localRow(lastRead, selected, download);
+    if (row.state === "failed") void (row.cause === "download" ? install() : actions.retry());
+    else if (row.state === "not-installed" && row.tracked) void install();
+    else if (row.state === "not-installed" || row.state === "installed") actions.choose();
   }
 
   function resume() {
@@ -111,6 +123,7 @@ export function watchLocalModel(hooks: LocalModelHooks): LocalModel {
     row: (selected) => localRow(lastRead, selected, download),
     refresh,
     install,
+    press,
     resume,
     release,
   };

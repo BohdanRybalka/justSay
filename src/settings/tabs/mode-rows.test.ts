@@ -54,6 +54,20 @@ describe("localRow — the download the row follows", () => {
     });
   });
 
+  it("offers Install for a missing model while Local is the mode and nothing downloads yet", () => {
+    expect(localRow(buildLocalStatus(MISSING), true, buildDownload())).toEqual({
+      state: "not-installed",
+      bytes: 1_624_555_275,
+      tracked: true,
+    });
+  });
+
+  it("still says Starting for an engine that reports no download while Local is the mode", () => {
+    const status = buildLocalStatus({ ...MISSING, model_download_reported: false });
+
+    expect(localRow(status, true, null).state).toBe("starting");
+  });
+
   it("lets an engine this computer cannot run outrank a download", () => {
     const download = buildDownload({ stage: "downloading", bytes_total: 10 });
 
@@ -123,6 +137,17 @@ describe("drawRow — the progress area under the Local row", () => {
 
     expect(area.querySelector(".install-bar")!.hasAttribute("aria-valuenow")).toBe(false);
     expect(area.querySelector(".install-percent")!.textContent).toBe("");
+  });
+
+  it("leaves the action buttons in place while a redraw changes nothing about them", () => {
+    const { row } = mount();
+    const view = localView({ state: "not-installed", bytes: 100, tracked: true });
+    drawRow(row, false, view);
+    const button = row.querySelector(".btn");
+
+    drawRow(row, false, { ...view, hint: "Not installed · 1.5 GB" });
+
+    expect(row.querySelector(".btn")).toBe(button);
   });
 
   it("draws the Cloud row, which has no progress area, without one", () => {

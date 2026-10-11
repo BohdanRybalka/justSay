@@ -20,9 +20,12 @@ REAL_CLIENT = httpx.Client
 
 
 class _Server:
-    def __init__(self, data=DATA, *, honours_range=True, break_after=None, status=None):
+    def __init__(
+        self, data=DATA, *, honours_range=True, break_after=None, status=None, bare_416=False
+    ):
         self.data = data
         self.honours_range = honours_range
+        self.bare_416 = bare_416
         self.break_after = break_after
         self.status = status
         self.range_headers = []
@@ -39,6 +42,8 @@ class _Server:
             return httpx.Response(self.status)
         start = self._requested_start(request)
         if start is not None and start >= len(self.data):
+            if self.bare_416:
+                return httpx.Response(416)
             return httpx.Response(416, headers={"Content-Range": f"bytes */{len(self.data)}"})
         if start is None or not self.honours_range:
             headers = {"Content-Length": str(len(self.data))}
@@ -182,6 +187,18 @@ def test_a_partial_file_that_is_already_whole_is_only_renamed(monkeypatch, tmp_p
     assert model_download.snapshot().bytes_total == len(DATA)
 
 
+def test_a_refusal_without_a_content_range_downloads_the_model_again(monkeypatch, tmp_path):
+    model_path, part_path = _paths(tmp_path)
+    part_path.parent.mkdir(parents=True)
+    part_path.write_bytes(DATA)
+    server = _serve(monkeypatch, _Server(bare_416=True))
+
+    model_download.download("tiny", model_path)
+
+    assert model_path.read_bytes() == DATA
+    assert server.range_headers == [f"bytes={len(DATA)}-", None]
+
+
 def test_a_body_shorter_than_announced_fails_and_keeps_the_partial_file(monkeypatch, tmp_path):
     server = _Server()
     server.handler = lambda request: httpx.Response(
@@ -294,6 +311,24 @@ def test_a_load_that_needs_the_model_waits_for_the_download_install_started(
     assert len(server.range_headers) == 1
     assert model_path.read_bytes() == DATA
     _wait_for(lambda: not model_download._download_lock.locked())
+
+
+def test_start_gives_the_lock_back_when_its_thread_cannot_start(monkeypatch, tmp_path):
+    class _NoThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    _serve(monkeypatch, _Server())
+    monkeypatch.setattr(model_download.threading, "Thread", _NoThread)
+
+    with pytest.raises(RuntimeError):
+        model_download.start("tiny", _paths(tmp_path)[0])
+
+    assert not model_download._download_lock.locked()
+    assert model_download.snapshot().stage == "idle"
 
 
 def test_start_does_nothing_when_the_model_is_there(monkeypatch, tmp_path):

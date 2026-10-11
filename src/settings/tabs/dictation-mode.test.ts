@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudKeyStatus, LocalSTTStatus, UserSettings } from "../../api";
 import type { TabLifecycle } from "../settings";
+import { buildDownload } from "../local-status-stub.test-helper";
 
 const apiMock = {
   sttLocalStatus: vi.fn(),
@@ -573,13 +574,7 @@ describe("renderDictationMode — the two rows", () => {
 
 describe("renderDictationMode — Install downloads the model", () => {
   const tracked = { model_downloaded: false, model_download_reported: true };
-  const download = (overrides: Record<string, unknown>) => ({
-    stage: "idle",
-    bytes_done: 0,
-    bytes_total: null,
-    error: null,
-    ...overrides,
-  });
+  const download = buildDownload;
   const progress = (container: HTMLElement) =>
     container.querySelector<HTMLElement>("#mode-local + .mode-row-install")!;
 

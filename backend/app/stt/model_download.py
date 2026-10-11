@@ -60,7 +60,7 @@ def _begin() -> None:
 def download(model_size: str, model_path: Path) -> None:
     """Fetch the ``model_size`` model to ``model_path`` and return once it is there.
 
-    A second caller waits for the first and then finds the file. Raises
+    A second caller waits for the first, then finds the file or transfers it again. Raises
     ``ResourceUnavailableError`` with a plain sentence and leaves a partial file for a resume.
     """
     with _download_lock:
@@ -72,7 +72,10 @@ def download(model_size: str, model_path: Path) -> None:
 
 def start(model_size: str, model_path: Path) -> ModelDownloadState:
     """Begin the download on a background thread, unless one runs or the model is there."""
-    if model_path.is_file() or not _download_lock.acquire(blocking=False):
+    if not _download_lock.acquire(blocking=False):
+        return snapshot()
+    if model_path.is_file():
+        _download_lock.release()
         return snapshot()
     _begin()
     worker = threading.Thread(
@@ -81,7 +84,12 @@ def start(model_size: str, model_path: Path) -> ModelDownloadState:
         name="model-download",
         daemon=True,
     )
-    worker.start()
+    try:
+        worker.start()
+    except BaseException:
+        _update(stage="idle")
+        _download_lock.release()
+        raise
     return snapshot()
 
 

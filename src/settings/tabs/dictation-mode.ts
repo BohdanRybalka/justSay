@@ -96,12 +96,12 @@ export function renderDictationMode(
   }
 
   cloudRow.addEventListener("click", () => void switchMode("cloud"));
-  localRowEl.addEventListener("click", () => {
-    const row = model.row(currentMode === "local");
-    if (row.state === "failed") void (row.cause === "download" ? model.install() : tryAgain());
-    else if (row.state === "not-installed" && row.tracked) void model.install();
-    else if (row.state === "not-installed" || row.state === "installed") void switchMode("local");
-  });
+  localRowEl.addEventListener("click", () =>
+    model.press(currentMode === "local", {
+      choose: () => void switchMode("local"),
+      retry: () => void tryAgain(),
+    }),
+  );
 
   draw();
   if (!windowHidden) model.resume();

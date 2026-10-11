@@ -67,10 +67,13 @@ export function localRow(read: LocalRead, selected: boolean, download: ModelDown
   const error = displayableError(read.last_error);
   const indicator = computeIndicatorState({ active: selected, ready: read.model_loaded, error });
   if (indicator === "error") return { state: "failed", reason: error!, cause: "engine" };
-  if (indicator === "loading") return { state: "starting" };
-  if (indicator === "idle" && !(read.package_installed && read.model_downloaded)) {
+  const missing = !(read.package_installed && read.model_downloaded);
+  const idleOrWaitingForADownload =
+    indicator === "idle" || (indicator === "loading" && read.model_download_reported);
+  if (idleOrWaitingForADownload && missing) {
     return { state: "not-installed", bytes: read.model_bytes, tracked: read.model_download_reported };
   }
+  if (indicator === "loading") return { state: "starting" };
   return { state: "installed" };
 }
 
@@ -138,7 +141,8 @@ export function drawRow(row: HTMLButtonElement, checked: boolean, view: RowView)
   const hint = row.querySelector<HTMLElement>(".mode-row-hint")!;
   hint.textContent = view.hint;
   hint.classList.toggle("mode-row-alert", view.alert);
-  row.querySelector<HTMLElement>(".mode-row-action")!.innerHTML = view.action;
+  const action = row.querySelector<HTMLElement>(".mode-row-action")!;
+  if (action.innerHTML !== view.action) action.innerHTML = view.action;
   const area = row.nextElementSibling;
   if (area?.classList.contains("mode-row-install")) drawProgress(area as HTMLElement, view.progress ?? null);
 }
