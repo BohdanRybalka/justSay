@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudKeyStatus, LocalSTTStatus, UserSettings } from "../../api";
 import type { TabLifecycle } from "../settings";
-import { buildDownload } from "../local-status-stub.test-helper";
+import { buildDownload, installStepStates } from "../local-status-stub.test-helper";
 
 const apiMock = {
   sttLocalStatus: vi.fn(),
@@ -116,7 +116,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   apiMock.setSttMode.mockResolvedValue({});
   apiMock.sttLocalPrewarm.mockResolvedValue({ started: true });
-  apiMock.sttLocalModel.mockResolvedValue({ stage: "idle", bytes_done: 0, bytes_total: null, error: null });
+  apiMock.sttLocalModel.mockResolvedValue(buildDownload());
 });
 
 afterEach(() => {
@@ -588,6 +588,52 @@ describe("renderDictationMode — Install downloads the model", () => {
     await vi.waitFor(() => expect(hint(container, "local").textContent).toBe("Installing…"));
     expect(apiMock.sttLocalModelStart).toHaveBeenCalledOnce();
     expect(apiMock.setSttMode).not.toHaveBeenCalled();
+  });
+
+  it("walks the four steps, then switches the mode to Local on its own", async () => {
+    vi.useFakeTimers();
+    try {
+      apiMock.sttLocalModelStart.mockResolvedValue(download({ stage: "downloading" }));
+      const container = await render(buildStatus(tracked), { stt_mode: "cloud" });
+      await vi.advanceTimersByTimeAsync(0);
+      row(container, "local").click();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(installStepStates(progress(container))).toEqual(["running", "pending", "pending", "pending"]);
+
+      apiMock.sttLocalModel.mockResolvedValue(download({ stage: "checking", bytes_done: 1, bytes_total: 1 }));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(installStepStates(progress(container))).toEqual(["done", "running", "pending", "pending"]);
+
+      apiMock.sttLocalModel.mockResolvedValue(download({ stage: "done" }));
+      apiMock.sttLocalStatus.mockResolvedValue(buildStatus({ ...tracked, model_downloaded: true, model_loaded: true }));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(hint(container, "local").textContent).toBe("Installed · runs on this computer");
+      expect(action(container)).toBe("Ready");
+      expect(installStepStates(progress(container))).toEqual(["done", "done", "done", "done"]);
+      expect(apiMock.setSttMode).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(900);
+      expect(apiMock.setSttMode).toHaveBeenCalledExactlyOnceWith("local");
+      expect(row(container, "local").getAttribute("aria-checked")).toBe("true");
+      expect(progress(container).hidden).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("marks the step that failed and runs the install again on Try again", async () => {
+    apiMock.sttLocalModel.mockResolvedValue(
+      download({ stage: "failed", error: "The engine did not start.", failed_step: "starting", bytes_done: 1, bytes_total: 1 }),
+    );
+    apiMock.sttLocalModelStart.mockResolvedValue(download({ stage: "checking" }));
+    const container = await render(buildStatus({ ...tracked, model_downloaded: true }), { stt_mode: "cloud" });
+    await vi.waitFor(() => expect(hint(container, "local").textContent).toBe("The engine did not start."));
+    expect(installStepStates(progress(container))).toEqual(["done", "done", "failed", "pending"]);
+
+    row(container, "local").click();
+
+    await vi.waitFor(() => expect(apiMock.sttLocalModelStart).toHaveBeenCalledOnce());
+    expect(apiMock.sttLocalPrewarm).not.toHaveBeenCalled();
   });
 
   it("shows the bar with the share of the model that has arrived", async () => {

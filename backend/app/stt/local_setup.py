@@ -7,7 +7,7 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 from pydantic import BaseModel
 
@@ -16,7 +16,7 @@ from app.core.errors import ResourceUnavailableError
 from app.core.frozen_build import is_frozen_build
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
-from app.stt import local_whisper_cpp_cmd, routing
+from app.stt import local_whisper_cpp_cmd, model_download, routing
 from app.stt.base import latched_load_error, load_error_sentence
 from app.stt.config import STTSettings
 from app.stt.local_factory import (
@@ -201,6 +201,27 @@ def maybe_prewarm_local(stt_settings: STTSettings) -> None:
         return
     _write_consecutive_incomplete_prewarms(0)
     tasks.spawn_background_task(ensure_local_ready(stt_settings), name="local-stt-prewarm")
+
+
+def finish_local_install(stt_settings: STTSettings) -> None:
+    """The last two steps of Install: check the machine, then start the engine.
+
+    Runs once the model is on disk and starts the engine whatever the mode is. Each step
+    reports its stage through ``model_download``; a failure is recorded against its step
+    and ends the run, never raised.
+    """
+    step: Literal["checking", "starting"] = "checking"
+    try:
+        model_download.advance("checking")
+        if local_whisper_cpp_cmd.resolve_binary_path() is None:
+            raise ResourceUnavailableError(local_whisper_cpp_cmd.binary_not_found_message())
+        step = "starting"
+        model_download.advance("starting")
+        routing.get_provider(ProviderMode.LOCAL, stt_settings)._get_model()
+    except Exception as e:
+        model_download.fail(step, latched_load_error(e))
+        return
+    model_download.advance("done")
 
 
 MAX_CONSECUTIVE_INCOMPLETE_PREWARMS = 2

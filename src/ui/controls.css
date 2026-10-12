@@ -118,7 +118,9 @@
 .install-step--running .install-step-dot{border-color:var(--orange);border-right-color:transparent;
   animation:install-step-spin .8s linear infinite}
 .install-step--done .install-step-dot{background:var(--orange);border-color:var(--orange);color:#fff}
-.install-step--running,.install-step--done{color:var(--text)}
+.install-step--failed .install-step-dot{border-color:var(--orange);color:var(--orange)}
+.install-step--running,.install-step--done,.install-step--failed{color:var(--text)}
+.install-steps{list-style:none;margin:6px 0 0;padding:0}
 .install-bar{height:6px;border-radius:4px;background:var(--inset);overflow:hidden;margin:6px 0 2px}
 .install-bar>i{display:block;height:100%;width:0;background:var(--bar);border-radius:4px;transition:width .3s}
 .install-meta{display:flex;justify-content:space-between;font-size:11px;color:var(--muted)}

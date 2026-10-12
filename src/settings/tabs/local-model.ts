@@ -1,33 +1,37 @@
 /**
- * What the Local model row reads from the backend: the engine's status every 3 s, and the model
- * download every second while one runs. The backend holds the state, so every page that draws the
- * row shows the same one, and a download goes on while the window is closed.
+ * What the Local model row reads from the backend: the engine's status every 3 s, and the install
+ * (download, check, engine start) every second while one runs. The backend holds the state, so
+ * every page that draws the row shows the same one, and an install goes on while the window is
+ * closed. An install pressed here ends with a pause for the finished steps, then `onInstalled`.
  */
 import { api, type LocalSTTStatus, type ModelDownload } from "../../api";
 import { notifyError } from "../../notify";
 import { isStaleStatusResponse } from "../../stale-response";
-import { localRow, type LocalRead, type LocalRow } from "./mode-rows";
+import { isInstalling, localRow, type LocalRead, type LocalRow } from "./mode-rows";
 
 const STATUS_POLL_MS = 3000;
 const DOWNLOAD_POLL_MS = 1000;
+const SWITCH_DELAY_MS = 900;
 
 export interface LocalModelHooks {
   /** Called after every change to what the row should show. */
   onChange: () => void;
   /** Called with each status the backend answered, before `onChange`. */
   onStatus?: (status: LocalSTTStatus) => void;
+  /** Called about a second after an install pressed here finished: the moment to choose Local. */
+  onInstalled?: () => void;
 }
 
 export interface LocalModel {
   read: () => LocalRead;
   row: (selected: boolean) => LocalRow;
   refresh: () => Promise<void>;
-  /** Starts the download, or resumes a failed one; the backend ignores it while one runs. */
+  /** Starts the install, or resumes a failed one; the backend ignores it while one runs. */
   install: () => Promise<void>;
   /** What pressing the row does: install, retry, or hand over to `choose` once it is installed. */
   press: (selected: boolean, actions: { choose: () => void; retry: () => void }) => void;
   resume: () => void;
-  /** Stops reading and disowns an answer still in flight; a download keeps going. */
+  /** Stops reading and disowns an answer still in flight; an install keeps going. */
   release: () => void;
 }
 
@@ -36,11 +40,32 @@ export function watchLocalModel(hooks: LocalModelHooks): LocalModel {
   let download: ModelDownload | null = null;
   let latestToken = 0;
   let active = false;
+  let installingHere = false;
+  let finishing = false;
   let statusTimer: ReturnType<typeof setInterval> | null = null;
   let downloadTimer: ReturnType<typeof setInterval> | null = null;
+  let switchTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function adopt(next: ModelDownload | null) {
+    download = next;
+    if (!installingHere) return;
+    if (next?.stage === "done") finishInstall();
+    else if (next?.stage === "failed") installingHere = false;
+  }
+
+  function finishInstall() {
+    installingHere = false;
+    finishing = true;
+    switchTimer = setTimeout(() => {
+      switchTimer = null;
+      finishing = false;
+      hooks.onChange();
+      hooks.onInstalled?.();
+    }, SWITCH_DELAY_MS);
+  }
 
   function syncDownloadTimer() {
-    const wanted = active && download?.stage === "downloading";
+    const wanted = active && download !== null && isInstalling(download.stage);
     if (wanted && downloadTimer === null) {
       downloadTimer = setInterval(() => void readDownload(), DOWNLOAD_POLL_MS);
     } else if (!wanted && downloadTimer !== null) {
@@ -63,7 +88,7 @@ export function watchLocalModel(hooks: LocalModelHooks): LocalModel {
     }
     if (isStaleStatusResponse(token, latestToken)) return;
     lastRead = read;
-    download = progress;
+    adopt(progress);
     if (read !== "failed") hooks.onStatus?.(read);
     syncDownloadTimer();
     hooks.onChange();
@@ -78,8 +103,8 @@ export function watchLocalModel(hooks: LocalModelHooks): LocalModel {
       return;
     }
     if (isStaleStatusResponse(token, latestToken)) return;
-    download = next;
-    if (next.stage === "downloading") hooks.onChange();
+    adopt(next);
+    if (isInstalling(next.stage)) hooks.onChange();
     else void refresh();
   }
 
@@ -92,14 +117,15 @@ export function watchLocalModel(hooks: LocalModelHooks): LocalModel {
       return;
     }
     latestToken += 1;
-    download = started;
+    installingHere = true;
+    adopt(started);
     syncDownloadTimer();
     hooks.onChange();
   }
 
   function press(selected: boolean, actions: { choose: () => void; retry: () => void }) {
-    const row = localRow(lastRead, selected, download);
-    if (row.state === "failed") void (row.cause === "download" ? install() : actions.retry());
+    const row = localRow(lastRead, selected, download, finishing);
+    if (row.state === "failed") void (row.cause === "install" ? install() : actions.retry());
     else if (row.state === "not-installed" && row.tracked) void install();
     else if (row.state === "not-installed" || row.state === "installed") actions.choose();
   }
@@ -114,13 +140,17 @@ export function watchLocalModel(hooks: LocalModelHooks): LocalModel {
     active = false;
     if (statusTimer !== null) clearInterval(statusTimer);
     statusTimer = null;
+    if (switchTimer !== null) clearTimeout(switchTimer);
+    switchTimer = null;
+    finishing = false;
+    installingHere = false;
     syncDownloadTimer();
     latestToken += 1;
   }
 
   return {
     read: () => lastRead,
-    row: (selected) => localRow(lastRead, selected, download),
+    row: (selected) => localRow(lastRead, selected, download, finishing),
     refresh,
     install,
     press,

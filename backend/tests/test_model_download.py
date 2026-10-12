@@ -258,13 +258,17 @@ def _wait_for(predicate, timeout=5.0):
         time.sleep(0.01)
 
 
+def _finish():
+    model_download.advance("done")
+
+
 def test_start_answers_downloading_at_once_and_finishes_in_the_background(monkeypatch, tmp_path):
     server = _Server()
     server.release.clear()
     _serve(monkeypatch, server)
     model_path, _ = _paths(tmp_path)
 
-    started = model_download.start("tiny", model_path)
+    started = model_download.start("tiny", model_path, after=_finish)
 
     assert started.stage == "downloading"
     server.release.set()
@@ -278,16 +282,65 @@ def test_a_second_start_while_one_runs_does_not_start_another(monkeypatch, tmp_p
     server.release.clear()
     _serve(monkeypatch, server)
     model_path, _ = _paths(tmp_path)
-    model_download.start("tiny", model_path)
+    model_download.start("tiny", model_path, after=_finish)
     assert server.entered.wait(timeout=5)
 
-    again = model_download.start("tiny", model_path)
+    again = model_download.start("tiny", model_path, after=_finish)
 
     assert again.stage == "downloading"
     server.release.set()
     _wait_for(lambda: model_download.snapshot().stage == "done")
     _wait_for(lambda: not model_download._download_lock.locked())
     assert len(server.range_headers) == 1
+
+
+def test_the_steps_after_the_download_start_with_checking_and_without_the_lock(
+    monkeypatch, tmp_path
+):
+    _serve(monkeypatch, _Server())
+    model_path, _ = _paths(tmp_path)
+    seen = []
+
+    def after():
+        seen.append((model_download.snapshot(), model_download._download_lock.locked()))
+        model_download.download("tiny", model_path)
+        model_download.advance("done")
+
+    model_download.start("tiny", model_path, after=after)
+
+    _wait_for(lambda: model_download.snapshot().stage == "done")
+    (state, locked), = seen
+    assert state == model_download.ModelDownloadState(
+        stage="checking", bytes_done=len(DATA), bytes_total=len(DATA)
+    )
+    assert not locked
+
+
+def test_a_second_start_while_the_steps_after_the_download_run_does_not_run_them_again(
+    monkeypatch, tmp_path
+):
+    _serve(monkeypatch, _Server())
+    model_path, _ = _paths(tmp_path)
+    in_after = threading.Event()
+    leave_after = threading.Event()
+    runs = []
+
+    def after():
+        runs.append(1)
+        model_download.advance("starting")
+        in_after.set()
+        leave_after.wait(timeout=5)
+        model_download.advance("done")
+
+    model_download.start("tiny", model_path, after=after)
+    assert in_after.wait(timeout=5)
+
+    again = model_download.start("tiny", model_path, after=after)
+
+    assert again.stage == "starting"
+    leave_after.set()
+    _wait_for(lambda: model_download.snapshot().stage == "done")
+    assert runs == [1]
 
 
 def test_a_load_that_needs_the_model_waits_for_the_download_install_started(
@@ -297,7 +350,7 @@ def test_a_load_that_needs_the_model_waits_for_the_download_install_started(
     server.release.clear()
     _serve(monkeypatch, server)
     model_path, _ = _paths(tmp_path)
-    model_download.start("tiny", model_path)
+    model_download.start("tiny", model_path, after=_finish)
     assert server.entered.wait(timeout=5)
     loader = threading.Thread(target=model_download.download, args=("tiny", model_path))
     loader.start()
@@ -325,30 +378,52 @@ def test_start_gives_the_lock_back_when_its_thread_cannot_start(monkeypatch, tmp
     monkeypatch.setattr(model_download.threading, "Thread", _NoThread)
 
     with pytest.raises(RuntimeError):
-        model_download.start("tiny", _paths(tmp_path)[0])
+        model_download.start("tiny", _paths(tmp_path)[0], after=_finish)
 
     assert not model_download._download_lock.locked()
     assert model_download.snapshot().stage == "idle"
 
 
-def test_start_does_nothing_when_the_model_is_there(monkeypatch, tmp_path):
+def test_start_goes_straight_to_the_steps_after_the_download_when_the_model_is_there(
+    monkeypatch, tmp_path
+):
     server = _serve(monkeypatch, _Server())
     model_path, _ = _paths(tmp_path)
     model_path.parent.mkdir(parents=True)
     model_path.write_bytes(b"already here")
+    model_download.fail("starting", "The engine did not start.")
 
-    state = model_download.start("tiny", model_path)
+    state = model_download.start("tiny", model_path, after=_finish)
 
-    assert state.stage == "idle"
+    assert state.stage == "checking"
+    assert state.error is None
+    assert state.failed_step is None
+    _wait_for(lambda: model_download.snapshot().stage == "done")
     assert server.range_headers == []
-    assert not model_download._download_lock.locked()
+    _wait_for(lambda: not model_download._download_lock.locked())
 
 
 def test_a_failed_background_download_is_readable_from_the_state(monkeypatch, tmp_path):
     _serve(monkeypatch, _Server(break_after=CHUNK))
+    ran_after = []
 
-    model_download.start("tiny", _paths(tmp_path)[0])
+    model_download.start("tiny", _paths(tmp_path)[0], after=lambda: ran_after.append(1))
 
     _wait_for(lambda: model_download.snapshot().stage == "failed")
-    assert "interrupted" in model_download.snapshot().error
+    state = model_download.snapshot()
+    assert "interrupted" in state.error
+    assert state.failed_step == "downloading"
     _wait_for(lambda: not model_download._download_lock.locked())
+    assert ran_after == []
+
+
+def test_a_failure_names_its_step_and_the_next_stage_forgets_it():
+    model_download.fail("starting", "The engine did not start.")
+
+    assert model_download.snapshot() == model_download.ModelDownloadState(
+        stage="failed", error="The engine did not start.", failed_step="starting"
+    )
+
+    model_download.advance("checking")
+
+    assert model_download.snapshot() == model_download.ModelDownloadState(stage="checking")

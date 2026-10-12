@@ -16,7 +16,7 @@ import pytest
 from app.core.errors import ResourceUnavailableError
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
-from app.stt import local_setup, local_whisper_cpp_cmd, routing
+from app.stt import local_setup, local_whisper_cpp_cmd, model_download, routing
 from app.stt.base import LOAD_FAILED_WITHOUT_A_MESSAGE
 from app.stt.config import STTSettings
 from app.stt.local_factory import get_local_provider_class as _real_get_local_provider_class
@@ -2868,3 +2868,75 @@ def test_psutil_selftest_rejects_a_boolean_resident_set_size(monkeypatch):
 
     assert ok is False
     assert message.endswith("of True")
+
+
+class _EngineProvider:
+    def __init__(self, fail_with=None):
+        self.fail_with = fail_with
+        self.stage_while_starting = []
+
+    def _get_model(self):
+        self.stage_while_starting.append(model_download.snapshot().stage)
+        if self.fail_with is not None:
+            raise self.fail_with
+
+
+@pytest.fixture
+def install_steps(monkeypatch):
+    monkeypatch.setattr(model_download, "_state", model_download.ModelDownloadState())
+    monkeypatch.setattr(local_whisper_cpp_cmd, "resolve_binary_path", lambda: pathlib.Path("bin"))
+
+    def use(provider):
+        monkeypatch.setattr(routing, "get_provider", lambda mode, settings: provider)
+        return provider
+
+    return use
+
+
+def test_finish_local_install_starts_the_engine_even_when_cloud_is_the_mode(install_steps):
+    provider = install_steps(_EngineProvider())
+
+    local_setup.finish_local_install(STTSettings(mode=ProviderMode.CLOUD))
+
+    assert provider.stage_while_starting == ["starting"]
+    assert model_download.snapshot().stage == "done"
+
+
+def test_finish_local_install_stops_at_checking_when_the_engine_binary_is_missing(
+    install_steps, monkeypatch
+):
+    provider = install_steps(_EngineProvider())
+    monkeypatch.setattr(local_whisper_cpp_cmd, "resolve_binary_path", lambda: None)
+
+    local_setup.finish_local_install(STTSettings())
+
+    assert provider.stage_while_starting == []
+    assert model_download.snapshot() == model_download.ModelDownloadState(
+        stage="failed",
+        error=local_whisper_cpp_cmd.binary_not_found_message(),
+        failed_step="checking",
+    )
+
+
+def test_finish_local_install_names_starting_as_the_step_an_engine_that_will_not_start_failed_in(
+    install_steps,
+):
+    install_steps(_EngineProvider(ResourceUnavailableError("whisper-server exited early (code 1)")))
+
+    local_setup.finish_local_install(STTSettings())
+
+    assert model_download.snapshot() == model_download.ModelDownloadState(
+        stage="failed", error="whisper-server exited early (code 1)", failed_step="starting"
+    )
+
+
+def test_finish_local_install_gives_a_sentence_when_the_engine_failed_without_a_message(
+    install_steps,
+):
+    install_steps(_EngineProvider(RuntimeError()))
+
+    local_setup.finish_local_install(STTSettings())
+
+    state = model_download.snapshot()
+    assert state.failed_step == "starting"
+    assert state.error == LOAD_FAILED_WITHOUT_A_MESSAGE

@@ -147,37 +147,46 @@ async def test_stt_local_prewarm_dispatches_and_returns_started(client, monkeypa
 async def test_stt_local_model_reads_the_shared_download_state(client, monkeypatch):
     from app.stt import model_download
 
-    state = model_download.ModelDownloadState(stage="downloading", bytes_done=5, bytes_total=20)
+    state = model_download.ModelDownloadState(
+        stage="failed", bytes_done=5, bytes_total=20, error="No engine.", failed_step="checking"
+    )
     monkeypatch.setattr(model_download, "_state", state)
 
     resp = await client.get("/stt/local/model")
 
     assert resp.status_code == 200
     assert resp.json() == {
-        "stage": "downloading",
+        "stage": "failed",
         "bytes_done": 5,
         "bytes_total": 20,
-        "error": None,
+        "error": "No engine.",
+        "failed_step": "checking",
     }
 
 
 @pytest.mark.asyncio
-async def test_stt_local_model_start_downloads_the_configured_size(client, monkeypatch, tmp_path):
+async def test_stt_local_model_start_installs_the_configured_size_and_then_the_engine(
+    client, monkeypatch, tmp_path
+):
     import app.stt.router as stt_router_module
     from app.stt import model_download
     from app.stt.config import stt_settings
     from app.stt.local_factory import LocalProviderKind
 
     started = []
+    finished = []
     model_path = tmp_path / "ggml.bin"
     monkeypatch.setattr(
         stt_router_module, "get_local_provider_kind", lambda: LocalProviderKind.WHISPER_CPP_SERVER
     )
     monkeypatch.setattr(stt_router_module, "resolve_model_path", lambda size: model_path)
     monkeypatch.setattr(
+        stt_router_module, "finish_local_install", lambda settings: finished.append(settings)
+    )
+    monkeypatch.setattr(
         model_download,
         "start",
-        lambda size, path: started.append((size, path))
+        lambda size, path, after: started.append((size, path, after))
         or model_download.ModelDownloadState(stage="downloading"),
     )
 
@@ -185,7 +194,10 @@ async def test_stt_local_model_start_downloads_the_configured_size(client, monke
 
     assert resp.status_code == 200
     assert resp.json()["stage"] == "downloading"
-    assert started == [(stt_settings.whisper_model_size, model_path)]
+    [(size, path, after)] = started
+    assert (size, path) == (stt_settings.whisper_model_size, model_path)
+    after()
+    assert finished == [stt_settings]
 
 
 @pytest.mark.asyncio

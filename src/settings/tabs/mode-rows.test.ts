@@ -5,41 +5,101 @@ import { drawRow, localModeRowHtml, localRow, localView, modeRowHtml } from "./m
 
 const MISSING = { model_downloaded: false };
 
-describe("localRow — the download the row follows", () => {
+describe("localRow — the install the row follows", () => {
   it("counts whole percent of the bytes that arrived", () => {
     const download = buildDownload({ stage: "downloading", bytes_done: 333, bytes_total: 1000 });
 
-    expect(localRow(buildLocalStatus(MISSING), false, download)).toEqual({ state: "downloading", percent: 33 });
+    expect(localRow(buildLocalStatus(MISSING), false, download)).toEqual({
+      state: "installing",
+      step: "downloading",
+      percent: 33,
+    });
   });
 
   it("never passes 100 and has no percent before the size is known", () => {
     const over = buildDownload({ stage: "downloading", bytes_done: 1200, bytes_total: 1000 });
     const unknown = buildDownload({ stage: "downloading", bytes_done: 50, bytes_total: null });
 
-    expect(localRow(buildLocalStatus(MISSING), false, over)).toEqual({ state: "downloading", percent: 100 });
-    expect(localRow(buildLocalStatus(MISSING), false, unknown)).toEqual({ state: "downloading", percent: null });
+    expect(localRow(buildLocalStatus(MISSING), false, over)).toMatchObject({ percent: 100 });
+    expect(localRow(buildLocalStatus(MISSING), false, unknown)).toMatchObject({ percent: null });
   });
 
-  it("reads a failed download as a failure of the download, with the backend's sentence", () => {
-    const download = buildDownload({ stage: "failed", error: "The download was interrupted." });
+  it("follows the steps after the download with the model already on the disk", () => {
+    const checking = buildDownload({ stage: "checking", bytes_done: 1000, bytes_total: 1000 });
+    const starting = buildDownload({ stage: "starting" });
+
+    expect(localRow(buildLocalStatus(), false, checking)).toEqual({
+      state: "installing",
+      step: "checking",
+      percent: 100,
+    });
+    expect(localRow(buildLocalStatus(), false, starting)).toEqual({
+      state: "installing",
+      step: "starting",
+      percent: 100,
+    });
+  });
+
+  it("keeps the steps on show while the engine is up but the install has not said it is done", () => {
+    const starting = buildDownload({ stage: "starting" });
+
+    expect(localRow(buildLocalStatus({ model_loaded: true }), false, starting).state).toBe("installing");
+  });
+
+  it("reads a failed download as a failure of the install at its step, with the backend's sentence", () => {
+    const download = buildDownload({
+      stage: "failed",
+      error: "The download was interrupted.",
+      failed_step: "downloading",
+      bytes_done: 400,
+      bytes_total: 1000,
+    });
 
     expect(localRow(buildLocalStatus(MISSING), false, download)).toEqual({
       state: "failed",
       reason: "The download was interrupted.",
-      cause: "download",
+      cause: "install",
+      step: "downloading",
+      percent: 40,
+    });
+  });
+
+  it("reads a failure after the download as the install's too, at 100%", () => {
+    const download = buildDownload({ stage: "failed", error: "The engine did not start.", failed_step: "starting" });
+
+    expect(localRow(buildLocalStatus(), false, download)).toEqual({
+      state: "failed",
+      reason: "The engine did not start.",
+      cause: "install",
+      step: "starting",
+      percent: 100,
     });
   });
 
   it("forgets a failed download once the model is on the disk", () => {
-    const download = buildDownload({ stage: "failed", error: "The download was interrupted." });
+    const download = buildDownload({ stage: "failed", error: "The download was interrupted.", failed_step: "downloading" });
 
     expect(localRow(buildLocalStatus(), false, download)).toEqual({ state: "installed" });
   });
 
-  it("draws a download under way over the engine starting while Local is the mode", () => {
+  it("forgets a failure to start the engine once the engine runs", () => {
+    const download = buildDownload({ stage: "failed", error: "The engine did not start.", failed_step: "starting" });
+
+    expect(localRow(buildLocalStatus({ model_loaded: true }), false, download)).toEqual({ state: "installed" });
+  });
+
+  it("keeps the finished steps on show for the pause before the switch, and not after it", () => {
+    const status = buildLocalStatus({ model_loaded: true });
+    const done = buildDownload({ stage: "done" });
+
+    expect(localRow(status, false, done, true)).toEqual({ state: "ready" });
+    expect(localRow(status, false, done, false)).toEqual({ state: "installed" });
+  });
+
+  it("draws an install under way over the engine starting while Local is the mode", () => {
     const download = buildDownload({ stage: "downloading", bytes_total: 10 });
 
-    expect(localRow(buildLocalStatus(MISSING), true, download).state).toBe("downloading");
+    expect(localRow(buildLocalStatus(MISSING), true, download).state).toBe("installing");
     expect(localRow(buildLocalStatus(), true, null).state).toBe("starting");
   });
 
@@ -85,10 +145,42 @@ describe("localRow — the download the row follows", () => {
 
 describe("localView", () => {
   it("opens the progress step and closes the row while the model downloads", () => {
-    const view = localView({ state: "downloading", percent: 40 });
+    const view = localView({ state: "installing", step: "downloading", percent: 40 });
 
     expect(view).toMatchObject({ hint: "Installing…", locked: true, disabled: true, action: "" });
-    expect(view.progress).toEqual({ percent: 40, label: "Downloading the model" });
+    expect(view.progress).toEqual({
+      percent: 40,
+      label: "Downloading the model",
+      steps: ["running", "pending", "pending", "pending"],
+    });
+  });
+
+  it("checks off the steps behind the one in hand", () => {
+    expect(localView({ state: "installing", step: "checking", percent: 100 }).progress).toEqual({
+      percent: 100,
+      label: "Checking your computer",
+      steps: ["done", "running", "pending", "pending"],
+    });
+    expect(localView({ state: "installing", step: "starting", percent: 100 }).progress).toEqual({
+      percent: 100,
+      label: "Starting the engine",
+      steps: ["done", "done", "running", "pending"],
+    });
+  });
+
+  it("says Installed with a Ready chip and all four steps done in the pause before the switch", () => {
+    const view = localView({ state: "ready" });
+
+    expect(view).toMatchObject({
+      hint: "Installed · runs on this computer",
+      action: expect.stringContaining("Ready"),
+      locked: false,
+    });
+    expect(view.progress).toEqual({
+      percent: 100,
+      label: "Ready to use",
+      steps: ["done", "done", "done", "done"],
+    });
   });
 
   it("offers Install with the size, and Try again with the reason", () => {
@@ -96,11 +188,18 @@ describe("localView", () => {
       hint: "Not installed · 1.5 GB",
       action: expect.stringContaining("Install"),
     });
-    expect(localView({ state: "failed", reason: "No space.", cause: "download" })).toMatchObject({
+    expect(localView({ state: "failed", reason: "No space.", cause: "engine" })).toMatchObject({
       hint: "No space.",
       alert: true,
       action: expect.stringContaining("Try again"),
     });
+  });
+
+  it("marks the step a failed install stopped in, and shows no steps for an engine failure", () => {
+    const failed = localView({ state: "failed", reason: "No engine.", cause: "install", step: "checking", percent: 100 });
+
+    expect(failed.progress?.steps).toEqual(["done", "failed", "pending", "pending"]);
+    expect(localView({ state: "failed", reason: "Out of memory.", cause: "engine" }).progress).toBeNull();
   });
 });
 
@@ -115,7 +214,7 @@ describe("drawRow — the progress area under the Local row", () => {
 
   it("shows the bar, the percentage and the label, then hides them again", () => {
     const { row, area } = mount();
-    const view = localView({ state: "downloading", percent: 40 });
+    const view = localView({ state: "installing", step: "downloading", percent: 40 });
 
     drawRow(row, false, view);
 
@@ -132,11 +231,44 @@ describe("drawRow — the progress area under the Local row", () => {
   it("leaves the bar without a value while the size is unknown", () => {
     const { row, area } = mount();
 
-    drawRow(row, false, localView({ state: "downloading", percent: 40 }));
-    drawRow(row, false, localView({ state: "downloading", percent: null }));
+    drawRow(row, false, localView({ state: "installing", step: "downloading", percent: 40 }));
+    drawRow(row, false, localView({ state: "installing", step: "downloading", percent: null }));
 
     expect(area.querySelector(".install-bar")!.hasAttribute("aria-valuenow")).toBe(false);
     expect(area.querySelector(".install-percent")!.textContent).toBe("");
+  });
+
+  it("draws the four steps as spinner, check or failure marker as they stand", () => {
+    const { row, area } = mount();
+    const items = Array.from(area.querySelectorAll<HTMLElement>(".install-step"));
+    const marker = (i: number) => items[i].querySelector("use")!.getAttribute("href");
+
+    expect(items.map((item) => item.textContent)).toEqual([
+      "Downloading the model",
+      "Checking your computer",
+      "Starting the engine",
+      "Ready to use",
+    ]);
+
+    drawRow(row, false, localView({ state: "installing", step: "starting", percent: 100 }));
+    expect(items.map((item) => item.className)).toEqual([
+      "install-step install-step--done",
+      "install-step install-step--done",
+      "install-step install-step--running",
+      "install-step",
+    ]);
+    expect(items[2].getAttribute("aria-current")).toBe("step");
+    expect(items[0].hasAttribute("aria-current")).toBe(false);
+
+    drawRow(row, false, localView({ state: "failed", reason: "x", cause: "install", step: "starting", percent: 100 }));
+    expect(items[2].className).toBe("install-step install-step--failed");
+    expect(marker(2)).toBe("#x");
+    expect(marker(0)).toBe("#check");
+    expect(items[2].hasAttribute("aria-current")).toBe(false);
+
+    drawRow(row, false, localView({ state: "ready" }));
+    expect(items.every((item) => item.classList.contains("install-step--done"))).toBe(true);
+    expect(marker(2)).toBe("#check");
   });
 
   it("leaves the action buttons in place while a redraw changes nothing about them", () => {

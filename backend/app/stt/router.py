@@ -12,6 +12,7 @@ from app.stt.config import stt_settings
 from app.stt.local_factory import LocalProviderKind, get_local_provider_kind
 from app.stt.local_setup import (
     LocalSTTStatus,
+    finish_local_install,
     install_local_packages,
 )
 from app.stt.local_setup import (
@@ -97,15 +98,18 @@ async def stt_local_model():
 
 @router.post("/local/model", response_model=model_download.ModelDownloadState)
 async def stt_local_model_start():
-    """Start downloading the local model in the background and return its state.
+    """Install the local model in the background and return its state.
 
-    A no-op while a download runs or the model is on disk; a failed one resumes.
+    Downloads the model, checks the computer, starts the engine. A no-op while an install
+    runs; a failed one resumes, from the partial file if the download stopped.
     """
     kind = await asyncio.to_thread(get_local_provider_kind)
     if kind != LocalProviderKind.WHISPER_CPP_SERVER:
         raise HTTPException(status_code=400, detail=_MODEL_DOWNLOAD_NOT_REPORTED_DETAIL)
     size = stt_settings.whisper_model_size
-    return model_download.start(size, resolve_model_path(size))
+    return model_download.start(
+        size, resolve_model_path(size), after=lambda: finish_local_install(stt_settings)
+    )
 
 
 @router.post("/local/install")

@@ -67,7 +67,11 @@ export function renderDictationMode(
     prevLastError = reported;
   }
 
-  const model = watchLocalModel({ onChange: draw, onStatus: reportNewFailure });
+  const model = watchLocalModel({
+    onChange: draw,
+    onStatus: reportNewFailure,
+    onInstalled: () => void switchMode("local"),
+  });
 
   async function switchMode(mode: Mode) {
     if (currentMode === mode) return;

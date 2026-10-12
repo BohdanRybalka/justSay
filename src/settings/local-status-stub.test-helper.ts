@@ -22,5 +22,15 @@ export function buildLocalStatus(overrides: Partial<LocalSTTStatus> = {}): Local
 }
 
 export function buildDownload(overrides: Partial<ModelDownload> = {}): ModelDownload {
-  return { stage: "idle", bytes_done: 0, bytes_total: null, error: null, ...overrides };
+  return { stage: "idle", bytes_done: 0, bytes_total: null, error: null, failed_step: null, ...overrides };
+}
+
+/** What each of the four install steps under a Local row shows: done, running, failed or pending. */
+export function installStepStates(area: Element): string[] {
+  return Array.from(area.querySelectorAll(".install-step")).map((item) => {
+    for (const state of ["done", "running", "failed"]) {
+      if (item.classList.contains(`install-step--${state}`)) return state;
+    }
+    return "pending";
+  });
 }
