@@ -1143,7 +1143,6 @@ def _transcription_the_provider_would_have_returned() -> SimpleNamespace:
     return SimpleNamespace(
         text="hello",
         duration_ms=100,
-        copied_to_clipboard=True,
         model_name="mock/provider",
     )
 

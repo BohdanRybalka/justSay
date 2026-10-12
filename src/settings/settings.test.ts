@@ -314,11 +314,10 @@ describe("the sidebar", () => {
       (item) => item.dataset.panel,
     );
 
-  it("opens the window on Insights with nothing old hosted in it", async () => {
+  it("opens the window on Insights", async () => {
     await bootWithSettingsLoaded();
 
     expect(document.querySelector("#pane > .panel > #insights-body")).not.toBeNull();
-    expect(document.querySelectorAll("#pane .legacy-tab")).toHaveLength(0);
     expect(currentPanels()).toEqual(["insights"]);
   });
 
@@ -346,7 +345,7 @@ describe("the sidebar", () => {
     expect(historyTab.destroy).toHaveBeenCalledOnce();
   });
 
-  it("draws the Settings card with nothing old hosted under it", async () => {
+  it("draws the storage, version and history rows in Settings and keeps the microphone test out", async () => {
     await bootWithSettingsLoaded();
 
     openPanel("settings");
@@ -355,7 +354,6 @@ describe("the sidebar", () => {
     expect(panel.querySelector(".card .storage-row")).not.toBeNull();
     expect(panel.querySelector(".card .version-row")).not.toBeNull();
     expect(panel.querySelector(".history-delete")).not.toBeNull();
-    expect(panel.querySelectorAll(".legacy-tab")).toHaveLength(0);
     expect(panel.querySelector("#btn-test-mic")).toBeNull();
   });
 
@@ -383,7 +381,6 @@ describe("the sidebar", () => {
     expect(card.querySelector("#lang-select")).not.toBeNull();
     expect(card.querySelector("#btn-shortcut")).not.toBeNull();
     expect(card.querySelector("#btn-test-mic")).not.toBeNull();
-    expect(panel.querySelectorAll(".legacy-tab")).toHaveLength(0);
     const modeRows = panel.querySelector(":scope > #dictation-mode-body")!;
     expect(card.compareDocumentPosition(modeRows) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(panel.querySelector("#meeting-card")).toBeNull();

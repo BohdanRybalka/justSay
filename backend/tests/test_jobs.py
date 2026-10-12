@@ -2,7 +2,7 @@
 
 Most tests drive `JobQueue` with a stand-in for `process_audio` that makes the observer calls a
 real run makes, when the test releases it. One runs the real pipeline over a fake provider to
-prove the saved row and the clipboard.
+prove the saved row.
 """
 
 from __future__ import annotations
@@ -84,11 +84,11 @@ class _FakePipeline:
         if isinstance(self.outcome, BaseException):
             raise self.outcome
         if self.outcome == "silence":
-            return ProcessingResult("", 5, False, discarded_reason="silence")
+            return ProcessingResult("", 5, discarded_reason="silence")
         observer.before_save()
         if self.outcome == "saved":
             observer.saved(f"entry-{len(self.calls)}")
-        return ProcessingResult("hello", 5, False, model_name="mock/model")
+        return ProcessingResult("hello", 5, model_name="mock/model")
 
 
 @pytest.fixture(autouse=True)
@@ -172,7 +172,6 @@ async def test_a_job_moves_through_its_stages_and_ends_on_its_entry(queue, fakes
     call = pipeline.calls[0]
     assert (call["source"], call["source_name"]) == ("file", "talk.wav")
     assert call["language"] == "auto"
-    assert call["copy_to_clipboard"] is False
     assert not call["path"].exists()
 
 
@@ -509,7 +508,7 @@ async def client(tmp_path, monkeypatch, queue):
         yield ac
 
 
-async def test_a_dropped_file_is_saved_as_a_file_entry_and_never_copied(
+async def test_a_dropped_file_is_saved_as_a_file_entry(
     client, queue, tmp_path, monkeypatch
 ):
     monkeypatch.setattr(history, "_output_dir", tmp_path)
@@ -523,7 +522,6 @@ async def test_a_dropped_file_is_saved_as_a_file_entry_and_never_copied(
         with (
             patch("app.pipeline.service.get_provider", return_value=stt),
             patch("app.pipeline.service.analyze_vad", return_value=None),
-            patch("app.pipeline.service.pyperclip.copy") as copy,
         ):
             upload = {"file": ("standup.wav", _wav(tmp_path), "audio/wav")}
             job_id = (await client.post("/jobs/file", files=upload)).json()["id"]
@@ -536,7 +534,6 @@ async def test_a_dropped_file_is_saved_as_a_file_entry_and_never_copied(
         assert (entry.source, entry.source_name) == ("file", "standup.wav")
         assert entry.text == "from the file"
         assert stt.transcribe.call_args.args[0].suffix == ".flac"
-        copy.assert_not_called()
     finally:
         with history._lock:
             history._close_conn_locked()

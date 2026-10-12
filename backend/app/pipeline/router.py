@@ -25,7 +25,6 @@ class DictateResponse(BaseModel):
     """Wire shape for /pipeline/dictate responses."""
     text: str
     duration_ms: int
-    copied_to_clipboard: bool
     model_name: str = ""
     discarded_reason: str | None = None
 
@@ -35,10 +34,9 @@ async def dictate(
     background_tasks: BackgroundTasks,
     ref: SessionRef | None = None,
     language: str = "uk",
-    copy_to_clipboard: bool = True,
     recorder: MicrophoneRecorder = Depends(get_recorder),
 ):
-    """One-shot: stop recording -> transcribe -> clipboard.
+    """One-shot: stop recording -> transcribe -> the text, saved to history.
 
     Call POST /audio/start first, then this when done speaking. An optional
     ``session_id`` names the recording meant; a stranger's is refused with 403.
@@ -58,7 +56,6 @@ async def dictate(
             result = await process_audio(
                 audio_path,
                 language=language,
-                copy_to_clipboard=copy_to_clipboard,
                 audio_duration=captured_duration if captured_duration > 0.0 else None,
                 background_tasks=background_tasks,
                 source="dictation",
