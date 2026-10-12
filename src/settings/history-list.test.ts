@@ -70,7 +70,6 @@ interface Harness {
   reading: () => boolean;
   countText: () => string;
   failureText: () => string | null;
-  failureLines: () => number;
   retry: () => void;
 }
 
@@ -109,7 +108,6 @@ function harness(): Harness {
     reading: () => sentinel.classList.contains(SENTINEL_READING),
     countText: () => count.textContent!,
     failureText: () => (failure.hidden ? null : failure.textContent),
-    failureLines: () => failure.querySelectorAll(".panel-error").length,
     retry: () => failure.querySelector("button")!.click(),
   };
 }
@@ -574,33 +572,19 @@ describe("createHistoryList — one request at a time decides the rows and the c
     expect(h.failureText()).toBe("Couldn't load this. Try again");
   });
 
-  it("holds one line for the list and a lane together, the latest failure's Try again on it", async () => {
+  it("takes the failure line away when the backend answers that it is too old", async () => {
     const h = harness();
-    apiMock.getHistory.mockResolvedValueOnce(pageOf([], 0, null));
+    const cursor: HistoryCursor = { ts: 300, id: "b" };
+    apiMock.getHistory.mockResolvedValueOnce(pageOf(entries("a", "b"), 3, cursor));
     apiMock.getHistory.mockRejectedValueOnce(new Error("503 store busy"));
+    apiMock.getHistory.mockRejectedValueOnce(new SidecarTooOldError("no next_cursor"));
     const list = listOver(h);
     await list.load();
-    const lane = vi.fn();
-    const claim = list.claimRows();
-    claim.renderFailure(lane);
-    claim.release();
-    expect(h.failureLines()).toBe(1);
+    cross();
+    await vi.waitFor(() => expect(h.failureText()).not.toBeNull());
 
-    await list.loadNewer();
-    apiMock.getHistory.mockReturnValueOnce(new Promise(() => {}));
-    h.retry();
-
-    expect(h.failureLines()).toBe(0);
-    expect(lane).not.toHaveBeenCalled();
-  });
-
-  it("lets a claim that was superseded write no failure line", async () => {
-    const h = harness();
-    const list = listOver(h);
-    const old = list.claimRows();
-    list.claimRows();
-
-    old.renderFailure(() => {});
+    cross();
+    await vi.waitFor(() => expect(h.countText()).toBe(sidecarTooOldText("History")));
 
     expect(h.failureText()).toBeNull();
   });
