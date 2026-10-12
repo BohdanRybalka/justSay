@@ -28,6 +28,7 @@ def test_every_listed_phrase_alone_leaves_nothing(phrase):
         "[Music][Applause]",
         "Дякую за перегляд ...",
         "- Thanks for watching! -",
+        "Thanks for watching __",
         "Дякую за перегляд. Дякую за перегляд. Дякую за перегляд.",
         "[Music] Thank you for watching!",
     ],
@@ -43,6 +44,12 @@ def test_a_phrase_leaves_in_any_case_with_any_punctuation_and_when_repeated(text
         ("Привіт, дякую за перегляд, бувай", "Привіт, бувай"),
         ("Так [inaudible] добре", "Так добре"),
         ("Дякую за перегляд, підпишіться на канал", "підпишіться на канал"),
+        ("Привіт(Дякую за перегляд)Бувай", "Привіт Бувай"),
+        ("(Thanks for watching)Привіт", "Привіт"),
+        ("[Music] Так ... ні", "Так ... ні"),
+        ("[Music] Ціна 5 – 10 грн", "Ціна 5 – 10 грн"),
+        ("♪ 2 + 2 = 4", "2 + 2 = 4"),
+        ("Дякую за перегляд. Ціна 50 % і 2", "Ціна 50 % і 2"),
     ],
 )
 def test_the_words_around_a_phrase_stay_with_the_spaces_closed_up(text, expected):
