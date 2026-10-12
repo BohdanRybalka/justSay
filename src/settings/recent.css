@@ -2,6 +2,10 @@
   margin-top: 0;
 }
 
+.recent-failure {
+  padding: 8px 0;
+}
+
 .recent .entry-text {
   -webkit-line-clamp: 1;
 }

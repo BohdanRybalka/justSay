@@ -105,3 +105,20 @@ export function renderSelect(select: HTMLSelectElement): void {
   box.append(select);
   box.insertAdjacentHTML("beforeend", icon("chev", "small"));
 }
+
+/**
+ * Fills `host` with the one muted line a failed read leaves behind: "Couldn't load this."
+ * and a Try again button that calls `onRetry`. It replaces whatever `host` held.
+ */
+export function renderReadFailure(host: HTMLElement, onRetry: () => void): void {
+  const line = host.ownerDocument.createElement("p");
+  line.className = "panel-error";
+  line.append("Couldn't load this. ");
+  const retry = host.ownerDocument.createElement("button");
+  retry.type = "button";
+  retry.className = "btn btn-small";
+  retry.textContent = "Try again";
+  retry.addEventListener("click", onRetry);
+  line.append(retry);
+  host.replaceChildren(line);
+}

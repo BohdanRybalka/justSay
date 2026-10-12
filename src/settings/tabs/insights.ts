@@ -2,13 +2,15 @@
  * The Insights panel: a greeting with today's dictation, the clay card of the time
  * talking saved this month, the words-per-day chart, facts about your voice and your
  * favourite words, then the card shared or saved as an image. The backend computes every
- * figure; this panel formats them, and reads them again each time the window comes back
- * on screen. The chart's 7d / 30d switch and the words' All / Fillers switch each read
- * again and redraw their own card alone.
+ * figure; this panel formats them and reads them again when the window returns. The chart's
+ * 7d / 30d switch and the words' All / Fillers switch each read again and redraw their own
+ * card alone. Until the first read lands it shows the card shapes empty; with nothing
+ * said yet, one card on how to start.
  */
 import { api, type ChartSpan, type Insights, type TopWordsResponse, type WordFilter } from "../../api";
 import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
 import { formatCoarseDuration, formatHoursClock, wholeMinutes } from "../../format";
+import { renderReadFailure } from "../../ui/controls";
 import { icon } from "../../ui/icons";
 import { escapeHtml } from "../html";
 import type { TabLifecycle } from "../settings";
@@ -23,6 +25,8 @@ export interface InsightsViewer {
 }
 
 const COMPARE_FROM_SECONDS = 600;
+
+const SKELETON = `<div class="insights-skeleton" aria-hidden="true"><i class="insights-skeleton-saved"></i><i class="insights-skeleton-chart"></i></div>`;
 
 const SAVED_PHRASES: readonly [belowMinutes: number, phrase: string][] = [
   [10, "A few minutes back."],
@@ -63,7 +67,7 @@ export function renderInsights(
   section.innerHTML = `
     <h2 class="panel-title"></h2>
     <p class="panel-subtitle" id="insights-today"></p>
-    <div id="insights-body"></div>
+    <div id="insights-body">${SKELETON}</div>
   `;
   container.append(section);
   const title = section.querySelector<HTMLElement>(".panel-title")!;
@@ -94,13 +98,19 @@ export function renderInsights(
       const card = figures.month.recordings > 0 ? savedCardView(figures) : null;
       body.innerHTML = card === null ? "" : savedCard(card);
       chart = null;
-      if (chartShown || hasSpoken(figures)) mountChart(figures, requested);
-      body.insertAdjacentHTML("beforeend", voiceFacts(figures));
+      const drawChart = chartShown || hasSpoken(figures);
+      if (drawChart) mountChart(figures, requested);
+      const voice = voiceFacts(figures);
+      body.insertAdjacentHTML("beforeend", voice);
       const wordsHost = document.createElement("div");
       body.append(wordsHost);
       favouriteWords = mountFavouriteWords(wordsHost, favourites.top, wordFilter, (next) => void switchWords(next));
       if (favourites.filter !== wordFilter) void switchWords(wordFilter);
       if (card !== null) mountShare(card);
+      if (card === null && !drawChart && voice === "" && favouriteWords === null) {
+        today.textContent = "";
+        body.innerHTML = firstWordsCard(shortcut);
+      }
     } catch (e) {
       if (token !== latestRead) return;
       showFailure(e);
@@ -186,8 +196,10 @@ export function renderInsights(
   function showFailure(e: unknown): void {
     console.error("Reading insights failed:", e);
     chart = null;
-    body.innerHTML = `<p class="panel-error">Insights could not be read. <button type="button" class="btn btn-small">Try again</button></p>`;
-    body.querySelector("button")!.addEventListener("click", () => void read());
+    renderReadFailure(body, () => {
+      body.innerHTML = SKELETON;
+      void read();
+    });
   }
 
   const disown = () => {
@@ -202,6 +214,18 @@ export function renderInsights(
 
 function hasSpoken({ month, days, previous_period_words }: Insights): boolean {
   return month.recordings > 0 || previous_period_words > 0 || days.some((day) => day.words > 0);
+}
+
+function firstWordsCard(shortcut: string): string {
+  return `
+    <section class="card first-words" aria-label="Your first words">
+      <span class="brand-mark">${icon("mic", "large")}</span>
+      <div>
+        <b>Hold <span class="num">${escapeHtml(shortcut)}</span> anywhere and talk.</b>
+        <span>Your first words will show up here.</span>
+      </div>
+    </section>
+  `;
 }
 
 function todayLine(today: Insights["today"], shortcut: string): string {

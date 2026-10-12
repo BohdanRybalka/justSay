@@ -7,6 +7,7 @@ A real `httpx.Client` runs over a `MockTransport` that answers the way Hugging F
 import errno
 import threading
 import time
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -262,6 +263,19 @@ def _finish():
     model_download.advance("done")
 
 
+class _InlineThread:
+    def __init__(self, target, args, **kwargs):
+        self._target = target
+        self._args = args
+
+    def start(self):
+        self._target(*self._args)
+
+
+def _run_installs_inline(monkeypatch):
+    monkeypatch.setattr(model_download, "threading", SimpleNamespace(Thread=_InlineThread))
+
+
 def test_start_answers_downloading_at_once_and_finishes_in_the_background(monkeypatch, tmp_path):
     server = _Server()
     server.release.clear()
@@ -388,6 +402,7 @@ def test_start_goes_straight_to_the_steps_after_the_download_when_the_model_is_t
     monkeypatch, tmp_path
 ):
     server = _serve(monkeypatch, _Server())
+    _run_installs_inline(monkeypatch)
     model_path, _ = _paths(tmp_path)
     model_path.parent.mkdir(parents=True)
     model_path.write_bytes(b"already here")
@@ -398,9 +413,21 @@ def test_start_goes_straight_to_the_steps_after_the_download_when_the_model_is_t
     assert state.stage == "checking"
     assert state.error is None
     assert state.failed_step is None
-    _wait_for(lambda: model_download.snapshot().stage == "done")
+    assert model_download.snapshot().stage == "done"
     assert server.range_headers == []
-    _wait_for(lambda: not model_download._download_lock.locked())
+    assert not model_download._download_lock.locked()
+
+
+def test_start_answers_with_the_state_it_began_in_when_the_install_is_already_over(
+    monkeypatch, tmp_path
+):
+    _serve(monkeypatch, _Server())
+    _run_installs_inline(monkeypatch)
+
+    started = model_download.start("tiny", _paths(tmp_path)[0], after=_finish)
+
+    assert started.stage == "downloading"
+    assert model_download.snapshot().stage == "done"
 
 
 def test_a_failed_background_download_is_readable_from_the_state(monkeypatch, tmp_path):
