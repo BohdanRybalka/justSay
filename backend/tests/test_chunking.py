@@ -581,3 +581,86 @@ async def test_a_piece_reaches_the_engine_without_its_silent_stretches(
 
     expected = 4.0 + 2 * pauses.SPEECH_PAD_SECONDS
     assert provider.sent[0]["seconds"] == pytest.approx(expected, abs=0.05)
+
+
+def _speech_of(seconds_per_piece: list[float], monkeypatch):
+    """Every piece in turn keeps this many seconds of speech, from its start."""
+    remaining = list(seconds_per_piece)
+    monkeypatch.setattr(
+        chunking, "speech_spans", lambda samples, settings: [(0.0, remaining.pop(0))]
+    )
+
+
+async def test_a_phrase_made_up_over_a_piece_with_little_speech_is_dropped(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 20.0)
+    _speech_of([1.0], monkeypatch)
+    provider = _Provider([TranscriptionResult("Дякую за перегляд!", detected_language="uk")])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob, result.detected_language) == ("", 1.0, None)
+
+
+async def test_the_same_phrase_in_a_piece_with_real_speech_is_kept(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 20.0)
+    _speech_of([chunking.LITTLE_SPEECH_SECONDS], monkeypatch)
+    provider = _Provider([TranscriptionResult("Дякую за перегляд!")])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob) == ("Дякую за перегляд!", None)
+
+
+async def test_words_beside_a_made_up_phrase_in_a_piece_with_little_speech_are_kept(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 20.0)
+    _speech_of([2.0], monkeypatch)
+    provider = _Provider([TranscriptionResult("Так. Thanks for watching.")])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob) == ("Так.", None)
+
+
+async def test_a_piece_of_made_up_text_is_silent_and_its_language_is_not_counted(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 50.0)
+    _speech_of([0.5, 20.0], monkeypatch)
+    provider = _Provider([
+        TranscriptionResult("[BLANK_AUDIO]", detected_language="en"),
+        TranscriptionResult("добрий день", detected_language="uk"),
+    ])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.detected_language, result.no_speech_prob) == (
+        "добрий день", "uk", None,
+    )
+
+
+@pytest.mark.parametrize(("speech_seconds", "text"), [(1.0, ""), (4.0, "Thanks for watching.")])
+async def test_the_speech_a_piece_keeps_decides_whether_a_made_up_phrase_stays(
+    tmp_path, short_pieces, monkeypatch, speech_seconds, text
+):
+    path = _audio(tmp_path, 20.0)
+
+    def speech_from_8_seconds(samples, settings):
+        hops = samples.size // vad._HOP_SAMPLES
+        seconds = np.arange(hops) * vad.HOP_SECONDS
+        return np.where((seconds >= 8.0) & (seconds < 8.0 + speech_seconds), 0.9, 0.1).astype(
+            np.float32
+        )
+
+    monkeypatch.setattr(vad, "speech_probabilities", speech_from_8_seconds)
+    monkeypatch.setattr(chunking, "speech_spans", pauses.speech_spans)
+    provider = _Provider([TranscriptionResult("Thanks for watching.")])
+
+    result = await _run(provider, path)
+
+    assert result.text == text
