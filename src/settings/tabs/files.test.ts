@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UserSettings } from "../../api";
 import { DICTATION_LANGUAGES } from "../../languages";
 import { buildEntry, FakeResizeObserver, pageOf } from "../history-page-stub.test-helper";
-import { buildDownload, buildLocalStatus } from "../local-status-stub.test-helper";
+import { buildDownload, buildLocalStatus, installStepStates } from "../local-status-stub.test-helper";
 import type { Recent } from "../recent";
 
 const apiMock = {
@@ -291,6 +291,77 @@ describe("renderFiles — the Local model row installs from here", () => {
     expect(area.querySelector(".install-label")!.textContent).toBe("Downloading the model");
     expect(area.querySelector(".install-percent")!.textContent).toBe("25%");
     expect(area.querySelector<HTMLElement>(".install-bar>i")!.style.width).toBe("25%");
+  });
+
+  it("walks the four steps, then chooses Local for the files on its own", async () => {
+    vi.useFakeTimers();
+    try {
+      apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus({ model_downloaded: false }));
+      apiMock.sttLocalModelStart.mockResolvedValue(buildDownload({ stage: "downloading" }));
+      const container = render(undefined, undefined, { files_engine: "cloud" });
+      await vi.advanceTimersByTimeAsync(0);
+      container.querySelector<HTMLButtonElement>("#files-local")!.click();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(installStepStates(progressArea(container))).toEqual(["running", "pending", "pending", "pending"]);
+
+      apiMock.sttLocalModel.mockResolvedValue(buildDownload({ stage: "starting", bytes_done: 1, bytes_total: 1 }));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(installStepStates(progressArea(container))).toEqual(["done", "done", "running", "pending"]);
+
+      apiMock.sttLocalModel.mockResolvedValue(buildDownload({ stage: "done" }));
+      apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus({ model_loaded: true }));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(localHint(container)).toBe("Installed · runs on this computer");
+      expect(installStepStates(progressArea(container))).toEqual(["done", "done", "done", "done"]);
+      expect(saveSettingsMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(900);
+      expect(saveSettingsMock).toHaveBeenCalledExactlyOnceWith({ files_engine: "local" });
+      expect(progressArea(container).hidden).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps Cloud for the files when it was picked while Local installed", async () => {
+    vi.useFakeTimers();
+    try {
+      apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus({ model_downloaded: false }));
+      apiMock.sttLocalModelStart.mockResolvedValue(buildDownload({ stage: "downloading" }));
+      const container = render(undefined, undefined, { files_engine: "local" });
+      await vi.advanceTimersByTimeAsync(0);
+      container.querySelector<HTMLButtonElement>("#files-local")!.click();
+      await vi.advanceTimersByTimeAsync(0);
+      container.querySelector<HTMLButtonElement>("#files-cloud")!.click();
+      await vi.advanceTimersByTimeAsync(0);
+
+      apiMock.sttLocalModel.mockResolvedValue(buildDownload({ stage: "done" }));
+      apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus({ model_loaded: true }));
+      await vi.advanceTimersByTimeAsync(1000 + 900);
+
+      expect(saveSettingsMock).toHaveBeenCalledExactlyOnceWith({ files_engine: "cloud" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("marks the step that failed and offers Try again", async () => {
+    apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus());
+    apiMock.sttLocalModel.mockResolvedValue(
+      buildDownload({
+        stage: "failed",
+        error: "The engine could not start.",
+        failed_step: "starting",
+        bytes_done: 1,
+        bytes_total: 1,
+      }),
+    );
+    const container = render();
+
+    await vi.waitFor(() => expect(localHint(container)).toBe("The engine could not start."));
+
+    expect(installStepStates(progressArea(container))).toEqual(["done", "done", "failed", "pending"]);
+    expect(container.querySelector("#files-local .btn")!.textContent).toBe("Try again");
   });
 
   it("does not choose Local while the model downloads", async () => {

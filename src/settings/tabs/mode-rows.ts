@@ -1,5 +1,5 @@
 /** The big radio rows that pick Cloud or Local model, what each says about itself, and the Local row's install state. */
-import type { CloudKeyStatus, LocalSTTStatus, ModelDownload } from "../../api";
+import type { CloudKeyStatus, InstallStep, LocalSTTStatus, ModelDownload } from "../../api";
 import { displayableError } from "../../notify";
 import { computeIndicatorState } from "../../status-indicator";
 import { icon } from "../../ui/icons";
@@ -12,10 +12,15 @@ export function cloudKeyMissing(cloud: CloudKeyStatus | null): boolean {
   return cloud !== null && !cloud.groq_key_set;
 }
 
+export type StepState = "pending" | "running" | "done" | "failed";
+
 export interface RowProgress {
   /** Whole percent, or `null` while the size is not known yet. */
   percent: number | null;
+  /** The step in hand. */
   label: string;
+  /** One state per entry of `STEP_LABELS`. */
+  steps: StepState[];
 }
 
 export interface RowView {
@@ -34,12 +39,27 @@ export type LocalRow =
   | { state: "checking" }
   | { state: "unavailable" }
   | { state: "not-installed"; bytes: number | null; tracked: boolean }
-  | { state: "downloading"; percent: number | null }
+  | { state: "installing"; step: InstallStep; percent: number | null }
   | { state: "starting" }
   | { state: "installed" }
-  | { state: "failed"; reason: string; cause: "download" | "engine" };
+  | { state: "ready" }
+  | { state: "failed"; reason: string; cause: "engine" }
+  | { state: "failed"; reason: string; cause: "install"; step: InstallStep; percent: number | null };
 
 const READ_FAILED = "Couldn't load this";
+
+export const STEP_LABELS = [
+  "Downloading the model",
+  "Checking your computer",
+  "Starting the engine",
+  "Ready to use",
+] as const;
+const INSTALL_STEPS: readonly InstallStep[] = ["downloading", "checking", "starting"];
+const ALL_STEPS_DONE = STEP_LABELS.length;
+
+export function isInstalling(stage: ModelDownload["stage"]): stage is InstallStep {
+  return (INSTALL_STEPS as readonly string[]).includes(stage);
+}
 
 /** Binary units, as the file manager shows the model file. */
 export function formatModelSize(bytes: number): string {
@@ -47,22 +67,39 @@ export function formatModelSize(bytes: number): string {
   return gib >= 1 ? `${gib.toFixed(1)} GB` : `${Math.round(bytes / 2 ** 20)} MB`;
 }
 
-function downloadPercent(download: ModelDownload): number | null {
+function stepPercent(download: ModelDownload, step: InstallStep): number | null {
+  if (step !== "downloading") return 100;
   if (!download.bytes_total) return null;
   return Math.min(100, Math.floor((download.bytes_done / download.bytes_total) * 100));
 }
 
+/** A failed download is over once the model is on the disk; a failure after it, once the engine runs. */
+function failureStillApplies(read: LocalSTTStatus, step: InstallStep): boolean {
+  return step === "downloading" ? !read.model_downloaded : !read.model_loaded;
+}
+
 /** The Local row for `read`. An engine failure counts only while Local is the
- *  mode (ADR 009); an engine this computer cannot run outranks it, and a download
- *  under way or failed outranks everything about an engine that is not there yet. */
-export function localRow(read: LocalRead, selected: boolean, download: ModelDownload | null): LocalRow {
+ *  mode (ADR 009); an engine this computer cannot run outranks it, and an install
+ *  under way or failed outranks everything about an engine that is not there yet.
+ *  `finishing` keeps the finished steps on show for the moment before the switch. */
+export function localRow(
+  read: LocalRead,
+  selected: boolean,
+  download: ModelDownload | null,
+  finishing = false,
+): LocalRow {
   if (read === "failed") return { state: "failed", reason: READ_FAILED, cause: "engine" };
   if (read === null) return { state: "checking" };
   if (!read.available) return { state: "unavailable" };
-  const pending = read.model_download_reported && !read.model_downloaded ? download : null;
-  if (pending?.stage === "downloading") return { state: "downloading", percent: downloadPercent(pending) };
-  if (pending?.stage === "failed" && pending.error) {
-    return { state: "failed", reason: pending.error, cause: "download" };
+  const reported = read.model_download_reported ? download : null;
+  if (reported && isInstalling(reported.stage)) {
+    return { state: "installing", step: reported.stage, percent: stepPercent(reported, reported.stage) };
+  }
+  if (reported?.stage === "failed" && reported.error) {
+    const step = reported.failed_step ?? "downloading";
+    if (failureStillApplies(read, step)) {
+      return { state: "failed", reason: reported.error, cause: "install", step, percent: stepPercent(reported, step) };
+    }
   }
   const error = displayableError(read.last_error);
   const indicator = computeIndicatorState({ active: selected, ready: read.model_loaded, error });
@@ -74,8 +111,28 @@ export function localRow(read: LocalRead, selected: boolean, download: ModelDown
     return { state: "not-installed", bytes: read.model_bytes, tracked: read.model_download_reported };
   }
   if (indicator === "loading") return { state: "starting" };
-  return { state: "installed" };
+  return { state: finishing ? "ready" : "installed" };
 }
+
+function progressAt(reached: number, failed: boolean, percent: number | null): RowProgress {
+  return {
+    percent,
+    label: STEP_LABELS[Math.min(reached, STEP_LABELS.length - 1)],
+    steps: STEP_LABELS.map((_, i): StepState => {
+      if (i < reached) return "done";
+      if (i > reached) return "pending";
+      return failed ? "failed" : "running";
+    }),
+  };
+}
+
+const INSTALLED_VIEW: RowView = {
+  hint: "Installed · runs on this computer",
+  alert: false,
+  locked: false,
+  disabled: false,
+  action: '<span class="chip">Ready</span>',
+};
 
 export function localView(row: LocalRow): RowView {
   switch (row.state) {
@@ -91,25 +148,21 @@ export function localView(row: LocalRow): RowView {
         disabled: false,
         action: '<span class="btn btn-blue btn-small">Install</span>',
       };
-    case "downloading":
+    case "installing":
       return {
         hint: "Installing…",
         alert: false,
         locked: true,
         disabled: true,
         action: "",
-        progress: { percent: row.percent, label: "Downloading the model" },
+        progress: progressAt(INSTALL_STEPS.indexOf(row.step), false, row.percent),
       };
     case "starting":
       return { hint: "Starting…", alert: false, locked: false, disabled: false, action: "" };
     case "installed":
-      return {
-        hint: "Installed · runs on this computer",
-        alert: false,
-        locked: false,
-        disabled: false,
-        action: '<span class="chip">Ready</span>',
-      };
+      return INSTALLED_VIEW;
+    case "ready":
+      return { ...INSTALLED_VIEW, progress: progressAt(ALL_STEPS_DONE, false, 100) };
     case "failed":
       return {
         hint: row.reason,
@@ -117,6 +170,7 @@ export function localView(row: LocalRow): RowView {
         locked: false,
         disabled: false,
         action: '<span class="btn btn-small">Try again</span>',
+        progress: row.cause === "install" ? progressAt(INSTALL_STEPS.indexOf(row.step), true, row.percent) : null,
       };
   }
 }
@@ -131,6 +185,16 @@ function drawProgress(area: HTMLElement, progress: RowProgress | null): void {
   area.querySelector<HTMLElement>(".install-label")!.textContent = progress.label;
   area.querySelector<HTMLElement>(".install-percent")!.textContent =
     progress.percent === null ? "" : `${progress.percent}%`;
+  const items = area.querySelectorAll<HTMLElement>(".install-step");
+  progress.steps.forEach((state, i) => {
+    const item = items[i];
+    item.classList.toggle("install-step--running", state === "running");
+    item.classList.toggle("install-step--done", state === "done");
+    item.classList.toggle("install-step--failed", state === "failed");
+    if (state === "running") item.setAttribute("aria-current", "step");
+    else item.removeAttribute("aria-current");
+    item.querySelector("use")!.setAttribute("href", state === "failed" ? "#x" : "#check");
+  });
 }
 
 export function drawRow(row: HTMLButtonElement, checked: boolean, view: RowView): void {
@@ -157,11 +221,15 @@ export function modeRowHtml(id: string, iconName: "cloud" | "chip", title: strin
     </button>`;
 }
 
-/** The Local model row with the progress area that opens under it while the model downloads. */
+/** The Local model row with the progress area that opens under it while the model installs. */
 export function localModeRowHtml(id: string): string {
+  const steps = STEP_LABELS.map(
+    (label) => `<li class="install-step"><span class="install-step-dot">${icon("check")}</span>${label}</li>`,
+  ).join("");
   return `${modeRowHtml(id, "chip", "Local model")}
     <div class="mode-row-install" hidden>
-      <div class="install-bar" role="progressbar" aria-label="Downloading the model" aria-valuemin="0" aria-valuemax="100"><i></i></div>
+      <div class="install-bar" role="progressbar" aria-label="Installing the model" aria-valuemin="0" aria-valuemax="100"><i></i></div>
       <div class="install-meta"><span class="install-label"></span><span class="install-percent"></span></div>
+      <ol class="install-steps">${steps}</ol>
     </div>`;
 }

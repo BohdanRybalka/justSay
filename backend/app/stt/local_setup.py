@@ -7,7 +7,7 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 from pydantic import BaseModel
 
@@ -16,7 +16,7 @@ from app.core.errors import ResourceUnavailableError
 from app.core.frozen_build import is_frozen_build
 from app.core.types import ProviderMode
 from app.core.utils import sse_event
-from app.stt import local_whisper_cpp_cmd, routing
+from app.stt import local_whisper_cpp_cmd, model_download, routing
 from app.stt.base import latched_load_error, load_error_sentence
 from app.stt.config import STTSettings
 from app.stt.local_factory import (
@@ -203,6 +203,30 @@ def maybe_prewarm_local(stt_settings: STTSettings) -> None:
     tasks.spawn_background_task(ensure_local_ready(stt_settings), name="local-stt-prewarm")
 
 
+def finish_local_install(stt_settings: STTSettings) -> None:
+    """The last two steps of Install: check the machine, then start the engine.
+
+    Runs once the model is on disk and starts the engine whatever the mode is, clearing an
+    older load failure while that engine is the one in use. Each step reports its stage through
+    ``model_download``; a failure is recorded against its step and ends the run, never raised.
+    """
+    step: Literal["checking", "starting"] = "checking"
+    try:
+        model_download.advance("checking")
+        if local_whisper_cpp_cmd.resolve_binary_path() is None:
+            raise ResourceUnavailableError(local_whisper_cpp_cmd.binary_not_found_message())
+        step = "starting"
+        model_download.advance("starting")
+        provider = routing.get_provider(ProviderMode.LOCAL, stt_settings)
+        provider._get_model()
+    except Exception as e:
+        model_download.fail(step, latched_load_error(e))
+        return
+    _record_load_outcome(provider, None, None)
+    _release_if_superseded(provider)
+    model_download.advance("done")
+
+
 MAX_CONSECUTIVE_INCOMPLETE_PREWARMS = 2
 _CRASH_GUARD_FILENAME = "prewarm_crash_guard.json"
 
@@ -298,11 +322,7 @@ async def _run_get_model(provider) -> None:
         _record_load_outcome(provider, None, _load_delta_mb(baseline_rss, census))
     finally:
         _finish_load()
-        if not _load_speaks_for_the_cache(provider):
-            try:
-                provider.cleanup()
-            except Exception:
-                log.warning("Releasing the superseded local provider failed", exc_info=True)
+        _release_if_superseded(provider)
 
 
 async def ensure_local_ready(stt_settings: STTSettings) -> None:
@@ -484,6 +504,16 @@ def _record_load_outcome(provider, error: str | None, megabytes: int | None) -> 
         return
     _prewarm_error = error
     _model_ram_mb = megabytes
+
+
+def _release_if_superseded(provider) -> None:
+    """Release ``provider`` once the cache has moved past it; a failing release is only logged."""
+    if _load_speaks_for_the_cache(provider):
+        return
+    try:
+        provider.cleanup()
+    except Exception:
+        log.warning("Releasing the superseded local provider failed", exc_info=True)
 
 
 def _clear_model_ram_mb(provider) -> None:

@@ -1,12 +1,15 @@
-"""The local speech model's download: one shared state, resumable, one transfer at a time.
+"""The local speech model's install: one shared state, a resumable download, one transfer at a time.
 
 The first load of the engine and the Install button both come through here, so a download
-started by either shows the same progress in `snapshot()`.
+started by either shows the same progress in `snapshot()`. Install goes on past the download
+into two more steps, checking the computer and starting the engine, which report their stage
+here too.
 """
 
 import errno
 import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -28,14 +31,23 @@ _DISK_FAILED = "The model could not be saved to the disk."
 _UNEXPECTED = "The download failed. See the JustSay log for the reason."
 
 
-class ModelDownloadState(BaseModel):
-    """``bytes_total`` is ``None`` until the server has announced the size."""
+Step = Literal["downloading", "checking", "starting"]
 
-    stage: Literal["idle", "downloading", "done", "failed"] = "idle"
+
+class ModelDownloadState(BaseModel):
+    """``bytes_total`` is ``None`` until the server has announced the size.
+
+    ``failed_step`` names the step a ``failed`` install stopped in.
+    """
+
+    stage: Literal["idle", "downloading", "checking", "starting", "done", "failed"] = "idle"
     bytes_done: int = 0
     bytes_total: int | None = None
     error: str | None = None
+    failed_step: Step | None = None
 
+
+_ENGINE_STEPS = ("checking", "starting")
 
 _download_lock = threading.Lock()
 _state_lock = threading.Lock()
@@ -54,7 +66,18 @@ def _update(**fields) -> None:
 
 
 def _begin() -> None:
-    _update(stage="downloading", bytes_done=0, bytes_total=None, error=None)
+    _update(stage="downloading", bytes_done=0, bytes_total=None, error=None, failed_step=None)
+
+
+def advance(stage: Literal["checking", "starting", "done"]) -> None:
+    """Move the shared state to ``stage``, clearing an earlier failure."""
+    _update(stage=stage, error=None, failed_step=None)
+
+
+def fail(step: Step, sentence: str) -> None:
+    """Record that the install stopped in ``step``, with a plain ``sentence`` for the user."""
+    log.warning("Local model install failed in the %s step: %s", step, sentence, exc_info=True)
+    _update(stage="failed", error=sentence, failed_step=step)
 
 
 def download(model_size: str, model_path: Path) -> None:
@@ -67,21 +90,28 @@ def download(model_size: str, model_path: Path) -> None:
         if model_path.is_file():
             return
         _begin()
-        _transfer(model_size, model_path)
+        _transfer(model_size, model_path, finished="done")
 
 
-def start(model_size: str, model_path: Path) -> ModelDownloadState:
-    """Begin the download on a background thread, unless one runs or the model is there."""
+def start(model_size: str, model_path: Path, after: Callable[[], None]) -> ModelDownloadState:
+    """Install on a background thread: download the model if it is missing, then run ``after``.
+
+    ``after`` owns the stages from ``checking`` on: it ends them in ``done`` or ``fail`` and
+    never raises. A no-op while an install is past its download or still in it.
+    """
     if not _download_lock.acquire(blocking=False):
         return snapshot()
-    if model_path.is_file():
+    if snapshot().stage in _ENGINE_STEPS:
         _download_lock.release()
         return snapshot()
-    _begin()
+    if model_path.is_file():
+        advance("checking")
+    else:
+        _begin()
     worker = threading.Thread(
-        target=_transfer_then_release,
-        args=(model_size, model_path),
-        name="model-download",
+        target=_install,
+        args=(model_size, model_path, after),
+        name="model-install",
         daemon=True,
     )
     try:
@@ -93,16 +123,18 @@ def start(model_size: str, model_path: Path) -> ModelDownloadState:
     return snapshot()
 
 
-def _transfer_then_release(model_size: str, model_path: Path) -> None:
+def _install(model_size: str, model_path: Path, after: Callable[[], None]) -> None:
     try:
-        _transfer(model_size, model_path)
+        if not model_path.is_file():
+            _transfer(model_size, model_path, finished="checking")
     except ResourceUnavailableError:
-        pass
+        return
     finally:
         _download_lock.release()
+    after()
 
 
-def _transfer(model_size: str, model_path: Path) -> None:
+def _transfer(model_size: str, model_path: Path, finished: Literal["checking", "done"]) -> None:
     url = HF_MODEL_URL_TEMPLATE.format(size=model_size)
     part_path = model_path.with_name(model_path.name + ".part")
     log.info("Downloading GGML model: %s -> %s", url, model_path)
@@ -112,19 +144,14 @@ def _transfer(model_size: str, model_path: Path) -> None:
             _stream_into(client, url, part_path)
         part_path.replace(model_path)
     except ResourceUnavailableError as exc:
-        _record_failure(str(exc))
+        fail("downloading", str(exc))
         raise
     except Exception as exc:
         sentence = _failure_sentence(exc)
-        _record_failure(sentence)
+        fail("downloading", sentence)
         raise ResourceUnavailableError(sentence) from exc
-    _update(stage="done", error=None)
+    advance(finished)
     log.info("GGML model download complete: %s", model_path)
-
-
-def _record_failure(sentence: str) -> None:
-    log.warning("GGML model download failed: %s", sentence, exc_info=True)
-    _update(stage="failed", error=sentence)
 
 
 def _stream_into(client: httpx.Client, url: str, part_path: Path) -> None:

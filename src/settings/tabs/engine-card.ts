@@ -59,7 +59,10 @@ export function mountEngineCard(
   const keyMissing = cloudKeyMissing(getCloudKeyStatus());
 
   let drawn: Engine = engine;
-  const model = watchLocalModel({ onChange: () => show(drawn) });
+  const model = watchLocalModel({
+    onChange: () => show(drawn),
+    onInstalled: () => void choose("local"),
+  });
 
   function show(shown: Engine) {
     drawn = shown;
@@ -77,6 +80,7 @@ export function mountEngineCard(
 
   async function choose(next: Engine) {
     if (saving || next === engine) return;
+    if (next === "cloud") model.declineSwitch();
     saving = true;
     show(next);
     const saved = await saveChoice({ [field]: next });

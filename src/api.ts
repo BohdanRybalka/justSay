@@ -604,12 +604,17 @@ export interface CloudKeyStatus {
   groq_key_set: boolean;
 }
 
-/** `bytes_total` is null until the server has announced the size; `error` is a plain sentence. */
+/** The steps of installing the local model, in order; the last two follow the download. */
+export type InstallStep = "downloading" | "checking" | "starting";
+
+/** `bytes_total` is null until the server has announced the size; `error` is a plain sentence
+ *  and `failed_step` the step a `failed` install stopped in. */
 export interface ModelDownload {
-  stage: "idle" | "downloading" | "done" | "failed";
+  stage: "idle" | InstallStep | "done" | "failed";
   bytes_done: number;
   bytes_total: number | null;
   error: string | null;
+  failed_step: InstallStep | null;
 }
 
 export interface LocalSTTStatus {
@@ -1108,8 +1113,8 @@ export const api = {
   sttLocalPrewarm: () =>
     request<{ started: boolean }>("POST", "/stt/local/prewarm", undefined, REREADABLE),
 
-  /** Starts the model download on the backend and answers at once. A press while one runs
-   *  changes nothing and a failed one resumes, so asking again is safe. */
+  /** Starts the install (download, check, engine start) on the backend and answers at once. A
+   *  press while one runs changes nothing and a failed one resumes, so asking again is safe. */
   sttLocalModelStart: () =>
     request<ModelDownload>("POST", "/stt/local/model", undefined, REREADABLE),
 
