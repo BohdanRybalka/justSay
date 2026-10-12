@@ -531,8 +531,8 @@ export interface DictateResponse {
   text: string;
   duration_ms: number;
   model_name?: string;
-  /** Set (currently only to "silence") when the backend's silence guard
-   *  short-circuited before any provider ran — no STT call, no History row.
+  /** Set (currently only to "silence") when the backend discarded the audio as
+   *  silence, before or after the provider ran — no History row either way.
    *  Not an error: dictationResultView renders it as "No speech". */
   discarded_reason?: string | null;
 }
@@ -1042,8 +1042,7 @@ export const api = {
    *  it unknown and the transcript possibly already in History. Transcription is
    *  legitimately slow — the local path alone waits up to 300 s for readiness
    *  before it starts — so any budget short enough to be useful fires on work
-   *  that was going to finish. The backend never copies: the text comes back here
-   *  and `copyToClipboard` puts it on the clipboard. */
+   *  that was going to finish. The backend never touches the clipboard. */
   dictate: (sessionId: string, language = "uk") =>
     request<DictateResponse>(
       "POST",
