@@ -209,7 +209,6 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
         if (!isCurrent()) return;
         rows.replaceWith(painted);
         rowsAreOwnPage = false;
-        clearFailure();
       },
       release() {
         if (!isCurrent()) return;
@@ -250,6 +249,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
    */
   async function loadPage(append: boolean): Promise<void> {
     if (append && cursor === null) return;
+    if (!append) clearFailure();
     const claim = issueClaim();
     elements.sentinel.classList.add(SENTINEL_READING);
     const askedFilter = filter();
@@ -324,7 +324,10 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
       return loadPage(false);
     },
     loadNewer,
-    claimRows: issueClaim,
+    claimRows() {
+      clearFailure();
+      return issueClaim();
+    },
     entryRemoved() {
       if (!rowsAreOwnPage || latestClaim === null) return;
       total--;

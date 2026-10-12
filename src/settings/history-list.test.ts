@@ -510,14 +510,47 @@ describe("createHistoryList — one request at a time decides the rows and the c
     expect(h.failureText()).toBeNull();
   });
 
-  it("drops the line when another lane paints its own rows", async () => {
+  it("drops the line when the older page lands on its own, as the bottom is reached again", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "b" };
+    apiMock.getHistory.mockResolvedValueOnce(pageOf(entries("a", "b"), 3, cursor));
+    apiMock.getHistory.mockRejectedValueOnce(new Error("503 store busy"));
+    apiMock.getHistory.mockResolvedValueOnce(pageOf(entries("c"), 3, null));
+    const list = listOver(h);
+    await list.load();
+    cross();
+    await vi.waitFor(() => expect(h.failureText()).not.toBeNull());
+
+    cross();
+    await vi.waitFor(() => expect(h.paintedIds()).toEqual(["a", "b", "c"]));
+
+    expect(h.failureText()).toBeNull();
+  });
+
+  it("drops the line the moment another lane takes the rows, so Try again cannot cut it off", async () => {
     const h = harness();
     apiMock.getHistory.mockRejectedValueOnce(new Error("503 store busy"));
     const list = listOver(h);
     await list.load();
     expect(h.failureText()).not.toBeNull();
 
-    list.claimRows().replaceRows([document.createElement("div")]);
+    list.claimRows();
+
+    expect(h.failureText()).toBeNull();
+  });
+
+  it("drops an older page's line when the rows are read again, so Try again cannot page across a new filter", async () => {
+    const h = harness();
+    const cursor: HistoryCursor = { ts: 300, id: "b" };
+    apiMock.getHistory.mockResolvedValueOnce(pageOf(entries("a", "b"), 3, cursor));
+    apiMock.getHistory.mockRejectedValueOnce(new Error("503 store busy"));
+    apiMock.getHistory.mockReturnValueOnce(new Promise(() => {}));
+    const list = listOver(h);
+    await list.load();
+    cross();
+    await vi.waitFor(() => expect(h.failureText()).not.toBeNull());
+
+    void list.load();
 
     expect(h.failureText()).toBeNull();
   });

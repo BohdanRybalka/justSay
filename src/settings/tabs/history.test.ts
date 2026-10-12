@@ -1216,6 +1216,22 @@ describe("renderHistory — a read that fails", () => {
   });
 });
 
+describe("renderHistory — a failure line and a search", () => {
+  it("takes the line away when a search starts, so Try again cannot undo the search", async () => {
+    apiMock.getHistory.mockRejectedValueOnce(new Error("HTTP 503"));
+    apiMock.searchHistory.mockReturnValue(new Promise(() => {}));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { container } = mount();
+    const failure = container.querySelector<HTMLElement>("#history-failure")!;
+    await vi.waitFor(() => expect(failure.hidden).toBe(false));
+
+    await typeQuery(container, "hello");
+
+    expect(failure.hidden).toBe(true);
+    expect(container.querySelector("#history-search-hint")!.textContent).toBe("Searching...");
+  });
+});
+
 describe("renderHistory — a delete", () => {
   it("decrements the total after an ordinary load", async () => {
     apiMock.deleteHistoryEntry.mockResolvedValue({ deleted: true });

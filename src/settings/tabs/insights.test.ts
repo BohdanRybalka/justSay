@@ -413,6 +413,20 @@ describe("the Insights panel", () => {
     expect(container.querySelector(".saved-card, .chart, .favourite-words, .insights-skeleton")).toBeNull();
   });
 
+  it("keeps the voice facts instead of the first-words card when only they have something to say", async () => {
+    await mount({ ...buildEmptyInsights(), vocabulary: 2140 }, false, []);
+
+    expect(container.querySelector(".first-words")).toBeNull();
+    expect(container.querySelectorAll(".fact-card")).toHaveLength(1);
+  });
+
+  it("keeps the favourite words instead of the first-words card when only they have something to say", async () => {
+    await mount(buildEmptyInsights());
+
+    expect(container.querySelector(".first-words")).toBeNull();
+    expect(container.querySelector(".favourite-words")).not.toBeNull();
+  });
+
   it("does not call a first-time panel empty when only older words exist", async () => {
     await mount(
       buildInsights({ month: { recordings: 0 }, days: spokenDays(Array(30).fill(0)), previous_period_words: 0 }),
