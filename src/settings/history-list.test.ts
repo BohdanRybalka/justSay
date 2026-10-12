@@ -70,6 +70,7 @@ interface Harness {
   reading: () => boolean;
   countText: () => string;
   failureText: () => string | null;
+  failureLines: () => number;
   retry: () => void;
 }
 
@@ -108,6 +109,7 @@ function harness(): Harness {
     reading: () => sentinel.classList.contains(SENTINEL_READING),
     countText: () => count.textContent!,
     failureText: () => (failure.hidden ? null : failure.textContent),
+    failureLines: () => failure.querySelectorAll(".panel-error").length,
     retry: () => failure.querySelector("button")!.click(),
   };
 }
@@ -539,18 +541,66 @@ describe("createHistoryList — one request at a time decides the rows and the c
     expect(h.failureText()).toBeNull();
   });
 
-  it("drops an older page's line when the rows are read again, so Try again cannot page across a new filter", async () => {
+  it("drops an older page's line when the rows are read again under a new filter, so Try again cannot page across it", async () => {
     const h = harness();
     const cursor: HistoryCursor = { ts: 300, id: "b" };
     apiMock.getHistory.mockResolvedValueOnce(pageOf(entries("a", "b"), 3, cursor));
     apiMock.getHistory.mockRejectedValueOnce(new Error("503 store busy"));
     apiMock.getHistory.mockReturnValueOnce(new Promise(() => {}));
-    const list = listOver(h);
+    let asked: HistoryFilter = EVERY_ENTRY;
+    const list = listOver(h, 2, () => false, defaultCreateRow, () => asked);
     await list.load();
     cross();
     await vi.waitFor(() => expect(h.failureText()).not.toBeNull());
 
+    asked = { source: "meeting", starred: false };
     void list.load();
+
+    expect(h.failureText()).toBeNull();
+  });
+
+  it("keeps the line on screen while the poll asks again and the backend is still down", async () => {
+    const h = harness();
+    apiMock.getHistory.mockResolvedValueOnce(pageOf([], 0, null));
+    apiMock.getHistory.mockRejectedValueOnce(new Error("503 store busy"));
+    apiMock.getHistory.mockReturnValueOnce(new Promise(() => {}));
+    const list = listOver(h);
+    await list.load();
+    await list.loadNewer();
+    expect(h.failureText()).not.toBeNull();
+
+    void list.loadNewer();
+
+    expect(h.failureText()).toBe("Couldn't load this. Try again");
+  });
+
+  it("holds one line for the list and a lane together, the latest failure's Try again on it", async () => {
+    const h = harness();
+    apiMock.getHistory.mockResolvedValueOnce(pageOf([], 0, null));
+    apiMock.getHistory.mockRejectedValueOnce(new Error("503 store busy"));
+    const list = listOver(h);
+    await list.load();
+    const lane = vi.fn();
+    const claim = list.claimRows();
+    claim.renderFailure(lane);
+    claim.release();
+    expect(h.failureLines()).toBe(1);
+
+    await list.loadNewer();
+    apiMock.getHistory.mockReturnValueOnce(new Promise(() => {}));
+    h.retry();
+
+    expect(h.failureLines()).toBe(0);
+    expect(lane).not.toHaveBeenCalled();
+  });
+
+  it("lets a claim that was superseded write no failure line", async () => {
+    const h = harness();
+    const list = listOver(h);
+    const old = list.claimRows();
+    list.claimRows();
+
+    old.renderFailure(() => {});
 
     expect(h.failureText()).toBeNull();
   });

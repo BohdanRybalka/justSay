@@ -3,9 +3,9 @@
  * talking saved this month, the words-per-day chart, facts about your voice and your
  * favourite words, then the card shared or saved as an image. The backend computes every
  * figure; this panel formats them and reads them again when the window returns. The chart's
- * 7d / 30d switch and the words' All / Fillers switch each redraw their own card alone.
- * Until the first read lands it shows the card shapes empty; with nothing said yet, one
- * card on how to start.
+ * 7d / 30d switch and the words' All / Fillers switch each read again and redraw their own
+ * card alone. Until the first read lands it shows the card shapes empty; with nothing
+ * said yet, one card on how to start.
  */
 import { api, type ChartSpan, type Insights, type TopWordsResponse, type WordFilter } from "../../api";
 import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";

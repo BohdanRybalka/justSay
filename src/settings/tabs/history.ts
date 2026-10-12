@@ -9,7 +9,7 @@ import {
   type UserSettings,
 } from "../../api";
 import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
-import { renderReadFailure, renderSegmented, type SegmentedOption } from "../../ui/controls";
+import { renderSegmented, type SegmentedOption } from "../../ui/controls";
 import { icon } from "../../ui/icons";
 import { createEntryCards, EMPTY_KIND, SKELETON_CARD, SOURCE_ICONS } from "../history-entry";
 import {
@@ -198,7 +198,8 @@ export function renderHistory(
         searchHint.textContent = "Invalid search query";
       } else {
         console.error(e);
-        renderReadFailure(searchHint, () => void runSearch(q));
+        searchHint.textContent = "";
+        claim.renderFailure(() => void runSearch(q));
       }
     } finally {
       claim.release();

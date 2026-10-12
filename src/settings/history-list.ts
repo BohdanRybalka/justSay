@@ -83,6 +83,9 @@ export interface HistoryRowsClaim {
   isCurrent(): boolean;
   renderCount(text: string): void;
   renderMore(visible: boolean): void;
+  /** Shows the one failure line with Try again calling `onRetry`; the line is shared, so a
+   *  failure of the list and of a lane never stack two. */
+  renderFailure(onRetry: () => void): void;
   replaceRows(rows: readonly HTMLElement[]): void;
   release(): void;
 }
@@ -205,6 +208,11 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
       renderMore(visible: boolean) {
         if (isCurrent()) elements.sentinel.hidden = !visible;
       },
+      renderFailure(onRetry: () => void) {
+        if (!isCurrent()) return;
+        elements.failure.hidden = false;
+        renderReadFailure(elements.failure, onRetry);
+      },
       replaceRows(painted: readonly HTMLElement[]) {
         if (!isCurrent()) return;
         rows.replaceWith(painted);
@@ -229,8 +237,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
   function showFailure(claim: HistoryRowsClaim, append: boolean): void {
     claim.renderCount("");
-    elements.failure.hidden = false;
-    renderReadFailure(elements.failure, () => {
+    claim.renderFailure(() => {
       clearFailure();
       void loadPage(append);
     });
@@ -249,7 +256,6 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
    */
   async function loadPage(append: boolean): Promise<void> {
     if (append && cursor === null) return;
-    if (!append) clearFailure();
     const claim = issueClaim();
     elements.sentinel.classList.add(SENTINEL_READING);
     const askedFilter = filter();
@@ -321,6 +327,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
 
   return {
     load() {
+      clearFailure();
       return loadPage(false);
     },
     loadNewer,

@@ -1061,7 +1061,7 @@ describe("renderHistory — paging while a search owns the rows", () => {
 
     await typeQuery(container, "hello");
     await vi.waitFor(() => {
-      expect(container.querySelector("#history-search-hint")!.textContent).toBe("Couldn't load this. Try again");
+      expect(container.querySelector("#history-failure")!.textContent).toBe("Couldn't load this. Try again");
     });
 
     expect(sentinel(container).hidden).toBe(false);
@@ -1077,11 +1077,11 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
 
     await typeQuery(container, "hello");
     await vi.waitFor(() => {
-      expect(container.querySelector("#history-search-hint")!.textContent).toBe("Couldn't load this. Try again");
+      expect(container.querySelector("#history-failure")!.textContent).toBe("Couldn't load this. Try again");
     });
     await flush();
 
-    expect(container.querySelector("#history-search-hint")!.textContent).toBe("Couldn't load this. Try again");
+    expect(container.querySelector("#history-failure")!.textContent).toBe("Couldn't load this. Try again");
   });
 
   it("leaves a newer search's error message alone when the one it superseded settles", async () => {
@@ -1156,7 +1156,7 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
     await typeQuery(container, "hello");
 
     await vi.waitFor(() => {
-      expect(container.querySelector("#history-search-hint")!.textContent).toBe("Couldn't load this. Try again");
+      expect(container.querySelector("#history-failure")!.textContent).toBe("Couldn't load this. Try again");
     });
     expect(countText(container)).toBe("2 recordings");
     expect(container.textContent).not.toContain("undefined");
@@ -1170,16 +1170,33 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
     apiMock.searchHistory.mockResolvedValueOnce({ entries: [buildEntry("9")], total: 1 });
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const { container } = await renderAndWait([buildEntry("1"), buildEntry("2")]);
-    const hint = container.querySelector("#history-search-hint")!;
+    const failure = container.querySelector<HTMLElement>("#history-failure")!;
 
     await typeQuery(container, "hello");
-    await vi.waitFor(() => expect(hint.textContent).toBe("Couldn't load this. Try again"));
-    hint.querySelector("button")!.click();
+    await vi.waitFor(() => expect(failure.textContent).toBe("Couldn't load this. Try again"));
+    expect(container.querySelector("#history-search-hint")!.textContent).toBe("");
+    failure.querySelector("button")!.click();
     await vi.waitFor(() => expect(countText(container)).toBe("1 match"));
 
     expect(apiMock.searchHistory.mock.calls.map((call) => call[0])).toEqual(["hello", "hello"]);
-    expect(hint.textContent).toBe("");
+    expect(failure.hidden).toBe(true);
     logged.mockRestore();
+  });
+
+  it("shows one line, not two, when the list fails too while a failed search is on screen", async () => {
+    apiMock.getHistory.mockResolvedValueOnce(pageOf([], 0, null));
+    apiMock.searchHistory.mockRejectedValue(new Error("HTTP 503"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { container } = mount();
+    await vi.waitFor(() => expect(countText(container)).toBe("0 recordings"));
+    await typeQuery(container, "hello");
+    await vi.waitFor(() => expect(container.querySelectorAll(".panel-error")).toHaveLength(1));
+
+    apiMock.getHistory.mockRejectedValue(new Error("HTTP 503"));
+    await vi.advanceTimersByTimeAsync(NEWER_POLL_MS);
+
+    expect(container.querySelectorAll(".panel-error")).toHaveLength(1);
+    expect(container.querySelector("#history-search-hint")!.textContent).toBe("");
   });
 });
 
