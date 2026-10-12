@@ -97,7 +97,8 @@ def start(model_size: str, model_path: Path, after: Callable[[], None]) -> Model
     """Install on a background thread: download the model if it is missing, then run ``after``.
 
     ``after`` owns the stages from ``checking`` on: it ends them in ``done`` or ``fail`` and
-    never raises. A no-op while an install is past its download or still in it.
+    never raises. A no-op while an install is past its download or still in it. Returns the
+    state the install began in, however fast the thread then runs.
     """
     if not _download_lock.acquire(blocking=False):
         return snapshot()
@@ -108,6 +109,7 @@ def start(model_size: str, model_path: Path, after: Callable[[], None]) -> Model
         advance("checking")
     else:
         _begin()
+    started = snapshot()
     worker = threading.Thread(
         target=_install,
         args=(model_size, model_path, after),
@@ -120,7 +122,7 @@ def start(model_size: str, model_path: Path, after: Callable[[], None]) -> Model
         _update(stage="idle")
         _download_lock.release()
         raise
-    return snapshot()
+    return started
 
 
 def _install(model_size: str, model_path: Path, after: Callable[[], None]) -> None:
