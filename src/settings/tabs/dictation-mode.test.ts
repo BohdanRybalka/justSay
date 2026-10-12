@@ -621,6 +621,31 @@ describe("renderDictationMode — Install downloads the model", () => {
     }
   });
 
+  it("does not switch to Local when you picked Cloud while it installed", async () => {
+    vi.useFakeTimers();
+    try {
+      const container = await render(buildStatus(tracked), { stt_mode: "local" });
+      await vi.advanceTimersByTimeAsync(0);
+      apiMock.sttLocalModelStart.mockResolvedValue(download({ stage: "downloading" }));
+      apiMock.sttLocalModel.mockResolvedValue(download({ stage: "downloading" }));
+      row(container, "local").click();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(apiMock.sttLocalModelStart).toHaveBeenCalledOnce();
+      expect(hint(container, "local").textContent).toBe("Installing…");
+      row(container, "cloud").click();
+      await vi.advanceTimersByTimeAsync(0);
+
+      apiMock.sttLocalModel.mockResolvedValue(download({ stage: "done" }));
+      apiMock.sttLocalStatus.mockResolvedValue(buildStatus({ ...tracked, model_downloaded: true, model_loaded: true }));
+      await vi.advanceTimersByTimeAsync(1000 + 900);
+
+      expect(apiMock.setSttMode).toHaveBeenCalledExactlyOnceWith("cloud");
+      expect(row(container, "cloud").getAttribute("aria-checked")).toBe("true");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("marks the step that failed and runs the install again on Try again", async () => {
     apiMock.sttLocalModel.mockResolvedValue(
       download({ stage: "failed", error: "The engine did not start.", failed_step: "starting", bytes_done: 1, bytes_total: 1 }),

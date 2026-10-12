@@ -1,7 +1,8 @@
 /**
  * MODEL on the Dictation page: the Cloud and Local model radio rows. Cloud says whether the
  * Groq key is set; Local draws the local engine's state while the window is shown, and its
- * Install downloads the model. Picking an installed row switches the mode.
+ * Install downloads the model, starts the engine and then switches to Local. Picking an
+ * installed row switches the mode.
  */
 import { api, type LocalSTTStatus, type UserSettings } from "../../api";
 import { getCloudKeyStatus, loadSettings, type TabLifecycle } from "../settings";
@@ -75,6 +76,7 @@ export function renderDictationMode(
 
   async function switchMode(mode: Mode) {
     if (currentMode === mode) return;
+    if (mode === "cloud") model.declineSwitch();
     const previous = currentMode;
     currentMode = mode;
     draw();

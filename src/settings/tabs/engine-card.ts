@@ -80,6 +80,7 @@ export function mountEngineCard(
 
   async function choose(next: Engine) {
     if (saving || next === engine) return;
+    if (next === "cloud") model.declineSwitch();
     saving = true;
     show(next);
     const saved = await saveChoice({ [field]: next });

@@ -31,6 +31,8 @@ export interface LocalModel {
   /** What pressing the row does: install, retry, or hand over to `choose` once it is installed. */
   press: (selected: boolean, actions: { choose: () => void; retry: () => void }) => void;
   resume: () => void;
+  /** The user chose another engine meanwhile: an install pressed here no longer ends in `onInstalled`. */
+  declineSwitch: () => void;
   /** Stops reading and disowns an answer still in flight; an install keeps going. */
   release: () => void;
 }
@@ -51,6 +53,13 @@ export function watchLocalModel(hooks: LocalModelHooks): LocalModel {
     if (!installingHere) return;
     if (next?.stage === "done") finishInstall();
     else if (next?.stage === "failed") installingHere = false;
+  }
+
+  function declineSwitch() {
+    installingHere = false;
+    finishing = false;
+    if (switchTimer !== null) clearTimeout(switchTimer);
+    switchTimer = null;
   }
 
   function finishInstall() {
@@ -140,10 +149,7 @@ export function watchLocalModel(hooks: LocalModelHooks): LocalModel {
     active = false;
     if (statusTimer !== null) clearInterval(statusTimer);
     statusTimer = null;
-    if (switchTimer !== null) clearTimeout(switchTimer);
-    switchTimer = null;
-    finishing = false;
-    installingHere = false;
+    declineSwitch();
     syncDownloadTimer();
     latestToken += 1;
   }
@@ -155,6 +161,7 @@ export function watchLocalModel(hooks: LocalModelHooks): LocalModel {
     install,
     press,
     resume,
+    declineSwitch,
     release,
   };
 }

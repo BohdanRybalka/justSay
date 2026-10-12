@@ -323,6 +323,28 @@ describe("renderFiles — the Local model row installs from here", () => {
     }
   });
 
+  it("keeps Cloud for the files when it was picked while Local installed", async () => {
+    vi.useFakeTimers();
+    try {
+      apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus({ model_downloaded: false }));
+      apiMock.sttLocalModelStart.mockResolvedValue(buildDownload({ stage: "downloading" }));
+      const container = render(undefined, undefined, { files_engine: "local" });
+      await vi.advanceTimersByTimeAsync(0);
+      container.querySelector<HTMLButtonElement>("#files-local")!.click();
+      await vi.advanceTimersByTimeAsync(0);
+      container.querySelector<HTMLButtonElement>("#files-cloud")!.click();
+      await vi.advanceTimersByTimeAsync(0);
+
+      apiMock.sttLocalModel.mockResolvedValue(buildDownload({ stage: "done" }));
+      apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus({ model_loaded: true }));
+      await vi.advanceTimersByTimeAsync(1000 + 900);
+
+      expect(saveSettingsMock).toHaveBeenCalledExactlyOnceWith({ files_engine: "cloud" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("marks the step that failed and offers Try again", async () => {
     apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus());
     apiMock.sttLocalModel.mockResolvedValue(

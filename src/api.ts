@@ -1113,8 +1113,8 @@ export const api = {
   sttLocalPrewarm: () =>
     request<{ started: boolean }>("POST", "/stt/local/prewarm", undefined, REREADABLE),
 
-  /** Starts the model download on the backend and answers at once. A press while one runs
-   *  changes nothing and a failed one resumes, so asking again is safe. */
+  /** Starts the install (download, check, engine start) on the backend and answers at once. A
+   *  press while one runs changes nothing and a failed one resumes, so asking again is safe. */
   sttLocalModelStart: () =>
     request<ModelDownload>("POST", "/stt/local/model", undefined, REREADABLE),
 

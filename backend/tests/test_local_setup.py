@@ -2874,20 +2874,26 @@ class _EngineProvider:
     def __init__(self, fail_with=None):
         self.fail_with = fail_with
         self.stage_while_starting = []
+        self.cleaned = 0
 
     def _get_model(self):
         self.stage_while_starting.append(model_download.snapshot().stage)
         if self.fail_with is not None:
             raise self.fail_with
 
+    def cleanup(self):
+        self.cleaned += 1
+
 
 @pytest.fixture
 def install_steps(monkeypatch):
     monkeypatch.setattr(model_download, "_state", model_download.ModelDownloadState())
+    monkeypatch.setattr(local_setup, "_prewarm_error", None)
     monkeypatch.setattr(local_whisper_cpp_cmd, "resolve_binary_path", lambda: pathlib.Path("bin"))
 
-    def use(provider):
+    def use(provider, *, cached=True):
         monkeypatch.setattr(routing, "get_provider", lambda mode, settings: provider)
+        monkeypatch.setattr(routing, "peek_local_provider", lambda: provider if cached else None)
         return provider
 
     return use
@@ -2899,6 +2905,31 @@ def test_finish_local_install_starts_the_engine_even_when_cloud_is_the_mode(inst
     local_setup.finish_local_install(STTSettings(mode=ProviderMode.CLOUD))
 
     assert provider.stage_while_starting == ["starting"]
+    assert provider.cleaned == 0
+    assert model_download.snapshot().stage == "done"
+
+
+def test_finish_local_install_clears_the_failure_an_earlier_load_left_behind(
+    install_steps, monkeypatch
+):
+    install_steps(_EngineProvider())
+    monkeypatch.setattr(local_setup, "_prewarm_error", "Out of memory.")
+
+    local_setup.finish_local_install(STTSettings())
+
+    assert local_setup._prewarm_error is None
+
+
+def test_finish_local_install_lets_go_of_an_engine_the_cache_has_moved_past(
+    install_steps, monkeypatch
+):
+    provider = install_steps(_EngineProvider(), cached=False)
+    monkeypatch.setattr(local_setup, "_prewarm_error", "Out of memory.")
+
+    local_setup.finish_local_install(STTSettings())
+
+    assert provider.cleaned == 1
+    assert local_setup._prewarm_error == "Out of memory."
     assert model_download.snapshot().stage == "done"
 
 
