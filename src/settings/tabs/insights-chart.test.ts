@@ -33,6 +33,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   document.body.innerHTML = "";
 });
 
@@ -78,6 +79,14 @@ describe("the words-per-day chart", () => {
     await vi.advanceTimersByTimeAsync(29 * 14);
     expect(heights().slice(-2)).toEqual(["72.19%", "89.29%"]);
     expect(heights()[1]).toBe("3%");
+  });
+
+  it("grows every bar at once when the OS asks for less motion", async () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: true }));
+    draw(DESIGN_WORDS);
+
+    await vi.advanceTimersByTimeAsync(20);
+    expect(bars().filter((bar) => bar.querySelector("i")!.style.height !== "0px")).toHaveLength(30);
   });
 
   it("dims the real weekend days", () => {
@@ -129,6 +138,55 @@ describe("the words-per-day chart", () => {
 
     bars()[19].dispatchEvent(new FocusEvent("blur"));
     expect(tip.classList.contains("chart-tip--visible")).toBe(false);
+  });
+
+  describe("from the keyboard", () => {
+    const tabStops = () => bars().flatMap((bar, index) => (bar.tabIndex === 0 ? [index] : []));
+    const press = (from: number, key: string): KeyboardEvent => {
+      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      bars()[from].dispatchEvent(event);
+      return event;
+    };
+
+    it("is one stop in the tab order: the latest day, then wherever focus last was", () => {
+      draw(DESIGN_WORDS);
+      expect(tabStops()).toEqual([29]);
+
+      press(29, "ArrowLeft");
+      expect(tabStops()).toEqual([28]);
+    });
+
+    it("walks the days with the arrow keys and Home and End, and stops at the ends", () => {
+      draw(DESIGN_WORDS);
+      const focused = () => bars().indexOf(document.activeElement as HTMLElement);
+
+      press(29, "ArrowLeft");
+      expect(focused()).toBe(28);
+      press(28, "ArrowRight");
+      expect(focused()).toBe(29);
+      press(29, "ArrowRight");
+      expect(focused()).toBe(29);
+      press(29, "Home");
+      expect(focused()).toBe(0);
+      press(0, "ArrowLeft");
+      expect(focused()).toBe(0);
+      press(0, "End");
+      expect(focused()).toBe(29);
+    });
+
+    it("leaves every other key, Tab included, to the browser", () => {
+      draw(DESIGN_WORDS);
+
+      expect(press(29, "Tab").defaultPrevented).toBe(false);
+      expect(press(29, "ArrowLeft").defaultPrevented).toBe(true);
+    });
+
+    it("names each bar to a screen reader", () => {
+      draw(DESIGN_WORDS);
+
+      expect(bars()[29].getAttribute("role")).toBe("img");
+      expect(bars()[29].getAttribute("aria-label")).toBe("1,212 words, 29 Sep");
+    });
   });
 
   it("writes three dates under the axis: first, middle, last", () => {

@@ -5,7 +5,7 @@
  */
 import { api, type UserSettings } from "../../api";
 import { notifyError } from "../../notify";
-import { renderFold, renderSegmented, type SegmentedOption } from "../../ui/controls";
+import { renderFold, renderSegmented, setDisabled, type SegmentedOption } from "../../ui/controls";
 import { icon } from "../../ui/icons";
 import { applyAppTheme, type ThemePreference } from "../../ui/theme";
 import { getCloudKeyStatus, saveSettings, type TabLifecycle } from "../settings";
@@ -40,8 +40,8 @@ function button(label: string, className = "btn"): HTMLButtonElement {
 }
 
 /** Puts Cancel and `confirmLabel` in place of what `controls` holds until one
- *  is pressed, then puts it back with focus on the button that asked.
- *  Resolves true only for `confirmLabel`. */
+ *  is pressed or Escape cancels, then puts it back with focus on the button
+ *  that asked. Resolves true only for `confirmLabel`. */
 function confirmInline(controls: HTMLElement, confirmLabel: string): Promise<boolean> {
   const held = [...controls.childNodes];
   const asker = document.activeElement;
@@ -50,11 +50,16 @@ function confirmInline(controls: HTMLElement, confirmLabel: string): Promise<boo
   controls.replaceChildren(cancel, confirm);
   cancel.focus();
   return new Promise((resolve) => {
+    const cancelOnEscape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") answer(false);
+    };
     const answer = (yes: boolean): void => {
+      controls.removeEventListener("keydown", cancelOnEscape);
       controls.replaceChildren(...held);
       if (asker instanceof HTMLElement && controls.contains(asker)) asker.focus();
       resolve(yes);
     };
+    controls.addEventListener("keydown", cancelOnEscape);
     cancel.addEventListener("click", () => answer(false));
     confirm.addEventListener("click", () => answer(true));
   });
@@ -127,18 +132,18 @@ function renderStorageRow(row: HTMLElement, isDestroyed: () => boolean): void {
       showSize();
       return;
     }
-    clear.disabled = true;
+    setDisabled(true, clear);
     hint.textContent = "Clearing…";
     try {
       await api.cleanupTemp();
     } catch (e) {
       if (isDestroyed()) return;
-      clear.disabled = false;
+      setDisabled(false, clear);
       hint.textContent = `Could not clear: ${describeFailure(e)}`;
       return;
     }
     if (isDestroyed()) return;
-    clear.disabled = false;
+    setDisabled(false, clear);
     await load();
   });
 
@@ -162,7 +167,7 @@ function renderDeleteHistory(area: HTMLElement, isDestroyed: () => boolean): voi
       status.textContent = "";
       return;
     }
-    start.disabled = true;
+    setDisabled(true, start);
     status.textContent = "Deleting…";
     try {
       await api.clearHistory();
@@ -172,7 +177,7 @@ function renderDeleteHistory(area: HTMLElement, isDestroyed: () => boolean): voi
       if (isDestroyed()) return;
       status.textContent = `Could not delete: ${describeFailure(e)}`;
     }
-    start.disabled = false;
+    setDisabled(false, start);
   });
 }
 

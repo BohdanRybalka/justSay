@@ -10,7 +10,7 @@
 import { api, type ChartSpan, type Insights, type TopWordsResponse, type WordFilter } from "../../api";
 import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
 import { formatCoarseDuration, formatHoursClock, wholeMinutes } from "../../format";
-import { renderReadFailure } from "../../ui/controls";
+import { renderReadFailure, setDisabled } from "../../ui/controls";
 import { icon } from "../../ui/icons";
 import { escapeHtml } from "../html";
 import type { TabLifecycle } from "../settings";
@@ -150,7 +150,7 @@ export function renderInsights(
     const [share, download] = row.querySelectorAll("button");
     const status = row.querySelector<HTMLElement>(".share-month-status")!;
     const act = async (work: (png: Uint8Array) => Promise<string>, failure: string): Promise<void> => {
-      share.disabled = download.disabled = true;
+      setDisabled(true, share, download);
       status.textContent = "";
       try {
         status.textContent = await work(await savedCardPng(card));
@@ -158,7 +158,7 @@ export function renderInsights(
         console.error(`${failure}:`, e);
         status.textContent = `${failure}. Try again`;
       } finally {
-        share.disabled = download.disabled = false;
+        setDisabled(false, share, download);
       }
     };
     share.addEventListener("click", () =>

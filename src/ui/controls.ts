@@ -13,7 +13,7 @@ export interface SegmentedOption<T extends string> {
   icon?: IconName;
 }
 
-const ARROW_STEP: Readonly<Record<string, number>> = { ArrowLeft: -1, ArrowRight: 1 };
+export const ARROW_STEP: Readonly<Record<string, number>> = { ArrowLeft: -1, ArrowRight: 1 };
 
 /**
  * Fills `root` with one pressed-state button per option, `value` pressed, drawn as one
@@ -104,6 +104,22 @@ export function renderSelect(select: HTMLSelectElement): void {
   select.replaceWith(box);
   box.append(select);
   box.insertAdjacentHTML("beforeend", icon("chev", "small"));
+}
+
+const heldFocus = new WeakSet<HTMLElement>();
+
+/**
+ * Sets `disabled` on each of `controls`. The browser drops focus from a control
+ * the moment it is disabled, so the one that held it takes it back when it is
+ * enabled again, unless focus has gone elsewhere meanwhile.
+ */
+export function setDisabled(disabled: boolean, ...controls: (HTMLButtonElement | HTMLInputElement)[]): void {
+  for (const control of controls) {
+    const { activeElement, body } = control.ownerDocument;
+    if (disabled && activeElement === control) heldFocus.add(control);
+    control.disabled = disabled;
+    if (!disabled && heldFocus.delete(control) && activeElement === body) control.focus();
+  }
 }
 
 /**

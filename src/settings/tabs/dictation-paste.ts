@@ -7,7 +7,7 @@
 import type { UserSettings } from "../../api";
 import { saveSettings } from "../settings";
 import { notifyError } from "../../notify";
-import { renderToggle } from "../../ui/controls";
+import { renderToggle, setDisabled } from "../../ui/controls";
 
 const PASTE_HINT = "Text lands at the cursor as soon as it's ready";
 export const PERMISSION_HINT =
@@ -63,7 +63,7 @@ export function wirePasteRow(
   }
 
   renderToggle(toggle, on, async (next) => {
-    toggle.disabled = true;
+    setDisabled(true, toggle);
     try {
       await saveSettings({ paste_at_cursor: next });
       on = next;
@@ -72,7 +72,7 @@ export function wirePasteRow(
       notifyError(e instanceof Error ? e.message : String(e));
     }
     if (destroyed) return;
-    toggle.disabled = false;
+    setDisabled(false, toggle);
     draw();
   });
 

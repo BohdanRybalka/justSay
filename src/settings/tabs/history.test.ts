@@ -1296,6 +1296,19 @@ describe("renderHistory — a delete", () => {
     const heads = Array.from(container.querySelectorAll(".day-head b")).map((b) => b.textContent);
     expect(heads).toEqual(["Yesterday"]);
   });
+
+  it("keeps keyboard focus on the card's More button when the delete fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    apiMock.deleteHistoryEntry.mockRejectedValue(new Error("backend down"));
+    const container = await renderWith(2);
+    const more = openMenuOf(cards(container)[0]);
+
+    container.querySelector<HTMLButtonElement>('[data-action="delete"]')!.click();
+    await flush();
+
+    expect(cards(container)).toHaveLength(2);
+    expect(document.activeElement).toBe(more);
+  });
 });
 
 describe("renderHistory — a record whose recording time could not be recovered", () => {

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FillerNote, Insights, TopWordsResponse, WordCount } from "../../api";
+import { dropFocusWhenDisabled } from "../../ui/browser-focus.test-helper";
 
 const { apiMock, imageMock } = vi.hoisted(() => ({
   apiMock: { insights: vi.fn(), wordsTop: vi.fn() },
@@ -554,6 +555,25 @@ describe("the Insights panel", () => {
     expect(imageMock.savedCardPng).toHaveBeenCalledWith(savedCardView(buildInsights()));
     expect(imageMock.copyImage).toHaveBeenCalledWith(png);
     expect(text(".share-month-status")).toBe("Image copied — paste it anywhere");
+  });
+
+  it("keeps keyboard focus on Share through the copy, which disables the buttons meanwhile", async () => {
+    const restoreDisabled = dropFocusWhenDisabled();
+    try {
+      await mount(buildInsights());
+      imageMock.savedCardPng.mockResolvedValue(new Uint8Array([137, 80]));
+      imageMock.copyImage.mockResolvedValue(undefined);
+      const share = container.querySelector<HTMLButtonElement>(".share-month .btn-primary")!;
+      share.focus();
+
+      share.click();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(text(".share-month-status")).toBe("Image copied — paste it anywhere");
+      expect(document.activeElement).toBe(share);
+    } finally {
+      restoreDisabled();
+    }
   });
 
   it("saves the card under this month's name, and says when copying failed", async () => {

@@ -41,6 +41,7 @@ const MICROPHONE_UNCONFIRMED_LABEL =
 
 const RESULT_HINT = "setting-row-hint--result";
 const SHORTCUT_HINT = "Hold it down while you speak";
+const CAPTURING_HINT = "Press the new keys, or Esc to cancel";
 const NO_MICROPHONE = "No microphone";
 const UNKNOWN_MICROPHONE = "Your default microphone";
 
@@ -317,6 +318,8 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
   }
 
   let captureHandler: ((e: KeyboardEvent) => void) | null = null;
+  let activeShortcut: string | null = settings.shortcut;
+  const activeLabel = () => (activeShortcut === null ? "Not set" : formatAccelerator(activeShortcut, platform));
 
   function stopCapture() {
     if (captureHandler) {
@@ -327,12 +330,19 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
     shortcutBtn.classList.remove("keycap--capturing");
   }
 
+  function cancelCapture() {
+    stopCapture();
+    shortcutBtn.textContent = activeLabel();
+    shortcutHint.textContent = SHORTCUT_HINT;
+    shortcutHint.classList.remove(RESULT_HINT);
+  }
+
   shortcutBtn.addEventListener("click", () => {
     if (recording) return;
     recording = true;
     shortcutBtn.textContent = "Press keys…";
     shortcutBtn.classList.add("keycap--capturing");
-    shortcutHint.textContent = SHORTCUT_HINT;
+    shortcutHint.textContent = CAPTURING_HINT;
     shortcutHint.classList.remove(RESULT_HINT);
 
     captureHandler = (e: KeyboardEvent) => {
@@ -340,19 +350,24 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
       e.preventDefault();
       e.stopPropagation();
 
+      if (e.key === "Escape" && !(e.ctrlKey || e.altKey || e.shiftKey || e.metaKey)) {
+        cancelCapture();
+        return;
+      }
+
       const captured = acceleratorFromKeyEvent(e);
       if (!captured.ok) {
         if (captured.reason === "no-modifier") showShortcutResult(modifierHint(platform));
         return;
       }
 
-      const activeLabel = formatAccelerator(settings.shortcut, platform);
+      const revertLabel = activeLabel();
 
       stopCapture();
       shortcutBtn.textContent = formatAccelerator(captured.accelerator, platform);
       showShortcutResult("Applying…");
 
-      void requestShortcut(captured.accelerator, activeLabel);
+      void requestShortcut(captured.accelerator, revertLabel);
     };
 
     document.addEventListener("keydown", captureHandler, true);
@@ -366,12 +381,14 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
         if (destroyed) return;
         const label = formatAccelerator(payload.shortcut, platform);
         if (!payload.ok) {
+          activeShortcut = payload.stillActive ?? null;
           showShortcutResult(`${label} was not accepted: ${payload.reason ?? "unknown reason"}`);
           shortcutBtn.textContent = payload.stillActive
             ? formatAccelerator(payload.stillActive, platform)
             : "Not set";
           return;
         }
+        activeShortcut = payload.shortcut;
         if (payload.persisted === true) cachePersistedShortcut(payload.shortcut);
         showShortcutResult(
           payload.persisted === false

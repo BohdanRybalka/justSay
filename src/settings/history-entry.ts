@@ -142,7 +142,6 @@ export function createEntryCards(deleted: (card: HTMLElement) => void): EntryCar
   function create(entry: HistoryEntry): HTMLElement {
     const el = document.createElement("article");
     el.className = `entry entry--${entry.source}`;
-    el.tabIndex = 0;
     el.dataset.id = entry.id;
 
     const textHtml = entry.highlighted_text
@@ -207,7 +206,7 @@ export function createEntryCards(deleted: (card: HTMLElement) => void): EntryCar
           button.setAttribute("aria-label", "Copy");
         }, COPIED_FLASH_MS);
       } else if (button.dataset.action === "delete") {
-        closeMenu();
+        closeMenu(true);
         try {
           await api.deleteHistoryEntry(entry.id);
           deleted(el);
