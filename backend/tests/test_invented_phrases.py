@@ -1,4 +1,6 @@
-"""The listed phrases and sound labels leave a transcript; everything else stays as it was."""
+"""The listed phrases, sound labels and the marks touching them leave a transcript; no word does."""
+
+import time
 
 import pytest
 
@@ -70,3 +72,13 @@ def test_the_words_around_a_phrase_stay_with_the_spaces_closed_up(text, expected
 )
 def test_text_without_a_listed_phrase_comes_back_exactly_as_it_was(text):
     assert without_invented_phrases(text) == text
+
+
+def test_a_long_run_of_marks_is_cut_in_a_blink_not_in_seconds():
+    text = "-" * 10000 + " ні Thanks for watching"
+
+    started = time.perf_counter()
+    result = without_invented_phrases(text)
+
+    assert result == "-" * 10000 + " ні"
+    assert time.perf_counter() - started < 1.0

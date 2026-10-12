@@ -30,9 +30,10 @@ def _phrase_pattern(phrase: str) -> str:
     return r"\W+".join(re.escape(word) for word in _WORD.findall(phrase))
 
 
+_PHRASES = "|".join(_phrase_pattern(phrase) for phrase in INVENTED_PHRASES)
+_LEADING_MARKS = rf"(?:(?<!{_MARK}){_MARK}*)?"
 _INVENTED = re.compile(
-    rf"{_MARK}*(?:(?<!\w)(?:{'|'.join(_phrase_pattern(p) for p in INVENTED_PHRASES)})(?!\w)"
-    rf"|{_SOUND_LABEL}){_MARK}*",
+    rf"{_LEADING_MARKS}(?:(?<!\w)(?:{_PHRASES})(?!\w)|{_SOUND_LABEL}){_MARK}*",
     re.IGNORECASE,
 )
 
