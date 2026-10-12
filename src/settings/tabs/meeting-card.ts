@@ -57,6 +57,7 @@ export function mountMeetingCard(
   let levels: AbortController | null = null;
   let latestRead = 0;
   let reading = false;
+  let focusHeld = false;
   let destroyed = false;
 
   function currentView(): View {
@@ -109,8 +110,25 @@ export function mountMeetingCard(
     `;
   }
 
+  function noteFocus() {
+    const { activeElement, body } = card.ownerDocument;
+    if (card.contains(activeElement)) focusHeld = true;
+    else if (activeElement !== body) focusHeld = false;
+  }
+
+  function restoreFocus(view: View) {
+    if (!focusHeld) return;
+    const target = view === "disclosure" ? "#meeting-cancel" : "button:not(:disabled)";
+    const button = card.querySelector<HTMLButtonElement>(target);
+    if (button?.disabled === false) {
+      button.focus();
+      focusHeld = false;
+    }
+  }
+
   function draw() {
     const view = currentView();
+    noteFocus();
     card.className = `card meeting-card meeting-card--${view}`;
     card.innerHTML =
       view === "recording" ? recordingHtml() : view === "disclosure" ? disclosureHtml() : startHtml();
@@ -120,9 +138,11 @@ export function mountMeetingCard(
     card.querySelector("#meeting-cancel")?.addEventListener("click", cancel);
     card.querySelector("#meeting-stop")?.addEventListener("click", () => void requestToggle());
     drawTimer();
+    restoreFocus(view);
   }
 
   function disableButtons() {
+    noteFocus();
     card.querySelectorAll<HTMLButtonElement>("button").forEach((button) => (button.disabled = true));
   }
 
@@ -268,6 +288,9 @@ export function mountMeetingCard(
     closeLevels();
   }
 
+  card.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && disclosureOpen) cancel();
+  });
   draw();
   if (!windowHidden) resumeResources();
 

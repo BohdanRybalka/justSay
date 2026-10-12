@@ -6,6 +6,7 @@
  */
 import { type CloudKeyStatus, type UserSettings } from "../../api";
 import { MASKED_API_KEY } from "../../contracts";
+import { setDisabled } from "../../ui/controls";
 import { saveSettings, getCloudKeyStatus } from "../settings";
 
 type KeyField = "gemini_api_key" | "groq_api_key";
@@ -121,7 +122,7 @@ export function renderKeys(container: HTMLElement, settings: UserSettings, cloud
       const value = input.value.trim();
       if (!value) return;
       const refocus = row.contains(document.activeElement);
-      locked.forEach((control) => (control.disabled = true));
+      setDisabled(true, ...locked);
       save.textContent = "Saving…";
       status.textContent = "";
       try {
@@ -131,7 +132,7 @@ export function renderKeys(container: HTMLElement, settings: UserSettings, cloud
         draw(spec, storedState(), refocus);
       } catch (err) {
         status.textContent = `Error: ${describeFailure(err)}`;
-        locked.forEach((control) => (control.disabled = false));
+        setDisabled(false, ...locked);
         save.textContent = "Save";
       }
     });

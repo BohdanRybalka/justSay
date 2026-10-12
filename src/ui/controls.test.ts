@@ -2,7 +2,7 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { renderFold, renderReadFailure, renderSegmented, renderSelect, renderToggle } from "./controls";
+import { renderFold, renderReadFailure, renderSegmented, renderSelect, renderToggle, setDisabled } from "./controls";
 
 type Range = "7d" | "30d" | "90d";
 const RANGES = [
@@ -252,8 +252,69 @@ describe("renderReadFailure", () => {
   });
 });
 
+describe("setDisabled", () => {
+  function mountButtons(): [HTMLButtonElement, HTMLButtonElement] {
+    const buttons = [document.createElement("button"), document.createElement("button")] as const;
+    document.body.append(...buttons);
+    return [buttons[0], buttons[1]];
+  }
+
+  function disableDroppingFocus(...buttons: HTMLButtonElement[]): void {
+    setDisabled(true, ...buttons);
+    buttons.forEach((button) => {
+      button.disabled = false;
+      button.blur();
+      button.disabled = true;
+    });
+  }
+
+  it("disables and enables every control it is given", () => {
+    const [first, second] = mountButtons();
+
+    setDisabled(true, first, second);
+    expect([first.disabled, second.disabled]).toEqual([true, true]);
+    setDisabled(false, first, second);
+    expect([first.disabled, second.disabled]).toEqual([false, false]);
+  });
+
+  it("gives focus back to the control that held it, which the browser dropped when it was disabled", () => {
+    const [first, second] = mountButtons();
+    first.focus();
+
+    disableDroppingFocus(first, second);
+    expect(document.activeElement).toBe(document.body);
+    setDisabled(false, first, second);
+
+    expect(document.activeElement).toBe(first);
+  });
+
+  it("leaves focus where the user moved it meanwhile", () => {
+    const [first, second] = mountButtons();
+    first.focus();
+    disableDroppingFocus(first);
+
+    second.focus();
+    setDisabled(false, first);
+
+    expect(document.activeElement).toBe(second);
+  });
+
+  it("does not focus a control that never held focus", () => {
+    const [first] = mountButtons();
+
+    disableDroppingFocus(first);
+    setDisabled(false, first);
+
+    expect(document.activeElement).toBe(document.body);
+  });
+});
+
 describe("controls stylesheet", () => {
   const css = readFileSync(join(__dirname, "controls.css"), "utf-8");
+
+  it("rings a field box that holds focus, since its bare input draws no ring of its own", () => {
+    expect(css).toMatch(/\.search-box:focus-within,\.word-add:focus-within\{outline:2px solid var\(--orange\)/);
+  });
 
   it.each([
     '.segmented button[aria-pressed="true"]',

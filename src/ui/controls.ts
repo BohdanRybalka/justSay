@@ -106,6 +106,22 @@ export function renderSelect(select: HTMLSelectElement): void {
   box.insertAdjacentHTML("beforeend", icon("chev", "small"));
 }
 
+const heldFocus = new WeakSet<HTMLElement>();
+
+/**
+ * Sets `disabled` on each of `controls`. The browser drops focus from a control
+ * the moment it is disabled, so the one that held it takes it back when it is
+ * enabled again, unless focus has gone elsewhere meanwhile.
+ */
+export function setDisabled(disabled: boolean, ...controls: (HTMLButtonElement | HTMLInputElement)[]): void {
+  for (const control of controls) {
+    const { activeElement, body } = control.ownerDocument;
+    if (disabled && activeElement === control) heldFocus.add(control);
+    control.disabled = disabled;
+    if (!disabled && heldFocus.delete(control) && activeElement === body) control.focus();
+  }
+}
+
 /**
  * Fills `host` with the one muted line a failed read leaves behind: "Couldn't load this."
  * and a Try again button that calls `onRetry`. It replaces whatever `host` held.

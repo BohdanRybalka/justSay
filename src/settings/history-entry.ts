@@ -85,6 +85,15 @@ function paintStar(button: HTMLButtonElement, starred: boolean): void {
   button.classList.toggle("entry-star--on", starred);
 }
 
+/** The first action of the card after `card` on screen, else of the one before: where focus goes when `card` is deleted. */
+function actionBeside(card: HTMLElement): HTMLElement | undefined {
+  const cards = [...card.ownerDocument.querySelectorAll<HTMLElement>(".entry")].filter((other) =>
+    other.querySelector(".entry-actions button"),
+  );
+  const at = cards.indexOf(card);
+  return (cards[at + 1] ?? cards[at - 1])?.querySelector<HTMLElement>(".entry-actions button") ?? undefined;
+}
+
 export interface EntryCards {
   create(entry: HistoryEntry): HTMLElement;
   destroy(): void;
@@ -142,7 +151,6 @@ export function createEntryCards(deleted: (card: HTMLElement) => void): EntryCar
   function create(entry: HistoryEntry): HTMLElement {
     const el = document.createElement("article");
     el.className = `entry entry--${entry.source}`;
-    el.tabIndex = 0;
     el.dataset.id = entry.id;
 
     const textHtml = entry.highlighted_text
@@ -207,10 +215,12 @@ export function createEntryCards(deleted: (card: HTMLElement) => void): EntryCar
           button.setAttribute("aria-label", "Copy");
         }, COPIED_FLASH_MS);
       } else if (button.dataset.action === "delete") {
-        closeMenu();
+        closeMenu(true);
         try {
           await api.deleteHistoryEntry(entry.id);
+          const next = actionBeside(el);
           deleted(el);
+          next?.focus();
         } catch (err) {
           console.error(err);
         }

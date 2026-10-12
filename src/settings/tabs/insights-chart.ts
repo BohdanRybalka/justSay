@@ -7,6 +7,7 @@
 import type { ChartSpan, Insights } from "../../api";
 import { renderSegmented } from "../../ui/controls";
 import { icon } from "../../ui/icons";
+import { prefersReducedMotion } from "../../ui/motion";
 import { escapeHtml } from "../html";
 
 export type ChartFigures = Pick<Insights, "days" | "previous_period_words">;
@@ -19,6 +20,7 @@ const HEADROOM = 1.12;
 const LOWEST_BAR_PERCENT = 3;
 const GROW_START_MS = 20;
 const GROW_STAGGER_MS = 14;
+const BAR_STEP: Readonly<Record<string, number>> = { ArrowLeft: -1, ArrowRight: 1 };
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const SPANS = [
   { value: "7", label: "7d" },
@@ -94,13 +96,17 @@ function drawPlot(plot: HTMLElement, days: ChartFigures["days"], words: number[]
     <div class="chart-tip" role="status"></div>
   `;
   const tip = plot.querySelector<HTMLElement>(".chart-tip")!;
+  const bars: HTMLElement[] = [];
+  const reduceMotion = prefersReducedMotion();
   days.forEach((day, index) => {
     const bar = plot.ownerDocument.createElement("div");
     bar.className = `chart-bar${isWeekend(day.date) ? " chart-bar--weekend" : ""}${index === best ? " chart-bar--best" : ""}`;
-    bar.tabIndex = 0;
+    bar.tabIndex = index === days.length - 1 ? 0 : -1;
+    bar.setAttribute("role", "img");
     bar.setAttribute("aria-label", `${number(day.words)} words, ${dayLabel(day.date)}`);
     bar.innerHTML = `<i style="height:0"></i>`;
     const show = () => {
+      bars.forEach((other) => (other.tabIndex = other === bar ? 0 : -1));
       tip.innerHTML = `<b class="num">${number(day.words)} words</b><span class="num">${dayLabel(day.date)}</span>`;
       tip.style.setProperty("--center", centerOf(index));
       tip.classList.add("chart-tip--visible");
@@ -110,10 +116,17 @@ function drawPlot(plot: HTMLElement, days: ChartFigures["days"], words: number[]
     bar.addEventListener("focus", show);
     bar.addEventListener("mouseleave", hide);
     bar.addEventListener("blur", hide);
+    bar.addEventListener("keydown", (event) => {
+      const target = barAfterKey(event.key, index, days.length);
+      if (target === null) return;
+      event.preventDefault();
+      bars[target].focus();
+    });
+    bars.push(bar);
     plot.append(bar);
     setTimeout(() => {
       bar.querySelector("i")!.style.height = `${Math.max(LOWEST_BAR_PERCENT, percentOf(day.words)).toFixed(2)}%`;
-    }, GROW_START_MS + index * GROW_STAGGER_MS);
+    }, GROW_START_MS + (reduceMotion ? 0 : index * GROW_STAGGER_MS));
   });
   if (best < 0) return;
   const callout = plot.ownerDocument.createElement("div");
@@ -122,6 +135,14 @@ function drawPlot(plot: HTMLElement, days: ChartFigures["days"], words: number[]
   callout.style.bottom = `${percentOf(most).toFixed(2)}%`;
   callout.innerHTML = `<span class="num">${number(most)} words · ${escapeHtml(dayLabel(days[best].date))}</span>`;
   plot.append(callout);
+}
+
+/** The column an arrow, Home or End key moves to from `from`, or `null` for any other key. */
+function barAfterKey(key: string, from: number, count: number): number | null {
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  const step = BAR_STEP[key];
+  return step === undefined ? null : Math.min(Math.max(from + step, 0), count - 1);
 }
 
 function sum(values: number[]): number {

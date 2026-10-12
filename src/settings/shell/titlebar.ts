@@ -2,7 +2,8 @@
  * The main window's own 40px title bar. The bar, the mark and the name are the
  * drag region. Windows gets minimise, maximise and close drawn here; macOS
  * draws its native traffic lights over the bar's left end, so there the bar
- * only makes room for them.
+ * only makes room for them. The drawn controls stay out of the Tab order, as
+ * the system's own caption buttons are: Tab starts at the sidebar.
  */
 import type { Window } from "@tauri-apps/api/window";
 import type { ShortcutPlatform } from "../../accelerator";
@@ -24,9 +25,9 @@ export function renderTitlebar(bar: HTMLElement, platform: ShortcutPlatform): vo
   bar.insertAdjacentHTML(
     "beforeend",
     `<div class="titlebar-controls">` +
-      `<button type="button" class="titlebar-button" id="btn-minimise" aria-label="Minimise">${icon("min", "small")}</button>` +
-      `<button type="button" class="titlebar-button" id="btn-maximise" aria-label="Maximise">${icon("sq", "small")}</button>` +
-      `<button type="button" class="titlebar-button titlebar-button--close" id="btn-close" aria-label="Close">${icon("x", "small")}</button>` +
+      `<button type="button" tabindex="-1" class="titlebar-button" id="btn-minimise" aria-label="Minimise">${icon("min", "small")}</button>` +
+      `<button type="button" tabindex="-1" class="titlebar-button" id="btn-maximise" aria-label="Maximise">${icon("sq", "small")}</button>` +
+      `<button type="button" tabindex="-1" class="titlebar-button titlebar-button--close" id="btn-close" aria-label="Close">${icon("x", "small")}</button>` +
       `</div>`,
   );
 }

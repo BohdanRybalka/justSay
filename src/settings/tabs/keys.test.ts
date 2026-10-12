@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudKeyStatus, UserSettings } from "../../api";
+import { dropFocusWhenDisabled } from "../../ui/browser-focus.test-helper";
 
 const apiMock = {
   updateSettings: vi.fn(),
@@ -179,6 +180,30 @@ describe("renderKeys — Save routes through saveSettings (Bug 2)", () => {
     expect(input.value).toBe("gsk-new");
     expect(input.disabled).toBe(false);
     expect(container.querySelector<HTMLButtonElement>("#groq-save")!.disabled).toBe(false);
+  });
+});
+
+describe("renderKeys — keyboard focus", () => {
+  it("stays on Save through a save that fails, though the row is disabled meanwhile", async () => {
+    const restoreDisabled = dropFocusWhenDisabled();
+    try {
+      saveSettingsMock.mockRejectedValue(new Error("backend down"));
+      const container = render(buildSettings());
+      const input = container.querySelector<HTMLInputElement>("#groq-key-input")!;
+      input.value = "gsk-new";
+      input.dispatchEvent(new Event("input"));
+      const save = container.querySelector<HTMLButtonElement>("#groq-save")!;
+      save.focus();
+
+      save.click();
+      await vi.waitFor(() => {
+        expect(container.querySelector("#groq-status")!.textContent).toBe("Error: backend down");
+      });
+
+      expect(document.activeElement).toBe(save);
+    } finally {
+      restoreDisabled();
+    }
   });
 });
 

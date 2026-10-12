@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { UserSettings } from "../../api";
+import { dropFocusWhenDisabled } from "../../ui/browser-focus.test-helper";
 
 const {
   saveSettingsMock,
@@ -147,6 +148,44 @@ describe("Storage", () => {
     expect(buttonLabelled(row, "Open folder")).toBeDefined();
   });
 
+  it("keeps keyboard focus on Clear through the clearing, which disables it meanwhile", async () => {
+    const restoreDisabled = dropFocusWhenDisabled();
+    try {
+      apiMock.cleanupTemp.mockResolvedValue({ freed_bytes: 69_000_000 });
+      const row = storageRow(render("system"));
+      await vi.waitFor(() => expect(row.querySelector(".num")).not.toBeNull());
+      apiMock.getStorageInfo.mockResolvedValue({ temp_size_bytes: 0 });
+      const clear = buttonLabelled(row, "Clear");
+      clear.focus();
+      clear.click();
+
+      row.querySelector<HTMLButtonElement>(".btn-primary")!.click();
+      await vi.waitFor(() =>
+        expect(row.querySelector(".storage-size")!.textContent).toBe("0 B of temporary audio"),
+      );
+
+      expect(document.activeElement).toBe(clear);
+    } finally {
+      restoreDisabled();
+    }
+  });
+
+  it("lets Escape answer the clearing question with Cancel", async () => {
+    const row = storageRow(render("system"));
+    await vi.waitFor(() => expect(row.querySelector(".num")).not.toBeNull());
+    const clear = buttonLabelled(row, "Clear");
+    clear.focus();
+    clear.click();
+
+    buttonLabelled(row, "Cancel").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    await vi.waitFor(() =>
+      expect(row.querySelector(".storage-size")!.textContent).toBe("65.8 MB of temporary audio"),
+    );
+    expect(apiMock.cleanupTemp).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(clear);
+  });
+
   it("clears on the confirmation and shows the size that is left", async () => {
     apiMock.cleanupTemp.mockResolvedValue({ freed_bytes: 69_000_000 });
     const row = storageRow(render("system"));
@@ -189,6 +228,19 @@ describe("Delete all history", () => {
     buttonLabelled(area, "Cancel").click();
 
     await vi.waitFor(() => expect(document.activeElement).toBe(start));
+  });
+
+  it("lets Escape answer the question with Cancel", async () => {
+    const area = deleteArea(render("system"));
+    const start = buttonLabelled(area, "Delete all history");
+    start.focus();
+    start.click();
+
+    buttonLabelled(area, "Cancel").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    await vi.waitFor(() => expect(area.textContent).not.toContain("Delete every recording"));
+    expect(apiMock.clearHistory).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(start);
   });
 
   it("deletes everything on the confirmation and says so", async () => {

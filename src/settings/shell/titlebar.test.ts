@@ -56,6 +56,13 @@ describe("renderTitlebar", () => {
     expect(buttons.some((button) => button.hasAttribute("data-tauri-drag-region"))).toBe(false);
   });
 
+  it("keeps the three controls out of the Tab order, so Tab starts at the sidebar", () => {
+    const bar = newBar();
+    renderTitlebar(bar, "windows");
+
+    expect([...bar.querySelectorAll("button")].map((button) => button.tabIndex)).toEqual([-1, -1, -1]);
+  });
+
   it("leaves the controls to the native traffic lights on macOS", () => {
     const bar = newBar();
     renderTitlebar(bar, "mac");

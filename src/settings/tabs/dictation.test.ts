@@ -255,7 +255,7 @@ describe("renderDictation — the everyday card", () => {
     expect(hint.classList.contains(RESULT_HINT)).toBe(true);
 
     keycap.click();
-    expect(hint.textContent).toBe("Hold it down while you speak");
+    expect(hint.textContent).toBe("Press the new keys, or Esc to cancel");
     expect(hint.classList.contains(RESULT_HINT)).toBe(false);
   });
 });
@@ -371,6 +371,33 @@ describe("renderDictation — push-to-talk shortcut (spec 071)", () => {
     });
     expect(hintOf(container).textContent).toBe("Could not apply the shortcut: bridge down");
     expect(container.querySelector("#btn-shortcut")!.textContent).toBe("Ctrl + Alt + V");
+  });
+
+  it("lets Esc leave the capture: the old keys come back, nothing is sent, and the next key is free", () => {
+    const container = document.createElement("div");
+    renderDictation(container, buildSettings());
+    const keycap = container.querySelector<HTMLButtonElement>("#btn-shortcut")!;
+    keycap.click();
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape" }));
+    const next = new KeyboardEvent("keydown", { key: "Tab", code: "Tab", cancelable: true });
+    document.dispatchEvent(next);
+
+    expect(keycap.textContent).toBe("Ctrl + Alt + V");
+    expect(keycap.classList.contains("keycap--capturing")).toBe(false);
+    expect(hintOf(container).textContent).toBe("Hold it down while you speak");
+    expect(emitMock).not.toHaveBeenCalled();
+    expect(next.defaultPrevented).toBe(false);
+  });
+
+  it("still captures Esc held with a modifier as the new shortcut", async () => {
+    const container = document.createElement("div");
+    renderDictation(container, buildSettings());
+    capture(container, { key: "Escape", code: "Escape", ctrlKey: true });
+
+    await vi.waitFor(() => {
+      expect(emitMock).toHaveBeenCalledWith("shortcut-requested", { shortcut: "Ctrl+Escape" });
+    });
   });
 
   it("names the host platform's modifiers when none was held", () => {

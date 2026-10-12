@@ -3,6 +3,7 @@
  * last found to be none, and the updater's check, install and restart. The
  * time of the last "up to date" answer is UI state kept in `localStorage`.
  */
+import { setDisabled } from "../../ui/controls";
 import { icon } from "../../ui/icons";
 
 const LAST_UP_TO_DATE_KEY = "justsay.updates.lastUpToDateAt";
@@ -88,16 +89,16 @@ export function renderVersionRow(row: HTMLElement, isDestroyed: () => boolean): 
     pending = null;
     action.className = "btn version-action";
     action.innerHTML = `${icon("refresh", "small")}Check`;
-    action.disabled = false;
+    setDisabled(false, action);
   };
   const offerInstall = (update: PendingUpdate, label: string): void => {
     pending = update;
     action.className = "btn btn-primary version-action";
     action.textContent = label;
-    action.disabled = false;
+    setDisabled(false, action);
   };
   const busy = (label: string, text: string): void => {
-    action.disabled = true;
+    setDisabled(true, action);
     action.textContent = label;
     status.textContent = text;
   };

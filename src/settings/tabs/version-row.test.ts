@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { dropFocusWhenDisabled } from "../../ui/browser-focus.test-helper";
 
 const { checkMock, relaunchMock } = vi.hoisted(() => ({
   checkMock: vi.fn(),
@@ -62,6 +63,24 @@ describe("Version row — what it says before any check", () => {
 });
 
 describe("Version row — check, install and restart", () => {
+  it("keeps keyboard focus on the button through a check, which disables it meanwhile", async () => {
+    const restoreDisabled = dropFocusWhenDisabled();
+    try {
+      checkMock.mockResolvedValue(null);
+      const { row, button, status } = renderRow();
+      document.body.append(row);
+      button.focus();
+
+      button.click();
+      await vi.waitFor(() => expect(status.textContent).toBe("Checked just now · up to date"));
+
+      expect(document.activeElement).toBe(button);
+    } finally {
+      restoreDisabled();
+      document.body.innerHTML = "";
+    }
+  });
+
   it("a check that finds nothing says so, remembers when, and can check again", async () => {
     checkMock.mockResolvedValue(null);
     const { button, status } = renderRow();

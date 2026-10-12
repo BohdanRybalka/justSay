@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UserSettings } from "../../api";
 import { EVENT_MEETING_TOGGLE } from "../../contracts";
+import { dropFocusWhenDisabled } from "../../ui/browser-focus.test-helper";
 
 const calls: string[] = [];
 
@@ -221,6 +222,100 @@ describe("the first start (ADR 040 obligation 3)", () => {
 
     expect(title()).toBe("Record a meeting");
     expect(emitMock).toHaveBeenCalledExactlyOnceWith(EVENT_MEETING_TOGGLE);
+  });
+});
+
+describe("keyboard focus", () => {
+  async function onScreen(overrides: Partial<UserSettings> = {}) {
+    const view = await mountReady(overrides);
+    document.body.append(view.card);
+    return view;
+  }
+
+  const focused = () => document.activeElement?.id;
+  let restoreDisabled: () => void;
+
+  beforeEach(() => {
+    restoreDisabled = dropFocusWhenDisabled();
+  });
+
+  afterEach(() => {
+    restoreDisabled();
+    document.body.innerHTML = "";
+  });
+
+  it("follows the card from Start to the disclosure's Cancel and back to Start", async () => {
+    const { button } = await onScreen({ meeting_consent_acknowledged: false });
+    button("meeting-start").focus();
+
+    button("meeting-start").click();
+    expect(focused()).toBe("meeting-cancel");
+
+    button("meeting-cancel").click();
+    expect(focused()).toBe("meeting-start");
+  });
+
+  it("stays on the card through accepting, until Stop is there to take it", async () => {
+    const { button } = await onScreen({ meeting_consent_acknowledged: false });
+    button("meeting-start").click();
+    button("meeting-accept").focus();
+
+    button("meeting-accept").click();
+    await settle();
+    getMeetingStatusMock.mockResolvedValue(status(true, 1));
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(focused()).toBe("meeting-stop");
+  });
+
+  it("takes focus back from the held button once the meeting has ended", async () => {
+    getMeetingStatusMock.mockResolvedValue(status(true, 3));
+    const { button } = await onScreen();
+    button("meeting-stop").focus();
+    button("meeting-stop").click();
+    await settle();
+
+    getMeetingStatusMock.mockResolvedValue(status(false));
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(focused()).toBe("meeting-start");
+  });
+
+  it("cancels the disclosure on Esc, as Cancel does", async () => {
+    const { button, title } = await onScreen({ meeting_consent_acknowledged: false });
+    button("meeting-start").click();
+
+    button("meeting-accept").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    expect(title()).toBe("Record a meeting");
+    expect(emitMock).not.toHaveBeenCalled();
+  });
+
+  it("does not pull focus back once the user moved it elsewhere while the buttons were held", async () => {
+    getMeetingStatusMock.mockResolvedValue(status(true, 3));
+    const { button } = await onScreen();
+    const elsewhere = document.body.appendChild(document.createElement("button"));
+    button("meeting-stop").focus();
+    button("meeting-stop").click();
+    await settle();
+    elsewhere.focus();
+
+    getMeetingStatusMock.mockResolvedValue(status(false));
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
+  it("does not pull focus into the card when it was somewhere else", async () => {
+    const { button } = await onScreen({ meeting_consent_acknowledged: false });
+    const elsewhere = document.body.appendChild(document.createElement("button"));
+    button("meeting-start").focus();
+    button("meeting-start").click();
+    elsewhere.focus();
+
+    button("meeting-cancel").click();
+
+    expect(document.activeElement).toBe(elsewhere);
   });
 });
 

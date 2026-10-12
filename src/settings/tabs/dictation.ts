@@ -41,6 +41,7 @@ const MICROPHONE_UNCONFIRMED_LABEL =
 
 const RESULT_HINT = "setting-row-hint--result";
 const SHORTCUT_HINT = "Hold it down while you speak";
+const CAPTURING_HINT = "Press the new keys, or Esc to cancel";
 const NO_MICROPHONE = "No microphone";
 const UNKNOWN_MICROPHONE = "Your default microphone";
 
@@ -327,18 +328,30 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
     shortcutBtn.classList.remove("keycap--capturing");
   }
 
+  function cancelCapture() {
+    stopCapture();
+    shortcutBtn.textContent = formatAccelerator(settings.shortcut, platform);
+    shortcutHint.textContent = SHORTCUT_HINT;
+    shortcutHint.classList.remove(RESULT_HINT);
+  }
+
   shortcutBtn.addEventListener("click", () => {
     if (recording) return;
     recording = true;
     shortcutBtn.textContent = "Press keys…";
     shortcutBtn.classList.add("keycap--capturing");
-    shortcutHint.textContent = SHORTCUT_HINT;
+    shortcutHint.textContent = CAPTURING_HINT;
     shortcutHint.classList.remove(RESULT_HINT);
 
     captureHandler = (e: KeyboardEvent) => {
       if (destroyed) return;
       e.preventDefault();
       e.stopPropagation();
+
+      if (e.key === "Escape" && !(e.ctrlKey || e.altKey || e.shiftKey || e.metaKey)) {
+        cancelCapture();
+        return;
+      }
 
       const captured = acceleratorFromKeyEvent(e);
       if (!captured.ok) {

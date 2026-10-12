@@ -81,6 +81,7 @@
   background:var(--inset);border:1px solid var(--border)}
 .word-add input{flex:1;border:0;background:none;color:var(--text);font-size:12.5px;outline:none}
 .word-add .icon{color:var(--muted)}
+.search-box:focus-within,.word-add:focus-within{outline:2px solid var(--orange);outline-offset:2px}
 
 .search-box{display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:12px;
   background:var(--surface);border:1px solid var(--border);box-shadow:var(--bevel)}

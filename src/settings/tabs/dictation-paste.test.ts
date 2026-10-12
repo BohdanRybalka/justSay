@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UserSettings } from "../../api";
+import { dropFocusWhenDisabled } from "../../ui/browser-focus.test-helper";
 
 const { invokeMock, saveSettingsMock, notifyErrorMock } = vi.hoisted(() => ({
   invokeMock: vi.fn<(command: string) => Promise<unknown>>(),
@@ -30,6 +31,7 @@ beforeEach(() => {
 afterEach(() => {
   teardown?.();
   teardown = null;
+  document.body.innerHTML = "";
 });
 
 function mount(pasteAtCursor: boolean, onSaved = vi.fn()) {
@@ -37,6 +39,7 @@ function mount(pasteAtCursor: boolean, onSaved = vi.fn()) {
   container.innerHTML = PASTE_ROW;
   teardown = wirePasteRow(container, { paste_at_cursor: pasteAtCursor } as UserSettings, onSaved);
   return {
+    container,
     toggle: container.querySelector<HTMLButtonElement>("#paste-toggle")!,
     hint: container.querySelector<HTMLElement>("#paste-hint")!,
     allow: container.querySelector<HTMLButtonElement>("#btn-allow-paste")!,
@@ -59,6 +62,22 @@ describe("Paste where I'm typing", () => {
     await vi.waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
     expect(saveSettingsMock).toHaveBeenCalledExactlyOnceWith({ paste_at_cursor: false });
     expect(toggle.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("keeps keyboard focus on the switch through the save, which disables it meanwhile", async () => {
+    const restoreDisabled = dropFocusWhenDisabled();
+    try {
+      const { container, toggle } = mount(true);
+      document.body.append(container);
+      toggle.focus();
+
+      toggle.click();
+      await vi.waitFor(() => expect(toggle.disabled).toBe(false));
+
+      expect(document.activeElement).toBe(toggle);
+    } finally {
+      restoreDisabled();
+    }
   });
 
   it("puts the switch back when the save fails", async () => {
