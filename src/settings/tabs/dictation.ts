@@ -318,6 +318,8 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
   }
 
   let captureHandler: ((e: KeyboardEvent) => void) | null = null;
+  let activeShortcut: string | null = settings.shortcut;
+  const activeLabel = () => (activeShortcut === null ? "Not set" : formatAccelerator(activeShortcut, platform));
 
   function stopCapture() {
     if (captureHandler) {
@@ -330,7 +332,7 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
 
   function cancelCapture() {
     stopCapture();
-    shortcutBtn.textContent = formatAccelerator(settings.shortcut, platform);
+    shortcutBtn.textContent = activeLabel();
     shortcutHint.textContent = SHORTCUT_HINT;
     shortcutHint.classList.remove(RESULT_HINT);
   }
@@ -359,13 +361,13 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
         return;
       }
 
-      const activeLabel = formatAccelerator(settings.shortcut, platform);
+      const revertLabel = activeLabel();
 
       stopCapture();
       shortcutBtn.textContent = formatAccelerator(captured.accelerator, platform);
       showShortcutResult("Applying…");
 
-      void requestShortcut(captured.accelerator, activeLabel);
+      void requestShortcut(captured.accelerator, revertLabel);
     };
 
     document.addEventListener("keydown", captureHandler, true);
@@ -379,12 +381,14 @@ export function renderDictation(container: HTMLElement, settings: UserSettings):
         if (destroyed) return;
         const label = formatAccelerator(payload.shortcut, platform);
         if (!payload.ok) {
+          activeShortcut = payload.stillActive ?? null;
           showShortcutResult(`${label} was not accepted: ${payload.reason ?? "unknown reason"}`);
           shortcutBtn.textContent = payload.stillActive
             ? formatAccelerator(payload.stillActive, platform)
             : "Not set";
           return;
         }
+        activeShortcut = payload.shortcut;
         if (payload.persisted === true) cachePersistedShortcut(payload.shortcut);
         showShortcutResult(
           payload.persisted === false

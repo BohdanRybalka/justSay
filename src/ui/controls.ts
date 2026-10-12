@@ -13,7 +13,7 @@ export interface SegmentedOption<T extends string> {
   icon?: IconName;
 }
 
-const ARROW_STEP: Readonly<Record<string, number>> = { ArrowLeft: -1, ArrowRight: 1 };
+export const ARROW_STEP: Readonly<Record<string, number>> = { ArrowLeft: -1, ArrowRight: 1 };
 
 /**
  * Fills `root` with one pressed-state button per option, `value` pressed, drawn as one

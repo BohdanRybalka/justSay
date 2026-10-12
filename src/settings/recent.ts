@@ -7,7 +7,7 @@
 import { api, type EntrySource, type HistoryEntry } from "../api";
 import { renderReadFailure } from "../ui/controls";
 import { icon } from "../ui/icons";
-import { createEntryCards, EMPTY_KIND, SKELETON_CARD, type SectionKind } from "./history-entry";
+import { createEntryCards, EMPTY_KIND, keepCardFocus, SKELETON_CARD, type SectionKind } from "./history-entry";
 import { createJobCards } from "./history-jobs";
 import type { TabLifecycle } from "./settings";
 
@@ -89,9 +89,11 @@ export function mountRecent(
       loaded && fresh.length === entries.length && fresh.every((entry, i) => entry.id === entries[i].id);
     loaded = true;
     if (unchanged) return;
-    entries = fresh;
-    entryRows = fresh.map((entry) => cards.create(entry));
-    paint();
+    keepCardFocus(() => {
+      entries = fresh;
+      entryRows = fresh.map((entry) => cards.create(entry));
+      paint();
+    });
   }
 
   async function load(): Promise<void> {

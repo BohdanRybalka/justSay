@@ -5,7 +5,7 @@
  * The plot is a size container, so the callout and tooltip stay inside it in CSS.
  */
 import type { ChartSpan, Insights } from "../../api";
-import { renderSegmented } from "../../ui/controls";
+import { ARROW_STEP, renderSegmented } from "../../ui/controls";
 import { icon } from "../../ui/icons";
 import { prefersReducedMotion } from "../../ui/motion";
 import { escapeHtml } from "../html";
@@ -20,7 +20,6 @@ const HEADROOM = 1.12;
 const LOWEST_BAR_PERCENT = 3;
 const GROW_START_MS = 20;
 const GROW_STAGGER_MS = 14;
-const BAR_STEP: Readonly<Record<string, number>> = { ArrowLeft: -1, ArrowRight: 1 };
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const SPANS = [
   { value: "7", label: "7d" },
@@ -141,7 +140,7 @@ function drawPlot(plot: HTMLElement, days: ChartFigures["days"], words: number[]
 function barAfterKey(key: string, from: number, count: number): number | null {
   if (key === "Home") return 0;
   if (key === "End") return count - 1;
-  const step = BAR_STEP[key];
+  const step = ARROW_STEP[key];
   return step === undefined ? null : Math.min(Math.max(from + step, 0), count - 1);
 }
 

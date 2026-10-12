@@ -85,13 +85,34 @@ function paintStar(button: HTMLButtonElement, starred: boolean): void {
   button.classList.toggle("entry-star--on", starred);
 }
 
-/** The first action of the card after `card` on screen, else of the one before: where focus goes when `card` is deleted. */
-function actionBeside(card: HTMLElement): HTMLElement | undefined {
+/** The card after `card` on screen, else the one before, when focus is on `card` or lost: where it goes once `card` is deleted. */
+function neighbourFor(card: HTMLElement): HTMLElement | undefined {
+  const { activeElement, body } = card.ownerDocument;
+  if (!card.contains(activeElement) && activeElement !== body) return undefined;
   const cards = [...card.ownerDocument.querySelectorAll<HTMLElement>(".entry")].filter((other) =>
     other.querySelector(".entry-actions button"),
   );
   const at = cards.indexOf(card);
-  return (cards[at + 1] ?? cards[at - 1])?.querySelector<HTMLElement>(".entry-actions button") ?? undefined;
+  return at < 0 ? undefined : (cards[at + 1] ?? cards[at - 1]);
+}
+
+function focusFirstAction(card: HTMLElement): void {
+  for (const action of card.querySelectorAll<HTMLElement>(".entry-actions button")) {
+    action.focus();
+    if (card.ownerDocument.activeElement === action) return;
+  }
+}
+
+/** Runs `rebuild`, which replaces every card, then gives focus back to the same button of the same entry if one had it. */
+export function keepCardFocus(rebuild: () => void): void {
+  const active = document.activeElement;
+  const card = active instanceof HTMLElement ? active.closest<HTMLElement>(".entry") : null;
+  const id = card?.dataset.id;
+  const at = card ? [...card.querySelectorAll("button")].indexOf(active as HTMLButtonElement) : -1;
+  rebuild();
+  if (id === undefined || at < 0) return;
+  const same = [...document.querySelectorAll<HTMLElement>(".entry")].find((other) => other.dataset.id === id);
+  same?.querySelectorAll("button")[at]?.focus();
 }
 
 export interface EntryCards {
@@ -215,12 +236,13 @@ export function createEntryCards(deleted: (card: HTMLElement) => void): EntryCar
           button.setAttribute("aria-label", "Copy");
         }, COPIED_FLASH_MS);
       } else if (button.dataset.action === "delete") {
-        closeMenu(true);
+        const byKeyboard = e.detail === 0;
+        closeMenu(byKeyboard);
         try {
           await api.deleteHistoryEntry(entry.id);
-          const next = actionBeside(el);
+          const next = byKeyboard ? neighbourFor(el) : undefined;
           deleted(el);
-          next?.focus();
+          if (next) focusFirstAction(next);
         } catch (err) {
           console.error(err);
         }

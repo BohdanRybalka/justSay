@@ -289,7 +289,8 @@ export function mountMeetingCard(
   }
 
   card.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && disclosureOpen) cancel();
+    const cancelButton = card.querySelector<HTMLButtonElement>("#meeting-cancel");
+    if (event.key === "Escape" && cancelButton?.disabled === false) cancel();
   });
   draw();
   if (!windowHidden) resumeResources();

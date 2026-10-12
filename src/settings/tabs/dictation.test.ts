@@ -390,6 +390,44 @@ describe("renderDictation — push-to-talk shortcut (spec 071)", () => {
     expect(next.defaultPrevented).toBe(false);
   });
 
+  it("puts back the shortcut that is active now, not the one the panel opened with, when Esc cancels", async () => {
+    const container = document.createElement("div");
+    renderDictation(container, buildSettings());
+    await vi.waitFor(() => {
+      expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
+    });
+    listenMock.mock.calls[0][1]({
+      payload: { shortcut: "Ctrl+Alt+KeyB", ok: true, reason: null, persisted: true, stillActive: "Ctrl+Alt+KeyB" },
+    });
+
+    container.querySelector<HTMLButtonElement>("#btn-shortcut")!.click();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape" }));
+
+    expect(container.querySelector("#btn-shortcut")!.textContent).toBe("Ctrl + Alt + B");
+  });
+
+  it("puts back what a refusal says is still firing, or Not set when nothing is, when Esc cancels", async () => {
+    const container = document.createElement("div");
+    renderDictation(container, buildSettings());
+    await vi.waitFor(() => {
+      expect(listenMock).toHaveBeenCalledWith("shortcut-applied", expect.any(Function));
+    });
+    const refuse = (stillActive: string | null) =>
+      listenMock.mock.calls[0][1]({
+        payload: { shortcut: "Ctrl+Alt+KeyB", ok: false, reason: "in use", persisted: null, stillActive },
+      });
+    const cancelCapture = () => {
+      container.querySelector<HTMLButtonElement>("#btn-shortcut")!.click();
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape" }));
+      return container.querySelector("#btn-shortcut")!.textContent;
+    };
+
+    refuse("Ctrl+Alt+KeyK");
+    expect(cancelCapture()).toBe("Ctrl + Alt + K");
+    refuse(null);
+    expect(cancelCapture()).toBe("Not set");
+  });
+
   it("still captures Esc held with a modifier as the new shortcut", async () => {
     const container = document.createElement("div");
     renderDictation(container, buildSettings());

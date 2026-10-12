@@ -291,6 +291,21 @@ describe("keyboard focus", () => {
     expect(emitMock).not.toHaveBeenCalled();
   });
 
+  it("ignores Esc while the acknowledgement is being saved, so the start is not left half cancelled", async () => {
+    let finishSaving: () => void = () => {};
+    saveSettingsMock.mockImplementation(() => new Promise<void>((resolve) => (finishSaving = resolve)));
+    const { button, card, title } = await onScreen({ meeting_consent_acknowledged: false });
+    button("meeting-start").click();
+    button("meeting-accept").click();
+
+    card.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(title()).toBe("Before your first meeting");
+    finishSaving();
+    await settle();
+
+    expect(emitMock).toHaveBeenCalledExactlyOnceWith(EVENT_MEETING_TOGGLE);
+  });
+
   it("does not pull focus back once the user moved it elsewhere while the buttons were held", async () => {
     getMeetingStatusMock.mockResolvedValue(status(true, 3));
     const { button } = await onScreen();
