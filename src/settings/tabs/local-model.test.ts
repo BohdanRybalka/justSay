@@ -270,6 +270,26 @@ describe("watchLocalModel — the switch to Local after an install", () => {
     model.release();
   });
 
+  it("does not switch when the user chose another engine while the install was being started", async () => {
+    const { model, onInstalled } = watchWithSwitch();
+    model.resume();
+    await vi.advanceTimersByTimeAsync(0);
+    let answerStart: (download: ModelDownload) => void = () => {};
+    apiMock.sttLocalModelStart.mockReturnValue(new Promise((resolve) => (answerStart = resolve)));
+    apiMock.sttLocalModel.mockResolvedValue(DONE);
+    apiMock.sttLocalStatus.mockResolvedValue(buildLocalStatus({ model_loaded: true }));
+    const starting = model.install();
+
+    model.declineSwitch();
+    answerStart(downloading(0));
+    await starting;
+    await vi.advanceTimersByTimeAsync(1000 + 5000);
+
+    expect(model.row(false)).toEqual({ state: "installed" });
+    expect(onInstalled).not.toHaveBeenCalled();
+    model.release();
+  });
+
   it("drops the switch, and the finished steps, when the user chooses another engine in the pause", async () => {
     const { model, onInstalled } = watchWithSwitch();
     await installUntilTheEngineRuns(model);

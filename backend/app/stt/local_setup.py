@@ -207,8 +207,8 @@ def finish_local_install(stt_settings: STTSettings) -> None:
     """The last two steps of Install: check the machine, then start the engine.
 
     Runs once the model is on disk and starts the engine whatever the mode is, clearing an
-    older load failure it outlives. Each step reports its stage through ``model_download``;
-    a failure is recorded against its step and ends the run, never raised.
+    older load failure while that engine is the one in use. Each step reports its stage through
+    ``model_download``; a failure is recorded against its step and ends the run, never raised.
     """
     step: Literal["checking", "starting"] = "checking"
     try:
@@ -223,8 +223,7 @@ def finish_local_install(stt_settings: STTSettings) -> None:
         model_download.fail(step, latched_load_error(e))
         return
     _record_load_outcome(provider, None, None)
-    if not _load_speaks_for_the_cache(provider):
-        provider.cleanup()
+    _release_if_superseded(provider)
     model_download.advance("done")
 
 
@@ -323,11 +322,7 @@ async def _run_get_model(provider) -> None:
         _record_load_outcome(provider, None, _load_delta_mb(baseline_rss, census))
     finally:
         _finish_load()
-        if not _load_speaks_for_the_cache(provider):
-            try:
-                provider.cleanup()
-            except Exception:
-                log.warning("Releasing the superseded local provider failed", exc_info=True)
+        _release_if_superseded(provider)
 
 
 async def ensure_local_ready(stt_settings: STTSettings) -> None:
@@ -509,6 +504,16 @@ def _record_load_outcome(provider, error: str | None, megabytes: int | None) -> 
         return
     _prewarm_error = error
     _model_ram_mb = megabytes
+
+
+def _release_if_superseded(provider) -> None:
+    """Release ``provider`` once the cache has moved past it; a failing release is only logged."""
+    if _load_speaks_for_the_cache(provider):
+        return
+    try:
+        provider.cleanup()
+    except Exception:
+        log.warning("Releasing the superseded local provider failed", exc_info=True)
 
 
 def _clear_model_ram_mb(provider) -> None:

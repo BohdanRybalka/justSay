@@ -2933,6 +2933,21 @@ def test_finish_local_install_lets_go_of_an_engine_the_cache_has_moved_past(
     assert model_download.snapshot().stage == "done"
 
 
+def test_finish_local_install_still_ends_done_when_letting_go_of_the_old_engine_fails(
+    install_steps,
+):
+    provider = install_steps(_EngineProvider(), cached=False)
+
+    def failing_cleanup():
+        raise RuntimeError("cannot start the thread")
+
+    provider.cleanup = failing_cleanup
+
+    local_setup.finish_local_install(STTSettings())
+
+    assert model_download.snapshot().stage == "done"
+
+
 def test_finish_local_install_stops_at_checking_when_the_engine_binary_is_missing(
     install_steps, monkeypatch
 ):

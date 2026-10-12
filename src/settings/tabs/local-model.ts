@@ -43,6 +43,7 @@ export function watchLocalModel(hooks: LocalModelHooks): LocalModel {
   let latestToken = 0;
   let active = false;
   let installingHere = false;
+  let declines = 0;
   let finishing = false;
   let statusTimer: ReturnType<typeof setInterval> | null = null;
   let downloadTimer: ReturnType<typeof setInterval> | null = null;
@@ -56,6 +57,7 @@ export function watchLocalModel(hooks: LocalModelHooks): LocalModel {
   }
 
   function declineSwitch() {
+    declines += 1;
     installingHere = false;
     finishing = false;
     if (switchTimer !== null) clearTimeout(switchTimer);
@@ -119,6 +121,7 @@ export function watchLocalModel(hooks: LocalModelHooks): LocalModel {
 
   async function install() {
     let started: ModelDownload;
+    const declinedBefore = declines;
     try {
       started = await api.sttLocalModelStart();
     } catch (e) {
@@ -126,7 +129,7 @@ export function watchLocalModel(hooks: LocalModelHooks): LocalModel {
       return;
     }
     latestToken += 1;
-    installingHere = true;
+    installingHere = declines === declinedBefore;
     adopt(started);
     syncDownloadTimer();
     hooks.onChange();
