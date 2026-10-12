@@ -143,6 +143,72 @@ async def test_stt_local_prewarm_dispatches_and_returns_started(client, monkeypa
     assert call_count["n"] == 2
 
 
+@pytest.mark.asyncio
+async def test_stt_local_model_reads_the_shared_download_state(client, monkeypatch):
+    from app.stt import model_download
+
+    state = model_download.ModelDownloadState(stage="downloading", bytes_done=5, bytes_total=20)
+    monkeypatch.setattr(model_download, "_state", state)
+
+    resp = await client.get("/stt/local/model")
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "stage": "downloading",
+        "bytes_done": 5,
+        "bytes_total": 20,
+        "error": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_stt_local_model_start_downloads_the_configured_size(client, monkeypatch, tmp_path):
+    import app.stt.router as stt_router_module
+    from app.stt import model_download
+    from app.stt.config import stt_settings
+    from app.stt.local_factory import LocalProviderKind
+
+    started = []
+    model_path = tmp_path / "ggml.bin"
+    monkeypatch.setattr(
+        stt_router_module, "get_local_provider_kind", lambda: LocalProviderKind.WHISPER_CPP_SERVER
+    )
+    monkeypatch.setattr(stt_router_module, "resolve_model_path", lambda size: model_path)
+    monkeypatch.setattr(
+        model_download,
+        "start",
+        lambda size, path: started.append((size, path))
+        or model_download.ModelDownloadState(stage="downloading"),
+    )
+
+    resp = await client.post("/stt/local/model")
+
+    assert resp.status_code == 200
+    assert resp.json()["stage"] == "downloading"
+    assert started == [(stt_settings.whisper_model_size, model_path)]
+
+
+@pytest.mark.asyncio
+async def test_stt_local_model_start_refuses_an_engine_that_reports_no_progress(
+    client, monkeypatch
+):
+    import app.stt.router as stt_router_module
+    from app.stt import model_download
+    from app.stt.local_factory import LocalProviderKind
+
+    monkeypatch.setattr(
+        stt_router_module, "get_local_provider_kind", lambda: LocalProviderKind.FASTER_WHISPER
+    )
+    monkeypatch.setattr(
+        model_download, "start", lambda *args: pytest.fail("a download must not start")
+    )
+
+    resp = await client.post("/stt/local/model")
+
+    assert resp.status_code == 400
+    assert "without progress" in resp.json()["detail"]
+
+
 def _make_recorder_mock(duration: float, audio_path: Path) -> MagicMock:
     recorder = MagicMock()
     recorder.is_recording = True

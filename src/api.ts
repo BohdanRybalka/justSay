@@ -604,6 +604,14 @@ export interface CloudKeyStatus {
   groq_key_set: boolean;
 }
 
+/** `bytes_total` is null until the server has announced the size; `error` is a plain sentence. */
+export interface ModelDownload {
+  stage: "idle" | "downloading" | "done" | "failed";
+  bytes_done: number;
+  bytes_total: number | null;
+  error: string | null;
+}
+
 export interface LocalSTTStatus {
   /** This build has, or can install, an engine for this machine. */
   available: boolean;
@@ -611,6 +619,8 @@ export interface LocalSTTStatus {
   model_downloaded: boolean;
   /** On disk when `model_downloaded`, else the expected download; null when unknown. */
   model_bytes: number | null;
+  /** The engine downloads its model through `/stt/local/model`, with progress. */
+  model_download_reported: boolean;
   model_loaded: boolean;
   model_name: string;
   model_ram_mb: number | null;
@@ -873,6 +883,8 @@ export const api = {
 
   sttLocalStatus: () => request<LocalSTTStatus>("GET", "/stt/local/status", undefined, REREADABLE),
 
+  sttLocalModel: () => request<ModelDownload>("GET", "/stt/local/model", undefined, REREADABLE),
+
   getSettings: () => request<UserSettings>("GET", "/settings", undefined, REREADABLE),
 
   getStorageInfo: () => request<StorageInfo>("GET", "/settings/storage", undefined, REREADABLE),
@@ -1095,6 +1107,11 @@ export const api = {
    *  forever hangs the one button that exists to escape a stuck state. */
   sttLocalPrewarm: () =>
     request<{ started: boolean }>("POST", "/stt/local/prewarm", undefined, REREADABLE),
+
+  /** Starts the model download on the backend and answers at once. A press while one runs
+   *  changes nothing and a failed one resumes, so asking again is safe. */
+  sttLocalModelStart: () =>
+    request<ModelDownload>("POST", "/stt/local/model", undefined, REREADABLE),
 
   updateSettings: (updates: Partial<UserSettings>) =>
     request<SettingsUpdateResponse>("PUT", "/settings", updates, UNRECONCILED),

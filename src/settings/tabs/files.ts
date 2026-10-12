@@ -13,12 +13,14 @@ import { mountLanguageCard } from "./language-card";
 import { CLOUD_HINT } from "./mode-rows";
 
 /** Adds the Files page to the end of `container`; Choose a file calls `pick`, and All in
- *  History calls `openHistory` with the files filter. */
+ *  History calls `openHistory` with the files filter. `windowHidden` keeps the model row from
+ *  reading until the window is shown. */
 export function renderFiles(
   container: HTMLElement,
   settings: UserSettings,
   pick: () => void,
   openHistory: (source: EntrySource) => void,
+  windowHidden = false,
 ): Recent {
   container.insertAdjacentHTML(
     "beforeend",
@@ -42,12 +44,17 @@ export function renderFiles(
     detectHint: "Each file is heard in its own language",
     listTitle: "File language",
   });
-  const engine = mountEngineCard(container, settings, {
-    idPrefix: "files",
-    field: "files_engine",
-    ariaLabel: "File model",
-    cloudHint: CLOUD_HINT,
-  });
+  const engine = mountEngineCard(
+    container,
+    settings,
+    {
+      idPrefix: "files",
+      field: "files_engine",
+      ariaLabel: "File model",
+      cloudHint: CLOUD_HINT,
+    },
+    windowHidden,
+  );
 
   return {
     ...recent,
@@ -55,6 +62,14 @@ export function renderFiles(
       language.destroy();
       engine.destroy();
       recent.destroy();
+    },
+    releaseResources: () => {
+      recent.releaseResources();
+      engine.releaseResources();
+    },
+    resumeResources: () => {
+      recent.resumeResources();
+      engine.resumeResources();
     },
   };
 }

@@ -2,9 +2,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudKeyStatus, LocalSTTStatus, UserSettings } from "../../api";
 import type { TabLifecycle } from "../settings";
+import { buildDownload } from "../local-status-stub.test-helper";
 
 const apiMock = {
   sttLocalStatus: vi.fn(),
+  sttLocalModel: vi.fn(),
+  sttLocalModelStart: vi.fn(),
   sttLocalPrewarm: vi.fn(),
   setSttMode: vi.fn(),
   updateSettings: vi.fn(),
@@ -65,6 +68,7 @@ function buildStatus(overrides: Partial<LocalSTTStatus> = {}): LocalSTTStatus {
     package_installed: true,
     model_downloaded: true,
     model_bytes: 1_624_555_275,
+    model_download_reported: false,
     model_loaded: false,
     model_name: "large-v3-turbo",
     model_ram_mb: null,
@@ -112,6 +116,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   apiMock.setSttMode.mockResolvedValue({});
   apiMock.sttLocalPrewarm.mockResolvedValue({ started: true });
+  apiMock.sttLocalModel.mockResolvedValue({ stage: "idle", bytes_done: 0, bytes_total: null, error: null });
 });
 
 afterEach(() => {
@@ -564,5 +569,75 @@ describe("renderDictationMode — the two rows", () => {
     const container = await render(buildStatus());
 
     expect(hint(container, "cloud").textContent).toBe("Your API keys · fastest and most accurate");
+  });
+});
+
+describe("renderDictationMode — Install downloads the model", () => {
+  const tracked = { model_downloaded: false, model_download_reported: true };
+  const download = buildDownload;
+  const progress = (container: HTMLElement) =>
+    container.querySelector<HTMLElement>("#mode-local + .mode-row-install")!;
+
+  it("starts the download and leaves the mode alone", async () => {
+    apiMock.sttLocalModelStart.mockResolvedValue(download({ stage: "downloading" }));
+    const container = await render(buildStatus(tracked), { stt_mode: "cloud" });
+    await vi.waitFor(() => expect(action(container)).toBe("Install"));
+
+    row(container, "local").click();
+
+    await vi.waitFor(() => expect(hint(container, "local").textContent).toBe("Installing…"));
+    expect(apiMock.sttLocalModelStart).toHaveBeenCalledOnce();
+    expect(apiMock.setSttMode).not.toHaveBeenCalled();
+  });
+
+  it("shows the bar with the share of the model that has arrived", async () => {
+    apiMock.sttLocalModel.mockResolvedValue(download({ stage: "downloading", bytes_done: 600, bytes_total: 1000 }));
+    const container = await render(buildStatus(tracked), { stt_mode: "cloud" });
+
+    await vi.waitFor(() => expect(progress(container).hidden).toBe(false));
+    expect(progress(container).querySelector(".install-percent")!.textContent).toBe("60%");
+    expect(progress(container).querySelector(".install-label")!.textContent).toBe("Downloading the model");
+  });
+
+  it("shows the download that is under way while Local is the mode and the engine is still starting", async () => {
+    apiMock.sttLocalModel.mockResolvedValue(download({ stage: "downloading", bytes_done: 10, bytes_total: 100 }));
+    const container = await render(buildStatus(tracked), { stt_mode: "local" });
+
+    await vi.waitFor(() => expect(hint(container, "local").textContent).toBe("Installing…"));
+  });
+
+  it("resumes a failed download on Try again instead of reloading the engine", async () => {
+    apiMock.sttLocalModel.mockResolvedValue(download({ stage: "failed", error: "The download was interrupted." }));
+    apiMock.sttLocalModelStart.mockResolvedValue(download({ stage: "downloading" }));
+    const container = await render(buildStatus(tracked), { stt_mode: "cloud" });
+    await vi.waitFor(() => expect(action(container)).toBe("Try again"));
+    expect(hint(container, "local").textContent).toBe("The download was interrupted.");
+
+    row(container, "local").click();
+
+    await vi.waitFor(() => expect(apiMock.sttLocalModelStart).toHaveBeenCalledOnce());
+    expect(apiMock.sttLocalPrewarm).not.toHaveBeenCalled();
+  });
+
+  it("keeps switching the mode on an engine that reports no download progress", async () => {
+    const container = await render(buildStatus({ model_downloaded: false }), { stt_mode: "cloud" });
+    await vi.waitFor(() => expect(action(container)).toBe("Install"));
+
+    row(container, "local").click();
+
+    await vi.waitFor(() => expect(apiMock.setSttMode).toHaveBeenCalledWith("local"));
+    expect(apiMock.sttLocalModelStart).not.toHaveBeenCalled();
+    expect(apiMock.sttLocalModel).not.toHaveBeenCalled();
+  });
+
+  it("ignores a press while the model downloads", async () => {
+    apiMock.sttLocalModel.mockResolvedValue(download({ stage: "downloading", bytes_done: 1, bytes_total: 100 }));
+    const container = await render(buildStatus(tracked), { stt_mode: "cloud" });
+    await vi.waitFor(() => expect(hint(container, "local").textContent).toBe("Installing…"));
+
+    row(container, "local").click();
+
+    expect(apiMock.sttLocalModelStart).not.toHaveBeenCalled();
+    expect(apiMock.setSttMode).not.toHaveBeenCalled();
   });
 });

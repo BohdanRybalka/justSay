@@ -48,13 +48,18 @@ export function renderMeetings(
     detectHint: "For calls in several languages",
     listTitle: "Meeting language",
   });
-  const engine = mountEngineCard(container, settings, {
-    idPrefix: "meetings",
-    field: "meetings_engine",
-    ariaLabel: "Meeting model",
-    cloudHint: CLOUD_HINT,
-    onShown: (shown) => card.setEngine(shown),
-  });
+  const engine = mountEngineCard(
+    container,
+    settings,
+    {
+      idPrefix: "meetings",
+      field: "meetings_engine",
+      ariaLabel: "Meeting model",
+      cloudHint: CLOUD_HINT,
+      onShown: (shown) => card.setEngine(shown),
+    },
+    windowHidden,
+  );
 
   return {
     destroy: () => {
@@ -66,10 +71,12 @@ export function renderMeetings(
     releaseResources: () => {
       card.releaseResources?.();
       recent.releaseResources();
+      engine.releaseResources();
     },
     resumeResources: () => {
       card.resumeResources?.();
       recent.resumeResources();
+      engine.resumeResources();
     },
   };
 }
