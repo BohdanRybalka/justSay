@@ -1084,6 +1084,24 @@ describe("renderHistory — the search hint belongs to the lane that put it up",
     expect(container.querySelector("#history-search-hint")!.textContent).toBe("Couldn't load this. Try again");
   });
 
+  it("shows nothing for a search that fails after a newer one has started", async () => {
+    let fail: (error: Error) => void = () => {};
+    let searches = 0;
+    apiMock.searchHistory.mockImplementation(() => {
+      searches += 1;
+      return searches === 1 ? new Promise((_, reject) => (fail = reject)) : new Promise(() => {});
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { container } = await renderAndWait([buildEntry("1"), buildEntry("2")]);
+
+    await typeQuery(container, "a");
+    await typeQuery(container, "ab");
+    fail(new Error("HTTP 503"));
+    await flush();
+
+    expect(container.querySelector("#history-search-hint")!.textContent).toBe("Searching...");
+  });
+
   it("leaves a newer search's error message alone when the one it superseded settles", async () => {
     const superseded = deferred<{ entries: HistoryEntry[]; total: number }>();
     let searches = 0;

@@ -572,6 +572,20 @@ describe("createHistoryList — one request at a time decides the rows and the c
     expect(h.failureText()).toBe("Couldn't load this. Try again");
   });
 
+  it("shows no failure line for a read that fails after another lane took the rows", async () => {
+    const h = harness();
+    let fail: (error: Error) => void = () => {};
+    apiMock.getHistory.mockReturnValueOnce(new Promise((_, reject) => (fail = reject)));
+    const list = listOver(h);
+    const loading = list.load();
+    list.claimRows();
+
+    fail(new Error("503 store busy"));
+    await loading;
+
+    expect(h.failureText()).toBeNull();
+  });
+
   it("takes the failure line away when the backend answers that it is too old", async () => {
     const h = harness();
     const cursor: HistoryCursor = { ts: 300, id: "b" };
