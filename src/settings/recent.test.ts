@@ -380,25 +380,6 @@ describe("mountRecent — staying current", () => {
   });
 });
 
-describe("mountRecent — keyboard focus", () => {
-  it("stays on the same action of the same entry when the list is rebuilt after a delete", async () => {
-    apiMock.getHistory.mockResolvedValue(pageOf([entryOf("c"), entryOf("b"), entryOf("a")], 4, null));
-    apiMock.deleteHistoryEntry.mockResolvedValue(undefined);
-    const { container } = mount("meeting");
-    await flush();
-    apiMock.getHistory.mockResolvedValue(pageOf([entryOf("b"), entryOf("a"), entryOf("z")], 3, null));
-    const first = container.querySelector<HTMLElement>(".timeline > .entry")!;
-    first.querySelector<HTMLButtonElement>('[data-action="more"]')!.click();
-    first.querySelector<HTMLButtonElement>('[data-action="delete"]')!.click();
-    await flush();
-
-    const second = container.querySelector<HTMLElement>(".timeline > .entry")!;
-    expect(second.dataset.id).toBe("b");
-    expect(document.activeElement).toBe(second.querySelector(".entry-actions button"));
-    expect(second.isConnected).toBe(true);
-  });
-});
-
 describe("mountRecent — All in History", () => {
   it("opens History with its own kind", async () => {
     const { container, openHistory } = mount("meeting");

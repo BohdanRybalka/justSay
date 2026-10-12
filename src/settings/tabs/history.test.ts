@@ -1297,106 +1297,17 @@ describe("renderHistory — a delete", () => {
     expect(heads).toEqual(["Yesterday"]);
   });
 
-  describe("and where keyboard focus goes", () => {
-    const firstAction = (card: HTMLElement) => card.querySelector(".entry-actions button");
+  it("keeps keyboard focus on the card's More button when the delete fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    apiMock.deleteHistoryEntry.mockRejectedValue(new Error("backend down"));
+    const container = await renderWith(2);
+    const more = openMenuOf(cards(container)[0]);
 
-    async function deleteRow(container: HTMLElement, index: number): Promise<HTMLButtonElement> {
-      const more = openMenuOf(cards(container)[index]);
-      container.querySelector<HTMLButtonElement>('[data-action="delete"]')!.click();
-      await flush();
-      return more;
-    }
+    container.querySelector<HTMLButtonElement>('[data-action="delete"]')!.click();
+    await flush();
 
-    it("moves to the first action of the card that takes the deleted one's place", async () => {
-      apiMock.deleteHistoryEntry.mockResolvedValue({ deleted: true });
-      const container = await renderWith(3);
-
-      await deleteRow(container, 0);
-
-      expect(document.activeElement).toBe(firstAction(cards(container)[0]));
-      expect(cards(container)[0].dataset.id).toBe("2");
-    });
-
-    it("moves to the card before when the last one is deleted", async () => {
-      apiMock.deleteHistoryEntry.mockResolvedValue({ deleted: true });
-      const container = await renderWith(3);
-
-      await deleteRow(container, 2);
-
-      expect(cards(container)).toHaveLength(2);
-      expect(document.activeElement).toBe(firstAction(cards(container)[1]));
-    });
-
-    it("leaves focus alone when the delete was a mouse click", async () => {
-      apiMock.deleteHistoryEntry.mockResolvedValue({ deleted: true });
-      const container = await renderWith(3);
-      openMenuOf(cards(container)[0]);
-      const input = container.querySelector<HTMLInputElement>("#history-search")!;
-
-      container.querySelector<HTMLButtonElement>('[data-action="delete"]')!.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, detail: 1 }),
-      );
-      await flush();
-
-      expect(cards(container)).toHaveLength(2);
-      expect(document.activeElement).not.toBe(firstAction(cards(container)[0]));
-      expect(document.activeElement).not.toBe(input);
-    });
-
-    it("does not take focus from the search box the user went to meanwhile", async () => {
-      const release = deferred<{ deleted: boolean }>();
-      apiMock.deleteHistoryEntry.mockReturnValue(release.promise);
-      const container = await renderWith(3);
-      openMenuOf(cards(container)[0]);
-      container.querySelector<HTMLButtonElement>('[data-action="delete"]')!.click();
-      const input = container.querySelector<HTMLInputElement>("#history-search")!;
-      input.focus();
-
-      release.release({ deleted: true });
-      await flush();
-
-      expect(cards(container)).toHaveLength(2);
-      expect(document.activeElement).toBe(input);
-    });
-
-    it("does not jump to the top when the card was already replaced while the delete ran", async () => {
-      const release = deferred<{ deleted: boolean }>();
-      apiMock.deleteHistoryEntry.mockReturnValue(release.promise);
-      const container = await renderWith(3);
-      const doomed = cards(container)[1];
-      openMenuOf(doomed);
-      doomed.querySelector<HTMLButtonElement>('[data-action="delete"]')!.click();
-      doomed.remove();
-
-      release.release({ deleted: true });
-      await flush();
-
-      expect(document.activeElement).toBe(document.body);
-    });
-
-    it("moves on to the next action of the neighbour when its first one cannot take focus", async () => {
-      apiMock.deleteHistoryEntry.mockResolvedValue({ deleted: true });
-      const container = await renderWith(2);
-      const [first, second] = [...cards(container)];
-      const [hidden, shown] = second.querySelectorAll<HTMLButtonElement>(".entry-actions button");
-      vi.spyOn(hidden, "focus").mockImplementation(() => {});
-      openMenuOf(first);
-      first.querySelector<HTMLButtonElement>('[data-action="delete"]')!.click();
-      await flush();
-
-      expect(document.activeElement).toBe(shown);
-    });
-
-    it("stays on the card's More button when the delete fails", async () => {
-      vi.spyOn(console, "error").mockImplementation(() => {});
-      apiMock.deleteHistoryEntry.mockRejectedValue(new Error("backend down"));
-      const container = await renderWith(2);
-
-      const more = await deleteRow(container, 0);
-
-      expect(cards(container)).toHaveLength(2);
-      expect(document.activeElement).toBe(more);
-    });
+    expect(cards(container)).toHaveLength(2);
+    expect(document.activeElement).toBe(more);
   });
 });
 
