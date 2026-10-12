@@ -21,6 +21,8 @@ def test_every_listed_phrase_alone_leaves_nothing(phrase):
         "thanks, for watching!",
         "Subtitles by the Amara.org community",
         "Субтитри зроблені спільнотою Amara.org",
+        "Субтитры создавал DimaTorzok",
+        "субтитры сделал dimatorzok.",
         "[silence]",
         "[BLANK_AUDIO]",
         "[Музика]",

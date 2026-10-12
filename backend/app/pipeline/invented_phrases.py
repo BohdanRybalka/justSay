@@ -18,6 +18,8 @@ INVENTED_PHRASES = (
     "дякуємо за перегляд",
     "субтитри зроблені спільнотою amara.org",
     "субтитри створено спільнотою amara.org",
+    "субтитры создавал dimatorzok",
+    "субтитры сделал dimatorzok",
 )
 
 _WORD = re.compile(r"\w+")
