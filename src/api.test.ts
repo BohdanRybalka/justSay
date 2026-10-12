@@ -1133,7 +1133,7 @@ describe("session-carrying calls", () => {
     expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
       "http://127.0.0.1:9377/audio/start",
       "http://127.0.0.1:9377/audio/discard",
-      "http://127.0.0.1:9377/pipeline/dictate?language=uk&copy_to_clipboard=false",
+      "http://127.0.0.1:9377/pipeline/dictate?language=uk",
     ]);
     expect(bodies).toEqual([
       { session_id: SESSION_ID },

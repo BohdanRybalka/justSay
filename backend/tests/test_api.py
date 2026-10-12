@@ -230,9 +230,7 @@ def _make_recorder_mock(duration: float, audio_path: Path) -> MagicMock:
 
 
 def _make_pipeline_result() -> ProcessingResult:
-    return ProcessingResult(
-        text="ok", duration_ms=100, copied_to_clipboard=True
-    )
+    return ProcessingResult(text="ok", duration_ms=100)
 
 
 @pytest.mark.asyncio

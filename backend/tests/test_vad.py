@@ -585,7 +585,6 @@ async def test_averted_energy_false_positive_is_not_discarded_end_to_end(tmp_pat
     stt.is_local = False
 
     with patch("app.pipeline.service.get_provider", return_value=stt), \
-            patch("app.pipeline.service.pyperclip.copy"), \
             patch("app.pipeline.service.save_entry"):
         result = await process_audio(path, language="uk", source="dictation")
 
@@ -873,7 +872,7 @@ _MIN_CONTENTION_SCAN_S = 0.05
 async def _median_gate_ms(path: Path, duration: float, runs: int = 5) -> float:
     """Median wall time of `process_audio` over `path`, gate work only.
 
-    Routing, clipboard and history are patched out, and ``audio_duration`` is
+    Routing and history are patched out, and ``audio_duration`` is
     passed explicitly so `detect_duration` never runs — what is left inside
     the timed region is the silence gate plus mock overhead."""
     stt = MagicMock()
@@ -883,7 +882,6 @@ async def _median_gate_ms(path: Path, duration: float, runs: int = 5) -> float:
 
     samples: list[float] = []
     with patch("app.pipeline.service.get_provider", return_value=stt), \
-            patch("app.pipeline.service.pyperclip.copy"), \
             patch("app.pipeline.service.save_entry"):
         await process_audio(path, language="uk", audio_duration=duration, source="dictation")
         for _ in range(runs):

@@ -358,7 +358,6 @@ class JobQueue:
                     language=(
                         stt_settings.meetings_language if meeting else stt_settings.files_language
                     ),
-                    copy_to_clipboard=False,
                     source=job.kind,
                     source_name=None if meeting else job.name,
                     observer=_JobObserver(self, job),

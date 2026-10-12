@@ -3,7 +3,7 @@
 Dedicated router-test file, split from the service-level `test_pipeline.py`
 the same way `test_preferences_router.py` is split from `test_user_settings.py`
 (spec 019). `app.pipeline.router.process_audio` is patched so no real STT
-call, history write, or clipboard access happens — this file only asserts
+call or history write happens — this file only asserts
 what the router forwards to `process_audio`.
 """
 
@@ -40,7 +40,6 @@ def _fake_result() -> SimpleNamespace:
     return SimpleNamespace(
         text="hello",
         duration_ms=100,
-        copied_to_clipboard=True,
         model_name="mock/provider",
     )
 
@@ -188,8 +187,8 @@ async def test_a_refused_dictate_transcribes_nothing(client, tmp_path):
     """A 403 has to arrive before the pipeline runs, not after it.
 
     Transcribing somebody else's capture and then refusing to answer would
-    still have copied it to the clipboard and written a History row — the
-    zero-leak posture broken by an endpoint that was only trying to be safe.
+    still have written a History row — the zero-leak posture broken by an
+    endpoint that was only trying to be safe.
     """
     recorder = _stopping_recorder(tmp_path / "rec.wav")
     recorder.stop = AsyncMock(side_effect=SessionMismatchError("not yours"))

@@ -83,11 +83,9 @@ def _vad_abstains(request):
 
 @pytest.fixture(autouse=True)
 def _isolate_side_effects():
-    """Clipboard writes and history persistence are side-effects we mock out."""
-    with patch("app.pipeline.service.pyperclip.copy") as copy_mock, patch(
-        "app.pipeline.service.save_entry"
-    ) as save_mock:
-        yield copy_mock, save_mock
+    """History persistence is a side-effect we mock out."""
+    with patch("app.pipeline.service.save_entry") as save_mock:
+        yield save_mock
 
 
 @pytest.fixture
@@ -110,15 +108,13 @@ def _make_stt_mock(text: str = "hello world", tokens: int | None = None):
 async def test_pipeline_returns_stt_text_verbatim(
     sample_wav, cloud_mode, _isolate_side_effects
 ):
-    copy_mock, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     stt = _make_stt_mock("Привіт світ")
 
     with patch("app.pipeline.service.get_provider", return_value=stt):
         result = await process_audio(sample_wav, language="uk", source="dictation")
 
     assert result.text == "Привіт світ"
-    assert result.copied_to_clipboard is True
-    copy_mock.assert_called_once_with("Привіт світ")
     saved_kwargs = save_mock.call_args.kwargs
     assert saved_kwargs["text"] == "Привіт світ"
     assert saved_kwargs["language"] == "uk"
@@ -131,21 +127,7 @@ async def test_pipeline_returns_stt_text_verbatim(
 
 
 @pytest.mark.asyncio
-async def test_pipeline_does_not_copy_empty_text(
-    sample_wav, cloud_mode, _isolate_side_effects
-):
-    copy_mock, _ = _isolate_side_effects
-    stt = _make_stt_mock("")
-
-    with patch("app.pipeline.service.get_provider", return_value=stt):
-        result = await process_audio(sample_wav, language="uk", source="dictation")
-
-    assert result.copied_to_clipboard is False
-    copy_mock.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_pipeline_copies_speech_that_opens_like_a_refusal(
+async def test_pipeline_keeps_speech_that_opens_like_a_refusal(
     sample_wav, cloud_mode, _isolate_side_effects
 ):
     """The layer where the damage was visible, not the layer that caused it.
@@ -155,7 +137,7 @@ async def test_pipeline_copies_speech_that_opens_like_a_refusal(
     proves that one filter stays gone; this pins the outcome the user gets, so
     a discard reintroduced anywhere in the pipeline turns it red too.
     """
-    copy_mock, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     spoken = "Sorry, I was late to the meeting."
     stt = _make_stt_mock(spoken)
 
@@ -163,32 +145,9 @@ async def test_pipeline_copies_speech_that_opens_like_a_refusal(
         result = await process_audio(sample_wav, language="en", source="dictation")
 
     assert result.text == spoken
-    assert result.copied_to_clipboard is True
     assert result.discarded_reason is None
-    copy_mock.assert_called_once_with(spoken)
     assert save_mock.call_args.kwargs["text"] == spoken
     assert save_mock.call_args.kwargs["word_count"] == 7
-
-
-@pytest.mark.asyncio
-async def test_pipeline_clipboard_failure_is_graceful(
-    sample_wav, cloud_mode, _isolate_side_effects, caplog
-):
-    copy_mock, save_mock = _isolate_side_effects
-    copy_mock.side_effect = RuntimeError("no clipboard")
-    stt = _make_stt_mock("text")
-
-    with (
-        patch("app.pipeline.service.get_provider", return_value=stt),
-        caplog.at_level(logging.DEBUG, logger="app.pipeline.service"),
-    ):
-        result = await process_audio(sample_wav, language="uk", source="dictation")
-
-    assert result.text == "text"
-    assert result.copied_to_clipboard is False
-    assert save_mock.call_count == 1
-    assert save_mock.call_args.kwargs["text"] == "text"
-    assert [r for r in caplog.records if r.name == "app.pipeline.service" and r.exc_info]
 
 
 @pytest.mark.asyncio
@@ -196,7 +155,7 @@ async def test_pipeline_forwards_tokens_used_to_history(
     sample_wav, cloud_mode, _isolate_side_effects
 ):
     """tokens_used from STT result must reach save_entry unchanged."""
-    _, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     stt = _make_stt_mock("hello", tokens=1500)
 
     with patch("app.pipeline.service.get_provider", return_value=stt):
@@ -209,7 +168,7 @@ async def test_pipeline_forwards_tokens_used_to_history(
 async def test_pipeline_forwards_the_source_to_history(
     sample_wav, cloud_mode, _isolate_side_effects
 ):
-    _, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     stt = _make_stt_mock("hello")
 
     with patch("app.pipeline.service.get_provider", return_value=stt):
@@ -220,10 +179,10 @@ async def test_pipeline_forwards_the_source_to_history(
 
 
 @pytest.mark.asyncio
-async def test_a_cloud_dictation_reaches_the_clipboard_cleaned_and_history_keeps_both(
+async def test_a_cloud_dictation_comes_back_cleaned_and_history_keeps_both(
     sample_wav, cloud_mode, _isolate_side_effects
 ):
-    copy_mock, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     stt = _make_stt_mock("ну е звіт до четверга")
     clean = AsyncMock(return_value="Звіт до четверга.")
 
@@ -233,7 +192,6 @@ async def test_a_cloud_dictation_reaches_the_clipboard_cleaned_and_history_keeps
         result = await process_audio(sample_wav, source="dictation")
 
     assert result.text == "Звіт до четверга."
-    copy_mock.assert_called_once_with("Звіт до четверга.")
     saved = save_mock.call_args.kwargs
     assert (saved["text"], saved["raw_text"]) == ("Звіт до четверга.", "ну е звіт до четверга")
     assert saved["word_count"] == 3
@@ -247,7 +205,7 @@ async def test_a_cloud_dictation_reaches_the_clipboard_cleaned_and_history_keeps
 async def test_files_meetings_and_local_dictations_are_not_cleaned(
     sample_wav, cloud_mode, _isolate_side_effects, source, is_local
 ):
-    copy_mock, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     stt = _make_stt_mock("ну е звіт")
     stt.is_local = is_local
     clean = AsyncMock(return_value="Звіт.")
@@ -296,7 +254,7 @@ async def test_pipeline_propagates_stt_failure(
     sample_wav, cloud_mode, _isolate_side_effects
 ):
     """STT exception must bubble up; no history entry created."""
-    _, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     stt = MagicMock()
     stt.transcribe = AsyncMock(side_effect=RuntimeError("groq down"))
     stt.model_name = "mock/provider"
@@ -314,7 +272,7 @@ async def test_pipeline_concurrent_invocations_save_independently(
     cloud_mode, _isolate_side_effects, tmp_path
 ):
     """Five parallel pipeline runs must each emit one save_entry."""
-    _, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
 
     paths = []
     for i in range(5):
@@ -360,7 +318,7 @@ async def test_pipeline_schedules_embedding_via_background_tasks_not_awaited(
     request/response cycle. spec 017: a second task,
     `vector_store.run_background_indexer` (no args), must also be
     scheduled alongside it, for every dictation that produces text."""
-    _, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     fake_entry = MagicMock()
     fake_entry.id = "entry-123"
     save_mock.return_value = fake_entry
@@ -426,7 +384,7 @@ async def test_pipeline_survives_embedding_provider_outage(
     causes: `save_entry` is mocked via `_isolate_side_effects` so no entry
     actually lands in the isolated `entries` table, and
     `run_background_indexer` finds an empty backlog and returns immediately."""
-    _, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     fake_entry = MagicMock()
     fake_entry.id = "entry-456"
     save_mock.return_value = fake_entry
@@ -437,7 +395,6 @@ async def test_pipeline_survives_embedding_provider_outage(
         result = await process_audio(sample_wav, background_tasks=bt, source="dictation")
 
     assert result.text == "hello world"
-    assert result.copied_to_clipboard is True
     assert save_mock.call_count == 1
 
     with (
@@ -467,18 +424,16 @@ async def test_pipeline_silence_guard_skips_stt_call(
 
     stt.transcribe.assert_not_called()
     assert result.text == ""
-    assert result.copied_to_clipboard is False
     assert result.discarded_reason == "silence"
 
 
 @pytest.mark.asyncio
-async def test_pipeline_silence_guard_skips_clipboard_history_and_embeddings(
+async def test_pipeline_silence_guard_skips_history_and_embeddings(
     silent_wav, cloud_mode, _isolate_side_effects
 ):
-    """AC-6: no pyperclip.copy, no save_entry, no scheduled background
-    embedding tasks -- all four asserted via _isolate_side_effects plus a
-    real BackgroundTasks add_task spy."""
-    copy_mock, save_mock = _isolate_side_effects
+    """AC-6: no save_entry, no scheduled background embedding tasks -- asserted
+    via _isolate_side_effects plus a real BackgroundTasks add_task spy."""
+    save_mock = _isolate_side_effects
     stt = _make_stt_mock("Дякую за перегляд")
 
     bt = BackgroundTasks()
@@ -491,9 +446,7 @@ async def test_pipeline_silence_guard_skips_clipboard_history_and_embeddings(
         )
 
     assert result.text == ""
-    assert result.copied_to_clipboard is False
     assert result.discarded_reason == "silence"
-    copy_mock.assert_not_called()
     save_mock.assert_not_called()
     add_task_mock.assert_not_called()
 
@@ -652,7 +605,7 @@ async def test_process_audio_awaits_shared_readiness_barrier_no_second_get_model
     from app.stt.base import TranscriptionResult
     from app.stt.local import LocalSTTProvider
 
-    _, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     call_count = {"n": 0}
 
     def _slow_get_model(self):
@@ -717,7 +670,7 @@ async def test_process_audio_proceeds_to_transcribe_when_barrier_returns_not_rea
     barrier existed. A request must never be worse off than before."""
     from app.stt.base import TranscriptionResult
 
-    _, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
 
     async def _fake_await_local_ready(stt_settings, timeout=None):
         return False
@@ -747,7 +700,7 @@ async def test_pipeline_auto_language_substitutes_detected_language(
     sample_wav, cloud_mode, _isolate_side_effects
 ):
     """AC-21: language="auto" + provider reports "uk" -> saved as "uk"."""
-    _, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     stt = MagicMock()
     stt.transcribe = AsyncMock(
         return_value=TranscriptionResult(text="привіт", tokens_used=None, detected_language="uk")
@@ -767,7 +720,7 @@ async def test_pipeline_explicit_language_never_overridden_by_detection(
 ):
     """AC-21: language="uk" + provider reports "en" -> saved as "uk" -- an
     explicit user choice is never overridden by a provider's guess."""
-    _, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     stt = MagicMock()
     stt.transcribe = AsyncMock(
         return_value=TranscriptionResult(text="hello", tokens_used=None, detected_language="en")
@@ -787,7 +740,7 @@ async def test_pipeline_auto_language_falls_back_to_auto_sentinel_when_provider_
 ):
     """AC-22: language="auto" + provider reports nothing -> saved language
     stays the literal "auto" sentinel -- current behaviour, no regression."""
-    _, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     stt = _make_stt_mock("ok")
 
     with patch("app.pipeline.service.get_provider", return_value=stt):
@@ -834,7 +787,7 @@ async def test_vad_silent_verdict_is_discarded(
     included: today no embedding task can be scheduled because `save_entry`
     is what schedules them, but a refactor that moved scheduling earlier
     would otherwise regress silently on the layer that actually discards."""
-    copy_mock, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     stt = _make_stt_mock("Дякую за перегляд")
 
     bt = BackgroundTasks()
@@ -850,7 +803,6 @@ async def test_vad_silent_verdict_is_discarded(
     assert result.discarded_reason == "silence"
     assert result.text == ""
     assert stt.transcribe.await_count == 0
-    copy_mock.assert_not_called()
     save_mock.assert_not_called()
     add_task_mock.assert_not_called()
 
@@ -1083,7 +1035,7 @@ async def test_vad_disabled_still_discards_on_the_energy_verdict(
     VAD misbehaves, and it must fall back to shipped-029 behaviour, not to no
     gate at all. Narrowing service.py's fallback condition to
     `if vad is None and settings.audio.silence_vad_enabled:` fails here."""
-    copy_mock, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     stt = _make_stt_mock("Дякую за перегляд")
     monkeypatch.setattr(settings.audio, "silence_vad_enabled", False)
 
@@ -1104,7 +1056,6 @@ async def test_vad_disabled_still_discards_on_the_energy_verdict(
     assert result.discarded_reason == "silence"
     assert result.text == ""
     assert stt.transcribe.await_count == 0
-    copy_mock.assert_not_called()
     save_mock.assert_not_called()
 
 
@@ -1158,7 +1109,7 @@ async def test_high_no_speech_prob_discards_after_model(
     """AC-19: the confidently-decoded hallucination -- the exact class
     Whisper's own `no_speech_prob > 0.6 AND avg_logprob < -1.0` never
     suppresses, because the AND fails on a confident decode."""
-    copy_mock, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     stt = _stt_mock_with_no_speech("Дякую за перегляд!", 0.7)
 
     bt = BackgroundTasks()
@@ -1172,9 +1123,7 @@ async def test_high_no_speech_prob_discards_after_model(
 
     assert result.discarded_reason == "silence"
     assert result.text == ""
-    assert result.copied_to_clipboard is False
     assert result.model_name == "mock/provider"
-    copy_mock.assert_not_called()
     save_mock.assert_not_called()
     add_task_mock.assert_not_called()
 
@@ -1275,7 +1224,7 @@ async def test_history_save_failure_records_its_cause(
     so by the time anyone opened `backend.log` the cause was gone — a locked
     database, a full disk and a failed migration all read identically.
     """
-    _copy_mock, save_mock = _isolate_side_effects
+    save_mock = _isolate_side_effects
     save_mock.side_effect = OSError("database is locked")
     stt = _make_stt_mock("the transcript")
 

@@ -466,7 +466,6 @@ describe("two dictations finishing within two seconds of each other", () => {
     apiMock.dictate.mockResolvedValue({
       text: "one",
       duration_ms: 100,
-      copied_to_clipboard: false,
     });
     const widget = document.getElementById("widget")!;
 
@@ -619,7 +618,7 @@ describe("a meeting that goes wrong while nobody is looking", () => {
   it("keeps the degraded marker when a dictation's auto-revert fires under it", async () => {
     await loadWidget();
     apiMock.audioStart.mockResolvedValue(recordingStatus());
-    apiMock.dictate.mockResolvedValue({ text: "one", duration_ms: 100, copied_to_clipboard: false });
+    apiMock.dictate.mockResolvedValue({ text: "one", duration_ms: 100 });
     invokeMock.mockImplementation(async (command) => (command === "paste_text" ? "failed" : undefined));
     const root = document.getElementById("widget")!;
     root.dispatchEvent(new MouseEvent("click"));
@@ -908,7 +907,6 @@ describe("a dictation the backend accepts and never answers", () => {
     apiMock.dictate.mockResolvedValue({
       text: "one",
       duration_ms: 100,
-      copied_to_clipboard: false,
     });
     const widget = document.getElementById("widget")!;
 
@@ -982,7 +980,6 @@ describe("what a dictation looks like from start to finish", () => {
     apiMock.dictate.mockResolvedValue({
       text: "one two three",
       duration_ms: 100,
-      copied_to_clipboard: false,
     });
 
     widget.dispatchEvent(new MouseEvent("click"));
@@ -1004,7 +1001,6 @@ describe("what a dictation looks like from start to finish", () => {
     apiMock.dictate.mockResolvedValue({
       text: "",
       duration_ms: 100,
-      copied_to_clipboard: false,
       discarded_reason: "silence",
     });
 
@@ -1020,7 +1016,7 @@ describe("what a dictation looks like from start to finish", () => {
       { language: "uk", shortcut: DEFAULT_SHORTCUT, paste_at_cursor: false } as never,
     );
     const widget = await startListening();
-    apiMock.dictate.mockResolvedValue({ text: "one two", duration_ms: 100, copied_to_clipboard: false });
+    apiMock.dictate.mockResolvedValue({ text: "one two", duration_ms: 100 });
 
     widget.dispatchEvent(new MouseEvent("click"));
 
@@ -1032,7 +1028,7 @@ describe("what a dictation looks like from start to finish", () => {
 
   it("says copied when the text could only be copied", async () => {
     const widget = await startListening();
-    apiMock.dictate.mockResolvedValue({ text: "one two", duration_ms: 100, copied_to_clipboard: false });
+    apiMock.dictate.mockResolvedValue({ text: "one two", duration_ms: 100 });
     invokeMock.mockImplementation(async (command) => (command === "paste_text" ? "copied" : undefined));
 
     widget.dispatchEvent(new MouseEvent("click"));
@@ -1043,7 +1039,7 @@ describe("what a dictation looks like from start to finish", () => {
 
   it("says Copy failed when the shell cannot put the text on the clipboard", async () => {
     const widget = await startListening();
-    apiMock.dictate.mockResolvedValue({ text: "one two", duration_ms: 100, copied_to_clipboard: false });
+    apiMock.dictate.mockResolvedValue({ text: "one two", duration_ms: 100 });
     invokeMock.mockImplementation(async (command) => (command === "paste_text" ? "failed" : undefined));
 
     widget.dispatchEvent(new MouseEvent("click"));

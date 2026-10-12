@@ -13,7 +13,6 @@ dependencies = [
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "python-multipart>=0.0.9",
-    "pyperclip>=1.9.0",
     "psutil>=5.9.0",
     "sqlite-vec==0.1.9",
 ]
@@ -82,7 +81,6 @@ ignore_decorators = ["@router.*"]
 ignore_names = [
     "time_info", "frame_count",
     "size_bytes",
-    "copied_to_clipboard",
     "temp_size_bytes", "freed_bytes", "gemini_key_set", "groq_key_set",
     "shortcut", "theme", "display_name", "paste_at_cursor", "previous_language", "package_installed", "model_loaded", "model_ram_mb",
     "model_downloaded", "model_bytes", "model_download_reported", "bytes_done", "bytes_total", "failed_step",

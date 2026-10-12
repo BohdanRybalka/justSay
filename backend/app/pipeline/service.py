@@ -1,7 +1,7 @@
-"""Audio processing pipeline: Audio -> STT -> cleanup -> Clipboard.
+"""Audio processing pipeline: Audio -> STT -> cleanup -> History.
 
 Cloud mode transcribes on Groq Whisper, Local mode on this machine's engine.
-A Cloud-mode dictation is cleaned of fillers before the clipboard; history keeps both texts.
+A Cloud-mode dictation is cleaned of fillers before it is returned; history keeps both texts.
 """
 
 import asyncio
@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-import pyperclip
 from fastapi import BackgroundTasks
 
 from app.audio.analysis import analyze_silence
@@ -34,7 +33,6 @@ class ProcessingResult:
 
     text: str
     duration_ms: int
-    copied_to_clipboard: bool
     model_name: str = ""
     discarded_reason: str | None = None
 
@@ -81,7 +79,6 @@ def _holds_no_speech(audio_path: Path) -> bool:
 async def process_audio(
     audio_path: Path,
     language: str = "uk",
-    copy_to_clipboard: bool = True,
     audio_duration: float | None = None,
     background_tasks: BackgroundTasks | None = None,
     *,
@@ -90,7 +87,7 @@ async def process_audio(
     observer: PipelineObserver | None = None,
     mode: ProviderMode | None = None,
 ) -> ProcessingResult:
-    """Full pipeline: transcribe -> clipboard, on ``mode``'s provider, else the user's mode.
+    """Full pipeline on ``mode``'s provider, else the user's mode: transcribe, clean up, save.
 
     ``background_tasks`` schedules embedding generation after the response is sent. ``source``
     and ``source_name`` say where the history entry came from; with an ``observer`` the audio
@@ -108,7 +105,6 @@ async def process_audio(
         return ProcessingResult(
             text="",
             duration_ms=int((time.perf_counter() - start) * 1000),
-            copied_to_clipboard=False,
             discarded_reason="silence",
         )
 
@@ -162,7 +158,6 @@ async def process_audio(
         return ProcessingResult(
             text="",
             duration_ms=int((time.perf_counter() - start) * 1000),
-            copied_to_clipboard=False,
             model_name=stt.model_name,
             discarded_reason="silence",
         )
@@ -178,14 +173,6 @@ async def process_audio(
         len(text),
         int((time.perf_counter() - start) * 1000),
     )
-
-    copied = False
-    if copy_to_clipboard and text:
-        try:
-            pyperclip.copy(text)
-            copied = True
-        except Exception:
-            log.warning("Copying the transcript to the clipboard failed", exc_info=True)
 
     duration_ms = int((time.perf_counter() - start) * 1000)
     word_count = len(text.split()) if text else 0
@@ -223,6 +210,5 @@ async def process_audio(
     return ProcessingResult(
         text=text,
         duration_ms=duration_ms,
-        copied_to_clipboard=copied,
         model_name=stt.model_name,
     )

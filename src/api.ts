@@ -530,12 +530,10 @@ export interface MeetingStopResponse {
 export interface DictateResponse {
   text: string;
   duration_ms: number;
-  copied_to_clipboard: boolean;
   model_name?: string;
-  /** Set (currently only to "silence") when the backend's silence guard
-   *  short-circuited before any provider ran — no STT call, no clipboard
-   *  write, no History row. Not an error: dictationResultView renders it as
-   *  "No speech". */
+  /** Set (currently only to "silence") when the backend discarded the audio as
+   *  silence, before or after the provider ran — no History row either way.
+   *  Not an error: dictationResultView renders it as "No speech". */
   discarded_reason?: string | null;
 }
 
@@ -1044,11 +1042,11 @@ export const api = {
    *  it unknown and the transcript possibly already in History. Transcription is
    *  legitimately slow — the local path alone waits up to 300 s for readiness
    *  before it starts — so any budget short enough to be useful fires on work
-   *  that was going to finish. The backend never copies: see `copyToClipboard`. */
+   *  that was going to finish. The backend never touches the clipboard. */
   dictate: (sessionId: string, language = "uk") =>
     request<DictateResponse>(
       "POST",
-      `/pipeline/dictate?language=${language}&copy_to_clipboard=false`,
+      `/pipeline/dictate?language=${language}`,
       { session_id: sessionId },
       UNRECONCILED,
     ),
