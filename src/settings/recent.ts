@@ -1,10 +1,13 @@
 /**
  * The latest meetings or files under a section's top card: running and failed jobs of that
  * kind first, then the newest finished entries, three in all, with a link into History.
+ * Until the first read answers it shows a card shape empty; if that read fails, one muted
+ * line with Try again.
  */
 import { api, type EntrySource, type HistoryEntry } from "../api";
+import { renderReadFailure } from "../ui/controls";
 import { icon } from "../ui/icons";
-import { createEntryCards, EMPTY_KIND, type SectionKind } from "./history-entry";
+import { createEntryCards, EMPTY_KIND, SKELETON_CARD, type SectionKind } from "./history-entry";
 import { createJobCards } from "./history-jobs";
 import type { TabLifecycle } from "./settings";
 
@@ -36,16 +39,23 @@ export function mountRecent(
     </div>
     <div class="timeline"></div>
     <p class="history-empty" hidden>${EMPTY_KIND[kind]}</p>
+    <div class="recent-failure" hidden></div>
   `;
   container.append(root);
   const rows = root.querySelector<HTMLElement>(".timeline")!;
   const empty = root.querySelector<HTMLElement>(".history-empty")!;
+  const failure = root.querySelector<HTMLElement>(".recent-failure")!;
+  const skeleton = document.createElement("div");
+  skeleton.className = "timeline-more timeline-more--reading";
+  skeleton.innerHTML = SKELETON_CARD;
+  rows.append(skeleton);
   root.querySelector(".see-all")!.addEventListener("click", () => openHistory(kind));
 
   let entries: HistoryEntry[] = [];
   let entryRows: HTMLElement[] = [];
   let jobCards: readonly HTMLElement[] = [];
   let loaded = false;
+  let firstReadFailed = false;
   let readSucceeded = false;
   let latestRead = 0;
   let pollTimer: number | null = null;
@@ -61,10 +71,18 @@ export function mountRecent(
   function paint(): void {
     const jobsShown = jobCards.slice(0, RECENT_SHOWN);
     const shown = [...jobsShown, ...entryRows.slice(0, RECENT_SHOWN - jobsShown.length)];
-    rows.replaceChildren(...shown);
-    rows.hidden = shown.length === 0;
+    const waiting = shown.length === 0 && !loaded && !firstReadFailed;
+    rows.replaceChildren(...(waiting ? [skeleton] : shown));
+    rows.hidden = shown.length === 0 && !waiting;
     empty.hidden = !loaded || shown.length > 0;
+    failure.hidden = loaded || !firstReadFailed;
   }
+
+  renderReadFailure(failure, () => {
+    firstReadFailed = false;
+    paint();
+    void load();
+  });
 
   function adopt(fresh: HistoryEntry[]): void {
     const unchanged =
@@ -86,6 +104,10 @@ export function mountRecent(
       readSucceeded = true;
     } catch (error) {
       console.error(error);
+      if (!destroyed && token === latestRead && !loaded) {
+        firstReadFailed = true;
+        paint();
+      }
     }
   }
 

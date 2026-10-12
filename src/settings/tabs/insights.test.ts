@@ -48,6 +48,21 @@ function buildInsights(overrides: {
   };
 }
 
+function buildEmptyInsights(): Insights {
+  return {
+    ...buildInsights({
+      today: { words: 0, recordings: 0 },
+      month: { recordings: 0, words: 0 },
+      days: spokenDays(Array(30).fill(0)),
+      previous_period_words: 0,
+    }),
+    vocabulary: 0,
+    peak_hour: null,
+    longest: null,
+    meetings_week: { count: 0, seconds: 0 },
+  };
+}
+
 const FILLER_WORDS = new Set(["so", "like", "just"]);
 const FAVOURITES: WordCount[] = ["or", "by", "so", "mean", "example", "like", "which", "will", "just", "overall"].map(
   (word, index) => ({ word, count: 50 - index * 4, is_filler: FILLER_WORDS.has(word) }),
@@ -358,7 +373,7 @@ describe("the Insights panel", () => {
     renderInsights(container, viewer, false);
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(text(".panel-error")).toBe("Insights could not be read. Try again");
+    expect(text(".panel-error")).toBe("Couldn't load this. Try again");
   });
 
   it("offers Try again on a failed read, and the retry fills the panel", async () => {
@@ -367,12 +382,56 @@ describe("the Insights panel", () => {
     renderInsights(container, viewer, false);
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(text(".panel-error")).toBe("Insights could not be read. Try again");
+    expect(text(".panel-error")).toBe("Couldn't load this. Try again");
     apiMock.insights.mockResolvedValue(buildInsights());
     container.querySelector<HTMLButtonElement>(".panel-error button")!.click();
+    expect(container.querySelector(".insights-skeleton")).not.toBeNull();
     await vi.advanceTimersByTimeAsync(0);
 
     expect(text(".saved-card-value")).toBe("2 h 57 m");
+  });
+
+  it("shows the card shapes empty until the first read lands", async () => {
+    apiMock.insights.mockResolvedValue(buildInsights());
+    apiMock.wordsTop.mockResolvedValue({ items: FAVOURITES, note: NOTE });
+    renderInsights(container, viewer, false);
+
+    expect(container.querySelector(".insights-skeleton")).not.toBeNull();
+    expect(container.querySelector(".saved-card")).toBeNull();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(container.querySelector(".insights-skeleton")).toBeNull();
+    expect(container.querySelector(".saved-card")).not.toBeNull();
+  });
+
+  it("says how to start in one card, and nowhere else, before a first word", async () => {
+    await mount(buildEmptyInsights(), false, []);
+
+    expect(text(".first-words")).toBe("Hold Ctrl + Alt + V anywhere and talk. Your first words will show up here.");
+    expect(text("#insights-today")).toBe("");
+    expect(text(".panel-title")).toBe("Good evening, Bohdan");
+    expect(container.querySelector(".saved-card, .chart, .favourite-words, .insights-skeleton")).toBeNull();
+  });
+
+  it("does not call a first-time panel empty when only older words exist", async () => {
+    await mount(
+      buildInsights({ month: { recordings: 0 }, days: spokenDays(Array(30).fill(0)), previous_period_words: 0 }),
+    );
+
+    expect(container.querySelector(".first-words")).toBeNull();
+    expect(container.querySelectorAll(".fact-card").length).toBeGreaterThan(0);
+  });
+
+  it("leaves the first-words card for the real panel once the first dictation is read", async () => {
+    const tab = await mount(buildEmptyInsights(), false, []);
+    expect(container.querySelector(".first-words")).not.toBeNull();
+    apiMock.insights.mockResolvedValue(buildInsights({ today: { words: 5, recordings: 1 }, month: { recordings: 1, words: 5 } }));
+
+    tab.resumeResources!();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(container.querySelector(".first-words")).toBeNull();
+    expect(container.querySelector(".saved-card")).not.toBeNull();
   });
 
   it("flags fillers in clay and says how often you say the top one", async () => {

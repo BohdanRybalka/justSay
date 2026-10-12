@@ -9,9 +9,9 @@ import {
   type UserSettings,
 } from "../../api";
 import { detectShortcutPlatform, formatAccelerator } from "../../accelerator";
-import { renderSegmented, type SegmentedOption } from "../../ui/controls";
+import { renderReadFailure, renderSegmented, type SegmentedOption } from "../../ui/controls";
 import { icon } from "../../ui/icons";
-import { createEntryCards, EMPTY_KIND, SOURCE_ICONS } from "../history-entry";
+import { createEntryCards, EMPTY_KIND, SKELETON_CARD, SOURCE_ICONS } from "../history-entry";
 import {
   createHistoryList,
   sidecarTooOldText,
@@ -37,8 +37,6 @@ const KIND_CHIPS: readonly SegmentedOption<KindChip>[] = [
   { value: "file", label: "Files", icon: SOURCE_ICONS.file },
 ];
 
-const SKELETON_CARD = `<div class="entry entry--skeleton" aria-hidden="true"><span class="entry-dot"></span><i></i><i></i></div>`;
-
 /** The panel's title and subtitle, which sit above whatever the panel hosts before the timeline. */
 export function renderHistoryHeading(container: HTMLElement): void {
   container.insertAdjacentHTML(
@@ -63,6 +61,7 @@ export function renderHistory(
     <div class="chips history-filter"><div id="history-kind" aria-label="Show"></div><span class="chips-sep"></span><button type="button" class="chip-btn chip-btn--star" id="history-starred" aria-pressed="false">${icon("star")}Starred</button></div>
     <div class="history-search-hint" id="history-search-hint"></div>
     <div class="history-count" id="history-count">Loading...</div>
+    <div class="history-failure" id="history-failure" hidden></div>
     <div class="timeline">
       <div id="history-days"></div>
       <div class="timeline-more ${SENTINEL_READING}" id="history-more">${SKELETON_CARD.repeat(3)}</div>
@@ -93,6 +92,7 @@ export function renderHistory(
     featureName: "History",
     elements: {
       count: section.querySelector<HTMLElement>("#history-count")!,
+      failure: section.querySelector<HTMLElement>("#history-failure")!,
       sentinel: section.querySelector<HTMLElement>("#history-more")!,
     },
     rows: timeline,
@@ -194,14 +194,11 @@ export function renderHistory(
       if (!claim.isCurrent()) return;
       if (e instanceof SidecarTooOldError) {
         searchHint.textContent = sidecarTooOldText("Search");
-      } else if (e instanceof MalformedResponseError) {
-        searchHint.textContent = "Search failed";
-        console.error(e);
+      } else if (!(e instanceof MalformedResponseError) && /invalid/i.test((e as Error).message ?? "")) {
+        searchHint.textContent = "Invalid search query";
       } else {
-        const msg = (e as Error).message || "Search failed";
-        searchHint.textContent = msg.toLowerCase().includes("invalid")
-          ? "Invalid search query"
-          : msg;
+        console.error(e);
+        renderReadFailure(searchHint, () => void runSearch(q));
       }
     } finally {
       claim.release();

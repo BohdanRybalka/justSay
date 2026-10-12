@@ -8,6 +8,7 @@ import {
   type HistoryPageResponse,
 } from "../api";
 import { isStaleStatusResponse } from "../stale-response";
+import { renderReadFailure } from "../ui/controls";
 
 /** The singular/plural pair a tab uses when it names its own rows. */
 export interface HistoryListNoun {
@@ -37,12 +38,14 @@ export interface HistoryRows {
 }
 
 /**
- * The two elements the shared list writes to. `sentinel` sits below the rows:
+ * The elements the shared list writes to. `failure` is hidden until a read fails and
+ * then holds the one muted line with Try again. `sentinel` sits below the rows:
  * scrolling it into view asks for the next page, and while a page is read it
  * carries the `--reading` class the skeleton cards hang on.
  */
 export interface HistoryListElements {
   count: HTMLElement;
+  failure: HTMLElement;
   sentinel: HTMLElement;
 }
 
@@ -88,7 +91,7 @@ export interface HistoryList {
   /**
    * Asks for the first page with no cursor and, once it arrives, replaces
    * whatever is painted and adopts both cursors the response carried. A request
-   * that fails changes nothing.
+   * that fails changes nothing but the failure line it shows.
    */
   load(): Promise<void>;
   /**
@@ -206,6 +209,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
         if (!isCurrent()) return;
         rows.replaceWith(painted);
         rowsAreOwnPage = false;
+        clearFailure();
       },
       release() {
         if (!isCurrent()) return;
@@ -217,6 +221,20 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
     latestClaim = claim;
     if (isCurrent()) pagingHeld = true;
     return claim;
+  }
+
+  function clearFailure(): void {
+    elements.failure.hidden = true;
+    elements.failure.replaceChildren();
+  }
+
+  function showFailure(claim: HistoryRowsClaim, append: boolean): void {
+    claim.renderCount("");
+    elements.failure.hidden = false;
+    renderReadFailure(elements.failure, () => {
+      clearFailure();
+      void loadPage(append);
+    });
   }
 
   function build(entries: readonly HistoryEntry[]): BuiltRow[] {
@@ -253,6 +271,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
         newest = response.newest_cursor;
         paintedFilter = askedFilter;
       }
+      clearFailure();
       renderEmptyState(response.entries.length === 0 && !append);
 
       cursor = response.next_cursor;
@@ -263,7 +282,7 @@ export function createHistoryList(options: HistoryListOptions): HistoryList {
         backendOmitsCursor = true;
         renderTotal(claim);
       } else {
-        claim.renderCount("Failed to load");
+        showFailure(claim, append);
       }
       console.error(error);
     } finally {

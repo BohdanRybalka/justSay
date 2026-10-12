@@ -4,13 +4,45 @@
   font-weight: 600;
 }
 
-.panel-error {
+.insights-skeleton i {
+  display: block;
+  background: var(--inset);
+}
+
+.insights-skeleton-saved {
+  height: 289px;
+  border-radius: 18px;
+}
+
+.insights-skeleton-chart {
+  height: 290px;
+  margin-top: 53px;
+  border-radius: 14px;
+}
+
+.first-words {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin: 0;
+  gap: 18px;
+  padding: 26px;
+}
+
+.first-words .brand-mark {
+  width: 48px;
+  height: 48px;
+  border-radius: 15px;
+}
+
+.first-words b {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 15px;
+  font-weight: 640;
+}
+
+.first-words div > span {
   font-size: 13px;
-  color: var(--muted);
+  color: var(--text-2);
 }
 
 .saved-card {

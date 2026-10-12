@@ -2,7 +2,7 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { renderFold, renderSegmented, renderSelect, renderToggle } from "./controls";
+import { renderFold, renderReadFailure, renderSegmented, renderSelect, renderToggle } from "./controls";
 
 type Range = "7d" | "30d" | "90d";
 const RANGES = [
@@ -233,6 +233,22 @@ describe("renderSelect", () => {
 
     expect(document.querySelectorAll(".select")).toHaveLength(1);
     expect(document.querySelectorAll(".select svg")).toHaveLength(1);
+  });
+});
+
+describe("renderReadFailure", () => {
+  it("says it once, with a Try again that asks again, in place of what was there", () => {
+    const host = document.createElement("div");
+    host.innerHTML = "<i>old</i>";
+    const retry = vi.fn();
+
+    renderReadFailure(host, retry);
+    host.querySelector("button")!.click();
+
+    expect(host.textContent).toBe("Couldn't load this. Try again");
+    expect(host.querySelectorAll(".panel-error")).toHaveLength(1);
+    expect(host.querySelector("i")).toBeNull();
+    expect(retry).toHaveBeenCalledOnce();
   });
 });
 

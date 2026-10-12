@@ -159,6 +159,87 @@ describe("mountRecent — what is listed", () => {
   });
 });
 
+describe("mountRecent — while the first read is out, and when it fails", () => {
+  const skeleton = (container: HTMLElement) => container.querySelector(".entry--skeleton");
+  const failure = (container: HTMLElement) => container.querySelector<HTMLElement>(".recent-failure")!;
+
+  it("holds a card shape until the first read answers, and then lets it go", async () => {
+    apiMock.getHistory.mockResolvedValue(pageOf([entryOf("a")], 1, null));
+    const { container } = mount("meeting");
+
+    expect(skeleton(container)).not.toBeNull();
+    expect(container.querySelector<HTMLElement>(".timeline")!.hidden).toBe(false);
+    await flush();
+
+    expect(skeleton(container)).toBeNull();
+    expect(shown(container)).toEqual(["a"]);
+  });
+
+  it("lets the card shape go for the empty line when the first read finds nothing", async () => {
+    const { container } = mount("file");
+    await flush();
+
+    expect(skeleton(container)).toBeNull();
+    expect(container.querySelector<HTMLElement>(".history-empty")!.hidden).toBe(false);
+  });
+
+  it("says it could not load, with Try again, instead of staying blank", async () => {
+    apiMock.getHistory.mockRejectedValue(new Error("HTTP 503"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { container } = mount("meeting");
+    expect(failure(container).hidden).toBe(true);
+    await flush();
+
+    expect(failure(container).hidden).toBe(false);
+    expect(failure(container).textContent).toBe("Couldn't load this. Try again");
+    expect(skeleton(container)).toBeNull();
+    expect(container.querySelector<HTMLElement>(".history-empty")!.hidden).toBe(true);
+  });
+
+  it("shows the card shape again on Try again and clears the line once the read lands", async () => {
+    apiMock.getHistory.mockRejectedValueOnce(new Error("HTTP 503"));
+    apiMock.getHistory.mockResolvedValue(pageOf([entryOf("a")], 1, null));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { container } = mount("meeting");
+    await flush();
+
+    failure(container).querySelector("button")!.click();
+    expect(failure(container).hidden).toBe(true);
+    expect(skeleton(container)).not.toBeNull();
+    await flush();
+
+    expect(failure(container).hidden).toBe(true);
+    expect(shown(container)).toEqual(["a"]);
+  });
+
+  it("clears the line by itself when a later poll gets through", async () => {
+    apiMock.getHistory.mockRejectedValueOnce(new Error("HTTP 503"));
+    apiMock.getHistory.mockResolvedValue(pageOf([entryOf("a")], 1, null));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { container } = mount("meeting");
+    await flush();
+    expect(failure(container).hidden).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(RECENT_POLL_MS);
+
+    expect(failure(container).hidden).toBe(true);
+    expect(shown(container)).toEqual(["a"]);
+  });
+
+  it("keeps the list it has when a later read fails, with no line", async () => {
+    apiMock.getHistory.mockResolvedValueOnce(pageOf([entryOf("a")], 1, null));
+    apiMock.getHistory.mockRejectedValue(new Error("HTTP 503"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { container } = mount("meeting");
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(RECENT_POLL_MS);
+
+    expect(shown(container)).toEqual(["a"]);
+    expect(failure(container).hidden).toBe(true);
+  });
+});
+
 describe("mountRecent — a job becoming its entry", () => {
   it("turns a finished job's card into its entry where it stood", async () => {
     apiMock.getHistory.mockResolvedValue(pageOf([entryOf("old")], 1, null));

@@ -41,6 +41,7 @@
 .btn-blue:hover{background:var(--blue-hi)}
 .btn-small{padding:6px 10px;font-size:11.5px}
 .btn:disabled{opacity:.5;cursor:default;pointer-events:none}
+.panel-error{display:flex;align-items:center;gap:10px;margin:0;font-size:13px;color:var(--muted)}
 .chip{padding:3px 8px;border-radius:7px;font-size:10.5px;font-weight:660;background:var(--orange-soft);color:var(--orange)}
 .chip--blue{background:var(--blue-soft);color:var(--blue)}
 .select{position:relative;display:inline-flex;align-items:center;border-radius:9px;
