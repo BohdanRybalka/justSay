@@ -603,6 +603,18 @@ async def test_a_phrase_made_up_over_a_piece_with_little_speech_is_dropped(
     assert (result.text, result.no_speech_prob, result.detected_language) == ("", 1.0, None)
 
 
+async def test_a_piece_where_no_speech_is_heard_is_one_with_little_speech(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 20.0)
+    monkeypatch.setattr(chunking, "speech_spans", lambda samples, settings: [])
+    provider = _Provider([TranscriptionResult("Thanks for watching.")])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob) == ("", 1.0)
+
+
 async def test_the_same_phrase_in_a_piece_with_real_speech_is_kept(
     tmp_path, short_pieces, monkeypatch
 ):
