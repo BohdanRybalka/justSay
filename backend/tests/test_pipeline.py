@@ -12,9 +12,11 @@ from fastapi import BackgroundTasks
 
 from app.config import settings
 from app.core.types import ProviderMode
+from app.pipeline import service
 from app.pipeline.service import process_audio
 from app.stt.base import TranscriptionResult
 from app.transcripts import history
+from tests.conftest import write_meeting_wav
 
 
 @pytest.fixture(autouse=True)
@@ -1243,3 +1245,90 @@ async def test_history_save_failure_records_its_cause(
     assert failures[0].exc_info is not None
     assert "database is locked" in "".join(traceback.format_exception(*failures[0].exc_info))
 
+
+
+class _Observer:
+    async def before_transcribe(self, model_name, audio_duration):
+        return None
+
+    async def before_piece(self, index, total):
+        return None
+
+    async def pause(self, seconds):
+        return None
+
+    def piece_done(self, done, total):
+        return None
+
+    def before_save(self):
+        return None
+
+    def saved(self, entry_id):
+        return None
+
+
+def _answers(*texts: str):
+    return AsyncMock(side_effect=[TranscriptionResult(text=text) for text in texts])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("energy_decides_speech")
+async def test_a_two_channel_meeting_is_saved_as_labelled_turns_and_counts_no_labels(
+    tmp_path, cloud_mode, _isolate_side_effects
+):
+    path = write_meeting_wav(
+        tmp_path / "meeting_0123456789ab.wav", 20.0, you=((0.0, 3.0),), others=((8.0, 12.0),)
+    )
+    stt = _make_stt_mock()
+    stt.longest_piece_seconds = 30.0
+    stt.transcribe = _answers("привіт колего", "добрий день усім")
+
+    with patch("app.pipeline.service.get_provider", return_value=stt):
+        result = await process_audio(
+            path, language="uk", source="meeting", observer=_Observer()
+        )
+
+    saved = _isolate_side_effects.call_args.kwargs
+    assert result.text == "You: привіт колего\nOthers: добрий день усім"
+    assert saved["text"] == saved["raw_text"] == result.text
+    assert saved["word_count"] == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("energy_decides_speech")
+async def test_a_two_channel_meeting_with_speech_on_one_side_only_is_not_judged_by_its_downmix(
+    tmp_path, cloud_mode, _isolate_side_effects
+):
+    path = write_meeting_wav(tmp_path / "meeting_0123456789ab.wav", 20.0, you=((0.0, 3.0),))
+    stt = _make_stt_mock()
+    stt.longest_piece_seconds = 30.0
+    stt.transcribe = _answers("лише мої слова")
+
+    with (
+        patch("app.pipeline.service.get_provider", return_value=stt),
+        patch("app.pipeline.service._silence_note", wraps=service._silence_note) as gate,
+    ):
+        result = await process_audio(
+            path, language="uk", source="meeting", observer=_Observer()
+        )
+
+    assert path not in [call.args[0] for call in gate.call_args_list]
+    assert result.text == "лише мої слова"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("energy_decides_speech")
+async def test_a_one_channel_meeting_file_is_transcribed_as_before(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    stt = _make_stt_mock()
+    stt.longest_piece_seconds = 30.0
+    stt.transcribe = _answers("старий запис наради")
+
+    with patch("app.pipeline.service.get_provider", return_value=stt):
+        result = await process_audio(
+            sample_wav, language="uk", source="meeting", observer=_Observer()
+        )
+
+    assert result.text == "старий запис наради"
+    assert _isolate_side_effects.call_args.kwargs["word_count"] == 3

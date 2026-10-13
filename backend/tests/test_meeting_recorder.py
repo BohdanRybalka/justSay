@@ -366,11 +366,17 @@ def _wait_for_writes(recorder: MeetingRecorder, timeout: float = 5.0) -> None:
 
 
 def _wav_signal(path: Path) -> tuple[int, np.ndarray]:
-    """The written file as a normalised float signal, plus its rate."""
+    """The written file as a normalised float signal of shape (frames, channels), plus its rate."""
     with wave.open(str(path), "rb") as wf:
         rate = wf.getframerate()
+        channels = wf.getnchannels()
         samples = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
-    return rate, samples.astype(np.float32) / 32768.0
+    return rate, samples.reshape(-1, channels).astype(np.float32) / 32768.0
+
+
+def _audible_frames(signal: np.ndarray, threshold: float) -> np.ndarray:
+    """The frames in which any channel of `signal` is louder than `threshold`."""
+    return np.flatnonzero(np.abs(signal).max(axis=1) > threshold)
 
 
 def _hold_the_owner_thread(recorder: MeetingRecorder) -> threading.Event:
@@ -453,10 +459,10 @@ async def test_stop_writes_exactly_one_file_inside_temp_dir(
 
 
 @pytest.mark.asyncio
-async def test_stop_writes_16khz_mono_16bit_like_the_dictation_path(
+async def test_stop_writes_a_16khz_16bit_wav_with_a_channel_for_each_source(
     audio_settings, fake_system_source, fake_microphone_stream
 ):
-    """The pipeline must receive the same kind of file it receives today."""
+    """The pipeline tells the two sides apart by channel, so the file has exactly two."""
     recorder = MeetingRecorder(audio_settings)
 
     await recorder.start()
@@ -464,16 +470,16 @@ async def test_stop_writes_16khz_mono_16bit_like_the_dictation_path(
     audio_path = (await recorder.stop()).path
 
     with wave.open(str(audio_path), "rb") as wf:
-        assert wf.getnchannels() == 1
+        assert wf.getnchannels() == 2
         assert wf.getsampwidth() == 2
         assert wf.getframerate() == 16000
 
 
 @pytest.mark.asyncio
-async def test_both_sources_are_audible_in_the_written_wav(
+async def test_each_source_has_a_channel_of_its_own_in_the_written_wav(
     audio_settings, fake_system_source, fake_microphone_stream
 ):
-    """Neither half may be dropped by the mix."""
+    """The microphone is the left channel and the far side the right, with neither in the other."""
     recorder = MeetingRecorder(audio_settings)
 
     await recorder.start()
@@ -484,11 +490,13 @@ async def test_both_sources_are_audible_in_the_written_wav(
     time.sleep(0.02)
     audio_path = (await recorder.stop()).path
 
-    with wave.open(str(audio_path), "rb") as wf:
-        samples = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+    _rate, signal = _wav_signal(audio_path)
 
-    assert np.max(np.abs(samples)) > int(0.4 * 32767), (
-        "the mixed peak is below either source's own level — one of them was lost"
+    assert np.max(np.abs(signal[:, 0])) == pytest.approx(0.3, abs=0.03), (
+        "the left channel does not hold the microphone alone"
+    )
+    assert np.max(np.abs(signal[:, 1])) == pytest.approx(0.2, abs=0.03), (
+        "the right channel does not hold the far side alone"
     )
 
 
@@ -1845,13 +1853,9 @@ async def test_a_slow_open_adds_no_leading_silence_to_the_wav(
     audio_path = (await recorder.stop()).path
 
     measured_span = stopped_at - started_at
-    with wave.open(str(audio_path), "rb") as wf:
-        rate = wf.getframerate()
-        samples = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
-
-    normalized = samples.astype(np.float32) / 32768.0
-    duration = len(normalized) / rate
-    audible = np.flatnonzero(np.abs(normalized) > 10 ** (-40 / 20))
+    rate, signal = _wav_signal(audio_path)
+    duration = len(signal) / rate
+    audible = _audible_frames(signal, 10 ** (-40 / 20))
 
     assert abs(duration - measured_span) < 0.15, (
         f"the WAV is {duration:.3f}s long against a measured span of "
@@ -2954,7 +2958,7 @@ async def test_far_side_audio_during_the_microphone_open_reaches_the_file(audio_
             _wait_for_writes(recorder)
 
     rate, signal = _wav_signal(audio_path)
-    audible = np.flatnonzero(np.abs(signal) > 10 ** (-40 / 20))
+    audible = _audible_frames(signal, 10 ** (-40 / 20))
 
     assert audible.size > 0, (
         "the far side spoke through the whole microphone open and the file is silent"

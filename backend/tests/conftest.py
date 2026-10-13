@@ -1118,6 +1118,35 @@ def write_aac_m4a(path: Path, seconds: float, rate: int = 44100) -> Path:
     return path
 
 
+def write_meeting_wav(
+    path: Path,
+    seconds: float,
+    *,
+    you: tuple[tuple[float, float], ...] = (),
+    others: tuple[tuple[float, float], ...] = (),
+) -> Path:
+    """A meeting file as the recorder writes it: noise on the left channel during the ``you``
+    ranges, on the right during the ``others`` ranges, digital silence elsewhere."""
+    import numpy as np
+    import soundfile as sf
+
+    rate = 16000
+    noise = np.random.default_rng(0).uniform(-0.1, 0.1, int(seconds * rate)).astype(np.float32)
+    signal = np.zeros((noise.size, 2), dtype=np.float32)
+    for channel, ranges in enumerate((you, others)):
+        for start, end in ranges:
+            first, last = int(start * rate), int(end * rate)
+            signal[first:last, channel] = noise[first:last]
+    sf.write(str(path), signal, rate, subtype="PCM_16")
+    return path
+
+
+@pytest.fixture
+def energy_decides_speech(monkeypatch):
+    """Speech is whatever is louder than the energy floor, with or without the neural VAD."""
+    monkeypatch.setattr("app.audio.vad.speech_probabilities", lambda samples, settings: None)
+
+
 def drop_frames(error: BaseException) -> BaseException:
     """Clears `error`'s traceback, context and cause in place, and returns it.
 

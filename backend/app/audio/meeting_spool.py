@@ -19,14 +19,15 @@ INDEX_DTYPE = np.dtype([("arrival", "<f8"), ("frames", "<i4")])
 ASSEMBLY_RESERVE_MARGIN_BYTES = 64 * 1024 * 1024
 
 
-def assembly_reserve_bytes(seconds: float, sample_rate: int) -> int:
+def assembly_reserve_bytes(seconds: float, sample_rate: int, tracks: int) -> int:
     """Free space assembly will need after capturing `seconds` more seconds.
 
-    Both terms — a float32 mix memmap and the int16 WAV read out of it — are
-    derived from `sample_rate` rather than written down, so raising the rate
-    cannot silently under-reserve. The margin covers the index records.
+    Both terms — a float32 mix memmap and the int16 WAV read out of it, each
+    with `tracks` channels — are derived from `sample_rate` rather than written
+    down, so raising the rate cannot silently under-reserve. The margin covers
+    the index records.
     """
-    per_second = sample_rate * 4 + sample_rate * 2
+    per_second = (sample_rate * 4 + sample_rate * 2) * tracks
     return int(per_second * max(seconds, 0.0)) + ASSEMBLY_RESERVE_MARGIN_BYTES
 
 

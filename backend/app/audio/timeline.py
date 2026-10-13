@@ -3,7 +3,7 @@
 Pure functions only — no device access, no I/O of its own. Both sources spill
 blocks to disk tagged with the `time.monotonic()` reading taken on arrival,
 and this module reconciles their two device clocks against that one shared
-wall clock (ADR 038).
+wall clock (ADR 038). A meeting file keeps them apart, one channel each.
 
 Everything works in chunks over a memmap and never holds a whole source (ADR 058).
 """
@@ -15,6 +15,10 @@ from dataclasses import dataclass
 
 import numpy as np
 import soxr
+
+MICROPHONE_TRACK = 0
+SYSTEM_TRACK = 1
+TRACK_COUNT = 2
 
 
 @dataclass(frozen=True)
@@ -167,10 +171,10 @@ def place_on_timeline(
 
 
 def normalize_in_place(timeline: np.ndarray, chunk_frames: int) -> None:
-    """Scale the mixed timeline down only if it clips, a chunk at a time.
+    """Scale the timeline down only if it clips, a chunk at a time.
 
-    Division is by the actual peak, so both sources keep their relative
-    loudness and neither is attenuated when the sum already fits.
+    Division is by the actual peak across every channel, so the sources keep
+    their relative loudness and neither is attenuated when the timeline already fits.
     """
     peak = 0.0
     for start in range(0, len(timeline), chunk_frames):

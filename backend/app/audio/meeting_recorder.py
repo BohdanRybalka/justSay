@@ -1,7 +1,7 @@
-"""Meeting recorder — microphone plus system audio, mixed into one WAV.
+"""Meeting recorder — microphone plus system audio, one channel each in one WAV.
 
-Writes the same 16 kHz mono 16-bit WAV `MicrophoneRecorder` does, so the file
-enters the pipeline through the same door; `stop()` answers with a
+Writes a 16 kHz 16-bit WAV, microphone on the left and system audio on the
+right, so who spoke survives to the pipeline. `stop()` answers with a
 `MeetingRecording` rather than a bare `Path`, which is why `AudioRecorder`
 declares none. System audio comes from `app.audio.system_source` (ADR 037).
 Every device handle and lifecycle transition runs on `self._devices`' single
@@ -43,7 +43,13 @@ from app.audio.system_source import (
     SystemAudioUnsupportedError,
     create_system_audio_source,
 )
-from app.audio.timeline import normalize_in_place, place_on_timeline
+from app.audio.timeline import (
+    MICROPHONE_TRACK,
+    SYSTEM_TRACK,
+    TRACK_COUNT,
+    normalize_in_place,
+    place_on_timeline,
+)
 from app.core.errors import NotReadyError, ResourceUnavailableError
 
 log = logging.getLogger(__name__)
@@ -368,7 +374,9 @@ class MeetingRecorder(AudioRecorder):
             try:
                 if appended % self._settings.meeting_free_space_check_blocks == 0:
                     elapsed = time.monotonic() - started_at
-                    reserve = assembly_reserve_bytes(elapsed, self._settings.sample_rate)
+                    reserve = assembly_reserve_bytes(
+                        elapsed, self._settings.sample_rate, TRACK_COUNT
+                    )
                     if free_bytes(self._settings.temp_dir) < reserve:
                         accumulating = False
                         self._note_incident(
@@ -671,7 +679,7 @@ class MeetingRecorder(AudioRecorder):
         self._transition(MeetingState.IDLE)
 
     def _assemble_and_write(self, captured: _CapturedMeeting) -> Path:
-        """Stream both spools into one mix file and read the WAV out of it.
+        """Stream both spools into one two-channel mix file and read the WAV out of it.
 
         The spools and the mix file go in the `finally`: a write that failed must
         not leave the raw capture behind next to no recording.
@@ -691,7 +699,7 @@ class MeetingRecorder(AudioRecorder):
     def _mix_into(
         self, captured: _CapturedMeeting, mix_path: Path, output_path: Path
     ) -> Path:
-        """Sum both spools into one mix file and read the WAV out of it.
+        """Place each spool on its own channel of a mix file and read the WAV out of it.
 
         The mix is a `np.memmap`, so a meeting has no length limit beyond the disk.
         All three mappings are closed by an `ExitStack` before this returns.
@@ -703,7 +711,10 @@ class MeetingRecorder(AudioRecorder):
 
         with ExitStack() as mappings:
             mix = np.memmap(
-                mix_path, dtype=np.float32, mode="w+", shape=(max(total_samples, 1),)
+                mix_path,
+                dtype=np.float32,
+                mode="w+",
+                shape=(max(total_samples, 1), TRACK_COUNT),
             )
             mappings.callback(close_memmap, mix)
             timeline = mix[:total_samples]
@@ -713,20 +724,23 @@ class MeetingRecorder(AudioRecorder):
                 "gap_tolerance_blocks": self._settings.meeting_gap_tolerance_blocks,
                 "rate_tolerance": self._settings.meeting_rate_tolerance,
                 "chunk_frames": chunk_frames,
-                "out": timeline,
             }
-            for spool, nominal_rate in (
-                (captured.microphone_spool, target_rate),
-                (captured.system_spool, captured.system_rate),
+            for track, spool, nominal_rate in (
+                (MICROPHONE_TRACK, captured.microphone_spool, target_rate),
+                (SYSTEM_TRACK, captured.system_spool, captured.system_rate),
             ):
                 samples = spool.samples()
                 mappings.callback(close_memmap, samples)
                 place_on_timeline(
-                    spool.index(), samples, nominal_rate=nominal_rate, **common
+                    spool.index(),
+                    samples,
+                    nominal_rate=nominal_rate,
+                    out=timeline[:, track],
+                    **common,
                 )
             normalize_in_place(timeline, chunk_frames)
             return write_wav_streaming(
-                output_path, timeline, target_rate, 1, chunk_frames
+                output_path, timeline, target_rate, TRACK_COUNT, chunk_frames
             )
 
     @property
