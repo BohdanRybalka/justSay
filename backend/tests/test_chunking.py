@@ -93,10 +93,11 @@ async def _run(
 
 @pytest.fixture(autouse=True)
 def _noise_is_speech(monkeypatch):
-    """The synthetic noise stands for speech, so every piece keeps all of it."""
+    """The synthetic noise stands for speech, so every piece keeps all of it and all is voiced."""
     monkeypatch.setattr(
         chunking, "speech_spans", lambda samples, settings: [(0.0, samples.size / 16000)]
     )
+    monkeypatch.setattr(chunking, "voiced_seconds", lambda samples, settings: samples.size / 16000)
 
 
 @pytest.fixture
@@ -575,6 +576,7 @@ async def test_a_piece_reaches_the_engine_without_its_silent_stretches(
 
     monkeypatch.setattr(vad, "speech_probabilities", speech_from_8_to_12_seconds)
     monkeypatch.setattr(chunking, "speech_spans", pauses.speech_spans)
+    monkeypatch.setattr(chunking, "voiced_seconds", pauses.voiced_seconds)
     provider = _Provider([TranscriptionResult("добрий день", detected_language="uk")])
 
     await _run(provider, path)
@@ -671,8 +673,47 @@ async def test_the_speech_a_piece_keeps_decides_whether_a_made_up_phrase_stays(
 
     monkeypatch.setattr(vad, "speech_probabilities", speech_from_8_seconds)
     monkeypatch.setattr(chunking, "speech_spans", pauses.speech_spans)
+    monkeypatch.setattr(chunking, "voiced_seconds", pauses.voiced_seconds)
     provider = _Provider([TranscriptionResult("Thanks for watching.")])
 
     result = await _run(provider, path)
 
     assert result.text == text
+
+
+async def test_words_no_voice_could_say_in_the_voice_heard_are_dropped_from_any_piece(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 20.0)
+    _speech_of([10.0], monkeypatch)
+    monkeypatch.setattr(chunking, "voiced_seconds", lambda samples, settings: 0.1)
+    provider = _Provider(
+        [TranscriptionResult("and I'll see you next time.", detected_language="en")]
+    )
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob, result.detected_language) == ("", 1.0, None)
+
+
+async def test_a_single_word_over_a_hint_of_voice_is_kept(tmp_path, short_pieces, monkeypatch):
+    path = _audio(tmp_path, 20.0)
+    _speech_of([10.0], monkeypatch)
+    monkeypatch.setattr(chunking, "voiced_seconds", lambda samples, settings: 0.1)
+    provider = _Provider([TranscriptionResult("Дякую!")])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob) == ("Дякую!", None)
+
+
+async def test_words_from_a_piece_where_no_voice_is_heard_are_dropped(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 20.0)
+    monkeypatch.setattr(chunking, "speech_spans", lambda samples, settings: [])
+    provider = _Provider([TranscriptionResult("see you next time everyone")])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob) == ("", 1.0)

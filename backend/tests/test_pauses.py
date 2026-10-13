@@ -92,3 +92,15 @@ def test_no_speech_heard_is_no_span(monkeypatch):
     samples = _probabilities(monkeypatch, [(0.0, 10.0)])
 
     assert pauses.speech_spans(samples, SETTINGS) == []
+
+
+def test_voiced_seconds_count_the_speech_hops_without_pad_or_merging(monkeypatch):
+    samples = _probabilities(monkeypatch, [(0.0, 2.0), (3.0, 4.0), (5.0, 8.0)])
+
+    assert pauses.voiced_seconds(samples, SETTINGS) == pytest.approx(4.0, abs=0.05)
+
+
+def test_no_voice_heard_is_zero_voiced_seconds(monkeypatch):
+    samples = _probabilities(monkeypatch, [(0.0, 10.0)])
+
+    assert pauses.voiced_seconds(samples, SETTINGS) == 0.0

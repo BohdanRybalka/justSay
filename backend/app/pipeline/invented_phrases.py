@@ -3,7 +3,9 @@
 The list holds the sign-offs and subtitle credits Whisper-family engines write where nobody spoke,
 in English and Ukrainian. A phrase matches as whole words in any case with any punctuation between
 them; a square-bracketed label such as ``[BLANK_AUDIO]`` and a music note always match. Marks
-touching a cut go with it, and a text left without a letter or a digit is empty.
+touching a cut go with it, and a text left without a letter or a digit is empty. A text of two
+words or more that no voice could say in the seconds of voice heard is made up whatever it says:
+Whisper's own check calls a word under 0.133 s an anomaly.
 """
 
 import re
@@ -22,6 +24,9 @@ INVENTED_PHRASES = (
     "субтитры сделал dimatorzok",
 )
 
+MAX_WORDS_PER_VOICED_SECOND = 1 / 0.133
+MIN_WORDS_TO_JUDGE_PACE = 2
+
 _WORD = re.compile(r"\w+")
 _ALNUM = re.compile(r"[^\W_]")
 _MARK = r"[^\w\s\[\]]"
@@ -38,6 +43,15 @@ _INVENTED = re.compile(
     rf"{_LEADING_MARKS}(?:(?<!\w)(?:{_PHRASES})(?!\w)|{_SOUND_LABEL}){_MARK}*",
     re.IGNORECASE,
 )
+
+
+def outpaces_speech(text: str, voiced_seconds: float) -> bool:
+    """Whether ``text`` holds more words than a voice can say in ``voiced_seconds``.
+
+    A single word is never judged: one short word can be real in a very short sound.
+    """
+    words = len(text.split())
+    return words >= MIN_WORDS_TO_JUDGE_PACE and words > MAX_WORDS_PER_VOICED_SECOND * voiced_seconds
 
 
 def without_invented_phrases(text: str) -> str:

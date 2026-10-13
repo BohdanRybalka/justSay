@@ -28,7 +28,7 @@ from app.core.errors import (
 )
 from app.core.types import ProviderMode
 from app.main import app
-from app.pipeline import jobs, service
+from app.pipeline import chunking, jobs, service
 from app.pipeline.jobs import DictationGate, JobQueue, remove_leftover_files
 from app.pipeline.jobs_router import get_job_queue
 from app.pipeline.service import ProcessingResult
@@ -89,6 +89,11 @@ class _FakePipeline:
         if self.outcome == "saved":
             observer.saved(f"entry-{len(self.calls)}")
         return ProcessingResult("hello", 5, model_name="mock/model")
+
+
+@pytest.fixture
+def noise_is_voice(monkeypatch):
+    monkeypatch.setattr(chunking, "voiced_seconds", lambda samples, settings: samples.size / 16000)
 
 
 @pytest.fixture(autouse=True)
@@ -509,7 +514,7 @@ async def client(tmp_path, monkeypatch, queue):
 
 
 async def test_a_dropped_file_is_saved_as_a_file_entry(
-    client, queue, tmp_path, monkeypatch
+    client, queue, tmp_path, monkeypatch, noise_is_voice
 ):
     monkeypatch.setattr(history, "_output_dir", tmp_path)
     monkeypatch.setattr(history, "_conn", None)
@@ -764,7 +769,7 @@ async def test_leftover_meetings_are_listed_failed_and_can_be_tried_again(
 
 
 async def test_a_meeting_runs_the_real_pipeline_on_its_own_engine(
-    client, queue, tmp_path, monkeypatch
+    client, queue, tmp_path, monkeypatch, noise_is_voice
 ):
     monkeypatch.setattr(history, "_output_dir", tmp_path)
     monkeypatch.setattr(history, "_conn", None)

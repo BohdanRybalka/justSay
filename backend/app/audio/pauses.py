@@ -42,6 +42,12 @@ def longest_pause(samples: np.ndarray, settings: AudioSettings) -> float | None:
     return (middle + width / 2) * vad.HOP_SECONDS
 
 
+def voiced_seconds(samples: np.ndarray, settings: AudioSettings) -> float:
+    """Seconds of 16 kHz mono ``samples`` in which hops hold speech, with no pad or merging."""
+    levels, speech_from = _hop_levels(samples, settings)
+    return float(np.count_nonzero(levels >= speech_from)) * vad.HOP_SECONDS
+
+
 def speech_spans(samples: np.ndarray, settings: AudioSettings) -> list[tuple[float, float]]:
     """``(start, end)`` seconds of the speech in 16 kHz mono ``samples``; empty when none is heard.
 

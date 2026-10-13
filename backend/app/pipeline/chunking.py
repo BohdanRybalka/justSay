@@ -21,11 +21,11 @@ from typing import Protocol
 import numpy as np
 
 from app.audio.config import audio_settings
-from app.audio.pauses import longest_pause, speech_spans
+from app.audio.pauses import longest_pause, speech_spans, voiced_seconds
 from app.core.audio_formats import UndecodableAudioError, decode_to_mono_wav
 from app.core.errors import ResourceUnavailableError
 from app.core.scratch import discard_scratch_file
-from app.pipeline.invented_phrases import without_invented_phrases
+from app.pipeline.invented_phrases import outpaces_speech, without_invented_phrases
 from app.stt.base import STTProvider, TranscriptionResult
 
 log = logging.getLogger(__name__)
@@ -57,6 +57,12 @@ class PiecePacer(Protocol):
     async def pause(self, seconds: float) -> None: ...
 
     def piece_done(self, done: int, total: int) -> None: ...
+
+
+@dataclass(frozen=True)
+class PieceSpeech:
+    kept_seconds: float
+    voiced_seconds: float
 
 
 @dataclass(frozen=True)
@@ -165,15 +171,16 @@ def join_at_seam(left: str, right: str) -> str:
     return "".join(left_tokens[: tail_start + a + half] + right_tokens[b + half :]).strip()
 
 
-def _speech_only(samples: np.ndarray) -> tuple[np.ndarray, float]:
-    """``samples`` without their non-speech stretches, and the seconds of speech kept.
+def _speech_only(samples: np.ndarray) -> tuple[np.ndarray, PieceSpeech]:
+    """``samples`` without their non-speech stretches, and how much speech they hold.
 
-    Where no speech is heard, ``samples`` go whole and the seconds are zero.
+    Where no speech is heard, ``samples`` go whole and both seconds are zero.
     """
-    spans = speech_spans(samples.astype(np.float32) / 32768.0, audio_settings)
+    levels = samples.astype(np.float32) / 32768.0
+    spans = speech_spans(levels, audio_settings)
     if not spans:
         log.info("No speech heard in a %.1fs piece; sending it whole", samples.size / PIECE_RATE)
-        return samples, 0.0
+        return samples, PieceSpeech(0.0, 0.0)
     speech = np.concatenate(
         [samples[round(start * PIECE_RATE) : round(end * PIECE_RATE)] for start, end in spans]
     )
@@ -181,20 +188,20 @@ def _speech_only(samples: np.ndarray) -> tuple[np.ndarray, float]:
         "A %.1fs piece keeps %.1fs of speech in %d stretches",
         samples.size / PIECE_RATE, speech.size / PIECE_RATE, len(spans),
     )
-    return speech, speech.size / PIECE_RATE
+    return speech, PieceSpeech(speech.size / PIECE_RATE, voiced_seconds(levels, audio_settings))
 
 
-def _write_piece(mono: Path, piece: Path, start: float, end: float) -> float:
-    """Write the speech of ``mono`` between ``start`` and ``end`` to ``piece``; its seconds."""
+def _write_piece(mono: Path, piece: Path, start: float, end: float) -> PieceSpeech:
+    """Write the speech of ``mono`` from ``start`` to ``end`` to ``piece``; how much it holds."""
     import soundfile as sf
 
     with sf.SoundFile(str(mono)) as source:
         first = round(start * PIECE_RATE)
         source.seek(first)
         samples = source.read(round(end * PIECE_RATE) - first, dtype="int16")
-    speech, speech_seconds = _speech_only(samples)
+    speech, held = _speech_only(samples)
     sf.write(str(piece), speech, PIECE_RATE, format="FLAC", subtype="PCM_16")
-    return speech_seconds
+    return held
 
 
 def _frames(mono: Path) -> int:
@@ -268,15 +275,23 @@ async def _transcribe_checked(
     return replace(kept, tokens_used=sum(spent) if spent else None)
 
 
-def _without_made_up_phrases(text: str, speech_seconds: float) -> str:
-    """``text`` of a piece; with little speech in it, minus the phrases engines make up."""
-    if speech_seconds >= LITTLE_SPEECH_SECONDS:
+def _without_made_up_text(text: str, speech: PieceSpeech) -> str:
+    """``text`` of a piece, or nothing if no voice could say it in the voice heard there.
+
+    With little speech in the piece, the phrases engines make up are cut out of it as well.
+    """
+    if outpaces_speech(text, speech.voiced_seconds):
+        log.info(
+            "Dropped %d words said over %.1fs of voice", len(text.split()), speech.voiced_seconds
+        )
+        return ""
+    if speech.kept_seconds >= LITTLE_SPEECH_SECONDS:
         return text
     kept = without_invented_phrases(text)
     if kept != text:
         log.info(
             "Dropped made-up phrases from a piece with %.1fs of speech (%d of %d chars kept)",
-            speech_seconds, len(kept), len(text),
+            speech.kept_seconds, len(kept), len(text),
         )
     return kept
 
@@ -335,7 +350,7 @@ async def transcribe_in_pieces(
             piece = audio_path.with_name(f"{audio_path.stem}-piece{index}.flac")
             seconds = planned.end - planned.start
             try:
-                speech_seconds = await asyncio.to_thread(
+                speech = await asyncio.to_thread(
                     _write_piece, mono, piece, planned.start, planned.end
                 )
                 if await asyncio.to_thread(holds_no_speech, piece):
@@ -356,7 +371,7 @@ async def transcribe_in_pieces(
             if prob is not None and prob > no_speech_threshold:
                 silent += 1
                 continue
-            kept = _without_made_up_phrases(result.text, speech_seconds)
+            kept = _without_made_up_text(result.text, speech)
             if result.text and not kept:
                 silent += 1
                 continue

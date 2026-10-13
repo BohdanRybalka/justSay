@@ -4,7 +4,12 @@ import time
 
 import pytest
 
-from app.pipeline.invented_phrases import INVENTED_PHRASES, without_invented_phrases
+from app.pipeline.invented_phrases import (
+    INVENTED_PHRASES,
+    MAX_WORDS_PER_VOICED_SECOND,
+    outpaces_speech,
+    without_invented_phrases,
+)
 
 
 @pytest.mark.parametrize("phrase", INVENTED_PHRASES)
@@ -84,3 +89,39 @@ def test_a_long_run_of_marks_is_cut_in_a_blink_not_in_seconds():
 
     assert result == "-" * 10000 + " ні"
     assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize(
+    ("text", "voiced"),
+    [
+        ("and I'll see you next time.", 0.1),
+        ("Thank you.", 0.1),
+        ("Дякую за перегляд!", 0.08),
+        ("один два три чотири п'ять шість сім вісім", 1.0),
+        ("слово інше", 0.0),
+    ],
+)
+def test_more_words_than_a_voice_can_say_in_the_voice_heard_are_made_up(text, voiced):
+    assert outpaces_speech(text, voiced)
+
+
+@pytest.mark.parametrize(
+    ("text", "voiced"),
+    [
+        ("Дякую!", 0.1),
+        ("моделями.", 0.0),
+        ("Так, добре", 0.6),
+        (" ".join(["слово"] * 34), 11.6),
+        ("", 0.0),
+    ],
+)
+def test_a_single_word_and_a_real_pace_are_not_made_up(text, voiced):
+    assert not outpaces_speech(text, voiced)
+
+
+def test_the_pace_limit_is_a_word_in_less_than_a_hundred_and_thirty_three_milliseconds():
+    on_the_limit = " ".join(["слово"] * 15)
+
+    assert MAX_WORDS_PER_VOICED_SECOND * 2.0 == pytest.approx(15.04, abs=0.01)
+    assert not outpaces_speech(on_the_limit, 2.0)
+    assert outpaces_speech(on_the_limit + " слово", 2.0)
