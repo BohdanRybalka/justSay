@@ -28,8 +28,10 @@ pytestmark = pytest.mark.usefixtures("energy_decides_speech")
 
 
 class _Provider(STTProvider):
-    def __init__(self, answers: list[TranscriptionResult]) -> None:
+    def __init__(self, answers: list[TranscriptionResult], *, longest: float | None = None) -> None:
         self.answers = list(answers)
+        if longest is not None:
+            self.longest_piece_seconds = longest
         self.sent = 0
 
     @property
@@ -128,7 +130,7 @@ async def test_a_microphone_turn_that_only_repeats_the_others_is_cut(meeting):
 
 @pytest.mark.asyncio
 async def test_a_repeat_from_seconds_away_is_not_an_echo(meeting):
-    path = meeting(60.0, you=((40.0, 44.0),), others=((6.0, 10.0),))
+    path = meeting(60.0, you=((22.0, 26.0),), others=((6.0, 10.0),))
     provider = _Provider(
         _said("завтра о десятій буде нарада в офісі", "завтра о десятій буде нарада в офісі")
     )
@@ -139,6 +141,18 @@ async def test_a_repeat_from_seconds_away_is_not_an_echo(meeting):
         "Others: завтра о десятій буде нарада в офісі\n"
         "You: завтра о десятій буде нарада в офісі"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_starting_a_moment_after_the_others_stopped_is_still_an_echo(meeting):
+    path = meeting(20.0, you=((10.0, 13.0),), others=((3.0, 7.5),))
+    provider = _Provider(
+        _said("завтра о десятій буде нарада в офісі", "завтра о десятій буде нарада в офісі")
+    )
+
+    result = await _transcribe(provider, path)
+
+    assert result.text == "завтра о десятій буде нарада в офісі"
 
 
 @pytest.mark.asyncio
@@ -171,6 +185,25 @@ async def test_progress_counts_every_turn_as_a_piece_of_one_file(meeting):
 
     await _transcribe(_Provider(_said("раз", "два", "три")), path, pacer)
 
+    assert pacer.events == [
+        ("before", 0, 3),
+        ("done", 1, 3),
+        ("before", 1, 3),
+        ("done", 2, 3),
+        ("before", 2, 3),
+        ("done", 3, 3),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_pieces_of_a_long_turn_all_count_before_the_turns_that_follow(meeting):
+    path = meeting(40.0, you=((0.0, 25.0),), others=((30.0, 33.0),))
+    pacer = _Pacer()
+    provider = _Provider(_said("раз два", "три чотири", "п'ять"), longest=20.0)
+
+    result = await _transcribe(provider, path, pacer)
+
+    assert result.text == "You: раз два три чотири\nOthers: п'ять"
     assert pacer.events == [
         ("before", 0, 3),
         ("done", 1, 3),
@@ -225,8 +258,34 @@ async def test_tokens_add_up_and_the_language_most_turns_were_heard_in_is_report
         ),
         ("зовсім інші слова", "завтра о десятій буде нарада", "зовсім інші слова"),
         ("", "завтра о десятій", ""),
+        (
+            "раз два три чотири п'ять шість сім вісім",
+            "раз два три чотири п'ять шість",
+            "",
+        ),
+        (
+            "раз два три чотири п'ять шість сім вісім",
+            "раз два три чотири п'ять",
+            "шість сім вісім",
+        ),
+        ("раз два три чотири", "раз два п'ять три чотири", ""),
+        (
+            "ну я думаю що завтра о десятій буде в офісі",
+            "завтра о десятій буде нарада",
+            "ну я думаю що в офісі",
+        ),
     ],
-    ids=["a copy with one slip", "a long run among own words", "a short run", "unrelated", "empty"],
+    ids=[
+        "a copy with one slip",
+        "a long run among own words",
+        "a short run",
+        "unrelated",
+        "empty",
+        "a copy at the threshold",
+        "a run of five among own words",
+        "two runs of two",
+        "a run of exactly four",
+    ],
 )
 def test_the_words_the_others_said_in_the_same_seconds_are_taken_out(text, heard, expected):
     assert without_repeats(text, heard) == expected
