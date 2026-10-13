@@ -50,10 +50,10 @@ _INVENTED = re.compile(
 def outpaces_speech(text: str, voiced_seconds: float) -> bool:
     """Whether ``text`` holds more words than a voice can say in under a second of voice.
 
-    Only a sound with hardly any voice is judged, and never a single word: one short word can
-    be real in a very short sound, and a longer one gives the VAD room to undercount.
+    Only a sound with under a second of voice is judged, so a text that sits on much voice stays,
+    and never a single word: one short word can be real in a very short sound. Marks are no words.
     """
-    words = len(text.split())
+    words = sum(1 for token in text.split() if _ALNUM.search(token))
     return (
         voiced_seconds < MAX_VOICED_SECONDS_TO_JUDGE
         and words >= MIN_WORDS_TO_JUDGE_PACE

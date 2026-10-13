@@ -589,7 +589,7 @@ async def test_a_piece_reaches_the_engine_without_its_silent_stretches(
 
 
 def _speech_of(seconds_per_piece: list[float], monkeypatch, voiced: float | None = None):
-    """Every piece in turn keeps this many seconds of speech, from its start; all voiced."""
+    """Every piece in turn keeps this many seconds of speech; all voiced unless ``voiced`` says."""
     remaining = list(seconds_per_piece)
 
     def profile(samples, settings):

@@ -109,6 +109,8 @@ def test_more_words_than_a_voice_can_say_in_the_voice_heard_are_made_up(text, vo
     ("text", "voiced"),
     [
         ("Дякую!", 0.1),
+        ("— Так.", 0.2),
+        ("... моделями ...", 0.0),
         ("моделями.", 0.0),
         ("Так, добре", 0.6),
         (" ".join(["слово"] * 34), 11.6),
