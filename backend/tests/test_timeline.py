@@ -450,6 +450,16 @@ def test_a_timeline_that_does_not_clip_is_left_exactly_as_it_was():
     assert np.all(timeline == np.float32(0.5))
 
 
+def test_a_clipping_channel_scales_every_channel_by_the_same_factor():
+    timeline = np.array([[1.5, 0.5], [0.3, -0.1]], dtype=np.float32)
+
+    normalize_in_place(timeline, 1024)
+
+    assert timeline[0, 0] == pytest.approx(1.0)
+    assert timeline[0, 1] == pytest.approx(1 / 3)
+    assert timeline[1, 1] == pytest.approx(-0.1 / 1.5)
+
+
 def test_to_mono_averages_channels_rather_than_taking_the_first():
     stereo = np.array([[1.0, 0.0], [0.5, 0.5]], dtype=np.float32)
 

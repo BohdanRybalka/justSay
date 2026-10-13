@@ -36,7 +36,7 @@ from app.audio.meeting_recorder import (
     MeetingWriteFailedError,
     microphone_has_stalled,
 )
-from app.audio.meeting_spool import MeetingSpool
+from app.audio.meeting_spool import MeetingSpool, assembly_reserve_bytes
 from app.main import app
 
 BLOCK_FRAMES = 1024
@@ -455,6 +455,28 @@ async def test_capture_stops_accumulating_while_the_disk_cannot_hold_the_assembl
             "capture went on filling the disk it had already been told it "
             "could not assemble from"
         )
+    finally:
+        recorder.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_the_assembly_reserve_counts_a_channel_for_each_source(
+    settings, source, microphone_stream
+):
+    """The mix file and the WAV each hold two channels, so the floor must reserve for two."""
+    recorder = MeetingRecorder(settings)
+
+    try:
+        with patch(
+            "app.audio.meeting_recorder.assembly_reserve_bytes", wraps=assembly_reserve_bytes
+        ) as reserve:
+            await recorder.start()
+            _feed(recorder, 20)
+            await asyncio.sleep(0.05)
+            recorder._finish_spill()
+
+        assert reserve.call_args_list
+        assert {call.args[2] for call in reserve.call_args_list} == {2}
     finally:
         recorder.cleanup()
 

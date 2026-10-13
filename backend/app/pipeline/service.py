@@ -19,6 +19,7 @@ from app.audio.vad import analyze_vad
 from app.core.types import ProviderMode
 from app.pipeline.chunking import PiecePacer, transcribe_in_pieces
 from app.pipeline.cleanup import clean_dictation
+from app.pipeline.meeting_text import has_two_tracks, spoken_word_count, transcribe_meeting
 from app.pipeline.utils import detect_duration
 from app.stt.config import stt_settings
 from app.stt.routing import get_provider, is_local_provider
@@ -99,7 +100,12 @@ async def process_audio(
     if duration is None:
         duration = detect_duration(audio_path)
 
-    discard_log = await asyncio.to_thread(_silence_note, audio_path)
+    two_tracks = (
+        source == "meeting"
+        and observer is not None
+        and await asyncio.to_thread(has_two_tracks, audio_path)
+    )
+    discard_log = None if two_tracks else await asyncio.to_thread(_silence_note, audio_path)
     if discard_log is not None:
         log.warning(discard_log[0], *discard_log[1])
         return ProcessingResult(
@@ -130,6 +136,15 @@ async def process_audio(
     try:
         if observer is None:
             result = await stt.transcribe(audio_path, language=language, audio_duration=duration)
+        elif two_tracks:
+            result = await transcribe_meeting(
+                stt,
+                audio_path,
+                language=language,
+                no_speech_threshold=stt_settings.no_speech_prob_threshold,
+                holds_no_speech=_holds_no_speech,
+                pacer=observer,
+            )
         else:
             result = await transcribe_in_pieces(
                 stt,
@@ -175,7 +190,7 @@ async def process_audio(
     )
 
     duration_ms = int((time.perf_counter() - start) * 1000)
-    word_count = len(text.split()) if text else 0
+    word_count = spoken_word_count(text) if source == "meeting" else len(text.split())
 
     effective_language = language
     if language == "auto" and result.detected_language:

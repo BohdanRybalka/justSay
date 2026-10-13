@@ -113,25 +113,26 @@ def test_the_assembly_reserve_is_derived_from_the_sample_rate_not_written_down()
     """AC: raising `sample_rate` alone cannot silently under-reserve.
 
     The mix file is float32 at the target rate and the WAV is int16 at the
-    target rate, so both terms are that rate -- asserted symbolically against
-    the settings rather than against a literal byte count.
+    target rate, each with a channel per track, so every term is that rate --
+    asserted symbolically against the settings rather than a literal byte count.
     """
     settings = AudioSettings()
     seconds = 3600
 
-    reserve = assembly_reserve_bytes(seconds, settings.sample_rate)
+    reserve = assembly_reserve_bytes(seconds, settings.sample_rate, 2)
 
     assert reserve == (
-        (settings.sample_rate * 4 + settings.sample_rate * 2) * seconds
+        (settings.sample_rate * 4 + settings.sample_rate * 2) * 2 * seconds
         + ASSEMBLY_RESERVE_MARGIN_BYTES
     )
-    assert assembly_reserve_bytes(seconds, 48000) > reserve
+    assert assembly_reserve_bytes(seconds, 48000, 2) > reserve
+    assert assembly_reserve_bytes(seconds, settings.sample_rate, 1) < reserve
 
 
 def test_the_reserve_never_goes_below_its_own_margin():
     """A capture that has just started still needs room to assemble."""
-    assert assembly_reserve_bytes(0.0, 16000) == ASSEMBLY_RESERVE_MARGIN_BYTES
-    assert assembly_reserve_bytes(-5.0, 16000) == ASSEMBLY_RESERVE_MARGIN_BYTES
+    assert assembly_reserve_bytes(0.0, 16000, 2) == ASSEMBLY_RESERVE_MARGIN_BYTES
+    assert assembly_reserve_bytes(-5.0, 16000, 2) == ASSEMBLY_RESERVE_MARGIN_BYTES
 
 
 def test_free_space_is_read_off_the_volume_the_recording_lands_on(tmp_path: Path):

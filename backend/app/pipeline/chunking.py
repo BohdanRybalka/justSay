@@ -100,7 +100,7 @@ def plan_pieces(
     return pieces
 
 
-def _normalised(token: str) -> str:
+def normalised(token: str) -> str:
     return "".join(ch for ch in token.casefold() if ch.isalnum())
 
 
@@ -114,7 +114,7 @@ def looks_broken(text: str, seconds: float) -> bool:
     Counted in letters, so languages written without spaces are measured alike. An empty answer
     always is; below ``SPARSE_CHECK_FROM_SECONDS`` a piece may hold one word and is not sparse.
     """
-    letters = _normalised(text)
+    letters = normalised(text)
     if not letters:
         return True
     sparse_possible = seconds >= SPARSE_CHECK_FROM_SECONDS
@@ -124,8 +124,8 @@ def looks_broken(text: str, seconds: float) -> bool:
     return stretches > 0 and 1 - _distinct_stretches(letters) / stretches > LOOP_REPEATED_SHARE
 
 
-def _seam_words(tokens: list[str]) -> list[object]:
-    return [_normalised(token) or object() for token in tokens]
+def comparable_words(tokens: list[str]) -> list[object]:
+    return [normalised(token) or object() for token in tokens]
 
 
 def _overlap_run(tail: list[object], head: list[object]) -> tuple[int, int, int] | None:
@@ -162,7 +162,8 @@ def join_at_seam(left: str, right: str) -> str:
     left_tokens, right_tokens = _TOKEN.findall(left), _TOKEN.findall(right)
     tail_start = max(0, len(left_tokens) - MAX_OVERLAP_WORDS)
     run = _overlap_run(
-        _seam_words(left_tokens[tail_start:]), _seam_words(right_tokens[:MAX_OVERLAP_WORDS])
+        comparable_words(left_tokens[tail_start:]),
+        comparable_words(right_tokens[:MAX_OVERLAP_WORDS]),
     )
     if run is None:
         return f"{left.rstrip()} {right.lstrip()}".strip()
@@ -222,6 +223,11 @@ def _pause_in(mono: Path, start: float, end: float) -> float | None:
     return None if offset is None else start + offset
 
 
+def _pause_relative_to(mono: Path, begin: float, start: float, end: float) -> float | None:
+    pause = _pause_in(mono, begin + start, begin + end)
+    return None if pause is None else pause - begin
+
+
 def _retry_after(refusal: ResourceUnavailableError) -> float | None:
     value = (refusal.headers or {}).get("Retry-After")
     try:
@@ -270,8 +276,8 @@ async def _transcribe_checked(
         (first, second),
         key=lambda r: (
             not looks_broken(r.text, seconds),
-            _distinct_stretches(_normalised(r.text), VARIETY_NGRAM_CHARS),
-            len(_normalised(r.text)),
+            _distinct_stretches(normalised(r.text), VARIETY_NGRAM_CHARS),
+            len(normalised(r.text)),
         ),
     )
     spent = [r.tokens_used for r in (first, second) if r.tokens_used is not None]
@@ -299,10 +305,89 @@ def _without_made_up_text(text: str, speech: PieceSpeech) -> str:
     return kept
 
 
-def _reported_language(asked: str, heard: Counter[str]) -> str | None:
+def reported_language(asked: str, heard: Counter[str]) -> str | None:
     if asked != "auto":
         return asked
     return heard.most_common(1)[0][0] if heard else None
+
+
+async def transcribe_stretch(
+    stt: STTProvider,
+    scratch: Path,
+    mono: Path,
+    begin: float,
+    end: float,
+    *,
+    language: str,
+    no_speech_threshold: float,
+    holds_no_speech: Callable[[Path], bool],
+    pacer: PiecePacer,
+) -> TranscriptionResult:
+    """Transcribe the seconds ``begin`` to ``end`` of the 16 kHz ``mono`` file, piece by piece.
+
+    Piece files sit beside ``scratch`` and are removed. A piece ``holds_no_speech`` judges silent
+    is never sent; one whose ``no_speech_prob`` exceeds ``no_speech_threshold`` adds no text.
+    ``"auto"`` is detected in every piece apart, and the language most pieces were heard in is
+    reported. With no speech in any piece, ``no_speech_prob`` is 1.0, so the caller discards it.
+    """
+    pieces = await asyncio.to_thread(
+        plan_pieces,
+        end - begin,
+        stt.longest_piece_seconds,
+        lambda start, stop: _pause_relative_to(mono, begin, start, stop),
+    )
+    texts: list[tuple[str, bool]] = []
+    heard: Counter[str] = Counter()
+    silent = 0
+    tokens: list[int] = []
+    for index, planned in enumerate(pieces):
+
+        async def turn(index: int = index) -> None:
+            await pacer.before_piece(index, len(pieces))
+
+        await turn()
+        piece = scratch.with_name(f"{scratch.stem}-piece{index}.flac")
+        seconds = planned.end - planned.start
+        try:
+            speech = await asyncio.to_thread(
+                _write_piece, mono, piece, begin + planned.start, begin + planned.end
+            )
+            if await asyncio.to_thread(holds_no_speech, piece):
+                result = None
+            else:
+                result = await _transcribe_checked(
+                    stt, piece, language, seconds, no_speech_threshold, pacer, turn
+                )
+        finally:
+            discard_scratch_file(piece)
+        pacer.piece_done(index + 1, len(pieces))
+        if result is None:
+            silent += 1
+            continue
+        if result.tokens_used is not None:
+            tokens.append(result.tokens_used)
+        prob = result.no_speech_prob
+        if prob is not None and prob > no_speech_threshold:
+            silent += 1
+            continue
+        kept = _without_made_up_text(result.text, speech)
+        if result.text and not kept:
+            silent += 1
+            continue
+        if result.detected_language:
+            heard[result.detected_language] += 1
+        if kept:
+            texts.append((kept, planned.overlaps_previous))
+
+    text = texts[0][0] if texts else ""
+    for following, overlaps in texts[1:]:
+        text = join_at_seam(text, following) if overlaps else f"{text} {following}"
+    return TranscriptionResult(
+        text=text,
+        tokens_used=sum(tokens) if tokens else None,
+        detected_language=reported_language(language, heard),
+        no_speech_prob=1.0 if silent == len(pieces) else None,
+    )
 
 
 async def transcribe_in_pieces(
@@ -317,10 +402,8 @@ async def transcribe_in_pieces(
 ) -> TranscriptionResult:
     """Transcribe ``audio_path`` piece by piece; scratch files sit beside it and are removed.
 
-    A piece ``holds_no_speech`` judges silent is never sent; one whose ``no_speech_prob`` exceeds
-    ``no_speech_threshold`` adds no text. ``"auto"`` is detected in every piece apart, and the
-    language most pieces were heard in is reported. With no speech in any piece, ``no_speech_prob``
-    is 1.0, so the caller discards it.
+    Audio that cannot be cut here goes whole. Otherwise see ``transcribe_stretch``, applied to
+    all of it.
     """
     mono = audio_path.with_name(f"{audio_path.stem}-16k.wav")
     try:
@@ -334,63 +417,16 @@ async def transcribe_in_pieces(
 
     try:
         total = await asyncio.to_thread(_frames, mono) / PIECE_RATE
-        pieces = await asyncio.to_thread(
-            plan_pieces,
+        return await transcribe_stretch(
+            stt,
+            audio_path,
+            mono,
+            0.0,
             total,
-            stt.longest_piece_seconds,
-            lambda start, end: _pause_in(mono, start, end),
+            language=language,
+            no_speech_threshold=no_speech_threshold,
+            holds_no_speech=holds_no_speech,
+            pacer=pacer,
         )
-        texts: list[tuple[str, bool]] = []
-        heard: Counter[str] = Counter()
-        silent = 0
-        tokens: list[int] = []
-        for index, planned in enumerate(pieces):
-
-            async def turn(index: int = index) -> None:
-                await pacer.before_piece(index, len(pieces))
-
-            await turn()
-            piece = audio_path.with_name(f"{audio_path.stem}-piece{index}.flac")
-            seconds = planned.end - planned.start
-            try:
-                speech = await asyncio.to_thread(
-                    _write_piece, mono, piece, planned.start, planned.end
-                )
-                if await asyncio.to_thread(holds_no_speech, piece):
-                    result = None
-                else:
-                    result = await _transcribe_checked(
-                        stt, piece, language, seconds, no_speech_threshold, pacer, turn
-                    )
-            finally:
-                discard_scratch_file(piece)
-            pacer.piece_done(index + 1, len(pieces))
-            if result is None:
-                silent += 1
-                continue
-            if result.tokens_used is not None:
-                tokens.append(result.tokens_used)
-            prob = result.no_speech_prob
-            if prob is not None and prob > no_speech_threshold:
-                silent += 1
-                continue
-            kept = _without_made_up_text(result.text, speech)
-            if result.text and not kept:
-                silent += 1
-                continue
-            if result.detected_language:
-                heard[result.detected_language] += 1
-            if kept:
-                texts.append((kept, planned.overlaps_previous))
     finally:
         discard_scratch_file(mono)
-
-    text = texts[0][0] if texts else ""
-    for following, overlaps in texts[1:]:
-        text = join_at_seam(text, following) if overlaps else f"{text} {following}"
-    return TranscriptionResult(
-        text=text,
-        tokens_used=sum(tokens) if tokens else None,
-        detected_language=_reported_language(language, heard),
-        no_speech_prob=1.0 if silent == len(pieces) else None,
-    )
