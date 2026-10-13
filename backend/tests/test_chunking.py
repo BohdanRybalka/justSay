@@ -14,6 +14,7 @@ import pytest
 import soundfile as sf
 
 from app.audio import pauses, vad
+from app.audio.pauses import SpeechProfile
 from app.core.audio_formats import ffmpeg_selftest
 from app.core.errors import ResourceUnavailableError
 from app.pipeline import chunking
@@ -93,9 +94,13 @@ async def _run(
 
 @pytest.fixture(autouse=True)
 def _noise_is_speech(monkeypatch):
-    """The synthetic noise stands for speech, so every piece keeps all of it."""
+    """The synthetic noise stands for speech, so every piece keeps all of it and all is voiced."""
     monkeypatch.setattr(
-        chunking, "speech_spans", lambda samples, settings: [(0.0, samples.size / 16000)]
+        chunking,
+        "speech_profile",
+        lambda samples, settings: SpeechProfile(
+            [(0.0, samples.size / 16000)], samples.size / 16000
+        ),
     )
 
 
@@ -574,10 +579,148 @@ async def test_a_piece_reaches_the_engine_without_its_silent_stretches(
         return np.where((seconds >= 8.0) & (seconds < 12.0), 0.9, 0.1).astype(np.float32)
 
     monkeypatch.setattr(vad, "speech_probabilities", speech_from_8_to_12_seconds)
-    monkeypatch.setattr(chunking, "speech_spans", pauses.speech_spans)
+    monkeypatch.setattr(chunking, "speech_profile", pauses.speech_profile)
     provider = _Provider([TranscriptionResult("добрий день", detected_language="uk")])
 
     await _run(provider, path)
 
     expected = 4.0 + 2 * pauses.SPEECH_PAD_SECONDS
     assert provider.sent[0]["seconds"] == pytest.approx(expected, abs=0.05)
+
+
+def _speech_of(seconds_per_piece: list[float], monkeypatch, voiced: float | None = None):
+    """Every piece in turn keeps this many seconds of speech; all voiced unless ``voiced`` says."""
+    remaining = list(seconds_per_piece)
+
+    def profile(samples, settings):
+        kept = remaining.pop(0)
+        return SpeechProfile([(0.0, kept)], kept if voiced is None else voiced)
+
+    monkeypatch.setattr(chunking, "speech_profile", profile)
+
+
+async def test_a_phrase_made_up_over_a_piece_with_little_speech_is_dropped(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 20.0)
+    _speech_of([1.0], monkeypatch)
+    provider = _Provider([TranscriptionResult("Дякую за перегляд!", detected_language="uk")])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob, result.detected_language) == ("", 1.0, None)
+
+
+async def test_a_piece_where_no_speech_is_heard_is_one_with_little_speech(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 20.0)
+    monkeypatch.setattr(
+        chunking, "speech_profile", lambda samples, settings: SpeechProfile([], 0.0)
+    )
+    provider = _Provider([TranscriptionResult("Thanks for watching.")])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob) == ("", 1.0)
+
+
+async def test_the_same_phrase_in_a_piece_with_real_speech_is_kept(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 20.0)
+    _speech_of([chunking.LITTLE_SPEECH_SECONDS], monkeypatch)
+    provider = _Provider([TranscriptionResult("Дякую за перегляд!")])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob) == ("Дякую за перегляд!", None)
+
+
+async def test_words_beside_a_made_up_phrase_in_a_piece_with_little_speech_are_kept(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 20.0)
+    _speech_of([2.0], monkeypatch)
+    provider = _Provider([TranscriptionResult("Так. Thanks for watching.")])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob) == ("Так.", None)
+
+
+async def test_a_piece_of_made_up_text_is_silent_and_its_language_is_not_counted(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 50.0)
+    _speech_of([0.5, 20.0], monkeypatch)
+    provider = _Provider([
+        TranscriptionResult("[BLANK_AUDIO]", detected_language="en"),
+        TranscriptionResult("добрий день", detected_language="uk"),
+    ])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.detected_language, result.no_speech_prob) == (
+        "добрий день", "uk", None,
+    )
+
+
+@pytest.mark.parametrize(("speech_seconds", "text"), [(1.0, ""), (4.0, "Thanks for watching.")])
+async def test_the_speech_a_piece_keeps_decides_whether_a_made_up_phrase_stays(
+    tmp_path, short_pieces, monkeypatch, speech_seconds, text
+):
+    path = _audio(tmp_path, 20.0)
+
+    def speech_from_8_seconds(samples, settings):
+        hops = samples.size // vad._HOP_SAMPLES
+        seconds = np.arange(hops) * vad.HOP_SECONDS
+        return np.where((seconds >= 8.0) & (seconds < 8.0 + speech_seconds), 0.9, 0.1).astype(
+            np.float32
+        )
+
+    monkeypatch.setattr(vad, "speech_probabilities", speech_from_8_seconds)
+    monkeypatch.setattr(chunking, "speech_profile", pauses.speech_profile)
+    provider = _Provider([TranscriptionResult("Thanks for watching.")])
+
+    result = await _run(provider, path)
+
+    assert result.text == text
+
+
+async def test_words_no_voice_could_say_in_the_voice_heard_are_dropped_from_any_piece(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 20.0)
+    _speech_of([10.0], monkeypatch, voiced=0.1)
+    provider = _Provider(
+        [TranscriptionResult("and I'll see you next time.", detected_language="en")]
+    )
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob, result.detected_language) == ("", 1.0, None)
+
+
+async def test_a_single_word_over_a_hint_of_voice_is_kept(tmp_path, short_pieces, monkeypatch):
+    path = _audio(tmp_path, 20.0)
+    _speech_of([10.0], monkeypatch, voiced=0.1)
+    provider = _Provider([TranscriptionResult("Дякую!")])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob) == ("Дякую!", None)
+
+
+async def test_words_from_a_piece_where_no_voice_is_heard_are_dropped(
+    tmp_path, short_pieces, monkeypatch
+):
+    path = _audio(tmp_path, 20.0)
+    monkeypatch.setattr(
+        chunking, "speech_profile", lambda samples, settings: SpeechProfile([], 0.0)
+    )
+    provider = _Provider([TranscriptionResult("see you next time everyone")])
+
+    result = await _run(provider, path)
+
+    assert (result.text, result.no_speech_prob) == ("", 1.0)
