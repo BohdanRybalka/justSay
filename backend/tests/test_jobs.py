@@ -18,6 +18,7 @@ import soundfile as sf
 from httpx import ASGITransport, AsyncClient
 
 from app.audio.meeting_recorder import leftover_recordings
+from app.audio.pauses import SpeechProfile
 from app.audio.vad import VadAnalysis
 from app.config import settings
 from app.core.audio_formats import UNREADABLE_HERE
@@ -93,7 +94,13 @@ class _FakePipeline:
 
 @pytest.fixture
 def noise_is_voice(monkeypatch):
-    monkeypatch.setattr(chunking, "voiced_seconds", lambda samples, settings: samples.size / 16000)
+    monkeypatch.setattr(
+        chunking,
+        "speech_profile",
+        lambda samples, settings: SpeechProfile(
+            [(0.0, samples.size / 16000)], samples.size / 16000
+        ),
+    )
 
 
 @pytest.fixture(autouse=True)

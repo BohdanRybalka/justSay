@@ -21,7 +21,7 @@ from typing import Protocol
 import numpy as np
 
 from app.audio.config import audio_settings
-from app.audio.pauses import longest_pause, speech_spans, voiced_seconds
+from app.audio.pauses import longest_pause, speech_profile
 from app.core.audio_formats import UndecodableAudioError, decode_to_mono_wav
 from app.core.errors import ResourceUnavailableError
 from app.core.scratch import discard_scratch_file
@@ -177,18 +177,21 @@ def _speech_only(samples: np.ndarray) -> tuple[np.ndarray, PieceSpeech]:
     Where no speech is heard, ``samples`` go whole and both seconds are zero.
     """
     levels = samples.astype(np.float32) / 32768.0
-    spans = speech_spans(levels, audio_settings)
-    if not spans:
+    profile = speech_profile(levels, audio_settings)
+    if not profile.spans:
         log.info("No speech heard in a %.1fs piece; sending it whole", samples.size / PIECE_RATE)
         return samples, PieceSpeech(0.0, 0.0)
     speech = np.concatenate(
-        [samples[round(start * PIECE_RATE) : round(end * PIECE_RATE)] for start, end in spans]
+        [
+            samples[round(start * PIECE_RATE) : round(end * PIECE_RATE)]
+            for start, end in profile.spans
+        ]
     )
     log.info(
         "A %.1fs piece keeps %.1fs of speech in %d stretches",
-        samples.size / PIECE_RATE, speech.size / PIECE_RATE, len(spans),
+        samples.size / PIECE_RATE, speech.size / PIECE_RATE, len(profile.spans),
     )
-    return speech, PieceSpeech(speech.size / PIECE_RATE, voiced_seconds(levels, audio_settings))
+    return speech, PieceSpeech(speech.size / PIECE_RATE, profile.voiced_seconds)
 
 
 def _write_piece(mono: Path, piece: Path, start: float, end: float) -> PieceSpeech:

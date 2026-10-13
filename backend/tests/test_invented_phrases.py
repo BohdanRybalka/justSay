@@ -97,7 +97,7 @@ def test_a_long_run_of_marks_is_cut_in_a_blink_not_in_seconds():
         ("and I'll see you next time.", 0.1),
         ("Thank you.", 0.1),
         ("Дякую за перегляд!", 0.08),
-        ("один два три чотири п'ять шість сім вісім", 1.0),
+        ("один два три чотири п'ять шість сім вісім", 0.9),
         ("слово інше", 0.0),
     ],
 )
@@ -120,8 +120,14 @@ def test_a_single_word_and_a_real_pace_are_not_made_up(text, voiced):
 
 
 def test_the_pace_limit_is_a_word_in_less_than_a_hundred_and_thirty_three_milliseconds():
-    on_the_limit = " ".join(["слово"] * 15)
+    assert MAX_WORDS_PER_VOICED_SECOND * 0.5 == pytest.approx(3.76, abs=0.01)
+    assert not outpaces_speech(" ".join(["слово"] * 3), 0.5)
+    assert outpaces_speech(" ".join(["слово"] * 4), 0.5)
 
-    assert MAX_WORDS_PER_VOICED_SECOND * 2.0 == pytest.approx(15.04, abs=0.01)
-    assert not outpaces_speech(on_the_limit, 2.0)
-    assert outpaces_speech(on_the_limit + " слово", 2.0)
+
+def test_a_sound_with_a_second_of_voice_or_more_is_never_judged_by_its_pace():
+    eight = " ".join(["слово"] * 8)
+
+    assert outpaces_speech(eight, 0.99)
+    assert not outpaces_speech(eight, 1.0)
+    assert not outpaces_speech(" ".join(["слово"] * 102), 13.0)

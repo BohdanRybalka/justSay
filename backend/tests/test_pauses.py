@@ -76,10 +76,10 @@ def test_speech_probabilities_abstain_without_the_library(monkeypatch):
     assert vad.speech_probabilities(np.zeros(4096, np.float32), SETTINGS) is None
 
 
-def test_speech_spans_merge_short_gaps_split_long_ones_and_keep_a_pad(monkeypatch):
+def test_speech_profile_spans_merge_short_gaps_split_long_ones_and_keep_a_pad(monkeypatch):
     samples = _probabilities(monkeypatch, [(0.0, 2.0), (3.0, 4.0), (5.0, 8.0)])
 
-    spans = pauses.speech_spans(samples, SETTINGS)
+    spans = pauses.speech_profile(samples, SETTINGS).spans
 
     pad = pauses.SPEECH_PAD_SECONDS
     expected = [(2.0 - pad, 5.0 + pad), (8.0 - pad, 10.0)]
@@ -91,16 +91,16 @@ def test_speech_spans_merge_short_gaps_split_long_ones_and_keep_a_pad(monkeypatc
 def test_no_speech_heard_is_no_span(monkeypatch):
     samples = _probabilities(monkeypatch, [(0.0, 10.0)])
 
-    assert pauses.speech_spans(samples, SETTINGS) == []
+    assert pauses.speech_profile(samples, SETTINGS).spans == []
 
 
 def test_voiced_seconds_count_the_speech_hops_without_pad_or_merging(monkeypatch):
     samples = _probabilities(monkeypatch, [(0.0, 2.0), (3.0, 4.0), (5.0, 8.0)])
 
-    assert pauses.voiced_seconds(samples, SETTINGS) == pytest.approx(4.0, abs=0.05)
+    assert pauses.speech_profile(samples, SETTINGS).voiced_seconds == pytest.approx(4.0, abs=0.05)
 
 
 def test_no_voice_heard_is_zero_voiced_seconds(monkeypatch):
     samples = _probabilities(monkeypatch, [(0.0, 10.0)])
 
-    assert pauses.voiced_seconds(samples, SETTINGS) == 0.0
+    assert pauses.speech_profile(samples, SETTINGS).voiced_seconds == 0.0

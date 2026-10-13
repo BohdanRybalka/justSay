@@ -14,6 +14,7 @@ import pytest
 import soundfile as sf
 
 from app.audio import pauses, vad
+from app.audio.pauses import SpeechProfile
 from app.core.audio_formats import ffmpeg_selftest
 from app.core.errors import ResourceUnavailableError
 from app.pipeline import chunking
@@ -95,9 +96,12 @@ async def _run(
 def _noise_is_speech(monkeypatch):
     """The synthetic noise stands for speech, so every piece keeps all of it and all is voiced."""
     monkeypatch.setattr(
-        chunking, "speech_spans", lambda samples, settings: [(0.0, samples.size / 16000)]
+        chunking,
+        "speech_profile",
+        lambda samples, settings: SpeechProfile(
+            [(0.0, samples.size / 16000)], samples.size / 16000
+        ),
     )
-    monkeypatch.setattr(chunking, "voiced_seconds", lambda samples, settings: samples.size / 16000)
 
 
 @pytest.fixture
@@ -575,8 +579,7 @@ async def test_a_piece_reaches_the_engine_without_its_silent_stretches(
         return np.where((seconds >= 8.0) & (seconds < 12.0), 0.9, 0.1).astype(np.float32)
 
     monkeypatch.setattr(vad, "speech_probabilities", speech_from_8_to_12_seconds)
-    monkeypatch.setattr(chunking, "speech_spans", pauses.speech_spans)
-    monkeypatch.setattr(chunking, "voiced_seconds", pauses.voiced_seconds)
+    monkeypatch.setattr(chunking, "speech_profile", pauses.speech_profile)
     provider = _Provider([TranscriptionResult("добрий день", detected_language="uk")])
 
     await _run(provider, path)
@@ -585,12 +588,15 @@ async def test_a_piece_reaches_the_engine_without_its_silent_stretches(
     assert provider.sent[0]["seconds"] == pytest.approx(expected, abs=0.05)
 
 
-def _speech_of(seconds_per_piece: list[float], monkeypatch):
-    """Every piece in turn keeps this many seconds of speech, from its start."""
+def _speech_of(seconds_per_piece: list[float], monkeypatch, voiced: float | None = None):
+    """Every piece in turn keeps this many seconds of speech, from its start; all voiced."""
     remaining = list(seconds_per_piece)
-    monkeypatch.setattr(
-        chunking, "speech_spans", lambda samples, settings: [(0.0, remaining.pop(0))]
-    )
+
+    def profile(samples, settings):
+        kept = remaining.pop(0)
+        return SpeechProfile([(0.0, kept)], kept if voiced is None else voiced)
+
+    monkeypatch.setattr(chunking, "speech_profile", profile)
 
 
 async def test_a_phrase_made_up_over_a_piece_with_little_speech_is_dropped(
@@ -609,7 +615,9 @@ async def test_a_piece_where_no_speech_is_heard_is_one_with_little_speech(
     tmp_path, short_pieces, monkeypatch
 ):
     path = _audio(tmp_path, 20.0)
-    monkeypatch.setattr(chunking, "speech_spans", lambda samples, settings: [])
+    monkeypatch.setattr(
+        chunking, "speech_profile", lambda samples, settings: SpeechProfile([], 0.0)
+    )
     provider = _Provider([TranscriptionResult("Thanks for watching.")])
 
     result = await _run(provider, path)
@@ -672,8 +680,7 @@ async def test_the_speech_a_piece_keeps_decides_whether_a_made_up_phrase_stays(
         )
 
     monkeypatch.setattr(vad, "speech_probabilities", speech_from_8_seconds)
-    monkeypatch.setattr(chunking, "speech_spans", pauses.speech_spans)
-    monkeypatch.setattr(chunking, "voiced_seconds", pauses.voiced_seconds)
+    monkeypatch.setattr(chunking, "speech_profile", pauses.speech_profile)
     provider = _Provider([TranscriptionResult("Thanks for watching.")])
 
     result = await _run(provider, path)
@@ -685,8 +692,7 @@ async def test_words_no_voice_could_say_in_the_voice_heard_are_dropped_from_any_
     tmp_path, short_pieces, monkeypatch
 ):
     path = _audio(tmp_path, 20.0)
-    _speech_of([10.0], monkeypatch)
-    monkeypatch.setattr(chunking, "voiced_seconds", lambda samples, settings: 0.1)
+    _speech_of([10.0], monkeypatch, voiced=0.1)
     provider = _Provider(
         [TranscriptionResult("and I'll see you next time.", detected_language="en")]
     )
@@ -698,8 +704,7 @@ async def test_words_no_voice_could_say_in_the_voice_heard_are_dropped_from_any_
 
 async def test_a_single_word_over_a_hint_of_voice_is_kept(tmp_path, short_pieces, monkeypatch):
     path = _audio(tmp_path, 20.0)
-    _speech_of([10.0], monkeypatch)
-    monkeypatch.setattr(chunking, "voiced_seconds", lambda samples, settings: 0.1)
+    _speech_of([10.0], monkeypatch, voiced=0.1)
     provider = _Provider([TranscriptionResult("Дякую!")])
 
     result = await _run(provider, path)
@@ -711,7 +716,9 @@ async def test_words_from_a_piece_where_no_voice_is_heard_are_dropped(
     tmp_path, short_pieces, monkeypatch
 ):
     path = _audio(tmp_path, 20.0)
-    monkeypatch.setattr(chunking, "speech_spans", lambda samples, settings: [])
+    monkeypatch.setattr(
+        chunking, "speech_profile", lambda samples, settings: SpeechProfile([], 0.0)
+    )
     provider = _Provider([TranscriptionResult("see you next time everyone")])
 
     result = await _run(provider, path)

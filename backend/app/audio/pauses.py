@@ -5,6 +5,8 @@ decides speech when the library loads; otherwise a hop louder than ``silence_fra
 Speech stretches follow faster-whisper's VAD defaults: 2 s of silence splits, 0.4 s pads.
 """
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from app.audio import vad
@@ -42,17 +44,18 @@ def longest_pause(samples: np.ndarray, settings: AudioSettings) -> float | None:
     return (middle + width / 2) * vad.HOP_SECONDS
 
 
-def voiced_seconds(samples: np.ndarray, settings: AudioSettings) -> float:
-    """Seconds of 16 kHz mono ``samples`` in which hops hold speech, with no pad or merging."""
-    levels, speech_from = _hop_levels(samples, settings)
-    return float(np.count_nonzero(levels >= speech_from)) * vad.HOP_SECONDS
+@dataclass(frozen=True)
+class SpeechProfile:
+    spans: list[tuple[float, float]]
+    voiced_seconds: float
 
 
-def speech_spans(samples: np.ndarray, settings: AudioSettings) -> list[tuple[float, float]]:
-    """``(start, end)`` seconds of the speech in 16 kHz mono ``samples``; empty when none is heard.
+def speech_profile(samples: np.ndarray, settings: AudioSettings) -> SpeechProfile:
+    """The speech spans of 16 kHz mono ``samples`` and the seconds of hops that hold speech.
 
-    Speech closer than ``MIN_SILENCE_SECONDS`` to the next is one span, and every span keeps
-    ``SPEECH_PAD_SECONDS`` around it, within the audio.
+    A span is ``(start, end)`` seconds; none means no speech is heard. Speech closer than
+    ``MIN_SILENCE_SECONDS`` to the next is one span, and every span keeps ``SPEECH_PAD_SECONDS``
+    around it, within the audio. The voiced seconds count hops alone, with no pad or merging.
     """
     levels, speech_from = _hop_levels(samples, settings)
     speech = (levels >= speech_from).astype(np.int8)
@@ -64,10 +67,11 @@ def speech_spans(samples: np.ndarray, settings: AudioSettings) -> list[tuple[flo
         else:
             runs.append([int(start), int(end)])
     duration = samples.size / vad._HOP_SAMPLES * vad.HOP_SECONDS
-    return [
+    spans = [
         (
             max(start * vad.HOP_SECONDS - SPEECH_PAD_SECONDS, 0.0),
             min(end * vad.HOP_SECONDS + SPEECH_PAD_SECONDS, duration),
         )
         for start, end in runs
     ]
+    return SpeechProfile(spans, int(np.count_nonzero(speech)) * vad.HOP_SECONDS)
