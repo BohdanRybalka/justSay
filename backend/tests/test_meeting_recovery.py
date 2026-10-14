@@ -121,6 +121,29 @@ async def test_a_hand_over_that_fails_keeps_the_spools_and_goes_on(settings):
     assert all(path.exists() for path in first_spill)
 
 
+@pytest.mark.asyncio
+async def test_a_set_with_nothing_to_rebuild_hands_nothing_over(settings):
+    _left_behind(settings.temp_dir, "0123456789ab", blocks=0)
+    handed_over: list[list[Path]] = []
+
+    await rebuild_interrupted_meetings(settings, ["0123456789ab"], handed_over.append)
+
+    assert handed_over == []
+
+
+@pytest.mark.asyncio
+async def test_a_recording_cleared_before_it_was_listed_keeps_its_spools(settings):
+    """Clear takes the names to spare before the job exists, so it can reach a fresh rebuild."""
+    spill = _left_behind(settings.temp_dir, "0123456789ab")
+
+    def cleared_meanwhile(recordings: list[Path]) -> None:
+        recordings[0].unlink()
+
+    await rebuild_interrupted_meetings(settings, ["0123456789ab"], cleared_meanwhile)
+
+    assert all(path.exists() for path in spill)
+
+
 def test_a_spool_a_scanner_still_holds_is_never_rebuilt_into_a_second_meeting(settings):
     """Windows refuses to delete a file another process has open, such as a virus scanner.
 

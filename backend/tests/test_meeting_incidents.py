@@ -809,9 +809,8 @@ async def test_a_write_that_fails_keeps_the_spools_and_leaves_no_mix_or_unfinish
     failure is raised from `write_wav_streaming`, the only point at which all
     three mappings -- the mix and one over each spool -- are open at once. On
     Windows a file cannot be unlinked while a mapping over it is open, and a
-    raising call keeps its frame alive in the traceback, so before `_mix_into`
-    closed its mappings explicitly the `finally` swallowed `WinError 32` and
-    left hundreds of megabytes of `.f32` behind during the disk-full incident.
+    raising call keeps its frame alive in the traceback, so the mix file goes
+    only if `_mix_into` closes its mappings itself.
     """
     recorder = MeetingRecorder(settings)
     try:

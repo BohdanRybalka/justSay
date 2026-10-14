@@ -132,6 +132,9 @@ async def rebuild_interrupted_meetings(
                 exc_info=True,
             )
             continue
+        if not recording.exists():
+            log.warning("The rebuilt %s went before it was listed; its spill files stay", recording)
+            continue
         log.info("Meeting %s cut off by the last run rebuilt into %s", meeting_id, recording)
         _discard_spill(settings.temp_dir, meeting_id)
 
