@@ -1,18 +1,13 @@
 /**
  * The Version row of the Settings card: the running version, when updates were
  * last found to be none, and the updater's check, install and restart. The
+ * install runs in the shell, which closes JustSay the way Quit does first. The
  * time of the last "up to date" answer is UI state kept in `localStorage`.
  */
 import { setDisabled } from "../../ui/controls";
 import { icon } from "../../ui/icons";
 
 const LAST_UP_TO_DATE_KEY = "justsay.updates.lastUpToDateAt";
-
-/** The subset of the updater plugin's `Update` this row uses. */
-interface PendingUpdate {
-  version: string;
-  downloadAndInstall: () => Promise<unknown>;
-}
 
 function describeFailure(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -83,16 +78,16 @@ export function renderVersionRow(row: HTMLElement, isDestroyed: () => boolean): 
   const number = row.querySelector<HTMLElement>(".version-number")!;
   const status = row.querySelector<HTMLElement>(".version-status")!;
   const action = row.querySelector<HTMLButtonElement>(".version-action")!;
-  let pending: PendingUpdate | null = null;
+  let installReady = false;
 
   const offerCheck = (): void => {
-    pending = null;
+    installReady = false;
     action.className = "btn version-action";
     action.innerHTML = `${icon("refresh", "small")}Check`;
     setDisabled(false, action);
   };
-  const offerInstall = (update: PendingUpdate, label: string): void => {
-    pending = update;
+  const offerInstall = (label: string): void => {
+    installReady = true;
     action.className = "btn btn-primary version-action";
     action.textContent = label;
     setDisabled(false, action);
@@ -118,7 +113,7 @@ export function renderVersionRow(row: HTMLElement, isDestroyed: () => boolean): 
       }
       rememberUpToDate(null);
       status.textContent = `Version ${found.version} is ready`;
-      offerInstall(found, "Install and restart");
+      offerInstall("Install and restart");
     } catch (err) {
       if (isDestroyed()) return;
       status.textContent = describeUpdateCheckFailure(err);
@@ -126,14 +121,15 @@ export function renderVersionRow(row: HTMLElement, isDestroyed: () => boolean): 
     }
   }
 
-  async function install(update: PendingUpdate): Promise<void> {
+  async function install(): Promise<void> {
     busy("Installing…", "Downloading and installing update…");
     try {
-      await update.downloadAndInstall();
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("install_update");
     } catch (err) {
       if (isDestroyed()) return;
       status.textContent = `Install failed: ${describeFailure(err)}`;
-      offerInstall(update, "Try again");
+      offerInstall("Try again");
       return;
     }
     try {
@@ -150,7 +146,7 @@ export function renderVersionRow(row: HTMLElement, isDestroyed: () => boolean): 
 
   action.addEventListener("click", () => {
     if (action.disabled) return;
-    void (pending ? install(pending) : check());
+    void (installReady ? install() : check());
   });
 
   const lastUpToDate = readLastUpToDate();

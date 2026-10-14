@@ -2317,8 +2317,13 @@ mod tests {
         );
         assert_eq!(
             lib_source.matches("backend::shutdown()").count(),
-            1,
-            "lib.rs must name backend::shutdown() exactly once"
+            2,
+            "lib.rs must name backend::shutdown() exactly twice: on RunEvent::Exit and before \
+             the Windows update installer, which exits without that event"
+        );
+        assert!(
+            lib_source.contains("RunEvent::Exit => backend::shutdown()"),
+            "RunEvent::Exit must run the waiting graceful shutdown"
         );
     }
 

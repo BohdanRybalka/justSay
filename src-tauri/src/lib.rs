@@ -1,4 +1,5 @@
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tauri::{
     image::Image,
@@ -6,6 +7,7 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, RunEvent, WindowEvent, Wry,
 };
+use tauri_plugin_updater::UpdaterExt;
 
 mod account;
 mod backend;
@@ -253,6 +255,45 @@ fn show_settings_window(app: AppHandle) {
     show_settings(&app);
 }
 
+/// What runs right before the updater starts the Windows installer and ends the
+/// process without a `RunEvent::Exit`: the backend stop Quit runs, so a meeting
+/// being recorded is closed for the next launch, then the plugin's own cleanup.
+fn close_before_the_installer(app: &AppHandle) {
+    backend::shutdown();
+    app.cleanup_before_exit();
+}
+
+/// Download and install the newest update; the page restarts into it after.
+/// An install that fails once JustSay is closed restarts it, since its backend,
+/// tray icon and windows are gone by then.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let closed = Arc::new(AtomicBool::new(false));
+    let hook_app = app.clone();
+    let hook_closed = Arc::clone(&closed);
+    let updater = app
+        .updater_builder()
+        .on_before_exit(move || {
+            close_before_the_installer(&hook_app);
+            hook_closed.store(true, Ordering::Release);
+        })
+        .build()
+        .map_err(|e| e.to_string())?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "No update is available any more".to_string())?;
+    let installed = update.download_and_install(|_, _| {}, || {}).await;
+    if let Err(e) = &installed {
+        if closed.load(Ordering::Acquire) {
+            log::error!("The installer did not start after JustSay closed; restarting: {}", e);
+            app.request_restart();
+        }
+    }
+    installed.map_err(|e| e.to_string())
+}
+
 /// A second launch lands here, in the copy already running, which brings its
 /// window forward while the second process exits. Its plugin is registered
 /// first so that exit comes before `setup` spawns a backend, which would find
@@ -371,6 +412,7 @@ pub fn run() {
             set_meeting_recording,
             set_meetings_allowed,
             show_settings_window,
+            install_update,
             clipboard::write_clipboard_text,
             image_export::copy_image,
             image_export::save_image,
@@ -435,6 +477,36 @@ mod tests {
             top_level_fn_source("fn show_the_running_copy(").contains("show_settings(app)"),
             "a second launch exits on its own, so unless the running copy shows its \
              window the launch looks like it did nothing"
+        );
+    }
+
+    #[test]
+    fn an_update_stops_the_backend_the_way_quit_does_before_the_installer_starts() {
+        let close = top_level_fn_source("fn close_before_the_installer(");
+        let stop = close
+            .find(concat!("backend::", "shutdown();"))
+            .expect("the Windows updater skips RunEvent::Exit, so the hook must stop the backend");
+        let cleanup = close
+            .find("app.cleanup_before_exit();")
+            .expect("replacing the plugin's hook must keep its own cleanup");
+        assert!(stop < cleanup, "the backend stops while the tray and windows still exist");
+        assert!(
+            top_level_fn_source("async fn install_update(")
+                .contains(".on_before_exit(move || {\n            close_before_the_installer(&hook_app);"),
+            "the install must run through an updater whose before-exit hook closes JustSay"
+        );
+    }
+
+    #[test]
+    fn an_install_that_fails_after_the_close_restarts_the_app() {
+        let install = top_level_fn_source("async fn install_update(");
+        let restart = install
+            .find("app.request_restart();")
+            .expect("a closed JustSay with no installer running has no backend or tray left");
+        assert!(
+            install[..restart].contains("if closed.load(Ordering::Acquire) {"),
+            "only an install that failed after the close may restart; a failed download keeps \
+             the running app and shows the error"
         );
     }
 
