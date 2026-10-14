@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -755,12 +756,113 @@ def test_a_stored_engine_choice_from_before_groq_only_is_ignored_and_dropped(iso
     assert "cloud_routing_threshold" not in saved
 
 
-def test_an_unreadable_settings_file_still_falls_back_to_defaults(isolated, monkeypatch):
-    (isolated["settings_dir"] / "settings.json").write_text("{not json", encoding="utf-8")
+_CUT_MID_LETTER = '{"display_name": "Привіт"}'.encode()[:-3]
 
+
+@pytest.mark.parametrize("stored", [b"{not json", _CUT_MID_LETTER, b"[]"])
+def test_a_settings_file_that_holds_no_settings_is_kept_beside_the_defaults(
+    isolated, monkeypatch, stored
+):
+    """Defaults take over, but the next save must not destroy the only copy of the keys."""
+    settings_dir = isolated["settings_dir"]
+    (settings_dir / "settings.json").write_bytes(stored)
     monkeypatch.setattr(user_settings, "_settings", None)
 
     assert user_settings.get_user_settings().language == "uk"
+    user_settings.update_user_settings({"language": "en"})
+
+    saved = json.loads((settings_dir / "settings.json").read_text(encoding="utf-8"))
+    assert (settings_dir / "settings.json.bad").read_bytes() == stored
+    assert saved["language"] == "en"
+
+
+def test_a_file_that_cannot_be_set_aside_still_falls_back_to_defaults(
+    isolated, monkeypatch, caplog
+):
+    (isolated["settings_dir"] / "settings.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(user_settings, "_settings", None)
+
+    def refuse(source, target):
+        raise PermissionError("held open by another program")
+
+    monkeypatch.setattr(user_settings.os, "replace", refuse)
+
+    with caplog.at_level(logging.WARNING, logger="app.preferences.user_settings"):
+        assert user_settings.get_user_settings().language == "uk"
+
+    assert "could not be set aside" in caplog.text
+
+
+def test_a_crash_while_saving_leaves_the_previous_settings_whole(isolated, monkeypatch):
+    """The new text sits in full in its own file before ``settings.json`` is touched."""
+    settings_dir = isolated["settings_dir"]
+    user_settings.update_user_settings({"groq_api_key": "gsk-real-key", "stt_mode": "local"})
+    flushed_before_the_crash: list[dict] = []
+
+    def power_lost(fd):
+        unfinished = settings_dir / "settings.json.tmp"
+        flushed_before_the_crash.append(json.loads(unfinished.read_text(encoding="utf-8")))
+        raise OSError("power lost")
+
+    monkeypatch.setattr(user_settings, "_force_to_disk", power_lost)
+    with pytest.raises(OSError, match="power lost"):
+        user_settings.update_user_settings({"language": "en", "groq_api_key": ""})
+
+    assert flushed_before_the_crash[0]["language"] == "en"
+    in_memory = user_settings.get_user_settings()
+    monkeypatch.setattr(user_settings, "_settings", None)
+    for kept in (in_memory, user_settings.get_user_settings()):
+        assert (kept.groq_api_key, kept.stt_mode, kept.language) == ("gsk-real-key", "local", "uk")
+    assert [path.name for path in settings_dir.glob("settings.json*")] == ["settings.json"]
+
+
+def test_a_settings_file_that_cannot_be_read_falls_back_to_defaults_and_stays(
+    isolated, monkeypatch, caplog
+):
+    settings_dir = isolated["settings_dir"]
+    (settings_dir / "settings.json").write_text('{"language": "en"}', encoding="utf-8")
+    monkeypatch.setattr(user_settings, "_settings", None)
+
+    def locked(self):
+        raise PermissionError("held open by another program")
+
+    monkeypatch.setattr(Path, "read_bytes", locked)
+    with caplog.at_level(logging.WARNING, logger="app.preferences.user_settings"):
+        assert user_settings.get_user_settings().language == "uk"
+
+    assert "Could not read" in caplog.text
+    assert [path.name for path in settings_dir.glob("settings.json*")] == ["settings.json"]
+
+
+def _record_the_flush(monkeypatch, full_fsync_refused: bool) -> list[tuple]:
+    calls: list[tuple] = []
+
+    def full_fsync(fd, command):
+        if full_fsync_refused:
+            raise OSError("not supported on this volume")
+        calls.append(("F_FULLFSYNC", fd, command))
+
+    fake_fcntl = types.SimpleNamespace(F_FULLFSYNC=51, fcntl=full_fsync)
+    monkeypatch.setitem(sys.modules, "fcntl", fake_fcntl)
+    monkeypatch.setattr(user_settings.sys, "platform", "darwin")
+    monkeypatch.setattr(user_settings.os, "fsync", lambda fd: calls.append(("fsync", fd)))
+    return calls
+
+
+def test_on_a_mac_saved_settings_are_pushed_past_the_drive_cache(monkeypatch):
+    calls = _record_the_flush(monkeypatch, full_fsync_refused=False)
+
+    user_settings._force_to_disk(7)
+
+    assert calls == [("F_FULLFSYNC", 7, 51)]
+
+
+def test_a_mac_volume_that_refuses_a_full_flush_still_gets_fsync(monkeypatch):
+    calls = _record_the_flush(monkeypatch, full_fsync_refused=True)
+
+    user_settings._force_to_disk(7)
+
+    assert calls == [("fsync", 7)]
 
 
 def test_falling_back_to_defaults_is_never_silent(isolated, monkeypatch, caplog):

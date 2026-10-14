@@ -5,6 +5,7 @@ This is Layer 2 config (user preferences). Layer 1 (secrets/.env) is read-only.
 
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -319,22 +320,43 @@ _FORBIDDEN_PARENTS = _forbidden_parents()
 
 
 def _load() -> UserSettings:
-    """Load from disk or return defaults."""
+    """Load from disk or return defaults; a file that is not a JSON object is set aside first."""
     settings_path = _settings_path()
     if not settings_path.exists():
         return UserSettings()
     try:
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = settings_path.read_bytes()
+    except OSError:
         log.warning("Could not read %s; starting from defaults", settings_path, exc_info=True)
         return UserSettings()
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        data = None
     if not isinstance(data, dict):
-        log.warning("%s does not hold an object; starting from defaults", settings_path)
+        _set_aside(settings_path)
         return UserSettings()
     try:
         return UserSettings.model_validate(data)
     except ValidationError as failure:
         return _load_without_rejected_fields(data, failure)
+
+
+def _set_aside(settings_path: Path) -> None:
+    """Rename a ``settings.json`` that holds no settings object to ``settings.json.bad``.
+
+    Otherwise the next save would replace the only copy of the user's keys with defaults. A
+    ``.bad`` file left by an earlier failure gives way to the newer one.
+    """
+    bad_path = settings_path.with_name(settings_path.name + ".bad")
+    try:
+        os.replace(settings_path, bad_path)
+    except OSError:
+        log.warning("%s does not hold a settings object and could not be set aside; "
+                    "starting from defaults", settings_path, exc_info=True)
+        return
+    log.warning("%s does not hold a settings object; kept it as %s, starting from defaults",
+                settings_path, bad_path)
 
 
 def _load_without_rejected_fields(data: dict, failure: ValidationError) -> UserSettings:
@@ -397,9 +419,38 @@ def sync_to_runtime(us: UserSettings) -> bool:
 
 
 def _save(s: UserSettings) -> None:
-    """Write settings to disk."""
-    _settings_dir().mkdir(parents=True, exist_ok=True)
-    _settings_path().write_text(
-        s.model_dump_json(indent=2),
-        encoding="utf-8",
-    )
+    """Replace ``settings.json`` in one step, so a crash mid-save leaves the old file or the new.
+
+    The text goes to a sibling file, reaches the disk, and only then is renamed over the old one.
+    """
+    settings_path = _settings_path()
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    unfinished_path = settings_path.with_name(settings_path.name + ".tmp")
+    try:
+        with unfinished_path.open("w", encoding="utf-8") as unfinished:
+            unfinished.write(s.model_dump_json(indent=2))
+            unfinished.flush()
+            _force_to_disk(unfinished.fileno())
+        os.replace(unfinished_path, settings_path)
+    finally:
+        try:
+            unfinished_path.unlink(missing_ok=True)
+        except OSError:
+            log.warning("The unfinished settings file %s could not be removed", unfinished_path)
+
+
+def _force_to_disk(fd: int) -> None:
+    """Push the file's bytes past the drive's own cache before it may be renamed into place.
+
+    macOS ``fsync`` stops at that cache, so ``F_FULLFSYNC`` goes first there; a volume that
+    refuses it gets ``fsync``, as SQLite and LevelDB fall back.
+    """
+    if sys.platform == "darwin":
+        import fcntl
+
+        try:
+            fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
+            return
+        except OSError:
+            pass
+    os.fsync(fd)
