@@ -401,11 +401,20 @@ mod tests {
     };
     use tauri::{PhysicalSize, WindowEvent};
 
-    fn run_source() -> String {
+    fn top_level_fn_source(signature: &str) -> String {
         let source = include_str!("lib.rs").lines().collect::<Vec<_>>().join("\n");
-        let start = source.find("pub fn run()").expect("lib.rs defines run()");
-        let end = start + source[start..].find("\n}\n").expect("run() closes in column zero");
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("lib.rs defines `{}`", signature));
+        let end = start
+            + source[start..]
+                .find("\n}\n")
+                .expect("a top-level fn closes in column zero");
         source[start..end].to_string()
+    }
+
+    fn run_source() -> String {
+        top_level_fn_source("pub fn run()")
     }
 
     #[test]
@@ -417,6 +426,15 @@ mod tests {
                 .starts_with(".plugin(tauri_plugin_single_instance::init(show_the_running_copy))"),
             "the single-instance plugin must be registered first; otherwise a second launch \
              reaches setup, spawns a backend and reaps the running copy's by name"
+        );
+    }
+
+    #[test]
+    fn the_running_copy_answers_a_second_launch_with_its_window() {
+        assert!(
+            top_level_fn_source("fn show_the_running_copy(").contains("show_settings(app)"),
+            "a second launch exits on its own, so unless the running copy shows its \
+             window the launch looks like it did nothing"
         );
     }
 
