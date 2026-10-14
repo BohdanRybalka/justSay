@@ -253,9 +253,19 @@ fn show_settings_window(app: AppHandle) {
     show_settings(&app);
 }
 
+/// A second launch lands here, in the copy already running, which brings its
+/// window forward while the second process exits. Its plugin is registered
+/// first so that exit comes before `setup` spawns a backend, which would find
+/// the port taken and reap this copy's by name. A Dock or Finder relaunch on
+/// macOS starts no process and arrives as `RunEvent::Reopen` instead.
+fn show_the_running_copy(app: &AppHandle, _args: Vec<String>, _cwd: String) {
+    show_settings(app);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(show_the_running_copy))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -375,10 +385,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|_app, event| {
-        if let RunEvent::Exit = event {
-            backend::shutdown();
-        }
+    app.run(|_app, event| match event {
+        RunEvent::Exit => backend::shutdown(),
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => show_settings(_app),
+        _ => {}
     });
 }
 
@@ -389,6 +400,52 @@ mod tests {
         settings_visibility_to_announce,
     };
     use tauri::{PhysicalSize, WindowEvent};
+
+    fn top_level_fn_source(signature: &str) -> String {
+        let source = include_str!("lib.rs").lines().collect::<Vec<_>>().join("\n");
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("lib.rs defines `{}`", signature));
+        let end = start
+            + source[start..]
+                .find("\n}\n")
+                .expect("a top-level fn closes in column zero");
+        source[start..end].to_string()
+    }
+
+    fn run_source() -> String {
+        top_level_fn_source("pub fn run()")
+    }
+
+    #[test]
+    fn a_second_launch_is_turned_away_before_any_other_plugin_or_the_backend_starts() {
+        let run = run_source();
+        let first_plugin = run.find(".plugin(").expect("run() registers plugins");
+        assert!(
+            run[first_plugin..]
+                .starts_with(".plugin(tauri_plugin_single_instance::init(show_the_running_copy))"),
+            "the single-instance plugin must be registered first; otherwise a second launch \
+             reaches setup, spawns a backend and reaps the running copy's by name"
+        );
+    }
+
+    #[test]
+    fn the_running_copy_answers_a_second_launch_with_its_window() {
+        assert!(
+            top_level_fn_source("fn show_the_running_copy(").contains("show_settings(app)"),
+            "a second launch exits on its own, so unless the running copy shows its \
+             window the launch looks like it did nothing"
+        );
+    }
+
+    #[test]
+    fn a_dock_or_finder_relaunch_on_macos_brings_the_window_forward() {
+        assert!(
+            run_source().contains("RunEvent::Reopen { .. } => show_settings("),
+            "macOS reactivates a running app with Reopen rather than a second process, \
+             so run() must answer it with the window"
+        );
+    }
 
     #[test]
     fn the_meeting_item_is_in_the_tray_once_acknowledged_or_while_recording() {
