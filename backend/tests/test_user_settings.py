@@ -794,22 +794,43 @@ def test_a_file_that_cannot_be_set_aside_still_falls_back_to_defaults(
 
 
 def test_a_crash_while_saving_leaves_the_previous_settings_whole(isolated, monkeypatch):
-    """The new text never touches ``settings.json`` before it is on the disk in full."""
+    """The new text sits in full in its own file before ``settings.json`` is touched."""
     settings_dir = isolated["settings_dir"]
     user_settings.update_user_settings({"groq_api_key": "gsk-real-key", "stt_mode": "local"})
+    flushed_before_the_crash: list[dict] = []
 
     def power_lost(fd):
+        unfinished = settings_dir / "settings.json.tmp"
+        flushed_before_the_crash.append(json.loads(unfinished.read_text(encoding="utf-8")))
         raise OSError("power lost")
 
     monkeypatch.setattr(user_settings, "_force_to_disk", power_lost)
     with pytest.raises(OSError, match="power lost"):
         user_settings.update_user_settings({"language": "en", "groq_api_key": ""})
 
+    assert flushed_before_the_crash[0]["language"] == "en"
+    in_memory = user_settings.get_user_settings()
     monkeypatch.setattr(user_settings, "_settings", None)
-    reloaded = user_settings.get_user_settings()
-    assert (reloaded.groq_api_key, reloaded.stt_mode, reloaded.language) == (
-        "gsk-real-key", "local", "uk"
-    )
+    for kept in (in_memory, user_settings.get_user_settings()):
+        assert (kept.groq_api_key, kept.stt_mode, kept.language) == ("gsk-real-key", "local", "uk")
+    assert [path.name for path in settings_dir.glob("settings.json*")] == ["settings.json"]
+
+
+def test_a_settings_file_that_cannot_be_read_falls_back_to_defaults_and_stays(
+    isolated, monkeypatch, caplog
+):
+    settings_dir = isolated["settings_dir"]
+    (settings_dir / "settings.json").write_text('{"language": "en"}', encoding="utf-8")
+    monkeypatch.setattr(user_settings, "_settings", None)
+
+    def locked(self):
+        raise PermissionError("held open by another program")
+
+    monkeypatch.setattr(Path, "read_bytes", locked)
+    with caplog.at_level(logging.WARNING, logger="app.preferences.user_settings"):
+        assert user_settings.get_user_settings().language == "uk"
+
+    assert "Could not read" in caplog.text
     assert [path.name for path in settings_dir.glob("settings.json*")] == ["settings.json"]
 
 
