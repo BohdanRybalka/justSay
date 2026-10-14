@@ -17,6 +17,7 @@ from app.audio.meeting_spool import (
     ASSEMBLY_RESERVE_MARGIN_BYTES,
     INDEX_DTYPE,
     MeetingSpool,
+    SpoolFiles,
     assembly_reserve_bytes,
     free_bytes,
 )
@@ -67,17 +68,53 @@ def test_a_spool_nothing_was_appended_to_reads_back_as_nothing(spool: MeetingSpo
     assert spool.index().size == 0
 
 
-def test_the_files_carry_the_prefix_the_scratch_cleanup_already_reaps(spool: MeetingSpool):
-    """`_SCRATCH_PREFIXES` in `app/audio/scratch_router.py` covers `meeting_`.
+def test_the_files_carry_the_names_the_launch_scan_reads(spool: MeetingSpool):
+    """`app/audio/meeting_recovery.py` finds a cut-off meeting by these names.
 
-    A spool orphaned by a hard crash is reachable by the existing cleanup
-    only while its name starts that way, so the name is a contract rather
-    than a label.
+    A spool orphaned by a crash is rebuilt only while its name says which
+    meeting and which source it holds, so the name is a contract.
     """
-    assert spool.samples_path.name.startswith("meeting_")
-    assert spool.index_path.name.startswith("meeting_")
-    assert spool.samples_path.name.endswith("_microphone.pcm")
-    assert spool.index_path.name.endswith("_microphone.idx")
+    spool.record_rate(48000)
+
+    assert spool.samples_path.name == "meeting_spill_abc123_microphone.pcm"
+    assert spool.index_path.name == "meeting_spill_abc123_microphone.idx"
+    assert spool.rate_path.name == "meeting_spill_abc123_microphone.rate"
+    assert SpoolFiles(spool.samples_path.parent, "abc123", "microphone").nominal_rate() == 48000
+
+
+def test_every_appended_block_is_on_disk_before_the_spool_is_closed(spool: MeetingSpool):
+    """A killed process runs no `close()`, so what it leaves is what was flushed."""
+    spool.append(1.0, np.full(1024, 0.5, dtype=np.float32))
+    spool.append(1.064, np.full(1024, 0.25, dtype=np.float32))
+
+    left = SpoolFiles(spool.samples_path.parent, "abc123", "microphone")
+
+    assert list(left.index()["frames"]) == [1024, 1024]
+    assert np.array_equal(
+        np.asarray(left.samples()),
+        np.concatenate([np.full(1024, 0.5), np.full(1024, 0.25)]).astype(np.float32),
+    )
+    spool.close()
+
+
+def test_a_cut_off_spool_reads_only_the_blocks_wholly_on_disk(spool: MeetingSpool):
+    """A kill can land between a block's frames and its record, or inside either."""
+    for index in range(3):
+        spool.append(float(index), np.zeros(100, dtype=np.float32))
+    spool.close()
+    with open(spool.samples_path, "r+b") as samples:
+        samples.truncate(250 * 4 + 2)
+    with open(spool.index_path, "ab") as index:
+        index.write(bytes(5))
+
+    left = SpoolFiles(spool.samples_path.parent, "abc123", "microphone")
+
+    assert list(left.index()["arrival"]) == [0.0, 1.0]
+    assert left.samples().size == 250
+
+
+def test_a_spool_with_no_recorded_rate_says_so(spool: MeetingSpool):
+    assert SpoolFiles(spool.samples_path.parent, "abc123", "microphone").nominal_rate() is None
 
 
 def test_appending_to_a_closed_spool_raises_rather_than_losing_the_block(spool: MeetingSpool):
@@ -94,6 +131,7 @@ def test_appending_to_a_closed_spool_raises_rather_than_losing_the_block(spool: 
 
 def test_a_discarded_spool_leaves_nothing_behind(spool: MeetingSpool):
     spool.append(1.0, np.zeros(8, dtype=np.float32))
+    spool.record_rate(16000)
 
     spool.discard()
 

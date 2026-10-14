@@ -36,6 +36,7 @@ from app.audio.meeting_recorder import (
     MeetingWriteFailedError,
     microphone_has_stalled,
 )
+from app.audio.meeting_recovery import interrupted_meetings, rebuild_meeting
 from app.audio.meeting_spool import MeetingSpool, assembly_reserve_bytes
 from app.main import app
 
@@ -650,6 +651,39 @@ async def test_a_meeting_leaves_no_spill_files_behind(
 
 
 @pytest.mark.asyncio
+async def test_a_meeting_quit_midway_is_rebuilt_with_both_sides_at_the_next_launch(
+    settings, source, microphone_stream
+):
+    """Quit runs `cleanup()` mid-meeting, and the spools it closes are the meeting.
+
+    Deleting them there lost every meeting the user quit in the middle of;
+    the next launch must find them and rebuild a recording of both sides.
+    """
+    recorder = MeetingRecorder(settings)
+    await recorder.start()
+    started = recorder._start_time
+    _feed(recorder, 8)
+    for index in range(8):
+        source.deliver(started + index * BLOCK_FRAMES / SYSTEM_RATE)
+
+    recorder.cleanup()
+    await asyncio.to_thread(recorder._devices.shutdown, True)
+    assert source.stopped is True
+
+    [meeting_id] = interrupted_meetings(settings.temp_dir)
+    recording = rebuild_meeting(settings, meeting_id)
+
+    with wave.open(str(recording), "rb") as wav:
+        assert wav.getnchannels() == 2
+        channels = np.frombuffer(wav.readframes(wav.getnframes()), dtype=np.int16).reshape(-1, 2)
+    system_seconds = 8 * BLOCK_FRAMES / SYSTEM_RATE
+    assert np.count_nonzero(channels[:, 0]) > 0, "the microphone half did not survive the quit"
+    assert np.count_nonzero(channels[:, 1]) > 0.95 * system_seconds * settings.sample_rate, (
+        "the far side did not survive the quit whole"
+    )
+
+
+@pytest.mark.asyncio
 async def test_an_abandoned_start_leaves_no_spill_files_behind(
     settings, microphone_stream
 ):
@@ -765,21 +799,18 @@ def test_the_spill_thread_is_named_so_a_stack_dump_says_which_thread_it_is(setti
 
 
 @pytest.mark.asyncio
-async def test_a_write_that_fails_leaves_no_spill_or_mix_file_behind(
+async def test_a_write_that_fails_keeps_the_spools_and_leaves_no_mix_or_unfinished_file(
     settings, source, microphone_stream
 ):
-    """The recording a disk-full write could not produce costs no disk either.
+    """A recording a disk-full write could not produce is rebuilt at the next launch.
 
-    The failure is raised from `write_wav_streaming`, which is the last thing
-    assembly does and the only point at which all three mappings -- the mix
-    and one over each spool -- are open at once. On Windows a file cannot be
-    unlinked while a mapping over it is open, and a raising call keeps its
-    frame alive in the traceback, so before `_mix_into` closed its mappings
-    explicitly the `finally` that removes them swallowed `WinError 32` and
-    left hundreds of megabytes of `.pcm` and `.f32` in the scratch directory
-    -- during the disk-full incident, which is the worst possible moment for
-    it. On POSIX the unlink succeeds either way, so this pins the behaviour
-    everywhere and the regression on Windows.
+    So the spools stay, whole, and the mix file and the half-written WAV go --
+    a half WAV under the final name would pass for the whole recording. The
+    failure is raised from `write_wav_streaming`, the only point at which all
+    three mappings -- the mix and one over each spool -- are open at once. On
+    Windows a file cannot be unlinked while a mapping over it is open, and a
+    raising call keeps its frame alive in the traceback, so the mix file goes
+    only if `_mix_into` closes its mappings itself.
     """
     recorder = MeetingRecorder(settings)
     try:
@@ -789,18 +820,30 @@ async def test_a_write_that_fails_leaves_no_spill_or_mix_file_behind(
             source.deliver(recorder._start_time + index * BLOCK_FRAMES / SYSTEM_RATE)
         recorder._start_time = recorder._start_time - 1.0
 
-        def refuse_to_write(*args, **kwargs):
+        def run_out_of_space_halfway(path, *args, **kwargs):
+            path.write_bytes(b"RIFF")
             raise OSError("[Errno 28] No space left on device")
 
         with patch(
-            "app.audio.meeting_recorder.write_wav_streaming", refuse_to_write
+            "app.audio.meeting_recorder.write_wav_streaming", run_out_of_space_halfway
         ), pytest.raises(MeetingWriteFailedError):
             await recorder.stop()
         await asyncio.to_thread(recorder._writer.shutdown, True)
 
         left_behind = sorted(path.name for path in settings.temp_dir.iterdir())
-        assert left_behind == [], (
-            f"a failed write left {left_behind} in the scratch directory"
+        meeting_ids = {name.split("_")[2] for name in left_behind}
+        assert len(meeting_ids) == 1, f"a failed write left {left_behind}"
+        stem = f"meeting_spill_{meeting_ids.pop()}"
+        assert left_behind == [
+            f"{stem}_microphone.idx",
+            f"{stem}_microphone.pcm",
+            f"{stem}_microphone.rate",
+            f"{stem}_system.idx",
+            f"{stem}_system.pcm",
+            f"{stem}_system.rate",
+        ], f"a failed write left {left_behind} in the scratch directory"
+        assert (settings.temp_dir / f"{stem}_microphone.pcm").stat().st_size == (
+            8 * BLOCK_FRAMES * 4
         )
     finally:
         recorder.cleanup()

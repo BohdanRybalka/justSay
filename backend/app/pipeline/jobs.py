@@ -54,6 +54,7 @@ NO_KEY_REASON = "Add an API key in Settings"
 FAILED_REASON = "Couldn't turn this file into text. Try again"
 MEETING_NO_SPEECH_REASON = "We didn't hear any speech in this meeting"
 MEETING_FAILED_REASON = "Couldn't turn this meeting into text"
+MEETING_INTERRUPTED_REASON = "JustSay closed before this meeting was turned into text"
 MEETING_FAILED_HERE_REASON = (
     "Couldn't turn this meeting into text on this computer. "
     "You can send meetings to the cloud in Dictation"
@@ -245,8 +246,15 @@ class JobQueue:
 
     def add_leftover_meetings(self, recordings: Iterable[Path]) -> None:
         """List recordings a past run never turned into text as failed meetings, to try again."""
+        self._add_failed_meetings(recordings, MEETING_FAILED_REASON)
+
+    def add_cut_off_meetings(self, recordings: Iterable[Path]) -> None:
+        """List recordings rebuilt from meetings a past run cut off, for the user to send."""
+        self._add_failed_meetings(recordings, MEETING_INTERRUPTED_REASON)
+
+    def _add_failed_meetings(self, recordings: Iterable[Path], reason: str) -> None:
         for recording in recordings:
-            self._fail(self._meeting(recording), MEETING_FAILED_REASON)
+            self._fail(self._meeting(recording), reason)
 
     def retry(self, job_id: str) -> bool:
         """Queue a failed meeting again; ``False`` for an unknown id.

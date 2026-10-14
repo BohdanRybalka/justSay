@@ -2,19 +2,24 @@
 
 A meeting is captured to disk rather than to memory, so peak RAM stops
 depending on how long the call ran (ADR 058). Each source gets a `.pcm` of
-mono float32 frames and a sibling `.idx` of fixed-width per-block records,
-which is what lets assembly rebuild the arrival timeline without holding a
-block in RAM. Pure storage — no device access, no audio processing.
+mono float32 frames and a sibling `.idx` of fixed-width per-block records, which
+is what lets assembly rebuild the arrival timeline without a block in RAM, plus a
+`.rate` naming the source's rate for a rebuild at the launch after a crash.
 """
 
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 
 import numpy as np
 
+log = logging.getLogger(__name__)
+
 INDEX_DTYPE = np.dtype([("arrival", "<f8"), ("frames", "<i4")])
+
+SAMPLE_BYTES = np.dtype(np.float32).itemsize
 
 ASSEMBLY_RESERVE_MARGIN_BYTES = 64 * 1024 * 1024
 
@@ -48,7 +53,59 @@ def free_bytes(directory: Path) -> int:
     return shutil.disk_usage(directory).free
 
 
-class MeetingSpool:
+class SpoolFiles:
+    """One source's spill files, read back as far as they reached the disk.
+
+    A spool whose writer was killed may end in half a record, or in a record
+    whose frames never landed; reading stops at the last block wholly on disk.
+    """
+
+    def __init__(self, directory: Path, meeting_id: str, source: str) -> None:
+        stem = f"meeting_spill_{meeting_id}_{source}"
+        self.meeting_id = meeting_id
+        self.samples_path = directory / f"{stem}.pcm"
+        self.index_path = directory / f"{stem}.idx"
+        self.rate_path = directory / f"{stem}.rate"
+
+    def nominal_rate(self) -> int | None:
+        """The rate the writer said this source delivers at, or None if it never said."""
+        try:
+            return int(self.rate_path.read_text(encoding="ascii"))
+        except (OSError, ValueError):
+            return None
+
+    def index(self) -> np.ndarray:
+        """The arrival record of every block whose frames are all on disk, in order."""
+        whole_records = self.index_path.stat().st_size // INDEX_DTYPE.itemsize
+        records = np.fromfile(self.index_path, dtype=INDEX_DTYPE, count=whole_records)
+        ends = np.cumsum(records["frames"], dtype=np.int64)
+        return records[: int(np.searchsorted(ends, self._frames_on_disk(), side="right"))]
+
+    def samples(self) -> np.ndarray:
+        """A read-only memmap over every frame on disk."""
+        frames = self._frames_on_disk()
+        if frames == 0:
+            return np.zeros(0, dtype=np.float32)
+        return np.memmap(self.samples_path, dtype=np.float32, mode="r", shape=(frames,))
+
+    def _frames_on_disk(self) -> int:
+        return self.samples_path.stat().st_size // SAMPLE_BYTES
+
+    def discard(self) -> None:
+        """Remove every file of this spool, logging rather than raising what stays.
+
+        Each file is tried even when an earlier one stays, and a spool without its
+        `.rate` is never rebuilt, so a `.pcm` a scanner still holds open cannot
+        come back as a second meeting.
+        """
+        for path in (self.rate_path, self.index_path, self.samples_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                log.warning("The meeting spill file %s could not be removed", path)
+
+
+class MeetingSpool(SpoolFiles):
     """One source's frames on disk, appended in arrival order.
 
     Arrival order is what makes a segment a contiguous slice of the `.pcm`,
@@ -57,9 +114,7 @@ class MeetingSpool:
 
     def __init__(self, directory: Path, meeting_id: str, source: str) -> None:
         directory.mkdir(parents=True, exist_ok=True)
-        stem = f"meeting_spill_{meeting_id}_{source}"
-        self.samples_path = directory / f"{stem}.pcm"
-        self.index_path = directory / f"{stem}.idx"
+        super().__init__(directory, meeting_id, source)
         self._samples_file = open(self.samples_path, "wb")
         self._index_file = open(self.index_path, "wb")
         self._frames = 0
@@ -69,16 +124,22 @@ class MeetingSpool:
         """How many frames have been appended so far."""
         return self._frames
 
+    def record_rate(self, rate: int) -> None:
+        """Note the rate this source delivers at, which a rebuild after a crash needs."""
+        self.rate_path.write_text(str(rate), encoding="ascii")
+
     def append(self, arrival: float, samples: np.ndarray) -> None:
         """Write one block's frames and the record describing it.
 
-        The index record is written after the frames, so an interrupted spool
-        describes less audio than it holds, never more.
+        Each is flushed before the next is written, frames first, so a process
+        killed at any instant leaves a spool describing less audio than it holds.
         """
         block = np.asarray(samples, dtype=np.float32).reshape(-1)
         self._samples_file.write(block.tobytes())
+        self._samples_file.flush()
         record = np.array([(arrival, block.size)], dtype=INDEX_DTYPE)
         self._index_file.write(record.tobytes())
+        self._index_file.flush()
         self._frames += int(block.size)
 
     def close(self) -> None:
@@ -88,28 +149,10 @@ class MeetingSpool:
                 handle.flush()
                 handle.close()
 
-    def index(self) -> np.ndarray:
-        """The arrival record of every appended block, in order."""
-        return np.fromfile(self.index_path, dtype=INDEX_DTYPE)
-
-    def samples(self) -> np.ndarray:
-        """A read-only memmap over every appended frame."""
-        if self._frames == 0:
-            return np.zeros(0, dtype=np.float32)
-        return np.memmap(self.samples_path, dtype=np.float32, mode="r")
-
     def discard(self) -> None:
-        """Close both files and remove them, never raising.
-
-        Called from the `finally` that ends every capture, so a spool that has
-        already gone must not turn one failure into a different one.
-        """
+        """Close both files and remove every file of this spool, never raising."""
         try:
             self.close()
         except OSError:
             pass
-        for path in (self.samples_path, self.index_path):
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        super().discard()

@@ -775,6 +775,22 @@ async def test_leftover_meetings_are_listed_failed_and_can_be_tried_again(
     assert not newer.exists()
 
 
+def test_a_meeting_a_past_run_cut_off_says_so_and_can_be_tried_again(queue, tmp_path):
+    """A leftover WAV may be a meeting that already failed; only a rebuilt one was cut off."""
+    rebuilt = tmp_path / "meeting_00000000000c.wav"
+    rebuilt.write_bytes(b"RIFF....WAVE....")
+
+    queue.add_cut_off_meetings([rebuilt])
+
+    [view] = queue.views()
+    assert (view.kind, view.stage, view.error) == (
+        "meeting",
+        "failed",
+        jobs.MEETING_INTERRUPTED_REASON,
+    )
+    assert queue.kept_recording_names() == {rebuilt.name}
+
+
 async def test_a_meeting_runs_the_real_pipeline_on_its_own_engine(
     client, queue, tmp_path, monkeypatch, noise_is_voice
 ):

@@ -133,6 +133,19 @@ async def lifespan(app: FastAPI):
         "listing meetings the last run did not turn into text",
         lambda: app.state.jobs.add_leftover_meetings(leftover_recordings(settings.audio.temp_dir)),
     )
+    from app.audio.meeting_recovery import interrupted_meetings, rebuild_interrupted_meetings
+    interrupted = _run_optional_step(
+        "startup",
+        "finding meetings the last run cut off",
+        lambda: interrupted_meetings(settings.audio.temp_dir),
+    )
+    if interrupted:
+        tasks.spawn_background_task(
+            rebuild_interrupted_meetings(
+                settings.audio, interrupted, app.state.jobs.add_cut_off_meetings
+            ),
+            name="meeting-recovery",
+        )
     yield
     log.info("Backend shutdown: draining background tasks")
     from app.stt.local_setup import peek_active_load
