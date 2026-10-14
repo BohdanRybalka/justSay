@@ -43,7 +43,9 @@ from app.audio.meeting_recorder import (
     MeetingStatusSnapshot,
     MeetingWriteFailedError,
     _CapturedMeeting,
+    _mix_into,
     _release_devices,
+    write_recording,
 )
 from app.audio.meeting_spool import MeetingSpool
 from app.audio.system_source import (
@@ -1614,7 +1616,7 @@ async def test_meeting_start_503_carries_the_device_reason(client):
 
 @pytest.mark.asyncio
 async def test_meeting_stop_leaves_the_event_loop_free(
-    audio_settings, fake_system_source, fake_microphone_stream
+    audio_settings, fake_system_source, fake_microphone_stream, monkeypatch
 ):
     """JS-81: two resamples, a mix and a wave write must not run on the loop.
 
@@ -1634,13 +1636,12 @@ async def test_meeting_stop_leaves_the_event_loop_free(
         fake_system_source.deliver(recorder._start_time + i * BLOCK_FRAMES / 48000)
 
     blocked_seconds = 0.2
-    assemble_and_write = recorder._assemble_and_write
 
-    def slow_assemble_and_write(*args):
+    def slow_write_recording(*args):
         time.sleep(blocked_seconds)
-        return assemble_and_write(*args)
+        return write_recording(*args)
 
-    recorder._assemble_and_write = slow_assemble_and_write
+    monkeypatch.setattr("app.audio.meeting_recorder.write_recording", slow_write_recording)
 
     ticks = 0
 
@@ -2779,15 +2780,14 @@ async def test_a_meeting_whose_file_cannot_be_written_answers_507_and_is_already
         _wait_for_devices(recorder)
         _feed_microphone(recorder, 3)
         _deliver_over_a_real_span(recorder, fake_system_source, 3)
-        write_the_wav = recorder._assemble_and_write
-
-        def write_into_a_vanished_directory(captured):
+        def write_into_a_vanished_directory(settings, captured):
             shutil.rmtree(audio_settings.temp_dir)
-            return write_the_wav(captured)
+            return write_recording(settings, captured)
 
-        recorder._assemble_and_write = write_into_a_vanished_directory
-
-        resp = await client.post("/audio/meeting/stop")
+        with patch(
+            "app.audio.meeting_recorder.write_recording", write_into_a_vanished_directory
+        ):
+            resp = await client.post("/audio/meeting/stop")
 
         assert resp.status_code == 507
         detail = resp.json()["detail"]
@@ -2869,8 +2869,8 @@ def test_the_mix_closes_every_mapping_it_made_before_it_returns(audio_settings):
             patch("app.audio.meeting_recorder.np", recording_numpy),
             patch("app.audio.meeting_spool.np", recording_numpy),
         ):
-            written = recorder._mix_into(
-                captured, mix_path, audio_settings.temp_dir / "meeting.wav"
+            written = _mix_into(
+                audio_settings, captured, mix_path, audio_settings.temp_dir / "meeting.wav"
             )
 
         assert written.exists()
@@ -3340,7 +3340,7 @@ async def test_an_abandoned_start_clears_both_level_meters(audio_settings):
 
 @pytest.mark.asyncio
 async def test_a_second_meeting_cannot_rewrite_what_the_first_stop_answers(
-    tmp_path, fake_system_source, fake_microphone_stream
+    tmp_path, fake_system_source, fake_microphone_stream, monkeypatch
 ):
     """The stop answer describes its own capture, not the recorder's live state.
 
@@ -3354,15 +3354,14 @@ async def test_a_second_meeting_cannot_rewrite_what_the_first_stop_answers(
     recorder = MeetingRecorder(settings)
     write_started = threading.Event()
     release_write = threading.Event()
-    write_the_wav = recorder._assemble_and_write
 
     def held_open_write(*args):
         if not write_started.is_set():
             write_started.set()
             release_write.wait(5.0)
-        return write_the_wav(*args)
+        return write_recording(*args)
 
-    recorder._assemble_and_write = held_open_write
+    monkeypatch.setattr("app.audio.meeting_recorder.write_recording", held_open_write)
 
     await recorder.start()
     _feed_microphone(recorder, 50)
@@ -3544,14 +3543,15 @@ def test_a_failed_write_carries_the_cause_and_not_a_second_sentence(audio_settin
     captured = _harvested_capture(recorder)
 
     try:
-        with patch.object(
-            recorder, "_assemble_and_write", side_effect=OSError("No space left on device")
+        with patch(
+            "app.audio.meeting_recorder.write_recording",
+            side_effect=OSError("No space left on device"),
         ):
             with pytest.raises(MeetingWriteFailedError) as raised:
                 recorder._write_captured_meeting(captured)
         assert str(raised.value) == "No space left on device"
 
-        with patch.object(recorder, "_assemble_and_write", side_effect=OSError()):
+        with patch("app.audio.meeting_recorder.write_recording", side_effect=OSError()):
             with pytest.raises(MeetingWriteFailedError) as unnamed:
                 recorder._write_captured_meeting(captured)
         assert str(unnamed.value) == "the write failed without saying why", (

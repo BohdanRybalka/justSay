@@ -764,7 +764,7 @@ async def test_leftover_meetings_are_listed_failed_and_can_be_tried_again(
 
     views = queue.views()
     assert [(v.kind, v.stage, v.error) for v in views] == [
-        ("meeting", "failed", jobs.MEETING_FAILED_REASON)
+        ("meeting", "failed", jobs.MEETING_INTERRUPTED_REASON)
     ] * 2
     assert queue.kept_recording_names() == {older.name, newer.name}
     pipeline = _FakePipeline()

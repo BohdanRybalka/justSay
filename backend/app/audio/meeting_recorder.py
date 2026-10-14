@@ -14,6 +14,7 @@ import asyncio
 import functools
 import itertools
 import logging
+import os
 import queue
 import re
 import threading
@@ -34,6 +35,7 @@ from app.audio.base import AudioRecorder, write_wav_streaming
 from app.audio.config import AudioSettings
 from app.audio.meeting_spool import (
     MeetingSpool,
+    SpoolFiles,
     assembly_reserve_bytes,
     close_memmap,
     free_bytes,
@@ -56,14 +58,18 @@ log = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
-_RECORDING_NAME = re.compile(r"meeting_[0-9a-f]{12}\.wav")
+RECORDING_NAME = re.compile(r"meeting_[0-9a-f]{12}\.wav")
+
+MIX_PREFIX = "meeting_mix_"
+
+UNFINISHED_SUFFIX = ".part"
 
 
 def leftover_recordings(temp_dir: Path) -> list[Path]:
     """The meeting recordings in ``temp_dir``, oldest first; spill and mix files are not ones."""
     if not temp_dir.is_dir():
         return []
-    found = [entry for entry in temp_dir.iterdir() if _RECORDING_NAME.fullmatch(entry.name)]
+    found = [entry for entry in temp_dir.iterdir() if RECORDING_NAME.fullmatch(entry.name)]
     return sorted(found, key=lambda entry: entry.stat().st_mtime)
 
 
@@ -161,12 +167,12 @@ MEETING_BUSY_DETAIL = (
 class _CapturedMeeting(NamedTuple):
     """Everything the WAV needs, taken out of the recorder in one lock hold.
 
-    The two spools are files on disk; discarding them is the writer's
-    obligation from here on.
+    The two spools are files on disk; from here on they are the writer's, which
+    removes them once the WAV is whole and keeps them when it is not.
     """
 
-    microphone_spool: MeetingSpool
-    system_spool: MeetingSpool
+    microphone_spool: SpoolFiles
+    system_spool: SpoolFiles
     system_rate: int
     recording_start: float
     recording_stop: float
@@ -223,6 +229,79 @@ def _release_devices(
             source.stop()
         except Exception:
             log.warning("Closing the system audio source failed", exc_info=True)
+
+
+def write_recording(settings: AudioSettings, captured: _CapturedMeeting) -> Path:
+    """Stream both spools into `meeting_<id>.wav` and remove them once it is whole.
+
+    Written under an unfinished name and renamed, so a file named like a
+    recording is always complete. A write that fails keeps the spools, for the
+    next launch to rebuild the recording from.
+    """
+    meeting_id = captured.microphone_spool.meeting_id
+    output_path = settings.temp_dir / f"meeting_{meeting_id}.wav"
+    unfinished_path = output_path.with_name(output_path.name + UNFINISHED_SUFFIX)
+    mix_path = settings.temp_dir / f"{MIX_PREFIX}{meeting_id}.f32"
+    try:
+        _mix_into(settings, captured, mix_path, unfinished_path)
+        os.replace(unfinished_path, output_path)
+    finally:
+        for leftover in (mix_path, unfinished_path):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError:
+                log.warning("The meeting file %s could not be removed", leftover)
+    captured.microphone_spool.discard()
+    captured.system_spool.discard()
+    return output_path
+
+
+def _mix_into(
+    settings: AudioSettings, captured: _CapturedMeeting, mix_path: Path, output_path: Path
+) -> Path:
+    """Place each spool on its own channel of a mix file and read the WAV out of it.
+
+    The mix is a `np.memmap`, so a meeting has no length limit beyond the disk.
+    All three mappings are closed by an `ExitStack` before this returns.
+    """
+    target_rate = settings.sample_rate
+    chunk_frames = settings.meeting_assembly_chunk_frames
+    span = captured.recording_stop - captured.recording_start
+    total_samples = max(int(round(span * target_rate)), 0)
+
+    with ExitStack() as mappings:
+        mix = np.memmap(
+            mix_path,
+            dtype=np.float32,
+            mode="w+",
+            shape=(max(total_samples, 1), TRACK_COUNT),
+        )
+        mappings.callback(close_memmap, mix)
+        timeline = mix[:total_samples]
+        common = {
+            "target_rate": target_rate,
+            "recording_start": captured.recording_start,
+            "gap_tolerance_blocks": settings.meeting_gap_tolerance_blocks,
+            "rate_tolerance": settings.meeting_rate_tolerance,
+            "chunk_frames": chunk_frames,
+        }
+        for track, spool, nominal_rate in (
+            (MICROPHONE_TRACK, captured.microphone_spool, target_rate),
+            (SYSTEM_TRACK, captured.system_spool, captured.system_rate),
+        ):
+            samples = spool.samples()
+            mappings.callback(close_memmap, samples)
+            place_on_timeline(
+                spool.index(),
+                samples,
+                nominal_rate=nominal_rate,
+                out=timeline[:, track],
+                **common,
+            )
+        normalize_in_place(timeline, chunk_frames)
+        return write_wav_streaming(
+            output_path, timeline, target_rate, TRACK_COUNT, chunk_frames
+        )
 
 
 class MeetingRecorder(AudioRecorder):
@@ -543,6 +622,7 @@ class MeetingRecorder(AudioRecorder):
                 functools.partial(self._system_callback, token),
                 functools.partial(self._system_failed, token),
             )
+            spools[SYSTEM_SOURCE].record_rate(source.native_sample_rate)
             stream = sd.InputStream(
                 samplerate=self._settings.sample_rate,
                 channels=self._settings.channels,
@@ -621,11 +701,11 @@ class MeetingRecorder(AudioRecorder):
             _release_devices(stream, source)
             self._transition(MeetingState.IDLE)
 
-        captured.microphone_spool.close()
-        captured.system_spool.close()
-        if not captured.microphone_spool.frames and not captured.system_spool.frames:
-            captured.microphone_spool.discard()
-            captured.system_spool.discard()
+        microphone_spool.close()
+        system_spool.close()
+        if not microphone_spool.frames and not system_spool.frames:
+            microphone_spool.discard()
+            system_spool.discard()
             raise MeetingCaptureEmptyError("No audio data captured")
         return self._writer.submit(self._write_captured_meeting, captured)
 
@@ -636,7 +716,7 @@ class MeetingRecorder(AudioRecorder):
         response's filename, and the party that asked may already be gone.
         """
         try:
-            output_path = self._assemble_and_write(captured)
+            output_path = write_recording(self._settings, captured)
         except Exception as e:
             log.error("Writing the meeting recording failed", exc_info=True)
             raise MeetingWriteFailedError(str(e) or "the write failed without saying why") from e
@@ -659,7 +739,12 @@ class MeetingRecorder(AudioRecorder):
         self._discard_capture()
 
     def _discard_capture(self) -> None:
-        """Release both handles and return to idle, writing no WAV.
+        """Release both handles and return to idle, deleting the spools and writing no WAV."""
+        for spool in self._release_capture():
+            spool.discard()
+
+    def _release_capture(self) -> list[MeetingSpool]:
+        """Release both handles and return to idle, handing the caller the capture's spools.
 
         Leaves the recorder exactly as a start that failed on its devices does,
         both level meters included.
@@ -672,76 +757,9 @@ class MeetingRecorder(AudioRecorder):
             self._system_source = None
             self._forget_capture()
         self._finish_spill()
-        for spool in spools:
-            if spool is not None:
-                spool.discard()
         _release_devices(stream, source)
         self._transition(MeetingState.IDLE)
-
-    def _assemble_and_write(self, captured: _CapturedMeeting) -> Path:
-        """Stream both spools into one two-channel mix file and read the WAV out of it.
-
-        The spools and the mix file go in the `finally`: a write that failed must
-        not leave the raw capture behind next to no recording.
-        """
-        output_path = self._settings.temp_dir / f"meeting_{uuid.uuid4().hex[:12]}.wav"
-        mix_path = self._settings.temp_dir / f"meeting_mix_{uuid.uuid4().hex[:12]}.f32"
-        try:
-            return self._mix_into(captured, mix_path, output_path)
-        finally:
-            try:
-                mix_path.unlink(missing_ok=True)
-            except OSError:
-                log.warning("The meeting mix file %s could not be removed", mix_path)
-            captured.microphone_spool.discard()
-            captured.system_spool.discard()
-
-    def _mix_into(
-        self, captured: _CapturedMeeting, mix_path: Path, output_path: Path
-    ) -> Path:
-        """Place each spool on its own channel of a mix file and read the WAV out of it.
-
-        The mix is a `np.memmap`, so a meeting has no length limit beyond the disk.
-        All three mappings are closed by an `ExitStack` before this returns.
-        """
-        target_rate = self._settings.sample_rate
-        chunk_frames = self._settings.meeting_assembly_chunk_frames
-        span = captured.recording_stop - captured.recording_start
-        total_samples = max(int(round(span * target_rate)), 0)
-
-        with ExitStack() as mappings:
-            mix = np.memmap(
-                mix_path,
-                dtype=np.float32,
-                mode="w+",
-                shape=(max(total_samples, 1), TRACK_COUNT),
-            )
-            mappings.callback(close_memmap, mix)
-            timeline = mix[:total_samples]
-            common = {
-                "target_rate": target_rate,
-                "recording_start": captured.recording_start,
-                "gap_tolerance_blocks": self._settings.meeting_gap_tolerance_blocks,
-                "rate_tolerance": self._settings.meeting_rate_tolerance,
-                "chunk_frames": chunk_frames,
-            }
-            for track, spool, nominal_rate in (
-                (MICROPHONE_TRACK, captured.microphone_spool, target_rate),
-                (SYSTEM_TRACK, captured.system_spool, captured.system_rate),
-            ):
-                samples = spool.samples()
-                mappings.callback(close_memmap, samples)
-                place_on_timeline(
-                    spool.index(),
-                    samples,
-                    nominal_rate=nominal_rate,
-                    out=timeline[:, track],
-                    **common,
-                )
-            normalize_in_place(timeline, chunk_frames)
-            return write_wav_streaming(
-                output_path, timeline, target_rate, TRACK_COUNT, chunk_frames
-            )
+        return [spool for spool in spools if spool is not None]
 
     @property
     def is_recording(self) -> bool:
@@ -844,11 +862,13 @@ class MeetingRecorder(AudioRecorder):
         self._devices.shutdown(wait=False)
 
     def _shutdown_capture(self) -> None:
-        """Discard the capture, then retire the writer, on the owner thread.
+        """Close the capture's spools for the next launch, then retire the writer.
 
-        Retired here rather than from the event loop: behind the discard, the
-        device queue's own order guarantees an `_end_capture` has submitted its write.
+        Closed, not deleted, so a meeting quit midway is rebuilt at the next launch.
+        Retired here rather than from the event loop: behind the close, the device
+        queue's own order guarantees an `_end_capture` has submitted its write.
         """
-        self._discard_capture()
+        for spool in self._release_capture():
+            spool.close()
         self._writer.shutdown(wait=False)
         self._spill.shutdown(wait=False)

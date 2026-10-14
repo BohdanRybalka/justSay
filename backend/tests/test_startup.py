@@ -8,8 +8,10 @@ mirror of the teardown tests in tests/test_background_tasks.py.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -19,8 +21,10 @@ import app.embeddings
 import app.main
 import app.stt
 from app.audio.dependencies import get_recorder
+from app.audio.meeting_spool import MeetingSpool
 from app.core.app_paths import resolve_app_data_root
 from app.main import app as fastapi_app
+from app.pipeline.jobs import MEETING_INTERRUPTED_REASON
 from app.preferences import user_settings
 from app.preferences.user_settings import UserSettings
 from app.stt import local_setup
@@ -281,6 +285,35 @@ def test_a_failing_meeting_recorder_leaves_dictation_working(monkeypatch, caplog
     assert any("building the meeting recorder" in message for message in warnings)
     assert not any("releasing the meeting recorder" in message for message in warnings)
     assert released == ["stt", "embeddings", "recorder"]
+
+
+def test_a_meeting_the_last_run_cut_off_waits_in_history_untranscribed():
+    """The launch rebuilds it and lists it to try again; nothing resumes and nothing transcribes.
+
+    The user's words (2026-10-14): the meeting must not resume by itself, it waits in History
+    with a button, and recording again is a separate meeting.
+    """
+    temp_dir = app.main.settings.audio.temp_dir
+    for source, rate, frames in (("microphone", None, 1600), ("system", 48000, 4800)):
+        spool = MeetingSpool(temp_dir, "0123456789ab", source)
+        if rate is not None:
+            spool.record_rate(rate)
+        spool.append(100.0, np.full(frames, 0.1, dtype=np.float32))
+        spool.close()
+
+    with TestClient(fastapi_app) as client:
+        deadline = time.monotonic() + 10.0
+        jobs = client.get("/jobs").json()
+        while not jobs and time.monotonic() < deadline:
+            time.sleep(0.02)
+            jobs = client.get("/jobs").json()
+        status = client.get("/audio/meeting/status").json()
+
+    assert [(job["kind"], job["stage"], job["error"]) for job in jobs] == [
+        ("meeting", "failed", MEETING_INTERRUPTED_REASON)
+    ]
+    assert status["is_recording"] is False
+    assert (temp_dir / "meeting_0123456789ab.wav").exists()
 
 
 def test_a_failing_sync_to_runtime_still_takes_the_backend_down(monkeypatch):

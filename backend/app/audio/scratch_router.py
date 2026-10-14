@@ -5,7 +5,7 @@ two paths are one surface on the wire. It lives in ``app.audio``, the package
 owning ``temp_dir`` and every producer writing into it (ADR 091). The walk and
 the deletions run off the event loop, so a large scratch directory cannot stall
 the audio-level stream. A meeting recording a job still needs is neither counted
-nor reaped.
+nor reaped, and neither is a meeting not yet written as a whole recording.
 """
 
 import asyncio
@@ -17,13 +17,14 @@ from pydantic import BaseModel
 
 from app.audio.config import audio_settings
 from app.audio.dependencies import get_recording_queue
+from app.audio.meeting_recorder import RECORDING_NAME
 from app.audio.recording_queue import RecordingQueue
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
-_SCRATCH_PREFIXES = ("rec_", "pipeline_", "meeting_")
+_SCRATCH_PREFIXES = ("rec_", "pipeline_")
 
 
 class StorageInfo(BaseModel):
@@ -37,16 +38,21 @@ class CleanupResult(BaseModel):
 def _scratch_files(tmp_dir: Path, kept: frozenset[str]) -> list[Path]:
     """Files in the scratch directory that this app wrote (ADR 033), except the ``kept`` names.
 
-    ``rec_*`` from the microphone recorder, ``pipeline_*`` from the upload path, ``meeting_*`` from
-    the meeting recorder. Deletion is scoped by ownership, so anything else found there survives.
+    ``rec_*`` from the microphone recorder, ``pipeline_*`` from the upload path, finished meeting
+    recordings. A meeting's spill, mix and unfinished files are its only copy until it is written
+    or rebuilt. Deletion is scoped by ownership, so anything else found there survives.
     """
     if not tmp_dir.is_dir():
         return []
     return [
         entry
         for entry in tmp_dir.iterdir()
-        if entry.is_file() and entry.name.startswith(_SCRATCH_PREFIXES) and entry.name not in kept
+        if entry.is_file() and _is_scratch(entry.name) and entry.name not in kept
     ]
+
+
+def _is_scratch(name: str) -> bool:
+    return name.startswith(_SCRATCH_PREFIXES) or RECORDING_NAME.fullmatch(name) is not None
 
 
 def _scratch_size(tmp_dir: Path, kept: frozenset[str]) -> int:

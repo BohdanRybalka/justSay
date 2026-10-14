@@ -77,11 +77,11 @@ async def test_a_meeting_wav_is_counted_and_cleaned_like_any_other_scratch_file(
     client, isolated_temp_dir
 ):
     """Spec 066 added a third producer into the scratch directory, and ADR 033
-    scopes deletion by ownership — so the meeting recorder registers its own
-    prefix rather than being caught by a location rule. A file matching no
-    prefix still survives both.
+    scopes deletion by ownership — so a finished meeting recording is matched by
+    its own name rather than caught by a location rule. A file matching no
+    producer still survives both.
     """
-    (isolated_temp_dir / "meeting_abc123.wav").write_bytes(b"m" * 4321)
+    (isolated_temp_dir / "meeting_00000000abc1.wav").write_bytes(b"m" * 4321)
     history_db = isolated_temp_dir / "history.db"
     history_db.write_bytes(b"SQLite format 3\x00" + b"z" * 500)
 
@@ -91,7 +91,7 @@ async def test_a_meeting_wav_is_counted_and_cleaned_like_any_other_scratch_file(
 
     assert resp.status_code == 200
     assert resp.json()["freed_bytes"] == 4321
-    assert not (isolated_temp_dir / "meeting_abc123.wav").exists()
+    assert not (isolated_temp_dir / "meeting_00000000abc1.wav").exists()
     assert history_db.exists()
 
 
@@ -174,3 +174,29 @@ async def test_a_recording_a_job_still_needs_is_neither_counted_nor_cleared(
 
     assert kept.exists()
     assert not (isolated_temp_dir / "meeting_ba9876543210.wav").exists()
+
+
+@pytest.mark.anyio
+async def test_a_meeting_not_yet_written_whole_is_neither_counted_nor_cleared(
+    client, isolated_temp_dir
+):
+    """Spill files are a meeting's only copy while it records, while it is written and until the
+    next launch rebuilds it; a mix file and an unfinished WAV are the write itself."""
+    unwritten = [
+        isolated_temp_dir / name
+        for name in (
+            "meeting_spill_0123456789ab_microphone.pcm",
+            "meeting_spill_0123456789ab_microphone.idx",
+            "meeting_spill_0123456789ab_system.rate",
+            "meeting_mix_0123456789ab.f32",
+            "meeting_0123456789ab.wav.part",
+        )
+    ]
+    for path in unwritten:
+        path.write_bytes(b"s" * 100)
+    (isolated_temp_dir / "rec_abc123.wav").write_bytes(b"r" * 40)
+
+    assert (await client.get("/settings/storage")).json()["temp_size_bytes"] == 40
+    assert (await client.post("/settings/cleanup")).json()["freed_bytes"] == 40
+
+    assert [path.name for path in unwritten if not path.exists()] == []
