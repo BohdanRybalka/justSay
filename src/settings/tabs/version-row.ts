@@ -1,8 +1,9 @@
 /**
  * The Version row of the Settings card: the running version, when updates were
  * last found to be none, and the updater's check, install and restart. The
- * install runs in the shell, which closes JustSay the way Quit does first. The
- * time of the last "up to date" answer is UI state kept in `localStorage`.
+ * install runs in the shell, which on Windows closes JustSay the way Quit does
+ * before the installer starts. The time of the last "up to date" answer is UI
+ * state kept in `localStorage`.
  */
 import { setDisabled } from "../../ui/controls";
 import { icon } from "../../ui/icons";

@@ -491,22 +491,30 @@ mod tests {
             .expect("replacing the plugin's hook must keep its own cleanup");
         assert!(stop < cleanup, "the backend stops while the tray and windows still exist");
         assert!(
-            top_level_fn_source("async fn install_update(")
-                .contains(".on_before_exit(move || {\n            close_before_the_installer(&hook_app);"),
-            "the install must run through an updater whose before-exit hook closes JustSay"
+            top_level_fn_source("async fn install_update(").contains(
+                ".on_before_exit(move || {\n            close_before_the_installer(&hook_app);\n            \
+                 hook_closed.store(true, Ordering::Release);\n        })"
+            ),
+            "the install must run through an updater whose before-exit hook closes JustSay \
+             and records that it did"
         );
     }
 
     #[test]
     fn an_install_that_fails_after_the_close_restarts_the_app() {
         let install = top_level_fn_source("async fn install_update(");
-        let restart = install
-            .find("app.request_restart();")
-            .expect("a closed JustSay with no installer running has no backend or tray left");
+        let guard = install
+            .find("if closed.load(Ordering::Acquire) {")
+            .expect("only an install that failed after the close may restart");
+        let guard_end = guard
+            + install[guard..]
+                .find("\n        }")
+                .expect("the guard closes its block");
+        assert_eq!(install.matches("app.request_restart();").count(), 1);
         assert!(
-            install[..restart].contains("if closed.load(Ordering::Acquire) {"),
-            "only an install that failed after the close may restart; a failed download keeps \
-             the running app and shows the error"
+            install[guard..guard_end].contains("app.request_restart();"),
+            "a closed JustSay with no installer running has no backend or tray left, while a \
+             failed download keeps the running app and shows the error"
         );
     }
 
