@@ -2,12 +2,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dropFocusWhenDisabled } from "../../ui/browser-focus.test-helper";
 
-const { checkMock, relaunchMock } = vi.hoisted(() => ({
+const { checkMock, invokeMock, relaunchMock } = vi.hoisted(() => ({
   checkMock: vi.fn(),
+  invokeMock: vi.fn(),
   relaunchMock: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: checkMock }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: relaunchMock }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn(async () => "0.13.1") }));
 
@@ -25,12 +27,15 @@ function renderRow(isDestroyed: () => boolean = () => false) {
   };
 }
 
-function buildUpdate(downloadAndInstall = vi.fn(async () => {})) {
-  return { version: "0.14.0", currentVersion: "0.13.1", downloadAndInstall };
+const READY_UPDATE = { version: "0.14.0", currentVersion: "0.13.1" };
+
+function installCalls(): number {
+  return invokeMock.mock.calls.filter(([command]) => command === "install_update").length;
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  invokeMock.mockResolvedValue(undefined);
   localStorage.clear();
 });
 
@@ -95,9 +100,8 @@ describe("Version row — check, install and restart", () => {
     await vi.waitFor(() => expect(checkMock).toHaveBeenCalledTimes(2));
   });
 
-  it("names the version that is ready and installs it once, without checking again", async () => {
-    const downloadAndInstall = vi.fn(async () => {});
-    checkMock.mockResolvedValue(buildUpdate(downloadAndInstall));
+  it("names the version that is ready and has the shell install it once, then restarts", async () => {
+    checkMock.mockResolvedValue(READY_UPDATE);
     const { button, status } = renderRow();
 
     button.click();
@@ -106,13 +110,14 @@ describe("Version row — check, install and restart", () => {
 
     button.click();
     await vi.waitFor(() => expect(relaunchMock).toHaveBeenCalledTimes(1));
-    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith("install_update");
+    expect(installCalls()).toBe(1);
     expect(checkMock).toHaveBeenCalledTimes(1);
   });
 
   it("forgets the old up-to-date time once an update is found", async () => {
     localStorage.setItem(LAST_UP_TO_DATE_KEY, String(Date.now() - 86_400_000));
-    checkMock.mockResolvedValue(buildUpdate());
+    checkMock.mockResolvedValue(READY_UPDATE);
     const { button } = renderRow();
 
     button.click();
@@ -124,8 +129,8 @@ describe("Version row — check, install and restart", () => {
 
   it("keeps the button disabled for the whole install", async () => {
     let finishInstall!: () => void;
-    const downloadAndInstall = vi.fn(() => new Promise<void>((resolve) => (finishInstall = resolve)));
-    checkMock.mockResolvedValue(buildUpdate(downloadAndInstall));
+    invokeMock.mockReturnValue(new Promise<void>((resolve) => (finishInstall = resolve)));
+    checkMock.mockResolvedValue(READY_UPDATE);
     const { button } = renderRow();
 
     button.click();
@@ -137,15 +142,12 @@ describe("Version row — check, install and restart", () => {
     button.click();
     finishInstall();
     await vi.waitFor(() => expect(relaunchMock).toHaveBeenCalledTimes(1));
-    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(installCalls()).toBe(1);
   });
 
   it("a failed install offers a retry that installs, not checks", async () => {
-    const downloadAndInstall = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("disk full"))
-      .mockResolvedValueOnce(undefined);
-    checkMock.mockResolvedValue(buildUpdate(downloadAndInstall));
+    invokeMock.mockRejectedValueOnce("disk full");
+    checkMock.mockResolvedValue(READY_UPDATE);
     const { button, status } = renderRow();
 
     button.click();
@@ -154,15 +156,15 @@ describe("Version row — check, install and restart", () => {
     await vi.waitFor(() => expect(button.textContent).toBe("Try again"));
     expect(status.textContent).toBe("Install failed: disk full");
     expect(button.disabled).toBe(false);
+    expect(relaunchMock).not.toHaveBeenCalled();
 
     button.click();
-    await vi.waitFor(() => expect(downloadAndInstall).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(installCalls()).toBe(2));
     expect(checkMock).toHaveBeenCalledTimes(1);
   });
 
   it("a relaunch failure does not report the finished install as failed", async () => {
-    const downloadAndInstall = vi.fn(async () => {});
-    checkMock.mockResolvedValue(buildUpdate(downloadAndInstall));
+    checkMock.mockResolvedValue(READY_UPDATE);
     relaunchMock.mockRejectedValue(new Error("process:allow-restart denied"));
     const { button, status } = renderRow();
 
@@ -175,7 +177,7 @@ describe("Version row — check, install and restart", () => {
     expect(status.textContent).not.toContain("Install failed");
     button.click();
     await vi.waitFor(() => expect(checkMock).toHaveBeenCalledTimes(2));
-    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(installCalls()).toBe(1);
   });
 
   it("names an unpublished release manifest and lets the user check again", async () => {

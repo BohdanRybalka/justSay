@@ -246,10 +246,10 @@ static BACKEND_PROCESS: Mutex<Option<BackendProcess>> = Mutex::new(None);
 ///
 /// **One-way latch: never reset back to `false`.** Correctness depends on
 /// every call site that sets it leading to the whole process exiting shortly
-/// after; true today for all of them (`RunEvent::Exit` and the Windows
-/// console Ctrl+C/close handler, both via `shutdown()`; the main-thread panic
-/// hook via `shutdown_without_waiting()`). `spawn()`'s post-store recheck
-/// reads the latch but does not set it — it calls `kill_current_process()`
+/// after; true today for all of them (`RunEvent::Exit`, the updater's Windows
+/// before-exit hook and the Windows console Ctrl+C/close handler, all via
+/// `shutdown()`; the main-thread panic hook via `shutdown_without_waiting()`).
+/// `spawn()`'s post-store recheck reads the latch but does not set it — it calls `kill_current_process()`
 /// directly rather than `shutdown()`, since it only ever runs when the latch
 /// is already `true`. A future call site that does NOT lead to process exit
 /// would permanently and silently disable the watchdog for the rest of the
@@ -1229,9 +1229,9 @@ enum LockWait {
     Skip,
     /// Retry every `SHUTDOWN_LOCK_WAIT_POLL_INTERVAL` up to
     /// `SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS` times. Used by `shutdown()` (the
-    /// waiting entry point called from `RunEvent::Exit` and the console
-    /// fail-safe handler) and, directly rather than through `shutdown()`, by
-    /// `spawn()`'s post-store recheck.
+    /// waiting entry point called from `RunEvent::Exit`, the updater's
+    /// before-exit hook and the console fail-safe handler) and, directly rather
+    /// than through `shutdown()`, by `spawn()`'s post-store recheck.
     UntilFree,
 }
 
@@ -1470,7 +1470,7 @@ fn terminate_gracefully(
 /// Kill the backend process on shutdown, waiting up to
 /// `SHUTDOWN_LOCK_WAIT_MAX_ATTEMPTS * SHUTDOWN_LOCK_WAIT_POLL_INTERVAL` for
 /// `BACKEND_PROCESS` to free up if another thread currently holds it.
-/// Callers: `RunEvent::Exit` (`lib.rs`), `spawn()`'s post-store recheck, and
+/// Callers: `RunEvent::Exit` and `close_before_the_installer` (`lib.rs`), and
 /// `wait_for_inflight_shutdown_then_exit()`.
 pub fn shutdown() {
     SHUTDOWN_REQUESTED.store(true, Ordering::Release);
@@ -2317,8 +2317,13 @@ mod tests {
         );
         assert_eq!(
             lib_source.matches("backend::shutdown()").count(),
-            1,
-            "lib.rs must name backend::shutdown() exactly once"
+            2,
+            "lib.rs must name backend::shutdown() exactly twice: on RunEvent::Exit and before \
+             the Windows update installer, which exits without that event"
+        );
+        assert!(
+            lib_source.contains("RunEvent::Exit => backend::shutdown()"),
+            "RunEvent::Exit must run the waiting graceful shutdown"
         );
     }
 
