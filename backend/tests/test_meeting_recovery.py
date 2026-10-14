@@ -1,4 +1,4 @@
-"""JS-279: a meeting a past run cut off is rebuilt from its spill files at the next launch.
+"""A meeting a past run cut off is rebuilt from its spill files at the next launch.
 
 Every spool here is written by the real `MeetingSpool` and closed the way a
 dying process's handles are, so the files are exactly what a crash leaves.
@@ -17,6 +17,7 @@ import pytest
 from app.audio.base import write_wav_streaming
 from app.audio.config import AudioSettings
 from app.audio.meeting_recovery import (
+    _discard_spill,
     interrupted_meetings,
     rebuild_interrupted_meetings,
     rebuild_meeting,
@@ -38,13 +39,12 @@ def _left_behind(
     temp_dir: Path,
     meeting_id: str,
     blocks: int = 10,
-    record_rate: bool = True,
     written_at: float = CUT_OFF_AT,
 ) -> list[Path]:
     microphone = MeetingSpool(temp_dir, meeting_id, "microphone")
     system = MeetingSpool(temp_dir, meeting_id, "system")
-    if record_rate:
-        system.record_rate(SYSTEM_RATE)
+    microphone.record_rate(16000)
+    system.record_rate(SYSTEM_RATE)
     for index in range(blocks):
         microphone.append(
             100.0 + index * MICROPHONE_FRAMES / 16000,
@@ -83,7 +83,67 @@ def test_a_cut_off_meeting_is_rebuilt_into_a_recording_of_both_sides(settings):
         "History names a meeting by its file's time, so the rebuild must carry "
         "the moment the meeting was cut off rather than the moment of the launch"
     )
+    assert all(path.exists() for path in spill), (
+        "the spools are the only copy until the recording is listed, so the "
+        "rebuild leaves them to its caller"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_spools_go_only_once_the_recording_is_handed_over(settings):
+    spill = _left_behind(settings.temp_dir, "0123456789ab")
+    present_at_hand_over: list[bool] = []
+
+    def hand_over(recordings: list[Path]) -> None:
+        present_at_hand_over.extend(path.exists() for path in spill)
+
+    await rebuild_interrupted_meetings(settings, ["0123456789ab"], hand_over)
+
+    assert present_at_hand_over and all(present_at_hand_over)
     assert [path.name for path in spill if path.exists()] == []
+    assert (settings.temp_dir / "meeting_0123456789ab.wav").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_hand_over_that_fails_keeps_the_spools_and_goes_on(settings):
+    first_spill = _left_behind(settings.temp_dir, "aaaaaaaaaaaa")
+    _left_behind(settings.temp_dir, "bbbbbbbbbbbb")
+    handed_over: list[Path] = []
+
+    def hand_over(recordings: list[Path]) -> None:
+        if recordings[0].name == "meeting_aaaaaaaaaaaa.wav":
+            raise FileNotFoundError(recordings[0])
+        handed_over.extend(recordings)
+
+    await rebuild_interrupted_meetings(settings, ["aaaaaaaaaaaa", "bbbbbbbbbbbb"], hand_over)
+
+    assert handed_over == [settings.temp_dir / "meeting_bbbbbbbbbbbb.wav"]
+    assert all(path.exists() for path in first_spill)
+
+
+def test_a_spool_a_scanner_still_holds_is_never_rebuilt_into_a_second_meeting(settings):
+    """Windows refuses to delete a file another process has open, such as a virus scanner.
+
+    The finished meeting was listed and may be sent and gone by the next launch,
+    so a `.pcm` left behind must not come back as a meeting of its own.
+    """
+    spill = _left_behind(settings.temp_dir, "0123456789ab")
+    held = {path for path in spill if path.suffix in (".pcm", ".idx")}
+    unlink = Path.unlink
+
+    def refuse_held(path: Path, missing_ok: bool = False) -> None:
+        if path in held:
+            raise PermissionError(13, "The process cannot access the file", str(path))
+        unlink(path, missing_ok=missing_ok)
+
+    recording = rebuild_meeting(settings, "0123456789ab")
+    with patch.object(Path, "unlink", refuse_held):
+        _discard_spill(settings.temp_dir, "0123456789ab")
+    recording.unlink()
+
+    assert interrupted_meetings(settings.temp_dir) == ["0123456789ab"]
+    assert rebuild_meeting(settings, "0123456789ab") is None
+    assert list(settings.temp_dir.glob("meeting_*.wav")) == []
 
 
 def test_the_meetings_a_past_run_cut_off_are_found_oldest_first(settings):
@@ -98,7 +158,11 @@ def test_the_meetings_a_past_run_cut_off_are_found_oldest_first(settings):
         temp_dir / "meeting_mix_aaaaaaaaaaaa.f32",
         temp_dir / "meeting_aaaaaaaaaaaa.wav.part",
     ]
-    unrelated = [temp_dir / "rec_0123.wav", temp_dir / "meeting_dddddddddddd.wav"]
+    unrelated = [
+        temp_dir / "rec_0123.wav",
+        temp_dir / "meeting_dddddddddddd.wav",
+        temp_dir / "download.part",
+    ]
     for path in unfinished + unrelated:
         path.write_bytes(b"x")
 
@@ -114,17 +178,35 @@ def test_nothing_is_found_where_there_is_no_scratch_directory(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("blocks", "record_rate"),
-    [(10, False), (0, True)],
-    ids=["the system rate was never recorded", "no audio reached the disk"],
+    ("blocks", "lost"),
+    [
+        (10, "meeting_spill_0123456789ab_system.rate"),
+        (10, "meeting_spill_0123456789ab_microphone.rate"),
+        (10, "meeting_spill_0123456789ab_system.idx"),
+        (0, None),
+    ],
+    ids=["no system rate", "no microphone rate", "a spool file is gone", "no audio"],
 )
-def test_a_set_that_cannot_become_a_recording_is_removed(settings, blocks, record_rate):
-    spill = _left_behind(settings.temp_dir, "0123456789ab", blocks=blocks, record_rate=record_rate)
+def test_a_set_that_cannot_become_a_recording_is_removed(settings, blocks, lost):
+    spill = _left_behind(settings.temp_dir, "0123456789ab", blocks=blocks)
+    if lost is not None:
+        (settings.temp_dir / lost).unlink()
 
     assert rebuild_meeting(settings, "0123456789ab") is None
 
     assert [path.name for path in spill if path.exists()] == []
     assert list(settings.temp_dir.glob("meeting_*")) == []
+
+
+def test_a_disk_too_full_for_the_rebuild_keeps_the_spools(settings):
+    """Assembly writes through a memory map, and a full disk under one can end the process."""
+    spill = _left_behind(settings.temp_dir, "0123456789ab")
+
+    with patch("app.audio.meeting_recovery.free_bytes", return_value=1024), pytest.raises(OSError):
+        rebuild_meeting(settings, "0123456789ab")
+
+    assert all(path.exists() for path in spill)
+    assert list(settings.temp_dir.glob("meeting_*.wav*")) == []
 
 
 @pytest.mark.asyncio

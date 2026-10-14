@@ -764,7 +764,7 @@ async def test_leftover_meetings_are_listed_failed_and_can_be_tried_again(
 
     views = queue.views()
     assert [(v.kind, v.stage, v.error) for v in views] == [
-        ("meeting", "failed", jobs.MEETING_INTERRUPTED_REASON)
+        ("meeting", "failed", jobs.MEETING_FAILED_REASON)
     ] * 2
     assert queue.kept_recording_names() == {older.name, newer.name}
     pipeline = _FakePipeline()
@@ -773,6 +773,22 @@ async def test_leftover_meetings_are_listed_failed_and_can_be_tried_again(
     pipeline.release.set()
     await _settle(queue, views[0].id)
     assert not newer.exists()
+
+
+def test_a_meeting_a_past_run_cut_off_says_so_and_can_be_tried_again(queue, tmp_path):
+    """A leftover WAV may be a meeting that already failed; only a rebuilt one was cut off."""
+    rebuilt = tmp_path / "meeting_00000000000c.wav"
+    rebuilt.write_bytes(b"RIFF....WAVE....")
+
+    queue.add_cut_off_meetings([rebuilt])
+
+    [view] = queue.views()
+    assert (view.kind, view.stage, view.error) == (
+        "meeting",
+        "failed",
+        jobs.MEETING_INTERRUPTED_REASON,
+    )
+    assert queue.kept_recording_names() == {rebuilt.name}
 
 
 async def test_a_meeting_runs_the_real_pipeline_on_its_own_engine(

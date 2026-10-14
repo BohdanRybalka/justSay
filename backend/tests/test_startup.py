@@ -288,16 +288,11 @@ def test_a_failing_meeting_recorder_leaves_dictation_working(monkeypatch, caplog
 
 
 def test_a_meeting_the_last_run_cut_off_waits_in_history_untranscribed():
-    """The launch rebuilds it and lists it to try again; nothing resumes and nothing transcribes.
-
-    The user's words (2026-10-14): the meeting must not resume by itself, it waits in History
-    with a button, and recording again is a separate meeting.
-    """
+    """The launch rebuilds it and lists it to send; nothing resumes and nothing transcribes."""
     temp_dir = app.main.settings.audio.temp_dir
-    for source, rate, frames in (("microphone", None, 1600), ("system", 48000, 4800)):
+    for source, rate, frames in (("microphone", 16000, 1600), ("system", 48000, 4800)):
         spool = MeetingSpool(temp_dir, "0123456789ab", source)
-        if rate is not None:
-            spool.record_rate(rate)
+        spool.record_rate(rate)
         spool.append(100.0, np.full(frames, 0.1, dtype=np.float32))
         spool.close()
 

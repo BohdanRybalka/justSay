@@ -142,7 +142,7 @@ async def lifespan(app: FastAPI):
     if interrupted:
         tasks.spawn_background_task(
             rebuild_interrupted_meetings(
-                settings.audio, interrupted, app.state.jobs.add_leftover_meetings
+                settings.audio, interrupted, app.state.jobs.add_cut_off_meetings
             ),
             name="meeting-recovery",
         )

@@ -2,17 +2,20 @@
 
 A meeting is captured to disk rather than to memory, so peak RAM stops
 depending on how long the call ran (ADR 058). Each source gets a `.pcm` of
-mono float32 frames, a sibling `.idx` of fixed-width per-block records and a
-`.rate`, which is what lets assembly rebuild the arrival timeline without a
-block in RAM, at stop or at the launch after a crash. Pure storage.
+mono float32 frames and a sibling `.idx` of fixed-width per-block records, which
+is what lets assembly rebuild the arrival timeline without a block in RAM, plus a
+`.rate` naming the source's rate for a rebuild at the launch after a crash.
 """
 
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 INDEX_DTYPE = np.dtype([("arrival", "<f8"), ("frames", "<i4")])
 
@@ -89,16 +92,17 @@ class SpoolFiles:
         return self.samples_path.stat().st_size // SAMPLE_BYTES
 
     def discard(self) -> None:
-        """Remove every file of this spool, never raising.
+        """Remove every file of this spool, logging rather than raising what stays.
 
-        Called from the `finally` that ends every capture, so a spool that has
-        already gone must not turn one failure into a different one.
+        Each file is tried even when an earlier one stays, and a spool without its
+        `.rate` is never rebuilt, so a `.pcm` a scanner still holds open cannot
+        come back as a second meeting.
         """
-        for path in (self.samples_path, self.index_path, self.rate_path):
+        for path in (self.rate_path, self.index_path, self.samples_path):
             try:
                 path.unlink(missing_ok=True)
             except OSError:
-                pass
+                log.warning("The meeting spill file %s could not be removed", path)
 
 
 class MeetingSpool(SpoolFiles):

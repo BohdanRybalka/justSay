@@ -150,6 +150,7 @@ def _harvested_capture(recorder: MeetingRecorder, blocks: int = 0) -> _CapturedM
     return _CapturedMeeting(
         microphone_spool=spools[0],
         system_spool=spools[1],
+        microphone_rate=microphone_rate,
         system_rate=SYSTEM_RATE,
         recording_start=0.0,
         recording_stop=blocks * BLOCK_FRAMES / microphone_rate if blocks else 1.0,

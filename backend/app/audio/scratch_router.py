@@ -39,8 +39,8 @@ def _scratch_files(tmp_dir: Path, kept: frozenset[str]) -> list[Path]:
     """Files in the scratch directory that this app wrote (ADR 033), except the ``kept`` names.
 
     ``rec_*`` from the microphone recorder, ``pipeline_*`` from the upload path, finished meeting
-    recordings. A meeting's spill, mix and unfinished files are its only copy until it is written
-    or rebuilt. Deletion is scoped by ownership, so anything else found there survives.
+    recordings. A meeting's spill files are its only copy until its WAV is whole, and its mix and
+    unfinished files are that write. Scoped by ownership, so anything else found there survives.
     """
     if not tmp_dir.is_dir():
         return []

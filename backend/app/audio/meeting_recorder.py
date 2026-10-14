@@ -167,12 +167,13 @@ MEETING_BUSY_DETAIL = (
 class _CapturedMeeting(NamedTuple):
     """Everything the WAV needs, taken out of the recorder in one lock hold.
 
-    The two spools are files on disk; from here on they are the writer's, which
-    removes them once the WAV is whole and keeps them when it is not.
+    The two spools are files on disk; from here on they are the writer's, and
+    they go only once the WAV is whole.
     """
 
     microphone_spool: SpoolFiles
     system_spool: SpoolFiles
+    microphone_rate: int
     system_rate: int
     recording_start: float
     recording_stop: float
@@ -232,11 +233,11 @@ def _release_devices(
 
 
 def write_recording(settings: AudioSettings, captured: _CapturedMeeting) -> Path:
-    """Stream both spools into `meeting_<id>.wav` and remove them once it is whole.
+    """Stream both spools into `meeting_<id>.wav`, leaving the spools to the caller.
 
     Written under an unfinished name and renamed, so a file named like a
-    recording is always complete. A write that fails keeps the spools, for the
-    next launch to rebuild the recording from.
+    recording is always complete. The caller removes the spools once it has
+    the recording, so a write that fails leaves them for the next launch.
     """
     meeting_id = captured.microphone_spool.meeting_id
     output_path = settings.temp_dir / f"meeting_{meeting_id}.wav"
@@ -251,8 +252,6 @@ def write_recording(settings: AudioSettings, captured: _CapturedMeeting) -> Path
                 leftover.unlink(missing_ok=True)
             except OSError:
                 log.warning("The meeting file %s could not be removed", leftover)
-    captured.microphone_spool.discard()
-    captured.system_spool.discard()
     return output_path
 
 
@@ -286,7 +285,7 @@ def _mix_into(
             "chunk_frames": chunk_frames,
         }
         for track, spool, nominal_rate in (
-            (MICROPHONE_TRACK, captured.microphone_spool, target_rate),
+            (MICROPHONE_TRACK, captured.microphone_spool, captured.microphone_rate),
             (SYSTEM_TRACK, captured.system_spool, captured.system_rate),
         ):
             samples = spool.samples()
@@ -605,6 +604,7 @@ class MeetingRecorder(AudioRecorder):
                 name: MeetingSpool(self._settings.temp_dir, meeting_id, name)
                 for name in (MICROPHONE_SOURCE, SYSTEM_SOURCE)
             }
+            spools[MICROPHONE_SOURCE].record_rate(self._settings.sample_rate)
             started_at = time.monotonic()
             work: queue.Queue = queue.Queue(
                 maxsize=self._settings.meeting_spill_queue_blocks
@@ -622,7 +622,6 @@ class MeetingRecorder(AudioRecorder):
                 functools.partial(self._system_callback, token),
                 functools.partial(self._system_failed, token),
             )
-            spools[SYSTEM_SOURCE].record_rate(source.native_sample_rate)
             stream = sd.InputStream(
                 samplerate=self._settings.sample_rate,
                 channels=self._settings.channels,
@@ -631,6 +630,7 @@ class MeetingRecorder(AudioRecorder):
                 callback=functools.partial(self._microphone_callback, token),
             )
             stream.start()
+            spools[SYSTEM_SOURCE].record_rate(source.native_sample_rate)
         except BaseException:
             _release_devices(stream, source)
             with self._lock:
@@ -690,6 +690,7 @@ class MeetingRecorder(AudioRecorder):
                 captured = _CapturedMeeting(
                     microphone_spool=microphone_spool,
                     system_spool=system_spool,
+                    microphone_rate=self._settings.sample_rate,
                     system_rate=system_rate,
                     recording_start=self._start_time,
                     recording_stop=time.monotonic(),
@@ -720,6 +721,8 @@ class MeetingRecorder(AudioRecorder):
         except Exception as e:
             log.error("Writing the meeting recording failed", exc_info=True)
             raise MeetingWriteFailedError(str(e) or "the write failed without saying why") from e
+        captured.microphone_spool.discard()
+        captured.system_spool.discard()
         log.info("Meeting recording written to %s", output_path)
         return MeetingRecording(
             path=output_path,

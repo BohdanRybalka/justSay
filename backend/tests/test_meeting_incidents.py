@@ -681,7 +681,6 @@ async def test_a_meeting_quit_midway_is_rebuilt_with_both_sides_at_the_next_laun
     assert np.count_nonzero(channels[:, 1]) > 0.95 * system_seconds * settings.sample_rate, (
         "the far side did not survive the quit whole"
     )
-    assert list(settings.temp_dir.glob("meeting_spill_*")) == []
 
 
 @pytest.mark.asyncio
@@ -805,7 +804,8 @@ async def test_a_write_that_fails_keeps_the_spools_and_leaves_no_mix_or_unfinish
 ):
     """A recording a disk-full write could not produce is rebuilt at the next launch.
 
-    So the spools stay, whole, and the mix file and the unfinished WAV go. The
+    So the spools stay, whole, and the mix file and the half-written WAV go --
+    a half WAV under the final name would pass for the whole recording. The
     failure is raised from `write_wav_streaming`, the only point at which all
     three mappings -- the mix and one over each spool -- are open at once. On
     Windows a file cannot be unlinked while a mapping over it is open, and a
@@ -821,11 +821,12 @@ async def test_a_write_that_fails_keeps_the_spools_and_leaves_no_mix_or_unfinish
             source.deliver(recorder._start_time + index * BLOCK_FRAMES / SYSTEM_RATE)
         recorder._start_time = recorder._start_time - 1.0
 
-        def refuse_to_write(*args, **kwargs):
+        def run_out_of_space_halfway(path, *args, **kwargs):
+            path.write_bytes(b"RIFF")
             raise OSError("[Errno 28] No space left on device")
 
         with patch(
-            "app.audio.meeting_recorder.write_wav_streaming", refuse_to_write
+            "app.audio.meeting_recorder.write_wav_streaming", run_out_of_space_halfway
         ), pytest.raises(MeetingWriteFailedError):
             await recorder.stop()
         await asyncio.to_thread(recorder._writer.shutdown, True)
@@ -837,6 +838,7 @@ async def test_a_write_that_fails_keeps_the_spools_and_leaves_no_mix_or_unfinish
         assert left_behind == [
             f"{stem}_microphone.idx",
             f"{stem}_microphone.pcm",
+            f"{stem}_microphone.rate",
             f"{stem}_system.idx",
             f"{stem}_system.pcm",
             f"{stem}_system.rate",

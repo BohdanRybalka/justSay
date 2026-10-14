@@ -246,8 +246,15 @@ class JobQueue:
 
     def add_leftover_meetings(self, recordings: Iterable[Path]) -> None:
         """List recordings a past run never turned into text as failed meetings, to try again."""
+        self._add_failed_meetings(recordings, MEETING_FAILED_REASON)
+
+    def add_cut_off_meetings(self, recordings: Iterable[Path]) -> None:
+        """List recordings rebuilt from meetings a past run cut off, for the user to send."""
+        self._add_failed_meetings(recordings, MEETING_INTERRUPTED_REASON)
+
+    def _add_failed_meetings(self, recordings: Iterable[Path], reason: str) -> None:
         for recording in recordings:
-            self._fail(self._meeting(recording), MEETING_INTERRUPTED_REASON)
+            self._fail(self._meeting(recording), reason)
 
     def retry(self, job_id: str) -> bool:
         """Queue a failed meeting again; ``False`` for an unknown id.
