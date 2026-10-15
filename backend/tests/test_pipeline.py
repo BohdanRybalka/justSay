@@ -299,7 +299,7 @@ async def test_a_cloud_dictation_in_pieces_sends_nothing_after_cloud_is_switched
 
     async def switch_then_send(stt, path, *, pacer, **kwargs):
         settings.stt.mode = ProviderMode.LOCAL
-        await pacer.before_piece(0, 2)
+        await pacer.before_send()
         sent.append(path)
         return TranscriptionResult(text="late")
 
@@ -315,6 +315,32 @@ async def test_a_cloud_dictation_in_pieces_sends_nothing_after_cloud_is_switched
             )
 
     assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_short_cloud_dictation_sends_nothing_after_cloud_is_switched_off_before_its_send(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """A route fixed to Cloud, as a retry fixes it, checks again right before it sends."""
+    stt = _make_stt_mock("ok")
+
+    def switch_off(path):
+        settings.stt.mode = ProviderMode.LOCAL
+        return None
+
+    with (
+        patch("app.pipeline.service.get_provider", return_value=stt),
+        patch("app.pipeline.service._silence_note", side_effect=switch_off),
+    ):
+        with pytest.raises(chunking.RouteStoppedError):
+            await process_audio(
+                sample_wav,
+                audio_duration=60.0,
+                source="dictation",
+                mode=ProviderMode.CLOUD,
+            )
+
+    stt.transcribe.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1318,6 +1344,9 @@ class _Observer:
         return None
 
     async def before_piece(self, index, total):
+        return None
+
+    async def before_send(self):
         return None
 
     async def pause(self, seconds):

@@ -142,6 +142,9 @@ class _JobObserver:
     async def before_transcribe(self, model_name: str, audio_duration: float | None) -> None:
         self._job.expected_seconds = await _expected_seconds(model_name, audio_duration)
 
+    async def before_send(self) -> None:
+        return None
+
     async def before_piece(self, index: int, total: int) -> None:
         await self._queue.gate.wait_for_none()
         self._stop_if_cancelled()

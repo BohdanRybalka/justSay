@@ -17,7 +17,12 @@ from app.audio.analysis import analyze_silence
 from app.audio.config import audio_settings
 from app.audio.vad import analyze_vad
 from app.core.types import ProviderMode
-from app.pipeline.chunking import PiecePacer, UnpacedPieces, transcribe_in_pieces
+from app.pipeline.chunking import (
+    PiecePacer,
+    RouteStoppedError,
+    UnpacedPieces,
+    transcribe_in_pieces,
+)
 from app.pipeline.cleanup import clean_dictation
 from app.pipeline.meeting_text import has_two_tracks, spoken_word_count, transcribe_meeting
 from app.pipeline.utils import detect_duration
@@ -145,6 +150,7 @@ async def process_audio(
     pacer: PiecePacer = observer if observer is not None else UnpacedPieces(stays_on)
     try:
         if observer is None and not (duration is not None and duration > LONG_DICTATION_SECONDS):
+            await pacer.before_send()
             result = await stt.transcribe(audio_path, language=language, audio_duration=duration)
         elif two_tracks:
             result = await transcribe_meeting(
@@ -165,6 +171,9 @@ async def process_audio(
                 holds_no_speech=_holds_no_speech,
                 pacer=pacer,
             )
+    except RouteStoppedError:
+        log.info("Stopped %s: the route was switched off mid-run", stt.model_name)
+        raise
     except Exception:
         log.exception("STT transcribe failed (%s)", stt.model_name)
         raise

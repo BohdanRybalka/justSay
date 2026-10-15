@@ -16,7 +16,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 import numpy as np
 
@@ -49,10 +49,18 @@ LITTLE_SPEECH_SECONDS = 3.0
 _TOKEN = re.compile(r"\S+\s*")
 
 
+class RouteStoppedError(NotReadyError):
+    """The route was switched off while its pieces were being sent; nothing more was sent."""
+
+    code: ClassVar[str] = "route_stopped"
+
+
 class PiecePacer(Protocol):
     """What the caller hears around each piece; it may hold a piece back or stop the work."""
 
     async def before_piece(self, index: int, total: int) -> None: ...
+
+    async def before_send(self) -> None: ...
 
     async def pause(self, seconds: float) -> None: ...
 
@@ -62,26 +70,25 @@ class PiecePacer(Protocol):
 class UnpacedPieces:
     """A pacer for a caller that shows nothing: a provider's wait is slept, nothing else happens.
 
-    ``stays_on``, when given, is asked before each piece and after each wait; once it says no, the
-    work stops before anything more is sent to the provider.
+    ``stays_on``, when given, is asked right before each send to the provider; once it says no,
+    the work stops with ``RouteStoppedError`` and nothing further is sent.
     """
 
     def __init__(self, stays_on: Callable[[], bool] | None = None) -> None:
         self._stays_on = stays_on
 
     async def before_piece(self, index: int, total: int) -> None:
-        self._check()
+        return None
+
+    async def before_send(self) -> None:
+        if self._stays_on is not None and not self._stays_on():
+            raise RouteStoppedError("The route was switched off while its pieces were being sent")
 
     async def pause(self, seconds: float) -> None:
         await asyncio.sleep(seconds)
-        self._check()
 
     def piece_done(self, done: int, total: int) -> None:
         return None
-
-    def _check(self) -> None:
-        if self._stays_on is not None and not self._stays_on():
-            raise NotReadyError("The route was switched off while its pieces were being sent")
 
 
 @dataclass(frozen=True)
@@ -266,6 +273,7 @@ async def _transcribe_with_pauses(
 ) -> TranscriptionResult:
     pauses = 0
     while True:
+        await pacer.before_send()
         try:
             return await stt.transcribe(path, language=language, audio_duration=duration)
         except ResourceUnavailableError as refusal:
@@ -294,6 +302,8 @@ async def _transcribe_checked(
     await turn()
     try:
         second = await _transcribe_with_pauses(stt, piece, language, seconds, pacer)
+    except RouteStoppedError:
+        raise
     except Exception:
         log.warning("Asking again failed; keeping the first answer", exc_info=True)
         return first

@@ -69,8 +69,8 @@ _BUILTIN_EXCEPTION_BASES = frozenset(
     for name, value in vars(builtins).items()
     if isinstance(value, type) and issubclass(value, BaseException)
 )
-_DECLARED_EXCEPTION_CLASS_COUNT = 16
-_HIERARCHY_MEMBER_COUNT = 13
+_DECLARED_EXCEPTION_CLASS_COUNT = 17
+_HIERARCHY_MEMBER_COUNT = 14
 _WEB_FRAMEWORK_ROOTS = frozenset({"fastapi", "starlette"})
 
 
