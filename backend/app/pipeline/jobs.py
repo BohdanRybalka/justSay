@@ -224,10 +224,10 @@ def remove_leftover_files(temp_dir: Path) -> None:
 
 
 def leftover_dictations(temp_dir: Path) -> list[Path]:
-    """The kept dictation recordings in ``temp_dir``, oldest first."""
+    """The dictation recordings in ``temp_dir``, kept or scratch, oldest first."""
     if not temp_dir.is_dir():
         return []
-    found = [entry for entry in temp_dir.iterdir() if DICTATION_NAME.fullmatch(entry.name)]
+    found = list(temp_dir.glob(f"{DICTATION_FILE_PREFIX}*.wav"))
     return sorted(found, key=lambda entry: entry.stat().st_mtime)
 
 
@@ -295,8 +295,11 @@ class JobQueue:
         is kept when the audio is not on disk, since there is nothing to send.
         """
         job_id = uuid.uuid4().hex
-        language = language if re.fullmatch(r"[A-Za-z-]{2,12}", language) else "auto"
-        path = self._temp_dir / f"{DICTATION_FILE_PREFIX}{job_id}_{mode.value}_{language}.wav"
+        name = f"{DICTATION_FILE_PREFIX}{job_id}_{mode.value}_{language}.wav"
+        if DICTATION_NAME.fullmatch(name) is None:
+            language = "auto"
+            name = f"{DICTATION_FILE_PREFIX}{job_id}_{mode.value}_{language}.wav"
+        path = self._temp_dir / name
         try:
             self._temp_dir.mkdir(parents=True, exist_ok=True)
             audio.replace(path)
@@ -465,7 +468,9 @@ class JobQueue:
                 job.path, language=job.language, source="dictation", mode=mode
             )
         except Exception as failure:
-            if not isinstance(failure, JustSayError):
+            if isinstance(failure, JustSayError):
+                _log_refusal(job, failure)
+            else:
                 log.exception("The dictation job %s crashed", job.id)
             self._fail(job, DICTATION_FAILED_REASON)
             return
@@ -545,8 +550,6 @@ class JobQueue:
     def _failed_reason(job: _Job) -> str:
         if job.kind == "file":
             return FAILED_REASON
-        if job.kind == "dictation":
-            return DICTATION_FAILED_REASON
         if job.mode == ProviderMode.LOCAL:
             return MEETING_FAILED_HERE_REASON
         return MEETING_FAILED_REASON

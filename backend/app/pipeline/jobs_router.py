@@ -1,4 +1,4 @@
-"""Job endpoints — start a file transcription, list jobs, try a meeting again, cancel or dismiss."""
+"""Job endpoints — start a file transcription, list jobs, retry a meeting or dictation, dismiss."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from pydantic import BaseModel

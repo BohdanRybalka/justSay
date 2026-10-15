@@ -11,6 +11,7 @@ import soundfile as sf
 from fastapi import BackgroundTasks
 
 from app.config import settings
+from app.core.errors import NotReadyError
 from app.core.types import ProviderMode
 from app.pipeline import chunking, service
 from app.pipeline.service import process_audio
@@ -290,6 +291,33 @@ async def test_the_result_names_the_history_entry_it_saved(
     assert result.entry_id == "entry-7"
 
 
+async def test_a_cloud_dictation_in_pieces_sends_nothing_after_cloud_is_switched_off(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """Switching to Local while Cloud pieces are being sent stops the rest before they leave."""
+    sent: list[Path] = []
+
+    async def switch_then_send(stt, path, *, pacer, **kwargs):
+        settings.stt.mode = ProviderMode.LOCAL
+        await pacer.before_piece(0, 2)
+        sent.append(path)
+        return TranscriptionResult(text="late")
+
+    with (
+        patch("app.pipeline.service.get_provider", return_value=_make_stt_mock("ok")),
+        patch("app.pipeline.service.transcribe_in_pieces", side_effect=switch_then_send),
+    ):
+        with pytest.raises(NotReadyError):
+            await process_audio(
+                sample_wav,
+                audio_duration=service.LONG_DICTATION_SECONDS + 1,
+                source="dictation",
+            )
+
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_pipeline_propagates_stt_failure(
     sample_wav, cloud_mode, _isolate_side_effects
 ):

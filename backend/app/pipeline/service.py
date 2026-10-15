@@ -73,6 +73,10 @@ def _silence_note(audio_path: Path) -> tuple[str, tuple] | None:
     )
 
 
+def _cloud_stays_on() -> bool:
+    return stt_settings.mode == ProviderMode.CLOUD
+
+
 def _holds_no_speech(audio_path: Path) -> bool:
     note = _silence_note(audio_path)
     if note is not None:
@@ -136,7 +140,9 @@ async def process_audio(
     if observer is not None:
         await observer.before_transcribe(stt.model_name, duration)
 
-    pacer: PiecePacer = observer if observer is not None else UnpacedPieces()
+    cloud_dictation = source == "dictation" and route_settings.mode == ProviderMode.CLOUD
+    stays_on = _cloud_stays_on if cloud_dictation else None
+    pacer: PiecePacer = observer if observer is not None else UnpacedPieces(stays_on)
     try:
         if observer is None and not (duration is not None and duration > LONG_DICTATION_SECONDS):
             result = await stt.transcribe(audio_path, language=language, audio_duration=duration)

@@ -1004,7 +1004,7 @@ def test_leftover_dictations_are_listed_as_failed_unless_kept_past_fourteen_days
 async def test_a_kept_dictation_keeps_its_mode_and_language_across_a_restart(
     queue, tmp_path, monkeypatch
 ):
-    queue.keep_failed_dictation(_dictation_audio(tmp_path), language="de", mode=ProviderMode.LOCAL)
+    queue.keep_failed_dictation(_dictation_audio(tmp_path), language="de", mode=ProviderMode.CLOUD)
     restarted = JobQueue(queue._temp_dir, gate=queue.gate, clock=queue.clock)
     restarted.add_leftover_dictations(jobs.leftover_dictations(queue._temp_dir))
     [card] = restarted.views()
@@ -1016,11 +1016,30 @@ async def test_a_kept_dictation_keeps_its_mode_and_language_across_a_restart(
         return ProcessingResult("hello", 5, entry_id="entry-4")
 
     monkeypatch.setattr(jobs, "process_audio", transcribe_again)
-    monkeypatch.setattr(stt_settings, "mode", ProviderMode.LOCAL)
+    monkeypatch.setattr(stt_settings, "mode", ProviderMode.CLOUD)
     restarted.retry(card.id)
     await _settle(restarted, card.id)
 
-    assert sent == [{"language": "de", "source": "dictation", "mode": ProviderMode.LOCAL}]
+    assert sent == [{"language": "de", "source": "dictation", "mode": ProviderMode.CLOUD}]
+
+
+async def test_a_retry_that_fails_again_keeps_its_audio_as_a_card(queue, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        jobs,
+        "process_audio",
+        AsyncMock(side_effect=ResourceUnavailableError("the provider is down")),
+    )
+    _keep_failed_dictation(queue, _dictation_audio(tmp_path))
+    [card] = queue.views()
+
+    queue.retry(card.id)
+    await _settle(queue, card.id)
+
+    assert (_view(queue, card.id).stage, _view(queue, card.id).error) == (
+        "failed",
+        jobs.DICTATION_FAILED_REASON,
+    )
+    assert len(_kept_dictations(queue)) == 1
 
 
 @pytest.mark.parametrize(

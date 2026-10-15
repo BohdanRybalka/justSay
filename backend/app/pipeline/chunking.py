@@ -23,7 +23,7 @@ import numpy as np
 from app.audio.config import audio_settings
 from app.audio.pauses import longest_pause, speech_profile
 from app.core.audio_formats import UndecodableAudioError, decode_to_mono_wav
-from app.core.errors import ResourceUnavailableError
+from app.core.errors import NotReadyError, ResourceUnavailableError
 from app.core.scratch import discard_scratch_file
 from app.pipeline.invented_phrases import outpaces_speech, without_invented_phrases
 from app.stt.base import STTProvider, TranscriptionResult
@@ -60,16 +60,28 @@ class PiecePacer(Protocol):
 
 
 class UnpacedPieces:
-    """A pacer for a caller that shows nothing: a provider's wait is slept, nothing else happens."""
+    """A pacer for a caller that shows nothing: a provider's wait is slept, nothing else happens.
+
+    ``stays_on``, when given, is asked before each piece and after each wait; once it says no, the
+    work stops before anything more is sent to the provider.
+    """
+
+    def __init__(self, stays_on: Callable[[], bool] | None = None) -> None:
+        self._stays_on = stays_on
 
     async def before_piece(self, index: int, total: int) -> None:
-        return None
+        self._check()
 
     async def pause(self, seconds: float) -> None:
         await asyncio.sleep(seconds)
+        self._check()
 
     def piece_done(self, done: int, total: int) -> None:
         return None
+
+    def _check(self) -> None:
+        if self._stays_on is not None and not self._stays_on():
+            raise NotReadyError("The route was switched off while its pieces were being sent")
 
 
 @dataclass(frozen=True)
