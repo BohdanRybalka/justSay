@@ -46,7 +46,7 @@ async def cancel_or_dismiss_job(job_id: str, queue: JobQueue = Depends(get_job_q
 
 @router.post("/{job_id}/retry", response_model=JobCreated)
 async def retry_job(job_id: str, queue: JobQueue = Depends(get_job_queue)):
-    """Queue a failed meeting again; 409 for any other job, which has no audio left to send."""
+    """Queue a failed meeting or dictation again; 409 for any other job, which has no audio left."""
     if not queue.retry(job_id):
         raise HTTPException(status_code=404, detail="No such job")
     return JobCreated(id=job_id)

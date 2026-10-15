@@ -1,16 +1,18 @@
 """Background transcription jobs, kept in memory and run one at a time, oldest first.
 
-A job never touches the clipboard and goes in pieces, each held back while a dictation is being
-processed. Progress counts finished pieces, plus an estimate inside the current one from this
-machine's own speed for the routed model. A file's copy goes when its job ends; a meeting keeps its
-recording until it is saved or removed, so a failed one can be tried again. A dictation that failed
-keeps its audio for two weeks for the same reason. Jobs die with the app.
+A file or meeting job never touches the clipboard and goes in pieces, each held back while a
+dictation is being processed. Progress counts finished pieces, plus an estimate inside the
+current one from this machine's own speed for the routed model. A file's copy goes when its
+job ends; a meeting keeps its recording until it is saved or removed, so a failed one can be
+tried again. A dictation that failed keeps its audio for two weeks for the same reason. Jobs die
+with the app.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sqlite3
 import statistics
 import time
@@ -50,6 +52,9 @@ FINISHED_SHOWN_SECONDS = 60.0
 DICTATION_POLL_SECONDS = 0.05
 JOB_FILE_PREFIX = "job_"
 DICTATION_FILE_PREFIX = "dictation_"
+DICTATION_NAME = re.compile(
+    r"dictation_(?P<job>[0-9a-f]{32})_(?P<mode>cloud|local)_(?P<language>[A-Za-z-]{2,12})\.wav"
+)
 FAILED_DICTATION_KEEP_SECONDS = 14 * 24 * 3600.0
 
 NO_SPEECH_REASON = "We didn't hear any speech in this file"
@@ -207,17 +212,30 @@ def _recorded_name(label: str, recording: Path) -> str:
 
 
 def remove_leftover_files(temp_dir: Path) -> None:
-    """Delete the scratch files of jobs that were running when the app last quit."""
+    """Delete the scratch files of jobs that were running when the app last quit.
+
+    A dictation file that is not a kept recording is the scratch of a retry cut short.
+    """
     for path in temp_dir.glob(f"{JOB_FILE_PREFIX}*"):
         discard_scratch_file(path)
+    for path in temp_dir.glob(f"{DICTATION_FILE_PREFIX}*"):
+        if DICTATION_NAME.fullmatch(path.name) is None:
+            discard_scratch_file(path)
 
 
 def leftover_dictations(temp_dir: Path) -> list[Path]:
     """The kept dictation recordings in ``temp_dir``, oldest first."""
     if not temp_dir.is_dir():
         return []
-    found = [entry for entry in temp_dir.glob(f"{DICTATION_FILE_PREFIX}*.wav") if entry.is_file()]
+    found = [entry for entry in temp_dir.iterdir() if DICTATION_NAME.fullmatch(entry.name)]
     return sorted(found, key=lambda entry: entry.stat().st_mtime)
+
+
+def _dictation_mode(made_in: ProviderMode | None) -> ProviderMode:
+    """Cloud only if the dictation was made in Cloud and Cloud is on now; else this computer."""
+    if made_in == ProviderMode.CLOUD and stt_settings.mode == ProviderMode.CLOUD:
+        return ProviderMode.CLOUD
+    return ProviderMode.LOCAL
 
 
 class JobQueue:
@@ -270,16 +288,15 @@ class JobQueue:
         for recording in recordings:
             self._fail(self._meeting(recording), reason)
 
-    def keep_failed_dictation(
-        self, audio: Path, failure: Exception, *, language: str, mode: ProviderMode | None
-    ) -> None:
+    def keep_failed_dictation(self, audio: Path, *, language: str, mode: ProviderMode) -> None:
         """Keep the audio of a dictation that failed as a card that Try again can send once more.
 
-        The audio moves into the scratch folder under a name only dictations get. Nothing is kept
-        when the audio is not on disk, since there is nothing to send.
+        The name carries the mode and language, so a restart sends it again the same way. Nothing
+        is kept when the audio is not on disk, since there is nothing to send.
         """
         job_id = uuid.uuid4().hex
-        path = self._temp_dir / f"{DICTATION_FILE_PREFIX}{job_id}.wav"
+        language = language if re.fullmatch(r"[A-Za-z-]{2,12}", language) else "auto"
+        path = self._temp_dir / f"{DICTATION_FILE_PREFIX}{job_id}_{mode.value}_{language}.wav"
         try:
             self._temp_dir.mkdir(parents=True, exist_ok=True)
             audio.replace(path)
@@ -295,12 +312,15 @@ class JobQueue:
             mode=mode,
         )
         self._jobs[job_id] = job
-        self._fail(job, self._reason_for(job, failure))
+        self._fail(job, DICTATION_FAILED_REASON)
 
     def add_leftover_dictations(self, recordings: Iterable[Path]) -> None:
         """List dictations a past run kept as failed; delete those kept past the two-week limit."""
         now = time.time()
         for recording in recordings:
+            kept = DICTATION_NAME.fullmatch(recording.name)
+            if kept is None:
+                continue
             age = now - recording.stat().st_mtime
             if age > FAILED_DICTATION_KEEP_SECONDS:
                 discard_scratch_file(recording)
@@ -313,6 +333,8 @@ class JobQueue:
                 stage="failed",
                 error=DICTATION_FAILED_REASON,
                 finished_at=self.clock() - age,
+                mode=ProviderMode(kept["mode"]),
+                language=kept["language"],
             )
             self._jobs[job.id] = job
 
@@ -437,12 +459,15 @@ class JobQueue:
 
     async def _run_dictation(self, job: _Job) -> None:
         job.stage = "transcribing"
+        mode = _dictation_mode(job.mode)
         try:
             result = await process_audio(
-                job.path, language=job.language, source="dictation", mode=job.mode
+                job.path, language=job.language, source="dictation", mode=mode
             )
         except Exception as failure:
-            self._fail_on(job, failure)
+            if not isinstance(failure, JustSayError):
+                log.exception("The dictation job %s crashed", job.id)
+            self._fail(job, DICTATION_FAILED_REASON)
             return
         if result.discarded_reason is not None:
             self._drop_dictation(job)
@@ -453,7 +478,8 @@ class JobQueue:
             job.stage = "done"
             job.finished_at = self.clock()
             discard_scratch_file(job.path)
-            self._spawn_indexer()
+            if mode == ProviderMode.CLOUD:
+                self._spawn_indexer()
 
     async def _run(self, job: _Job) -> None:
         if job.kind == "dictation":

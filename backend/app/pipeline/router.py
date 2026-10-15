@@ -67,7 +67,7 @@ async def dictate(
             )
         return DictateResponse(**result.__dict__)
     except Exception as failure:
-        queue.keep_failed_dictation(audio_path, failure, language=language, mode=mode)
+        queue.keep_failed_dictation(audio_path, language=language, mode=mode)
         if isinstance(failure, JustSayError):
             raise
         log.exception("Pipeline failure")

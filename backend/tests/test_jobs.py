@@ -36,6 +36,7 @@ from app.pipeline.jobs import DictationGate, JobQueue, leftover_dictations, remo
 from app.pipeline.jobs_router import get_job_queue
 from app.pipeline.service import ProcessingResult
 from app.stt.base import TranscriptionResult
+from app.stt.config import stt_settings
 from app.transcripts import history, vector_store
 
 
@@ -833,17 +834,18 @@ def _dictation_audio(tmp_path: Path) -> Path:
     return path
 
 
+FRESH_ID = "0123456789abcdef0123456789abcdef"
+STALE_ID = "fedcba9876543210fedcba9876543210"
+
+
 def _kept_dictations(queue: JobQueue) -> list[Path]:
     return sorted(queue._temp_dir.glob("dictation_*.wav"))
 
 
-def _keep_failed_dictation(queue: JobQueue, audio: Path, failure: Exception | None = None) -> None:
-    queue.keep_failed_dictation(
-        audio,
-        failure or ResourceUnavailableError("the provider is down"),
-        language="uk",
-        mode=ProviderMode.CLOUD,
-    )
+def _keep_failed_dictation(
+    queue: JobQueue, audio: Path, *, language: str = "uk", mode: ProviderMode = ProviderMode.CLOUD
+) -> None:
+    queue.keep_failed_dictation(audio, language=language, mode=mode)
 
 
 def test_a_failed_dictation_keeps_its_audio_as_a_card_until_dismissed(queue, tmp_path):
@@ -863,19 +865,6 @@ def test_a_failed_dictation_keeps_its_audio_as_a_card_until_dismissed(queue, tmp
     assert _kept_dictations(queue) == []
 
 
-@pytest.mark.parametrize(
-    ("failure", "reason"),
-    [
-        (ConfigurationError("no key"), jobs.NO_KEY_REASON),
-        (RuntimeError("boom"), jobs.DICTATION_FAILED_REASON),
-    ],
-)
-def test_a_failed_dictation_says_why_in_plain_words(queue, tmp_path, failure, reason):
-    _keep_failed_dictation(queue, _dictation_audio(tmp_path), failure)
-
-    assert [card.error for card in queue.views()] == [reason]
-
-
 def test_a_failed_dictation_whose_audio_is_gone_makes_no_card(queue, tmp_path):
     _keep_failed_dictation(queue, tmp_path / "gone.wav")
 
@@ -892,12 +881,9 @@ async def test_a_kept_dictation_is_sent_again_in_its_own_mode_and_saved_once(
         return ProcessingResult("hello", 5, model_name="mock/model", entry_id="entry-9")
 
     monkeypatch.setattr(jobs, "process_audio", transcribe_again)
-    queue.keep_failed_dictation(
-        _dictation_audio(tmp_path),
-        ResourceUnavailableError("down"),
-        language="de",
-        mode=ProviderMode.LOCAL,
-    )
+    monkeypatch.setattr(stt_settings, "mode", ProviderMode.LOCAL)
+    audio = _dictation_audio(tmp_path)
+    _keep_failed_dictation(queue, audio, language="de", mode=ProviderMode.LOCAL)
     [card] = queue.views()
 
     assert queue.retry(card.id) is True
@@ -998,11 +984,12 @@ def test_leftover_dictations_are_listed_as_failed_unless_kept_past_fourteen_days
     temp_dir = tmp_path / "leftovers"
     temp_dir.mkdir()
     now = time.time()
-    fresh = temp_dir / "dictation_00000000000a.wav"
-    stale = temp_dir / "dictation_00000000000b.wav"
+    fresh = temp_dir / f"dictation_{FRESH_ID}_local_uk.wav"
+    stale = temp_dir / f"dictation_{STALE_ID}_local_uk.wav"
     other = temp_dir / "rec_00000000000c.wav"
+    chunk_scratch = temp_dir / f"dictation_{FRESH_ID}_local_uk-16k.wav"
     too_old = jobs.FAILED_DICTATION_KEEP_SECONDS + 3600
-    for path, age in ((fresh, 60.0), (stale, too_old), (other, 60.0)):
+    for path, age in ((fresh, 60.0), (stale, too_old), (other, 60.0), (chunk_scratch, 60.0)):
         path.write_bytes(b"RIFF....WAVE....")
         os.utime(path, (now - age, now - age))
 
@@ -1012,6 +999,84 @@ def test_leftover_dictations_are_listed_as_failed_unless_kept_past_fourteen_days
         ("dictation", "failed", jobs.DICTATION_FAILED_REASON)
     ]
     assert fresh.exists() and other.exists() and not stale.exists()
+
+
+async def test_a_kept_dictation_keeps_its_mode_and_language_across_a_restart(
+    queue, tmp_path, monkeypatch
+):
+    queue.keep_failed_dictation(_dictation_audio(tmp_path), language="de", mode=ProviderMode.LOCAL)
+    restarted = JobQueue(queue._temp_dir, gate=queue.gate, clock=queue.clock)
+    restarted.add_leftover_dictations(jobs.leftover_dictations(queue._temp_dir))
+    [card] = restarted.views()
+
+    sent: list[dict] = []
+
+    async def transcribe_again(path, **kwargs):
+        sent.append(kwargs)
+        return ProcessingResult("hello", 5, entry_id="entry-4")
+
+    monkeypatch.setattr(jobs, "process_audio", transcribe_again)
+    monkeypatch.setattr(stt_settings, "mode", ProviderMode.LOCAL)
+    restarted.retry(card.id)
+    await _settle(restarted, card.id)
+
+    assert sent == [{"language": "de", "source": "dictation", "mode": ProviderMode.LOCAL}]
+
+
+@pytest.mark.parametrize(
+    ("made_in", "now", "sent_to"),
+    [
+        (ProviderMode.CLOUD, ProviderMode.CLOUD, ProviderMode.CLOUD),
+        (ProviderMode.CLOUD, ProviderMode.LOCAL, ProviderMode.LOCAL),
+        (ProviderMode.LOCAL, ProviderMode.CLOUD, ProviderMode.LOCAL),
+        (ProviderMode.LOCAL, ProviderMode.LOCAL, ProviderMode.LOCAL),
+    ],
+)
+async def test_a_retry_goes_to_the_cloud_only_when_cloud_was_made_and_is_on(
+    queue, tmp_path, monkeypatch, made_in, now, sent_to
+):
+    indexer = MagicMock()
+    monkeypatch.setattr(JobQueue, "_spawn_indexer", staticmethod(indexer))
+    sent: list[dict] = []
+
+    async def transcribe_again(path, **kwargs):
+        sent.append(kwargs)
+        return ProcessingResult("hello", 5, entry_id="entry-5")
+
+    monkeypatch.setattr(jobs, "process_audio", transcribe_again)
+    monkeypatch.setattr(stt_settings, "mode", now)
+    _keep_failed_dictation(queue, _dictation_audio(tmp_path), mode=made_in)
+    [card] = queue.views()
+
+    queue.retry(card.id)
+    await _settle(queue, card.id)
+
+    assert sent[0]["mode"] is sent_to
+    assert indexer.called is (sent_to is ProviderMode.CLOUD)
+
+
+def test_a_kept_dictation_name_carries_a_safe_language(queue, tmp_path):
+    _keep_failed_dictation(queue, _dictation_audio(tmp_path), language="../escape")
+
+    [kept] = _kept_dictations(queue)
+    assert kept.name.endswith("_cloud_auto.wav")
+
+
+def test_a_restart_clears_what_a_retry_cut_short_left_behind(queue, tmp_path):
+    temp_dir = queue._temp_dir
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    kept = temp_dir / f"dictation_{FRESH_ID}_cloud_uk.wav"
+    left_over = [
+        temp_dir / f"dictation_{FRESH_ID}_cloud_uk-16k.wav",
+        temp_dir / f"dictation_{FRESH_ID}_cloud_uk-piece0.flac",
+    ]
+    for path in [kept, *left_over]:
+        path.write_bytes(b"RIFF....WAVE....")
+
+    jobs.remove_leftover_files(temp_dir)
+
+    assert kept.exists()
+    assert not any(path.exists() for path in left_over)
 
 
 async def test_retry_answers_404_for_an_unknown_job_and_409_for_a_file(client, queue, fakes):

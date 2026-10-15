@@ -1,6 +1,6 @@
 """Cloud STT provider — Groq Whisper (whisper-large-v3-turbo).
 
-Cloud mode's only transcription engine: dictation whole, files and meetings in pieces.
+Cloud mode's only transcription engine: a dictation up to ten minutes whole, the rest in pieces.
 """
 
 import asyncio

@@ -103,6 +103,8 @@ export function createJobCards(
     card.querySelector(".entry-job-status")!.textContent = jobStatusText(job);
     card.querySelector<HTMLElement>('[data-action="retry"]')!.hidden =
       job.kind === "file" || job.stage !== "failed";
+    card.querySelector<HTMLElement>('[data-action="remove"]')!.hidden =
+      job.kind === "dictation" && job.stage === "transcribing";
     card.querySelector('[data-action="remove"]')!.setAttribute("aria-label", removeLabel(job));
     const bar = card.querySelector<HTMLElement>(".entry-progress i")!;
     if (job.progress !== null) {

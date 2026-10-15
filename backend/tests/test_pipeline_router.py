@@ -274,8 +274,7 @@ async def test_a_failed_dictation_keeps_its_audio_as_a_card_for_try_again(
 ):
     """A dictation that fails is still answered as before, and its audio waits in History.
 
-    Before this, the audio was deleted in the endpoint's ``finally``, so nothing could be sent
-    again. The widget's error answer is unchanged.
+    The widget's error answer is unchanged; the audio is moved out before the ``finally`` runs.
     """
     recording = tmp_path / "rec.wav"
     recording.write_bytes(_wav_bytes())

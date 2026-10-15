@@ -260,6 +260,14 @@ describe("createJobCards", () => {
     expect(card.querySelector(".entry-dot")!.innerHTML).toBe(micIcon.innerHTML);
   });
 
+  it("offers no × on a dictation being turned into text, which cannot be cancelled", async () => {
+    apiMock.jobs.mockResolvedValue([job({ kind: "dictation", name: "Dictation · 8 Oct 14:32", stage: "transcribing", progress: null })]);
+    const cards = createJobCards(show, entrySaved, entryShown);
+    await cards.refresh();
+
+    expect(shown[0].querySelector<HTMLButtonElement>('[data-action="remove"]')!.hidden).toBe(true);
+  });
+
   it("empties the bar of a meeting queued again after it failed part way", async () => {
     apiMock.jobs.mockResolvedValue([job({ kind: "meeting", progress: 0.5 })]);
     const cards = createJobCards(show, entrySaved, entryShown);
