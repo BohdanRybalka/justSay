@@ -12,7 +12,7 @@ from fastapi import BackgroundTasks
 
 from app.config import settings
 from app.core.types import ProviderMode
-from app.pipeline import service
+from app.pipeline import chunking, service
 from app.pipeline.service import process_audio
 from app.stt.base import TranscriptionResult
 from app.transcripts import history
@@ -252,6 +252,44 @@ async def test_pipeline_asks_routing_for_the_mode_in_force(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("duration", "goes_in_pieces"),
+    [
+        (60.0, False),
+        (service.LONG_DICTATION_SECONDS + 1, True),
+    ],
+)
+async def test_a_dictation_goes_in_pieces_only_when_it_is_long(
+    sample_wav, cloud_mode, _isolate_side_effects, duration, goes_in_pieces
+):
+    """A short dictation keeps the one-request path; a long one is cut as files are, unpaced."""
+    stt = _make_stt_mock("ok")
+    pieces = AsyncMock(return_value=TranscriptionResult(text="ok"))
+
+    with (
+        patch("app.pipeline.service.get_provider", return_value=stt),
+        patch("app.pipeline.service.transcribe_in_pieces", pieces),
+    ):
+        await process_audio(sample_wav, audio_duration=duration, source="dictation")
+
+    assert pieces.await_count == (1 if goes_in_pieces else 0)
+    assert stt.transcribe.await_count == (0 if goes_in_pieces else 1)
+    if goes_in_pieces:
+        assert isinstance(pieces.call_args.kwargs["pacer"], chunking.UnpacedPieces)
+
+
+async def test_the_result_names_the_history_entry_it_saved(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    saved = MagicMock(id="entry-7")
+    _isolate_side_effects.return_value = saved
+
+    with patch("app.pipeline.service.get_provider", return_value=_make_stt_mock("ok")):
+        result = await process_audio(sample_wav, source="dictation")
+
+    assert result.entry_id == "entry-7"
+
+
 async def test_pipeline_propagates_stt_failure(
     sample_wav, cloud_mode, _isolate_side_effects
 ):

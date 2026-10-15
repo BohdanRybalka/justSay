@@ -121,7 +121,7 @@ async def lifespan(app: FastAPI):
     )
     if meeting_recorder is not None:
         app.state.meeting_recorder = meeting_recorder
-    from app.pipeline.jobs import JobQueue, remove_leftover_files
+    from app.pipeline.jobs import JobQueue, leftover_dictations, remove_leftover_files
     _run_optional_step(
         "startup",
         "removing files of jobs cut short by the last quit",
@@ -132,6 +132,13 @@ async def lifespan(app: FastAPI):
         "startup",
         "listing meetings the last run did not turn into text",
         lambda: app.state.jobs.add_leftover_meetings(leftover_recordings(settings.audio.temp_dir)),
+    )
+    _run_optional_step(
+        "startup",
+        "listing dictations the last run did not turn into text",
+        lambda: app.state.jobs.add_leftover_dictations(
+            leftover_dictations(settings.audio.temp_dir)
+        ),
     )
     from app.audio.meeting_recovery import interrupted_meetings, rebuild_interrupted_meetings
     interrupted = _run_optional_step(

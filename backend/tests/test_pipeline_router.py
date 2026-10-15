@@ -24,7 +24,8 @@ from app.audio.session import SessionMismatchError
 from app.core.errors import ConfigurationError, NotReadyError, ResourceUnavailableError
 from app.main import app
 from app.pipeline import router as pipeline_router
-from app.pipeline.jobs import dictation_gate
+from app.pipeline.jobs import JobQueue, dictation_gate
+from app.pipeline.jobs_router import get_job_queue
 from app.pipeline.router import DictateResponse
 from app.pipeline.service import ProcessingResult
 
@@ -45,7 +46,14 @@ def _fake_result() -> SimpleNamespace:
 
 
 @pytest.fixture
-async def client(tmp_path, monkeypatch):
+def jobs_queue(tmp_path) -> JobQueue:
+    queue = JobQueue(tmp_path / "scratch")
+    app.dependency_overrides[get_job_queue] = lambda: queue
+    return queue
+
+
+@pytest.fixture
+async def client(tmp_path, monkeypatch, jobs_queue):
     home = tmp_path / "home"
     home.mkdir()
     from pathlib import Path
@@ -258,6 +266,32 @@ async def test_dictate_lets_a_refusal_answer_with_its_own_status(
 
     assert resp.status_code == expected_status
     assert resp.json() == {"detail": "the provider said no", "code": expected_code}
+
+
+@pytest.mark.anyio
+async def test_a_failed_dictation_keeps_its_audio_as_a_card_for_try_again(
+    client, tmp_path, jobs_queue
+):
+    """A dictation that fails is still answered as before, and its audio waits in History.
+
+    Before this, the audio was deleted in the endpoint's ``finally``, so nothing could be sent
+    again. The widget's error answer is unchanged.
+    """
+    recording = tmp_path / "rec.wav"
+    recording.write_bytes(_wav_bytes())
+    app.dependency_overrides[get_recorder] = lambda: _stopping_recorder(recording)
+
+    with patch(
+        "app.pipeline.router.process_audio",
+        AsyncMock(side_effect=ResourceUnavailableError("the provider is down")),
+    ):
+        resp = await client.post("/pipeline/dictate")
+
+    assert resp.status_code == 503
+    [card] = jobs_queue.views()
+    assert (card.kind, card.stage) == ("dictation", "failed")
+    assert not recording.exists()
+    assert len(list((tmp_path / "scratch").glob("dictation_*.wav"))) == 1
 
 
 def test_the_dictate_response_carries_every_processing_result_field() -> None:

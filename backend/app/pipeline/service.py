@@ -17,7 +17,7 @@ from app.audio.analysis import analyze_silence
 from app.audio.config import audio_settings
 from app.audio.vad import analyze_vad
 from app.core.types import ProviderMode
-from app.pipeline.chunking import PiecePacer, transcribe_in_pieces
+from app.pipeline.chunking import PiecePacer, UnpacedPieces, transcribe_in_pieces
 from app.pipeline.cleanup import clean_dictation
 from app.pipeline.meeting_text import has_two_tracks, spoken_word_count, transcribe_meeting
 from app.pipeline.utils import detect_duration
@@ -26,6 +26,8 @@ from app.stt.routing import get_provider, is_local_provider
 from app.transcripts.history import EntrySource, save_entry
 
 log = logging.getLogger(__name__)
+
+LONG_DICTATION_SECONDS = 600.0
 
 
 @dataclass
@@ -36,6 +38,7 @@ class ProcessingResult:
     duration_ms: int
     model_name: str = ""
     discarded_reason: str | None = None
+    entry_id: str | None = None
 
 
 class PipelineObserver(PiecePacer, Protocol):
@@ -91,8 +94,8 @@ async def process_audio(
     """Full pipeline on ``mode``'s provider, else the user's mode: transcribe, clean up, save.
 
     ``background_tasks`` schedules embedding generation after the response is sent. ``source``
-    and ``source_name`` say where the history entry came from; with an ``observer`` the audio
-    goes in pieces it paces.
+    and ``source_name`` say where the history entry came from. Audio with an ``observer``, or
+    longer than ``LONG_DICTATION_SECONDS``, goes in pieces.
     """
     start = time.perf_counter()
 
@@ -133,8 +136,9 @@ async def process_audio(
     if observer is not None:
         await observer.before_transcribe(stt.model_name, duration)
 
+    pacer: PiecePacer = observer if observer is not None else UnpacedPieces()
     try:
-        if observer is None:
+        if observer is None and not (duration is not None and duration > LONG_DICTATION_SECONDS):
             result = await stt.transcribe(audio_path, language=language, audio_duration=duration)
         elif two_tracks:
             result = await transcribe_meeting(
@@ -143,7 +147,7 @@ async def process_audio(
                 language=language,
                 no_speech_threshold=stt_settings.no_speech_prob_threshold,
                 holds_no_speech=_holds_no_speech,
-                pacer=observer,
+                pacer=pacer,
             )
         else:
             result = await transcribe_in_pieces(
@@ -153,7 +157,7 @@ async def process_audio(
                 duration=duration,
                 no_speech_threshold=stt_settings.no_speech_prob_threshold,
                 holds_no_speech=_holds_no_speech,
-                pacer=observer,
+                pacer=pacer,
             )
     except Exception:
         log.exception("STT transcribe failed (%s)", stt.model_name)
@@ -199,6 +203,7 @@ async def process_audio(
     if observer is not None:
         observer.before_save()
 
+    entry_id: str | None = None
     try:
         entry = save_entry(
             text=text,
@@ -212,6 +217,7 @@ async def process_audio(
             source=source,
             source_name=source_name,
         )
+        entry_id = entry.id
         if observer is not None:
             observer.saved(entry.id)
         if background_tasks is not None and text:
@@ -226,4 +232,5 @@ async def process_audio(
         text=text,
         duration_ms=duration_ms,
         model_name=stt.model_name,
+        entry_id=entry_id,
     )

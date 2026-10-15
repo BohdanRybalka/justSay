@@ -4,13 +4,17 @@ import { escapeHtml } from "./html";
 
 export const JOBS_POLL_MS = 1000;
 
-const KIND_ICONS: Record<TranscriptionJob["kind"], IconName> = { file: "file", meeting: "users" };
+const KIND_ICONS: Record<TranscriptionJob["kind"], IconName> = {
+  file: "file",
+  meeting: "users",
+  dictation: "mic",
+};
 
 const RUNNING: ReadonlySet<TranscriptionJob["stage"]> = new Set(["queued", "transcribing", "saving"]);
 
-/** What the card's × says it does: a meeting's recording goes with its card, a file's copy is already gone. */
+/** What the card's × says it does: a meeting's or dictation's recording goes with its card, a file's copy is already gone. */
 export function removeLabel(job: TranscriptionJob): string {
-  if (job.kind === "meeting") return "Delete this recording";
+  if (job.kind !== "file") return "Delete this recording";
   return job.stage === "failed" ? "Dismiss" : "Cancel";
 }
 
@@ -36,8 +40,9 @@ export interface JobCards {
 }
 
 /**
- * The cards of files and meetings being transcribed. `show` receives them newest first whenever
- * the set changes. A failed meeting offers Try again. A finished job's card stays, asking `entrySaved` to paint its row, until
+ * The cards of files, meetings and dictations being transcribed. `show` receives them newest first
+ * whenever the set changes. A failed meeting or dictation offers Try again. A finished job's card
+ * stays, asking `entrySaved` to paint its row, until
  * `entryShown` says the row is painted, so the card turns into the entry where it stood. A job this
  * page removed is never painted again; a failed read is tried again a second later.
  */
@@ -97,7 +102,7 @@ export function createJobCards(
     card.classList.toggle("entry--job-failed", job.stage === "failed");
     card.querySelector(".entry-job-status")!.textContent = jobStatusText(job);
     card.querySelector<HTMLElement>('[data-action="retry"]')!.hidden =
-      job.kind !== "meeting" || job.stage !== "failed";
+      job.kind === "file" || job.stage !== "failed";
     card.querySelector('[data-action="remove"]')!.setAttribute("aria-label", removeLabel(job));
     const bar = card.querySelector<HTMLElement>(".entry-progress i")!;
     if (job.progress !== null) {

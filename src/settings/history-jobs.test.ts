@@ -246,6 +246,20 @@ describe("createJobCards", () => {
     expect(shown[0].querySelector<HTMLButtonElement>('[data-action="retry"]')!.hidden).toBe(true);
   });
 
+  it("offers a failed dictation Try again under a mic, and says Delete for the audio it keeps", async () => {
+    const failed = job({ kind: "dictation", name: "Dictation · 8 Oct 14:32", stage: "failed", progress: null, error: "Couldn't turn this dictation into text. Try again" });
+    apiMock.jobs.mockResolvedValue([failed]);
+    const cards = createJobCards(show, entrySaved, entryShown);
+    await cards.refresh();
+
+    const card = shown[0];
+    expect(card.querySelector<HTMLButtonElement>('[data-action="retry"]')!.hidden).toBe(false);
+    expect(card.querySelector('[data-action="remove"]')!.getAttribute("aria-label")).toBe("Delete this recording");
+    const micIcon = document.createElement("span");
+    micIcon.innerHTML = icon("mic", "small");
+    expect(card.querySelector(".entry-dot")!.innerHTML).toBe(micIcon.innerHTML);
+  });
+
   it("empties the bar of a meeting queued again after it failed part way", async () => {
     apiMock.jobs.mockResolvedValue([job({ kind: "meeting", progress: 0.5 })]);
     const cards = createJobCards(show, entrySaved, entryShown);

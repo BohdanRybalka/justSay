@@ -491,6 +491,16 @@ def _clear_dependency_overrides():
     app.dependency_overrides.clear()
 
 
+@pytest.fixture(autouse=True)
+def _job_queue_for_dictation(tmp_path):
+    """A test client never runs the lifespan, so ``app.state.jobs`` is absent; a failed
+    dictation keeps its audio in a queue, which this gives each test its own of."""
+    from app.pipeline.jobs import JobQueue
+    from app.pipeline.jobs_router import get_job_queue
+
+    app.dependency_overrides[get_job_queue] = lambda: JobQueue(tmp_path / "jobs")
+
+
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _IMPORT_PROBE_VIOLATION = 17
 _IMPORT_PROBE_TIMEOUT_SECONDS = 60

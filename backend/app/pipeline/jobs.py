@@ -3,7 +3,8 @@
 A job never touches the clipboard and goes in pieces, each held back while a dictation is being
 processed. Progress counts finished pieces, plus an estimate inside the current one from this
 machine's own speed for the routed model. A file's copy goes when its job ends; a meeting keeps its
-recording until it is saved or removed, so a failed one can be tried again. Jobs die with the app.
+recording until it is saved or removed, so a failed one can be tried again. A dictation that failed
+keeps its audio for two weeks for the same reason. Jobs die with the app.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from app.transcripts import history
 log = logging.getLogger(__name__)
 
 JobStage = Literal["queued", "transcribing", "saving", "done", "failed", "cancelled"]
-JobKind = Literal["file", "meeting"]
+JobKind = Literal["file", "meeting", "dictation"]
 RemovalOutcome = Literal["cancelled", "dismissed"]
 
 ESTIMATE_CAP = 0.95
@@ -48,10 +49,13 @@ SPEED_SAMPLE_ROWS = 50
 FINISHED_SHOWN_SECONDS = 60.0
 DICTATION_POLL_SECONDS = 0.05
 JOB_FILE_PREFIX = "job_"
+DICTATION_FILE_PREFIX = "dictation_"
+FAILED_DICTATION_KEEP_SECONDS = 14 * 24 * 3600.0
 
 NO_SPEECH_REASON = "We didn't hear any speech in this file"
 NO_KEY_REASON = "Add an API key in Settings"
 FAILED_REASON = "Couldn't turn this file into text. Try again"
+DICTATION_FAILED_REASON = "Couldn't turn this dictation into text. Try again"
 MEETING_NO_SPEECH_REASON = "We didn't hear any speech in this meeting"
 MEETING_FAILED_REASON = "Couldn't turn this meeting into text"
 MEETING_INTERRUPTED_REASON = "JustSay closed before this meeting was turned into text"
@@ -118,6 +122,7 @@ class _Job:
     finished_at: float | None = None
     task: asyncio.Task | None = None
     mode: ProviderMode | None = None
+    language: str = "uk"
 
 
 class _JobCancelledError(Exception):
@@ -196,9 +201,9 @@ def _log_refusal(job: _Job, refusal: JustSayError) -> None:
     )
 
 
-def _meeting_name(recording: Path) -> str:
+def _recorded_name(label: str, recording: Path) -> str:
     written = datetime.fromtimestamp(recording.stat().st_mtime)
-    return f"Meeting · {written.day} {written:%b %H:%M}"
+    return f"{label} · {written.day} {written:%b %H:%M}"
 
 
 def remove_leftover_files(temp_dir: Path) -> None:
@@ -207,10 +212,19 @@ def remove_leftover_files(temp_dir: Path) -> None:
         discard_scratch_file(path)
 
 
+def leftover_dictations(temp_dir: Path) -> list[Path]:
+    """The kept dictation recordings in ``temp_dir``, oldest first."""
+    if not temp_dir.is_dir():
+        return []
+    found = [entry for entry in temp_dir.glob(f"{DICTATION_FILE_PREFIX}*.wav") if entry.is_file()]
+    return sorted(found, key=lambda entry: entry.stat().st_mtime)
+
+
 class JobQueue:
     """Jobs by id; a failed one stays until dismissed, a done or cancelled one a minute.
 
     A meeting and a file each run on their own engine and language, read when their turn comes.
+    A failed dictation stays for ``FAILED_DICTATION_KEEP_SECONDS`` and then its audio goes.
     """
 
     def __init__(
@@ -256,16 +270,62 @@ class JobQueue:
         for recording in recordings:
             self._fail(self._meeting(recording), reason)
 
-    def retry(self, job_id: str) -> bool:
-        """Queue a failed meeting again; ``False`` for an unknown id.
+    def keep_failed_dictation(
+        self, audio: Path, failure: Exception, *, language: str, mode: ProviderMode | None
+    ) -> None:
+        """Keep the audio of a dictation that failed as a card that Try again can send once more.
 
-        ``NotReadyError`` for any other job, since only a failed meeting still has its audio.
+        The audio moves into the scratch folder under a name only dictations get. Nothing is kept
+        when the audio is not on disk, since there is nothing to send.
+        """
+        job_id = uuid.uuid4().hex
+        path = self._temp_dir / f"{DICTATION_FILE_PREFIX}{job_id}.wav"
+        try:
+            self._temp_dir.mkdir(parents=True, exist_ok=True)
+            audio.replace(path)
+        except OSError:
+            log.warning("Keeping the audio of a failed dictation failed", exc_info=True)
+            return
+        job = _Job(
+            id=job_id,
+            kind="dictation",
+            name=_recorded_name("Dictation", path),
+            path=path,
+            language=language,
+            mode=mode,
+        )
+        self._jobs[job_id] = job
+        self._fail(job, self._reason_for(job, failure))
+
+    def add_leftover_dictations(self, recordings: Iterable[Path]) -> None:
+        """List dictations a past run kept as failed; delete those kept past the two-week limit."""
+        now = time.time()
+        for recording in recordings:
+            age = now - recording.stat().st_mtime
+            if age > FAILED_DICTATION_KEEP_SECONDS:
+                discard_scratch_file(recording)
+                continue
+            job = _Job(
+                id=uuid.uuid4().hex,
+                kind="dictation",
+                name=_recorded_name("Dictation", recording),
+                path=recording,
+                stage="failed",
+                error=DICTATION_FAILED_REASON,
+                finished_at=self.clock() - age,
+            )
+            self._jobs[job.id] = job
+
+    def retry(self, job_id: str) -> bool:
+        """Queue a failed meeting or dictation again; ``False`` for an unknown id.
+
+        ``NotReadyError`` for any other job, since only those still hold their audio.
         """
         job = self._jobs.get(job_id)
         if job is None:
             return False
-        if job.kind != "meeting" or job.stage != "failed":
-            raise NotReadyError("Only a meeting that failed can be tried again")
+        if job.kind == "file" or job.stage != "failed":
+            raise NotReadyError("Only a meeting or a dictation that failed can be tried again")
         job.stage = "queued"
         job.error = None
         job.finished_at = None
@@ -286,7 +346,10 @@ class JobQueue:
 
     def _meeting(self, recording: Path) -> _Job:
         job = _Job(
-            id=uuid.uuid4().hex, kind="meeting", name=_meeting_name(recording), path=recording
+            id=uuid.uuid4().hex,
+            kind="meeting",
+            name=_recorded_name("Meeting", recording),
+            path=recording,
         )
         self._jobs[job.id] = job
         return job
@@ -302,7 +365,22 @@ class JobQueue:
             if job.stage in _EXPIRING and finished_at is not None:
                 if now - finished_at > FINISHED_SHOWN_SECONDS:
                     del self._jobs[job.id]
+            elif self._kept_too_long(job, now):
+                self._drop_dictation(job)
         return [self._view(job, now) for job in reversed(self._jobs.values())]
+
+    @staticmethod
+    def _kept_too_long(job: _Job, now: float) -> bool:
+        return (
+            job.kind == "dictation"
+            and job.stage == "failed"
+            and job.finished_at is not None
+            and now - job.finished_at > FAILED_DICTATION_KEEP_SECONDS
+        )
+
+    def _drop_dictation(self, job: _Job) -> None:
+        self._jobs.pop(job.id, None)
+        discard_scratch_file(job.path)
 
     def cancel_or_dismiss(self, job_id: str) -> RemovalOutcome | None:
         """Cancel a queued or transcribing job, forget a finished one; ``None`` for an unknown id.
@@ -314,6 +392,8 @@ class JobQueue:
         job = self._jobs.get(job_id)
         if job is None:
             return None
+        if job.kind == "dictation" and job.stage == "transcribing":
+            raise NotReadyError("This dictation is already being turned into text")
         if job.stage == "saving":
             raise NotReadyError(f"This {job.kind} is already being saved to History")
         if job.stage in _CANCELLABLE:
@@ -325,7 +405,7 @@ class JobQueue:
             job.finished_at = self.clock()
             return "cancelled"
         del self._jobs[job_id]
-        if job.kind == "meeting":
+        if job.kind != "file":
             discard_scratch_file(job.path)
         return "dismissed"
 
@@ -355,7 +435,30 @@ class JobQueue:
             return None
         return min(ESTIMATE_CAP, (job.pieces_done + within) / job.pieces_total)
 
+    async def _run_dictation(self, job: _Job) -> None:
+        job.stage = "transcribing"
+        try:
+            result = await process_audio(
+                job.path, language=job.language, source="dictation", mode=job.mode
+            )
+        except Exception as failure:
+            self._fail_on(job, failure)
+            return
+        if result.discarded_reason is not None:
+            self._drop_dictation(job)
+        elif result.entry_id is None:
+            self._fail(job, DICTATION_FAILED_REASON)
+        else:
+            job.entry_id = result.entry_id
+            job.stage = "done"
+            job.finished_at = self.clock()
+            discard_scratch_file(job.path)
+            self._spawn_indexer()
+
     async def _run(self, job: _Job) -> None:
+        if job.kind == "dictation":
+            await self._run_dictation(job)
+            return
         meeting = job.kind == "meeting"
         try:
             async with self._turn:
@@ -378,33 +481,46 @@ class JobQueue:
             else:
                 job.stage = "done"
                 job.finished_at = self.clock()
-                from app.transcripts import vector_store
-
-                tasks.spawn_background_task(
-                    vector_store.run_background_indexer(), name="vector-store-indexer"
-                )
+                self._spawn_indexer()
         except _JobCancelledError:
             log.info("The %s job %s was cancelled; its answer was not saved", job.kind, job.id)
-        except ConfigurationError:
-            self._fail(job, NO_KEY_REASON)
-        except ResourceUnavailableError as refusal:
-            _log_refusal(job, refusal)
-            reason = _reason_for_unavailable(refusal)
-            self._fail(job, self._failed_reason(job) if reason == FAILED_REASON else reason)
-        except JustSayError as refusal:
-            _log_refusal(job, refusal)
-            self._fail(job, self._failed_reason(job))
-        except Exception:
-            log.exception("The %s job %s crashed", job.kind, job.id)
-            self._fail(job, self._failed_reason(job))
+        except Exception as failure:
+            self._fail_on(job, failure)
         finally:
             if not meeting or job.stage in _EXPIRING:
                 discard_scratch_file(job.path)
 
     @staticmethod
+    def _spawn_indexer() -> None:
+        from app.transcripts import vector_store
+
+        tasks.spawn_background_task(
+            vector_store.run_background_indexer(), name="vector-store-indexer"
+        )
+
+    def _fail_on(self, job: _Job, failure: Exception) -> None:
+        """Fail ``job`` with the reason its ``failure`` names; call it from the ``except`` block."""
+        if not isinstance(failure, JustSayError):
+            log.exception("The %s job %s crashed", job.kind, job.id)
+        self._fail(job, self._reason_for(job, failure))
+
+    def _reason_for(self, job: _Job, failure: Exception) -> str:
+        if isinstance(failure, ConfigurationError):
+            return NO_KEY_REASON
+        if isinstance(failure, JustSayError):
+            _log_refusal(job, failure)
+        if isinstance(failure, ResourceUnavailableError):
+            reason = _reason_for_unavailable(failure)
+            if reason != FAILED_REASON:
+                return reason
+        return self._failed_reason(job)
+
+    @staticmethod
     def _failed_reason(job: _Job) -> str:
         if job.kind == "file":
             return FAILED_REASON
+        if job.kind == "dictation":
+            return DICTATION_FAILED_REASON
         if job.mode == ProviderMode.LOCAL:
             return MEETING_FAILED_HERE_REASON
         return MEETING_FAILED_REASON

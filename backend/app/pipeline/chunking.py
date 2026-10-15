@@ -59,6 +59,19 @@ class PiecePacer(Protocol):
     def piece_done(self, done: int, total: int) -> None: ...
 
 
+class UnpacedPieces:
+    """A pacer for a caller that shows nothing: a provider's wait is slept, nothing else happens."""
+
+    async def before_piece(self, index: int, total: int) -> None:
+        return None
+
+    async def pause(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
+    def piece_done(self, done: int, total: int) -> None:
+        return None
+
+
 @dataclass(frozen=True)
 class PieceSpeech:
     kept_seconds: float

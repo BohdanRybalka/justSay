@@ -10,8 +10,10 @@ from app.audio.recorder import MicrophoneRecorder
 from app.audio.session import SessionRef
 from app.core.errors import JustSayError
 from app.core.scratch import discard_scratch_file
-from app.pipeline.jobs import dictation_gate
+from app.pipeline.jobs import JobQueue, dictation_gate
+from app.pipeline.jobs_router import get_job_queue
 from app.pipeline.service import process_audio
+from app.stt.config import stt_settings
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -27,6 +29,7 @@ class DictateResponse(BaseModel):
     duration_ms: int
     model_name: str = ""
     discarded_reason: str | None = None
+    entry_id: str | None = None
 
 
 @router.post("/dictate", response_model=DictateResponse)
@@ -35,6 +38,7 @@ async def dictate(
     ref: SessionRef | None = None,
     language: str = "uk",
     recorder: MicrophoneRecorder = Depends(get_recorder),
+    queue: JobQueue = Depends(get_job_queue),
 ):
     """One-shot: stop recording -> transcribe -> the text, saved to history.
 
@@ -51,6 +55,7 @@ async def dictate(
         audio_path.name, captured_duration, language,
     )
 
+    mode = stt_settings.mode
     try:
         with dictation_gate.dictating():
             result = await process_audio(
@@ -61,9 +66,10 @@ async def dictate(
                 source="dictation",
             )
         return DictateResponse(**result.__dict__)
-    except JustSayError:
-        raise
-    except Exception:
+    except Exception as failure:
+        queue.keep_failed_dictation(audio_path, failure, language=language, mode=mode)
+        if isinstance(failure, JustSayError):
+            raise
         log.exception("Pipeline failure")
         raise HTTPException(
             status_code=500,
