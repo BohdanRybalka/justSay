@@ -36,6 +36,7 @@ from app.core.errors import (
 )
 from app.core.scratch import discard_scratch_file
 from app.core.types import ProviderMode
+from app.pipeline.chunking import RouteStoppedError
 from app.pipeline.service import process_audio
 from app.stt.config import stt_settings
 from app.transcripts import history
@@ -471,10 +472,10 @@ class JobQueue:
                 job.path, language=job.language, source="dictation", mode=mode
             )
         except Exception as failure:
-            if isinstance(failure, JustSayError):
-                _log_refusal(job, failure)
-            else:
+            if not isinstance(failure, JustSayError):
                 log.exception("The dictation job %s crashed", job.id)
+            elif not isinstance(failure, RouteStoppedError):
+                _log_refusal(job, failure)
             self._fail(job, DICTATION_FAILED_REASON)
             return
         if result.discarded_reason is not None:

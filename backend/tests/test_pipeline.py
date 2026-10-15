@@ -1427,3 +1427,25 @@ async def test_a_one_channel_meeting_file_is_transcribed_as_before(
 
     assert result.text == "старий запис наради"
     assert _isolate_side_effects.call_args.kwargs["word_count"] == 3
+
+
+@pytest.mark.parametrize(
+    ("mode", "one_attempt"), [(ProviderMode.CLOUD, True), (ProviderMode.LOCAL, False)]
+)
+async def test_a_dictation_sends_each_piece_as_one_attempt_only_on_cloud(
+    sample_wav, _isolate_side_effects, mode, one_attempt
+):
+    from app.stt.base import SINGLE_ATTEMPT
+
+    seen: list[bool] = []
+
+    async def record(path, **kwargs):
+        seen.append(SINGLE_ATTEMPT.get())
+        return TranscriptionResult(text="ok")
+
+    stt = _make_stt_mock("ok")
+    stt.transcribe = AsyncMock(side_effect=record)
+    with patch("app.pipeline.service.get_provider", return_value=stt):
+        await process_audio(sample_wav, source="dictation", mode=mode)
+
+    assert seen == [one_attempt]

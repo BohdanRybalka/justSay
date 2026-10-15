@@ -10,6 +10,7 @@ from pathlib import Path
 from app.core.constants import GROQ_TIMEOUT_SECONDS, RATE_LIMIT_RETRY_SECONDS
 from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.stt.base import (
+    SINGLE_ATTEMPT,
     WHISPER_WINDOW_SECONDS,
     STTProvider,
     TranscriptionResult,
@@ -106,7 +107,10 @@ class GroqWhisperSTTProvider(STTProvider):
 
         Returns ``(text, detected_language_raw, no_speech_prob)``; only
         ``language == "auto"`` escalates ``response_format`` to ``"verbose_json"``.
+        Under ``SINGLE_ATTEMPT`` the SDK makes one request, so each send is one the caller checked.
         """
+        if SINGLE_ATTEMPT.get():
+            client = client.with_options(max_retries=0)
         response_format = "verbose_json" if language == "auto" else "text"
         try:
             with audio_path.open("rb") as fh:

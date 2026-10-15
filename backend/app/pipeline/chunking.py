@@ -82,7 +82,7 @@ class UnpacedPieces:
 
     async def before_send(self) -> None:
         if self._stays_on is not None and not self._stays_on():
-            raise RouteStoppedError("The route was switched off while its pieces were being sent")
+            raise RouteStoppedError("Cloud was switched off before the rest of this was sent")
 
     async def pause(self, seconds: float) -> None:
         await asyncio.sleep(seconds)

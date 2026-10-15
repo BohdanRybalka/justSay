@@ -435,3 +435,28 @@ async def test_groq_log_names_the_characters_the_budget_cut(tmp_path, caplog):
     assert "481chars -10cut" in full_log
     assert _OVER_BUDGET_GLOSSARY not in full_log
     assert _UNDER_BUDGET_GLOSSARY not in full_log
+
+
+def test_a_checked_send_makes_one_sdk_attempt(tmp_path):
+    from app.stt.base import SINGLE_ATTEMPT
+
+    client = MagicMock()
+    token = SINGLE_ATTEMPT.set(True)
+    try:
+        GroqWhisperSTTProvider._call_groq(
+            client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None
+        )
+    finally:
+        SINGLE_ATTEMPT.reset(token)
+
+    client.with_options.assert_called_once_with(max_retries=0)
+    client.with_options.return_value.audio.transcriptions.create.assert_called_once()
+
+
+def test_an_unchecked_send_keeps_the_sdk_retries(tmp_path):
+    client = MagicMock()
+
+    GroqWhisperSTTProvider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None)
+
+    client.with_options.assert_not_called()
+    client.audio.transcriptions.create.assert_called_once()

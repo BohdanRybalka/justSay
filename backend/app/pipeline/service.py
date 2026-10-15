@@ -26,6 +26,7 @@ from app.pipeline.chunking import (
 from app.pipeline.cleanup import clean_dictation
 from app.pipeline.meeting_text import has_two_tracks, spoken_word_count, transcribe_meeting
 from app.pipeline.utils import detect_duration
+from app.stt.base import SINGLE_ATTEMPT
 from app.stt.config import stt_settings
 from app.stt.routing import get_provider, is_local_provider
 from app.transcripts.history import EntrySource, save_entry
@@ -148,6 +149,7 @@ async def process_audio(
     cloud_dictation = source == "dictation" and route_settings.mode == ProviderMode.CLOUD
     stays_on = _cloud_stays_on if cloud_dictation else None
     pacer: PiecePacer = observer if observer is not None else UnpacedPieces(stays_on)
+    attempt_token = SINGLE_ATTEMPT.set(cloud_dictation)
     try:
         if observer is None and not (duration is not None and duration > LONG_DICTATION_SECONDS):
             await pacer.before_send()
@@ -177,6 +179,8 @@ async def process_audio(
     except Exception:
         log.exception("STT transcribe failed (%s)", stt.model_name)
         raise
+    finally:
+        SINGLE_ATTEMPT.reset(attempt_token)
 
     if (
         result.no_speech_prob is not None
