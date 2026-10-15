@@ -36,10 +36,11 @@ def _retry_after(error: Exception) -> str:
 
 def _no_answer(error: Exception) -> bool:
     """Whether Groq gave no answer: a dropped connection, a timeout, or a server error."""
+    if getattr(error, "status_code", None) in (500, 502, 504):
+        return True
     from groq import APIConnectionError
 
-    status = getattr(error, "status_code", None)
-    return isinstance(error, APIConnectionError) or status in (500, 502, 504)
+    return isinstance(error, APIConnectionError)
 
 
 class GroqWhisperSTTProvider(STTProvider):

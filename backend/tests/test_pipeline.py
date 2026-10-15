@@ -1485,3 +1485,22 @@ async def test_a_short_cloud_dictation_does_not_wait_out_a_long_rate_limit(
 
     assert stt.transcribe.await_count == 1
     pause.assert_not_awaited()
+
+
+async def test_a_short_cloud_dictation_gives_up_after_two_pauses(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    stt = _make_stt_mock("ok")
+    stt.transcribe = AsyncMock(
+        side_effect=[ResourceUnavailableError("rate limit", headers={"Retry-After": "1"})] * 3
+    )
+
+    with (
+        patch("app.pipeline.service.get_provider", return_value=stt),
+        patch.object(chunking.UnpacedPieces, "pause", AsyncMock()) as pause,
+    ):
+        with pytest.raises(ResourceUnavailableError):
+            await process_audio(sample_wav, source="dictation")
+
+    assert stt.transcribe.await_count == 3
+    assert pause.await_count == 2

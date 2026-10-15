@@ -535,7 +535,10 @@ async def test_the_checked_flag_reaches_the_thread_the_sdk_call_runs_in(tmp_path
     provider = GroqWhisperSTTProvider(_settings())
     token = SINGLE_ATTEMPT.set(True)
     try:
-        with patch.object(GroqWhisperSTTProvider, "_call_groq", side_effect=spy):
+        with (
+            patch.object(GroqWhisperSTTProvider, "_get_client", return_value=MagicMock()),
+            patch.object(GroqWhisperSTTProvider, "_call_groq", side_effect=spy),
+        ):
             await provider.transcribe(_wav(tmp_path), language="uk")
     finally:
         SINGLE_ATTEMPT.reset(token)

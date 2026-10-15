@@ -489,6 +489,17 @@ async def test_a_rate_limit_pauses_then_sends_the_same_piece_again(tmp_path):
     assert provider.sent[0]["seconds"] == provider.sent[1]["seconds"]
 
 
+async def test_a_piece_waits_out_a_rate_limit_longer_than_a_short_dictation_allows(tmp_path):
+    path = _audio(tmp_path, 5.0)
+    provider = _Provider([_busy("20"), TranscriptionResult("after the pause")])
+    pacer = _Pacer()
+
+    result = await _run(provider, path, pacer)
+
+    assert result.text == "after the pause"
+    assert ("pause", 20.0) in pacer.events
+
+
 def _stays_on_until_the_check(passes: int):
     checks: list[bool] = []
 
