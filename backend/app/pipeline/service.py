@@ -18,6 +18,8 @@ from app.audio.config import audio_settings
 from app.audio.vad import analyze_vad
 from app.core.types import ProviderMode
 from app.pipeline.chunking import (
+    SHORT_MAX_PAUSE_SECONDS,
+    SHORT_MAX_PAUSES,
     PiecePacer,
     RouteStoppedError,
     UnpacedPieces,
@@ -153,7 +155,15 @@ async def process_audio(
     attempt_token = SINGLE_ATTEMPT.set(cloud_dictation)
     try:
         if observer is None and not (duration is not None and duration > LONG_DICTATION_SECONDS):
-            result = await transcribe_with_pauses(stt, audio_path, language, duration, pacer)
+            result = await transcribe_with_pauses(
+                stt,
+                audio_path,
+                language,
+                duration,
+                pacer,
+                max_pause=SHORT_MAX_PAUSE_SECONDS,
+                max_pauses=SHORT_MAX_PAUSES,
+            )
         elif two_tracks:
             result = await transcribe_meeting(
                 stt,

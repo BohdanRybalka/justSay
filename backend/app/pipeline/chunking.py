@@ -37,6 +37,8 @@ OVERLAP_SECONDS = 10.0
 OVERLAP_SHARE = 1 / 6
 MAX_PAUSE_SECONDS = 300.0
 MAX_PAUSES_PER_PIECE = 5
+SHORT_MAX_PAUSE_SECONDS = 10.0
+SHORT_MAX_PAUSES = 2
 MAX_OVERLAP_WORDS = 45
 MIN_SEAM_RUN = 3
 LOOP_NGRAM_CHARS = 32
@@ -269,7 +271,14 @@ def _retry_after(refusal: ResourceUnavailableError) -> float | None:
 
 
 async def transcribe_with_pauses(
-    stt: STTProvider, path: Path, language: str, duration: float | None, pacer: PiecePacer
+    stt: STTProvider,
+    path: Path,
+    language: str,
+    duration: float | None,
+    pacer: PiecePacer,
+    *,
+    max_pause: float = MAX_PAUSE_SECONDS,
+    max_pauses: int = MAX_PAUSES_PER_PIECE,
 ) -> TranscriptionResult:
     """One answer for one audio file: waits out Retry-After, checking the route before each send."""
     pauses = 0
@@ -280,7 +289,7 @@ async def transcribe_with_pauses(
         except ResourceUnavailableError as refusal:
             wait = _retry_after(refusal)
             pauses += 1
-            if wait is None or wait > MAX_PAUSE_SECONDS or pauses > MAX_PAUSES_PER_PIECE:
+            if wait is None or wait > max_pause or pauses > max_pauses:
                 raise
             log.info("%s asked to wait %.0fs; pausing (pause %d)", stt.model_name, wait, pauses)
             await pacer.pause(wait)

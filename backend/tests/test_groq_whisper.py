@@ -1,9 +1,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import httpx
 import pytest
-from groq import APIConnectionError, APITimeoutError
 
 from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.stt.config import STTSettings
@@ -470,20 +468,34 @@ class _HttpStatusError(Exception):
         self.status_code = status_code
 
 
-_NO_ANSWER_REQUEST = httpx.Request("POST", "https://api.groq.com/openai/v1/audio/transcriptions")
+def _connection_error() -> Exception:
+    import httpx
+    from groq import APIConnectionError
+
+    return APIConnectionError(request=httpx.Request("POST", "https://api.groq.com/"))
+
+
+def _timeout_error() -> Exception:
+    import httpx
+    from groq import APITimeoutError
+
+    return APITimeoutError(request=httpx.Request("POST", "https://api.groq.com/"))
 
 
 @pytest.mark.parametrize(
-    "error",
+    "make_error",
     [
-        _HttpStatusError(500),
-        APIConnectionError(request=_NO_ANSWER_REQUEST),
-        APITimeoutError(request=_NO_ANSWER_REQUEST),
+        lambda: _HttpStatusError(500),
+        lambda: _HttpStatusError(502),
+        lambda: _HttpStatusError(504),
+        _connection_error,
+        _timeout_error,
     ],
 )
-def test_a_checked_send_with_no_answer_is_a_paced_refusal(tmp_path, error):
+def test_a_checked_send_with_no_answer_is_a_paced_refusal(tmp_path, make_error):
     from app.stt.base import SINGLE_ATTEMPT
 
+    error = make_error()
     client = MagicMock()
     client.with_options.return_value.audio.transcriptions.create.side_effect = error
     token = SINGLE_ATTEMPT.set(True)
