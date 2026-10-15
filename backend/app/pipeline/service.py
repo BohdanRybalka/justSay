@@ -22,6 +22,7 @@ from app.pipeline.chunking import (
     RouteStoppedError,
     UnpacedPieces,
     transcribe_in_pieces,
+    transcribe_with_pauses,
 )
 from app.pipeline.cleanup import clean_dictation
 from app.pipeline.meeting_text import has_two_tracks, spoken_word_count, transcribe_meeting
@@ -152,8 +153,7 @@ async def process_audio(
     attempt_token = SINGLE_ATTEMPT.set(cloud_dictation)
     try:
         if observer is None and not (duration is not None and duration > LONG_DICTATION_SECONDS):
-            await pacer.before_send()
-            result = await stt.transcribe(audio_path, language=language, audio_duration=duration)
+            result = await transcribe_with_pauses(stt, audio_path, language, duration, pacer)
         elif two_tracks:
             result = await transcribe_meeting(
                 stt,

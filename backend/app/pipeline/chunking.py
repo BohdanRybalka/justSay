@@ -50,7 +50,7 @@ _TOKEN = re.compile(r"\S+\s*")
 
 
 class RouteStoppedError(NotReadyError):
-    """The route was switched off while its pieces were being sent; nothing more was sent."""
+    """The route was switched off before a send; nothing after that point was sent."""
 
     code: ClassVar[str] = "route_stopped"
 
@@ -82,7 +82,7 @@ class UnpacedPieces:
 
     async def before_send(self) -> None:
         if self._stays_on is not None and not self._stays_on():
-            raise RouteStoppedError("Cloud was switched off before the rest of this was sent")
+            raise RouteStoppedError("Cloud was switched off before this dictation was sent")
 
     async def pause(self, seconds: float) -> None:
         await asyncio.sleep(seconds)
@@ -268,9 +268,10 @@ def _retry_after(refusal: ResourceUnavailableError) -> float | None:
         return None
 
 
-async def _transcribe_with_pauses(
+async def transcribe_with_pauses(
     stt: STTProvider, path: Path, language: str, duration: float | None, pacer: PiecePacer
 ) -> TranscriptionResult:
+    """One answer for one audio file: waits out Retry-After, checking the route before each send."""
     pauses = 0
     while True:
         await pacer.before_send()
@@ -294,14 +295,14 @@ async def _transcribe_checked(
     pacer: PiecePacer,
     turn: Callable[[], Awaitable[None]],
 ) -> TranscriptionResult:
-    first = await _transcribe_with_pauses(stt, piece, language, seconds, pacer)
+    first = await transcribe_with_pauses(stt, piece, language, seconds, pacer)
     prob = first.no_speech_prob
     if (prob is not None and prob > no_speech_threshold) or not looks_broken(first.text, seconds):
         return first
     log.warning("%s: a %.0fs piece looked looping or sparse; again", stt.model_name, seconds)
     await turn()
     try:
-        second = await _transcribe_with_pauses(stt, piece, language, seconds, pacer)
+        second = await transcribe_with_pauses(stt, piece, language, seconds, pacer)
     except RouteStoppedError:
         raise
     except Exception:
@@ -446,7 +447,7 @@ async def transcribe_in_pieces(
     except UndecodableAudioError:
         log.info("%s cannot be cut here; sending it whole", audio_path.suffix)
         await pacer.before_piece(0, 1)
-        result = await _transcribe_with_pauses(stt, audio_path, language, duration, pacer)
+        result = await transcribe_with_pauses(stt, audio_path, language, duration, pacer)
         pacer.piece_done(1, 1)
         return result
 

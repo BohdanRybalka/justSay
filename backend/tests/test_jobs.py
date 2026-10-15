@@ -1098,6 +1098,25 @@ def test_a_restart_clears_what_a_retry_cut_short_left_behind(queue, tmp_path):
     assert not any(path.exists() for path in left_over)
 
 
+async def test_a_retry_stopped_by_a_switch_fails_keeping_its_audio_without_a_refusal_warning(
+    queue, tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr(
+        jobs,
+        "process_audio",
+        AsyncMock(side_effect=chunking.RouteStoppedError("Cloud was switched off")),
+    )
+    _keep_failed_dictation(queue, _dictation_audio(tmp_path))
+    [card] = queue.views()
+
+    queue.retry(card.id)
+    await _settle(queue, card.id)
+
+    assert _view(queue, card.id).stage == "failed"
+    assert len(_kept_dictations(queue)) == 1
+    assert not [record for record in caplog.records if "was refused" in record.getMessage()]
+
+
 async def test_retry_answers_404_for_an_unknown_job_and_409_for_a_file(client, queue, fakes):
     assert (await client.post("/jobs/nope/retry")).status_code == 404
 

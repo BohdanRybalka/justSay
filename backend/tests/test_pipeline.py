@@ -11,11 +11,11 @@ import soundfile as sf
 from fastapi import BackgroundTasks
 
 from app.config import settings
-from app.core.errors import NotReadyError
+from app.core.errors import NotReadyError, ResourceUnavailableError
 from app.core.types import ProviderMode
 from app.pipeline import chunking, service
 from app.pipeline.service import process_audio
-from app.stt.base import TranscriptionResult
+from app.stt.base import SINGLE_ATTEMPT, TranscriptionResult
 from app.transcripts import history
 from tests.conftest import write_meeting_wav
 
@@ -1432,11 +1432,9 @@ async def test_a_one_channel_meeting_file_is_transcribed_as_before(
 @pytest.mark.parametrize(
     ("mode", "one_attempt"), [(ProviderMode.CLOUD, True), (ProviderMode.LOCAL, False)]
 )
-async def test_a_dictation_sends_each_piece_as_one_attempt_only_on_cloud(
-    sample_wav, _isolate_side_effects, mode, one_attempt
+async def test_a_dictation_sends_each_send_as_one_attempt_only_on_cloud(
+    sample_wav, cloud_mode, _isolate_side_effects, mode, one_attempt
 ):
-    from app.stt.base import SINGLE_ATTEMPT
-
     seen: list[bool] = []
 
     async def record(path, **kwargs):
@@ -1449,3 +1447,21 @@ async def test_a_dictation_sends_each_piece_as_one_attempt_only_on_cloud(
         await process_audio(sample_wav, source="dictation", mode=mode)
 
     assert seen == [one_attempt]
+    assert SINGLE_ATTEMPT.get() is False
+
+
+async def test_a_short_cloud_dictation_waits_out_a_rate_limit_then_sends_again(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    stt = _make_stt_mock("ok")
+    stt.transcribe = AsyncMock(
+        side_effect=[
+            ResourceUnavailableError("rate limit", headers={"Retry-After": "0.01"}),
+            TranscriptionResult(text="after the pause"),
+        ]
+    )
+
+    with patch("app.pipeline.service.get_provider", return_value=stt):
+        await process_audio(sample_wav, source="dictation")
+
+    assert stt.transcribe.await_count == 2
