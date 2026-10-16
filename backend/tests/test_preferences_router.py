@@ -144,6 +144,26 @@ async def test_cloud_status_groq_tracks_the_key_the_transcription_path_reads(cli
     assert filled.json()["groq_key_set"] is True
 
 
+@pytest.mark.anyio
+async def test_a_removed_key_reads_as_not_set_at_once(client):
+    """Saving an empty key takes it out of the runtime, so the status and the provider agree."""
+    from app.core.errors import ConfigurationError
+    from app.stt.groq_whisper import GroqWhisperSTTProvider
+
+    await client.put("/settings", json={"groq_api_key": "gsk-typed", "gemini_api_key": "AIza-x"})
+    assert (await client.get("/settings/cloud-status")).json()["groq_key_set"] is True
+
+    resp = await client.put("/settings", json={"groq_api_key": "", "gemini_api_key": ""})
+
+    assert resp.status_code == 200
+    assert (await client.get("/settings/cloud-status")).json() == {
+        "gemini_key_set": False,
+        "groq_key_set": False,
+    }
+    with pytest.raises(ConfigurationError):
+        GroqWhisperSTTProvider(runtime_settings.stt)._get_client()
+
+
 def _counting_spy(counter: dict):
     """monkeypatch-able stand-in for maybe_prewarm_local that just counts calls."""
     def _spy(stt_settings):

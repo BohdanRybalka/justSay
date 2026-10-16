@@ -22,7 +22,7 @@ from app.core.errors import ConfigurationError
 from app.core.types import ProviderMode
 from app.embeddings.config import embedding_settings
 from app.stt import routing as stt_routing
-from app.stt.config import stt_settings
+from app.stt.config import STTSettings, stt_settings
 from app.transcripts import relocation
 
 
@@ -376,21 +376,35 @@ def _load_without_rejected_fields(data: dict, failure: ValidationError) -> UserS
         return UserSettings()
 
 
+def _keys_from_environment() -> dict[str, str]:
+    """The cloud keys the environment and ``.env`` give, read apart from ``settings.json``."""
+    environment = STTSettings()
+    return {
+        "gemini_api_key": environment.gemini_api_key,
+        "groq_api_key": environment.groq_api_key,
+    }
+
+
+_environment_keys = _keys_from_environment()
+
+
 def sync_to_runtime(us: UserSettings) -> bool:
     """Push user settings onto the runtime settings each package owns.
 
-    Returns whether an STT-relevant field changed — the same check that gates this function's own
-    cache invalidation — so a caller gating a prewarm does not have to re-derive it.
+    A cloud key left empty falls back to the environment's, so removing a typed key stops its use.
+    Returns whether an STT-relevant field changed, the same check that gates the cache clear.
     """
     stt_mode = ProviderMode(us.stt_mode)
+    gemini_api_key = us.gemini_api_key or _environment_keys["gemini_api_key"]
+    groq_api_key = us.groq_api_key or _environment_keys["groq_api_key"]
 
     changed_stt = (
         stt_settings.mode != stt_mode
         or stt_settings.whisper_model_size != us.whisper_model_size
         or stt_settings.whisper_device != us.whisper_device
         or stt_settings.initial_prompt != us.initial_prompt
-        or (us.gemini_api_key and stt_settings.gemini_api_key != us.gemini_api_key)
-        or (us.groq_api_key and stt_settings.groq_api_key != us.groq_api_key)
+        or stt_settings.gemini_api_key != gemini_api_key
+        or stt_settings.groq_api_key != groq_api_key
     )
     changed_embeddings = embedding_settings.ollama_host != us.ollama_host
 
@@ -402,10 +416,8 @@ def sync_to_runtime(us: UserSettings) -> bool:
     stt_settings.whisper_model_size = us.whisper_model_size
     stt_settings.whisper_device = us.whisper_device
     stt_settings.initial_prompt = us.initial_prompt
-    if us.gemini_api_key:
-        stt_settings.gemini_api_key = us.gemini_api_key
-    if us.groq_api_key:
-        stt_settings.groq_api_key = us.groq_api_key
+    stt_settings.gemini_api_key = gemini_api_key
+    stt_settings.groq_api_key = groq_api_key
 
     embedding_settings.ollama_host = us.ollama_host
 
