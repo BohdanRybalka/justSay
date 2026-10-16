@@ -524,21 +524,72 @@ def test_sync_to_runtime_propagates_keys(monkeypatch):
     assert "emb" in cleared
 
 
-def test_sync_to_runtime_preserves_env_key_when_user_key_empty(monkeypatch):
-    """Empty UserSettings key must NOT overwrite a key already in the runtime (from .env)."""
+def test_an_empty_user_key_falls_back_to_the_environment_key(monkeypatch):
+    """Removing a typed key brings back the one `.env` gave, not the typed one."""
     from app.config import settings as runtime_settings
 
-    runtime_settings.stt.gemini_api_key = "env-key"
-    runtime_settings.stt.groq_api_key = "env-groq"
-
+    monkeypatch.setattr(
+        user_settings,
+        "_environment_keys",
+        {"gemini_api_key": "env-key", "groq_api_key": "env-groq"},
+    )
+    runtime_settings.stt.gemini_api_key = "AIza-typed"
+    runtime_settings.stt.groq_api_key = "gsk-typed"
     monkeypatch.setattr("app.stt.routing.clear_cache", lambda: None)
     monkeypatch.setattr("app.embeddings.clear_cache", lambda: None)
 
-    us = user_settings.UserSettings(gemini_api_key="", groq_api_key="")
-    user_settings.sync_to_runtime(us)
+    user_settings.sync_to_runtime(user_settings.UserSettings(gemini_api_key="", groq_api_key=""))
 
     assert runtime_settings.stt.gemini_api_key == "env-key"
     assert runtime_settings.stt.groq_api_key == "env-groq"
+
+
+def test_removing_a_typed_key_without_an_environment_key_stops_its_use(monkeypatch):
+    """The runtime key empties and the cached provider holding the old key is dropped."""
+    from app.config import settings as runtime_settings
+
+    cleared: list[str] = []
+    monkeypatch.setattr("app.stt.routing.clear_cache", lambda: cleared.append("stt"))
+    monkeypatch.setattr("app.embeddings.clear_cache", lambda: None)
+    user_settings.sync_to_runtime(user_settings.UserSettings(groq_api_key="gsk-typed"))
+    cleared.clear()
+
+    changed_stt = user_settings.sync_to_runtime(user_settings.UserSettings(groq_api_key=""))
+
+    assert runtime_settings.stt.groq_api_key == ""
+    assert changed_stt is True
+    assert cleared == ["stt"]
+
+
+def test_the_environment_keys_are_read_from_the_environment_not_the_runtime(monkeypatch):
+    """A key the user typed sits in the runtime settings and must not pass for an `.env` key."""
+    from app.config import settings as runtime_settings
+
+    monkeypatch.setenv("JUSTSAY_STT_GROQ_API_KEY", "env-groq")
+    monkeypatch.setenv("JUSTSAY_STT__GEMINI_API_KEY", "env-gemini")
+    runtime_settings.stt.groq_api_key = "gsk-typed"
+    runtime_settings.stt.gemini_api_key = "AIza-typed"
+
+    assert user_settings._keys_from_environment() == {
+        "gemini_api_key": "env-gemini",
+        "groq_api_key": "env-groq",
+    }
+
+
+def test_removing_only_the_google_key_drops_the_search_provider_holding_it(monkeypatch):
+    """The Google key alone changing must still clear the embeddings cache."""
+    from app.config import settings as runtime_settings
+
+    cleared: list[str] = []
+    monkeypatch.setattr("app.stt.routing.clear_cache", lambda: None)
+    monkeypatch.setattr("app.embeddings.clear_cache", lambda: cleared.append("emb"))
+    user_settings.sync_to_runtime(user_settings.UserSettings(gemini_api_key="AIza-typed"))
+    cleared.clear()
+
+    user_settings.sync_to_runtime(user_settings.UserSettings(gemini_api_key=""))
+
+    assert runtime_settings.stt.gemini_api_key == ""
+    assert cleared == ["emb"]
 
 
 def _seed_history(directory: Path, count: int) -> None:

@@ -1042,6 +1042,20 @@ def _dictation_cleanup_never_reaches_groq(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _no_environment_cloud_keys(monkeypatch):
+    """Every test starts as CI does, with no key from `backend/.env` in either place it lands.
+
+    `STTSettings` reads them at import and `sync_to_runtime` falls back to them; a test about that
+    fallback sets its own.
+    """
+    monkeypatch.setattr(
+        user_settings, "_environment_keys", {"gemini_api_key": "", "groq_api_key": ""}
+    )
+    monkeypatch.setattr(settings.stt, "gemini_api_key", "")
+    monkeypatch.setattr(settings.stt, "groq_api_key", "")
+
+
+@pytest.fixture(autouse=True)
 def _no_real_package_installs(monkeypatch, request):
     """Fail any test that tries to spawn a package installer, naming the test.
 
