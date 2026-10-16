@@ -1048,8 +1048,6 @@ def _no_environment_cloud_keys(monkeypatch):
     `STTSettings` reads them at import and `sync_to_runtime` falls back to them; a test about that
     fallback sets its own.
     """
-    from app.preferences import user_settings
-
     monkeypatch.setattr(
         user_settings, "_environment_keys", {"gemini_api_key": "", "groq_api_key": ""}
     )

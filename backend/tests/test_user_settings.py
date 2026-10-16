@@ -566,9 +566,30 @@ def test_the_environment_keys_are_read_from_the_environment_not_the_runtime(monk
     from app.config import settings as runtime_settings
 
     monkeypatch.setenv("JUSTSAY_STT_GROQ_API_KEY", "env-groq")
+    monkeypatch.setenv("JUSTSAY_STT__GEMINI_API_KEY", "env-gemini")
     runtime_settings.stt.groq_api_key = "gsk-typed"
+    runtime_settings.stt.gemini_api_key = "AIza-typed"
 
-    assert user_settings._keys_from_environment()["groq_api_key"] == "env-groq"
+    assert user_settings._keys_from_environment() == {
+        "gemini_api_key": "env-gemini",
+        "groq_api_key": "env-groq",
+    }
+
+
+def test_removing_only_the_google_key_drops_the_search_provider_holding_it(monkeypatch):
+    """The Google key alone changing must still clear the embeddings cache."""
+    from app.config import settings as runtime_settings
+
+    cleared: list[str] = []
+    monkeypatch.setattr("app.stt.routing.clear_cache", lambda: None)
+    monkeypatch.setattr("app.embeddings.clear_cache", lambda: cleared.append("emb"))
+    user_settings.sync_to_runtime(user_settings.UserSettings(gemini_api_key="AIza-typed"))
+    cleared.clear()
+
+    user_settings.sync_to_runtime(user_settings.UserSettings(gemini_api_key=""))
+
+    assert runtime_settings.stt.gemini_api_key == ""
+    assert cleared == ["emb"]
 
 
 def _seed_history(directory: Path, count: int) -> None:
