@@ -11,10 +11,11 @@ import soundfile as sf
 from fastapi import BackgroundTasks
 
 from app.config import settings
+from app.core.errors import NotReadyError, ResourceUnavailableError
 from app.core.types import ProviderMode
-from app.pipeline import service
+from app.pipeline import chunking, service
 from app.pipeline.service import process_audio
-from app.stt.base import TranscriptionResult
+from app.stt.base import SINGLE_ATTEMPT, TranscriptionResult
 from app.transcripts import history
 from tests.conftest import write_meeting_wav
 
@@ -249,6 +250,97 @@ async def test_pipeline_asks_routing_for_the_mode_in_force(
     with patch("app.pipeline.service.get_provider", return_value=stt) as routed:
         await process_audio(sample_wav, source="dictation")
     routed.assert_called_once_with(service.stt_settings.mode, service.stt_settings)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("duration", "goes_in_pieces"),
+    [
+        (60.0, False),
+        (service.LONG_DICTATION_SECONDS + 1, True),
+    ],
+)
+async def test_a_dictation_goes_in_pieces_only_when_it_is_long(
+    sample_wav, cloud_mode, _isolate_side_effects, duration, goes_in_pieces
+):
+    """A short dictation keeps the one-request path; a long one is cut as files are, unpaced."""
+    stt = _make_stt_mock("ok")
+    pieces = AsyncMock(return_value=TranscriptionResult(text="ok"))
+
+    with (
+        patch("app.pipeline.service.get_provider", return_value=stt),
+        patch("app.pipeline.service.transcribe_in_pieces", pieces),
+    ):
+        await process_audio(sample_wav, audio_duration=duration, source="dictation")
+
+    assert pieces.await_count == (1 if goes_in_pieces else 0)
+    assert stt.transcribe.await_count == (0 if goes_in_pieces else 1)
+    if goes_in_pieces:
+        assert isinstance(pieces.call_args.kwargs["pacer"], chunking.UnpacedPieces)
+
+
+async def test_the_result_names_the_history_entry_it_saved(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    saved = MagicMock(id="entry-7")
+    _isolate_side_effects.return_value = saved
+
+    with patch("app.pipeline.service.get_provider", return_value=_make_stt_mock("ok")):
+        result = await process_audio(sample_wav, source="dictation")
+
+    assert result.entry_id == "entry-7"
+
+
+async def test_a_cloud_dictation_in_pieces_sends_nothing_after_cloud_is_switched_off(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """Switching to Local while Cloud pieces are being sent stops the rest before they leave."""
+    sent: list[Path] = []
+
+    async def switch_then_send(stt, path, *, pacer, **kwargs):
+        settings.stt.mode = ProviderMode.LOCAL
+        await pacer.before_send()
+        sent.append(path)
+        return TranscriptionResult(text="late")
+
+    with (
+        patch("app.pipeline.service.get_provider", return_value=_make_stt_mock("ok")),
+        patch("app.pipeline.service.transcribe_in_pieces", side_effect=switch_then_send),
+    ):
+        with pytest.raises(NotReadyError):
+            await process_audio(
+                sample_wav,
+                audio_duration=service.LONG_DICTATION_SECONDS + 1,
+                source="dictation",
+            )
+
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_short_cloud_dictation_sends_nothing_after_cloud_is_switched_off_before_its_send(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """A route fixed to Cloud, as a retry fixes it, checks again right before it sends."""
+    stt = _make_stt_mock("ok")
+
+    def switch_off(path):
+        settings.stt.mode = ProviderMode.LOCAL
+        return None
+
+    with (
+        patch("app.pipeline.service.get_provider", return_value=stt),
+        patch("app.pipeline.service._silence_note", side_effect=switch_off),
+    ):
+        with pytest.raises(chunking.RouteStoppedError):
+            await process_audio(
+                sample_wav,
+                audio_duration=60.0,
+                source="dictation",
+                mode=ProviderMode.CLOUD,
+            )
+
+    stt.transcribe.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1254,6 +1346,9 @@ class _Observer:
     async def before_piece(self, index, total):
         return None
 
+    async def before_send(self):
+        return None
+
     async def pause(self, seconds):
         return None
 
@@ -1332,3 +1427,80 @@ async def test_a_one_channel_meeting_file_is_transcribed_as_before(
 
     assert result.text == "старий запис наради"
     assert _isolate_side_effects.call_args.kwargs["word_count"] == 3
+
+
+@pytest.mark.parametrize(
+    ("mode", "one_attempt"), [(ProviderMode.CLOUD, True), (ProviderMode.LOCAL, False)]
+)
+async def test_a_dictation_sends_each_send_as_one_attempt_only_on_cloud(
+    sample_wav, cloud_mode, _isolate_side_effects, mode, one_attempt
+):
+    seen: list[bool] = []
+
+    async def record(path, **kwargs):
+        seen.append(SINGLE_ATTEMPT.get())
+        return TranscriptionResult(text="ok")
+
+    stt = _make_stt_mock("ok")
+    stt.transcribe = AsyncMock(side_effect=record)
+    with patch("app.pipeline.service.get_provider", return_value=stt):
+        await process_audio(sample_wav, source="dictation", mode=mode)
+
+    assert seen == [one_attempt]
+    assert SINGLE_ATTEMPT.get() is False
+
+
+async def test_a_short_cloud_dictation_waits_out_a_rate_limit_then_sends_again(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    stt = _make_stt_mock("ok")
+    stt.transcribe = AsyncMock(
+        side_effect=[
+            ResourceUnavailableError("rate limit", headers={"Retry-After": "0.01"}),
+            TranscriptionResult(text="after the pause"),
+        ]
+    )
+
+    with patch("app.pipeline.service.get_provider", return_value=stt):
+        await process_audio(sample_wav, source="dictation")
+
+    assert stt.transcribe.await_count == 2
+
+
+async def test_a_short_cloud_dictation_does_not_wait_out_a_long_rate_limit(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    """A dictation holds the dictation gate while it waits, so its own waits stay short."""
+    stt = _make_stt_mock("ok")
+    stt.transcribe = AsyncMock(
+        side_effect=ResourceUnavailableError("rate limit", headers={"Retry-After": "60"})
+    )
+
+    with (
+        patch("app.pipeline.service.get_provider", return_value=stt),
+        patch.object(chunking.UnpacedPieces, "pause", AsyncMock()) as pause,
+    ):
+        with pytest.raises(ResourceUnavailableError):
+            await process_audio(sample_wav, source="dictation")
+
+    assert stt.transcribe.await_count == 1
+    pause.assert_not_awaited()
+
+
+async def test_a_short_cloud_dictation_gives_up_after_two_pauses(
+    sample_wav, cloud_mode, _isolate_side_effects
+):
+    stt = _make_stt_mock("ok")
+    stt.transcribe = AsyncMock(
+        side_effect=[ResourceUnavailableError("rate limit", headers={"Retry-After": "1"})] * 3
+    )
+
+    with (
+        patch("app.pipeline.service.get_provider", return_value=stt),
+        patch.object(chunking.UnpacedPieces, "pause", AsyncMock()) as pause,
+    ):
+        with pytest.raises(ResourceUnavailableError):
+            await process_audio(sample_wav, source="dictation")
+
+    assert stt.transcribe.await_count == 3
+    assert pause.await_count == 2

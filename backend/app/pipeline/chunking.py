@@ -16,14 +16,14 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 import numpy as np
 
 from app.audio.config import audio_settings
 from app.audio.pauses import longest_pause, speech_profile
 from app.core.audio_formats import UndecodableAudioError, decode_to_mono_wav
-from app.core.errors import ResourceUnavailableError
+from app.core.errors import NotReadyError, ResourceUnavailableError
 from app.core.scratch import discard_scratch_file
 from app.pipeline.invented_phrases import outpaces_speech, without_invented_phrases
 from app.stt.base import STTProvider, TranscriptionResult
@@ -37,6 +37,8 @@ OVERLAP_SECONDS = 10.0
 OVERLAP_SHARE = 1 / 6
 MAX_PAUSE_SECONDS = 300.0
 MAX_PAUSES_PER_PIECE = 5
+SHORT_MAX_PAUSE_SECONDS = 10.0
+SHORT_MAX_PAUSES = 2
 MAX_OVERLAP_WORDS = 45
 MIN_SEAM_RUN = 3
 LOOP_NGRAM_CHARS = 32
@@ -49,14 +51,46 @@ LITTLE_SPEECH_SECONDS = 3.0
 _TOKEN = re.compile(r"\S+\s*")
 
 
+class RouteStoppedError(NotReadyError):
+    """The route was switched off before a send; nothing after that point was sent."""
+
+    code: ClassVar[str] = "route_stopped"
+
+
 class PiecePacer(Protocol):
     """What the caller hears around each piece; it may hold a piece back or stop the work."""
 
     async def before_piece(self, index: int, total: int) -> None: ...
 
+    async def before_send(self) -> None: ...
+
     async def pause(self, seconds: float) -> None: ...
 
     def piece_done(self, done: int, total: int) -> None: ...
+
+
+class UnpacedPieces:
+    """A pacer for a caller that shows nothing: a provider's wait is slept, nothing else happens.
+
+    ``stays_on``, when given, is asked right before each send to the provider; once it says no,
+    the work stops with ``RouteStoppedError`` and nothing further is sent.
+    """
+
+    def __init__(self, stays_on: Callable[[], bool] | None = None) -> None:
+        self._stays_on = stays_on
+
+    async def before_piece(self, index: int, total: int) -> None:
+        return None
+
+    async def before_send(self) -> None:
+        if self._stays_on is not None and not self._stays_on():
+            raise RouteStoppedError("Cloud was switched off before this dictation was sent")
+
+    async def pause(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
+    def piece_done(self, done: int, total: int) -> None:
+        return None
 
 
 @dataclass(frozen=True)
@@ -236,17 +270,26 @@ def _retry_after(refusal: ResourceUnavailableError) -> float | None:
         return None
 
 
-async def _transcribe_with_pauses(
-    stt: STTProvider, path: Path, language: str, duration: float | None, pacer: PiecePacer
+async def transcribe_with_pauses(
+    stt: STTProvider,
+    path: Path,
+    language: str,
+    duration: float | None,
+    pacer: PiecePacer,
+    *,
+    max_pause: float = MAX_PAUSE_SECONDS,
+    max_pauses: int = MAX_PAUSES_PER_PIECE,
 ) -> TranscriptionResult:
+    """One answer for one audio file: waits out Retry-After, checking the route before each send."""
     pauses = 0
     while True:
+        await pacer.before_send()
         try:
             return await stt.transcribe(path, language=language, audio_duration=duration)
         except ResourceUnavailableError as refusal:
             wait = _retry_after(refusal)
             pauses += 1
-            if wait is None or wait > MAX_PAUSE_SECONDS or pauses > MAX_PAUSES_PER_PIECE:
+            if wait is None or wait > max_pause or pauses > max_pauses:
                 raise
             log.info("%s asked to wait %.0fs; pausing (pause %d)", stt.model_name, wait, pauses)
             await pacer.pause(wait)
@@ -261,14 +304,16 @@ async def _transcribe_checked(
     pacer: PiecePacer,
     turn: Callable[[], Awaitable[None]],
 ) -> TranscriptionResult:
-    first = await _transcribe_with_pauses(stt, piece, language, seconds, pacer)
+    first = await transcribe_with_pauses(stt, piece, language, seconds, pacer)
     prob = first.no_speech_prob
     if (prob is not None and prob > no_speech_threshold) or not looks_broken(first.text, seconds):
         return first
     log.warning("%s: a %.0fs piece looked looping or sparse; again", stt.model_name, seconds)
     await turn()
     try:
-        second = await _transcribe_with_pauses(stt, piece, language, seconds, pacer)
+        second = await transcribe_with_pauses(stt, piece, language, seconds, pacer)
+    except RouteStoppedError:
+        raise
     except Exception:
         log.warning("Asking again failed; keeping the first answer", exc_info=True)
         return first
@@ -411,7 +456,7 @@ async def transcribe_in_pieces(
     except UndecodableAudioError:
         log.info("%s cannot be cut here; sending it whole", audio_path.suffix)
         await pacer.before_piece(0, 1)
-        result = await _transcribe_with_pauses(stt, audio_path, language, duration, pacer)
+        result = await transcribe_with_pauses(stt, audio_path, language, duration, pacer)
         pacer.piece_done(1, 1)
         return result
 

@@ -67,6 +67,9 @@ class _TurnPacer:
         self._pieces = total
         await self._pacer.before_piece(self._finished_pieces + index, self._total())
 
+    async def before_send(self) -> None:
+        await self._pacer.before_send()
+
     async def pause(self, seconds: float) -> None:
         await self._pacer.pause(seconds)
 

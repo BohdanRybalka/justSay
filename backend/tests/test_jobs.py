@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,6 +18,7 @@ import pytest
 import soundfile as sf
 from httpx import ASGITransport, AsyncClient
 
+from app.audio import scratch_router
 from app.audio.meeting_recorder import leftover_recordings
 from app.audio.pauses import SpeechProfile
 from app.audio.vad import VadAnalysis
@@ -30,10 +32,11 @@ from app.core.errors import (
 from app.core.types import ProviderMode
 from app.main import app
 from app.pipeline import chunking, jobs, service
-from app.pipeline.jobs import DictationGate, JobQueue, remove_leftover_files
+from app.pipeline.jobs import DictationGate, JobQueue, leftover_dictations, remove_leftover_files
 from app.pipeline.jobs_router import get_job_queue
 from app.pipeline.service import ProcessingResult
 from app.stt.base import TranscriptionResult
+from app.stt.config import stt_settings
 from app.transcripts import history, vector_store
 
 
@@ -822,6 +825,296 @@ async def test_a_meeting_runs_the_real_pipeline_on_its_own_engine(
     finally:
         with history._lock:
             history._close_conn_locked()
+
+
+def _dictation_audio(tmp_path: Path) -> Path:
+    path = tmp_path / "tmp" / "rec_0123456789ab.wav"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"RIFF....WAVE....")
+    return path
+
+
+FRESH_ID = "0123456789abcdef0123456789abcdef"
+STALE_ID = "fedcba9876543210fedcba9876543210"
+
+
+def _kept_dictations(queue: JobQueue) -> list[Path]:
+    return sorted(queue._temp_dir.glob("dictation_*.wav"))
+
+
+def _keep_failed_dictation(
+    queue: JobQueue, audio: Path, *, language: str = "uk", mode: ProviderMode = ProviderMode.CLOUD
+) -> None:
+    queue.keep_failed_dictation(audio, language=language, mode=mode)
+
+
+def test_a_failed_dictation_keeps_its_audio_as_a_card_until_dismissed(queue, tmp_path):
+    audio = _dictation_audio(tmp_path)
+    _keep_failed_dictation(queue, audio)
+
+    [card] = queue.views()
+    assert (card.kind, card.stage, card.error) == (
+        "dictation",
+        "failed",
+        jobs.DICTATION_FAILED_REASON,
+    )
+    assert not audio.exists()
+    assert len(_kept_dictations(queue)) == 1
+
+    assert queue.cancel_or_dismiss(card.id) == "dismissed"
+    assert _kept_dictations(queue) == []
+
+
+def test_a_failed_dictation_whose_audio_is_gone_makes_no_card(queue, tmp_path):
+    _keep_failed_dictation(queue, tmp_path / "gone.wav")
+
+    assert queue.views() == []
+
+
+async def test_a_kept_dictation_is_sent_again_in_its_own_mode_and_saved_once(
+    queue, tmp_path, monkeypatch
+):
+    sent: list[dict] = []
+
+    async def transcribe_again(path, **kwargs):
+        sent.append(kwargs)
+        return ProcessingResult("hello", 5, model_name="mock/model", entry_id="entry-9")
+
+    monkeypatch.setattr(jobs, "process_audio", transcribe_again)
+    monkeypatch.setattr(stt_settings, "mode", ProviderMode.LOCAL)
+    audio = _dictation_audio(tmp_path)
+    _keep_failed_dictation(queue, audio, language="de", mode=ProviderMode.LOCAL)
+    [card] = queue.views()
+
+    assert queue.retry(card.id) is True
+    await _settle(queue, card.id)
+
+    assert (_view(queue, card.id).stage, _view(queue, card.id).entry_id) == ("done", "entry-9")
+    assert _kept_dictations(queue) == []
+    assert sent == [{"language": "de", "source": "dictation", "mode": ProviderMode.LOCAL}]
+
+
+async def test_a_retried_dictation_that_holds_no_speech_drops_its_card_and_audio(
+    queue, tmp_path, monkeypatch
+):
+    silent = AsyncMock(return_value=ProcessingResult("", 5, discarded_reason="silence"))
+    monkeypatch.setattr(jobs, "process_audio", silent)
+    _keep_failed_dictation(queue, _dictation_audio(tmp_path))
+    [card] = queue.views()
+
+    queue.retry(card.id)
+    await _settle(queue, card.id)
+
+    assert _view(queue, card.id) is None
+    assert _kept_dictations(queue) == []
+
+
+async def test_a_retry_of_a_dictation_does_not_wait_for_a_running_file(
+    queue, fakes, tmp_path, monkeypatch
+):
+    file_pipeline = _FakePipeline()
+    file_id = _start(queue, fakes, file_pipeline)
+    await asyncio.wait_for(file_pipeline.transcribing.wait(), 1)
+
+    async def transcribe_again(path, **kwargs):
+        return ProcessingResult("hello", 5, entry_id="entry-2")
+
+    monkeypatch.setattr(jobs, "process_audio", transcribe_again)
+    _keep_failed_dictation(queue, _dictation_audio(tmp_path))
+    dictation_id = next(card.id for card in queue.views() if card.kind == "dictation")
+
+    queue.retry(dictation_id)
+    await asyncio.wait_for(_settle(queue, dictation_id), 1)
+
+    assert _view(queue, dictation_id).stage == "done"
+    assert _view(queue, file_id).stage == "transcribing"
+    file_pipeline.release.set()
+    await _settle(queue, file_id)
+
+
+async def test_a_dictation_being_turned_into_text_cannot_be_dismissed(
+    queue, tmp_path, monkeypatch
+):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow(path, **kwargs):
+        started.set()
+        await release.wait()
+        return ProcessingResult("hello", 5, entry_id="entry-3")
+
+    monkeypatch.setattr(jobs, "process_audio", slow)
+    _keep_failed_dictation(queue, _dictation_audio(tmp_path))
+    [card] = queue.views()
+    queue.retry(card.id)
+    await asyncio.wait_for(started.wait(), 1)
+
+    with pytest.raises(NotReadyError):
+        queue.cancel_or_dismiss(card.id)
+    release.set()
+    await _settle(queue, card.id)
+    assert _view(queue, card.id).stage == "done"
+
+
+def test_a_failed_dictation_is_dropped_with_its_audio_after_fourteen_days(
+    queue, tmp_path, clock
+):
+    _keep_failed_dictation(queue, _dictation_audio(tmp_path))
+    [card] = queue.views()
+
+    clock.now += jobs.FAILED_DICTATION_KEEP_SECONDS
+    assert _view(queue, card.id) is not None
+
+    clock.now += 1
+    assert queue.views() == []
+    assert _kept_dictations(queue) == []
+
+
+def test_clear_temporary_audio_leaves_a_kept_dictation(queue, tmp_path):
+    _keep_failed_dictation(queue, _dictation_audio(tmp_path))
+
+    scratch_router._reap_scratch_files(tmp_path / "tmp", frozenset())
+
+    assert len(_kept_dictations(queue)) == 1
+
+
+def test_leftover_dictations_are_listed_as_failed_unless_kept_past_fourteen_days(
+    queue, tmp_path
+):
+    temp_dir = tmp_path / "leftovers"
+    temp_dir.mkdir()
+    now = time.time()
+    fresh = temp_dir / f"dictation_{FRESH_ID}_local_uk.wav"
+    stale = temp_dir / f"dictation_{STALE_ID}_local_uk.wav"
+    other = temp_dir / "rec_00000000000c.wav"
+    chunk_scratch = temp_dir / f"dictation_{FRESH_ID}_local_uk-16k.wav"
+    too_old = jobs.FAILED_DICTATION_KEEP_SECONDS + 3600
+    for path, age in ((fresh, 60.0), (stale, too_old), (other, 60.0), (chunk_scratch, 60.0)):
+        path.write_bytes(b"RIFF....WAVE....")
+        os.utime(path, (now - age, now - age))
+
+    queue.add_leftover_dictations(leftover_dictations(temp_dir))
+
+    assert [(v.kind, v.stage, v.error) for v in queue.views()] == [
+        ("dictation", "failed", jobs.DICTATION_FAILED_REASON)
+    ]
+    assert fresh.exists() and other.exists() and not stale.exists()
+
+
+async def test_a_kept_dictation_keeps_its_mode_and_language_across_a_restart(
+    queue, tmp_path, monkeypatch
+):
+    queue.keep_failed_dictation(_dictation_audio(tmp_path), language="de", mode=ProviderMode.CLOUD)
+    restarted = JobQueue(queue._temp_dir, gate=queue.gate, clock=queue.clock)
+    restarted.add_leftover_dictations(jobs.leftover_dictations(queue._temp_dir))
+    [card] = restarted.views()
+
+    sent: list[dict] = []
+
+    async def transcribe_again(path, **kwargs):
+        sent.append(kwargs)
+        return ProcessingResult("hello", 5, entry_id="entry-4")
+
+    monkeypatch.setattr(jobs, "process_audio", transcribe_again)
+    monkeypatch.setattr(stt_settings, "mode", ProviderMode.CLOUD)
+    restarted.retry(card.id)
+    await _settle(restarted, card.id)
+
+    assert sent == [{"language": "de", "source": "dictation", "mode": ProviderMode.CLOUD}]
+
+
+async def test_a_retry_that_fails_again_keeps_its_audio_as_a_card(queue, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        jobs,
+        "process_audio",
+        AsyncMock(side_effect=ResourceUnavailableError("the provider is down")),
+    )
+    _keep_failed_dictation(queue, _dictation_audio(tmp_path))
+    [card] = queue.views()
+
+    queue.retry(card.id)
+    await _settle(queue, card.id)
+
+    assert (_view(queue, card.id).stage, _view(queue, card.id).error) == (
+        "failed",
+        jobs.DICTATION_FAILED_REASON,
+    )
+    assert len(_kept_dictations(queue)) == 1
+
+
+@pytest.mark.parametrize(
+    ("made_in", "now", "sent_to"),
+    [
+        (ProviderMode.CLOUD, ProviderMode.CLOUD, ProviderMode.CLOUD),
+        (ProviderMode.CLOUD, ProviderMode.LOCAL, ProviderMode.LOCAL),
+        (ProviderMode.LOCAL, ProviderMode.CLOUD, ProviderMode.LOCAL),
+        (ProviderMode.LOCAL, ProviderMode.LOCAL, ProviderMode.LOCAL),
+    ],
+)
+async def test_a_retry_goes_to_the_cloud_only_when_cloud_was_made_and_is_on(
+    queue, tmp_path, monkeypatch, made_in, now, sent_to
+):
+    indexer = MagicMock()
+    monkeypatch.setattr(JobQueue, "_spawn_indexer", staticmethod(indexer))
+    sent: list[dict] = []
+
+    async def transcribe_again(path, **kwargs):
+        sent.append(kwargs)
+        return ProcessingResult("hello", 5, entry_id="entry-5")
+
+    monkeypatch.setattr(jobs, "process_audio", transcribe_again)
+    monkeypatch.setattr(stt_settings, "mode", now)
+    _keep_failed_dictation(queue, _dictation_audio(tmp_path), mode=made_in)
+    [card] = queue.views()
+
+    queue.retry(card.id)
+    await _settle(queue, card.id)
+
+    assert sent[0]["mode"] is sent_to
+    assert indexer.called is (sent_to is ProviderMode.CLOUD)
+
+
+def test_a_kept_dictation_name_carries_a_safe_language(queue, tmp_path):
+    _keep_failed_dictation(queue, _dictation_audio(tmp_path), language="../escape")
+
+    [kept] = _kept_dictations(queue)
+    assert kept.name.endswith("_cloud_auto.wav")
+
+
+def test_a_restart_clears_what_a_retry_cut_short_left_behind(queue, tmp_path):
+    temp_dir = queue._temp_dir
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    kept = temp_dir / f"dictation_{FRESH_ID}_cloud_uk.wav"
+    left_over = [
+        temp_dir / f"dictation_{FRESH_ID}_cloud_uk-16k.wav",
+        temp_dir / f"dictation_{FRESH_ID}_cloud_uk-piece0.flac",
+    ]
+    for path in [kept, *left_over]:
+        path.write_bytes(b"RIFF....WAVE....")
+
+    jobs.remove_leftover_files(temp_dir)
+
+    assert kept.exists()
+    assert not any(path.exists() for path in left_over)
+
+
+async def test_a_retry_stopped_by_a_switch_fails_keeping_its_audio_without_a_refusal_warning(
+    queue, tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr(
+        jobs,
+        "process_audio",
+        AsyncMock(side_effect=chunking.RouteStoppedError("Cloud was switched off")),
+    )
+    _keep_failed_dictation(queue, _dictation_audio(tmp_path))
+    [card] = queue.views()
+
+    queue.retry(card.id)
+    await _settle(queue, card.id)
+
+    assert _view(queue, card.id).stage == "failed"
+    assert len(_kept_dictations(queue)) == 1
+    assert not [record for record in caplog.records if "was refused" in record.getMessage()]
 
 
 async def test_retry_answers_404_for_an_unknown_job_and_409_for_a_file(client, queue, fakes):

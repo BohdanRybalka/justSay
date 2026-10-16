@@ -539,10 +539,10 @@ export interface DictateResponse {
 
 export type TranscriptionJobStage = "queued" | "transcribing" | "saving" | "done" | "failed" | "cancelled";
 
-/** A file or a stopped meeting being turned into text in the background, as `GET /jobs` lists it. */
+/** A file, a stopped meeting or a dictation that failed, being turned into text in the background, as `GET /jobs` lists it. */
 export interface TranscriptionJob {
   id: string;
-  kind: "file" | "meeting";
+  kind: "file" | "meeting" | "dictation";
   name: string;
   stage: TranscriptionJobStage;
   /** 0–1, estimated from this machine's past speed; null while it cannot be told. */

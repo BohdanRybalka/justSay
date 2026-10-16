@@ -50,6 +50,9 @@ class _Pacer:
     async def before_piece(self, index: int, total: int) -> None:
         self.events.append(("before", index, total))
 
+    async def before_send(self) -> None:
+        return None
+
     async def pause(self, seconds: float) -> None:
         self.events.append(("pause", seconds))
 

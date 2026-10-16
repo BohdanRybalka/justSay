@@ -435,3 +435,112 @@ async def test_groq_log_names_the_characters_the_budget_cut(tmp_path, caplog):
     assert "481chars -10cut" in full_log
     assert _OVER_BUDGET_GLOSSARY not in full_log
     assert _UNDER_BUDGET_GLOSSARY not in full_log
+
+
+def test_a_checked_send_makes_one_sdk_attempt(tmp_path):
+    from app.stt.base import SINGLE_ATTEMPT
+
+    client = MagicMock()
+    token = SINGLE_ATTEMPT.set(True)
+    try:
+        GroqWhisperSTTProvider._call_groq(
+            client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None
+        )
+    finally:
+        SINGLE_ATTEMPT.reset(token)
+
+    client.with_options.assert_called_once_with(max_retries=0)
+    client.with_options.return_value.audio.transcriptions.create.assert_called_once()
+
+
+def test_an_unchecked_send_keeps_the_sdk_retries(tmp_path):
+    client = MagicMock()
+
+    GroqWhisperSTTProvider._call_groq(client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None)
+
+    client.with_options.assert_not_called()
+    client.audio.transcriptions.create.assert_called_once()
+
+
+class _HttpStatusError(Exception):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
+def _connection_error() -> Exception:
+    import httpx
+    from groq import APIConnectionError
+
+    return APIConnectionError(request=httpx.Request("POST", "https://api.groq.com/"))
+
+
+def _timeout_error() -> Exception:
+    import httpx
+    from groq import APITimeoutError
+
+    return APITimeoutError(request=httpx.Request("POST", "https://api.groq.com/"))
+
+
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        lambda: _HttpStatusError(500),
+        lambda: _HttpStatusError(502),
+        lambda: _HttpStatusError(504),
+        _connection_error,
+        _timeout_error,
+    ],
+)
+def test_a_checked_send_with_no_answer_is_a_paced_refusal(tmp_path, make_error):
+    from app.stt.base import SINGLE_ATTEMPT
+
+    error = make_error()
+    client = MagicMock()
+    client.with_options.return_value.audio.transcriptions.create.side_effect = error
+    token = SINGLE_ATTEMPT.set(True)
+    try:
+        with pytest.raises(ResourceUnavailableError) as refusal:
+            GroqWhisperSTTProvider._call_groq(
+                client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None
+            )
+    finally:
+        SINGLE_ATTEMPT.reset(token)
+
+    assert refusal.value.headers == {"Retry-After": "2"}
+
+
+def test_an_unchecked_send_with_no_answer_keeps_the_sdk_error(tmp_path):
+    error = _HttpStatusError(500)
+    client = MagicMock()
+    client.audio.transcriptions.create.side_effect = error
+
+    with pytest.raises(_HttpStatusError) as raised:
+        GroqWhisperSTTProvider._call_groq(
+            client, "whisper-large-v3-turbo", _wav(tmp_path), "uk", None
+        )
+
+    assert raised.value is error
+
+
+async def test_the_checked_flag_reaches_the_thread_the_sdk_call_runs_in(tmp_path):
+    from app.stt.base import SINGLE_ATTEMPT
+
+    seen: list[bool] = []
+
+    def spy(*args, **kwargs):
+        seen.append(SINGLE_ATTEMPT.get())
+        return ("ok", None, None)
+
+    provider = GroqWhisperSTTProvider(_settings())
+    token = SINGLE_ATTEMPT.set(True)
+    try:
+        with (
+            patch.object(GroqWhisperSTTProvider, "_get_client", return_value=MagicMock()),
+            patch.object(GroqWhisperSTTProvider, "_call_groq", side_effect=spy),
+        ):
+            await provider.transcribe(_wav(tmp_path), language="uk")
+    finally:
+        SINGLE_ATTEMPT.reset(token)
+
+    assert seen == [True]

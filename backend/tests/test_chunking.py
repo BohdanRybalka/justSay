@@ -57,6 +57,9 @@ class _Pacer:
     async def before_piece(self, index: int, total: int) -> None:
         self.events.append(("before", index, total))
 
+    async def before_send(self) -> None:
+        return None
+
     async def pause(self, seconds: float) -> None:
         self.events.append(("pause", seconds))
 
@@ -74,7 +77,7 @@ def _audio(tmp_path: Path, seconds: float, rate: int = 44100, channels: int = 2)
 async def _run(
     provider: _Provider,
     path: Path,
-    pacer: _Pacer | None = None,
+    pacer: _Pacer | chunking.UnpacedPieces | None = None,
     language: str = "auto",
     silent_pieces: frozenset[int] = frozenset(),
 ):
@@ -484,6 +487,74 @@ async def test_a_rate_limit_pauses_then_sends_the_same_piece_again(tmp_path):
     assert result.text == "after the pause"
     assert pacer.events == [("before", 0, 1), ("pause", 7.0), ("done", 1, 1)]
     assert provider.sent[0]["seconds"] == provider.sent[1]["seconds"]
+
+
+async def test_a_piece_waits_out_a_rate_limit_longer_than_a_short_dictation_allows(tmp_path):
+    path = _audio(tmp_path, 5.0)
+    provider = _Provider([_busy("20"), TranscriptionResult("after the pause")])
+    pacer = _Pacer()
+
+    result = await _run(provider, path, pacer)
+
+    assert result.text == "after the pause"
+    assert ("pause", 20.0) in pacer.events
+
+
+def _stays_on_until_the_check(passes: int):
+    checks: list[bool] = []
+
+    def stays_on() -> bool:
+        checks.append(True)
+        return len(checks) <= passes
+
+    return stays_on
+
+
+async def test_a_switch_during_a_rate_limit_wait_sends_nothing_after_it(tmp_path):
+    path = _audio(tmp_path, 5.0)
+    provider = _Provider([_busy("0.01"), TranscriptionResult("never sent")])
+
+    with pytest.raises(chunking.RouteStoppedError):
+        await _run(provider, path, chunking.UnpacedPieces(_stays_on_until_the_check(1)))
+
+    assert len(provider.sent) == 1
+
+
+async def test_a_switch_while_asking_again_stops_the_piece_instead_of_keeping_the_first(tmp_path):
+    path = _audio(tmp_path, 120.0, rate=16000, channels=1)
+    loop = TranscriptionResult(" ".join(["we go to the cave with the scorpions now"] * 40))
+    provider = _Provider([loop, TranscriptionResult("never sent")])
+
+    with pytest.raises(chunking.RouteStoppedError):
+        await _run(provider, path, chunking.UnpacedPieces(_stays_on_until_the_check(1)))
+
+    assert len(provider.sent) == 1
+
+
+async def test_a_switch_while_a_piece_is_prepared_stops_before_that_piece_is_sent(
+    tmp_path, short_pieces
+):
+    path = _audio(tmp_path, 70.0, rate=16000, channels=1)
+    provider = _Provider([TranscriptionResult("first"), TranscriptionResult("never sent")])
+    state = {"on": True}
+
+    def holds_no_speech(piece: Path) -> bool:
+        if piece.stem.endswith("piece1"):
+            state["on"] = False
+        return False
+
+    with pytest.raises(chunking.RouteStoppedError):
+        await transcribe_in_pieces(
+            provider,
+            path,
+            language="auto",
+            duration=None,
+            no_speech_threshold=THRESHOLD,
+            holds_no_speech=holds_no_speech,
+            pacer=chunking.UnpacedPieces(lambda: state["on"]),
+        )
+
+    assert len(provider.sent) == 1
 
 
 @pytest.mark.parametrize(

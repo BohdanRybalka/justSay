@@ -1,6 +1,6 @@
 """Cloud STT provider — Groq Whisper (whisper-large-v3-turbo).
 
-Cloud mode's only transcription engine: dictation whole, files and meetings in pieces.
+Cloud mode's only transcription engine: a dictation up to ten minutes whole, the rest in pieces.
 """
 
 import asyncio
@@ -10,6 +10,7 @@ from pathlib import Path
 from app.core.constants import GROQ_TIMEOUT_SECONDS, RATE_LIMIT_RETRY_SECONDS
 from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.stt.base import (
+    SINGLE_ATTEMPT,
     WHISPER_WINDOW_SECONDS,
     STTProvider,
     TranscriptionResult,
@@ -23,11 +24,23 @@ from app.stt.glossary import glossary_summary, whisper_glossary
 log = logging.getLogger(__name__)
 
 
+NO_ANSWER_RETRY_SECONDS = "2"
+
+
 def _retry_after(error: Exception) -> str:
     """The seconds Groq's ``retry-after`` header asks for, or the app's default without one."""
     response = getattr(error, "response", None)
     headers = getattr(response, "headers", None) or {}
     return str(headers.get("retry-after") or RATE_LIMIT_RETRY_SECONDS)
+
+
+def _no_answer(error: Exception) -> bool:
+    """Whether Groq gave no answer: a dropped connection, a timeout, or a server error."""
+    if getattr(error, "status_code", None) in (500, 502, 504):
+        return True
+    from groq import APIConnectionError
+
+    return isinstance(error, APIConnectionError)
 
 
 class GroqWhisperSTTProvider(STTProvider):
@@ -106,7 +119,10 @@ class GroqWhisperSTTProvider(STTProvider):
 
         Returns ``(text, detected_language_raw, no_speech_prob)``; only
         ``language == "auto"`` escalates ``response_format`` to ``"verbose_json"``.
+        Under ``SINGLE_ATTEMPT`` the SDK makes one request, and no answer is a paced refusal.
         """
+        if SINGLE_ATTEMPT.get():
+            client = client.with_options(max_retries=0)
         response_format = "verbose_json" if language == "auto" else "text"
         try:
             with audio_path.open("rb") as fh:
@@ -131,6 +147,11 @@ class GroqWhisperSTTProvider(STTProvider):
                 raise ResourceUnavailableError(
                     "Groq is overloaded right now. Try again later.",
                     headers={"Retry-After": _retry_after(e)},
+                ) from e
+            if SINGLE_ATTEMPT.get() and _no_answer(e):
+                raise ResourceUnavailableError(
+                    "Groq did not answer. Try again later.",
+                    headers={"Retry-After": NO_ANSWER_RETRY_SECONDS},
                 ) from e
             raise
 

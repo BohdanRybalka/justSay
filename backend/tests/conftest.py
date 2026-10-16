@@ -491,6 +491,18 @@ def _clear_dependency_overrides():
     app.dependency_overrides.clear()
 
 
+@pytest.fixture(autouse=True)
+def _job_queue_on_the_app(tmp_path):
+    """The lifespan gives the app its job queue; a test client never runs it, so each test gets
+    one here, and removes it again so a later lifespan starts from nothing."""
+    from app.pipeline.jobs import JobQueue
+
+    app.state.jobs = JobQueue(tmp_path / "jobs")
+    yield
+    if hasattr(app.state, "jobs"):
+        del app.state.jobs
+
+
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _IMPORT_PROBE_VIOLATION = 17
 _IMPORT_PROBE_TIMEOUT_SECONDS = 60
