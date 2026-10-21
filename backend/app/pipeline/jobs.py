@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
 import sqlite3
 import statistics
 import time
@@ -53,6 +54,7 @@ FINISHED_SHOWN_SECONDS = 60.0
 DICTATION_POLL_SECONDS = 0.05
 JOB_FILE_PREFIX = "job_"
 DICTATION_FILE_PREFIX = "dictation_"
+RECORDING_FILE_PREFIX = "rec_"
 DICTATION_NAME = re.compile(
     r"dictation_(?P<job>[0-9a-f]{32})_(?P<mode>cloud|local)_(?P<language>[A-Za-z-]{2,12})\.wav"
 )
@@ -218,9 +220,14 @@ def _recorded_name(label: str, recording: Path) -> str:
 def remove_leftover_files(temp_dir: Path) -> None:
     """Delete the scratch files of jobs that were running when the app last quit.
 
-    A dictation file that is not a kept recording is the scratch of a retry cut short.
+    A dictation file that is not a kept recording is the scratch of a retry cut short; a
+    ``rec_`` file is a recording whose copy was kept while an engine still held it open.
     """
-    for path in temp_dir.glob(f"{JOB_FILE_PREFIX}*"):
+    leftovers = (
+        *temp_dir.glob(f"{JOB_FILE_PREFIX}*"),
+        *temp_dir.glob(f"{RECORDING_FILE_PREFIX}*"),
+    )
+    for path in leftovers:
         discard_scratch_file(path)
     for path in temp_dir.glob(f"{DICTATION_FILE_PREFIX}*"):
         if DICTATION_NAME.fullmatch(path.name) is None:
@@ -295,8 +302,9 @@ class JobQueue:
     def keep_failed_dictation(self, audio: Path, *, language: str, mode: ProviderMode) -> None:
         """Keep the audio of a dictation that failed as a card that Try again can send once more.
 
-        The name carries the mode and language, so a restart sends it again the same way. Nothing
-        is kept when the audio is not on disk, since there is nothing to send.
+        The name carries the mode and language, so a restart sends it again the same way. An
+        engine still reading the audio blocks a move on Windows, so it is copied then. Nothing is
+        kept when the audio is not on disk, since there is nothing to send.
         """
         job_id = uuid.uuid4().hex
         name = f"{DICTATION_FILE_PREFIX}{job_id}_{mode.value}_{language}.wav"
@@ -306,9 +314,13 @@ class JobQueue:
         path = self._temp_dir / name
         try:
             self._temp_dir.mkdir(parents=True, exist_ok=True)
-            audio.replace(path)
+            try:
+                audio.replace(path)
+            except PermissionError:
+                shutil.copyfile(audio, path)
         except OSError:
             log.warning("Keeping the audio of a failed dictation failed", exc_info=True)
+            discard_scratch_file(path)
             return
         job = _Job(
             id=job_id,

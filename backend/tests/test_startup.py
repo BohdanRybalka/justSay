@@ -23,6 +23,7 @@ import app.stt
 from app.audio.dependencies import get_recorder
 from app.audio.meeting_spool import MeetingSpool
 from app.core.app_paths import resolve_app_data_root
+from app.core.types import ProviderMode
 from app.main import app as fastapi_app
 from app.pipeline.jobs import MEETING_INTERRUPTED_REASON
 from app.preferences import user_settings
@@ -341,13 +342,13 @@ def test_a_dictation_being_recorded_at_quit_waits_in_history_with_try_again(monk
     with monkeypatch.context() as quitting:
         quitting.setattr(app.audio.recorder, "MicrophoneRecorder", _RecordingAtQuit)
         with TestClient(fastapi_app):
-            pass
+            quitting.setattr(app.main.settings.stt, "mode", ProviderMode.LOCAL)
     [kept] = _kept_dictations()
 
     with TestClient(fastapi_app) as client:
         [job] = client.get("/jobs").json()
 
-    assert kept.name.endswith(f"_{app.main.settings.stt.mode.value}_auto.wav")
+    assert kept.name.endswith("_local_auto.wav")
     assert (job["kind"], job["stage"], job["error"]) == (
         "dictation",
         "failed",

@@ -67,12 +67,9 @@ async def dictate(
                 source="dictation",
             )
         return DictateResponse(**result.__dict__)
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, Exception) as failure:
         queue.keep_failed_dictation(audio_path, language=language, mode=mode)
-        raise
-    except Exception as failure:
-        queue.keep_failed_dictation(audio_path, language=language, mode=mode)
-        if isinstance(failure, JustSayError):
+        if isinstance(failure, asyncio.CancelledError | JustSayError):
             raise
         log.exception("Pipeline failure")
         raise HTTPException(

@@ -302,24 +302,30 @@ async def test_a_dictation_cut_off_by_shutdown_keeps_its_audio_for_try_again(
     recording = tmp_path / "rec.wav"
     recording.write_bytes(_wav_bytes())
 
-    with patch(
-        "app.pipeline.router.process_audio",
-        AsyncMock(side_effect=asyncio.CancelledError()),
-    ):
-        with pytest.raises(asyncio.CancelledError):
-            await pipeline_router.dictate(
-                background_tasks=BackgroundTasks(),
-                ref=None,
-                language="de",
-                recorder=_stopping_recorder(recording),
-                queue=jobs_queue,
-            )
+    engine_handles = []
+
+    async def _cut_off_while_the_engine_reads_the_file(audio_path, **_kwargs):
+        engine_handles.append(audio_path.open("rb"))
+        raise asyncio.CancelledError
+
+    try:
+        with patch("app.pipeline.router.process_audio", _cut_off_while_the_engine_reads_the_file):
+            with pytest.raises(asyncio.CancelledError):
+                await pipeline_router.dictate(
+                    background_tasks=BackgroundTasks(),
+                    ref=None,
+                    language="de",
+                    recorder=_stopping_recorder(recording),
+                    queue=jobs_queue,
+                )
+    finally:
+        for handle in engine_handles:
+            handle.close()
 
     [card] = jobs_queue.views()
     assert (card.kind, card.stage) == ("dictation", "failed")
     [kept] = (tmp_path / "scratch").glob("dictation_*_de.wav")
     assert kept.read_bytes() == _wav_bytes()
-    assert not recording.exists()
 
 
 def test_the_dictate_response_carries_every_processing_result_field() -> None:
