@@ -381,6 +381,8 @@ def teardown_probe(monkeypatch):
         return None
 
     class _FakeRecorder:
+        is_recording = False
+
         def __init__(self, audio_settings) -> None:
             pass
 

@@ -1,5 +1,6 @@
 """Pipeline endpoints — unified audio-to-text flows."""
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -66,6 +67,9 @@ async def dictate(
                 source="dictation",
             )
         return DictateResponse(**result.__dict__)
+    except asyncio.CancelledError:
+        queue.keep_failed_dictation(audio_path, language=language, mode=mode)
+        raise
     except Exception as failure:
         queue.keep_failed_dictation(audio_path, language=language, mode=mode)
         if isinstance(failure, JustSayError):

@@ -73,6 +73,24 @@ def _run_optional_step(
         return None
 
 
+async def _keep_the_dictation_being_recorded(app: FastAPI) -> None:
+    """Write a dictation still recording at shutdown to disk as a failed dictation to try again.
+
+    Its language is unknown, since the caller names it only when it stops, so it is detected.
+    """
+    recorder = app.state.recorder
+    if not recorder.is_recording:
+        return
+    try:
+        audio = await recorder.stop()
+        app.state.jobs.keep_failed_dictation(audio, language="auto", mode=settings.stt.mode)
+    except Exception:
+        log.warning(
+            "Backend shutdown: keeping the dictation being recorded failed -- it is lost",
+            exc_info=True,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from app.preferences.user_settings import (
@@ -154,6 +172,7 @@ async def lifespan(app: FastAPI):
             name="meeting-recovery",
         )
     yield
+    await _keep_the_dictation_being_recorded(app)
     log.info("Backend shutdown: draining background tasks")
     from app.stt.local_setup import peek_active_load
     try:
