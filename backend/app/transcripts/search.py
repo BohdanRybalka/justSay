@@ -361,8 +361,9 @@ def search_history(
 async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearchHit]:
     """Embed ``q`` and rank entries by vector distance over ``vec_entries``.
 
-    Empty or whitespace ``q`` returns ``[]`` without an embedding call; every
-    unready state raises ``SemanticSearchUnavailableError``. No ``<mark>`` spans.
+    Empty or whitespace ``q`` returns ``[]`` without an embedding call. An unready state found
+    before the query, no vector from the current embedder included, raises
+    ``SemanticSearchUnavailableError`` without sending ``q``. No ``<mark>`` spans.
     """
     from app.embeddings import resolve_embedding_provider
     from app.embeddings.config import embedding_settings
@@ -384,7 +385,9 @@ async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearch
 
     with history._lock:
         conn = history._ensure_conn_locked()
-        indexed = conn.execute("SELECT COUNT(*) FROM entry_embeddings").fetchone()[0]
+        indexed = conn.execute(
+            "SELECT COUNT(*) FROM entry_embeddings WHERE model = ?", (provider.model_name,)
+        ).fetchone()[0]
     if indexed == 0:
         raise vector_store.SemanticSearchUnavailableError(vector_store.NO_ENTRIES_EMBEDDED_DETAIL)
 

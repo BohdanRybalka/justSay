@@ -38,6 +38,8 @@ class LocalEmbeddingProvider:
     Requires: pip install justsay-backend[local-llm]
     """
 
+    is_local = True
+
     def __init__(self, ollama_host: str, model: str):
         self._host = ollama_host
         self._model = model

@@ -17,6 +17,7 @@ class TranscriptionResult:
 
 WHISPER_WINDOW_SECONDS = 30.0
 SINGLE_ATTEMPT: ContextVar[bool] = ContextVar("single_attempt", default=False)
+CLOUD_MODEL_NAME_PREFIXES = ("gemini/", "groq/")
 
 LOAD_FAILED_WITHOUT_A_MESSAGE = "The local engine failed to load and gave no reason."
 

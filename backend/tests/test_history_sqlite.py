@@ -783,10 +783,10 @@ async def test_search_degrades_to_200_fts_only_for_every_semantic_unavailable_st
         e1 = history.save_entry(text="already embedded", duration_ms=1)
         with history._lock:
             conn = history._ensure_conn_locked()
-            vector_store.ensure_vec_table_locked(conn, "cloud", "text-embedding-004", 3)
+            vector_store.ensure_vec_table_locked(conn, "cloud", "gemini/text-embedding-004", 3)
             rowid = conn.execute("SELECT rowid FROM entries WHERE id = ?", (e1.id,)).fetchone()[0]
             vector_store.insert_embedding(
-                conn, e1.id, rowid, [1.0, 0.0, 0.0], "cloud", "text-embedding-004"
+                conn, e1.id, rowid, [1.0, 0.0, 0.0], "cloud", "gemini/text-embedding-004"
             )
 
     with contextlib.ExitStack() as stack:
