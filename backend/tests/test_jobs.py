@@ -1081,15 +1081,17 @@ def test_a_kept_dictation_name_carries_a_safe_language(queue, tmp_path):
     assert kept.name.endswith("_cloud_auto.wav")
 
 
-def test_a_dictation_an_engine_still_reads_is_copied_when_it_cannot_be_moved(
-    queue, tmp_path, monkeypatch
-):
-    audio = _dictation_audio(tmp_path)
-
+@pytest.fixture
+def move_blocked_by_an_engine(monkeypatch):
     def _held_open(self, target):
         raise PermissionError("the file is in use by another process")
 
     monkeypatch.setattr(Path, "replace", _held_open)
+
+
+@pytest.mark.usefixtures("move_blocked_by_an_engine")
+def test_a_dictation_an_engine_still_reads_is_copied_when_it_cannot_be_moved(queue, tmp_path):
+    audio = _dictation_audio(tmp_path)
     _keep_failed_dictation(queue, audio)
 
     [card] = queue.views()
@@ -1099,19 +1101,16 @@ def test_a_dictation_an_engine_still_reads_is_copied_when_it_cannot_be_moved(
     assert audio.exists()
 
 
+@pytest.mark.usefixtures("move_blocked_by_an_engine")
 def test_a_copy_that_breaks_halfway_leaves_no_card_and_no_partial_file(
     queue, tmp_path, monkeypatch
 ):
     audio = _dictation_audio(tmp_path)
 
-    def _held_open(self, target):
-        raise PermissionError("the file is in use by another process")
-
     def _breaks_halfway(source, target):
         Path(target).write_bytes(b"RIFF")
         raise OSError("the disk is full")
 
-    monkeypatch.setattr(Path, "replace", _held_open)
     monkeypatch.setattr(jobs.shutil, "copyfile", _breaks_halfway)
     _keep_failed_dictation(queue, audio)
 
@@ -1119,13 +1118,19 @@ def test_a_copy_that_breaks_halfway_leaves_no_card_and_no_partial_file(
     assert _kept_dictations(queue) == []
 
 
-def test_a_restart_removes_a_recording_left_by_a_copy_that_could_not_be_moved(tmp_path):
-    (tmp_path / "rec_0123456789ab.wav").write_bytes(b"x")
-    (tmp_path / f"dictation_{FRESH_ID}_cloud_uk.wav").write_bytes(b"x")
+def test_a_restart_removes_a_recording_only_when_a_kept_dictation_holds_the_same_audio(tmp_path):
+    copied = tmp_path / "rec_0123456789ab.wav"
+    only_copy = tmp_path / "rec_ba9876543210.wav"
+    kept = tmp_path / f"dictation_{FRESH_ID}_cloud_uk.wav"
+    copied.write_bytes(b"RIFF copied")
+    kept.write_bytes(b"RIFF copied")
+    only_copy.write_bytes(b"RIFF only copy")
 
     remove_leftover_files(tmp_path)
 
-    assert [p.name for p in tmp_path.iterdir()] == [f"dictation_{FRESH_ID}_cloud_uk.wav"]
+    assert not copied.exists()
+    assert only_copy.exists()
+    assert kept.exists()
 
 
 def test_a_restart_clears_what_a_retry_cut_short_left_behind(queue, tmp_path):

@@ -19,12 +19,13 @@ from app.audio.config import audio_settings
 from app.audio.dependencies import get_recording_queue
 from app.audio.meeting_recorder import RECORDING_NAME
 from app.audio.recording_queue import RecordingQueue
+from app.core.scratch import RECORDING_FILE_PREFIX
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
-_SCRATCH_PREFIXES = ("rec_", "pipeline_")
+_SCRATCH_PREFIXES = (RECORDING_FILE_PREFIX, "pipeline_")
 
 
 class StorageInfo(BaseModel):

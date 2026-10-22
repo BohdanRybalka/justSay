@@ -11,6 +11,7 @@ with the app.
 from __future__ import annotations
 
 import asyncio
+import filecmp
 import logging
 import re
 import shutil
@@ -35,7 +36,7 @@ from app.core.errors import (
     NotReadyError,
     ResourceUnavailableError,
 )
-from app.core.scratch import discard_scratch_file
+from app.core.scratch import RECORDING_FILE_PREFIX, discard_scratch_file
 from app.core.types import ProviderMode
 from app.pipeline.chunking import RouteStoppedError
 from app.pipeline.service import process_audio
@@ -54,7 +55,6 @@ FINISHED_SHOWN_SECONDS = 60.0
 DICTATION_POLL_SECONDS = 0.05
 JOB_FILE_PREFIX = "job_"
 DICTATION_FILE_PREFIX = "dictation_"
-RECORDING_FILE_PREFIX = "rec_"
 DICTATION_NAME = re.compile(
     r"dictation_(?P<job>[0-9a-f]{32})_(?P<mode>cloud|local)_(?P<language>[A-Za-z-]{2,12})\.wav"
 )
@@ -220,18 +220,30 @@ def _recorded_name(label: str, recording: Path) -> str:
 def remove_leftover_files(temp_dir: Path) -> None:
     """Delete the scratch files of jobs that were running when the app last quit.
 
-    A dictation file that is not a kept recording is the scratch of a retry cut short; a
-    ``rec_`` file is a recording whose copy was kept while an engine still held it open.
+    A dictation file that is not a kept recording is the scratch of a retry cut short. A
+    ``rec_`` recording goes only when a kept dictation holds the same audio, since otherwise it
+    may be the only copy.
     """
-    leftovers = (
-        *temp_dir.glob(f"{JOB_FILE_PREFIX}*"),
-        *temp_dir.glob(f"{RECORDING_FILE_PREFIX}*"),
-    )
-    for path in leftovers:
+    for path in temp_dir.glob(f"{JOB_FILE_PREFIX}*"):
         discard_scratch_file(path)
+    kept = [
+        path
+        for path in temp_dir.glob(f"{DICTATION_FILE_PREFIX}*.wav")
+        if DICTATION_NAME.fullmatch(path.name) is not None
+    ]
+    for path in temp_dir.glob(f"{RECORDING_FILE_PREFIX}*"):
+        if any(_same_audio(path, twin) for twin in kept):
+            discard_scratch_file(path)
     for path in temp_dir.glob(f"{DICTATION_FILE_PREFIX}*"):
         if DICTATION_NAME.fullmatch(path.name) is None:
             discard_scratch_file(path)
+
+
+def _same_audio(first: Path, second: Path) -> bool:
+    try:
+        return filecmp.cmp(first, second, shallow=False)
+    except OSError:
+        return False
 
 
 def leftover_dictations(temp_dir: Path) -> list[Path]:
