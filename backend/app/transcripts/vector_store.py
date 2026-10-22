@@ -13,14 +13,19 @@ import asyncio
 import logging
 import sqlite3
 import time
+from typing import TYPE_CHECKING
 
 import sqlite_vec
 from pydantic import BaseModel
 
 from app.core.errors import ResourceUnavailableError
 from app.core.types import ProviderMode
+from app.stt.base import CLOUD_MODEL_NAME_PREFIXES
 from app.stt.config import stt_settings
 from app.transcripts import history
+
+if TYPE_CHECKING:
+    from app.embeddings import EmbeddingProvider
 
 log = logging.getLogger(__name__)
 
@@ -158,26 +163,69 @@ def query_similar(
     ).fetchall()
 
 
+_UNEMBEDDED = "id NOT IN (SELECT entry_id FROM entry_embeddings)"
+
+
+def _readable_by(is_local_embedder: bool) -> tuple[str, tuple[object, ...]]:
+    """The ``entries`` condition naming what an embedder may read, and its parameters.
+
+    A local embedder reads every entry. A cloud one reads only text a cloud engine transcribed,
+    and no meeting or file whose own route is now this computer; an unlabelled entry stays here.
+    """
+    if is_local_embedder:
+        return "1", ()
+    prefixes = ", ".join("?" * len(CLOUD_MODEL_NAME_PREFIXES))
+    return (
+        f"substr(model_name, 1, instr(model_name, '/')) IN ({prefixes}) "
+        "AND NOT (source = 'meeting' AND ?) AND NOT (source = 'file' AND ?)",
+        (
+            *CLOUD_MODEL_NAME_PREFIXES,
+            stt_settings.meetings_mode == ProviderMode.LOCAL,
+            stt_settings.files_mode == ProviderMode.LOCAL,
+        ),
+    )
+
+
+def _embedder_id(provider: EmbeddingProvider) -> str:
+    return (ProviderMode.LOCAL if provider.is_local else ProviderMode.CLOUD).value
+
+
+async def _resolve_embedder() -> EmbeddingProvider | None:
+    """The embedding provider the settings choose now, or ``None`` when disabled."""
+    from app.embeddings import resolve_embedding_provider
+    from app.embeddings.config import embedding_settings
+
+    provider, _reason = await resolve_embedding_provider(stt_settings, embedding_settings)
+    return provider
+
+
 async def embed_entry_background(entry_id: str, text: str) -> None:
     """``BackgroundTasks`` entrypoint — runs after the response is sent.
 
-    Best-effort by contract and never raises: embeddings disabled returns at
-    ``debug``, and every other failure is caught and logged at ``warning``.
+    Best-effort by contract and never raises: embeddings disabled, or an entry the resolved
+    embedder may not read, returns at ``debug``; every other failure is logged at ``warning``.
     """
     if not history._vec_available:
         log.debug("sqlite-vec unavailable — skipping background embed for %s", entry_id)
         return
 
     try:
-        from app.embeddings import resolve_embedding_provider
-        from app.embeddings.config import embedding_settings
-
-        provider, _reason = await resolve_embedding_provider(stt_settings, embedding_settings)
+        provider = await _resolve_embedder()
         if provider is None:
             log.debug("Embeddings disabled — skipping background embed for %s", entry_id)
             return
 
-        provider_id = stt_settings.mode.value
+        readable, params = _readable_by(provider.is_local)
+        with history._lock:
+            conn = history._ensure_conn_locked()
+            allowed = conn.execute(
+                f"SELECT 1 FROM entries WHERE id = ? AND {readable}", (entry_id, *params)
+            ).fetchone()
+        if allowed is None:
+            log.debug("Entry %s is not for this embedder — skipping background embed", entry_id)
+            return
+
+        provider_id = _embedder_id(provider)
         vector = await provider.embed(text)
         with history._lock:
             conn = history._ensure_conn_locked()
@@ -190,63 +238,46 @@ async def embed_entry_background(entry_id: str, text: str) -> None:
         log.warning("Background embedding failed for entry %s", entry_id, exc_info=True)
 
 
-_UNEMBEDDED = (
-    "id NOT IN (SELECT entry_id FROM entry_embeddings) "
-    "AND NOT (source = 'meeting' AND ?) AND NOT (source = 'file' AND ?)"
-)
-
-
-def _stay_here() -> tuple[bool, bool]:
-    """Whether meetings, then files (the order ``_UNEMBEDDED`` binds), are now chosen to be
-    transcribed on this computer while the embedder is the cloud; such entries are held back."""
-    cloud_embedder = stt_settings.mode == ProviderMode.CLOUD
-    return (
-        cloud_embedder and stt_settings.meetings_mode == ProviderMode.LOCAL,
-        cloud_embedder and stt_settings.files_mode == ProviderMode.LOCAL,
-    )
-
-
 async def backfill_batch(batch_size: int) -> BackfillResult:
-    """Embed up to ``batch_size`` (clamped to ``[1, BACKFILL_BATCH_MAX]``)
-    not-yet-embedded entries, oldest first. Resumable: "already has an
-    ``entry_embeddings`` row" IS the resume cursor — no separate progress
-    table.
+    """Embed up to ``batch_size`` (clamped to ``[1, BACKFILL_BATCH_MAX]``) not-yet-embedded
+    entries the resolved embedder may read, oldest first. ``remaining`` counts those it, or
+    with none resolved the one the settings choose, may still read. Resumable: an
+    ``entry_embeddings`` row IS the resume cursor.
     """
     clamped = max(1, min(int(batch_size), BACKFILL_BATCH_MAX))
-
-    with history._lock:
-        conn = history._ensure_conn_locked()
-        rows = conn.execute(
-            f"SELECT rowid, id, cleaned_text FROM entries WHERE {_UNEMBEDDED} "
-            "ORDER BY ts ASC LIMIT ?",
-            (*_stay_here(), clamped),
-        ).fetchall()
+    provider = await _resolve_embedder() if history._vec_available else None
+    is_local_embedder = (
+        provider.is_local if provider is not None else stt_settings.mode == ProviderMode.LOCAL
+    )
+    readable, params = _readable_by(is_local_embedder)
 
     processed = 0
-    if rows and history._vec_available:
-        from app.embeddings import resolve_embedding_provider
-        from app.embeddings.config import embedding_settings
-
-        provider, _reason = await resolve_embedding_provider(stt_settings, embedding_settings)
-        if provider is not None:
-            provider_id = stt_settings.mode.value
-            for row in rows:
-                try:
-                    vector = await provider.embed(row["cleaned_text"])
-                    with history._lock:
-                        conn = history._ensure_conn_locked()
-                        ensure_vec_table_locked(conn, provider_id, provider.model_name, len(vector))
-                        insert_embedding(
-                            conn, row["id"], row["rowid"], vector, provider_id, provider.model_name
-                        )
-                    processed += 1
-                except Exception:
-                    log.warning("Backfill embed failed for entry %s", row["id"], exc_info=True)
+    if provider is not None:
+        with history._lock:
+            conn = history._ensure_conn_locked()
+            rows = conn.execute(
+                f"SELECT rowid, id, cleaned_text FROM entries WHERE {_UNEMBEDDED} AND {readable} "
+                "ORDER BY ts ASC LIMIT ?",
+                (*params, clamped),
+            ).fetchall()
+        provider_id = _embedder_id(provider)
+        for row in rows:
+            try:
+                vector = await provider.embed(row["cleaned_text"])
+                with history._lock:
+                    conn = history._ensure_conn_locked()
+                    ensure_vec_table_locked(conn, provider_id, provider.model_name, len(vector))
+                    insert_embedding(
+                        conn, row["id"], row["rowid"], vector, provider_id, provider.model_name
+                    )
+                processed += 1
+            except Exception:
+                log.warning("Backfill embed failed for entry %s", row["id"], exc_info=True)
 
     with history._lock:
         conn = history._ensure_conn_locked()
         remaining = conn.execute(
-            f"SELECT COUNT(*) FROM entries WHERE {_UNEMBEDDED}", _stay_here()
+            f"SELECT COUNT(*) FROM entries WHERE {_UNEMBEDDED} AND {readable}", params
         ).fetchone()[0]
 
     return BackfillResult(processed=processed, remaining=remaining)

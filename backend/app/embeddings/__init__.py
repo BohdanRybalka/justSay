@@ -31,6 +31,7 @@ __all__ = [
 
 class EmbeddingProvider(Protocol):
     model_name: str
+    is_local: bool
 
     async def embed(self, text: str) -> list[float]: ...
 

@@ -21,6 +21,8 @@ class CloudEmbeddingProvider:
     Requires: pip install justsay-backend[cloud]
     """
 
+    is_local = False
+
     def __init__(self, gemini_api_key: str, model: str):
         self._api_key = gemini_api_key
         self._model = model

@@ -421,6 +421,33 @@ async def test_the_only_embed_call_is_the_resolved_providers_own():
 
 
 @pytest.mark.asyncio
+async def test_vectors_another_embedder_wrote_answer_nothing_and_send_no_query():
+    """A switch to Cloud leaves the local vectors in place until a cloud entry is embedded,
+    and none may ever be; they are another model's space, and the query stays unsent."""
+    entry = history.save_entry(text="dictated here", duration_ms=1)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        vector_store.ensure_vec_table_locked(conn, "local", "ollama/nomic-embed-text", 3)
+        rowid = conn.execute("SELECT rowid FROM entries WHERE id = ?", (entry.id,)).fetchone()[0]
+        vector_store.insert_embedding(
+            conn, entry.id, rowid, [1.0, 0.0, 0.0], "local", "ollama/nomic-embed-text"
+        )
+    cloud_provider = AsyncMock()
+    cloud_provider.model_name = "gemini/gemini-embedding-001"
+    cloud_provider.embed = AsyncMock(return_value=[1.0, 0.0, 0.0])
+
+    with patch(
+        "app.embeddings.resolve_embedding_provider",
+        new=AsyncMock(return_value=(cloud_provider, None)),
+    ):
+        with pytest.raises(vector_store.SemanticSearchUnavailableError) as excinfo:
+            await search.search_history_semantic("anything", limit=10)
+
+    assert excinfo.value.message == vector_store.NO_ENTRIES_EMBEDDED_DETAIL
+    assert cloud_provider.embed.await_count == 0
+
+
+@pytest.mark.asyncio
 async def test_local_dictation_mode_gets_rows_rather_than_a_refusal():
     """Spec 169 AC: a Local-mode install used to be refused with the mixed-mode
     reason on every semantic search, because the other half of the eligibility
