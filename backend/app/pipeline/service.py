@@ -20,6 +20,7 @@ from app.core.types import ProviderMode
 from app.pipeline.chunking import (
     SHORT_MAX_PAUSE_SECONDS,
     SHORT_MAX_PAUSES,
+    FinishedPieces,
     PiecePacer,
     RouteStoppedError,
     UnpacedPieces,
@@ -103,12 +104,14 @@ async def process_audio(
     source_name: str | None = None,
     observer: PipelineObserver | None = None,
     mode: ProviderMode | None = None,
+    finished: FinishedPieces | None = None,
 ) -> ProcessingResult:
     """Full pipeline on ``mode``'s provider, else the user's mode: transcribe, clean up, save.
 
     ``background_tasks`` schedules embedding generation after the response is sent. ``source``
     and ``source_name`` say where the history entry came from. Audio with an ``observer``, or
-    longer than ``LONG_DICTATION_SECONDS``, goes in pieces.
+    longer than ``LONG_DICTATION_SECONDS``, goes in pieces; those ``finished`` already holds are
+    not sent again (not for a two-channel meeting).
     """
     start = time.perf_counter()
 
@@ -182,6 +185,7 @@ async def process_audio(
                 no_speech_threshold=stt_settings.no_speech_prob_threshold,
                 holds_no_speech=_holds_no_speech,
                 pacer=pacer,
+                finished=finished,
             )
     except RouteStoppedError:
         log.info("Stopped %s: the route was switched off mid-run", stt.model_name)

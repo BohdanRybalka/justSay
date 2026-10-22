@@ -238,12 +238,12 @@ describe("createJobCards", () => {
     expect(retry.hidden).toBe(true);
   });
 
-  it("offers no Try again on a failed file, whose audio is already gone", async () => {
+  it("offers a failed file Try again, since its copy is kept", async () => {
     apiMock.jobs.mockResolvedValue([job({ stage: "failed", progress: null, error: "Add an API key in Settings" })]);
     const cards = createJobCards(show, entrySaved, entryShown);
     await cards.refresh();
 
-    expect(shown[0].querySelector<HTMLButtonElement>('[data-action="retry"]')!.hidden).toBe(true);
+    expect(shown[0].querySelector<HTMLButtonElement>('[data-action="retry"]')!.hidden).toBe(false);
   });
 
   it("offers a failed dictation Try again under a mic, and says Delete for the audio it keeps", async () => {

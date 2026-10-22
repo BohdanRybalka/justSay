@@ -463,7 +463,7 @@ async def test_a_failed_job_says_why_in_plain_words(queue, outcome, reason, fake
 
     view = _view(queue, job_id)
     assert (view.stage, view.error) == ("failed", reason)
-    assert not pipeline.calls[0]["path"].exists()
+    assert pipeline.calls[0]["path"].exists()
 
 
 async def test_a_job_holds_its_audio_back_while_a_dictation_is_processed(queue, gate, fakes):
@@ -643,6 +643,25 @@ async def test_a_meeting_keeps_its_own_engine_and_language_beside_a_files_choice
     assert (call["source"], call["mode"], call["language"]) == ("meeting", ProviderMode.CLOUD, "pl")
 
 
+async def test_a_file_made_in_local_is_never_tried_again_in_the_cloud(
+    queue, fakes, monkeypatch
+):
+    monkeypatch.setattr(settings.stt, "files_mode", ProviderMode.LOCAL)
+    failing = _FakePipeline(outcome="unsaved")
+    job_id = _start(queue, fakes, failing)
+    failing.release.set()
+    await _settle(queue, job_id)
+    working = _FakePipeline()
+    fakes[next(name for name, fake in fakes.items() if fake is failing)] = working
+    monkeypatch.setattr(settings.stt, "files_mode", ProviderMode.CLOUD)
+
+    queue.retry(job_id)
+    working.release.set()
+    await _settle(queue, job_id)
+
+    assert working.calls[0]["mode"] == ProviderMode.LOCAL
+
+
 @pytest.mark.parametrize("engine", [ProviderMode.LOCAL, ProviderMode.CLOUD])
 async def test_a_stopped_meeting_becomes_a_meeting_entry_on_the_meetings_engine(
     queue, fakes, tmp_path, monkeypatch, engine
@@ -709,15 +728,16 @@ async def test_a_silent_meeting_says_so_and_keeps_its_recording(queue, fakes, tm
     assert recording.exists()
 
 
-async def test_only_a_failed_meeting_can_be_tried_again(queue, fakes, tmp_path):
+async def test_only_a_failed_job_can_be_tried_again(queue, fakes, tmp_path):
     assert queue.retry("nope") is False
 
-    failed_file = _FakePipeline(outcome="unsaved")
-    file_id = _start(queue, fakes, failed_file)
-    failed_file.release.set()
-    await _settle(queue, file_id)
+    running_file = _FakePipeline()
+    file_id = _start(queue, fakes, running_file)
+    await asyncio.wait_for(running_file.transcribing.wait(), 1)
     with pytest.raises(NotReadyError):
         queue.retry(file_id)
+    running_file.release.set()
+    await _settle(queue, file_id)
 
     running = _FakePipeline()
     meeting_id = queue.add_meeting(_recording(tmp_path, fakes, running))
@@ -726,6 +746,37 @@ async def test_only_a_failed_meeting_can_be_tried_again(queue, fakes, tmp_path):
         queue.retry(meeting_id)
     running.release.set()
     await _settle(queue, meeting_id)
+
+
+async def test_a_failed_file_keeps_its_copy_and_a_retry_continues_after_its_finished_pieces(
+    queue, fakes
+):
+    failing = _FakePipeline(outcome="unsaved")
+    job_id = _start(queue, fakes, failing)
+    failing.release.set()
+    await _settle(queue, job_id)
+    copy = failing.calls[0]["path"]
+    assert copy.exists()
+
+    working = _FakePipeline()
+    fakes[next(name for name, fake in fakes.items() if fake is failing)] = working
+    assert queue.retry(job_id) is True
+    working.release.set()
+    await _settle(queue, job_id)
+
+    assert working.calls[0]["finished"] is failing.calls[0]["finished"]
+    assert (_view(queue, job_id).stage, copy.exists()) == ("done", False)
+
+
+async def test_dismissing_a_failed_file_deletes_its_copy(queue, fakes):
+    failing = _FakePipeline(outcome="unsaved")
+    job_id = _start(queue, fakes, failing)
+    failing.release.set()
+    await _settle(queue, job_id)
+
+    assert queue.cancel_or_dismiss(job_id) == "dismissed"
+
+    assert not failing.calls[0]["path"].exists()
 
 
 async def test_removing_a_meeting_card_deletes_its_recording(queue, fakes, tmp_path):
@@ -1183,11 +1234,14 @@ async def test_a_retry_stopped_by_a_switch_fails_keeping_its_audio_without_a_ref
     assert not [record for record in caplog.records if "was refused" in record.getMessage()]
 
 
-async def test_retry_answers_404_for_an_unknown_job_and_409_for_a_file(client, queue, fakes):
+async def test_retry_answers_404_for_an_unknown_job_and_409_for_one_not_failed(
+    client, queue, fakes
+):
     assert (await client.post("/jobs/nope/retry")).status_code == 404
 
-    pipeline = _FakePipeline(outcome="unsaved")
+    pipeline = _FakePipeline()
     job_id = _start(queue, fakes, pipeline)
+    await asyncio.wait_for(pipeline.transcribing.wait(), 1)
+    assert (await client.post(f"/jobs/{job_id}/retry")).status_code == 409
     pipeline.release.set()
     await _settle(queue, job_id)
-    assert (await client.post(f"/jobs/{job_id}/retry")).status_code == 409

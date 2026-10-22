@@ -1075,7 +1075,7 @@ export const api = {
   /** Running jobs, failed ones until dismissed, and those finished in the last minute, newest first. */
   jobs: () => request<TranscriptionJob[]>("GET", "/jobs", undefined, REREADABLE),
 
-  /** Queues a failed meeting again; its recording was kept for this. */
+  /** Queues a failed job again; its audio was kept for this. */
   retryJob: (id: string) =>
     request<{ id: string }>("POST", `/jobs/${encodeURIComponent(id)}/retry`, undefined, UNRECONCILED),
 

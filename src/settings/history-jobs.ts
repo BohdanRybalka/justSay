@@ -12,7 +12,7 @@ const KIND_ICONS: Record<TranscriptionJob["kind"], IconName> = {
 
 const RUNNING: ReadonlySet<TranscriptionJob["stage"]> = new Set(["queued", "transcribing", "saving"]);
 
-/** What the card's × says it does: a meeting's or dictation's recording goes with its card, a file's copy is already gone. */
+/** What the card's × says it does: a meeting's or dictation's recording is deleted with its card, a file is cancelled or dismissed. */
 export function removeLabel(job: TranscriptionJob): string {
   if (job.kind !== "file") return "Delete this recording";
   return job.stage === "failed" ? "Dismiss" : "Cancel";
@@ -41,7 +41,7 @@ export interface JobCards {
 
 /**
  * The cards of files, meetings and dictations being transcribed. `show` receives them newest first
- * whenever the set changes. A failed meeting or dictation offers Try again. A finished job's card
+ * whenever the set changes. A failed job offers Try again. A finished job's card
  * stays, asking `entrySaved` to paint its row, until
  * `entryShown` says the row is painted, so the card turns into the entry where it stood. A job this
  * page removed is never painted again; a failed read is tried again a second later.
@@ -101,8 +101,7 @@ export function createJobCards(
   function paint(card: HTMLElement, job: TranscriptionJob): void {
     card.classList.toggle("entry--job-failed", job.stage === "failed");
     card.querySelector(".entry-job-status")!.textContent = jobStatusText(job);
-    card.querySelector<HTMLElement>('[data-action="retry"]')!.hidden =
-      job.kind === "file" || job.stage !== "failed";
+    card.querySelector<HTMLElement>('[data-action="retry"]')!.hidden = job.stage !== "failed";
     card.querySelector<HTMLElement>('[data-action="remove"]')!.hidden =
       job.kind === "dictation" && job.stage === "transcribing";
     card.querySelector('[data-action="remove"]')!.setAttribute("aria-label", removeLabel(job));
