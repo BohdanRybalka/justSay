@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from app.core.errors import JustSayError
 from app.core.types import ProviderMode
-from app.preferences.user_settings import update_user_settings
+from app.preferences.user_settings import get_user_settings, sync_to_runtime, update_user_settings
 from app.stt import model_download
 from app.stt.config import stt_settings
 from app.stt.local_factory import LocalProviderKind, get_local_provider_kind
@@ -36,9 +36,8 @@ class _ModeBody(BaseModel):
 
 @router.put("/mode")
 async def set_stt_mode(body: _ModeBody):
-    stt_settings.mode = body.mode
-    clear_cache()
     update_user_settings({"stt_mode": body.mode.value})
+    sync_to_runtime(get_user_settings())
     provider = get_provider(stt_settings.mode, stt_settings)
     from app.stt.local_setup import maybe_prewarm_local
 

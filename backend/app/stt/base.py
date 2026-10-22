@@ -131,3 +131,7 @@ class STTProvider(ABC):
 
         Called on mode switch and app shutdown. Default: no-op.
         """
+
+    def release_when_idle(self) -> None:
+        """Release resources once no transcription runs on this provider; default: now."""
+        self.cleanup()

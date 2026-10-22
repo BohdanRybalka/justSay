@@ -98,6 +98,29 @@ def is_local_provider(provider: STTProvider) -> bool:
     return provider.is_local
 
 
+def drop_cloud_provider() -> None:
+    """Drop the Groq provider, so the next request builds its client from the key set now.
+
+    A request already running keeps the client it was given.
+    """
+    from app.stt.groq_whisper import GroqWhisperSTTProvider
+
+    with _cache_lock:
+        provider = _providers.pop(GroqWhisperSTTProvider, None)
+    if provider is not None:
+        provider.cleanup()
+
+
+def release_local_if_unused(stt_settings: STTSettings) -> None:
+    """Free the local engine once no route uses it, after the transcriptions running on it end."""
+    routes = (stt_settings.mode, stt_settings.meetings_mode, stt_settings.files_mode)
+    if ProviderMode.LOCAL in routes:
+        return
+    provider = peek_local_provider()
+    if provider is not None:
+        provider.release_when_idle()
+
+
 def clear_cache() -> None:
     """Cleanup and invalidate every cached provider. Call on config change / shutdown."""
     with _cache_lock:

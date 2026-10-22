@@ -5,6 +5,7 @@ spawned and no real network call is made. `resolve_binary_path`/
 `resolve_model_path` are monkeypatched per-test to point at `tmp_path`.
 """
 
+import asyncio
 import ctypes
 import subprocess
 import sys
@@ -704,7 +705,7 @@ def _wait_until(predicate, timeout: float = 2.0, interval: float = 0.01) -> bool
 def test_cleanup_returns_promptly_without_deadlock_when_load_lock_held():
     """Mirrors `LocalSTTProvider`'s established
     non-blocking-lock-guard test: `cleanup()` is reachable synchronously from
-    `PUT /stt/mode`'s `clear_cache()` on the FastAPI event-loop thread, so it
+    `POST /stt/local/unload`'s `clear_cache()` on the FastAPI event-loop thread, so it
     must never block on `_load_lock` for the duration of an in-flight load.
     """
     provider = WhisperCppServerSTTProvider(STTSettings())
@@ -1614,3 +1615,111 @@ async def test_transcribe_log_redacts_glossary_content(monkeypatch, tmp_path, ca
     assert captured["data"]["prompt"] == secret
     assert secret not in full_log
     assert f"{len(secret)}chars" in full_log
+
+
+def _install_fake_popen_per_spawn(monkeypatch):
+    spawned: list[_FakeProcess] = []
+
+    def _fake_popen(argv, **kwargs):
+        spawned.append(_FakeProcess())
+        return spawned[-1]
+
+    monkeypatch.setattr(local_whisper_cpp_module.subprocess, "Popen", _fake_popen)
+    return spawned
+
+
+def _hold_post_until(finish: threading.Event, started: threading.Event):
+    def _post(url, data, files):
+        started.set()
+        finish.wait(timeout=5)
+        return _FakeResponse(200, {"text": "hello"})
+
+    return _post
+
+
+@pytest.mark.asyncio
+async def test_a_changed_model_waits_for_the_running_request_before_the_server_restarts(
+    monkeypatch, tmp_path
+):
+    provider, _model_path = _make_provider(tmp_path, monkeypatch)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+    in_request, finish_request = threading.Event(), threading.Event()
+    _install_fake_httpx(monkeypatch, post_impl=_hold_post_until(finish_request, in_request))
+    spawned = _install_fake_popen_per_spawn(monkeypatch)
+
+    running = asyncio.ensure_future(provider.transcribe(audio_path, language="uk"))
+    assert await asyncio.to_thread(in_request.wait, 2)
+    provider._settings.whisper_model_size = "small"
+    restarted = threading.Event()
+
+    def _reload():
+        provider._get_model()
+        restarted.set()
+
+    reloading = threading.Thread(target=_reload)
+    reloading.start()
+
+    assert not restarted.wait(0.3)
+    assert spawned[0].terminate_calls == 0
+    assert provider.is_loaded is False
+
+    finish_request.set()
+    assert (await running).text == "hello"
+    assert restarted.wait(3)
+    reloading.join(3)
+
+    assert len(spawned) == 2
+    assert _wait_until(lambda: spawned[0].terminate_calls == 1)
+    assert spawned[1].terminate_calls == 0
+    assert provider.is_loaded is True
+
+
+@pytest.mark.asyncio
+async def test_a_changed_glossary_reaches_the_next_request_without_restarting_the_server(
+    monkeypatch, tmp_path
+):
+    provider, _model_path = _make_provider(tmp_path, monkeypatch)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+    sent_prompts = []
+
+    def _post(url, data, files):
+        sent_prompts.append(data["prompt"])
+        return _FakeResponse(200, {"text": "hello"})
+
+    _install_fake_httpx(monkeypatch, post_impl=_post)
+    spawned = _install_fake_popen_per_spawn(monkeypatch)
+
+    await provider.transcribe(audio_path, language="uk")
+    provider._settings.initial_prompt = "Tauri"
+    await provider.transcribe(audio_path, language="uk")
+
+    assert len(spawned) == 1
+    assert spawned[0].terminate_calls == 0
+    assert sent_prompts == ["", "Tauri"]
+
+
+@pytest.mark.asyncio
+async def test_a_release_waits_for_the_running_request_then_stops_the_server(
+    monkeypatch, tmp_path
+):
+    provider, _model_path = _make_provider(tmp_path, monkeypatch)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+    in_request, finish_request = threading.Event(), threading.Event()
+    _install_fake_httpx(monkeypatch, post_impl=_hold_post_until(finish_request, in_request))
+    spawned = _install_fake_popen_per_spawn(monkeypatch)
+
+    running = asyncio.ensure_future(provider.transcribe(audio_path, language="uk"))
+    assert await asyncio.to_thread(in_request.wait, 2)
+
+    provider.release_when_idle()
+    assert spawned[0].terminate_calls == 0
+    assert provider.is_loaded is True
+
+    finish_request.set()
+    assert (await running).text == "hello"
+
+    assert provider.is_loaded is False
+    assert _wait_until(lambda: spawned[0].terminate_calls == 1)
