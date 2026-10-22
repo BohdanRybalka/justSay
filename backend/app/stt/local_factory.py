@@ -83,7 +83,12 @@ def get_local_provider_kind(vendor: "GpuVendor | None" = None) -> LocalProviderK
     return LocalProviderKind.FASTER_WHISPER
 
 
-LOCAL_STATUS_CONTRACT: tuple[str, ...] = ("_get_model", "is_loaded", "last_load_error")
+LOCAL_STATUS_CONTRACT: tuple[str, ...] = (
+    "_get_model",
+    "is_loaded",
+    "last_load_error",
+    "release_when_idle",
+)
 
 
 def get_local_provider_class() -> type[STTProvider]:

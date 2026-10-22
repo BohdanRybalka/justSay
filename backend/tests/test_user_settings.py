@@ -147,7 +147,7 @@ def test_update_output_dir_triggers_history_relocate(tmp_path, monkeypatch):
 
 
 
-def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
+def test_sync_to_runtime_releases_the_local_engine_only_on_a_mode_change(monkeypatch):
     from app.config import settings as runtime_settings
     from app.core.types import ProviderMode
 
@@ -160,7 +160,7 @@ def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
 
     cleared: list[str] = []
     monkeypatch.setattr(
-        "app.stt.routing.clear_cache", lambda: cleared.append("stt")
+        "app.stt.routing.release_local_if_unused", lambda settings: cleared.append("stt")
     )
     monkeypatch.setattr(
         "app.embeddings.clear_cache", lambda: cleared.append("emb")
@@ -178,8 +178,8 @@ def test_sync_to_runtime_clears_stt_cache_only_on_change(monkeypatch):
 def test_sync_to_runtime_ollama_host_change_invalidates_embeddings_cache(monkeypatch):
     """Changing the Ollama host alone must invalidate the embeddings provider
     cache — a different host is a different Ollama, so a provider pinned to the
-    old one must not survive. STT is untouched, so the STT cache must NOT be
-    cleared."""
+    old one must not survive. STT is untouched, so the local engine must NOT be
+    released."""
     from app.config import settings as runtime_settings
     from app.core.types import ProviderMode
 
@@ -193,7 +193,7 @@ def test_sync_to_runtime_ollama_host_change_invalidates_embeddings_cache(monkeyp
 
     cleared: list[str] = []
     monkeypatch.setattr(
-        "app.stt.routing.clear_cache", lambda: cleared.append("stt")
+        "app.stt.routing.release_local_if_unused", lambda settings: cleared.append("stt")
     )
     monkeypatch.setattr(
         "app.embeddings.clear_cache", lambda: cleared.append("emb")
@@ -205,10 +205,9 @@ def test_sync_to_runtime_ollama_host_change_invalidates_embeddings_cache(monkeyp
     assert runtime_settings.embeddings.ollama_host == "http://10.0.0.5:11434"
 
 
-def test_sync_to_runtime_propagates_initial_prompt_and_invalidates_cache(monkeypatch):
-    """Changing the glossary mid-session must drop cached providers so the next
-    transcribe call picks up the new value (cached providers freeze settings
-    at construction time)."""
+def test_sync_to_runtime_propagates_initial_prompt_and_touches_no_engine(monkeypatch):
+    """Every provider reads the glossary from the shared runtime settings on each
+    request, so a changed glossary needs no engine restart and no cache clear."""
     from app.config import settings as runtime_settings
     from app.core.types import ProviderMode
 
@@ -222,17 +221,42 @@ def test_sync_to_runtime_propagates_initial_prompt_and_invalidates_cache(monkeyp
 
     cleared: list[str] = []
     monkeypatch.setattr(
-        "app.stt.routing.clear_cache", lambda: cleared.append("stt")
+        "app.stt.routing.release_local_if_unused", lambda settings: cleared.append("stt")
     )
     monkeypatch.setattr(
         "app.embeddings.clear_cache", lambda: cleared.append("emb")
     )
 
     us = user_settings.UserSettings(initial_prompt="Tauri Pydantic")
-    user_settings.sync_to_runtime(us)
+    assert user_settings.sync_to_runtime(us) is False
 
     assert runtime_settings.stt.initial_prompt == "Tauri Pydantic"
-    assert cleared == ["stt", "emb"]
+    assert cleared == []
+
+
+def test_sync_to_runtime_reports_a_model_or_device_change_and_leaves_the_engine_to_notice(
+    monkeypatch,
+):
+    """The engine compares what it loaded with the settings and restarts itself once idle, so
+    sync only reports the change (it gates the pre-warm) and releases nothing."""
+    from app.config import settings as runtime_settings
+    from app.core.types import ProviderMode
+
+    runtime_settings.stt.mode = ProviderMode.CLOUD
+    runtime_settings.stt.whisper_model_size = "large-v3-turbo"
+    runtime_settings.stt.whisper_device = "auto"
+    cleared: list[str] = []
+    monkeypatch.setattr(
+        "app.stt.routing.release_local_if_unused", lambda settings: cleared.append("stt")
+    )
+    monkeypatch.setattr("app.embeddings.clear_cache", lambda: cleared.append("emb"))
+
+    assert user_settings.sync_to_runtime(user_settings.UserSettings(whisper_model_size="small"))
+    assert user_settings.sync_to_runtime(
+        user_settings.UserSettings(whisper_model_size="small", whisper_device="cpu")
+    )
+
+    assert cleared == []
 
 
 def test_initial_prompt_max_length_validation():
@@ -509,19 +533,19 @@ def test_sync_to_runtime_propagates_keys(monkeypatch):
 
     cleared: list[str] = []
     monkeypatch.setattr(
-        "app.stt.routing.clear_cache", lambda: cleared.append("stt")
+        "app.stt.routing.release_local_if_unused", lambda settings: cleared.append("stt")
     )
+    monkeypatch.setattr("app.stt.routing.drop_cloud_provider", lambda: cleared.append("groq"))
     monkeypatch.setattr(
         "app.embeddings.clear_cache", lambda: cleared.append("emb")
     )
 
     us = user_settings.UserSettings(gemini_api_key="AIza-new", groq_api_key="gsk-new")
-    user_settings.sync_to_runtime(us)
+    assert user_settings.sync_to_runtime(us) is False
 
     assert runtime_settings.stt.gemini_api_key == "AIza-new"
     assert runtime_settings.stt.groq_api_key == "gsk-new"
-    assert "stt" in cleared
-    assert "emb" in cleared
+    assert sorted(cleared) == ["emb", "groq"]
 
 
 def test_an_empty_user_key_falls_back_to_the_environment_key(monkeypatch):
@@ -535,7 +559,6 @@ def test_an_empty_user_key_falls_back_to_the_environment_key(monkeypatch):
     )
     runtime_settings.stt.gemini_api_key = "AIza-typed"
     runtime_settings.stt.groq_api_key = "gsk-typed"
-    monkeypatch.setattr("app.stt.routing.clear_cache", lambda: None)
     monkeypatch.setattr("app.embeddings.clear_cache", lambda: None)
 
     user_settings.sync_to_runtime(user_settings.UserSettings(gemini_api_key="", groq_api_key=""))
@@ -545,11 +568,14 @@ def test_an_empty_user_key_falls_back_to_the_environment_key(monkeypatch):
 
 
 def test_removing_a_typed_key_without_an_environment_key_stops_its_use(monkeypatch):
-    """The runtime key empties and the cached provider holding the old key is dropped."""
+    """The runtime key empties and the Groq provider holding the old key is dropped."""
     from app.config import settings as runtime_settings
 
     cleared: list[str] = []
-    monkeypatch.setattr("app.stt.routing.clear_cache", lambda: cleared.append("stt"))
+    monkeypatch.setattr(
+        "app.stt.routing.release_local_if_unused", lambda settings: cleared.append("stt")
+    )
+    monkeypatch.setattr("app.stt.routing.drop_cloud_provider", lambda: cleared.append("groq"))
     monkeypatch.setattr("app.embeddings.clear_cache", lambda: None)
     user_settings.sync_to_runtime(user_settings.UserSettings(groq_api_key="gsk-typed"))
     cleared.clear()
@@ -557,8 +583,8 @@ def test_removing_a_typed_key_without_an_environment_key_stops_its_use(monkeypat
     changed_stt = user_settings.sync_to_runtime(user_settings.UserSettings(groq_api_key=""))
 
     assert runtime_settings.stt.groq_api_key == ""
-    assert changed_stt is True
-    assert cleared == ["stt"]
+    assert changed_stt is False
+    assert cleared == ["groq"]
 
 
 def test_the_environment_keys_are_read_from_the_environment_not_the_runtime(monkeypatch):
@@ -581,7 +607,6 @@ def test_removing_only_the_google_key_drops_the_search_provider_holding_it(monke
     from app.config import settings as runtime_settings
 
     cleared: list[str] = []
-    monkeypatch.setattr("app.stt.routing.clear_cache", lambda: None)
     monkeypatch.setattr("app.embeddings.clear_cache", lambda: cleared.append("emb"))
     user_settings.sync_to_runtime(user_settings.UserSettings(gemini_api_key="AIza-typed"))
     cleared.clear()

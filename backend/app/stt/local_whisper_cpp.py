@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from ctypes import wintypes
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from app.stt.base import (
     normalize_detected_language,
 )
 from app.stt.config import STTSettings
+from app.stt.engine_use import EngineUse
 from app.stt.glossary import glossary_summary, whisper_glossary
 from app.stt.local_whisper_cpp_cmd import (
     binary_not_found_message,
@@ -272,8 +274,12 @@ class WhisperCppServerSTTProvider(STTProvider):
         self._settings = settings
         self._process: subprocess.Popen | None = None
         self._server_ready: bool = False
+        self._loaded_model_size: str | None = None
         self._last_load_error: str | None = None
         self._load_lock: threading.Lock = threading.Lock()
+        self._use = EngineUse(
+            is_stale=self._is_stale, is_ready=lambda: self.is_loaded, unload=self._unload
+        )
 
     @property
     def model_name(self) -> str:
@@ -286,17 +292,27 @@ class WhisperCppServerSTTProvider(STTProvider):
 
     @property
     def is_loaded(self) -> bool:
-        return self._server_ready
+        return self._server_ready and not self._is_stale()
 
     @property
     def last_load_error(self) -> str | None:
         return self._last_load_error
 
+    def _is_stale(self) -> bool:
+        """Whether the running server holds another model than the one chosen now."""
+        return (
+            self._loaded_model_size is not None
+            and self._loaded_model_size != self._settings.whisper_model_size
+        )
+
     def _get_model(self) -> None:
         """Sync lazy-load entrypoint: resolve the binary, download the GGML model
         if missing, spawn `whisper-server` once, health-poll it, then set
-        `is_loaded`. The name is the duck-typed one every local provider owes.
+        `is_loaded`. A server holding another model than the chosen one is replaced
+        once no transcription runs on it. The name is the duck-typed one every local
+        provider owes.
         """
+        self._use.settle()
         with self._load_lock:
             if self._server_ready and self._process is not None and self._process.poll() is None:
                 return
@@ -304,7 +320,8 @@ class WhisperCppServerSTTProvider(STTProvider):
                 binary_path = resolve_binary_path()
                 if binary_path is None:
                     raise ResourceUnavailableError(binary_not_found_message())
-                model_path = resolve_model_path(self._settings.whisper_model_size)
+                model_size = self._settings.whisper_model_size
+                model_path = resolve_model_path(model_size)
                 if not model_path.is_file():
                     self._download_model(model_path)
 
@@ -312,15 +329,14 @@ class WhisperCppServerSTTProvider(STTProvider):
                     self._spawn_server(binary_path, model_path)
                 self._wait_until_healthy()
                 self._server_ready = True
+                self._loaded_model_size = model_size
                 self._last_load_error = None
-                log.info(
-                    "whisper-server ready: model=%s port=%d",
-                    self._settings.whisper_model_size, _PORT,
-                )
+                log.info("whisper-server ready: model=%s port=%d", model_size, _PORT)
             except Exception as e:
                 msg = latched_load_error(e)
                 self._last_load_error = msg
                 self._server_ready = False
+                self._loaded_model_size = None
                 log.exception("whisper-server load failed: %s", msg)
                 self._terminate_process(self._process)
                 self._process = None
@@ -408,8 +424,13 @@ class WhisperCppServerSTTProvider(STTProvider):
         Every request carries `no_context`, so one dictation never conditions the
         next, and `prompt` rides every request, empty when there is no glossary.
         """
-        await asyncio.to_thread(self._get_model)
+        await self._use.enter(self._get_model)
+        try:
+            return await self._infer(audio_path, language)
+        finally:
+            self._use.leave()
 
+    async def _infer(self, audio_path: Path, language: str) -> TranscriptionResult:
         url = f"http://{_HOST}:{_PORT}/inference"
         response_format = "verbose_json" if language == "auto" else "json"
         glossary, dropped_terms = whisper_glossary(self._settings.initial_prompt)
@@ -469,12 +490,28 @@ class WhisperCppServerSTTProvider(STTProvider):
             log.info("cleanup() skipped: a server load is in flight (lock busy)")
             return
         try:
-            self._server_ready = False
-            process = self._process
-            self._process = None
-            if process is not None and process.poll() is None:
-                threading.Thread(
-                    target=self._terminate_process, args=(process,), daemon=True
-                ).start()
+            self._release_server()
         finally:
             self._load_lock.release()
+
+    def release_when_idle(self, still_unused: Callable[[], bool]) -> None:
+        self._use.release_when_idle(still_unused)
+
+    def _unload(self, only_if: Callable[[], bool] | None = None) -> None:
+        """Terminate the child, waiting for a load in flight instead of skipping it.
+
+        With ``only_if`` it terminates only while that is still true after the wait.
+        """
+        with self._load_lock:
+            if only_if is None or only_if():
+                self._release_server()
+
+    def _release_server(self) -> None:
+        self._server_ready = False
+        self._loaded_model_size = None
+        process = self._process
+        self._process = None
+        if process is not None and process.poll() is None:
+            threading.Thread(
+                target=self._terminate_process, args=(process,), daemon=True
+            ).start()

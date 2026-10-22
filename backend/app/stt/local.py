@@ -11,6 +11,7 @@ import asyncio
 import gc
 import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from app.stt.base import (
@@ -22,6 +23,7 @@ from app.stt.base import (
     normalize_detected_language,
 )
 from app.stt.config import STTSettings
+from app.stt.engine_use import EngineUse
 from app.stt.glossary import glossary_summary, whisper_glossary
 
 log = logging.getLogger(__name__)
@@ -42,8 +44,12 @@ class LocalSTTProvider(STTProvider):
     def __init__(self, settings: STTSettings):
         self._settings = settings
         self._model = None
+        self._loaded_with: tuple[str, str] | None = None
         self._last_load_error: str | None = None
         self._load_lock: threading.Lock = threading.Lock()
+        self._use = EngineUse(
+            is_stale=self._is_stale, is_ready=lambda: not self._is_stale(), unload=self._unload
+        )
 
     @property
     def model_name(self) -> str:
@@ -51,13 +57,22 @@ class LocalSTTProvider(STTProvider):
 
     @property
     def is_loaded(self) -> bool:
-        return self._model is not None
+        return self._model is not None and not self._is_stale()
 
     @property
     def last_load_error(self) -> str | None:
         return self._last_load_error
 
+    def _wanted(self) -> tuple[str, str]:
+        return self._settings.whisper_model_size, self._settings.whisper_device
+
+    def _is_stale(self) -> bool:
+        """Whether the loaded model was made for other settings than the ones chosen now."""
+        return self._loaded_with is not None and self._loaded_with != self._wanted()
+
     def _get_model(self):
+        """The loaded model; one made for other settings is replaced once nothing runs on it."""
+        self._use.settle()
         with self._load_lock:
             if self._model is None:
                 try:
@@ -68,7 +83,8 @@ class LocalSTTProvider(STTProvider):
                         compute_type_for_device,
                     )
 
-                    device = self._settings.whisper_device
+                    wanted = self._wanted()
+                    model_size, device = wanted
                     if device == "auto":
                         device = self._detect_device()
 
@@ -78,13 +94,14 @@ class LocalSTTProvider(STTProvider):
 
                     log.info(
                         "Loading whisper: model=%s device=%s compute=%s",
-                        self._settings.whisper_model_size, device, compute_type,
+                        model_size, device, compute_type,
                     )
                     self._model = WhisperModel(
-                        self._settings.whisper_model_size,
+                        model_size,
                         device=device,
                         compute_type=compute_type,
                     )
+                    self._loaded_with = wanted
                     self._last_load_error = None
                     log.info("Whisper loaded successfully")
                 except Exception as e:
@@ -92,7 +109,7 @@ class LocalSTTProvider(STTProvider):
                     self._last_load_error = msg
                     log.exception("Whisper load failed: %s", msg)
                     raise
-        return self._model
+            return self._model
 
     @staticmethod
     def _detect_device() -> str:
@@ -124,7 +141,15 @@ class LocalSTTProvider(STTProvider):
         without cross-segment context at or below `SHORT_CLIP_SECONDS`, beam 5
         with it otherwise. An unknown duration takes the long path.
         """
-        model = await asyncio.to_thread(self._get_model)
+        model = await self._use.enter(self._get_model)
+        try:
+            return await self._transcribe_with(model, audio_path, language, kwargs)
+        finally:
+            self._use.leave()
+
+    async def _transcribe_with(
+        self, model, audio_path: Path, language: str, kwargs: dict
+    ) -> TranscriptionResult:
         audio_duration = kwargs.get("audio_duration")
 
         is_short = audio_duration is not None and audio_duration <= SHORT_CLIP_SECONDS
@@ -183,18 +208,35 @@ class LocalSTTProvider(STTProvider):
             log.info("cleanup() skipped: a model load is in flight (lock busy)")
             return
         try:
-            if self._model is not None:
-                log.info("Releasing whisper model from memory")
-                del self._model
-                self._model = None
-                gc.collect()
-                try:
-                    import torch
-
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        log.info("CUDA cache cleared")
-                except ImportError:
-                    pass
+            self._release_model()
         finally:
             self._load_lock.release()
+
+    def release_when_idle(self, still_unused: Callable[[], bool]) -> None:
+        self._use.release_when_idle(still_unused)
+
+    def _unload(self, only_if: Callable[[], bool] | None = None) -> None:
+        """Release the model, waiting for a load in flight instead of skipping it.
+
+        With ``only_if`` it releases only while that is still true after the wait.
+        """
+        with self._load_lock:
+            if only_if is None or only_if():
+                self._release_model()
+
+    def _release_model(self) -> None:
+        if self._model is None:
+            return
+        log.info("Releasing whisper model from memory")
+        del self._model
+        self._model = None
+        self._loaded_with = None
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                log.info("CUDA cache cleared")
+        except ImportError:
+            pass

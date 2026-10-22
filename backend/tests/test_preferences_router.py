@@ -191,11 +191,10 @@ async def test_put_settings_triggers_prewarm_when_switching_to_local(client, mon
 
 @pytest.mark.prewarm
 @pytest.mark.anyio
-async def test_put_settings_triggers_prewarm_on_incidental_cache_clear(client, monkeypatch):
-    """An unrelated settings change (e.g. a glossary edit) that incidentally
-    clears the STT cache via `sync_to_runtime`'s `changed_stt` check must
-    still re-trigger `maybe_prewarm_local` while Local stays the active mode
-    — otherwise that edit would silently reintroduce a cold lazy-load."""
+async def test_put_settings_triggers_prewarm_when_the_local_model_changes(client, monkeypatch):
+    """A new model size while Local stays the active mode must re-trigger
+    `maybe_prewarm_local`, so the engine loads the new model before the next
+    dictation instead of at it. A glossary edit leaves the engine as it is."""
     import app.stt.local_setup as local_setup_module
 
     monkeypatch.setattr(runtime_settings.stt, "initial_prompt", runtime_settings.stt.initial_prompt)
@@ -208,6 +207,10 @@ async def test_put_settings_triggers_prewarm_on_incidental_cache_clear(client, m
     assert call_count["n"] == 1
 
     resp = await client.put("/settings", json={"initial_prompt": "Tauri FastAPI Pydantic"})
+    assert resp.status_code == 200
+    assert call_count["n"] == 1
+
+    resp = await client.put("/settings", json={"whisper_model_size": "small"})
     assert resp.status_code == 200
     assert call_count["n"] == 2
 
@@ -234,7 +237,7 @@ async def test_put_settings_does_not_prewarm_on_non_stt_field_change(client, mon
     assert resp.status_code == 200
     assert call_count["n"] == 1
 
-    resp = await client.put("/settings", json={"initial_prompt": "Tauri FastAPI Pydantic"})
+    resp = await client.put("/settings", json={"whisper_model_size": "small"})
     assert resp.status_code == 200
     assert call_count["n"] == 2
 

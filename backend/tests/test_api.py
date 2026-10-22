@@ -106,6 +106,30 @@ async def test_set_stt_mode_triggers_prewarm_without_awaiting_it(client, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_switching_dictation_to_cloud_keeps_the_engine_a_meeting_or_file_uses(
+    client, monkeypatch
+):
+    """The local engine is released at a mode switch only once no route uses it: meetings and
+    files choose their own engine, and a meeting being turned into text must not lose it."""
+    from app.core.types import ProviderMode
+    from app.stt.config import stt_settings
+    from app.stt.routing import get_provider
+
+    provider = get_provider(ProviderMode.LOCAL, stt_settings)
+    released = []
+    monkeypatch.setattr(provider, "release_when_idle", lambda still_unused: released.append(1))
+
+    await client.put("/stt/mode", json={"mode": "local"})
+    await client.put("/stt/mode", json={"mode": "cloud"})
+    assert released == []
+
+    await client.put("/settings", json={"meetings_engine": "cloud", "files_engine": "cloud"})
+    await client.put("/stt/mode", json={"mode": "local"})
+    await client.put("/stt/mode", json={"mode": "cloud"})
+    assert released == [1]
+
+
+@pytest.mark.asyncio
 async def test_stt_local_prewarm_rejects_when_not_local_mode(client):
     """Default STT mode is Cloud (reset by conftest's `_reset_settings`
     fixture) — the endpoint must 400 without ever touching `maybe_prewarm_local`."""

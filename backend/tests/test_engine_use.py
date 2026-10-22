@@ -1,0 +1,183 @@
+import asyncio
+import logging
+import threading
+import time
+
+import pytest
+
+from app.stt.engine_use import EngineUse
+from tests.conftest import wait_until
+
+
+class _Engine:
+    def __init__(self):
+        self.stale = False
+        self.ready = True
+        self.unloads = 0
+        self.use = EngineUse(
+            is_stale=lambda: self.stale, is_ready=lambda: self.ready, unload=self._unload
+        )
+
+    def _unload(self, only_if=None):
+        if only_if is None or only_if():
+            self.unloads += 1
+            self.stale = False
+
+
+def _settle_in_thread(use: EngineUse) -> tuple[threading.Thread, threading.Event]:
+    settled = threading.Event()
+
+    def _run():
+        use.settle()
+        settled.set()
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    return thread, settled
+
+
+@pytest.mark.asyncio
+async def test_a_stale_engine_is_unloaded_only_after_the_running_transcription_ends():
+    engine = _Engine()
+    await engine.use.enter(lambda: None)
+    engine.stale = True
+
+    thread, settled = _settle_in_thread(engine.use)
+
+    assert not settled.wait(0.3)
+    assert engine.unloads == 0
+
+    engine.use.leave()
+
+    assert settled.wait(2)
+    thread.join(2)
+    assert engine.unloads == 1
+
+
+def test_an_engine_that_is_not_stale_is_left_loaded():
+    engine = _Engine()
+
+    engine.use.settle()
+
+    assert engine.unloads == 0
+
+
+@pytest.mark.asyncio
+async def test_a_transcription_waits_for_the_restart_to_finish_before_it_is_counted():
+    engine = _Engine()
+    engine.stale = True
+    unloading = threading.Event()
+    finish_unload = threading.Event()
+
+    def _slow_unload():
+        unloading.set()
+        finish_unload.wait(5)
+        engine._unload()
+
+    use = EngineUse(
+        is_stale=lambda: engine.stale, is_ready=lambda: engine.ready, unload=_slow_unload
+    )
+    thread, _ = _settle_in_thread(use)
+    assert unloading.wait(2)
+
+    entered = []
+
+    async def _enter():
+        entered.append(await use.enter(lambda: "ready"))
+
+    task = asyncio.ensure_future(_enter())
+    await asyncio.sleep(0.3)
+    assert entered == []
+
+    finish_unload.set()
+    await asyncio.wait_for(task, 2)
+    thread.join(2)
+
+    assert entered == ["ready"]
+    use.leave()
+
+
+@pytest.mark.asyncio
+async def test_enter_prepares_again_while_the_engine_is_not_ready():
+    engine = _Engine()
+    engine.ready = False
+    calls = []
+
+    def _prepare():
+        calls.append(1)
+        engine.ready = len(calls) == 2
+        return len(calls)
+
+    assert await engine.use.enter(_prepare) == 2
+    engine.use.leave()
+
+
+@pytest.mark.asyncio
+async def test_a_release_unloads_only_after_the_last_running_transcription():
+    engine = _Engine()
+    await engine.use.enter(lambda: None)
+    await engine.use.enter(lambda: None)
+
+    engine.use.release_when_idle(lambda: True)
+    engine.use.leave()
+    time.sleep(0.3)
+    assert engine.unloads == 0
+
+    engine.use.leave()
+    assert wait_until(lambda: engine.unloads == 1)
+
+
+def test_a_release_unloads_at_once_when_nothing_is_running():
+    engine = _Engine()
+
+    engine.use.release_when_idle(lambda: True)
+
+    assert wait_until(lambda: engine.unloads == 1)
+
+
+@pytest.mark.asyncio
+async def test_a_release_is_dropped_when_the_engine_is_wanted_again_by_then():
+    engine = _Engine()
+    await engine.use.enter(lambda: None)
+    unused = [True]
+    engine.use.release_when_idle(lambda: unused[0])
+
+    unused[0] = False
+    engine.use.leave()
+    time.sleep(0.3)
+
+    assert engine.unloads == 0
+
+
+def test_a_release_that_raises_is_logged_and_the_engine_stays_usable(caplog):
+    def _fail(only_if=None):
+        raise RuntimeError("terminate refused")
+
+    use = EngineUse(is_stale=lambda: False, is_ready=lambda: True, unload=_fail)
+
+    with caplog.at_level(logging.WARNING):
+        use.release_when_idle(lambda: True)
+        assert wait_until(lambda: "Releasing the local engine failed" in caplog.text)
+
+    use.settle()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_that_fails_reaches_the_caller_and_the_next_request_still_enters():
+    engine = _Engine()
+    engine.stale = True
+    failing = [True]
+
+    def _unload(only_if=None):
+        if failing[0]:
+            raise RuntimeError("terminate refused")
+        engine._unload()
+
+    use = EngineUse(is_stale=lambda: engine.stale, is_ready=lambda: engine.ready, unload=_unload)
+
+    with pytest.raises(RuntimeError, match="terminate refused"):
+        use.settle()
+
+    failing[0] = False
+    await asyncio.wait_for(use.enter(lambda: None), 2)
+    use.leave()

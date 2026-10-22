@@ -392,21 +392,24 @@ def sync_to_runtime(us: UserSettings) -> bool:
     """Push user settings onto the runtime settings each package owns.
 
     A cloud key left empty falls back to the environment's, so removing a typed key stops its use.
-    Returns whether an STT-relevant field changed, the same check that gates the cache clear.
+    A local engine is told only of a mode change; it restarts itself for a new model or device.
+    Returns whether a field that decides which engine is loaded changed, the pre-warm's gate.
     """
     stt_mode = ProviderMode(us.stt_mode)
     gemini_api_key = us.gemini_api_key or _environment_keys["gemini_api_key"]
     groq_api_key = us.groq_api_key or _environment_keys["groq_api_key"]
 
+    changed_mode = stt_settings.mode != stt_mode
     changed_stt = (
-        stt_settings.mode != stt_mode
+        changed_mode
         or stt_settings.whisper_model_size != us.whisper_model_size
         or stt_settings.whisper_device != us.whisper_device
-        or stt_settings.initial_prompt != us.initial_prompt
-        or stt_settings.gemini_api_key != gemini_api_key
-        or stt_settings.groq_api_key != groq_api_key
     )
-    changed_embeddings = embedding_settings.ollama_host != us.ollama_host
+    changed_groq_key = stt_settings.groq_api_key != groq_api_key
+    changed_embeddings = (
+        embedding_settings.ollama_host != us.ollama_host
+        or stt_settings.gemini_api_key != gemini_api_key
+    )
 
     stt_settings.mode = stt_mode
     stt_settings.meetings_mode = ProviderMode(us.meetings_engine)
@@ -421,10 +424,11 @@ def sync_to_runtime(us: UserSettings) -> bool:
 
     embedding_settings.ollama_host = us.ollama_host
 
-    if changed_stt:
-        stt_routing.clear_cache()
-        embeddings.clear_cache()
-    if changed_embeddings:
+    if changed_groq_key:
+        stt_routing.drop_cloud_provider()
+    if changed_mode:
+        stt_routing.release_local_if_unused(stt_settings)
+    if changed_mode or changed_embeddings:
         embeddings.clear_cache()
 
     return bool(changed_stt)

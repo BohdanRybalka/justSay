@@ -8,7 +8,13 @@ from app.stt.config import STTSettings
 from app.stt.groq_whisper import GroqWhisperSTTProvider
 from app.stt.local import LocalSTTProvider
 from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
-from app.stt.routing import _providers, clear_cache, get_provider
+from app.stt.routing import (
+    _providers,
+    clear_cache,
+    drop_cloud_provider,
+    get_provider,
+    release_local_if_unused,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -172,3 +178,56 @@ def test_detect_duration_reads_real_wav(tmp_path):
     duration = detect_duration(path)
     assert duration is not None
     assert 1.9 < duration < 2.1
+
+
+def _routes(**overrides) -> STTSettings:
+    routes = dict(
+        mode=ProviderMode.CLOUD, meetings_mode=ProviderMode.CLOUD, files_mode=ProviderMode.CLOUD
+    )
+    routes.update(overrides)
+    return STTSettings(**routes)
+
+
+def test_the_local_engine_is_released_when_no_route_uses_it_and_not_if_one_does_by_then(
+    monkeypatch,
+):
+    settings = _routes()
+    provider = get_provider(ProviderMode.LOCAL, settings)
+    asked = []
+    monkeypatch.setattr(provider, "release_when_idle", asked.append)
+
+    release_local_if_unused(settings)
+
+    assert len(asked) == 1
+    assert asked[0]() is True
+    settings.meetings_mode = ProviderMode.LOCAL
+    assert asked[0]() is False
+
+
+@pytest.mark.parametrize("route", ["mode", "meetings_mode", "files_mode"])
+def test_the_local_engine_stays_while_any_route_uses_it(monkeypatch, route):
+    settings = _routes(**{route: ProviderMode.LOCAL})
+    provider = get_provider(ProviderMode.LOCAL, settings)
+    released = []
+    monkeypatch.setattr(provider, "release_when_idle", lambda still_unused: released.append(1))
+
+    release_local_if_unused(settings)
+
+    assert released == []
+
+
+def test_releasing_the_local_engine_makes_none_when_none_was_cached():
+    release_local_if_unused(_routes())
+
+    assert _providers == {}
+
+
+def test_dropping_the_cloud_provider_keeps_the_local_one_and_builds_a_new_cloud_one():
+    settings = _cloud_settings()
+    cloud = get_provider(ProviderMode.CLOUD, settings)
+    local = get_provider(ProviderMode.LOCAL, settings)
+
+    drop_cloud_provider()
+
+    assert get_provider(ProviderMode.LOCAL, settings) is local
+    assert get_provider(ProviderMode.CLOUD, settings) is not cloud
