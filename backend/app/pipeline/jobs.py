@@ -552,7 +552,7 @@ class JobQueue:
 
     @staticmethod
     def _mode_for(job: _Job) -> ProviderMode:
-        """The chosen engine of the job's kind; a file that ran in Local is not retried in the cloud."""
+        """The chosen engine of the job's kind; a file that ran in Local stays there on retry."""
         if job.kind == "meeting":
             return stt_settings.meetings_mode
         if job.mode == ProviderMode.LOCAL:
