@@ -522,7 +522,7 @@ class JobQueue:
         try:
             async with self._turn:
                 job.stage = "transcribing"
-                job.mode = stt_settings.meetings_mode if meeting else stt_settings.files_mode
+                job.mode = self._mode_for(job)
                 result = await process_audio(
                     job.path,
                     language=(
@@ -549,6 +549,15 @@ class JobQueue:
         finally:
             if job.stage in _EXPIRING:
                 discard_scratch_file(job.path)
+
+    @staticmethod
+    def _mode_for(job: _Job) -> ProviderMode:
+        """The chosen engine of the job's kind; a file made in Local never goes to the cloud."""
+        if job.kind == "meeting":
+            return stt_settings.meetings_mode
+        if job.mode == ProviderMode.LOCAL:
+            return ProviderMode.LOCAL
+        return stt_settings.files_mode
 
     @staticmethod
     def _spawn_indexer() -> None:

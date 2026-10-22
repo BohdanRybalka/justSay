@@ -643,6 +643,25 @@ async def test_a_meeting_keeps_its_own_engine_and_language_beside_a_files_choice
     assert (call["source"], call["mode"], call["language"]) == ("meeting", ProviderMode.CLOUD, "pl")
 
 
+async def test_a_file_made_in_local_is_never_tried_again_in_the_cloud(
+    queue, fakes, monkeypatch
+):
+    monkeypatch.setattr(settings.stt, "files_mode", ProviderMode.LOCAL)
+    failing = _FakePipeline(outcome="unsaved")
+    job_id = _start(queue, fakes, failing)
+    failing.release.set()
+    await _settle(queue, job_id)
+    working = _FakePipeline()
+    fakes[next(name for name, fake in fakes.items() if fake is failing)] = working
+    monkeypatch.setattr(settings.stt, "files_mode", ProviderMode.CLOUD)
+
+    queue.retry(job_id)
+    working.release.set()
+    await _settle(queue, job_id)
+
+    assert working.calls[0]["mode"] == ProviderMode.LOCAL
+
+
 @pytest.mark.parametrize("engine", [ProviderMode.LOCAL, ProviderMode.CLOUD])
 async def test_a_stopped_meeting_becomes_a_meeting_entry_on_the_meetings_engine(
     queue, fakes, tmp_path, monkeypatch, engine

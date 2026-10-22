@@ -12,7 +12,7 @@ const KIND_ICONS: Record<TranscriptionJob["kind"], IconName> = {
 
 const RUNNING: ReadonlySet<TranscriptionJob["stage"]> = new Set(["queued", "transcribing", "saving"]);
 
-/** What the card's × says it does: a meeting's or dictation's recording goes with its card, a file's copy is already gone. */
+/** What the card's × says it does: a meeting's or dictation's recording is deleted with its card, a file is cancelled or dismissed. */
 export function removeLabel(job: TranscriptionJob): string {
   if (job.kind !== "file") return "Delete this recording";
   return job.stage === "failed" ? "Dismiss" : "Cancel";

@@ -111,7 +111,7 @@ async def process_audio(
     ``background_tasks`` schedules embedding generation after the response is sent. ``source``
     and ``source_name`` say where the history entry came from. Audio with an ``observer``, or
     longer than ``LONG_DICTATION_SECONDS``, goes in pieces; those ``finished`` already holds are
-    not sent again.
+    not sent again (not for a two-channel meeting).
     """
     start = time.perf_counter()
 
