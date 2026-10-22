@@ -4,7 +4,9 @@ Decodable audio becomes 16 kHz mono FLAC pieces no longer than the provider's
 ``longest_piece_seconds``, each ending in a pause and holding only its speech; where no pause
 is found, pieces overlap and the words both heard are kept once. A transcript stuck in a loop or
 far too sparse is asked for again. A piece with little speech loses the phrases engines make up
-over silence. ``Retry-After`` pauses the work; undecodable audio goes whole.
+over silence. ``Retry-After`` pauses the work; a piece that failed otherwise is sent again after
+a growing wait. Pieces already done can be kept, so a run that failed continues after them;
+undecodable audio goes whole.
 """
 
 from __future__ import annotations
@@ -13,8 +15,8 @@ import asyncio
 import logging
 import re
 from collections import Counter
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import ClassVar, Protocol
 
@@ -22,8 +24,8 @@ import numpy as np
 
 from app.audio.config import audio_settings
 from app.audio.pauses import longest_pause, speech_profile
-from app.core.audio_formats import UndecodableAudioError, decode_to_mono_wav
-from app.core.errors import NotReadyError, ResourceUnavailableError
+from app.core.audio_formats import UNREADABLE_HERE, UndecodableAudioError, decode_to_mono_wav
+from app.core.errors import JustSayError, NotReadyError, ResourceUnavailableError
 from app.core.scratch import discard_scratch_file
 from app.pipeline.invented_phrases import outpaces_speech, without_invented_phrases
 from app.stt.base import STTProvider, TranscriptionResult
@@ -47,6 +49,8 @@ LOOP_REPEATED_SHARE = 0.3
 MIN_CHARS_PER_MINUTE = 60
 SPARSE_CHECK_FROM_SECONDS = 120.0
 LITTLE_SPEECH_SECONDS = 3.0
+PIECE_RETRY_DELAYS = (2.0, 10.0, 30.0)
+RETRYABLE_CLIENT_STATUSES = frozenset({408, 409, 429})
 
 _TOKEN = re.compile(r"\S+\s*")
 
@@ -104,6 +108,32 @@ class Piece:
     start: float
     end: float
     overlaps_previous: bool
+
+
+@dataclass(frozen=True)
+class FinishedPiece:
+    text: str
+    overlaps_previous: bool
+    silent: bool
+    tokens_used: int | None
+    language: str | None
+
+
+@dataclass
+class FinishedPieces:
+    """The pieces of one file already turned into text, for a run that failed to continue after.
+
+    Pieces made by another model, language or cut are forgotten when ``claim`` is given theirs.
+    """
+
+    key: tuple | None = None
+    pieces: list[FinishedPiece] = field(default_factory=list)
+
+    def claim(self, key: tuple) -> list[FinishedPiece]:
+        if key != self.key:
+            self.key = key
+            self.pieces = []
+        return self.pieces
 
 
 def plan_pieces(
@@ -270,6 +300,17 @@ def _retry_after(refusal: ResourceUnavailableError) -> float | None:
         return None
 
 
+def _worth_retrying(failure: Exception) -> bool:
+    """Whether sending the same piece again can help: not a refusal of the request itself."""
+    if isinstance(failure, ResourceUnavailableError):
+        return failure.message != UNREADABLE_HERE
+    if isinstance(failure, JustSayError):
+        return False
+    status = getattr(failure, "status_code", None)
+    refused = isinstance(status, int) and 400 <= status < 500
+    return not refused or status in RETRYABLE_CLIENT_STATUSES
+
+
 async def transcribe_with_pauses(
     stt: STTProvider,
     path: Path,
@@ -279,19 +320,33 @@ async def transcribe_with_pauses(
     *,
     max_pause: float = MAX_PAUSE_SECONDS,
     max_pauses: int = MAX_PAUSES_PER_PIECE,
+    retry_delays: Sequence[float] = (),
 ) -> TranscriptionResult:
-    """One answer for one audio file: waits out Retry-After, checking the route before each send."""
-    pauses = 0
+    """One answer for one audio file: waits out Retry-After, checking the route before each send.
+
+    Any other failure worth another try is sent again after each of ``retry_delays`` in turn.
+    """
+    pauses = failures = 0
     while True:
         await pacer.before_send()
         try:
             return await stt.transcribe(path, language=language, audio_duration=duration)
-        except ResourceUnavailableError as refusal:
-            wait = _retry_after(refusal)
-            pauses += 1
-            if wait is None or wait > max_pause or pauses > max_pauses:
+        except Exception as failure:
+            wait = _retry_after(failure) if isinstance(failure, ResourceUnavailableError) else None
+            if wait is not None:
+                pauses += 1
+                if wait > max_pause or pauses > max_pauses:
+                    raise
+                log.info("%s asked to wait %.0fs; pausing (pause %d)", stt.model_name, wait, pauses)
+            elif failures < len(retry_delays) and _worth_retrying(failure):
+                wait = retry_delays[failures]
+                failures += 1
+                log.warning(
+                    "%s failed (%s); sending the piece again in %.0fs (retry %d)",
+                    stt.model_name, type(failure).__name__, wait, failures,
+                )
+            else:
                 raise
-            log.info("%s asked to wait %.0fs; pausing (pause %d)", stt.model_name, wait, pauses)
             await pacer.pause(wait)
 
 
@@ -304,7 +359,9 @@ async def _transcribe_checked(
     pacer: PiecePacer,
     turn: Callable[[], Awaitable[None]],
 ) -> TranscriptionResult:
-    first = await transcribe_with_pauses(stt, piece, language, seconds, pacer)
+    first = await transcribe_with_pauses(
+        stt, piece, language, seconds, pacer, retry_delays=PIECE_RETRY_DELAYS
+    )
     prob = first.no_speech_prob
     if (prob is not None and prob > no_speech_threshold) or not looks_broken(first.text, seconds):
         return first
@@ -356,6 +413,25 @@ def reported_language(asked: str, heard: Counter[str]) -> str | None:
     return heard.most_common(1)[0][0] if heard else None
 
 
+def _finished_piece(
+    result: TranscriptionResult | None,
+    speech: PieceSpeech,
+    planned: Piece,
+    no_speech_threshold: float,
+) -> FinishedPiece:
+    """What a piece adds to the transcript, from its engine's ``result`` (``None``: not sent)."""
+    overlaps = planned.overlaps_previous
+    if result is None:
+        return FinishedPiece("", overlaps, True, None, None)
+    prob = result.no_speech_prob
+    if prob is not None and prob > no_speech_threshold:
+        return FinishedPiece("", overlaps, True, result.tokens_used, None)
+    kept = _without_made_up_text(result.text, speech)
+    if result.text and not kept:
+        return FinishedPiece("", overlaps, True, result.tokens_used, None)
+    return FinishedPiece(kept, overlaps, False, result.tokens_used, result.detected_language)
+
+
 async def transcribe_stretch(
     stt: STTProvider,
     scratch: Path,
@@ -367,13 +443,14 @@ async def transcribe_stretch(
     no_speech_threshold: float,
     holds_no_speech: Callable[[Path], bool],
     pacer: PiecePacer,
+    finished: FinishedPieces | None = None,
 ) -> TranscriptionResult:
     """Transcribe the seconds ``begin`` to ``end`` of the 16 kHz ``mono`` file, piece by piece.
 
     Piece files sit beside ``scratch`` and are removed. A piece ``holds_no_speech`` judges silent
     is never sent; one whose ``no_speech_prob`` exceeds ``no_speech_threshold`` adds no text.
-    ``"auto"`` is detected in every piece apart, and the language most pieces were heard in is
-    reported. With no speech in any piece, ``no_speech_prob`` is 1.0, so the caller discards it.
+    ``"auto"`` is detected per piece and the most heard language is reported. With no speech in
+    any piece, ``no_speech_prob`` is 1.0. Pieces ``finished`` holds are not sent again.
     """
     pieces = await asyncio.to_thread(
         plan_pieces,
@@ -381,11 +458,12 @@ async def transcribe_stretch(
         stt.longest_piece_seconds,
         lambda start, stop: _pause_relative_to(mono, begin, start, stop),
     )
-    texts: list[tuple[str, bool]] = []
-    heard: Counter[str] = Counter()
-    silent = 0
-    tokens: list[int] = []
+    key = (stt.model_name, stt.longest_piece_seconds, language, no_speech_threshold, len(pieces))
+    done = finished.claim(key) if finished is not None else []
     for index, planned in enumerate(pieces):
+        if index < len(done):
+            pacer.piece_done(index + 1, len(pieces))
+            continue
 
         async def turn(index: int = index) -> None:
             await pacer.before_piece(index, len(pieces))
@@ -406,32 +484,19 @@ async def transcribe_stretch(
         finally:
             discard_scratch_file(piece)
         pacer.piece_done(index + 1, len(pieces))
-        if result is None:
-            silent += 1
-            continue
-        if result.tokens_used is not None:
-            tokens.append(result.tokens_used)
-        prob = result.no_speech_prob
-        if prob is not None and prob > no_speech_threshold:
-            silent += 1
-            continue
-        kept = _without_made_up_text(result.text, speech)
-        if result.text and not kept:
-            silent += 1
-            continue
-        if result.detected_language:
-            heard[result.detected_language] += 1
-        if kept:
-            texts.append((kept, planned.overlaps_previous))
+        done.append(_finished_piece(result, speech, planned, no_speech_threshold))
 
+    texts = [(piece.text, piece.overlaps_previous) for piece in done if piece.text]
     text = texts[0][0] if texts else ""
     for following, overlaps in texts[1:]:
         text = join_at_seam(text, following) if overlaps else f"{text} {following}"
+    tokens = [piece.tokens_used for piece in done if piece.tokens_used is not None]
+    heard = Counter(piece.language for piece in done if piece.language)
     return TranscriptionResult(
         text=text,
         tokens_used=sum(tokens) if tokens else None,
         detected_language=reported_language(language, heard),
-        no_speech_prob=1.0 if silent == len(pieces) else None,
+        no_speech_prob=1.0 if all(piece.silent for piece in done) else None,
     )
 
 
@@ -444,6 +509,7 @@ async def transcribe_in_pieces(
     no_speech_threshold: float,
     holds_no_speech: Callable[[Path], bool],
     pacer: PiecePacer,
+    finished: FinishedPieces | None = None,
 ) -> TranscriptionResult:
     """Transcribe ``audio_path`` piece by piece; scratch files sit beside it and are removed.
 
@@ -456,7 +522,9 @@ async def transcribe_in_pieces(
     except UndecodableAudioError:
         log.info("%s cannot be cut here; sending it whole", audio_path.suffix)
         await pacer.before_piece(0, 1)
-        result = await transcribe_with_pauses(stt, audio_path, language, duration, pacer)
+        result = await transcribe_with_pauses(
+            stt, audio_path, language, duration, pacer, retry_delays=PIECE_RETRY_DELAYS
+        )
         pacer.piece_done(1, 1)
         return result
 
@@ -472,6 +540,7 @@ async def transcribe_in_pieces(
             no_speech_threshold=no_speech_threshold,
             holds_no_speech=holds_no_speech,
             pacer=pacer,
+            finished=finished,
         )
     finally:
         discard_scratch_file(mono)

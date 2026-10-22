@@ -2,10 +2,10 @@
 
 A file or meeting job never touches the clipboard and goes in pieces, each held back while a
 dictation is being processed. Progress counts finished pieces, plus an estimate inside the
-current one from this machine's own speed for the routed model. A file's copy goes when its
-job ends; a meeting keeps its recording until it is saved or removed, so a failed one can be
-tried again. A dictation that failed keeps its audio for two weeks for the same reason. Jobs die
-with the app.
+current one from this machine's own speed for the routed model. A file or meeting keeps its
+audio until it is saved or removed, so a failed one can be tried again, a file from the piece
+that failed. A dictation that failed keeps its audio for two weeks for the same reason. Jobs
+die with the app.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Generator, Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -38,7 +38,7 @@ from app.core.errors import (
 )
 from app.core.scratch import RECORDING_FILE_PREFIX, discard_scratch_file
 from app.core.types import ProviderMode
-from app.pipeline.chunking import RouteStoppedError
+from app.pipeline.chunking import FinishedPieces, RouteStoppedError
 from app.pipeline.service import process_audio
 from app.stt.config import stt_settings
 from app.transcripts import history
@@ -131,6 +131,7 @@ class _Job:
     task: asyncio.Task | None = None
     mode: ProviderMode | None = None
     language: str = "uk"
+    finished: FinishedPieces = field(default_factory=FinishedPieces)
 
 
 class _JobCancelledError(Exception):
@@ -369,15 +370,16 @@ class JobQueue:
             self._jobs[job.id] = job
 
     def retry(self, job_id: str) -> bool:
-        """Queue a failed meeting or dictation again; ``False`` for an unknown id.
+        """Queue a failed job again; ``False`` for an unknown id.
 
-        ``NotReadyError`` for any other job, since only those still hold their audio.
+        ``NotReadyError`` for any other job, since only a failed one still holds its audio. A file
+        goes on after the pieces it already turned into text.
         """
         job = self._jobs.get(job_id)
         if job is None:
             return False
-        if job.kind == "file" or job.stage != "failed":
-            raise NotReadyError("Only a meeting or a dictation that failed can be tried again")
+        if job.stage != "failed":
+            raise NotReadyError("Only a job that failed can be tried again")
         job.stage = "queued"
         job.error = None
         job.finished_at = None
@@ -457,8 +459,7 @@ class JobQueue:
             job.finished_at = self.clock()
             return "cancelled"
         del self._jobs[job_id]
-        if job.kind != "file":
-            discard_scratch_file(job.path)
+        discard_scratch_file(job.path)
         return "dismissed"
 
     def _view(self, job: _Job, now: float) -> JobView:
@@ -531,6 +532,7 @@ class JobQueue:
                     source_name=None if meeting else job.name,
                     observer=_JobObserver(self, job),
                     mode=job.mode,
+                    finished=job.finished,
                 )
             if result.discarded_reason is not None:
                 self._fail(job, MEETING_NO_SPEECH_REASON if meeting else NO_SPEECH_REASON)
@@ -545,7 +547,7 @@ class JobQueue:
         except Exception as failure:
             self._fail_on(job, failure)
         finally:
-            if not meeting or job.stage in _EXPIRING:
+            if job.stage in _EXPIRING:
                 discard_scratch_file(job.path)
 
     @staticmethod

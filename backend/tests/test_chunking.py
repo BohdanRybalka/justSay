@@ -15,10 +15,10 @@ import soundfile as sf
 
 from app.audio import pauses, vad
 from app.audio.pauses import SpeechProfile
-from app.core.audio_formats import ffmpeg_selftest
-from app.core.errors import ResourceUnavailableError
+from app.core.audio_formats import UNREADABLE_HERE, ffmpeg_selftest
+from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.pipeline import chunking
-from app.pipeline.chunking import join_at_seam, transcribe_in_pieces
+from app.pipeline.chunking import FinishedPieces, join_at_seam, transcribe_in_pieces
 from app.stt.base import STTProvider, TranscriptionResult
 from tests.conftest import write_aac_m4a
 
@@ -80,6 +80,7 @@ async def _run(
     pacer: _Pacer | chunking.UnpacedPieces | None = None,
     language: str = "auto",
     silent_pieces: frozenset[int] = frozenset(),
+    finished: FinishedPieces | None = None,
 ):
     def holds_no_speech(piece: Path) -> bool:
         return int(piece.stem.rsplit("piece", 1)[1]) in silent_pieces
@@ -92,6 +93,7 @@ async def _run(
         no_speech_threshold=THRESHOLD,
         holds_no_speech=holds_no_speech,
         pacer=pacer or _Pacer(),
+        finished=finished,
     )
 
 
@@ -560,7 +562,6 @@ async def test_a_switch_while_a_piece_is_prepared_stops_before_that_piece_is_sen
 @pytest.mark.parametrize(
     "answers",
     [
-        [_busy(None)],
         [_busy(str(chunking.MAX_PAUSE_SECONDS + 1))],
         [_busy("1")] * (chunking.MAX_PAUSES_PER_PIECE + 1),
     ],
@@ -574,6 +575,108 @@ async def test_a_refusal_without_a_short_wait_ends_the_work(tmp_path, answers):
 
     assert provider.answers == []
     assert sorted(p.name for p in tmp_path.iterdir()) == ["job_x.wav"]
+
+
+class _ConnectionResetError(Exception):
+    def __init__(self, status_code: int | None = None) -> None:
+        super().__init__("connection reset")
+        self.status_code = status_code
+
+
+async def test_a_piece_that_fails_is_sent_again_after_a_growing_wait(tmp_path):
+    path = _audio(tmp_path, 5.0)
+    provider = _Provider([
+        _ConnectionResetError(),
+        ResourceUnavailableError("no answer"),
+        TranscriptionResult("got it"),
+    ])
+    pacer = _Pacer()
+
+    result = await _run(provider, path, pacer)
+
+    assert result.text == "got it"
+    assert [e for e in pacer.events if e[0] == "pause"] == [
+        ("pause", chunking.PIECE_RETRY_DELAYS[0]),
+        ("pause", chunking.PIECE_RETRY_DELAYS[1]),
+    ]
+    assert len({s["seconds"] for s in provider.sent}) == 1
+
+
+async def test_a_piece_that_keeps_failing_ends_the_work_after_the_last_wait(tmp_path):
+    path = _audio(tmp_path, 5.0)
+    resets = [_ConnectionResetError() for _ in range(len(chunking.PIECE_RETRY_DELAYS) + 1)]
+    provider = _Provider([*resets, TranscriptionResult("never sent")])
+
+    with pytest.raises(_ConnectionResetError):
+        await _run(provider, path)
+
+    assert len(provider.sent) == len(chunking.PIECE_RETRY_DELAYS) + 1
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        ResourceUnavailableError(UNREADABLE_HERE),
+        ConfigurationError("Groq API key is missing."),
+        _ConnectionResetError(status_code=401),
+        _ConnectionResetError(status_code=413),
+    ],
+)
+async def test_a_piece_the_engine_refuses_for_what_it_is_is_not_sent_again(tmp_path, refusal):
+    path = _audio(tmp_path, 5.0)
+    provider = _Provider([refusal, TranscriptionResult("never sent")])
+    pacer = _Pacer()
+
+    with pytest.raises(type(refusal)):
+        await _run(provider, path, pacer)
+
+    assert (len(provider.sent), [e for e in pacer.events if e[0] == "pause"]) == (1, [])
+
+
+async def test_a_busy_engine_status_is_sent_again(tmp_path):
+    path = _audio(tmp_path, 5.0)
+    provider = _Provider([_ConnectionResetError(status_code=429), TranscriptionResult("got it")])
+
+    assert (await _run(provider, path)).text == "got it"
+
+
+async def test_a_run_that_failed_continues_after_the_pieces_it_finished(tmp_path, short_pieces):
+    path = _audio(tmp_path, 70.0)
+    finished = FinishedPieces()
+    resets = [_ConnectionResetError() for _ in range(len(chunking.PIECE_RETRY_DELAYS) + 1)]
+    first = _Provider([
+        TranscriptionResult("one two three four five six", detected_language="uk"), *resets
+    ])
+    with pytest.raises(_ConnectionResetError):
+        await _run(first, path, finished=finished)
+    pacer = _Pacer()
+    second = _Provider([
+        TranscriptionResult("four five six seven eight nine"),
+        TranscriptionResult("seven eight nine ten"),
+    ])
+
+    result = await _run(second, path, pacer, finished=finished)
+
+    assert result.text == "one two three four five six seven eight nine ten"
+    assert result.detected_language == "uk"
+    assert [round(s["seconds"]) for s in second.sent] == [30, 20]
+    assert pacer.events[0] == ("done", 1, 3)
+    assert ("before", 0, 3) not in pacer.events
+
+
+async def test_pieces_finished_by_another_cut_are_not_trusted(tmp_path, short_pieces):
+    path = _audio(tmp_path, 70.0)
+    finished = FinishedPieces()
+    resets = [_ConnectionResetError() for _ in range(len(chunking.PIECE_RETRY_DELAYS) + 1)]
+    first = _Provider([TranscriptionResult("old words here"), *resets])
+    with pytest.raises(_ConnectionResetError):
+        await _run(first, path, finished=finished)
+    second = _Provider([TranscriptionResult("new")] * 4, longest=25.0)
+
+    result = await _run(second, path, finished=finished)
+
+    assert len(second.sent) == 4
+    assert "old" not in result.text
 
 
 async def test_an_m4a_is_cut_into_pieces_like_any_other_recording(tmp_path, short_pieces):
