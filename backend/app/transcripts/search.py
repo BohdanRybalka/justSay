@@ -361,8 +361,8 @@ def search_history(
 async def search_history_semantic(q: str, limit: int = 20) -> list[HistorySearchHit]:
     """Embed ``q`` and rank entries by vector distance over ``vec_entries``.
 
-    Empty or whitespace ``q`` returns ``[]`` without an embedding call; every unready
-    state, vectors another embedder wrote included, raises ``SemanticSearchUnavailableError``
+    Empty or whitespace ``q`` returns ``[]`` without an embedding call; every unready state
+    raises ``SemanticSearchUnavailableError``, and no vector from the current embedder raises
     before ``q`` is sent anywhere. No ``<mark>`` spans.
     """
     from app.embeddings import resolve_embedding_provider

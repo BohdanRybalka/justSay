@@ -91,21 +91,30 @@ def recreate_delete_trigger_locked(conn: sqlite3.Connection) -> None:
     )
 
 
+def _forget_other_embedders_locked(conn: sqlite3.Connection, provider: str, model: str) -> bool:
+    """Caller MUST hold ``history._lock``. Whether ``embeddings_meta`` names ``(provider, model)``.
+
+    When it names another embedder, every vector and ``embeddings_meta`` itself are dropped
+    first, so each entry counts as not yet embedded for this one.
+    """
+    row = conn.execute("SELECT provider, model FROM embeddings_meta WHERE id = 1").fetchone()
+    if row is not None and (row["provider"], row["model"]) == (provider, model):
+        return True
+    if row is not None:
+        conn.execute("DROP TABLE IF EXISTS vec_entries")
+        conn.execute("DELETE FROM entry_embeddings")
+        conn.execute("DELETE FROM embeddings_meta")
+    return False
+
+
 def ensure_vec_table_locked(conn: sqlite3.Connection, provider: str, model: str, dim: int) -> None:
     """Caller MUST hold ``history._lock``. Prepares ``vec_entries`` for a model.
 
     A no-op if ``(provider, model)`` already matches ``embeddings_meta``; otherwise
     wipes and recreates at the new dimension, writing ``embeddings_meta`` LAST.
     """
-    row = conn.execute(
-        "SELECT provider, model, dim FROM embeddings_meta WHERE id = 1"
-    ).fetchone()
-    if row is not None and (row["provider"], row["model"]) == (provider, model):
+    if _forget_other_embedders_locked(conn, provider, model):
         return
-
-    if row is not None:
-        conn.execute("DROP TABLE IF EXISTS vec_entries")
-        conn.execute("DELETE FROM entry_embeddings")
 
     conn.execute(
         f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_entries USING vec0(embedding float[{dim}])"
@@ -190,6 +199,10 @@ def _embedder_id(provider: EmbeddingProvider) -> str:
     return (ProviderMode.LOCAL if provider.is_local else ProviderMode.CLOUD).value
 
 
+def _is_still_chosen(provider: EmbeddingProvider) -> bool:
+    return _embedder_id(provider) == stt_settings.mode.value
+
+
 async def _resolve_embedder() -> EmbeddingProvider | None:
     """The embedding provider the settings choose now, or ``None`` when disabled."""
     from app.embeddings import resolve_embedding_provider
@@ -239,10 +252,10 @@ async def embed_entry_background(entry_id: str, text: str) -> None:
 
 
 async def backfill_batch(batch_size: int) -> BackfillResult:
-    """Embed up to ``batch_size`` (clamped to ``[1, BACKFILL_BATCH_MAX]``) not-yet-embedded
-    entries the resolved embedder may read, oldest first. ``remaining`` counts those it, or
-    with none resolved the one the settings choose, may still read. Resumable: an
-    ``entry_embeddings`` row IS the resume cursor.
+    """Embed up to ``batch_size`` (clamped to ``[1, BACKFILL_BATCH_MAX]``) entries the resolved
+    embedder may read and has not embedded, oldest first, until the settings choose another.
+    ``remaining`` counts those it, or with none resolved the one the settings choose, may still
+    read. Resumable: an ``entry_embeddings`` row IS the resume cursor.
     """
     clamped = max(1, min(int(batch_size), BACKFILL_BATCH_MAX))
     provider = await _resolve_embedder() if history._vec_available else None
@@ -252,16 +265,19 @@ async def backfill_batch(batch_size: int) -> BackfillResult:
     readable, params = _readable_by(is_local_embedder)
 
     processed = 0
-    if provider is not None:
+    if provider is not None and _is_still_chosen(provider):
+        provider_id = _embedder_id(provider)
         with history._lock:
             conn = history._ensure_conn_locked()
+            _forget_other_embedders_locked(conn, provider_id, provider.model_name)
             rows = conn.execute(
                 f"SELECT rowid, id, cleaned_text FROM entries WHERE {_UNEMBEDDED} AND {readable} "
                 "ORDER BY ts ASC LIMIT ?",
                 (*params, clamped),
             ).fetchall()
-        provider_id = _embedder_id(provider)
         for row in rows:
+            if not _is_still_chosen(provider):
+                break
             try:
                 vector = await provider.embed(row["cleaned_text"])
                 with history._lock:

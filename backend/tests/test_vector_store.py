@@ -5,14 +5,17 @@ selftest (spec 003), automatic background indexing (spec 017 / ADR 010)."""
 from __future__ import annotations
 
 import asyncio
+import importlib
 import inspect
 import logging
+import pkgutil
 import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import app.stt as stt_package
 from app.config import settings
 from app.core.types import ProviderMode
 from app.stt import groq_whisper, local, local_whisper_cpp
@@ -571,27 +574,119 @@ async def test_a_local_embedder_reads_every_entry_whoever_transcribed_it(monkeyp
     assert result.remaining == 0
 
 
-async def test_the_resolved_embedder_decides_what_it_reads_not_the_setting_beside_it(monkeypatch):
-    """The switch can flip between reading the setting and resolving the provider; what the
-    provider that receives the text says about itself is the one fact that cannot go stale."""
+async def test_a_cloud_embedder_resolved_after_a_switch_to_local_sends_nothing(monkeypatch):
+    """The switch can flip between resolving the provider and embedding; the provider then
+    says Cloud while the settings say Local, and Local wins, its vectors untouched."""
     monkeypatch.setattr(settings.stt, "mode", ProviderMode.LOCAL)
-    history.save_entry(text="dictated here", duration_ms=1, model_name="whisper/large-v3")
+    here = history.save_entry(text="dictated here", duration_ms=1, model_name="whisper/large-v3")
     history.save_entry(text="dictated in the cloud", duration_ms=1, model_name=_GROQ_LABEL)
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        vector_store.ensure_vec_table_locked(conn, "local", "ollama/nomic-embed-text", 3)
+        rowid = _rowid(conn, here.id)
+        vector_store.insert_embedding(
+            conn, here.id, rowid, [1.0, 2.0, 3.0], "local", "ollama/nomic-embed-text"
+        )
     fake = _FakeProvider("gemini/gemini-embedding-001", vector=[1.0, 2.0, 3.0])
 
     with patch(
         "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
     ):
-        await vector_store.backfill_batch(10)
+        result = await vector_store.backfill_batch(10)
 
-    assert fake.embedded == ["dictated in the cloud"]
+    assert fake.embedded == []
+    assert (result.processed, _embedded_labels()) == (0, {"whisper/large-v3"})
+
+
+async def test_a_switch_to_local_stops_a_cloud_batch_already_running(monkeypatch):
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
+    for i in range(3):
+        history.save_entry(text=f"cloud entry {i}", duration_ms=1, model_name=_GROQ_LABEL)
+
+    class _SwitchedMidBatch(_FakeProvider):
+        async def embed(self, text: str) -> list[float]:
+            settings.stt.mode = ProviderMode.LOCAL
+            return await super().embed(text)
+
+    fake = _SwitchedMidBatch("gemini/gemini-embedding-001", vector=[1.0, 2.0, 3.0])
+
+    with patch(
+        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+    ):
+        result = await vector_store.backfill_batch(10)
+
+    assert fake.embedded == ["cloud entry 0"]
+    assert result.processed == 1
+
+
+async def test_vectors_of_the_other_mode_are_replaced_at_the_next_sweep(monkeypatch):
+    """After Local → Cloud every entry still holds a local vector, so without a drop nothing
+    would count as backlog and search by meaning would stay empty until a new dictation."""
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
+    here = history.save_entry(text="dictated here", duration_ms=1, model_name="whisper/large-v3")
+    cloud = history.save_entry(text="dictated in the cloud", duration_ms=1, model_name=_GROQ_LABEL)
     with history._lock:
         conn = history._ensure_conn_locked()
-        meta = conn.execute("SELECT provider FROM embeddings_meta WHERE id = 1").fetchone()
-    assert meta[0] == ProviderMode.CLOUD.value
+        vector_store.ensure_vec_table_locked(conn, "local", "ollama/nomic-embed-text", 5)
+        for entry in (here, cloud):
+            rowid = _rowid(conn, entry.id)
+            vector_store.insert_embedding(
+                conn, entry.id, rowid, [1.0] * 5, "local", "ollama/nomic-embed-text"
+            )
+    fake = _FakeProvider("gemini/gemini-embedding-001", vector=[1.0, 2.0, 3.0])
+
+    with patch(
+        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+    ):
+        result = await vector_store.backfill_batch(10)
+
+    assert fake.embedded == ["dictated in the cloud"]
+    assert (result.remaining, _embedded_labels()) == (0, {_GROQ_LABEL})
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        meta = conn.execute("SELECT provider, model FROM embeddings_meta WHERE id = 1").fetchone()
+    assert tuple(meta) == ("cloud", "gemini/gemini-embedding-001")
+
+
+async def test_the_shipped_embedders_keep_entries_made_here_out_of_the_cloud(monkeypatch):
+    """Real providers, only their network call stood in for: the locality each declares is
+    what the rule reads, so a wrong declaration on either class fails here."""
+    from app.embeddings import clear_cache as clear_embeddings_cache
+    from app.embeddings.cloud import CloudEmbeddingProvider
+    from app.embeddings.local import LocalEmbeddingProvider
+
+    history.save_entry(text="dictated here", duration_ms=1, model_name="whisper/large-v3")
+    history.save_entry(text="dictated in the cloud", duration_ms=1, model_name=_GROQ_LABEL)
+    sent: dict[str, list[str]] = {"cloud": [], "local": []}
+
+    def recorder(where: str):
+        def call_embed(_client, _model: str, text: str) -> list[float]:
+            sent[where].append(text)
+            return [1.0, 2.0, 3.0]
+
+        return staticmethod(call_embed)
+
+    monkeypatch.setattr(CloudEmbeddingProvider, "_get_client", lambda self: object())
+    monkeypatch.setattr(CloudEmbeddingProvider, "_call_embed", recorder("cloud"))
+    monkeypatch.setattr(LocalEmbeddingProvider, "_get_client", lambda self: object())
+    monkeypatch.setattr(LocalEmbeddingProvider, "_call_embed", recorder("local"))
+    monkeypatch.setattr("app.embeddings.local.is_model_available", AsyncMock(return_value=True))
+    clear_embeddings_cache()
+    try:
+        monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
+        await vector_store.backfill_batch(10)
+        monkeypatch.setattr(settings.stt, "mode", ProviderMode.LOCAL)
+        await vector_store.backfill_batch(10)
+    finally:
+        clear_embeddings_cache()
+
+    assert sent["cloud"] == ["dictated in the cloud"]
+    assert sorted(sent["local"]) == ["dictated here", "dictated in the cloud"]
 
 
 def _speech_engine_classes() -> set[type[STTProvider]]:
+    for module in pkgutil.iter_modules(stt_package.__path__):
+        importlib.import_module(f"{stt_package.__name__}.{module.name}")
     found: set[type[STTProvider]] = set()
     pending = list(STTProvider.__subclasses__())
     while pending:
@@ -639,6 +734,43 @@ async def test_a_dictation_made_here_is_not_embedded_in_the_cloud_after_the_swit
 
     assert fake.embedded == []
     assert _embedded_labels() == set()
+
+
+async def test_a_dictation_made_here_is_embedded_at_once_by_a_local_embedder(monkeypatch):
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.LOCAL)
+    e = history.save_entry(text="dictated here", duration_ms=1, model_name="whisper/large-v3")
+    fake = _FakeProvider("ollama/nomic-embed-text", vector=[1.0, 2.0, 3.0], is_local=True)
+
+    with patch(
+        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+    ):
+        await vector_store.embed_entry_background(e.id, "dictated here")
+
+    assert _embedded_labels() == {"whisper/large-v3"}
+
+
+async def test_an_entry_deleted_while_its_embedding_is_made_leaves_no_row(caplog):
+    e = history.save_entry(text="delete me midway", duration_ms=1, model_name=_GROQ_LABEL)
+
+    class _DeletesItsEntry(_FakeProvider):
+        async def embed(self, text: str) -> list[float]:
+            history.delete_entry(e.id)
+            return await super().embed(text)
+
+    fake = _DeletesItsEntry("gemini/gemini-embedding-001", vector=[1.0, 2.0, 3.0])
+    with (
+        caplog.at_level(logging.WARNING, logger=vector_store.log.name),
+        patch(
+            "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+        ),
+    ):
+        await vector_store.embed_entry_background(e.id, "delete me midway")
+
+    with history._lock:
+        conn = history._ensure_conn_locked()
+        count = conn.execute("SELECT COUNT(*) FROM entry_embeddings").fetchone()[0]
+    assert (fake.embedded, count) == (["delete me midway"], 0)
+    assert not caplog.records, [record.getMessage() for record in caplog.records]
 
 
 @pytest.mark.asyncio
@@ -882,8 +1014,8 @@ async def test_embed_entry_background_never_raises_on_provider_failure():
 
 @pytest.mark.asyncio
 async def test_embed_entry_background_skips_deleted_entry(caplog):
-    """If the entry was deleted before the background task ran, insert is
-    skipped instead of raising (rowid lookup returns None)."""
+    """If the entry was deleted before the background task ran, nothing is embedded
+    and nothing raises: the entry check finds no row before the provider is called."""
     fake = _FakeProvider("gemini/text-embedding-004")
     with (
         caplog.at_level(logging.WARNING, logger=vector_store.log.name),
@@ -903,8 +1035,9 @@ async def test_embed_entry_background_skips_deleted_entry(caplog):
         "an entry deleted before its background embed ran must leave no row behind, "
         f"rather than one pointing at an entry_id nothing resolves: {rows}"
     )
+    assert fake.embedded == []
     assert not caplog.records, (
-        "the missing row must be skipped by the rowid guard, not swallowed by the "
+        "the missing row must be skipped by the entry check, not swallowed by the "
         "failure handler -- both leave the table empty, so only the absence of a "
         f"warning tells them apart: {[record.getMessage() for record in caplog.records]}"
     )
