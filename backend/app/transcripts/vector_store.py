@@ -91,30 +91,21 @@ def recreate_delete_trigger_locked(conn: sqlite3.Connection) -> None:
     )
 
 
-def _forget_other_embedders_locked(conn: sqlite3.Connection, provider: str, model: str) -> bool:
-    """Caller MUST hold ``history._lock``. Whether ``embeddings_meta`` names ``(provider, model)``.
-
-    When it names another embedder, every vector and ``embeddings_meta`` itself are dropped
-    first, so each entry counts as not yet embedded for this one.
-    """
-    row = conn.execute("SELECT provider, model FROM embeddings_meta WHERE id = 1").fetchone()
-    if row is not None and (row["provider"], row["model"]) == (provider, model):
-        return True
-    if row is not None:
-        conn.execute("DROP TABLE IF EXISTS vec_entries")
-        conn.execute("DELETE FROM entry_embeddings")
-        conn.execute("DELETE FROM embeddings_meta")
-    return False
-
-
 def ensure_vec_table_locked(conn: sqlite3.Connection, provider: str, model: str, dim: int) -> None:
     """Caller MUST hold ``history._lock``. Prepares ``vec_entries`` for a model.
 
     A no-op if ``(provider, model)`` already matches ``embeddings_meta``; otherwise
     wipes and recreates at the new dimension, writing ``embeddings_meta`` LAST.
     """
-    if _forget_other_embedders_locked(conn, provider, model):
+    row = conn.execute(
+        "SELECT provider, model, dim FROM embeddings_meta WHERE id = 1"
+    ).fetchone()
+    if row is not None and (row["provider"], row["model"]) == (provider, model):
         return
+
+    if row is not None:
+        conn.execute("DROP TABLE IF EXISTS vec_entries")
+        conn.execute("DELETE FROM entry_embeddings")
 
     conn.execute(
         f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_entries USING vec0(embedding float[{dim}])"
@@ -269,7 +260,6 @@ async def backfill_batch(batch_size: int) -> BackfillResult:
         provider_id = _embedder_id(provider)
         with history._lock:
             conn = history._ensure_conn_locked()
-            _forget_other_embedders_locked(conn, provider_id, provider.model_name)
             rows = conn.execute(
                 f"SELECT rowid, id, cleaned_text FROM entries WHERE {_UNEMBEDDED} AND {readable} "
                 "ORDER BY ts ASC LIMIT ?",

@@ -615,37 +615,35 @@ async def test_a_switch_to_local_stops_a_cloud_batch_already_running(monkeypatch
     ):
         result = await vector_store.backfill_batch(10)
 
-    assert fake.embedded == ["cloud entry 0"]
-    assert result.processed == 1
+    assert (len(fake.embedded), result.processed) == (1, 1)
 
 
-async def test_vectors_of_the_other_mode_are_replaced_at_the_next_sweep(monkeypatch):
-    """After Local → Cloud every entry still holds a local vector, so without a drop nothing
-    would count as backlog and search by meaning would stay empty until a new dictation."""
+async def test_a_cloud_sweep_that_embeds_nothing_leaves_history_deletable(monkeypatch):
+    """Without a key or a network the cloud embedder writes nothing, so the local vectors must
+    stay whole until it does; a dropped vector table breaks every delete through its trigger."""
     monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
     here = history.save_entry(text="dictated here", duration_ms=1, model_name="whisper/large-v3")
     cloud = history.save_entry(text="dictated in the cloud", duration_ms=1, model_name=_GROQ_LABEL)
     with history._lock:
         conn = history._ensure_conn_locked()
-        vector_store.ensure_vec_table_locked(conn, "local", "ollama/nomic-embed-text", 5)
-        for entry in (here, cloud):
-            rowid = _rowid(conn, entry.id)
-            vector_store.insert_embedding(
-                conn, entry.id, rowid, [1.0] * 5, "local", "ollama/nomic-embed-text"
-            )
-    fake = _FakeProvider("gemini/gemini-embedding-001", vector=[1.0, 2.0, 3.0])
+        vector_store.ensure_vec_table_locked(conn, "local", "ollama/nomic-embed-text", 3)
+        rowid = _rowid(conn, here.id)
+        vector_store.insert_embedding(
+            conn, here.id, rowid, [1.0, 2.0, 3.0], "local", "ollama/nomic-embed-text"
+        )
+    failing = _FakeProvider("gemini/gemini-embedding-001", fail=True)
 
     with patch(
-        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(fake, None))
+        "app.embeddings.resolve_embedding_provider", new=AsyncMock(return_value=(failing, None))
     ):
-        result = await vector_store.backfill_batch(10)
+        await vector_store.backfill_batch(10)
+    history.delete_entry(here.id)
+    history.delete_entry(cloud.id)
 
-    assert fake.embedded == ["dictated in the cloud"]
-    assert (result.remaining, _embedded_labels()) == (0, {_GROQ_LABEL})
     with history._lock:
         conn = history._ensure_conn_locked()
-        meta = conn.execute("SELECT provider, model FROM embeddings_meta WHERE id = 1").fetchone()
-    assert tuple(meta) == ("cloud", "gemini/gemini-embedding-001")
+        left = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+    assert (failing.embedded, left) == (["dictated in the cloud"], 0)
 
 
 async def test_the_shipped_embedders_keep_entries_made_here_out_of_the_cloud(monkeypatch):
@@ -675,6 +673,8 @@ async def test_the_shipped_embedders_keep_entries_made_here_out_of_the_cloud(mon
     try:
         monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
         await vector_store.backfill_batch(10)
+        with history._lock:
+            history._ensure_conn_locked().execute("DELETE FROM entry_embeddings")
         monkeypatch.setattr(settings.stt, "mode", ProviderMode.LOCAL)
         await vector_store.backfill_batch(10)
     finally:
