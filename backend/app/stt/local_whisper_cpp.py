@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from ctypes import wintypes
 from pathlib import Path
 
@@ -493,8 +494,8 @@ class WhisperCppServerSTTProvider(STTProvider):
         finally:
             self._load_lock.release()
 
-    def release_when_idle(self) -> None:
-        self._use.release_when_idle(self.cleanup)
+    def release_when_idle(self, still_unused: Callable[[], bool]) -> None:
+        self._use.release_when_idle(still_unused)
 
     def _unload(self) -> None:
         """Terminate the child, waiting for a load in flight instead of skipping it."""

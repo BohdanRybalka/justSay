@@ -2,7 +2,7 @@
 
 An engine loaded with other settings than the current ones is restarted only when no
 transcription runs on it: every request that began before the change finishes on the old
-engine, and the new one loads after it. A release can be deferred the same way.
+engine, and the new one loads after it. A release waits for them the same way.
 """
 
 import asyncio
@@ -35,7 +35,6 @@ class EngineUse:
         self._changed = threading.Condition()
         self._running = 0
         self._restarting = False
-        self._release_on_idle: Callable[[], None] | None = None
 
     def settle(self) -> None:
         """Block until the engine is not stale, unloading a stale one once nothing runs on it."""
@@ -45,12 +44,7 @@ class EngineUse:
             if not self._is_stale():
                 return
             self._restarting = True
-        try:
-            self._unload()
-        finally:
-            with self._changed:
-                self._restarting = False
-                self._changed.notify_all()
+        self._unload_exclusively()
 
     async def enter(self, prepare: Callable[[], T]) -> T:
         """Count a transcription in once ``prepare`` has left a ready engine, and return its result.
@@ -63,32 +57,36 @@ class EngineUse:
             with self._changed:
                 if not self._restarting and self._is_ready():
                     self._running += 1
-                    self._release_on_idle = None
                     return prepared
 
     def leave(self) -> None:
-        """Count a finished transcription out, running a release that was waiting for the last."""
+        """Count a finished transcription out."""
         with self._changed:
             self._running -= 1
-            if not self._running and self._release_on_idle is not None:
-                release, self._release_on_idle = self._release_on_idle, None
-                self._run(release)
             self._changed.notify_all()
 
-    def release_when_idle(self, release: Callable[[], None]) -> None:
-        """Run ``release`` now when nothing runs, else after the last transcription ends.
+    def release_when_idle(self, still_unused: Callable[[], bool]) -> None:
+        """Unload the engine on a thread once nothing runs on it and a load in flight is over.
 
-        A transcription that begins before then cancels it.
+        Nothing is unloaded if ``still_unused`` is false by then.
         """
-        with self._changed:
-            if self._running:
-                self._release_on_idle = release
-            else:
-                self._run(release)
+        threading.Thread(target=self._release, args=(still_unused,), daemon=True).start()
 
-    @staticmethod
-    def _run(release: Callable[[], None]) -> None:
+    def _release(self, still_unused: Callable[[], bool]) -> None:
+        with self._changed:
+            while self._restarting or self._running:
+                self._changed.wait()
+            if not still_unused():
+                return
+            self._restarting = True
+        self._unload_exclusively()
+
+    def _unload_exclusively(self) -> None:
         try:
-            release()
+            self._unload()
         except Exception:
             log.warning("Releasing the local engine failed", exc_info=True)
+        finally:
+            with self._changed:
+                self._restarting = False
+                self._changed.notify_all()

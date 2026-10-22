@@ -76,10 +76,10 @@ def peek_local_provider() -> STTProvider | None:
 
 
 def is_model_loaded() -> bool:
-    """Is the local whisper model currently loaded in memory?
+    """Is the local whisper model loaded in memory and the one the settings choose?
 
-    ``False`` when no local provider is cached. The flag is read without a
-    default (ADR 075).
+    ``False`` when no local provider is cached, and while a loaded one waits to restart for
+    a changed model. The flag is read without a default (ADR 075).
     """
     from app.stt.local_factory import get_local_provider_class
     cls = get_local_provider_class()
@@ -112,13 +112,17 @@ def drop_cloud_provider() -> None:
 
 
 def release_local_if_unused(stt_settings: STTSettings) -> None:
-    """Free the local engine once no route uses it, after the transcriptions running on it end."""
-    routes = (stt_settings.mode, stt_settings.meetings_mode, stt_settings.files_mode)
-    if ProviderMode.LOCAL in routes:
+    """Free the local engine once no route uses it, after what runs or loads on it ends."""
+    if _local_in_use(stt_settings):
         return
     provider = peek_local_provider()
     if provider is not None:
-        provider.release_when_idle()
+        provider.release_when_idle(lambda: not _local_in_use(stt_settings))
+
+
+def _local_in_use(stt_settings: STTSettings) -> bool:
+    routes = (stt_settings.mode, stt_settings.meetings_mode, stt_settings.files_mode)
+    return ProviderMode.LOCAL in routes
 
 
 def clear_cache() -> None:

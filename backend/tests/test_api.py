@@ -117,7 +117,7 @@ async def test_switching_dictation_to_cloud_keeps_the_engine_a_meeting_or_file_u
 
     provider = get_provider(ProviderMode.LOCAL, stt_settings)
     released = []
-    monkeypatch.setattr(provider, "release_when_idle", lambda: released.append(1))
+    monkeypatch.setattr(provider, "release_when_idle", lambda still_unused: released.append(1))
 
     await client.put("/stt/mode", json={"mode": "local"})
     await client.put("/stt/mode", json={"mode": "cloud"})

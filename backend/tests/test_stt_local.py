@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import threading
+import time
 import types
 
 import pytest
@@ -118,10 +119,13 @@ async def test_a_release_waits_for_the_running_request_then_frees_the_model(
     running = asyncio.ensure_future(provider.transcribe(audio_path, language="uk"))
     assert await asyncio.to_thread(built_models.hold.started.wait, 2)
 
-    provider.release_when_idle()
+    provider.release_when_idle(lambda: True)
     assert provider.is_loaded is True
 
     built_models.hold.finish.set()
     await running
 
+    deadline = time.monotonic() + 2
+    while provider.is_loaded and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert provider.is_loaded is False

@@ -188,15 +188,20 @@ def _routes(**overrides) -> STTSettings:
     return STTSettings(**routes)
 
 
-def test_the_local_engine_is_released_when_no_route_uses_it(monkeypatch):
+def test_the_local_engine_is_released_when_no_route_uses_it_and_not_if_one_does_by_then(
+    monkeypatch,
+):
     settings = _routes()
     provider = get_provider(ProviderMode.LOCAL, settings)
-    released = []
-    monkeypatch.setattr(provider, "release_when_idle", lambda: released.append(1))
+    asked = []
+    monkeypatch.setattr(provider, "release_when_idle", asked.append)
 
     release_local_if_unused(settings)
 
-    assert released == [1]
+    assert len(asked) == 1
+    assert asked[0]() is True
+    settings.meetings_mode = ProviderMode.LOCAL
+    assert asked[0]() is False
 
 
 @pytest.mark.parametrize("route", ["mode", "meetings_mode", "files_mode"])
@@ -204,7 +209,7 @@ def test_the_local_engine_stays_while_any_route_uses_it(monkeypatch, route):
     settings = _routes(**{route: ProviderMode.LOCAL})
     provider = get_provider(ProviderMode.LOCAL, settings)
     released = []
-    monkeypatch.setattr(provider, "release_when_idle", lambda: released.append(1))
+    monkeypatch.setattr(provider, "release_when_idle", lambda still_unused: released.append(1))
 
     release_local_if_unused(settings)
 

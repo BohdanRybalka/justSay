@@ -1714,12 +1714,37 @@ async def test_a_release_waits_for_the_running_request_then_stops_the_server(
     running = asyncio.ensure_future(provider.transcribe(audio_path, language="uk"))
     assert await asyncio.to_thread(in_request.wait, 2)
 
-    provider.release_when_idle()
+    provider.release_when_idle(lambda: True)
     assert spawned[0].terminate_calls == 0
     assert provider.is_loaded is True
 
     finish_request.set()
     assert (await running).text == "hello"
 
-    assert provider.is_loaded is False
     assert _wait_until(lambda: spawned[0].terminate_calls == 1)
+    assert provider.is_loaded is False
+
+
+def test_a_release_asked_for_during_a_load_still_stops_the_server_once_it_is_up(
+    monkeypatch, tmp_path
+):
+    provider, _model_path = _make_provider(tmp_path, monkeypatch)
+    spawned = _install_fake_popen_per_spawn(monkeypatch)
+    health_asked, finish_health = threading.Event(), threading.Event()
+
+    def _get(url):
+        health_asked.set()
+        finish_health.wait(timeout=5)
+        return _FakeResponse(200)
+
+    _install_fake_httpx(monkeypatch, get_impl=_get)
+    loading = threading.Thread(target=provider._get_model)
+    loading.start()
+    assert health_asked.wait(2)
+
+    provider.release_when_idle(lambda: True)
+    finish_health.set()
+    loading.join(3)
+
+    assert _wait_until(lambda: spawned[0].terminate_calls == 1)
+    assert provider.is_loaded is False

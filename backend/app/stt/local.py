@@ -11,6 +11,7 @@ import asyncio
 import gc
 import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from app.stt.base import (
@@ -211,8 +212,8 @@ class LocalSTTProvider(STTProvider):
         finally:
             self._load_lock.release()
 
-    def release_when_idle(self) -> None:
-        self._use.release_when_idle(self.cleanup)
+    def release_when_idle(self, still_unused: Callable[[], bool]) -> None:
+        self._use.release_when_idle(still_unused)
 
     def _unload(self) -> None:
         """Release the model, waiting for a load in flight instead of skipping it."""

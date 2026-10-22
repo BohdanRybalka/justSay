@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import threading
+import time
 
 import pytest
 
@@ -109,51 +110,60 @@ async def test_enter_prepares_again_while_the_engine_is_not_ready():
     engine.use.leave()
 
 
-@pytest.mark.asyncio
-async def test_a_release_waits_for_the_last_running_transcription():
-    engine = _Engine()
-    released = []
-    await engine.use.enter(lambda: None)
-    await engine.use.enter(lambda: None)
-
-    engine.use.release_when_idle(lambda: released.append(1))
-    engine.use.leave()
-    assert released == []
-
-    engine.use.leave()
-    assert released == [1]
-
-
-def test_a_release_runs_at_once_when_nothing_is_running():
-    engine = _Engine()
-    released = []
-
-    engine.use.release_when_idle(lambda: released.append(1))
-
-    assert released == [1]
+def _wait_for(predicate, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
 
 
 @pytest.mark.asyncio
-async def test_a_transcription_that_begins_before_the_release_cancels_it():
+async def test_a_release_unloads_only_after_the_last_running_transcription():
     engine = _Engine()
-    released = []
     await engine.use.enter(lambda: None)
-    engine.use.release_when_idle(lambda: released.append(1))
-
     await engine.use.enter(lambda: None)
+
+    engine.use.release_when_idle(lambda: True)
     engine.use.leave()
+    time.sleep(0.3)
+    assert engine.unloads == 0
+
     engine.use.leave()
+    assert _wait_for(lambda: engine.unloads == 1)
 
-    assert released == []
 
-
-def test_a_release_that_raises_is_logged_and_does_not_reach_the_caller(caplog):
+def test_a_release_unloads_at_once_when_nothing_is_running():
     engine = _Engine()
 
+    engine.use.release_when_idle(lambda: True)
+
+    assert _wait_for(lambda: engine.unloads == 1)
+
+
+@pytest.mark.asyncio
+async def test_a_release_is_dropped_when_the_engine_is_wanted_again_by_then():
+    engine = _Engine()
+    await engine.use.enter(lambda: None)
+    unused = [True]
+    engine.use.release_when_idle(lambda: unused[0])
+
+    unused[0] = False
+    engine.use.leave()
+    time.sleep(0.3)
+
+    assert engine.unloads == 0
+
+
+def test_a_release_that_raises_is_logged_and_the_engine_stays_usable(caplog):
     def _fail():
         raise RuntimeError("terminate refused")
 
-    with caplog.at_level(logging.WARNING):
-        engine.use.release_when_idle(_fail)
+    use = EngineUse(is_stale=lambda: False, is_ready=lambda: True, unload=_fail)
 
-    assert "Releasing the local engine failed" in caplog.text
+    with caplog.at_level(logging.WARNING):
+        use.release_when_idle(lambda: True)
+        assert _wait_for(lambda: "Releasing the local engine failed" in caplog.text)
+
+    use.settle()
