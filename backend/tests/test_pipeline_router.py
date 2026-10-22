@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import BackgroundTasks
 from httpx import ASGITransport, AsyncClient
 
 from app.audio.dependencies import get_recorder
@@ -291,6 +292,40 @@ async def test_a_failed_dictation_keeps_its_audio_as_a_card_for_try_again(
     assert (card.kind, card.stage) == ("dictation", "failed")
     assert not recording.exists()
     assert len(list((tmp_path / "scratch").glob("dictation_*.wav"))) == 1
+
+
+@pytest.mark.anyio
+async def test_a_dictation_cut_off_by_shutdown_keeps_its_audio_for_try_again(
+    tmp_path, jobs_queue
+):
+    """Shutdown cancels a request being transcribed; its audio must outlive the ``finally``."""
+    recording = tmp_path / "rec.wav"
+    recording.write_bytes(_wav_bytes())
+
+    engine_handles = []
+
+    async def _cut_off_while_the_engine_reads_the_file(audio_path, **_kwargs):
+        engine_handles.append(audio_path.open("rb"))
+        raise asyncio.CancelledError
+
+    try:
+        with patch("app.pipeline.router.process_audio", _cut_off_while_the_engine_reads_the_file):
+            with pytest.raises(asyncio.CancelledError):
+                await pipeline_router.dictate(
+                    background_tasks=BackgroundTasks(),
+                    ref=None,
+                    language="de",
+                    recorder=_stopping_recorder(recording),
+                    queue=jobs_queue,
+                )
+    finally:
+        for handle in engine_handles:
+            handle.close()
+
+    [card] = jobs_queue.views()
+    assert (card.kind, card.stage) == ("dictation", "failed")
+    [kept] = (tmp_path / "scratch").glob("dictation_*_de.wav")
+    assert kept.read_bytes() == _wav_bytes()
 
 
 def test_the_dictate_response_carries_every_processing_result_field() -> None:

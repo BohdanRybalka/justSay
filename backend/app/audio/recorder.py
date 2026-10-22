@@ -16,6 +16,7 @@ from app.audio.base import AudioRecorder, write_wav
 from app.audio.config import AudioSettings
 from app.audio.session import SESSION_MISMATCH_DETAIL, SessionMismatchError
 from app.core.errors import NotReadyError
+from app.core.scratch import RECORDING_FILE_PREFIX
 
 log = logging.getLogger(__name__)
 
@@ -144,7 +145,7 @@ class MicrophoneRecorder(AudioRecorder):
         if not frames:
             raise RuntimeError("No audio data captured")
 
-        filename = f"rec_{uuid.uuid4().hex[:12]}.wav"
+        filename = f"{RECORDING_FILE_PREFIX}{uuid.uuid4().hex[:12]}.wav"
         output_path = self._settings.temp_dir / filename
 
         return await asyncio.to_thread(self._concatenate_and_write, frames, output_path)

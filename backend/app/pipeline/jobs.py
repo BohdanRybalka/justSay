@@ -11,8 +11,10 @@ with the app.
 from __future__ import annotations
 
 import asyncio
+import filecmp
 import logging
 import re
+import shutil
 import sqlite3
 import statistics
 import time
@@ -34,7 +36,7 @@ from app.core.errors import (
     NotReadyError,
     ResourceUnavailableError,
 )
-from app.core.scratch import discard_scratch_file
+from app.core.scratch import RECORDING_FILE_PREFIX, discard_scratch_file
 from app.core.types import ProviderMode
 from app.pipeline.chunking import RouteStoppedError
 from app.pipeline.service import process_audio
@@ -218,13 +220,29 @@ def _recorded_name(label: str, recording: Path) -> str:
 def remove_leftover_files(temp_dir: Path) -> None:
     """Delete the scratch files of jobs that were running when the app last quit.
 
-    A dictation file that is not a kept recording is the scratch of a retry cut short.
+    A dictation file that is not a kept recording is the scratch of a retry cut short. A
+    ``rec_`` recording goes only when a kept dictation holds the same audio.
     """
     for path in temp_dir.glob(f"{JOB_FILE_PREFIX}*"):
         discard_scratch_file(path)
+    kept = [
+        path
+        for path in temp_dir.glob(f"{DICTATION_FILE_PREFIX}*.wav")
+        if DICTATION_NAME.fullmatch(path.name) is not None
+    ]
+    for path in temp_dir.glob(f"{RECORDING_FILE_PREFIX}*"):
+        if any(_same_audio(path, twin) for twin in kept):
+            discard_scratch_file(path)
     for path in temp_dir.glob(f"{DICTATION_FILE_PREFIX}*"):
         if DICTATION_NAME.fullmatch(path.name) is None:
             discard_scratch_file(path)
+
+
+def _same_audio(first: Path, second: Path) -> bool:
+    try:
+        return filecmp.cmp(first, second, shallow=False)
+    except OSError:
+        return False
 
 
 def leftover_dictations(temp_dir: Path) -> list[Path]:
@@ -295,8 +313,9 @@ class JobQueue:
     def keep_failed_dictation(self, audio: Path, *, language: str, mode: ProviderMode) -> None:
         """Keep the audio of a dictation that failed as a card that Try again can send once more.
 
-        The name carries the mode and language, so a restart sends it again the same way. Nothing
-        is kept when the audio is not on disk, since there is nothing to send.
+        The name carries the mode and language, so a restart sends it again the same way. An
+        engine still reading the audio blocks a move on Windows, so it is copied then. Nothing is
+        kept when the audio is not on disk, since there is nothing to send.
         """
         job_id = uuid.uuid4().hex
         name = f"{DICTATION_FILE_PREFIX}{job_id}_{mode.value}_{language}.wav"
@@ -306,9 +325,13 @@ class JobQueue:
         path = self._temp_dir / name
         try:
             self._temp_dir.mkdir(parents=True, exist_ok=True)
-            audio.replace(path)
+            try:
+                audio.replace(path)
+            except PermissionError:
+                shutil.copyfile(audio, path)
         except OSError:
             log.warning("Keeping the audio of a failed dictation failed", exc_info=True)
+            discard_scratch_file(path)
             return
         job = _Job(
             id=job_id,

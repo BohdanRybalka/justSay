@@ -5,6 +5,8 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+RECORDING_FILE_PREFIX = "rec_"
+
 
 def discard_scratch_file(path: Path) -> None:
     """Delete ``path`` if it exists; an ``OSError`` is logged, never raised.

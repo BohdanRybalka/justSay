@@ -23,6 +23,7 @@ import app.stt
 from app.audio.dependencies import get_recorder
 from app.audio.meeting_spool import MeetingSpool
 from app.core.app_paths import resolve_app_data_root
+from app.core.types import ProviderMode
 from app.main import app as fastapi_app
 from app.pipeline.jobs import MEETING_INTERRUPTED_REASON
 from app.preferences import user_settings
@@ -309,6 +310,74 @@ def test_a_meeting_the_last_run_cut_off_waits_in_history_untranscribed():
     ]
     assert status["is_recording"] is False
     assert (temp_dir / "meeting_0123456789ab.wav").exists()
+
+
+class _RecordingAtQuit:
+    """A microphone recorder still capturing when the backend is told to stop."""
+
+    def __init__(self, _settings, *, capturing: bool = True, stop_error: Exception | None = None):
+        self.is_recording = capturing
+        self._stop_error = stop_error
+        self.cleaned_up = False
+        self.stopped = False
+
+    async def stop(self, session_id: str | None = None) -> Path:
+        self.stopped = True
+        if self._stop_error is not None:
+            raise self._stop_error
+        self.is_recording = False
+        audio = app.main.settings.audio.temp_dir / "rec_0123456789ab.wav"
+        audio.write_bytes(b"RIFF")
+        return audio
+
+    def cleanup(self) -> None:
+        self.cleaned_up = True
+
+
+def _kept_dictations() -> list[Path]:
+    return sorted(app.main.settings.audio.temp_dir.glob("dictation_*.wav"))
+
+
+def test_a_dictation_being_recorded_at_quit_waits_in_history_with_try_again(monkeypatch):
+    with monkeypatch.context() as quitting:
+        quitting.setattr(app.audio.recorder, "MicrophoneRecorder", _RecordingAtQuit)
+        with TestClient(fastapi_app):
+            quitting.setattr(app.main.settings.stt, "mode", ProviderMode.LOCAL)
+    [kept] = _kept_dictations()
+
+    with TestClient(fastapi_app) as client:
+        [job] = client.get("/jobs").json()
+
+    assert kept.name.endswith("_local_auto.wav")
+    assert (job["kind"], job["stage"], job["error"]) == (
+        "dictation",
+        "failed",
+        "Couldn't turn this dictation into text. Try again",
+    )
+
+
+def test_a_quit_with_nothing_being_recorded_keeps_no_dictation(monkeypatch):
+    idle = _RecordingAtQuit(None, capturing=False)
+    monkeypatch.setattr(app.audio.recorder, "MicrophoneRecorder", lambda settings: idle)
+    with TestClient(fastapi_app):
+        pass
+
+    assert not idle.stopped
+    assert idle.cleaned_up
+
+
+def test_a_recording_that_cannot_be_kept_does_not_stop_the_rest_of_the_shutdown(
+    monkeypatch, caplog
+):
+    recorder = _RecordingAtQuit(None, stop_error=RuntimeError("No audio data captured"))
+    monkeypatch.setattr(app.audio.recorder, "MicrophoneRecorder", lambda settings: recorder)
+
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        with TestClient(fastapi_app):
+            pass
+
+    assert recorder.cleaned_up
+    assert any("keeping the dictation being recorded" in r.getMessage() for r in caplog.records)
 
 
 def test_a_failing_sync_to_runtime_still_takes_the_backend_down(monkeypatch):
