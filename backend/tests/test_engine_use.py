@@ -160,3 +160,24 @@ def test_a_release_that_raises_is_logged_and_the_engine_stays_usable(caplog):
         assert wait_until(lambda: "Releasing the local engine failed" in caplog.text)
 
     use.settle()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_that_fails_reaches_the_caller_and_the_next_request_still_enters():
+    engine = _Engine()
+    engine.stale = True
+    failing = [True]
+
+    def _unload(only_if=None):
+        if failing[0]:
+            raise RuntimeError("terminate refused")
+        engine._unload()
+
+    use = EngineUse(is_stale=lambda: engine.stale, is_ready=lambda: engine.ready, unload=_unload)
+
+    with pytest.raises(RuntimeError, match="terminate refused"):
+        use.settle()
+
+    failing[0] = False
+    await asyncio.wait_for(use.enter(lambda: None), 2)
+    use.leave()

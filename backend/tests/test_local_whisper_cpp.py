@@ -23,7 +23,7 @@ from app.stt.base import LOAD_FAILED_WITHOUT_A_MESSAGE
 from app.stt.config import STTSettings
 from app.stt.glossary import WHISPER_PROMPT_CHAR_BUDGET
 from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
-from tests.conftest import write_aac_m4a
+from tests.conftest import wait_until, write_aac_m4a
 
 _requires_windows = pytest.mark.skipif(
     sys.platform != "win32",
@@ -688,20 +688,6 @@ async def test_transcribe_auto_path_missing_language_key_is_none(monkeypatch, tm
     assert result.detected_language is None
 
 
-
-
-def _wait_until(predicate, timeout: float = 2.0, interval: float = 0.01) -> bool:
-    """Poll `predicate` until it's truthy or `timeout` elapses -- used below
-    because the actual terminate()/kill() call now happens on a background
-    daemon thread, so it must not be asserted on instantaneously."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(interval)
-    return predicate()
-
-
 def test_cleanup_returns_promptly_without_deadlock_when_load_lock_held():
     """Mirrors `LocalSTTProvider`'s established
     non-blocking-lock-guard test: `cleanup()` is reachable synchronously from
@@ -755,7 +741,7 @@ def test_cleanup_returns_immediately_and_terminates_in_background_when_lock_is_f
     assert provider._process is None
     assert provider.is_loaded is False
 
-    assert _wait_until(lambda: process.terminate_calls == 1), (
+    assert wait_until(lambda: process.terminate_calls == 1), (
         "background thread never called terminate()"
     )
     assert process.kill_calls == 0
@@ -774,7 +760,7 @@ def test_cleanup_kills_process_in_background_when_terminate_does_not_exit_in_tim
 
     assert provider._process is None
 
-    assert _wait_until(lambda: process.kill_calls == 1), (
+    assert wait_until(lambda: process.kill_calls == 1), (
         "background thread never called kill()"
     )
     assert process.terminate_calls == 1
@@ -803,7 +789,7 @@ def test_cleanup_returns_immediately_even_though_terminate_sequence_would_block(
         f"cleanup() blocked for {elapsed:.3f}s -- should return near-instantly"
     )
 
-    assert _wait_until(lambda: process.kill_calls == 1, timeout=2.0), (
+    assert wait_until(lambda: process.kill_calls == 1, timeout=2.0), (
         "background thread never completed the full grace-poll + kill sequence"
     )
     assert process.terminate_calls == 1
@@ -1670,7 +1656,7 @@ async def test_a_changed_model_waits_for_the_running_request_before_the_server_r
     reloading.join(3)
 
     assert len(spawned) == 2
-    assert _wait_until(lambda: spawned[0].terminate_calls == 1)
+    assert wait_until(lambda: spawned[0].terminate_calls == 1)
     assert spawned[1].terminate_calls == 0
     assert provider.is_loaded is True
 
@@ -1721,7 +1707,7 @@ async def test_a_release_waits_for_the_running_request_then_stops_the_server(
     finish_request.set()
     assert (await running).text == "hello"
 
-    assert _wait_until(lambda: spawned[0].terminate_calls == 1)
+    assert wait_until(lambda: spawned[0].terminate_calls == 1)
     assert provider.is_loaded is False
 
 
@@ -1746,7 +1732,7 @@ def test_a_release_asked_for_during_a_load_still_stops_the_server_once_it_is_up(
     finish_health.set()
     loading.join(3)
 
-    assert _wait_until(lambda: spawned[0].terminate_calls == 1)
+    assert wait_until(lambda: spawned[0].terminate_calls == 1)
     assert provider.is_loaded is False
 
 

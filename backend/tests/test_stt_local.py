@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import threading
+import time
 import types
 
 import pytest
@@ -126,3 +127,31 @@ async def test_a_release_waits_for_the_running_request_then_frees_the_model(
     await running
 
     assert wait_until(lambda: not provider.is_loaded)
+
+
+def test_a_release_asked_for_during_a_load_is_dropped_if_a_route_uses_the_engine_by_its_end(
+    monkeypatch,
+):
+    building, finish_build = threading.Event(), threading.Event()
+
+    def _whisper_model(size, device, compute_type):
+        building.set()
+        finish_build.wait(timeout=5)
+        return _FakeModel(size)
+
+    monkeypatch.setitem(
+        sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=_whisper_model)
+    )
+    provider = _provider()
+    loading = threading.Thread(target=provider._get_model)
+    loading.start()
+    assert building.wait(2)
+    unused = [True]
+
+    provider.release_when_idle(lambda: unused[0])
+    unused[0] = False
+    finish_build.set()
+    loading.join(3)
+    time.sleep(0.3)
+
+    assert provider.is_loaded is True
