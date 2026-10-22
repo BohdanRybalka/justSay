@@ -497,10 +497,14 @@ class WhisperCppServerSTTProvider(STTProvider):
     def release_when_idle(self, still_unused: Callable[[], bool]) -> None:
         self._use.release_when_idle(still_unused)
 
-    def _unload(self) -> None:
-        """Terminate the child, waiting for a load in flight instead of skipping it."""
+    def _unload(self, only_if: Callable[[], bool] | None = None) -> None:
+        """Terminate the child, waiting for a load in flight instead of skipping it.
+
+        With ``only_if`` it terminates only while that is still true after the wait.
+        """
         with self._load_lock:
-            self._release_server()
+            if only_if is None or only_if():
+                self._release_server()
 
     def _release_server(self) -> None:
         self._server_ready = False

@@ -109,7 +109,7 @@ class LocalSTTProvider(STTProvider):
                     self._last_load_error = msg
                     log.exception("Whisper load failed: %s", msg)
                     raise
-        return self._model
+            return self._model
 
     @staticmethod
     def _detect_device() -> str:
@@ -215,10 +215,14 @@ class LocalSTTProvider(STTProvider):
     def release_when_idle(self, still_unused: Callable[[], bool]) -> None:
         self._use.release_when_idle(still_unused)
 
-    def _unload(self) -> None:
-        """Release the model, waiting for a load in flight instead of skipping it."""
+    def _unload(self, only_if: Callable[[], bool] | None = None) -> None:
+        """Release the model, waiting for a load in flight instead of skipping it.
+
+        With ``only_if`` it releases only while that is still true after the wait.
+        """
         with self._load_lock:
-            self._release_model()
+            if only_if is None or only_if():
+                self._release_model()
 
     def _release_model(self) -> None:
         if self._model is None:

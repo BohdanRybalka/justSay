@@ -20,14 +20,15 @@ class EngineUse:
     """The running-transcription count of one engine, with the restart and release that wait on it.
 
     ``is_stale`` says the loaded engine no longer matches the settings, ``is_ready`` says it can
-    transcribe now, ``unload`` frees it and may block.
+    transcribe now, ``unload`` frees it and may block; given a ``only_if`` check it frees the
+    engine only while that still holds, once a load in flight is over.
     """
 
     def __init__(
         self,
         is_stale: Callable[[], bool],
         is_ready: Callable[[], bool],
-        unload: Callable[[], None],
+        unload: Callable[..., None],
     ) -> None:
         self._is_stale = is_stale
         self._is_ready = is_ready
@@ -44,7 +45,10 @@ class EngineUse:
             if not self._is_stale():
                 return
             self._restarting = True
-        self._unload_exclusively()
+        try:
+            self._unload()
+        finally:
+            self._finish_exclusive()
 
     async def enter(self, prepare: Callable[[], T]) -> T:
         """Count a transcription in once ``prepare`` has left a ready engine, and return its result.
@@ -68,7 +72,7 @@ class EngineUse:
     def release_when_idle(self, still_unused: Callable[[], bool]) -> None:
         """Unload the engine on a thread once nothing runs on it and a load in flight is over.
 
-        Nothing is unloaded if ``still_unused`` is false by then.
+        Nothing is unloaded if ``still_unused`` is false by then, checked after that load.
         """
         threading.Thread(target=self._release, args=(still_unused,), daemon=True).start()
 
@@ -79,14 +83,14 @@ class EngineUse:
             if not still_unused():
                 return
             self._restarting = True
-        self._unload_exclusively()
-
-    def _unload_exclusively(self) -> None:
         try:
-            self._unload()
+            self._unload(only_if=still_unused)
         except Exception:
             log.warning("Releasing the local engine failed", exc_info=True)
         finally:
-            with self._changed:
-                self._restarting = False
-                self._changed.notify_all()
+            self._finish_exclusive()
+
+    def _finish_exclusive(self) -> None:
+        with self._changed:
+            self._restarting = False
+            self._changed.notify_all()

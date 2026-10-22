@@ -1133,6 +1133,16 @@ def fake_genai_modules(client_class) -> dict[str, ModuleType]:
     }
 
 
+def wait_until(predicate, timeout: float = 2.0, interval: float = 0.01) -> bool:
+    """Poll ``predicate`` until it is truthy or ``timeout`` seconds pass; its last answer."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
+
+
 def write_aac_m4a(path: Path, seconds: float, rate: int = 44100) -> Path:
     """An M4A of stereo AAC noise, the kind of file only FFmpeg decodes here."""
     import numpy as np

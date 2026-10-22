@@ -1,13 +1,13 @@
 import asyncio
 import sys
 import threading
-import time
 import types
 
 import pytest
 
 from app.stt.config import STTSettings
 from app.stt.local import LocalSTTProvider
+from tests.conftest import wait_until
 
 
 class _Info:
@@ -125,7 +125,4 @@ async def test_a_release_waits_for_the_running_request_then_frees_the_model(
     built_models.hold.finish.set()
     await running
 
-    deadline = time.monotonic() + 2
-    while provider.is_loaded and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert provider.is_loaded is False
+    assert wait_until(lambda: not provider.is_loaded)

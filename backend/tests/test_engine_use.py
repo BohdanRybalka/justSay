@@ -6,6 +6,7 @@ import time
 import pytest
 
 from app.stt.engine_use import EngineUse
+from tests.conftest import wait_until
 
 
 class _Engine:
@@ -17,9 +18,10 @@ class _Engine:
             is_stale=lambda: self.stale, is_ready=lambda: self.ready, unload=self._unload
         )
 
-    def _unload(self):
-        self.unloads += 1
-        self.stale = False
+    def _unload(self, only_if=None):
+        if only_if is None or only_if():
+            self.unloads += 1
+            self.stale = False
 
 
 def _settle_in_thread(use: EngineUse) -> tuple[threading.Thread, threading.Event]:
@@ -110,15 +112,6 @@ async def test_enter_prepares_again_while_the_engine_is_not_ready():
     engine.use.leave()
 
 
-def _wait_for(predicate, timeout: float = 2.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.01)
-    return predicate()
-
-
 @pytest.mark.asyncio
 async def test_a_release_unloads_only_after_the_last_running_transcription():
     engine = _Engine()
@@ -131,7 +124,7 @@ async def test_a_release_unloads_only_after_the_last_running_transcription():
     assert engine.unloads == 0
 
     engine.use.leave()
-    assert _wait_for(lambda: engine.unloads == 1)
+    assert wait_until(lambda: engine.unloads == 1)
 
 
 def test_a_release_unloads_at_once_when_nothing_is_running():
@@ -139,7 +132,7 @@ def test_a_release_unloads_at_once_when_nothing_is_running():
 
     engine.use.release_when_idle(lambda: True)
 
-    assert _wait_for(lambda: engine.unloads == 1)
+    assert wait_until(lambda: engine.unloads == 1)
 
 
 @pytest.mark.asyncio
@@ -157,13 +150,13 @@ async def test_a_release_is_dropped_when_the_engine_is_wanted_again_by_then():
 
 
 def test_a_release_that_raises_is_logged_and_the_engine_stays_usable(caplog):
-    def _fail():
+    def _fail(only_if=None):
         raise RuntimeError("terminate refused")
 
     use = EngineUse(is_stale=lambda: False, is_ready=lambda: True, unload=_fail)
 
     with caplog.at_level(logging.WARNING):
         use.release_when_idle(lambda: True)
-        assert _wait_for(lambda: "Releasing the local engine failed" in caplog.text)
+        assert wait_until(lambda: "Releasing the local engine failed" in caplog.text)
 
     use.settle()
