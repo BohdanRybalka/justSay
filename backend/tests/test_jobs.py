@@ -1124,13 +1124,27 @@ def test_a_restart_removes_a_recording_only_when_a_kept_dictation_holds_the_same
     kept = tmp_path / f"dictation_{FRESH_ID}_cloud_uk.wav"
     copied.write_bytes(b"RIFF copied")
     kept.write_bytes(b"RIFF copied")
-    only_copy.write_bytes(b"RIFF only copy")
+    only_copy.write_bytes(b"RIFF lonely")
 
     remove_leftover_files(tmp_path)
 
     assert not copied.exists()
     assert only_copy.exists()
     assert kept.exists()
+
+
+def test_a_restart_keeps_a_recording_it_cannot_compare_with_a_kept_dictation(tmp_path, monkeypatch):
+    recording = tmp_path / "rec_0123456789ab.wav"
+    recording.write_bytes(b"RIFF copied")
+    (tmp_path / f"dictation_{FRESH_ID}_cloud_uk.wav").write_bytes(b"RIFF copied")
+
+    def _unreadable(first, second, shallow):
+        raise OSError("the file is in use by another process")
+
+    monkeypatch.setattr(jobs.filecmp, "cmp", _unreadable)
+    remove_leftover_files(tmp_path)
+
+    assert recording.exists()
 
 
 def test_a_restart_clears_what_a_retry_cut_short_left_behind(queue, tmp_path):

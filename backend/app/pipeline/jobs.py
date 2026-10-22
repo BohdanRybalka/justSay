@@ -221,8 +221,7 @@ def remove_leftover_files(temp_dir: Path) -> None:
     """Delete the scratch files of jobs that were running when the app last quit.
 
     A dictation file that is not a kept recording is the scratch of a retry cut short. A
-    ``rec_`` recording goes only when a kept dictation holds the same audio, since otherwise it
-    may be the only copy.
+    ``rec_`` recording goes only when a kept dictation holds the same audio.
     """
     for path in temp_dir.glob(f"{JOB_FILE_PREFIX}*"):
         discard_scratch_file(path)
