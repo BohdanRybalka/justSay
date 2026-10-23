@@ -37,6 +37,7 @@ from app.pipeline.jobs_router import get_job_queue
 from app.pipeline.service import ProcessingResult
 from app.stt.base import TranscriptionResult
 from app.stt.config import stt_settings
+from app.stt.local_whisper_cpp_cmd import MODEL_NOT_INSTALLED, ModelNotInstalledError
 from app.transcripts import history, vector_store
 
 
@@ -447,6 +448,7 @@ async def test_a_finished_job_shows_for_a_minute_and_a_failed_one_until_dismisse
         (ConfigurationError("Groq API key is missing."), jobs.NO_KEY_REASON),
         (ResourceUnavailableError("Gemini returned no transcription"), jobs.FAILED_REASON),
         (ResourceUnavailableError(UNREADABLE_HERE), UNREADABLE_HERE),
+        (ModelNotInstalledError(MODEL_NOT_INSTALLED), MODEL_NOT_INSTALLED),
         (ResourceUnavailableError("rate limit", headers={"Retry-After": "30"}), jobs.BUSY_REASON),
         (
             ResourceUnavailableError("daily quota", headers={"Retry-After": "42188"}),

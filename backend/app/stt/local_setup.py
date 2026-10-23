@@ -19,6 +19,7 @@ from app.core.utils import sse_event
 from app.stt import local_whisper_cpp_cmd, model_download, routing
 from app.stt.base import latched_load_error, load_error_sentence
 from app.stt.config import STTSettings
+from app.stt.local import cached_model_folder
 from app.stt.local_factory import (
     LocalProviderKind,
     compute_type_for_device,
@@ -316,6 +317,8 @@ async def _run_get_model(provider) -> None:
     baseline_rss = _baseline_rss_bytes()
     try:
         await asyncio.to_thread(provider._get_model)
+    except local_whisper_cpp_cmd.ModelNotInstalledError:
+        _record_load_outcome(provider, None, None)
     except Exception as e:
         _record_load_outcome(provider, latched_load_error(e), None)
     else:
@@ -595,15 +598,10 @@ def _model_bytes_on_disk(kind: LocalProviderKind, model_size: str) -> int | None
     if kind == LocalProviderKind.WHISPER_CPP_SERVER:
         path = local_whisper_cpp_cmd.resolve_model_path(model_size)
         return path.stat().st_size if path.is_file() else None
-    try:
-        from faster_whisper.utils import download_model
-
-        folder = Path(download_model(model_size, local_files_only=True))
-    except Exception:
+    folder = cached_model_folder(model_size)
+    if folder is None:
         return None
-    if not (folder / "model.bin").is_file():
-        return None
-    return sum(f.stat().st_size for f in folder.iterdir() if f.is_file())
+    return sum(f.stat().st_size for f in Path(folder).iterdir() if f.is_file())
 
 
 def _local_install_refusal() -> str | None:

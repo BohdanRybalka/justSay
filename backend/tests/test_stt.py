@@ -250,12 +250,14 @@ def _local_provider_whose_model_load_raises(monkeypatch, exc):
     """A `LocalSTTProvider` whose faster-whisper construction raises `exc`.
 
     `_get_model` imports `faster_whisper` inside the `try`, so replacing the
-    module is what drives the `except` branch that writes `_last_load_error`.
+    module is what drives the `except` branch that writes `_last_load_error`; the
+    folder lookup is stubbed because the replacement has no `utils`.
     """
     def _explode(*_args, **_kwargs):
         raise exc
 
     monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=_explode))
+    monkeypatch.setattr("app.stt.local.model_folder", lambda size: size)
     return LocalSTTProvider(STTSettings(mode=ProviderMode.LOCAL, whisper_device="cpu"))
 
 
@@ -371,6 +373,7 @@ def test_load_lock_serialises_concurrent_get_model(monkeypatch):
         "faster_whisper",
         SimpleNamespace(WhisperModel=_FakeWhisperModel),
     )
+    monkeypatch.setattr("app.stt.local.model_folder", lambda size: size)
 
     threads = [threading.Thread(target=provider._get_model) for _ in range(2)]
     for t in threads:

@@ -41,6 +41,7 @@ from app.core.types import ProviderMode
 from app.pipeline.chunking import FinishedPieces, RouteStoppedError
 from app.pipeline.service import process_audio
 from app.stt.config import stt_settings
+from app.stt.local_whisper_cpp_cmd import ModelNotInstalledError
 from app.transcripts import history
 
 log = logging.getLogger(__name__)
@@ -195,8 +196,8 @@ async def _expected_seconds(model_name: str, audio_duration: float | None) -> fl
 
 
 def _reason_for_unavailable(refusal: ResourceUnavailableError) -> str:
-    if refusal.message == UNREADABLE_HERE:
-        return UNREADABLE_HERE
+    if refusal.message == UNREADABLE_HERE or isinstance(refusal, ModelNotInstalledError):
+        return refusal.message
     retry_after = (refusal.headers or {}).get("Retry-After")
     if retry_after is None:
         return FAILED_REASON

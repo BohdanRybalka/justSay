@@ -1,10 +1,11 @@
-"""Tests for `app.stt.model_download`: one resumable download, one shared progress state.
+"""Tests for `app.stt.model_download`: one resumable, verified download, one shared progress state.
 
 A real `httpx.Client` runs over a `MockTransport` that answers the way Hugging Face does:
 `Range` requests get 206 with `Content-Range`, unless a test switches that off.
 """
 
 import errno
+import hashlib
 import threading
 import time
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ class _Server:
         self.break_after = break_after
         self.status = status
         self.range_headers = []
+        self.urls = []
         self.progress_seen = []
         self.entered = threading.Event()
         self.release = threading.Event()
@@ -39,6 +41,7 @@ class _Server:
         self.entered.set()
         self.release.wait(timeout=5)
         self.range_headers.append(request.headers.get("Range"))
+        self.urls.append(str(request.url))
         if self.status is not None:
             return httpx.Response(self.status)
         start = self._requested_start(request)
@@ -77,6 +80,7 @@ class _Server:
 def _fresh_state(monkeypatch):
     monkeypatch.setattr(model_download, "_state", model_download.ModelDownloadState())
     monkeypatch.setattr(model_download, "_CHUNK_SIZE", CHUNK)
+    monkeypatch.setitem(model_download.GGML_SHA256, "tiny", hashlib.sha256(DATA).hexdigest())
     yield
     assert not model_download._download_lock.locked()
 
@@ -95,16 +99,21 @@ def _paths(tmp_path):
     return model_path, model_path.with_name(model_path.name + ".part")
 
 
+def _download(model_path):
+    model_download._begin()
+    model_download._transfer("tiny", model_path)
+
+
 def test_download_writes_the_model_and_reports_every_byte(monkeypatch, tmp_path):
     server = _serve(monkeypatch, _Server())
     model_path, part_path = _paths(tmp_path)
 
-    model_download.download("tiny", model_path)
+    _download(model_path)
 
     assert model_path.read_bytes() == DATA
     assert not part_path.exists()
     assert model_download.snapshot() == model_download.ModelDownloadState(
-        stage="done", bytes_done=len(DATA), bytes_total=len(DATA)
+        stage="checking", bytes_done=len(DATA), bytes_total=len(DATA)
     )
     assert server.range_headers == [None]
 
@@ -112,7 +121,7 @@ def test_download_writes_the_model_and_reports_every_byte(monkeypatch, tmp_path)
 def test_progress_grows_chunk_by_chunk_while_the_transfer_runs(monkeypatch, tmp_path):
     server = _serve(monkeypatch, _Server())
 
-    model_download.download("tiny", _paths(tmp_path)[0])
+    _download(_paths(tmp_path)[0])
 
     assert server.progress_seen == list(range(0, len(DATA), CHUNK))
 
@@ -124,7 +133,7 @@ def test_an_interrupted_download_fails_in_plain_words_and_keeps_what_arrived(
     model_path, part_path = _paths(tmp_path)
 
     with pytest.raises(ResourceUnavailableError, match="interrupted"):
-        model_download.download("tiny", model_path)
+        _download(model_path)
 
     state = model_download.snapshot()
     assert state.stage == "failed"
@@ -137,17 +146,17 @@ def test_a_retry_resumes_from_the_partial_file_with_a_range_request(monkeypatch,
     model_path, part_path = _paths(tmp_path)
     broken = _serve(monkeypatch, _Server(break_after=CHUNK * 3))
     with pytest.raises(ResourceUnavailableError):
-        model_download.download("tiny", model_path)
+        _download(model_path)
 
     healthy = _serve(monkeypatch, _Server())
-    model_download.download("tiny", model_path)
+    _download(model_path)
 
     assert broken.range_headers == [None]
     assert healthy.range_headers == [f"bytes={CHUNK * 3}-"]
     assert model_path.read_bytes() == DATA
     assert not part_path.exists()
     state = model_download.snapshot()
-    assert (state.stage, state.error) == ("done", None)
+    assert (state.stage, state.error) == ("checking", None)
 
 
 def test_a_server_that_ignores_the_range_restarts_from_zero(monkeypatch, tmp_path):
@@ -156,7 +165,7 @@ def test_a_server_that_ignores_the_range_restarts_from_zero(monkeypatch, tmp_pat
     part_path.write_bytes(DATA[:CHUNK * 2])
     _serve(monkeypatch, _Server(honours_range=False))
 
-    model_download.download("tiny", model_path)
+    _download(model_path)
 
     assert model_path.read_bytes() == DATA
 
@@ -169,7 +178,7 @@ def test_a_partial_file_longer_than_the_model_is_discarded_and_downloaded_again(
     part_path.write_bytes(b"x" * (len(DATA) + 10))
     server = _serve(monkeypatch, _Server())
 
-    model_download.download("tiny", model_path)
+    _download(model_path)
 
     assert model_path.read_bytes() == DATA
     assert server.range_headers == [f"bytes={len(DATA) + 10}-", None]
@@ -181,7 +190,7 @@ def test_a_partial_file_that_is_already_whole_is_only_renamed(monkeypatch, tmp_p
     part_path.write_bytes(DATA)
     server = _serve(monkeypatch, _Server())
 
-    model_download.download("tiny", model_path)
+    _download(model_path)
 
     assert model_path.read_bytes() == DATA
     assert server.range_headers == [f"bytes={len(DATA)}-"]
@@ -194,7 +203,7 @@ def test_a_refusal_without_a_content_range_downloads_the_model_again(monkeypatch
     part_path.write_bytes(DATA)
     server = _serve(monkeypatch, _Server(bare_416=True))
 
-    model_download.download("tiny", model_path)
+    _download(model_path)
 
     assert model_path.read_bytes() == DATA
     assert server.range_headers == [f"bytes={len(DATA)}-", None]
@@ -209,7 +218,7 @@ def test_a_body_shorter_than_announced_fails_and_keeps_the_partial_file(monkeypa
     model_path, part_path = _paths(tmp_path)
 
     with pytest.raises(ResourceUnavailableError, match="whole model"):
-        model_download.download("tiny", model_path)
+        _download(model_path)
 
     assert part_path.read_bytes() == DATA
     assert not model_path.exists()
@@ -219,7 +228,7 @@ def test_a_server_error_names_its_status(monkeypatch, tmp_path):
     _serve(monkeypatch, _Server(status=404))
 
     with pytest.raises(ResourceUnavailableError, match=r"error \(404\)"):
-        model_download.download("tiny", _paths(tmp_path)[0])
+        _download(_paths(tmp_path)[0])
 
     assert "404" in model_download.snapshot().error
 
@@ -230,26 +239,13 @@ def test_a_location_that_cannot_be_written_says_so(monkeypatch, tmp_path):
     blocker.write_bytes(b"")
 
     with pytest.raises(ResourceUnavailableError, match="saved to the disk"):
-        model_download.download("tiny", blocker / "ggml-tiny.bin")
+        _download(blocker / "ggml-tiny.bin")
 
 
 def test_a_full_disk_is_named_as_such():
     sentence = model_download._failure_sentence(OSError(errno.ENOSPC, "No space left on device"))
 
     assert "not enough free space" in sentence
-
-
-def test_download_returns_at_once_when_the_model_is_there(monkeypatch, tmp_path):
-    server = _serve(monkeypatch, _Server())
-    model_path, _ = _paths(tmp_path)
-    model_path.parent.mkdir(parents=True)
-    model_path.write_bytes(b"already here")
-
-    model_download.download("tiny", model_path)
-
-    assert server.range_headers == []
-    assert model_path.read_bytes() == b"already here"
-    assert model_download.snapshot().stage == "idle"
 
 
 def _wait_for(predicate, timeout=5.0):
@@ -317,7 +313,6 @@ def test_the_steps_after_the_download_start_with_checking_and_without_the_lock(
 
     def after():
         seen.append((model_download.snapshot(), model_download._download_lock.locked()))
-        model_download.download("tiny", model_path)
         model_download.advance("done")
 
     model_download.start("tiny", model_path, after=after)
@@ -355,29 +350,6 @@ def test_a_second_start_while_the_steps_after_the_download_run_does_not_run_them
     leave_after.set()
     _wait_for(lambda: model_download.snapshot().stage == "done")
     assert runs == [1]
-
-
-def test_a_load_that_needs_the_model_waits_for_the_download_install_started(
-    monkeypatch, tmp_path
-):
-    server = _Server()
-    server.release.clear()
-    _serve(monkeypatch, server)
-    model_path, _ = _paths(tmp_path)
-    model_download.start("tiny", model_path, after=_finish)
-    assert server.entered.wait(timeout=5)
-    loader = threading.Thread(target=model_download.download, args=("tiny", model_path))
-    loader.start()
-    time.sleep(0.1)
-    assert loader.is_alive()
-
-    server.release.set()
-    loader.join(timeout=5)
-
-    assert not loader.is_alive()
-    assert len(server.range_headers) == 1
-    assert model_path.read_bytes() == DATA
-    _wait_for(lambda: not model_download._download_lock.locked())
 
 
 def test_start_gives_the_lock_back_when_its_thread_cannot_start(monkeypatch, tmp_path):
@@ -454,3 +426,47 @@ def test_a_failure_names_its_step_and_the_next_stage_forgets_it():
     model_download.advance("checking")
 
     assert model_download.snapshot() == model_download.ModelDownloadState(stage="checking")
+
+
+def test_the_download_names_the_pinned_revision_not_a_branch(monkeypatch, tmp_path):
+    server = _serve(monkeypatch, _Server())
+
+    _download(_paths(tmp_path)[0])
+
+    (url,) = server.urls
+    assert f"/resolve/{model_download.GGML_REVISION}/ggml-tiny.bin" in url
+    assert "/main/" not in url
+
+
+def test_a_model_that_does_not_match_its_published_hash_is_removed_and_refused(
+    monkeypatch, tmp_path
+):
+    _serve(monkeypatch, _Server(data=DATA[::-1]))
+    model_path, part_path = _paths(tmp_path)
+
+    with pytest.raises(ResourceUnavailableError, match="did not match"):
+        _download(model_path)
+
+    assert not model_path.exists()
+    assert not part_path.exists()
+    state = model_download.snapshot()
+    assert (state.stage, state.failed_step) == ("failed", "downloading")
+    assert "did not match" in state.error
+
+
+def test_a_size_with_no_pinned_hash_is_refused_before_anything_is_fetched(monkeypatch, tmp_path):
+    server = _serve(monkeypatch, _Server())
+    model_path = tmp_path / "models" / "ggml-huge.bin"
+
+    with pytest.raises(ResourceUnavailableError, match="no verified download"):
+        model_download._transfer("huge", model_path)
+
+    assert server.urls == []
+    assert not model_path.exists()
+
+
+def test_every_model_size_the_app_lists_has_a_pinned_hash():
+    from app.stt.local_setup import EXPECTED_MODEL_BYTES
+
+    assert set(EXPECTED_MODEL_BYTES) == set(model_download.GGML_SHA256)
+    assert all(len(digest) == 64 for digest in model_download.GGML_SHA256.values())

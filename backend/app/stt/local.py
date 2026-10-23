@@ -14,6 +14,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
+from app.core.errors import ResourceUnavailableError
 from app.stt.base import (
     WHISPER_WINDOW_SECONDS,
     STTProvider,
@@ -25,17 +26,80 @@ from app.stt.base import (
 from app.stt.config import STTSettings
 from app.stt.engine_use import EngineUse
 from app.stt.glossary import glossary_summary, whisper_glossary
+from app.stt.model_download import UNVERIFIED_SIZE
 
 log = logging.getLogger(__name__)
 
 SHORT_CLIP_SECONDS = 30.0
 
+FASTER_WHISPER_REVISIONS: dict[str, str] = {
+    "tiny": "d90ca5fe260221311c53c58e660288d3deb8d356",
+    "base": "ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66",
+    "small": "536b0662742c02347bc0e980a01041f333bce120",
+    "medium": "08e178d48790749d25932bbc082711ddcfdfbc4f",
+    "large-v2": "f0fe81560cb8b68660e564f55dd99207059c092e",
+    "large-v3": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+    "large-v3-turbo": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+}
+
+
+_REQUIRED_MODEL_FILES = ("model.bin", "config.json", "tokenizer.json")
+_SIZES_WITH_FEATURE_CONFIG = ("large-v3", "large-v3-turbo")
+
+
+def _required_files(model_size: str) -> tuple[str, ...]:
+    """The files the engine reads; the 128-mel sizes also need their feature config."""
+    if model_size in _SIZES_WITH_FEATURE_CONFIG:
+        return (*_REQUIRED_MODEL_FILES, "preprocessor_config.json")
+    return _REQUIRED_MODEL_FILES
+
+
+def cached_model_folder(model_size: str) -> str | None:
+    """The complete cached folder of ``model_size``, or ``None``; never touches the network.
+
+    The pinned snapshot is looked up first, then the one an older version cached under
+    ``main``. A folder missing any file the engine reads counts as not cached, and so does
+    a computer without the faster-whisper package.
+    """
+    try:
+        from faster_whisper.utils import download_model
+    except ImportError:
+        return None
+
+    pinned = FASTER_WHISPER_REVISIONS.get(model_size)
+    for revision in dict.fromkeys((pinned, None)):
+        try:
+            folder = download_model(model_size, local_files_only=True, revision=revision)
+        except Exception:
+            continue
+        if all((Path(folder) / name).is_file() for name in _required_files(model_size)):
+            return folder
+    return None
+
+
+def model_folder(model_size: str) -> str:
+    """The folder holding ``model_size``: the cache if complete, else one pinned download.
+
+    A size with no pinned revision is refused with ``ResourceUnavailableError`` instead of
+    fetched from a branch.
+    """
+    from faster_whisper.utils import download_model
+
+    folder = cached_model_folder(model_size)
+    if folder is not None:
+        return folder
+    revision = FASTER_WHISPER_REVISIONS.get(model_size)
+    if revision is None:
+        raise ResourceUnavailableError(UNVERIFIED_SIZE)
+    return download_model(model_size, revision=revision)
+
 
 class LocalSTTProvider(STTProvider):
     """Faster-Whisper Large-v3 — local privacy-first STT provider.
 
-    The model is auto-downloaded on first use (~3GB) and runs on CUDA when
-    available, CPU otherwise. Requires `pip install justsay-backend[local]`.
+    The model is downloaded once on first use (~3GB, pinned revision), loads from the
+    local cache without network afterwards, and runs on CUDA when available, CPU
+    otherwise. Requires `pip install justsay-backend[local]`.
     """
 
     is_local = True
@@ -97,7 +161,7 @@ class LocalSTTProvider(STTProvider):
                         model_size, device, compute_type,
                     )
                     self._model = WhisperModel(
-                        model_size,
+                        model_folder(model_size),
                         device=device,
                         compute_type=compute_type,
                     )

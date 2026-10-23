@@ -14,11 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from app import embeddings
 from app.core.app_paths import resolve_app_data_root, resolve_temp_dir
 from app.core.errors import ConfigurationError
+from app.core.loopback import is_loopback_url
 from app.core.types import ProviderMode
 from app.embeddings.config import embedding_settings
 from app.stt import routing as stt_routing
@@ -40,6 +41,10 @@ log = logging.getLogger(__name__)
 _WHISPER_MODEL_SIZE_CHARS = r"[A-Za-z0-9._-]+"
 _WHISPER_MODEL_SIZE_PATTERN = rf"\A{_WHISPER_MODEL_SIZE_CHARS}\z"
 _WHISPER_MODEL_SIZE_RE = re.compile(_WHISPER_MODEL_SIZE_CHARS)
+_OLLAMA_HOST_NOT_LOCAL = (
+    "ollama_host must be an http(s) address on this computer (localhost, 127.x.x.x or ::1): "
+    "Local mode never sends text to another machine"
+)
 
 
 class UserSettings(BaseModel):
@@ -76,6 +81,13 @@ class UserSettings(BaseModel):
     display_name: str = Field(default="", max_length=80)
 
     paste_at_cursor: bool = True
+
+    @field_validator("ollama_host")
+    @classmethod
+    def _ollama_runs_on_this_computer(cls, value: str) -> str:
+        if not is_loopback_url(value):
+            raise ValueError(_OLLAMA_HOST_NOT_LOCAL)
+        return value
 
     @model_validator(mode="before")
     @classmethod
@@ -123,6 +135,11 @@ def update_user_settings(updates: dict) -> UpdateResult:
     with _lock:
         current = get_user_settings()
         warning: str | None = None
+
+        if "ollama_host" in updates and not (
+            isinstance(updates["ollama_host"], str) and is_loopback_url(updates["ollama_host"])
+        ):
+            raise ConfigurationError(_OLLAMA_HOST_NOT_LOCAL)
 
         if "output_dir" in updates:
             new_dir = _validate_output_dir(updates["output_dir"])
