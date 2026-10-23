@@ -4,9 +4,9 @@ Decodable audio becomes 16 kHz mono FLAC pieces no longer than the provider's
 ``longest_piece_seconds``, each ending in a pause and holding only its speech; where no pause
 is found, pieces overlap and the words both heard are kept once. A transcript stuck in a loop or
 far too sparse is asked for again. A piece with little speech loses the phrases engines make up
-over silence. ``Retry-After`` pauses the work; a piece that failed otherwise is sent again after
-a growing wait. Pieces already done can be kept, so a run that failed continues after them;
-undecodable audio goes whole.
+over silence. ``Retry-After`` pauses the work; a piece that failed otherwise, or that no one
+answered, is sent again after a growing wait. Pieces already done can be kept, so a run that
+failed continues after them; undecodable audio goes whole.
 """
 
 from __future__ import annotations

@@ -120,7 +120,7 @@ class GroqWhisperSTTProvider(STTProvider):
 
         Returns ``(text, detected_language_raw, no_speech_prob)``; only
         ``language == "auto"`` escalates ``response_format`` to ``"verbose_json"``.
-        Under ``SINGLE_ATTEMPT`` the SDK makes one request, and no answer is a paced refusal.
+        Under ``SINGLE_ATTEMPT`` the SDK makes one request; no answer is a refusal to wait out.
         """
         if SINGLE_ATTEMPT.get():
             client = client.with_options(max_retries=0)

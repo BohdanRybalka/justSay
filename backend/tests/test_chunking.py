@@ -619,6 +619,20 @@ async def test_a_send_nobody_answered_is_sent_again_on_the_growing_waits_not_the
     assert [e[1] for e in pacer.events if e[0] == "pause"] == list(chunking.PIECE_RETRY_DELAYS)
 
 
+async def test_a_short_send_nobody_answered_pauses_on_the_retry_after(tmp_path):
+    path = _audio(tmp_path, 5.0)
+    provider = _Provider([
+        ResourceUnavailableError(NO_ANSWER_MESSAGE, headers={"Retry-After": "2"}),
+        TranscriptionResult("got it"),
+    ])
+    pacer = _Pacer()
+
+    result = await chunking.transcribe_with_pauses(provider, path, "uk", 5.0, pacer)
+
+    assert result.text == "got it"
+    assert [e for e in pacer.events if e[0] == "pause"] == [("pause", 2.0)]
+
+
 async def test_a_piece_that_keeps_failing_ends_the_work_after_the_last_wait(tmp_path):
     path = _audio(tmp_path, 5.0)
     resets = [_ConnectionResetError() for _ in range(len(chunking.PIECE_RETRY_DELAYS) + 1)]
