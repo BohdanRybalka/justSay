@@ -63,9 +63,12 @@ async def test_set_stt_mode_tells_where_files_go_now(client):
     resp = await client.put("/stt/mode", json={"mode": "local"})
     assert resp.json()["files_engine"] == "local"
 
-    await client.put("/settings", json={"files_engine": "cloud"})
     resp = await client.put("/stt/mode", json={"mode": "cloud"})
     assert resp.json()["files_engine"] == "cloud"
+
+    await client.put("/settings", json={"files_engine": "local"})
+    resp = await client.put("/stt/mode", json={"mode": "cloud"})
+    assert (resp.json()["stt_mode"], resp.json()["files_engine"]) == ("cloud", "local")
 
 
 @pytest.mark.asyncio

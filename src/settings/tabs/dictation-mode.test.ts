@@ -514,14 +514,14 @@ describe("renderDictationMode — the two rows", () => {
     await vi.waitFor(() => expect(apiMock.setSttMode).toHaveBeenCalledWith("cloud"));
   });
 
-  it("hands the Files page the engine files now use, without waiting for a reload", async () => {
-    apiMock.setSttMode.mockResolvedValue({ files_engine: "local" });
+  it("hands the Files page the engine files now use, which can differ from the mode picked", async () => {
+    apiMock.setSttMode.mockResolvedValue({ files_engine: "cloud" });
     const container = await render(buildStatus({ model_loaded: true }), { stt_mode: "cloud" });
     await vi.waitFor(() => expect(action(container)).toBe("Ready"));
 
     row(container, "local").click();
 
-    await vi.waitFor(() => expect(cacheFilesEngineMock).toHaveBeenCalledExactlyOnceWith("local"));
+    await vi.waitFor(() => expect(cacheFilesEngineMock).toHaveBeenCalledExactlyOnceWith("cloud"));
   });
 
   it("puts the row back and says why when the mode could not be saved", async () => {

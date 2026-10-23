@@ -619,6 +619,17 @@ describe("the sidebar", () => {
     await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#files-language")!.value).toBe("en"));
   });
 
+  it("shows on the Files panel the engine files use after dictation is switched, before settings are read again", async () => {
+    await bootWithSettingsLoaded({ stt_mode: "cloud", files_engine: "cloud" });
+    const settingsModule = await import("./settings");
+
+    settingsModule.cacheFilesEngine("local");
+    openPanel("files");
+
+    expect(document.querySelector("#files-local")!.getAttribute("aria-checked")).toBe("true");
+    expect(settingsModule.getSettings()!.files_engine).toBe("local");
+  });
+
   it("leaves the panel alone when a change elsewhere did not touch the language", async () => {
     await bootWithSettingsLoaded({ language: "uk" });
     const { EVENT_SETTINGS_CHANGED } = await import("../contracts");
