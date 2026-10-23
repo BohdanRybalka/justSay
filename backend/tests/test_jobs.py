@@ -505,6 +505,7 @@ def test_processing_speeds_read_the_newest_rows_of_one_model(tmp_path, monkeypat
                 text="hi", duration_ms=work, language="en", model_name=model,
                 audio_duration_seconds=audio, word_count=1, source="dictation",
             )
+            time.sleep(0.01)
 
         assert history.processing_speeds("a", 50) == pytest.approx([0.03, 0.01])
         assert history.processing_speeds("a", 1) == pytest.approx([0.03])
