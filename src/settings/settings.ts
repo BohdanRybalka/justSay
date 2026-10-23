@@ -378,6 +378,10 @@ export function getSettings(): UserSettings | null {
   return settings;
 }
 
+export function cacheFilesEngine(files_engine: UserSettings["files_engine"]): void {
+  if (settings) settings = { ...settings, files_engine };
+}
+
 export function cachePersistedShortcut(shortcut: string): void {
   if (settings) settings = { ...settings, shortcut };
 }

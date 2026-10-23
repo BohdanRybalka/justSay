@@ -42,7 +42,11 @@ async def set_stt_mode(body: _ModeBody):
     from app.stt.local_setup import maybe_prewarm_local
 
     maybe_prewarm_local(stt_settings)
-    return {"stt_mode": stt_settings.mode, "model": provider.model_name}
+    return {
+        "stt_mode": stt_settings.mode,
+        "files_engine": stt_settings.files_mode,
+        "model": provider.model_name,
+    }
 
 
 @router.get("/local/status", response_model=LocalSTTStatus)

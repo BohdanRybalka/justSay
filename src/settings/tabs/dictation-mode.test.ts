@@ -18,8 +18,10 @@ vi.mock("../../api", () => ({
 }));
 
 const cloudStatusMock = vi.fn((): CloudKeyStatus | null => ({ gemini_key_set: true, groq_key_set: true }));
+const cacheFilesEngineMock = vi.fn();
 vi.mock("../settings", () => ({
   loadSettings: vi.fn(async () => {}),
+  cacheFilesEngine: (engine: string) => cacheFilesEngineMock(engine),
   getCloudKeyStatus: () => cloudStatusMock(),
 }));
 
@@ -115,7 +117,7 @@ function failureShown(container: HTMLElement): boolean {
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
-  apiMock.setSttMode.mockResolvedValue({});
+  apiMock.setSttMode.mockResolvedValue({ files_engine: "cloud" });
   apiMock.sttLocalPrewarm.mockResolvedValue({ started: true });
   apiMock.sttLocalModel.mockResolvedValue(buildDownload());
 });
@@ -510,6 +512,16 @@ describe("renderDictationMode — the two rows", () => {
 
     expect(row(container, "cloud").getAttribute("aria-checked")).toBe("true");
     await vi.waitFor(() => expect(apiMock.setSttMode).toHaveBeenCalledWith("cloud"));
+  });
+
+  it("hands the Files page the engine files now use, without waiting for a reload", async () => {
+    apiMock.setSttMode.mockResolvedValue({ files_engine: "local" });
+    const container = await render(buildStatus({ model_loaded: true }), { stt_mode: "cloud" });
+    await vi.waitFor(() => expect(action(container)).toBe("Ready"));
+
+    row(container, "local").click();
+
+    await vi.waitFor(() => expect(cacheFilesEngineMock).toHaveBeenCalledExactlyOnceWith("local"));
   });
 
   it("puts the row back and says why when the mode could not be saved", async () => {

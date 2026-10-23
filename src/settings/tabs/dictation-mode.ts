@@ -5,7 +5,7 @@
  * installed row switches the mode.
  */
 import { api, type LocalSTTStatus, type UserSettings } from "../../api";
-import { getCloudKeyStatus, loadSettings, type TabLifecycle } from "../settings";
+import { cacheFilesEngine, getCloudKeyStatus, loadSettings, type TabLifecycle } from "../settings";
 import { displayableError, notifyError } from "../../notify";
 import { onIndicatorStateChange } from "../../status-indicator";
 import { icon } from "../../ui/icons";
@@ -81,7 +81,7 @@ export function renderDictationMode(
     currentMode = mode;
     draw();
     try {
-      await api.setSttMode(mode);
+      cacheFilesEngine((await api.setSttMode(mode)).files_engine);
     } catch (e) {
       currentMode = previous;
       draw();

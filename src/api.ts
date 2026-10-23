@@ -1090,7 +1090,8 @@ export const api = {
       UNRECONCILED,
     ),
 
-  setSttMode: (mode: "cloud" | "local") => request("PUT", "/stt/mode", { mode }, UNRECONCILED),
+  setSttMode: (mode: "cloud" | "local") =>
+    request<{ files_engine: UserSettings["files_engine"] }>("PUT", "/stt/mode", { mode }, UNRECONCILED),
 
   /** "May take minutes on first run (model download)", and it leaves a loaded
    *  provider behind whether or not this window waited for the answer. */

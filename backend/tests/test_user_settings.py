@@ -480,6 +480,13 @@ def test_choosing_the_dictation_engine_for_files_makes_them_follow_again(isolate
     assert user_settings.get_user_settings().files_engine == "local"
 
 
+def test_a_files_engine_sent_with_a_dictation_change_is_judged_against_the_new_dictation(isolated):
+    user_settings.update_user_settings({"stt_mode": "local", "files_engine": "cloud"})
+
+    loaded = user_settings.get_user_settings()
+    assert (loaded.files_engine, loaded.files_follow_dictation) == ("cloud", False)
+
+
 def test_a_files_engine_differing_from_dictation_is_kept_when_chosen(isolated):
     user_settings.update_user_settings({"stt_mode": "local"})
     user_settings.update_user_settings({"files_engine": "cloud"})
