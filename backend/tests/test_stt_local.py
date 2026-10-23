@@ -34,14 +34,22 @@ class _Hold:
         self.finish = threading.Event()
 
 
-def _fake_faster_whisper(monkeypatch, whisper_model, download_model=None):
+def _cache_folder(root, name, files=("model.bin", "config.json", "tokenizer.json")):
+    folder = root / name
+    folder.mkdir(parents=True, exist_ok=True)
+    for file in files:
+        (folder / file).write_bytes(b"x")
+    return str(folder)
+
+
+def _fake_faster_whisper(monkeypatch, tmp_path, whisper_model, download_model=None):
     calls: list[dict] = []
 
     def _download_model(size, local_files_only=False, revision=None):
         calls.append({"size": size, "local_files_only": local_files_only, "revision": revision})
         if download_model is not None:
             return download_model(size, local_files_only, revision)
-        return f"cache/{size}"
+        return _cache_folder(tmp_path, size)
 
     monkeypatch.setitem(
         sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=whisper_model)
@@ -53,7 +61,7 @@ def _fake_faster_whisper(monkeypatch, whisper_model, download_model=None):
 
 
 @pytest.fixture
-def built_models(monkeypatch):
+def built_models(monkeypatch, tmp_path):
     built: list[_FakeModel] = []
     hold = _Hold()
 
@@ -61,7 +69,7 @@ def built_models(monkeypatch):
         built.append(_FakeModel(size, hold if not built else None))
         return built[-1]
 
-    _fake_faster_whisper(monkeypatch, _whisper_model)
+    _fake_faster_whisper(monkeypatch, tmp_path, _whisper_model)
     built_hold = types.SimpleNamespace(models=built, hold=hold)
     return built_hold
 
@@ -91,14 +99,17 @@ async def test_a_changed_model_never_sits_beside_the_one_a_request_is_using(
     reloading.start()
 
     assert not reloaded.wait(0.3)
-    assert [model.size for model in built_models.models] == ["cache/small"]
+    assert [model.size for model in built_models.models] == [str(tmp_path / "small")]
 
     built_models.hold.finish.set()
     await running
     assert reloaded.wait(3)
     reloading.join(3)
 
-    assert [model.size for model in built_models.models] == ["cache/small", "cache/medium"]
+    assert [model.size for model in built_models.models] == [
+        str(tmp_path / "small"),
+        str(tmp_path / "medium"),
+    ]
     assert provider._model is built_models.models[1]
 
 
@@ -147,7 +158,7 @@ async def test_a_release_waits_for_the_running_request_then_frees_the_model(
 
 
 def test_a_release_asked_for_during_a_load_is_dropped_if_a_route_uses_the_engine_by_its_end(
-    monkeypatch,
+    monkeypatch, tmp_path
 ):
     building, finish_build = threading.Event(), threading.Event()
 
@@ -156,7 +167,7 @@ def test_a_release_asked_for_during_a_load_is_dropped_if_a_route_uses_the_engine
         finish_build.wait(timeout=5)
         return _FakeModel(size)
 
-    _fake_faster_whisper(monkeypatch, _whisper_model)
+    _fake_faster_whisper(monkeypatch, tmp_path, _whisper_model)
     provider = _provider()
     loading = threading.Thread(target=provider._get_model)
     loading.start()
@@ -172,56 +183,97 @@ def test_a_release_asked_for_during_a_load_is_dropped_if_a_route_uses_the_engine
     assert provider.is_loaded is True
 
 
-def test_a_cached_model_loads_from_its_folder_without_any_download(monkeypatch):
-    loaded_from = []
-    calls = _fake_faster_whisper(
-        monkeypatch, lambda path, device, compute_type: loaded_from.append(path) or _FakeModel(path)
-    )
-
-    _provider()._get_model()
-
-    assert loaded_from == ["cache/small"]
-    assert calls == [{"size": "small", "local_files_only": True, "revision": None}]
+def _loader(loaded_from):
+    return lambda path, device, compute_type: loaded_from.append(path) or _FakeModel(path)
 
 
-def test_a_missing_model_is_downloaded_once_at_its_pinned_revision(monkeypatch):
-    loaded_from = []
-
-    def _only_the_pinned_download_works(size, local_files_only, revision):
+def _cached_only_at(root, revisions):
+    def _download_model(size, local_files_only, revision):
+        if local_files_only and revision in revisions:
+            return revisions[revision]
         if local_files_only:
             raise FileNotFoundError(size)
-        return f"downloaded/{size}"
+        return _cache_folder(root, f"downloaded-{size}")
 
+    return _download_model
+
+
+def test_a_model_cached_at_the_pinned_revision_loads_without_any_download(monkeypatch, tmp_path):
+    loaded_from = []
+    pinned = FASTER_WHISPER_REVISIONS["small"]
+    folder = _cache_folder(tmp_path, "pinned")
     calls = _fake_faster_whisper(
-        monkeypatch,
-        lambda path, device, compute_type: loaded_from.append(path) or _FakeModel(path),
-        _only_the_pinned_download_works,
+        monkeypatch, tmp_path, _loader(loaded_from), _cached_only_at(tmp_path, {pinned: folder})
     )
 
     _provider()._get_model()
 
-    assert loaded_from == ["downloaded/small"]
+    assert loaded_from == [folder]
+    assert calls == [{"size": "small", "local_files_only": True, "revision": pinned}]
+
+
+def test_a_model_an_older_version_cached_under_main_loads_without_any_download(
+    monkeypatch, tmp_path
+):
+    loaded_from = []
+    folder = _cache_folder(tmp_path, "older")
+    calls = _fake_faster_whisper(
+        monkeypatch, tmp_path, _loader(loaded_from), _cached_only_at(tmp_path, {None: folder})
+    )
+
+    _provider()._get_model()
+
+    assert loaded_from == [folder]
+    assert all(call["local_files_only"] for call in calls)
+
+
+def test_a_cached_folder_missing_a_file_is_downloaded_again_at_the_pinned_revision(
+    monkeypatch, tmp_path
+):
+    loaded_from = []
+    partial = _cache_folder(tmp_path, "partial", files=("config.json",))
+    calls = _fake_faster_whisper(
+        monkeypatch,
+        tmp_path,
+        _loader(loaded_from),
+        _cached_only_at(tmp_path, {None: partial, FASTER_WHISPER_REVISIONS["small"]: partial}),
+    )
+
+    _provider()._get_model()
+
+    assert loaded_from == [str(tmp_path / "downloaded-small")]
     assert calls[-1] == {
         "size": "small",
         "local_files_only": False,
         "revision": FASTER_WHISPER_REVISIONS["small"],
     }
-    assert len(calls) == 2
 
 
-def test_a_missing_model_of_an_unpinned_size_is_refused_without_a_download(monkeypatch):
-    def _nothing_cached(size, local_files_only, revision):
-        raise FileNotFoundError(size)
-
+def test_a_missing_model_is_downloaded_once_at_its_pinned_revision(monkeypatch, tmp_path):
+    loaded_from = []
     calls = _fake_faster_whisper(
-        monkeypatch, lambda *args, **kwargs: _FakeModel("x"), _nothing_cached
+        monkeypatch, tmp_path, _loader(loaded_from), _cached_only_at(tmp_path, {})
+    )
+
+    _provider()._get_model()
+
+    assert loaded_from == [str(tmp_path / "downloaded-small")]
+    assert [call["local_files_only"] for call in calls] == [True, True, False]
+    assert calls[-1]["revision"] == FASTER_WHISPER_REVISIONS["small"]
+
+
+def test_a_missing_model_of_an_unpinned_size_is_refused_without_a_download(
+    monkeypatch, tmp_path
+):
+    calls = _fake_faster_whisper(
+        monkeypatch, tmp_path, _loader([]), _cached_only_at(tmp_path, {})
     )
     provider = LocalSTTProvider(STTSettings(whisper_model_size="tiny.en", whisper_device="cpu"))
 
     with pytest.raises(ResourceUnavailableError, match="no verified download"):
         provider._get_model()
 
-    assert [call["local_files_only"] for call in calls] == [True]
+    assert all(call["local_files_only"] for call in calls)
 
 
 def test_every_model_size_the_app_lists_has_a_pinned_faster_whisper_revision():

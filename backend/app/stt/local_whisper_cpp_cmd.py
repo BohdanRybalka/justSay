@@ -11,6 +11,7 @@ import os
 import sys
 from pathlib import Path
 
+from app.core.errors import ResourceUnavailableError
 from app.core.frozen_build import is_frozen_build
 
 _WHISPER_CPP_BIN_ENV_VAR = "JUSTSAY_WHISPER_CPP_BIN"
@@ -54,6 +55,10 @@ _BIN_OVERRIDE_POINTS_AT_NOTHING = (
 MODEL_NOT_INSTALLED = (
     "The local speech model is not installed. Open Settings and press Install to download it."
 )
+
+
+class ModelNotInstalledError(ResourceUnavailableError):
+    """The model file is not on disk. Only Install fetches it, so this is a state, not a failure."""
 
 
 def binary_not_found_message() -> str:

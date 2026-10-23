@@ -43,21 +43,43 @@ FASTER_WHISPER_REVISIONS: dict[str, str] = {
 }
 
 
-def model_folder(model_size: str) -> str:
-    """The folder holding ``model_size``, from the local cache without any network call.
+_REQUIRED_MODEL_FILES = ("model.bin", "config.json", "tokenizer.json")
 
-    A missing model is downloaded once at its pinned revision; a size with no pinned
-    revision is refused with ``ResourceUnavailableError`` instead of fetched from a branch.
+
+def cached_model_folder(model_size: str) -> str | None:
+    """The complete cached folder of ``model_size``, or ``None``; never touches the network.
+
+    The pinned snapshot is looked up first, then the one an older version cached under
+    ``main``. A folder missing any file the engine reads counts as not cached.
     """
     from faster_whisper.utils import download_model
 
-    try:
-        return download_model(model_size, local_files_only=True)
-    except Exception:
-        revision = FASTER_WHISPER_REVISIONS.get(model_size)
-        if revision is None:
-            raise ResourceUnavailableError(UNVERIFIED_SIZE) from None
-        return download_model(model_size, revision=revision)
+    pinned = FASTER_WHISPER_REVISIONS.get(model_size)
+    for revision in dict.fromkeys((pinned, None)):
+        try:
+            folder = download_model(model_size, local_files_only=True, revision=revision)
+        except Exception:
+            continue
+        if all((Path(folder) / name).is_file() for name in _REQUIRED_MODEL_FILES):
+            return folder
+    return None
+
+
+def model_folder(model_size: str) -> str:
+    """The folder holding ``model_size``: the cache if complete, else one pinned download.
+
+    A size with no pinned revision is refused with ``ResourceUnavailableError`` instead of
+    fetched from a branch.
+    """
+    from faster_whisper.utils import download_model
+
+    folder = cached_model_folder(model_size)
+    if folder is not None:
+        return folder
+    revision = FASTER_WHISPER_REVISIONS.get(model_size)
+    if revision is None:
+        raise ResourceUnavailableError(UNVERIFIED_SIZE)
+    return download_model(model_size, revision=revision)
 
 
 class LocalSTTProvider(STTProvider):

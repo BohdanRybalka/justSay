@@ -37,6 +37,7 @@ from app.stt.engine_use import EngineUse
 from app.stt.glossary import glossary_summary, whisper_glossary
 from app.stt.local_whisper_cpp_cmd import (
     MODEL_NOT_INSTALLED,
+    ModelNotInstalledError,
     binary_not_found_message,
     build_server_argv,
     resolve_binary_path,
@@ -323,7 +324,7 @@ class WhisperCppServerSTTProvider(STTProvider):
                 model_size = self._settings.whisper_model_size
                 model_path = resolve_model_path(model_size)
                 if not model_path.is_file():
-                    raise ResourceUnavailableError(MODEL_NOT_INSTALLED)
+                    raise ModelNotInstalledError(MODEL_NOT_INSTALLED)
 
                 with _port_lock:
                     self._spawn_server(binary_path, model_path)
@@ -333,11 +334,12 @@ class WhisperCppServerSTTProvider(STTProvider):
                 self._last_load_error = None
                 log.info("whisper-server ready: model=%s port=%d", model_size, _PORT)
             except Exception as e:
-                msg = latched_load_error(e)
-                self._last_load_error = msg
+                self._last_load_error = None
+                if not isinstance(e, ModelNotInstalledError):
+                    self._last_load_error = latched_load_error(e)
                 self._server_ready = False
                 self._loaded_model_size = None
-                log.exception("whisper-server load failed: %s", msg)
+                log.exception("whisper-server load failed: %s", latched_load_error(e))
                 self._terminate_process(self._process)
                 self._process = None
                 raise

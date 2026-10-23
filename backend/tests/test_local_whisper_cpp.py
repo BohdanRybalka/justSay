@@ -270,7 +270,7 @@ def test_get_model_refuses_a_missing_model_without_fetching_or_spawning(monkeypa
     _install_fake_httpx(monkeypatch, stream_impl=_stream_impl)
     popen_calls, _process = _install_fake_popen(monkeypatch)
 
-    with pytest.raises(ResourceUnavailableError, match="press Install"):
+    with pytest.raises(local_whisper_cpp_module.ModelNotInstalledError, match="press Install"):
         provider._get_model()
 
     assert fetched == []
@@ -278,7 +278,7 @@ def test_get_model_refuses_a_missing_model_without_fetching_or_spawning(monkeypa
     assert not model_path.exists()
     assert not model_path.with_name(model_path.name + ".part").exists()
     assert provider.is_loaded is False
-    assert "press Install" in provider.last_load_error
+    assert provider.last_load_error is None
 
 
 def test_get_model_does_not_redownload_existing_model(monkeypatch, tmp_path):

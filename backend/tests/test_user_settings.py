@@ -993,3 +993,15 @@ def test_a_stored_ollama_host_off_this_computer_loads_as_the_default_and_keeps_t
 
     assert loaded.ollama_host == "http://localhost:11434"
     assert loaded.language == "en"
+
+
+def test_a_refused_ollama_host_stops_the_request_before_the_history_moves(tmp_path):
+    before = user_settings.get_user_settings().output_dir
+
+    with pytest.raises(ConfigurationError, match="on this computer"):
+        user_settings.update_user_settings(
+            {"output_dir": str(tmp_path / "elsewhere"), "ollama_host": "http://evil.example"}
+        )
+
+    assert user_settings.get_user_settings().output_dir == before
+    assert not (tmp_path / "elsewhere").exists()

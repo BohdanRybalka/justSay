@@ -136,6 +136,11 @@ def update_user_settings(updates: dict) -> UpdateResult:
         current = get_user_settings()
         warning: str | None = None
 
+        if "ollama_host" in updates and not (
+            isinstance(updates["ollama_host"], str) and is_loopback_url(updates["ollama_host"])
+        ):
+            raise ConfigurationError(_OLLAMA_HOST_NOT_LOCAL)
+
         if "output_dir" in updates:
             new_dir = _validate_output_dir(updates["output_dir"])
 
@@ -153,11 +158,6 @@ def update_user_settings(updates: dict) -> UpdateResult:
 
         if "whisper_model_size" in updates:
             _validate_whisper_model_size(updates["whisper_model_size"])
-
-        if "ollama_host" in updates and not (
-            isinstance(updates["ollama_host"], str) and is_loopback_url(updates["ollama_host"])
-        ):
-            raise ConfigurationError(_OLLAMA_HOST_NOT_LOCAL)
 
         if "language" in updates and updates["language"] != current.language:
             updates = {**updates, "previous_language": current.language}

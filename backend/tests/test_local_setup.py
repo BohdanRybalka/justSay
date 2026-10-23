@@ -143,10 +143,11 @@ def test_model_bytes_on_disk_reads_the_ggml_file_whisper_cpp_loads(monkeypatch, 
 
 def test_model_bytes_on_disk_sums_the_cached_faster_whisper_snapshot(monkeypatch, tmp_path):
     (tmp_path / "model.bin").write_bytes(b"x" * 1000)
-    (tmp_path / "config.json").write_bytes(b"x" * 24)
+    (tmp_path / "config.json").write_bytes(b"x" * 12)
+    (tmp_path / "tokenizer.json").write_bytes(b"x" * 12)
     calls = []
 
-    def cached_only(size, local_files_only=False):
+    def cached_only(size, local_files_only=False, revision=None):
         calls.append((size, local_files_only))
         return str(tmp_path)
 
@@ -163,7 +164,9 @@ def test_model_bytes_on_disk_is_none_for_a_snapshot_whose_weights_never_arrived(
 ):
     (tmp_path / "config.json").write_bytes(b"x" * 24)
     (tmp_path / "tokenizer.json").write_bytes(b"x" * 24)
-    fake_utils = SimpleNamespace(download_model=lambda size, local_files_only=False: str(tmp_path))
+    fake_utils = SimpleNamespace(
+        download_model=lambda size, local_files_only=False, revision=None: str(tmp_path)
+    )
     monkeypatch.setitem(sys.modules, "faster_whisper.utils", fake_utils)
     kind = local_setup.LocalProviderKind.FASTER_WHISPER
 
@@ -171,7 +174,7 @@ def test_model_bytes_on_disk_is_none_for_a_snapshot_whose_weights_never_arrived(
 
 
 def test_model_bytes_on_disk_is_none_when_the_cache_has_no_snapshot(monkeypatch):
-    def not_cached(size, local_files_only=False):
+    def not_cached(size, local_files_only=False, revision=None):
         raise FileNotFoundError(size)
 
     fake_utils = SimpleNamespace(download_model=not_cached)
@@ -2986,3 +2989,22 @@ def test_finish_local_install_gives_a_sentence_when_the_engine_failed_without_a_
     state = model_download.snapshot()
     assert state.failed_step == "starting"
     assert state.error == LOAD_FAILED_WITHOUT_A_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_a_missing_model_is_a_state_the_status_shows_not_an_error_it_latches(monkeypatch):
+    def _no_model(provider):
+        raise local_whisper_cpp_cmd.ModelNotInstalledError(
+            local_whisper_cpp_cmd.MODEL_NOT_INSTALLED
+        )
+
+    provider = _FakePrewarmProvider(get_model=_no_model)
+    monkeypatch.setattr("app.stt.routing.get_provider", lambda mode, s: provider)
+    monkeypatch.setattr("app.stt.routing.peek_local_provider", lambda: provider)
+    monkeypatch.setattr(local_setup, "_check_package_installed", lambda: True)
+    local_setup._prewarm_error = "an older failure"
+
+    await local_setup.ensure_local_ready(STTSettings(mode=ProviderMode.LOCAL))
+
+    assert provider.get_model_calls == 1
+    assert local_setup._prewarm_error is None
