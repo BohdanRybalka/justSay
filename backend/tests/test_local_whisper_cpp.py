@@ -7,6 +7,7 @@ spawned and no real network call is made. `resolve_binary_path`/
 
 import asyncio
 import ctypes
+import socket
 import subprocess
 import sys
 import threading
@@ -90,6 +91,11 @@ class _FakeResponse:
         return self._json_data
 
 
+def _ready():
+    """whisper-server's own answer to `/health` once its model is loaded."""
+    return _FakeResponse(200, {"status": "ok"})
+
+
 class _FakeStreamContext:
     def __init__(self, chunks, status_code=200):
         self._chunks = chunks
@@ -143,10 +149,10 @@ class _FakeHttpxClient:
 
 
 def _install_fake_httpx(monkeypatch, *, get_impl=None, post_impl=None, stream_impl=None):
-    """Default `get_impl`: always healthy (200). Callers override for
+    """Default `get_impl`: always healthy (`_ready()`). Callers override for
     failure-path tests."""
     if get_impl is None:
-        get_impl = lambda url: _FakeResponse(200)  # noqa: E731
+        get_impl = lambda url: _ready()  # noqa: E731
 
     monkeypatch.setattr(
         local_whisper_cpp_module.httpx,
@@ -310,6 +316,81 @@ def test_get_model_latches_error_on_health_poll_timeout(monkeypatch, tmp_path):
     assert "did not become healthy" in provider.last_load_error
 
 
+class _NotJson(_FakeResponse):
+    def json(self):
+        raise ValueError("an HTML page, not whisper-server's JSON")
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _FakeResponse(200),
+        _FakeResponse(200, {"status": "loading model"}),
+        _FakeResponse(200, ["ok"]),
+        _NotJson(200),
+    ],
+    ids=["empty-body", "another-status", "not-an-object", "not-json"],
+)
+def test_a_200_that_is_not_whisper_servers_ready_reply_is_not_taken_for_it(
+    monkeypatch, tmp_path, answer
+):
+    """Whatever else answers on the port while the model loads must not be sent the audio."""
+    provider, _model_path = _make_provider(tmp_path, monkeypatch)
+    _install_fake_httpx(monkeypatch, get_impl=lambda url: answer)
+    _install_fake_popen(monkeypatch)
+    monkeypatch.setattr(local_whisper_cpp_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
+
+    with pytest.raises(ResourceUnavailableError, match="did not become healthy"):
+        provider._get_model()
+
+    assert provider.is_loaded is False
+
+
+def _port_of(argv) -> int:
+    return int(argv[argv.index("--port") + 1])
+
+
+def test_whisper_server_is_never_started_on_a_port_another_program_holds(monkeypatch, tmp_path):
+    first, _model_path = _make_provider(tmp_path, monkeypatch)
+    calls, _process = _install_fake_popen(monkeypatch)
+    _install_fake_httpx(monkeypatch)
+    first._get_model()
+    taken = _port_of(calls[0])
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as other_program:
+        other_program.bind(("127.0.0.1", taken))
+        other_program.listen()
+        second, _model_path = _make_provider(tmp_path, monkeypatch)
+        second._get_model()
+
+    assert _port_of(calls[1]) != taken
+
+
+@pytest.mark.asyncio
+async def test_the_health_check_and_the_audio_go_to_the_port_the_server_was_started_on(
+    monkeypatch, tmp_path
+):
+    provider, _model_path = _make_provider(tmp_path, monkeypatch)
+    calls, _process = _install_fake_popen(monkeypatch)
+    seen: list[str] = []
+
+    def _get_impl(url):
+        seen.append(url)
+        return _ready()
+
+    def _post_impl(url, data, files):
+        seen.append(url)
+        return _FakeResponse(200, {"text": "ok"})
+
+    _install_fake_httpx(monkeypatch, get_impl=_get_impl, post_impl=_post_impl)
+
+    await provider.transcribe(_wav(tmp_path), language="uk")
+
+    port = _port_of(calls[0])
+    assert seen == [f"http://127.0.0.1:{port}/health", f"http://127.0.0.1:{port}/inference"]
+
+
 def test_get_model_terminates_orphaned_process_after_health_poll_timeout_then_retries(
     monkeypatch, tmp_path
 ):
@@ -334,7 +415,7 @@ def test_get_model_terminates_orphaned_process_after_health_poll_timeout_then_re
     assert provider._process is None
     assert provider.is_loaded is False
 
-    _install_fake_httpx(monkeypatch, get_impl=lambda url: _FakeResponse(200))
+    _install_fake_httpx(monkeypatch, get_impl=lambda url: _ready())
     second_process = _FakeProcess()
 
     def _fake_popen_2(argv, **kwargs):
@@ -864,8 +945,8 @@ def test_port_lock_blocks_second_providers_spawn_until_first_providers_terminate
     replaces the cached provider) while the old instance's `cleanup()` may
     still be tearing down its `whisper-server` in a background thread. A
     second, unrelated provider's `_get_model()` must not spawn a new
-    `whisper-server` on the shared fixed port until that in-flight
-    termination has genuinely finished."""
+    `whisper-server` until that in-flight termination has genuinely finished,
+    so two models never sit in video memory at once."""
     terminate_started = threading.Event()
     release_terminate = threading.Event()
 
@@ -1268,7 +1349,7 @@ def test_health_poll_reports_an_early_child_exit_as_a_resource_refusal(monkeypat
     dead.returncode = 3
     monkeypatch.setattr(local_whisper_cpp_module.subprocess, "Popen", lambda argv, **k: dead)
 
-    _install_fake_httpx(monkeypatch, get_impl=lambda url: _FakeResponse(200))
+    _install_fake_httpx(monkeypatch, get_impl=lambda url: _ready())
     monkeypatch.setattr(local_whisper_cpp_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
     monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
 
@@ -1299,7 +1380,7 @@ def test_early_exit_latches_the_status_text_the_settings_indicator_shows(monkeyp
     dead.returncode = 3
     monkeypatch.setattr(local_whisper_cpp_module.subprocess, "Popen", lambda argv, **k: dead)
 
-    _install_fake_httpx(monkeypatch, get_impl=lambda url: _FakeResponse(200))
+    _install_fake_httpx(monkeypatch, get_impl=lambda url: _ready())
     monkeypatch.setattr(local_whisper_cpp_module, "_HEALTH_POLL_MAX_ATTEMPTS", 3)
     monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
 
@@ -1449,7 +1530,7 @@ async def test_transcribe_sends_the_glossary_to_localhost_and_nowhere_else(monke
 
     def _get_impl(url):
         seen.append(url)
-        return _FakeResponse(200)
+        return _ready()
 
     def _post_impl(url, data, files):
         seen.append(url)
@@ -1603,7 +1684,7 @@ def test_a_release_asked_for_during_a_load_still_stops_the_server_once_it_is_up(
     def _get(url):
         health_asked.set()
         finish_health.wait(timeout=5)
-        return _FakeResponse(200)
+        return _ready()
 
     _install_fake_httpx(monkeypatch, get_impl=_get)
     loading = threading.Thread(target=provider._get_model)
@@ -1628,7 +1709,7 @@ def test_a_release_asked_for_during_a_load_is_dropped_if_a_route_uses_the_engine
     def _get(url):
         health_asked.set()
         finish_health.wait(timeout=5)
-        return _FakeResponse(200)
+        return _ready()
 
     _install_fake_httpx(monkeypatch, get_impl=_get)
     loading = threading.Thread(target=provider._get_model)

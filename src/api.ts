@@ -2,8 +2,8 @@
  * HTTP client for JustSay Python backend.
  */
 
-import { BACKEND_BASE_URL } from "./contracts";
-import { TimedOutError } from "./timeout";
+import { BACKEND_HOST, BACKEND_PORT } from "./contracts";
+import { TimedOutError, withTimeout } from "./timeout";
 import type { ThemePreference } from "./ui/theme";
 
 /** Why the per-launch token could not be obtained, retained so the UI can name
@@ -133,6 +133,14 @@ type BridgeModule = typeof import("@tauri-apps/api/core");
 const bridgeImportSlot: CallSlot<BridgeModule> = { pending: null };
 let bridgeDiagnosis: BridgeDiagnosis = { kind: "ok" };
 let authFailureSeen = false;
+/** The port the shell last said the backend listens on, `null` until it has
+ *  answered. It is replaced only by another answer, never dropped: while the
+ *  shell is silent, the last port it named beats a guess. */
+let cachedPort: number | null = null;
+/** Set when the port should be asked for again: a request reached nothing
+ *  there, or a health poll is due. Cleared by the shell's next answer. */
+let portStale = false;
+const portCallSlot: CallSlot<number> = { pending: null };
 
 const TOKEN_EXEMPT_PATHS = new Set(["/health"]);
 
@@ -273,6 +281,70 @@ function getToken(): Promise<string | null> {
   })());
 }
 
+/** The shell's answer to `get_backend_port`, or `null` when the bridge or the
+ *  call gave none, each step bounded and shared exactly as the token's are, so
+ *  the two give up together. A failure here is not reported: the token path
+ *  reports the same bridge, and the port already known, else the default,
+ *  stands in. */
+async function askBackendPort(): Promise<number | null> {
+  try {
+    const bridge = shareWhilePending(
+      bridgeImportSlot,
+      () => import("@tauri-apps/api/core"),
+      TOKEN_CALL_REUSE_MS,
+    );
+    const { invoke } = await withTimeout(bridge.call, TOKEN_TIMEOUT_MS);
+    const portCall = shareWhilePending(
+      portCallSlot,
+      () => invoke<number>("get_backend_port"),
+      TOKEN_CALL_REUSE_MS,
+    );
+    return await withTimeout(portCall.call, TOKEN_TIMEOUT_MS);
+  } catch {
+    return null;
+  }
+}
+
+/** Where the backend listens: the port the shell named, asked once and again
+ *  whenever it is stale. Outside Tauri, or before the shell has ever answered,
+ *  `BACKEND_PORT`, where a backend run by hand listens. */
+async function backendPort(): Promise<number> {
+  const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  if (inTauri && (cachedPort === null || portStale)) {
+    const answer = await askBackendPort();
+    if (answer !== null) {
+      cachedPort = answer;
+      portStale = false;
+    }
+  }
+  return cachedPort ?? BACKEND_PORT;
+}
+
+/** The token and where to send it, asked for side by side so one budget covers
+ *  both and neither waits on the other. */
+async function backendAddress(): Promise<{ token: string | null; baseUrl: string }> {
+  const [token, port] = await Promise.all([getToken(), backendPort()]);
+  return { token, baseUrl: `http://${BACKEND_HOST}:${port}` };
+}
+
+/** The one `fetch` to the backend, marking the port stale when nothing
+ *  answered there: the watchdog may have started the backend on another one. An
+ *  abort is the caller's own doing and says nothing about the port. */
+async function reach(baseUrl: string, path: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(`${baseUrl}${path}`, init);
+  } catch (e) {
+    if (!isAbortError(e)) portStale = true;
+    throw e;
+  }
+}
+
+/** A request ready to send: where to, and everything but the path. */
+interface Outgoing {
+  baseUrl: string;
+  init: RequestInit;
+}
+
 /** The body every refusal answers with, mirroring `ErrorBody` in
  *  `backend/app/api/error_handler.py` field for field.
  *
@@ -379,8 +451,8 @@ function until<T>(work: Promise<T>, signal: AbortSignal, giveUp: () => Error): P
 }
 
 /** The exchange itself, with no opinion about how long it may take. */
-async function fetchJson<T>(path: string, opts: RequestInit): Promise<T> {
-  const resp = await fetch(`${BACKEND_BASE_URL}${path}`, opts);
+async function fetchJson<T>(path: string, outgoing: Outgoing): Promise<T> {
+  const resp = await reach(outgoing.baseUrl, path, outgoing.init);
   recordAuthOutcome(path, resp);
   if (!resp.ok) {
     throw await responseError(resp);
@@ -408,15 +480,18 @@ async function fetchJson<T>(path: string, opts: RequestInit): Promise<T> {
  *  it is read. */
 async function fetchJsonWithin<T>(
   path: string,
-  buildRequest: () => Promise<RequestInit>,
+  buildRequest: () => Promise<Outgoing>,
   budgetMs: number,
 ): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), budgetMs);
   const timedOut = () => new TimedOutError(budgetMs, path.split("?")[0]);
   try {
-    const opts = await until(buildRequest(), controller.signal, timedOut);
-    return await fetchJson<T>(path, { ...opts, signal: controller.signal });
+    const outgoing = await until(buildRequest(), controller.signal, timedOut);
+    return await fetchJson<T>(path, {
+      baseUrl: outgoing.baseUrl,
+      init: { ...outgoing.init, signal: controller.signal },
+    });
   } catch (e) {
     if (e instanceof TimedOutError) {
       throw e;
@@ -435,7 +510,7 @@ async function fetchJsonWithin<T>(
  *  asserting an outcome nobody established. */
 async function fetchJsonUntilAnswered<T>(
   path: string,
-  buildRequest: () => Promise<RequestInit>,
+  buildRequest: () => Promise<Outgoing>,
 ): Promise<T> {
   return fetchJson<T>(path, await buildRequest());
 }
@@ -445,7 +520,7 @@ async function fetchJsonUntilAnswered<T>(
  *  by the same object every other endpoint is placed by. */
 function send<T>(
   path: string,
-  buildRequest: () => Promise<RequestInit>,
+  buildRequest: () => Promise<Outgoing>,
   budget: Budget,
 ): Promise<T> {
   return budget.ms === null
@@ -463,17 +538,17 @@ function request<T>(
   body: unknown,
   budget: Budget,
 ): Promise<T> {
-  const buildRequest = async () => {
-    const token = await getToken();
+  const buildRequest = async (): Promise<Outgoing> => {
+    const { token, baseUrl } = await backendAddress();
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (token) {
       headers["X-JustSay-Token"] = token;
     }
-    const opts: RequestInit = { method, headers };
+    const init: RequestInit = { method, headers };
     if (body) {
-      opts.body = JSON.stringify(body);
+      init.body = JSON.stringify(body);
     }
-    return opts;
+    return { baseUrl, init };
   };
   return send<T>(path, buildRequest, budget);
 }
@@ -871,7 +946,13 @@ export interface TopWordsResponse {
  * answered. Waiting there costs a spinner, which is the smaller of the two.
  */
 export const api = {
-  health: () => request<HealthResponse>("GET", "/health", undefined, REREADABLE),
+  /** Every window polls this, so it is also where the port is asked for again:
+   *  a backend the watchdog moved is followed at the first poll the shell
+   *  answers, even while another program answers on the port it left. */
+  health: () => {
+    portStale = true;
+    return request<HealthResponse>("GET", "/health", undefined, REREADABLE);
+  },
 
   audioStatus: () => request<RecordingStatus>("GET", "/audio/status", undefined, REREADABLE),
 
@@ -1057,12 +1138,12 @@ export const api = {
     return send<{ id: string }>(
       "/jobs/file",
       async () => {
-        const token = await getToken();
+        const { token, baseUrl } = await backendAddress();
         const headers: Record<string, string> = {};
         if (token) {
           headers["X-JustSay-Token"] = token;
         }
-        return { method: "POST", body: form, headers };
+        return { baseUrl, init: { method: "POST", body: form, headers } };
       },
       UNRECONCILED,
     );
@@ -1189,17 +1270,17 @@ function openLevelStream<T>(
     controller.abort();
   }, REQUEST_TIMEOUT_MS);
 
-  until(getToken(), controller.signal, () =>
+  until(backendAddress(), controller.signal, () =>
     timedOut
       ? new TimedOutError(REQUEST_TIMEOUT_MS, path)
       : new DOMException("The level stream was closed by its caller.", "AbortError"),
   )
-    .then((token) => {
+    .then(({ token, baseUrl }) => {
       const headers: Record<string, string> = {};
       if (token) {
         headers["X-JustSay-Token"] = token;
       }
-      return fetch(`${BACKEND_BASE_URL}${path}`, {
+      return reach(baseUrl, path, {
         method: "GET",
         signal: controller.signal,
         headers,

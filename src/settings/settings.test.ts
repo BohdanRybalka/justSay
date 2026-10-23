@@ -114,6 +114,14 @@ vi.mock("./shell/account-name", async (importOriginal) => ({
   readOsDisplayName: readOsDisplayNameMock,
 }));
 
+const readBackendFailureMock = vi.fn<() => Promise<string | null>>(async () => null);
+const restartJustSayMock = vi.fn<() => Promise<void>>(async () => {});
+
+vi.mock("./shell/backend-down", () => ({
+  readBackendFailure: readBackendFailureMock,
+  restartJustSay: restartJustSayMock,
+}));
+
 const eventListeners = new Map<string, (event: unknown) => unknown>();
 
 const listenAttemptsByEvent = new Map<string, number>();
@@ -221,6 +229,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   sawAuthFailureMock.mockReturnValue(false);
   lastBridgeDiagnosisMock.mockReturnValue({ kind: "ok" });
+  readBackendFailureMock.mockResolvedValue(null);
+  restartJustSayMock.mockResolvedValue(undefined);
   vi.resetModules();
   eventListeners.clear();
   listenAttemptsByEvent.clear();
@@ -887,6 +897,97 @@ describe("backend badge — health 200, then the first settings request 401s", (
   });
 });
 
+describe("a backend the shell says is not running", () => {
+  const REASON =
+    "Backend watchdog: giving up after 3 consecutive failed respawns; the last: Backend spawn failed: boom";
+
+  async function waitOutTheBudget(): Promise<HTMLElement> {
+    apiMock.health.mockRejectedValue(new TypeError("Failed to fetch"));
+    const { BACKEND_WAIT_BUDGET_MS } = await import("../backend-startup");
+    await import("./settings");
+    await vi.advanceTimersByTimeAsync(0);
+    await openSettingsWindow();
+    await vi.advanceTimersByTimeAsync(BACKEND_WAIT_BUDGET_MS);
+    return document.getElementById("pane")!;
+  }
+
+  it("names the shell's reason in place of the waiting sentence, and offers a restart", async () => {
+    vi.useFakeTimers();
+    readBackendFailureMock.mockResolvedValue(REASON);
+
+    const pane = await waitOutTheBudget();
+
+    expect(pane.textContent).toContain("Cannot load settings");
+    expect(pane.textContent).toContain(
+      "JustSay's backend is not running. Restart JustSay to start it again.",
+    );
+    expect(pane.querySelector(".panel-details")!.textContent).toBe(`Details: ${REASON}`);
+    expect(pane.textContent).not.toContain("has not finished starting");
+    expect(pane.querySelector("#btn-restart-app")).not.toBeNull();
+    expect(pane.querySelector("#btn-retry-settings")).not.toBeNull();
+
+    vi.useRealTimers();
+  });
+
+  it("restarts JustSay on Restart JustSay", async () => {
+    vi.useFakeTimers();
+    readBackendFailureMock.mockResolvedValue(REASON);
+    const pane = await waitOutTheBudget();
+    const restart = pane.querySelector<HTMLButtonElement>("#btn-restart-app")!;
+
+    restart.click();
+
+    expect(restartJustSayMock).toHaveBeenCalledTimes(1);
+    expect(restart.disabled, "a second press would restart twice").toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("leaves Restart JustSay to press again when the restart fails", async () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    readBackendFailureMock.mockResolvedValue(REASON);
+    restartJustSayMock.mockRejectedValue(new Error("process:allow-restart denied"));
+    const pane = await waitOutTheBudget();
+    const restart = pane.querySelector<HTMLButtonElement>("#btn-restart-app")!;
+
+    restart.click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(restart.disabled).toBe(false);
+    vi.useRealTimers();
+    consoleError.mockRestore();
+  });
+
+  it("follows the shell's reason as it changes, without waiting for the badge", async () => {
+    vi.useFakeTimers();
+    readBackendFailureMock.mockResolvedValue(null);
+    const pane = await waitOutTheBudget();
+    expect(pane.textContent).toContain("has not finished starting");
+
+    readBackendFailureMock.mockResolvedValue(REASON);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(pane.querySelector(".panel-details")!.textContent).toBe(`Details: ${REASON}`);
+    vi.useRealTimers();
+  });
+
+  it("drops the reason once the backend answers", async () => {
+    vi.useFakeTimers();
+    readBackendFailureMock.mockResolvedValue(REASON);
+    apiMock.getSettings.mockResolvedValue(buildSettings());
+    apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
+    const pane = await waitOutTheBudget();
+    expect(pane.textContent).toContain("Details:");
+
+    apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(pane.textContent).not.toContain("Details:");
+    expect(pane.textContent).not.toContain("is not running");
+    vi.useRealTimers();
+  });
+});
+
 describe("backend unreachable from the first poll", () => {
   it("says the app is starting until the wait budget runs out, then names the failure", async () => {
     vi.useFakeTimers();
@@ -904,6 +1005,7 @@ describe("backend unreachable from the first poll", () => {
     expect(pane.textContent).toContain("Starting JustSay");
     expect(pane.textContent).not.toContain("Cannot load settings");
     expect(pane.textContent).not.toContain("not responding");
+    expect(pane.querySelector("#btn-restart-app"), "a backend still coming up needs no restart").toBeNull();
     expect(
       pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled,
       "/health alone can be the broken half, and a window with nothing in flight and no " +
@@ -932,10 +1034,14 @@ describe("backend unreachable from the first poll", () => {
         "one that did would describe something that never happened",
     ).toContain("has not finished starting");
     expect(pane.textContent).not.toContain("was not responding");
+    expect(pane.textContent).not.toContain("Details:");
     expect(statusText()).toBe("Offline");
     expect(backendStatusEl().className).toBe("sidebar-status sidebar-status--offline");
     expect(pane.querySelector<HTMLButtonElement>("#btn-retry-settings")!.disabled).toBe(
       false,
+    );
+    expect(pane.querySelector<HTMLButtonElement>("#btn-restart-app")!.textContent).toBe(
+      "Restart JustSay",
     );
     expect(apiMock.getSettings).not.toHaveBeenCalled();
 

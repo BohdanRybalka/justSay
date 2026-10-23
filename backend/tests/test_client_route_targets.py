@@ -271,12 +271,13 @@ def test_no_client_path_is_assembled():
 
 
 def test_every_backend_request_is_composed_from_the_base_url_and_a_path():
-    """Both ``fetch`` calls put the base URL first and write no path inline.
+    """The one ``fetch`` call puts the base URL first and writes no path inline.
 
     This pins the *composition*, not the provenance: it says the path arrives as
-    an interpolated expression after ``BACKEND_BASE_URL`` and never as text
-    inside the template, which is what makes the literal rule above sufficient.
-    It says nothing about where that expression got its value.
+    an interpolated expression after ``baseUrl`` and never as text inside the
+    template, which is what makes the literal rule above sufficient. It says
+    nothing about where that expression got its value: the shell names the port
+    at run time, so the base URL is a value handed in rather than a constant.
     """
     calls = client_paths().fetch_calls
     shapes = sorted(
@@ -288,14 +289,14 @@ def test_every_backend_request_is_composed_from_the_base_url_and_a_path():
         )
         for call in calls
     )
-    composed = (True, ("Identifier", "Identifier"), ("BACKEND_BASE_URL",), ("", ""))
+    composed = (True, ("Identifier", "Identifier"), ("baseUrl",), ("", ""))
 
-    assert shapes == [composed, composed], (
+    assert shapes == [composed], (
         f"the fetch calls in src/api.ts no longer have the shape this gate relies on: "
-        f"{shapes}, at lines {sorted(call.line for call in calls)}. Every one must be a "
-        f"template with an empty head whose first interpolation is BACKEND_BASE_URL and "
-        f"whose literal parts are all empty. A path written inside the template instead "
-        f"is a path the literal rule cannot see"
+        f"{shapes}, at lines {sorted(call.line for call in calls)}. There must be one, a "
+        f"template with an empty head whose first interpolation is baseUrl and whose "
+        f"literal parts are all empty. A path written inside the template instead is a "
+        f"path the literal rule cannot see"
     )
 
 
@@ -341,17 +342,17 @@ def test_api_ts_is_the_whole_client_surface():
         f"request made anywhere else is never checked against the route set at all"
     )
 
-    naming_base_url = sorted(name for name, text in sources.items() if "BACKEND_BASE_URL" in text)
-    assert naming_base_url == ["src/api.ts", "src/contracts.ts"], (
-        f"these files name BACKEND_BASE_URL: {naming_base_url}. src/contracts.ts declares "
-        f"it and src/api.ts uses it; a third file is composing a backend URL somewhere "
-        f"this gate cannot see"
+    naming_host = sorted(name for name, text in sources.items() if "BACKEND_HOST" in text)
+    assert naming_host == ["src/api.ts", "src/contracts.ts"], (
+        f"these files name BACKEND_HOST: {naming_host}. src/contracts.ts declares it and "
+        f"src/api.ts uses it; a third file is composing a backend URL somewhere this gate "
+        f"cannot see"
     )
 
     hardcoding_host = sorted(name for name, text in sources.items() if "127.0.0.1" in text)
     assert hardcoding_host == ["src/contracts.ts"], (
         f"these files write the backend host literally: {hardcoding_host}. A request "
-        f"built from a hardcoded URL instead of BACKEND_BASE_URL escapes both this gate "
+        f"built from a hardcoded URL instead of BACKEND_HOST escapes both this gate "
         f"and the one constant that defines where the backend lives"
     )
 

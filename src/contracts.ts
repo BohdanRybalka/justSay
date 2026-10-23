@@ -19,9 +19,12 @@
 
 import type { PanelName } from "./settings/shell/sidebar";
 
-export const BACKEND_PORT = 9377;
+/** The address the shell binds the backend to: this computer only. */
+export const BACKEND_HOST = "127.0.0.1";
 
-export const BACKEND_BASE_URL = `http://127.0.0.1:${BACKEND_PORT}`;
+/** The port the shell starts the backend on whenever it is free, and where a
+ *  backend run by hand listens; the shell says when it chose another. */
+export const BACKEND_PORT = 9377;
 
 /** The sentinel the backend substitutes for a stored cloud key. Sending it
  *  back on a PUT is a no-op, so it doubles as "leave this key alone". */
