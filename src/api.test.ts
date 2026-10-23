@@ -220,8 +220,10 @@ describe("the port the backend listens on", () => {
     await expect(api.jobs()).rejects.toThrow("Failed to fetch");
     port = MOVED_AGAIN_PORT;
     await api.jobs();
+    await api.jobs();
 
     expect(fetchMock.mock.calls[1][0]).toBe(`http://127.0.0.1:${MOVED_AGAIN_PORT}/jobs`);
+    expect(callsOf("get_backend_port"), "an answer ends the re-asking").toBe(2);
   });
 
   it("is asked for again by every health poll, so a move is followed even while another program answers on the old port", async () => {

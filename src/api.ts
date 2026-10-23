@@ -284,7 +284,8 @@ function getToken(): Promise<string | null> {
 /** The shell's answer to `get_backend_port`, or `null` when the bridge or the
  *  call gave none, each step bounded and shared exactly as the token's are, so
  *  the two give up together. A failure here is not reported: the token path
- *  reports the same bridge, and the default port stands in. */
+ *  reports the same bridge, and the port already known, else the default,
+ *  stands in. */
 async function askBackendPort(): Promise<number | null> {
   try {
     const bridge = shareWhilePending(

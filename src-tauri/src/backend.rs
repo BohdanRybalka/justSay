@@ -738,8 +738,6 @@ fn resolve_sidecar(app: &AppHandle) -> Option<PathBuf> {
 const PORT_REAP_POLL_MAX_ATTEMPTS: u32 = 20;
 const PORT_REAP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-static ORPHANS_SWEPT: AtomicBool = AtomicBool::new(false);
-
 /// The port `spawn()` starts the backend on.
 ///
 /// `PREFERRED_PORT` when it binds, after reaping an orphaned sidecar of ours
@@ -747,27 +745,7 @@ static ORPHANS_SWEPT: AtomicBool = AtomicBool::new(false);
 /// another program, or a range Windows reserves for Hyper-V, can hold the
 /// preferred one for as long as it likes.
 fn choose_port() -> Result<u16, String> {
-    let first_of_launch = !ORPHANS_SWEPT.swap(true, Ordering::AcqRel);
-    choose_port_for(
-        first_of_launch,
-        PREFERRED_PORT,
-        sweep_orphaned_sidecars,
-        reap_orphan_sidecar,
-    )
-}
-
-/// The launch's first spawn sweeps orphans whether or not the preferred port is
-/// taken, because one a previous launch started on a port the OS handed out
-/// blocks nothing and the port-taken reap never meets it. Every spawn still
-/// reaps when the preferred port is taken (ADR 069).
-fn choose_port_for(
-    first_of_launch: bool,
-    preferred: u16,
-    sweep: impl FnOnce() -> bool,
-    reap: impl FnOnce() -> bool,
-) -> Result<u16, String> {
-    let swept = first_of_launch && sweep();
-    choose_port_from(preferred, move || swept || reap())
+    choose_port_from(PREFERRED_PORT, reap_orphan_sidecar)
 }
 
 /// `choose_port()` with the preferred port and the reaper passed in, so a test
@@ -849,29 +827,13 @@ fn reap_orphan_sidecar() -> bool {
 /// `docs/adr/069-an-orphaned-backend-is-cleared-at-the-next-launch.md`.
 #[cfg(target_os = "macos")]
 fn reap_orphan_sidecar() -> bool {
-    reap_processes_named(SIDECAR_EXECUTABLE_NAME, &[])
+    reap_processes_named(SIDECAR_EXECUTABLE_NAME)
 }
 
-/// On macOS: kill the sidecars launchd has adopted, which is what a sidecar
-/// becomes when its shell died without stopping it. One still shutting down
-/// after Quit keeps its shell as parent, so a launch in those seconds leaves it
-/// to finish saving.
-#[cfg(target_os = "macos")]
-fn sweep_orphaned_sidecars() -> bool {
-    reap_processes_named(SIDECAR_EXECUTABLE_NAME, &["-P", "1"])
-}
-
-/// Elsewhere there is nothing to sweep: on Windows the kill-on-close job ends a
-/// sidecar together with its shell (ADR 023).
-#[cfg(not(target_os = "macos"))]
-fn sweep_orphaned_sidecars() -> bool {
-    false
-}
-
-/// Kill every process whose executable name is exactly `executable_name` and
-/// that `pgrep_filter` also selects, reporting whether any was found. Split out
-/// of the reapers so a test can drive it against a name of its own choosing and
-/// never touch a real backend.
+/// Kill every process whose executable name is exactly `executable_name`,
+/// reporting whether any was found. Split out of `reap_orphan_sidecar()` so a
+/// test can drive it against a name of its own choosing and never touch a real
+/// backend.
 ///
 /// `pgrep -x` matches the executable name the kernel records rather than
 /// `argv[0]`, so it finds the sidecar however it was invoked. `SIGKILL` rather
@@ -880,9 +842,8 @@ fn sweep_orphaned_sidecars() -> bool {
 /// `GracefulStop::ForceKillOnly` exists to protect. Both tools are addressed by
 /// absolute path because a macOS GUI process inherits launchd's minimal `PATH`.
 #[cfg(target_os = "macos")]
-fn reap_processes_named(executable_name: &str, pgrep_filter: &[&str]) -> bool {
+fn reap_processes_named(executable_name: &str) -> bool {
     let listing = Command::new("/usr/bin/pgrep")
-        .args(pgrep_filter)
         .args(["-x", executable_name])
         .output();
     let pids: Vec<String> = match listing {
@@ -2762,7 +2723,7 @@ mod tests {
         let mut child = spawn_named_sleeper(&dir, &name);
         let listed_before = wait_until_pgrep_lists(&name);
 
-        let reaped = reap_processes_named(&name, &[]);
+        let reaped = reap_processes_named(&name);
         let exited = wait_for_exit(&mut child);
         std::fs::remove_dir_all(&dir).ok();
 
@@ -2813,85 +2774,9 @@ mod tests {
         let absent = short_unique_name("jsnone");
 
         assert!(
-            !reap_processes_named(&absent, &[]),
+            !reap_processes_named(&absent),
             "no process carries {}, so the reaper must report nothing and issue no kill",
             absent
-        );
-    }
-
-    /// Bounded poll (~5s) until `pgrep <filter> -x name` lists something
-    /// (`listed`) or nothing (`!listed`), reporting whether it got there.
-    #[cfg(target_os = "macos")]
-    fn pgrep_settles(filter: &[&str], name: &str, listed: bool) -> bool {
-        for _ in 0..50 {
-            if let Ok(output) = Command::new("/usr/bin/pgrep")
-                .args(filter)
-                .args(["-x", name])
-                .output()
-            {
-                if !String::from_utf8_lossy(&output.stdout).trim().is_empty() == listed {
-                    return true;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        false
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_sidecar_launchd_has_adopted_is_swept() {
-        let dir = scratch_process_dir("adopted");
-        let name = short_unique_name("jsadopt");
-        let binary = dir.join(&name);
-        std::fs::copy("/bin/sleep", &binary)
-            .expect("test setup step failed, not the sweep: could not copy /bin/sleep");
-        let backgrounded = Command::new("/bin/sh")
-            .args(["-c", "\"$0\" 30 >/dev/null 2>&1 &"])
-            .arg(&binary)
-            .status()
-            .expect("test setup step failed, not the sweep: could not run /bin/sh");
-
-        let adopted = pgrep_settles(&["-P", "1"], &name, true);
-        let swept = reap_processes_named(&name, &["-P", "1"]);
-        let gone = pgrep_settles(&[], &name, false);
-        std::fs::remove_dir_all(&dir).ok();
-
-        assert!(
-            backgrounded.success() && adopted,
-            "test setup step failed, not the sweep: the backgrounded sleeper never showed \
-             up with launchd as its parent"
-        );
-        assert!(
-            swept && gone,
-            "a sidecar whose shell died is what a force-quit leaves, and the launch's sweep \
-             must end it"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_sidecar_whose_shell_is_still_alive_is_not_swept() {
-        let dir = scratch_process_dir("parented");
-        let name = short_unique_name("jsparent");
-        let mut child = spawn_named_sleeper(&dir, &name);
-        let listed = wait_until_pgrep_lists(&name);
-
-        let swept = reap_processes_named(&name, &["-P", "1"]);
-        let still_running = matches!(child.try_wait(), Ok(None));
-        let _ = child.kill();
-        let _ = child.wait();
-        std::fs::remove_dir_all(&dir).ok();
-
-        assert!(
-            !listed.trim().is_empty(),
-            "test setup step failed, not the sweep: the sleeper never appeared under {}",
-            name
-        );
-        assert!(
-            !swept && still_running,
-            "a sidecar still shutting down after Quit has its shell as parent, and sweeping \
-             it cuts off what it is saving"
         );
     }
 
@@ -2935,58 +2820,6 @@ mod tests {
             chosen,
             Ok(port),
             "an orphan of ours reaped off the preferred port gives it back (ADR 069)"
-        );
-    }
-
-    #[test]
-    fn the_first_spawn_of_a_launch_sweeps_even_with_the_preferred_port_free() {
-        let (listener, port) = held_port();
-        drop(listener);
-        let mut sweeps = 0;
-        let chosen = choose_port_for(
-            true,
-            port,
-            || {
-                sweeps += 1;
-                false
-            },
-            || panic!("a free port has nothing to reap"),
-        );
-        assert_eq!(chosen, Ok(port));
-        assert_eq!(
-            sweeps, 1,
-            "an orphan a previous launch started on a port the OS handed out blocks \
-             nothing, so this sweep is the only thing that ends it"
-        );
-    }
-
-    #[test]
-    fn a_later_spawn_neither_sweeps_nor_reaps_on_a_free_preferred_port() {
-        let (listener, port) = held_port();
-        drop(listener);
-        assert_eq!(
-            choose_port_for(
-                false,
-                port,
-                || panic!("only a launch's first spawn sweeps"),
-                || panic!("a free port has nothing to reap"),
-            ),
-            Ok(port)
-        );
-    }
-
-    #[test]
-    fn a_first_spawn_that_swept_nothing_still_reaps_the_one_holding_the_preferred_port() {
-        let (held, port) = held_port();
-        let chosen = choose_port_for(true, port, || false, move || {
-            drop(held);
-            true
-        });
-        assert_eq!(
-            chosen,
-            Ok(port),
-            "an orphan whose shell is alive is not swept, and on the preferred port it is \
-             still reaped the way ADR 069 reaps it"
         );
     }
 
