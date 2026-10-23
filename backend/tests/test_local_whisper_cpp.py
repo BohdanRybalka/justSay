@@ -945,8 +945,8 @@ def test_port_lock_blocks_second_providers_spawn_until_first_providers_terminate
     replaces the cached provider) while the old instance's `cleanup()` may
     still be tearing down its `whisper-server` in a background thread. A
     second, unrelated provider's `_get_model()` must not spawn a new
-    `whisper-server` on the shared fixed port until that in-flight
-    termination has genuinely finished."""
+    `whisper-server` until that in-flight termination has genuinely finished,
+    so two models never sit in video memory at once."""
     terminate_started = threading.Event()
     release_terminate = threading.Event()
 

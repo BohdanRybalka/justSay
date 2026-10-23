@@ -738,6 +738,8 @@ fn resolve_sidecar(app: &AppHandle) -> Option<PathBuf> {
 const PORT_REAP_POLL_MAX_ATTEMPTS: u32 = 20;
 const PORT_REAP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+static ORPHANS_SWEPT: AtomicBool = AtomicBool::new(false);
+
 /// The port `spawn()` starts the backend on.
 ///
 /// `PREFERRED_PORT` when it binds, after reaping an orphaned sidecar of ours
@@ -745,7 +747,26 @@ const PORT_REAP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// another program, or a range Windows reserves for Hyper-V, can hold the
 /// preferred one for as long as it likes.
 fn choose_port() -> Result<u16, String> {
-    choose_port_from(PREFERRED_PORT, reap_orphan_sidecar)
+    let first_of_launch = !ORPHANS_SWEPT.swap(true, Ordering::AcqRel);
+    choose_port_for(first_of_launch, PREFERRED_PORT, reap_orphan_sidecar)
+}
+
+/// The launch's first spawn reaps whether or not the preferred port is taken:
+/// single-instance turns a second copy away before `setup`, so a sidecar of
+/// ours alive then is an orphan, and one a previous launch started on a port
+/// the OS handed out blocks nothing and would never be reaped. Later spawns
+/// reap only when the preferred port is taken.
+fn choose_port_for(
+    first_of_launch: bool,
+    preferred: u16,
+    reap: impl FnOnce() -> bool,
+) -> Result<u16, String> {
+    if first_of_launch {
+        let reaped = reap();
+        choose_port_from(preferred, move || reaped)
+    } else {
+        choose_port_from(preferred, reap)
+    }
 }
 
 /// `choose_port()` with the preferred port and the reaper passed in, so a test
@@ -2820,6 +2841,53 @@ mod tests {
             chosen,
             Ok(port),
             "an orphan of ours reaped off the preferred port gives it back (ADR 069)"
+        );
+    }
+
+    #[test]
+    fn the_first_spawn_of_a_launch_reaps_even_with_the_preferred_port_free() {
+        let (listener, port) = held_port();
+        drop(listener);
+        let mut reaps = 0;
+        let chosen = choose_port_for(true, port, || {
+            reaps += 1;
+            false
+        });
+        assert_eq!(chosen, Ok(port));
+        assert_eq!(
+            reaps, 1,
+            "an orphan a previous launch started on a port the OS handed out blocks \
+             nothing, so this sweep is the only thing that ends it"
+        );
+    }
+
+    #[test]
+    fn an_orphan_the_first_spawn_reaped_off_the_preferred_port_gives_it_back() {
+        let (held, port) = held_port();
+        let chosen = choose_port_for(true, port, move || {
+            drop(held);
+            true
+        });
+        assert_eq!(chosen, Ok(port));
+    }
+
+    #[test]
+    fn a_later_spawn_reaps_only_when_the_preferred_port_is_taken() {
+        let (listener, port) = held_port();
+        drop(listener);
+        assert_eq!(
+            choose_port_for(false, port, || panic!("a respawn on a free port has nothing to reap")),
+            Ok(port)
+        );
+    }
+
+    #[test]
+    fn spawn_records_the_port_it_starts_the_backend_on() {
+        let backend_source = strip_doc_comment_lines(include_str!("backend.rs"));
+        assert!(
+            extract_fn_body(&backend_source, "spawn").contains("CURRENT_PORT.store(port,"),
+            "the windows, the health poll and /shutdown all read current_port(); a backend \
+             started elsewhere without it is one nothing can reach"
         );
     }
 

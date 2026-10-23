@@ -936,7 +936,13 @@ export interface TopWordsResponse {
  * answered. Waiting there costs a spinner, which is the smaller of the two.
  */
 export const api = {
-  health: () => request<HealthResponse>("GET", "/health", undefined, REREADABLE),
+  /** Every window polls this, so it is also where the port is asked for again:
+   *  a backend the watchdog moved is followed within one poll, even while
+   *  another program answers on the port it left. */
+  health: () => {
+    cachedPort = null;
+    return request<HealthResponse>("GET", "/health", undefined, REREADABLE);
+  },
 
   audioStatus: () => request<RecordingStatus>("GET", "/audio/status", undefined, REREADABLE),
 

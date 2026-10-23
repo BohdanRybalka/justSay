@@ -184,7 +184,6 @@ describe("token cache does not poison on a transient failure", () => {
     await api.audioStatus();
 
     expect(callsOf("get_backend_token")).toBe(1);
-    expect(callsOf("get_backend_port")).toBe(1);
     expect(headerOf(2)["X-JustSay-Token"]).toBe("secret-token");
   });
 });
@@ -196,13 +195,13 @@ describe("the port the backend listens on", () => {
   it("is the one the shell names, asked once", async () => {
     const { api } = await import("./api");
     invokeMock.mockImplementation(shellAnswering("secret-token", MOVED_PORT));
-    fetchMock.mockResolvedValue(okJson({ status: "ok" }));
+    fetchMock.mockResolvedValue(okJson([]));
 
-    await api.health();
+    await api.jobs();
     await api.jobs();
 
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
-      `http://127.0.0.1:${MOVED_PORT}/health`,
+      `http://127.0.0.1:${MOVED_PORT}/jobs`,
       `http://127.0.0.1:${MOVED_PORT}/jobs`,
     ]);
     expect(callsOf("get_backend_port")).toBe(1);
@@ -216,29 +215,49 @@ describe("the port the backend listens on", () => {
     );
     fetchMock
       .mockRejectedValueOnce(new TypeError("Failed to fetch"))
-      .mockResolvedValue(okJson({ status: "ok" }));
+      .mockResolvedValue(okJson([]));
 
-    await expect(api.health()).rejects.toThrow("Failed to fetch");
+    await expect(api.jobs()).rejects.toThrow("Failed to fetch");
     port = MOVED_AGAIN_PORT;
+    await api.jobs();
+
+    expect(fetchMock.mock.calls[1][0]).toBe(`http://127.0.0.1:${MOVED_AGAIN_PORT}/jobs`);
+  });
+
+  it("is asked for again by every health poll, so a move is followed even while another program answers on the old port", async () => {
+    const { api } = await import("./api");
+    let port = MOVED_PORT;
+    invokeMock.mockImplementation(async (command: string) =>
+      command === "get_backend_port" ? port : "secret-token",
+    );
+    fetchMock.mockResolvedValue(okJson({ status: "ok" }));
+
+    await api.jobs();
+    port = MOVED_AGAIN_PORT;
+    await api.jobs();
     await api.health();
 
-    expect(fetchMock.mock.calls[1][0]).toBe(`http://127.0.0.1:${MOVED_AGAIN_PORT}/health`);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `http://127.0.0.1:${MOVED_PORT}/jobs`,
+      `http://127.0.0.1:${MOVED_PORT}/jobs`,
+      `http://127.0.0.1:${MOVED_AGAIN_PORT}/health`,
+    ]);
   });
 
   it("is kept when the request was abandoned, because an abort says nothing about the port", async () => {
     vi.useFakeTimers();
     const { api, REQUEST_TIMEOUT_MS } = await import("./api");
     invokeMock.mockImplementation(shellAnswering("secret-token", MOVED_PORT));
-    fetchMock.mockImplementationOnce(deafFetch()).mockResolvedValue(okJson({ status: "ok" }));
+    fetchMock.mockImplementationOnce(deafFetch()).mockResolvedValue(okJson([]));
 
-    const abandoned = api.health();
+    const abandoned = api.jobs();
     const settled = expect(abandoned).rejects.toThrow();
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS);
     await settled;
-    await api.health();
+    await api.jobs();
 
     expect(callsOf("get_backend_port")).toBe(1);
-    expect(fetchMock.mock.calls[1][0]).toBe(`http://127.0.0.1:${MOVED_PORT}/health`);
+    expect(fetchMock.mock.calls[1][0]).toBe(`http://127.0.0.1:${MOVED_PORT}/jobs`);
   });
 
   it("is the default outside Tauri, without asking a shell that is not there", async () => {
