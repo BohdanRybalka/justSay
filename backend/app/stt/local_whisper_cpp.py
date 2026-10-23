@@ -24,7 +24,6 @@ import httpx
 from app.core.audio_formats import UNREADABLE_HERE, UndecodableAudioError, decode_to_mono_wav
 from app.core.errors import ResourceUnavailableError
 from app.core.scratch import discard_scratch_file
-from app.stt import model_download
 from app.stt.base import (
     WHISPER_WINDOW_SECONDS,
     STTProvider,
@@ -37,6 +36,7 @@ from app.stt.config import STTSettings
 from app.stt.engine_use import EngineUse
 from app.stt.glossary import glossary_summary, whisper_glossary
 from app.stt.local_whisper_cpp_cmd import (
+    MODEL_NOT_INSTALLED,
     binary_not_found_message,
     build_server_argv,
     resolve_binary_path,
@@ -306,9 +306,9 @@ class WhisperCppServerSTTProvider(STTProvider):
         )
 
     def _get_model(self) -> None:
-        """Sync lazy-load entrypoint: resolve the binary, download the GGML model
-        if missing, spawn `whisper-server` once, health-poll it, then set
-        `is_loaded`. A server holding another model than the chosen one is replaced
+        """Sync lazy-load entrypoint: resolve the binary, require the GGML model on
+        disk (only Install downloads it), spawn `whisper-server` once, health-poll it,
+        then set `is_loaded`. A server holding another model than the chosen one is replaced
         once no transcription runs on it. The name is the duck-typed one every local
         provider owes.
         """
@@ -323,7 +323,7 @@ class WhisperCppServerSTTProvider(STTProvider):
                 model_size = self._settings.whisper_model_size
                 model_path = resolve_model_path(model_size)
                 if not model_path.is_file():
-                    self._download_model(model_path)
+                    raise ResourceUnavailableError(MODEL_NOT_INSTALLED)
 
                 with _port_lock:
                     self._spawn_server(binary_path, model_path)
@@ -341,10 +341,6 @@ class WhisperCppServerSTTProvider(STTProvider):
                 self._terminate_process(self._process)
                 self._process = None
                 raise
-
-    def _download_model(self, model_path: Path) -> None:
-        """Download the GGML model through the one shared, resumable transfer."""
-        model_download.download(self._settings.whisper_model_size, model_path)
 
     def _spawn_server(self, binary_path: Path, model_path: Path) -> None:
         argv = build_server_argv(binary_path, model_path, _HOST, _PORT)

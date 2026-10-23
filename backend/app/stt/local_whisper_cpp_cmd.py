@@ -51,6 +51,10 @@ _BIN_OVERRIDE_POINTS_AT_NOTHING = (
     "Point it at a whisper-server binary, or unset it to use the bundled one."
 )
 
+MODEL_NOT_INSTALLED = (
+    "The local speech model is not installed. Open Settings and press Install to download it."
+)
+
 
 def binary_not_found_message() -> str:
     """The one wording for "no whisper-server here", shared by every reader.

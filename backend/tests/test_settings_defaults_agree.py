@@ -48,7 +48,7 @@ _NON_DEFAULT_VALUES = {
     "files_language": "de",
     "gemini_api_key": "AIza-sync-probe",
     "groq_api_key": "gsk-sync-probe",
-    "ollama_host": "http://ollama.internal",
+    "ollama_host": "http://127.0.0.1:11500",
 }
 
 

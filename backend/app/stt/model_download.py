@@ -1,12 +1,12 @@
-"""The local speech model's install: one shared state, a resumable download, one transfer at a time.
+"""The local speech model's install: one shared state, a resumable, verified download.
 
-The first load of the engine and the Install button both come through here, so a download
-started by either shows the same progress in `snapshot()`. Install goes on past the download
-into two more steps, checking the computer and starting the engine, which report their stage
-here too.
+Only the Install button downloads, from a pinned revision, and the file must match its pinned
+SHA-256 before it is kept. Install goes on past the download into two more steps, checking the
+computer and starting the engine, which report their stage here too.
 """
 
 import errno
+import hashlib
 import logging
 import threading
 from collections.abc import Callable
@@ -20,7 +20,19 @@ from app.core.errors import ResourceUnavailableError
 
 log = logging.getLogger(__name__)
 
-HF_MODEL_URL_TEMPLATE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{size}.bin"
+GGML_REVISION = "5359861c739e955e79d9a303bcbc70fb988958b1"
+HF_MODEL_URL_TEMPLATE = (
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/" + GGML_REVISION + "/ggml-{size}.bin"
+)
+GGML_SHA256: dict[str, str] = {
+    "tiny": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+    "base": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+    "small": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+    "medium": "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208",
+    "large-v2": "9a423fe4d40c82774b6af34115b8b935f34152246eb19e80e376071d3f999487",
+    "large-v3": "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
+    "large-v3-turbo": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+}
 _CHUNK_SIZE = 1024 * 1024
 _TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=60.0)
 
@@ -29,6 +41,8 @@ _INCOMPLETE = "The download ended before the whole model arrived. Try again."
 _DISK_FULL = "There is not enough free space on the disk for the model."
 _DISK_FAILED = "The model could not be saved to the disk."
 _UNEXPECTED = "The download failed. See the JustSay log for the reason."
+_CORRUPT = "The downloaded model did not match the published file and was removed. Try again."
+UNVERIFIED_SIZE = "This model size has no verified download. Choose another model."
 
 
 Step = Literal["downloading", "checking", "starting"]
@@ -80,19 +94,6 @@ def fail(step: Step, sentence: str) -> None:
     _update(stage="failed", error=sentence, failed_step=step)
 
 
-def download(model_size: str, model_path: Path) -> None:
-    """Fetch the ``model_size`` model to ``model_path`` and return once it is there.
-
-    A second caller waits for the first, then finds the file or transfers it again. Raises
-    ``ResourceUnavailableError`` with a plain sentence and leaves a partial file for a resume.
-    """
-    with _download_lock:
-        if model_path.is_file():
-            return
-        _begin()
-        _transfer(model_size, model_path, finished="done")
-
-
 def start(model_size: str, model_path: Path, after: Callable[[], None]) -> ModelDownloadState:
     """Install on a background thread: download the model if it is missing, then run ``after``.
 
@@ -128,7 +129,7 @@ def start(model_size: str, model_path: Path, after: Callable[[], None]) -> Model
 def _install(model_size: str, model_path: Path, after: Callable[[], None]) -> None:
     try:
         if not model_path.is_file():
-            _transfer(model_size, model_path, finished="checking")
+            _transfer(model_size, model_path)
     except ResourceUnavailableError:
         return
     finally:
@@ -136,14 +137,18 @@ def _install(model_size: str, model_path: Path, after: Callable[[], None]) -> No
     after()
 
 
-def _transfer(model_size: str, model_path: Path, finished: Literal["checking", "done"]) -> None:
+def _transfer(model_size: str, model_path: Path) -> None:
     url = HF_MODEL_URL_TEMPLATE.format(size=model_size)
     part_path = model_path.with_name(model_path.name + ".part")
     log.info("Downloading GGML model: %s -> %s", url, model_path)
     try:
+        expected = GGML_SHA256.get(model_size)
+        if expected is None:
+            raise ResourceUnavailableError(UNVERIFIED_SIZE)
         model_path.parent.mkdir(parents=True, exist_ok=True)
         with httpx.Client(follow_redirects=True, timeout=_TIMEOUT) as client:
             _stream_into(client, url, part_path)
+        _require_digest(part_path, expected)
         part_path.replace(model_path)
     except ResourceUnavailableError as exc:
         fail("downloading", str(exc))
@@ -152,7 +157,7 @@ def _transfer(model_size: str, model_path: Path, finished: Literal["checking", "
         sentence = _failure_sentence(exc)
         fail("downloading", sentence)
         raise ResourceUnavailableError(sentence) from exc
-    advance(finished)
+    advance("checking")
     log.info("GGML model download complete: %s", model_path)
 
 
@@ -182,6 +187,17 @@ def _stream_into(client: httpx.Client, url: str, part_path: Path) -> None:
         if offset > total:
             part_path.unlink()
         raise ResourceUnavailableError(_INCOMPLETE)
+
+
+def _require_digest(part_path: Path, expected: str) -> None:
+    """Delete ``part_path`` and raise unless its SHA-256 is ``expected``."""
+    digest = hashlib.sha256()
+    with open(part_path, "rb") as part:
+        while chunk := part.read(_CHUNK_SIZE):
+            digest.update(chunk)
+    if digest.hexdigest() != expected:
+        part_path.unlink()
+        raise ResourceUnavailableError(_CORRUPT)
 
 
 def _announced_total(response: httpx.Response, resumed: bool) -> int | None:

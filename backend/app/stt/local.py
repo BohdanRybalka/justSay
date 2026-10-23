@@ -14,6 +14,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
+from app.core.errors import ResourceUnavailableError
 from app.stt.base import (
     WHISPER_WINDOW_SECONDS,
     STTProvider,
@@ -25,17 +26,46 @@ from app.stt.base import (
 from app.stt.config import STTSettings
 from app.stt.engine_use import EngineUse
 from app.stt.glossary import glossary_summary, whisper_glossary
+from app.stt.model_download import UNVERIFIED_SIZE
 
 log = logging.getLogger(__name__)
 
 SHORT_CLIP_SECONDS = 30.0
 
+FASTER_WHISPER_REVISIONS: dict[str, str] = {
+    "tiny": "d90ca5fe260221311c53c58e660288d3deb8d356",
+    "base": "ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66",
+    "small": "536b0662742c02347bc0e980a01041f333bce120",
+    "medium": "08e178d48790749d25932bbc082711ddcfdfbc4f",
+    "large-v2": "f0fe81560cb8b68660e564f55dd99207059c092e",
+    "large-v3": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+    "large-v3-turbo": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+}
+
+
+def model_folder(model_size: str) -> str:
+    """The folder holding ``model_size``, from the local cache without any network call.
+
+    A missing model is downloaded once at its pinned revision; a size with no pinned
+    revision is refused with ``ResourceUnavailableError`` instead of fetched from a branch.
+    """
+    from faster_whisper.utils import download_model
+
+    try:
+        return download_model(model_size, local_files_only=True)
+    except Exception:
+        revision = FASTER_WHISPER_REVISIONS.get(model_size)
+        if revision is None:
+            raise ResourceUnavailableError(UNVERIFIED_SIZE) from None
+        return download_model(model_size, revision=revision)
+
 
 class LocalSTTProvider(STTProvider):
     """Faster-Whisper Large-v3 — local privacy-first STT provider.
 
-    The model is auto-downloaded on first use (~3GB) and runs on CUDA when
-    available, CPU otherwise. Requires `pip install justsay-backend[local]`.
+    The model is downloaded once on first use (~3GB, pinned revision), loads from the
+    local cache without network afterwards, and runs on CUDA when available, CPU
+    otherwise. Requires `pip install justsay-backend[local]`.
     """
 
     is_local = True
@@ -97,7 +127,7 @@ class LocalSTTProvider(STTProvider):
                         model_size, device, compute_type,
                     )
                     self._model = WhisperModel(
-                        model_size,
+                        model_folder(model_size),
                         device=device,
                         compute_type=compute_type,
                     )
