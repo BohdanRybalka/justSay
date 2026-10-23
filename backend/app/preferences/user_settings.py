@@ -74,6 +74,7 @@ class UserSettings(BaseModel):
     meetings_language: str = "uk"
 
     files_engine: Literal["cloud", "local"] = "cloud"
+    files_follow_dictation: bool = True
     files_language: str = "auto"
 
     theme: Literal["system", "light", "dark"] = "system"
@@ -99,11 +100,20 @@ class UserSettings(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _files_start_on_the_dictation_engine(cls, data: object) -> object:
-        """A file without a files engine starts it at the dictation engine."""
-        if isinstance(data, dict) and "files_engine" not in data and "stt_mode" in data:
-            return {**data, "files_engine": data["stt_mode"]}
+    def _files_follow_the_dictation_engine_unless_kept_apart(cls, data: object) -> object:
+        """A file without the follow flag follows dictation, unless files alone are Local."""
+        if isinstance(data, dict) and "files_follow_dictation" not in data:
+            files_local = data.get("files_engine") == "local"
+            kept_apart = files_local and data.get("stt_mode", "cloud") == "cloud"
+            return {**data, "files_follow_dictation": not kept_apart}
         return data
+
+    @model_validator(mode="after")
+    def _files_follow_dictation_while_they_follow(self) -> "UserSettings":
+        """While files follow dictation, ``files_engine`` is ``stt_mode``."""
+        if self.files_follow_dictation:
+            self.files_engine = self.stt_mode
+        return self
 
 
 @dataclass
@@ -161,6 +171,10 @@ def update_user_settings(updates: dict) -> UpdateResult:
 
         if "language" in updates and updates["language"] != current.language:
             updates = {**updates, "previous_language": current.language}
+
+        if "files_engine" in updates and "files_follow_dictation" not in updates:
+            dictation = updates.get("stt_mode", current.stt_mode)
+            updates = {**updates, "files_follow_dictation": updates["files_engine"] == dictation}
 
         merged = UserSettings.model_validate({**current.model_dump(), **updates})
         _save(merged)

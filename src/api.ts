@@ -583,8 +583,10 @@ export interface UserSettings {
   meetings_engine: "cloud" | "local";
   /** A dictation language code, or "auto" to detect each part of a meeting apart. */
   meetings_language: string;
-  /** Where a file becomes text, apart from `stt_mode`; a settings file without it starts at `stt_mode`. */
+  /** Where a file becomes text; it is `stt_mode` while `files_follow_dictation` is true. */
   files_engine: "cloud" | "local";
+  /** True until the user picks a files engine other than the dictation one on the Files page. */
+  files_follow_dictation: boolean;
   /** A dictation language code, or "auto" to detect each file's language. */
   files_language: string;
   theme: ThemePreference;
