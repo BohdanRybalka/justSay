@@ -133,9 +133,13 @@ type BridgeModule = typeof import("@tauri-apps/api/core");
 const bridgeImportSlot: CallSlot<BridgeModule> = { pending: null };
 let bridgeDiagnosis: BridgeDiagnosis = { kind: "ok" };
 let authFailureSeen = false;
-/** The port the shell last said the backend listens on; `null` until it has
- *  answered, and again once a request reached nothing there. */
+/** The port the shell last said the backend listens on, `null` until it has
+ *  answered. It is replaced only by another answer, never dropped: while the
+ *  shell is silent, the last port it named beats a guess. */
 let cachedPort: number | null = null;
+/** Set when the port should be asked for again: a request reached nothing
+ *  there, or a health poll is due. Cleared by the shell's next answer. */
+let portStale = false;
 const portCallSlot: CallSlot<number> = { pending: null };
 
 const TOKEN_EXEMPT_PATHS = new Set(["/health"]);
@@ -301,11 +305,16 @@ async function askBackendPort(): Promise<number | null> {
 }
 
 /** Where the backend listens: the port the shell named, asked once and again
- *  after a request reached nothing. Outside Tauri, or while the shell has not
- *  answered, `BACKEND_PORT`, where a backend run by hand listens. */
+ *  whenever it is stale. Outside Tauri, or before the shell has ever answered,
+ *  `BACKEND_PORT`, where a backend run by hand listens. */
 async function backendPort(): Promise<number> {
-  if (cachedPort === null && typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
-    cachedPort = await askBackendPort();
+  const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  if (inTauri && (cachedPort === null || portStale)) {
+    const answer = await askBackendPort();
+    if (answer !== null) {
+      cachedPort = answer;
+      portStale = false;
+    }
   }
   return cachedPort ?? BACKEND_PORT;
 }
@@ -317,14 +326,14 @@ async function backendAddress(): Promise<{ token: string | null; baseUrl: string
   return { token, baseUrl: `http://${BACKEND_HOST}:${port}` };
 }
 
-/** The one `fetch` to the backend, forgetting the port when nothing answered
- *  there: the watchdog may have started the backend on another one. An abort is
- *  the caller's own doing and says nothing about the port. */
+/** The one `fetch` to the backend, marking the port stale when nothing
+ *  answered there: the watchdog may have started the backend on another one. An
+ *  abort is the caller's own doing and says nothing about the port. */
 async function reach(baseUrl: string, path: string, init: RequestInit): Promise<Response> {
   try {
     return await fetch(`${baseUrl}${path}`, init);
   } catch (e) {
-    if (!isAbortError(e)) cachedPort = null;
+    if (!isAbortError(e)) portStale = true;
     throw e;
   }
 }
@@ -937,10 +946,10 @@ export interface TopWordsResponse {
  */
 export const api = {
   /** Every window polls this, so it is also where the port is asked for again:
-   *  a backend the watchdog moved is followed within one poll, even while
-   *  another program answers on the port it left. */
+   *  a backend the watchdog moved is followed at the first poll the shell
+   *  answers, even while another program answers on the port it left. */
   health: () => {
-    cachedPort = null;
+    portStale = true;
     return request<HealthResponse>("GET", "/health", undefined, REREADABLE);
   },
 

@@ -244,6 +244,35 @@ describe("the port the backend listens on", () => {
     ]);
   });
 
+  it("stays the last one the shell named while the shell does not answer, rather than the default", async () => {
+    vi.useFakeTimers();
+    const { api } = await import("./api");
+    let silent = false;
+    invokeMock.mockImplementation((command: string) => {
+      if (command !== "get_backend_port") return Promise.resolve("secret-token");
+      return silent ? new Promise(() => {}) : Promise.resolve(MOVED_PORT);
+    });
+    fetchMock
+      .mockResolvedValueOnce(okJson([]))
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValue(okJson({ status: "ok" }));
+
+    await api.jobs();
+    silent = true;
+    const failed = expect(api.jobs()).rejects.toThrow("Failed to fetch");
+    await vi.advanceTimersByTimeAsync(3000);
+    await failed;
+    const poll = api.health();
+    await vi.advanceTimersByTimeAsync(3000);
+    await poll;
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `http://127.0.0.1:${MOVED_PORT}/jobs`,
+      `http://127.0.0.1:${MOVED_PORT}/jobs`,
+      `http://127.0.0.1:${MOVED_PORT}/health`,
+    ]);
+  });
+
   it("is kept when the request was abandoned, because an abort says nothing about the port", async () => {
     vi.useFakeTimers();
     const { api, REQUEST_TIMEOUT_MS } = await import("./api");
