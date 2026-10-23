@@ -268,6 +268,7 @@ describe("the meeting recording toggle", () => {
     expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
     expect(deps.reportError).toHaveBeenCalledOnce();
     expect(deps.reportError).toHaveBeenCalledWith(DICTATION_IN_PROGRESS_MESSAGE);
+    expect(DICTATION_IN_PROGRESS_MESSAGE).toBe("Finish the dictation first, then start the meeting.");
     expect(deps.openMeetings).not.toHaveBeenCalled();
   });
 

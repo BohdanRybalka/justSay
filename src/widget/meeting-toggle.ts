@@ -42,7 +42,7 @@
  * next click would take the start branch again and get the same 409.
  *
  * A dictation holding the microphone also refuses a start with 409, told apart
- * by its `code`. Nothing is being recorded then, so it takes the ordinary
+ * by its `code`. No meeting is being recorded then, so it takes the ordinary
  * failure branch, with a sentence that says what to do instead.
  *
  * The sentence a user reads is written here and the backend detail is appended

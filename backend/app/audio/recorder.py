@@ -35,8 +35,8 @@ class NotRecordingError(NotReadyError):
 class DictationInProgressError(NotReadyError):
     """A meeting start refused because a dictation holds the microphone.
 
-    Named apart from the meeting recorder's busy refusal, which also answers
-    409: after that one a meeting is recording, after this one nothing is.
+    Its own `code` tells it apart from the meeting recorder's busy refusal,
+    which also answers 409: this one leaves no meeting capture behind it.
     """
 
     code: ClassVar[str] = "dictation_in_progress"

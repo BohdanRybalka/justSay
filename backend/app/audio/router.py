@@ -2,10 +2,10 @@
 
 The `HTTPException` raises left here are this layer's own guards -- consent,
 "already recording", "not recording" -- decided from state the router can read
-before it calls anything; a guard a client must tell apart from another 409
-raises a named refusal for its `code`. Every refusal the recorders themselves
-produce carries its own status on its exception class and reaches the client
-through the error handler, so those statuses are documented where they are raised.
+before it calls anything; the dictation guard raises a named refusal instead,
+whose `code` sets it apart from the busy guard's 409. Every refusal the recorders
+themselves produce carries its own status on its exception class and reaches the
+client through the error handler, so those statuses are documented where raised.
 """
 
 import asyncio
