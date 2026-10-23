@@ -19,7 +19,7 @@ from app.core.audio_formats import UNREADABLE_HERE, ffmpeg_selftest
 from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.pipeline import chunking
 from app.pipeline.chunking import FinishedPieces, join_at_seam, transcribe_in_pieces
-from app.stt.base import STTProvider, TranscriptionResult
+from app.stt.base import NO_ANSWER_MESSAGE, STTProvider, TranscriptionResult
 from tests.conftest import write_aac_m4a
 
 GROQ_FILE_LIMIT = 25 * 1000 * 1000
@@ -600,6 +600,37 @@ async def test_a_piece_that_fails_is_sent_again_after_a_growing_wait(tmp_path):
         ("pause", chunking.PIECE_RETRY_DELAYS[1]),
     ]
     assert len({s["seconds"] for s in provider.sent}) == 1
+
+
+async def test_a_send_nobody_answered_is_sent_again_on_the_growing_waits_not_the_short_pauses(
+    tmp_path,
+):
+    path = _audio(tmp_path, 5.0)
+    unanswered = [
+        ResourceUnavailableError(NO_ANSWER_MESSAGE, headers={"Retry-After": "2"})
+        for _ in chunking.PIECE_RETRY_DELAYS
+    ]
+    provider = _Provider([*unanswered, TranscriptionResult("got it")])
+    pacer = _Pacer()
+
+    result = await _run(provider, path, pacer)
+
+    assert result.text == "got it"
+    assert [e[1] for e in pacer.events if e[0] == "pause"] == list(chunking.PIECE_RETRY_DELAYS)
+
+
+async def test_a_short_send_nobody_answered_pauses_on_the_retry_after(tmp_path):
+    path = _audio(tmp_path, 5.0)
+    provider = _Provider([
+        ResourceUnavailableError(NO_ANSWER_MESSAGE, headers={"Retry-After": "2"}),
+        TranscriptionResult("got it"),
+    ])
+    pacer = _Pacer()
+
+    result = await chunking.transcribe_with_pauses(provider, path, "uk", 5.0, pacer)
+
+    assert result.text == "got it"
+    assert [e for e in pacer.events if e[0] == "pause"] == [("pause", 2.0)]
 
 
 async def test_a_piece_that_keeps_failing_ends_the_work_after_the_last_wait(tmp_path):

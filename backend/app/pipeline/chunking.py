@@ -4,9 +4,9 @@ Decodable audio becomes 16 kHz mono FLAC pieces no longer than the provider's
 ``longest_piece_seconds``, each ending in a pause and holding only its speech; where no pause
 is found, pieces overlap and the words both heard are kept once. A transcript stuck in a loop or
 far too sparse is asked for again. A piece with little speech loses the phrases engines make up
-over silence. ``Retry-After`` pauses the work; a piece that failed otherwise is sent again after
-a growing wait. Pieces already done can be kept, so a run that failed continues after them;
-undecodable audio goes whole.
+over silence. ``Retry-After`` pauses the work; a piece that failed otherwise, or that no one
+answered, is sent again after a growing wait. Pieces already done can be kept, so a run that
+failed continues after them; undecodable audio goes whole.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from app.core.audio_formats import UNREADABLE_HERE, UndecodableAudioError, decod
 from app.core.errors import JustSayError, NotReadyError, ResourceUnavailableError
 from app.core.scratch import discard_scratch_file
 from app.pipeline.invented_phrases import outpaces_speech, without_invented_phrases
-from app.stt.base import STTProvider, TranscriptionResult
+from app.stt.base import NO_ANSWER_MESSAGE, STTProvider, TranscriptionResult
 
 log = logging.getLogger(__name__)
 
@@ -324,7 +324,8 @@ async def transcribe_with_pauses(
 ) -> TranscriptionResult:
     """One answer for one audio file: waits out Retry-After, checking the route before each send.
 
-    Any other failure worth another try is sent again after each of ``retry_delays`` in turn.
+    Any other failure worth another try is sent again after each of ``retry_delays`` in turn;
+    with ``retry_delays`` given, a send nobody answered counts as such a failure, not as a pause.
     """
     pauses = failures = 0
     while True:
@@ -332,7 +333,12 @@ async def transcribe_with_pauses(
         try:
             return await stt.transcribe(path, language=language, audio_duration=duration)
         except Exception as failure:
-            wait = _retry_after(failure) if isinstance(failure, ResourceUnavailableError) else None
+            unanswered = retry_delays and getattr(failure, "message", None) == NO_ANSWER_MESSAGE
+            wait = (
+                _retry_after(failure)
+                if isinstance(failure, ResourceUnavailableError) and not unanswered
+                else None
+            )
             if wait is not None:
                 pauses += 1
                 if wait > max_pause or pauses > max_pauses:

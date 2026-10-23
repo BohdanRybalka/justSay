@@ -10,6 +10,7 @@ from pathlib import Path
 from app.core.constants import GROQ_TIMEOUT_SECONDS, RATE_LIMIT_RETRY_SECONDS
 from app.core.errors import ConfigurationError, ResourceUnavailableError
 from app.stt.base import (
+    NO_ANSWER_MESSAGE,
     SINGLE_ATTEMPT,
     WHISPER_WINDOW_SECONDS,
     STTProvider,
@@ -119,7 +120,7 @@ class GroqWhisperSTTProvider(STTProvider):
 
         Returns ``(text, detected_language_raw, no_speech_prob)``; only
         ``language == "auto"`` escalates ``response_format`` to ``"verbose_json"``.
-        Under ``SINGLE_ATTEMPT`` the SDK makes one request, and no answer is a paced refusal.
+        Under ``SINGLE_ATTEMPT`` the SDK makes one request; no answer is a refusal to wait out.
         """
         if SINGLE_ATTEMPT.get():
             client = client.with_options(max_retries=0)
@@ -150,7 +151,7 @@ class GroqWhisperSTTProvider(STTProvider):
                 ) from e
             if SINGLE_ATTEMPT.get() and _no_answer(e):
                 raise ResourceUnavailableError(
-                    "Groq did not answer. Try again later.",
+                    NO_ANSWER_MESSAGE,
                     headers={"Retry-After": NO_ANSWER_RETRY_SECONDS},
                 ) from e
             raise

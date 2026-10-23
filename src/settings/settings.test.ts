@@ -206,9 +206,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     gemini_api_key: "",
     groq_api_key: "",
     meeting_consent_acknowledged: false,
-    meetings_engine: "local",
     meetings_language: "uk",
-    files_engine: "cloud",
     files_language: "auto",
     theme: "system",
     display_name: "",
@@ -616,6 +614,16 @@ describe("the sidebar", () => {
     await fromAnotherWindow(EVENT_SETTINGS_CHANGED, {});
 
     await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#files-language")!.value).toBe("en"));
+  });
+
+  it("tells on the Files panel where files become text, from the dictation mode", async () => {
+    await bootWithSettingsLoaded({ stt_mode: "local" });
+
+    openPanel("files");
+
+    expect(document.querySelector("#model-note")!.textContent).toBe(
+      "Turned into text on this computer. Change this on the Dictation page.",
+    );
   });
 
   it("leaves the panel alone when a change elsewhere did not touch the language", async () => {

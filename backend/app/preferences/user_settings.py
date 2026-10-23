@@ -70,10 +70,8 @@ class UserSettings(BaseModel):
     groq_api_key: str = ""
 
     meeting_consent_acknowledged: bool = False
-    meetings_engine: Literal["cloud", "local"] = "local"
     meetings_language: str = "uk"
 
-    files_engine: Literal["cloud", "local"] = "cloud"
     files_language: str = "auto"
 
     theme: Literal["system", "light", "dark"] = "system"
@@ -95,14 +93,6 @@ class UserSettings(BaseModel):
         """A file without a meeting language starts it at the dictation language."""
         if isinstance(data, dict) and "meetings_language" not in data and "language" in data:
             return {**data, "meetings_language": data["language"]}
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def _files_start_on_the_dictation_engine(cls, data: object) -> object:
-        """A file without a files engine starts it at the dictation engine."""
-        if isinstance(data, dict) and "files_engine" not in data and "stt_mode" in data:
-            return {**data, "files_engine": data["stt_mode"]}
         return data
 
 
@@ -429,9 +419,7 @@ def sync_to_runtime(us: UserSettings) -> bool:
     )
 
     stt_settings.mode = stt_mode
-    stt_settings.meetings_mode = ProviderMode(us.meetings_engine)
     stt_settings.meetings_language = us.meetings_language
-    stt_settings.files_mode = ProviderMode(us.files_engine)
     stt_settings.files_language = us.files_language
     stt_settings.whisper_model_size = us.whisper_model_size
     stt_settings.whisper_device = us.whisper_device

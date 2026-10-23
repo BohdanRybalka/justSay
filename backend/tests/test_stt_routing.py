@@ -180,18 +180,10 @@ def test_detect_duration_reads_real_wav(tmp_path):
     assert 1.9 < duration < 2.1
 
 
-def _routes(**overrides) -> STTSettings:
-    routes = dict(
-        mode=ProviderMode.CLOUD, meetings_mode=ProviderMode.CLOUD, files_mode=ProviderMode.CLOUD
-    )
-    routes.update(overrides)
-    return STTSettings(**routes)
-
-
-def test_the_local_engine_is_released_when_no_route_uses_it_and_not_if_one_does_by_then(
+def test_the_local_engine_is_released_in_cloud_mode_and_not_if_local_is_chosen_by_then(
     monkeypatch,
 ):
-    settings = _routes()
+    settings = STTSettings(mode=ProviderMode.CLOUD)
     provider = get_provider(ProviderMode.LOCAL, settings)
     asked = []
     monkeypatch.setattr(provider, "release_when_idle", asked.append)
@@ -200,13 +192,12 @@ def test_the_local_engine_is_released_when_no_route_uses_it_and_not_if_one_does_
 
     assert len(asked) == 1
     assert asked[0]() is True
-    settings.meetings_mode = ProviderMode.LOCAL
+    settings.mode = ProviderMode.LOCAL
     assert asked[0]() is False
 
 
-@pytest.mark.parametrize("route", ["mode", "meetings_mode", "files_mode"])
-def test_the_local_engine_stays_while_any_route_uses_it(monkeypatch, route):
-    settings = _routes(**{route: ProviderMode.LOCAL})
+def test_the_local_engine_stays_while_local_is_the_mode(monkeypatch):
+    settings = STTSettings(mode=ProviderMode.LOCAL)
     provider = get_provider(ProviderMode.LOCAL, settings)
     released = []
     monkeypatch.setattr(provider, "release_when_idle", lambda still_unused: released.append(1))
@@ -217,7 +208,7 @@ def test_the_local_engine_stays_while_any_route_uses_it(monkeypatch, route):
 
 
 def test_releasing_the_local_engine_makes_none_when_none_was_cached():
-    release_local_if_unused(_routes())
+    release_local_if_unused(STTSettings(mode=ProviderMode.CLOUD))
 
     assert _providers == {}
 

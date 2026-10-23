@@ -14,25 +14,17 @@ import { notifyError } from "../../notify";
 import { icon } from "../../ui/icons";
 import { saveSettings, type TabLifecycle } from "../settings";
 import { emitSettingsChanged } from "./dictation";
+import { whereItBecomesText } from "./mode-rows";
 
-type Engine = UserSettings["meetings_engine"];
+type Engine = UserSettings["stt_mode"];
 type View = "start" | "disclosure" | "recording";
 
 const POLL_MS = 1000;
 const PRESS_SETTLE_MS = 5000;
 const CLOCK_DRIFT_MS = 2000;
 
-const WHERE_IT_BECOMES_TEXT: Readonly<Record<Engine, string>> = {
-  cloud: "in the cloud",
-  local: "on this computer",
-};
-
 export function meetingCardHint(engine: Engine): string {
-  return `Your microphone and what this computer plays · turned into text ${WHERE_IT_BECOMES_TEXT[engine]}`;
-}
-
-export interface MeetingCard extends TabLifecycle {
-  setEngine: (engine: Engine) => void;
+  return `Your microphone and what this computer plays · turned into text ${whereItBecomesText(engine)}`;
 }
 
 function errorText(e: unknown): string {
@@ -44,8 +36,8 @@ export function mountMeetingCard(
   card: HTMLElement,
   settings: UserSettings,
   windowHidden: boolean,
-): MeetingCard {
-  let engine = settings.meetings_engine;
+): Required<TabLifecycle> {
+  const engine = settings.stt_mode;
   let acknowledged = settings.meeting_consent_acknowledged;
   let disclosureOpen = false;
   let recording = false;
@@ -296,11 +288,6 @@ export function mountMeetingCard(
   if (!windowHidden) resumeResources();
 
   return {
-    setEngine: (next) => {
-      engine = next;
-      const hint = card.querySelector("#meeting-hint");
-      if (hint) hint.textContent = meetingCardHint(engine);
-    },
     releaseResources,
     resumeResources,
     destroy: () => {

@@ -155,7 +155,7 @@ async def process_audio(
     cloud_dictation = source == "dictation" and route_settings.mode == ProviderMode.CLOUD
     stays_on = _cloud_stays_on if cloud_dictation else None
     pacer: PiecePacer = observer if observer is not None else UnpacedPieces(stays_on)
-    attempt_token = SINGLE_ATTEMPT.set(cloud_dictation)
+    attempt_token = SINGLE_ATTEMPT.set(route_settings.mode == ProviderMode.CLOUD)
     try:
         if observer is None and not (duration is not None and duration > LONG_DICTATION_SECONDS):
             result = await transcribe_with_pauses(

@@ -4,10 +4,8 @@ import type { UserSettings } from "../../api";
 import { DICTATION_LANGUAGES } from "../../languages";
 
 const saveSettingsMock = vi.fn();
-const getCloudKeyStatusMock = vi.fn();
 vi.mock("../settings", () => ({
   saveSettings: saveSettingsMock,
-  getCloudKeyStatus: getCloudKeyStatusMock,
 }));
 
 const emitSettingsChangedMock = vi.fn();
@@ -24,9 +22,6 @@ vi.mock("../../notify", async (importOriginal) => {
 const getMeetingStatusMock = vi.fn();
 const getHistoryMock = vi.fn();
 const jobsMock = vi.fn();
-const sttLocalStatusMock = vi.fn();
-const sttLocalModelMock = vi.fn();
-const sttLocalModelStartMock = vi.fn();
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
   return {
@@ -36,16 +31,12 @@ vi.mock("../../api", async (importOriginal) => {
       getMeetingStatus: getMeetingStatusMock,
       getHistory: getHistoryMock,
       jobs: jobsMock,
-      sttLocalStatus: sttLocalStatusMock,
-      sttLocalModel: sttLocalModelMock,
-      sttLocalModelStart: sttLocalModelStartMock,
     },
     meetingLevelStream: vi.fn(() => new AbortController()),
   };
 });
 
 const { buildEntry, FakeResizeObserver, pageOf } = await import("../history-page-stub.test-helper");
-const { buildDownload, buildLocalStatus } = await import("../local-status-stub.test-helper");
 const { renderMeetings } = await import("./meetings");
 const { meetingCardHint } = await import("./meeting-card");
 
@@ -62,9 +53,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     gemini_api_key: "",
     groq_api_key: "",
     meeting_consent_acknowledged: false,
-    meetings_engine: "local",
     meetings_language: "uk",
-    files_engine: "cloud",
     files_language: "auto",
     theme: "system",
     display_name: "",
@@ -89,11 +78,8 @@ beforeEach(() => {
   vi.stubGlobal("ResizeObserver", FakeResizeObserver);
   getHistoryMock.mockResolvedValue(pageOf([], 0, null));
   jobsMock.mockResolvedValue([]);
-  sttLocalStatusMock.mockResolvedValue(buildLocalStatus());
-  sttLocalModelMock.mockResolvedValue(buildDownload());
   getMeetingStatusMock.mockResolvedValue({ is_recording: false, duration_seconds: 0 });
   saveSettingsMock.mockResolvedValue({ settings: buildSettings(), warning: null });
-  getCloudKeyStatusMock.mockReturnValue({ groq_key_set: true });
 });
 
 afterEach(() => {
@@ -183,15 +169,13 @@ describe("renderMeetings — the page", () => {
     page.destroy();
   });
 
-  it("groups the rest as LANGUAGE and MODEL, in that order", () => {
+  it("groups the rest as LANGUAGE", () => {
     const { container } = render();
 
-    expect(groupLabels(container)).toEqual(["RECENT MEETINGS", "LANGUAGE", "MODEL"]);
-    const [language, model] = container.querySelectorAll(".group-label + .card");
+    expect(groupLabels(container)).toEqual(["RECENT MEETINGS", "LANGUAGE"]);
+    const [language] = container.querySelectorAll(".group-label + .card");
     expect(language.querySelector("#meetings-detect")).not.toBeNull();
     expect(language.querySelector("#meetings-language")).not.toBeNull();
-    expect(model.querySelector("#meetings-cloud")).not.toBeNull();
-    expect(model.querySelector("#meetings-local")).not.toBeNull();
   });
 
   it("holds nothing of the Dictation page", () => {
@@ -204,113 +188,27 @@ describe("renderMeetings — the page", () => {
 });
 
 describe("renderMeetings — where a meeting becomes text", () => {
-  function picked(container: HTMLElement): string[] {
-    return [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Meeting model"] .mode-row')]
-      .filter((row) => row.getAttribute("aria-checked") === "true")
-      .map((row) => row.id);
-  }
-
-  function rowHint(container: HTMLElement, id: string): HTMLElement {
-    return container.querySelector<HTMLElement>(`#${id} .mode-row-hint`)!;
-  }
-
-  it("names the meetings choice, not the dictation mode", async () => {
-    const view = render({ stt_mode: "cloud", meetings_engine: "local" }, false);
-
-    expect(view.hint.textContent).toBe(
-      "Your microphone and what this computer plays · turned into text on this computer",
+  it("names the dictation mode in the card and on the page, and says where to change it", () => {
+    const local = render({ stt_mode: "local" });
+    expect(local.hint.textContent).toBe(meetingCardHint("local"));
+    expect(local.container.querySelector("#model-note")!.textContent).toBe(
+      "Turned into text on this computer. Change this on the Dictation page.",
     );
-    expect(picked(view.container)).toEqual(["meetings-local"]);
-    await vi.waitFor(() =>
-      expect(rowHint(view.container, "meetings-local").textContent).toBe("Installed · runs on this computer"),
+
+    const cloud = render({ stt_mode: "cloud" });
+    expect(cloud.hint.textContent).toBe(
+      "Your microphone and what this computer plays · turned into text in the cloud",
     );
-    expect(rowHint(view.container, "meetings-cloud").textContent).toBe("Everyone's voices go to your cloud provider");
-    expect(render({ stt_mode: "local", meetings_engine: "cloud" }).hint.textContent).toBe(meetingCardHint("cloud"));
+    expect(cloud.container.querySelector("#model-note")!.textContent).toBe(
+      "Turned into text in the cloud. Change this on the Dictation page.",
+    );
   });
 
-  it("asks for the Groq key on the Cloud row when there is none", () => {
-    getCloudKeyStatusMock.mockReturnValue({ groq_key_set: false });
-    const hint = rowHint(render().container, "meetings-cloud");
+  it("offers no model choice of its own, so nothing here can change where meetings go", () => {
+    const { container } = render();
 
-    expect(hint.textContent).toBe("Add a Groq key in Settings");
-    expect(hint.classList.contains("mode-row-alert")).toBe(true);
-  });
-
-  it("saves a new choice and names it", async () => {
-    const view = render({ meetings_engine: "local" });
-
-    view.container.querySelector<HTMLButtonElement>("#meetings-cloud")!.click();
-
-    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledWith({ meetings_engine: "cloud" }));
-    await vi.waitFor(() => expect(emitSettingsChangedMock).toHaveBeenCalled());
-    expect(view.hint.textContent).toBe(meetingCardHint("cloud"));
-    expect(picked(view.container)).toEqual(["meetings-cloud"]);
-  });
-
-  it("goes back to the saved choice when the new one could not be saved", async () => {
-    saveSettingsMock.mockRejectedValue(new Error("backend down"));
-    const view = render({ meetings_engine: "local" });
-
-    view.container.querySelector<HTMLButtonElement>("#meetings-cloud")!.click();
-
-    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("backend down"));
-    expect(view.hint.textContent).toBe(meetingCardHint("local"));
-    expect(picked(view.container)).toEqual(["meetings-local"]);
-  });
-
-  it("takes no second choice while the first is still saving", async () => {
-    let finish: (value: unknown) => void = () => {};
-    saveSettingsMock.mockReturnValue(new Promise((resolve) => (finish = resolve)));
-    const view = render({ meetings_engine: "local" });
-    const cloud = view.container.querySelector<HTMLButtonElement>("#meetings-cloud")!;
-
-    cloud.click();
-    expect(cloud.getAttribute("aria-disabled")).toBe("true");
-    cloud.click();
-    finish({ settings: buildSettings(), warning: null });
-
-    await vi.waitFor(() => expect(cloud.hasAttribute("aria-disabled")).toBe(false));
-    expect(saveSettingsMock).toHaveBeenCalledTimes(1);
-    expect(picked(view.container)).toEqual(["meetings-cloud"]);
-  });
-
-  it("installs the model from the Meetings page without choosing Local", async () => {
-    sttLocalStatusMock.mockResolvedValue(buildLocalStatus({ model_downloaded: false }));
-    sttLocalModelStartMock.mockResolvedValue(buildDownload({ stage: "downloading" }));
-    const view = render({ meetings_engine: "cloud" }, false);
-    const local = view.container.querySelector<HTMLButtonElement>("#meetings-local")!;
-    await vi.waitFor(() => expect(rowHint(view.container, "meetings-local").textContent).toBe("Not installed · 1.5 GB"));
-
-    local.click();
-
-    await vi.waitFor(() => expect(rowHint(view.container, "meetings-local").textContent).toBe("Installing…"));
-    expect(sttLocalModelStartMock).toHaveBeenCalledTimes(1);
-    expect(saveSettingsMock).not.toHaveBeenCalled();
-  });
-
-  it("reads the engine only while the window is shown", async () => {
-    vi.useFakeTimers();
-    try {
-      const view = render({ meetings_engine: "cloud" }, true);
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(sttLocalStatusMock).not.toHaveBeenCalled();
-
-      view.page.resumeResources!();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(sttLocalStatusMock).toHaveBeenCalledTimes(1);
-
-      view.page.releaseResources!();
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(sttLocalStatusMock).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("saves nothing when the chosen row is picked again", () => {
-    render({ meetings_engine: "local" }).container.querySelector<HTMLButtonElement>("#meetings-local")!.click();
-
-    expect(saveSettingsMock).not.toHaveBeenCalled();
+    expect(container.querySelector('[aria-label="Meeting model"]')).toBeNull();
+    expect(container.querySelector("#meetings-cloud, #meetings-local")).toBeNull();
   });
 });
 

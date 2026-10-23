@@ -59,6 +59,18 @@ async def test_set_stt_mode_accepts_json_object(client):
 
 
 @pytest.mark.asyncio
+async def test_settings_take_no_engine_for_files_or_meetings_apart_from_dictation(client):
+    await client.put("/stt/mode", json={"mode": "local"})
+
+    resp = await client.put("/settings", json={"files_engine": "cloud", "meetings_engine": "cloud"})
+
+    assert resp.status_code == 200
+    assert "files_engine" not in resp.json()["settings"]
+    assert "meetings_engine" not in resp.json()["settings"]
+    assert (await client.get("/health")).json()["stt_mode"] == "local"
+
+
+@pytest.mark.asyncio
 async def test_switch_stt_mode_invalid(client):
     resp = await client.put("/stt/mode", json={"mode": "quantum"})
     assert resp.status_code == 422
@@ -106,11 +118,10 @@ async def test_set_stt_mode_triggers_prewarm_without_awaiting_it(client, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_switching_dictation_to_cloud_keeps_the_engine_a_meeting_or_file_uses(
+async def test_switching_to_cloud_releases_the_local_engine_and_switching_to_local_does_not(
     client, monkeypatch
 ):
-    """The local engine is released at a mode switch only once no route uses it: meetings and
-    files choose their own engine, and a meeting being turned into text must not lose it."""
+    """One switch decides dictation, meetings and files, so only Cloud frees the engine."""
     from app.core.types import ProviderMode
     from app.stt.config import stt_settings
     from app.stt.routing import get_provider
@@ -120,11 +131,8 @@ async def test_switching_dictation_to_cloud_keeps_the_engine_a_meeting_or_file_u
     monkeypatch.setattr(provider, "release_when_idle", lambda still_unused: released.append(1))
 
     await client.put("/stt/mode", json={"mode": "local"})
-    await client.put("/stt/mode", json={"mode": "cloud"})
     assert released == []
 
-    await client.put("/settings", json={"meetings_engine": "cloud", "files_engine": "cloud"})
-    await client.put("/stt/mode", json={"mode": "local"})
     await client.put("/stt/mode", json={"mode": "cloud"})
     assert released == [1]
 

@@ -148,7 +148,8 @@ class _JobObserver:
         self._job.expected_seconds = await _expected_seconds(model_name, audio_duration)
 
     async def before_send(self) -> None:
-        return None
+        if self._job.mode == ProviderMode.CLOUD and stt_settings.mode != ProviderMode.CLOUD:
+            raise RouteStoppedError("Cloud was switched off before this recording was sent")
 
     async def before_piece(self, index: int, total: int) -> None:
         await self._queue.gate.wait_for_none()
@@ -265,7 +266,8 @@ def _dictation_mode(made_in: ProviderMode | None) -> ProviderMode:
 class JobQueue:
     """Jobs by id; a failed one stays until dismissed, a done or cancelled one a minute.
 
-    A meeting and a file each run on their own engine and language, read when their turn comes.
+    A meeting and a file run on the chosen engine and each on its own language, read when their
+    turn comes; a cloud run stops before each piece it sends once Local is chosen.
     A failed dictation stays for ``FAILED_DICTATION_KEEP_SECONDS`` and then its audio goes.
     """
 
@@ -553,12 +555,10 @@ class JobQueue:
 
     @staticmethod
     def _mode_for(job: _Job) -> ProviderMode:
-        """The chosen engine of the job's kind; a file that ran in Local stays there on retry."""
-        if job.kind == "meeting":
-            return stt_settings.meetings_mode
-        if job.mode == ProviderMode.LOCAL:
+        """The chosen engine; a file that ran in Local stays there on retry."""
+        if job.kind == "file" and job.mode == ProviderMode.LOCAL:
             return ProviderMode.LOCAL
-        return stt_settings.files_mode
+        return stt_settings.mode
 
     @staticmethod
     def _spawn_indexer() -> None:

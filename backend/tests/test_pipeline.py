@@ -108,6 +108,33 @@ def _make_stt_mock(text: str = "hello world", tokens: int | None = None):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["dictation", "file", "meeting"])
+@pytest.mark.parametrize(
+    ("mode", "single"), [(ProviderMode.CLOUD, True), (ProviderMode.LOCAL, False)]
+)
+async def test_every_cloud_send_of_a_dictation_file_or_meeting_is_a_single_request(
+    sample_wav, cloud_mode, _isolate_side_effects, source, mode, single
+):
+    seen = []
+
+    async def transcribe(path, **kwargs):
+        seen.append(SINGLE_ATTEMPT.get())
+        return TranscriptionResult(text="hello")
+
+    stt = _make_stt_mock()
+    stt.transcribe = transcribe
+    stt.is_local = mode == ProviderMode.LOCAL
+
+    with (
+        patch("app.pipeline.service.get_provider", return_value=stt),
+        patch("app.stt.local_setup.await_local_ready", new=AsyncMock()),
+    ):
+        await process_audio(sample_wav, audio_duration=60.0, source=source, mode=mode)
+
+    assert seen == [single]
+
+
+@pytest.mark.asyncio
 async def test_pipeline_returns_stt_text_verbatim(
     sample_wav, cloud_mode, _isolate_side_effects
 ):

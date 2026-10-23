@@ -579,12 +579,8 @@ export interface UserSettings {
   /** Whether the user has acknowledged the meeting-recording disclosure.
    *  `POST /audio/meeting/start` answers `403` until it is true. */
   meeting_consent_acknowledged: boolean;
-  /** Where a stopped meeting becomes text, apart from `stt_mode`. */
-  meetings_engine: "cloud" | "local";
   /** A dictation language code, or "auto" to detect each part of a meeting apart. */
   meetings_language: string;
-  /** Where a file becomes text, apart from `stt_mode`; a settings file without it starts at `stt_mode`. */
-  files_engine: "cloud" | "local";
   /** A dictation language code, or "auto" to detect each file's language. */
   files_language: string;
   theme: ThemePreference;

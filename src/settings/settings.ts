@@ -135,14 +135,8 @@ const panels: Record<PanelName, PanelRenderer> = {
   },
   meetings: (container, loaded, windowHidden) =>
     renderMeetings(container, loaded, windowHidden, openHistoryOf),
-  files: (container, loaded, windowHidden) => {
-    filesPanel = renderFiles(
-      container,
-      loaded,
-      () => fileTranscription?.pick(),
-      openHistoryOf,
-      windowHidden,
-    );
+  files: (container, loaded) => {
+    filesPanel = renderFiles(container, loaded, () => fileTranscription?.pick(), openHistoryOf);
     return filesPanel;
   },
   settings: renderSettingsPanel,

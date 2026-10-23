@@ -58,7 +58,6 @@ function mount(overrides: Partial<UserSettings> = {}, windowHidden = false) {
   const mounted = mountMeetingCard(
     card,
     {
-      meetings_engine: "local",
       meeting_consent_acknowledged: true,
       ...overrides,
     } as UserSettings,
@@ -96,7 +95,7 @@ afterEach(() => {
 
 describe("the start card", () => {
   it("offers Start recording and says where the meeting becomes text", async () => {
-    const { button, title, card } = await mountReady({ meetings_engine: "local" });
+    const { button, title, card } = await mountReady({ stt_mode: "local" });
 
     expect(title()).toBe("Record a meeting");
     expect(card.querySelector("#meeting-hint")!.textContent).toBe(
@@ -105,13 +104,10 @@ describe("the start card", () => {
     expect(button("meeting-start").textContent).toContain("Start recording");
   });
 
-  it("names the cloud when meetings are heard there, and follows a change of engine", async () => {
-    const { mounted, card } = await mountReady({ meetings_engine: "cloud" });
+  it("names the cloud when the dictation mode sends meetings there", async () => {
+    const { card } = await mountReady({ stt_mode: "cloud" });
 
     expect(card.querySelector("#meeting-hint")!.textContent).toBe(meetingCardHint("cloud"));
-    mounted.setEngine("local");
-
-    expect(card.querySelector("#meeting-hint")!.textContent).toBe(meetingCardHint("local"));
   });
 
   it("cannot be pressed before the backend has said whether a meeting is running", async () => {

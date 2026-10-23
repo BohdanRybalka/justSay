@@ -112,7 +112,7 @@ def drop_cloud_provider() -> None:
 
 
 def release_local_if_unused(stt_settings: STTSettings) -> None:
-    """Free the local engine once no route uses it, after what runs or loads on it ends."""
+    """Free the local engine once Local is not the mode, after what runs or loads on it ends."""
     if _local_in_use(stt_settings):
         return
     provider = peek_local_provider()
@@ -121,8 +121,7 @@ def release_local_if_unused(stt_settings: STTSettings) -> None:
 
 
 def _local_in_use(stt_settings: STTSettings) -> bool:
-    routes = (stt_settings.mode, stt_settings.meetings_mode, stt_settings.files_mode)
-    return ProviderMode.LOCAL in routes
+    return stt_settings.mode == ProviderMode.LOCAL
 
 
 def clear_cache() -> None:

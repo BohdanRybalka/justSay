@@ -169,20 +169,15 @@ _UNEMBEDDED = "id NOT IN (SELECT entry_id FROM entry_embeddings)"
 def _readable_by(is_local_embedder: bool) -> tuple[str, tuple[object, ...]]:
     """The ``entries`` condition naming what an embedder may read, and its parameters.
 
-    A local embedder reads every entry. A cloud one reads only text a cloud engine transcribed,
-    and no meeting or file whose own route is now this computer; an unlabelled entry stays here.
+    A local embedder reads every entry. A cloud one reads only text a cloud engine transcribed;
+    an unlabelled entry stays here.
     """
     if is_local_embedder:
         return "1", ()
     prefixes = ", ".join("?" * len(CLOUD_MODEL_NAME_PREFIXES))
     return (
-        f"substr(model_name, 1, instr(model_name, '/')) IN ({prefixes}) "
-        "AND NOT (source = 'meeting' AND ?) AND NOT (source = 'file' AND ?)",
-        (
-            *CLOUD_MODEL_NAME_PREFIXES,
-            stt_settings.meetings_mode == ProviderMode.LOCAL,
-            stt_settings.files_mode == ProviderMode.LOCAL,
-        ),
+        f"substr(model_name, 1, instr(model_name, '/')) IN ({prefixes})",
+        CLOUD_MODEL_NAME_PREFIXES,
     )
 
 
