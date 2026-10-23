@@ -25,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -202,7 +202,32 @@ pub fn install_ctrl_handler() {
     }
 }
 
-pub const PORT: u16 = 9377;
+/// The port the backend starts on whenever it is free. A backend run by hand,
+/// and a window opened outside Tauri, use it too.
+pub const PREFERRED_PORT: u16 = 9377;
+
+static CURRENT_PORT: AtomicU16 = AtomicU16::new(PREFERRED_PORT);
+
+/// The port the backend was last started on: `PREFERRED_PORT`, or one the OS
+/// handed out because that one could not be bound. Read by the windows through
+/// the `get_backend_port` command.
+pub fn current_port() -> u16 {
+    CURRENT_PORT.load(Ordering::Acquire)
+}
+
+static LAST_FAILURE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Why the backend is not running, as last reported through
+/// `report_backend_failure`; `None` once a backend answered `/health`.
+pub fn last_failure() -> Option<String> {
+    LAST_FAILURE.lock().ok().and_then(|reason| reason.clone())
+}
+
+fn record_failure(reason: Option<String>) {
+    if let Ok(mut last) = LAST_FAILURE.lock() {
+        *last = reason;
+    }
+}
 
 /// Per-launch shared secret for the loopback API. Generated once (UUIDv4) and
 /// stable for the process lifetime. Handed to the sidecar via the
@@ -552,13 +577,15 @@ fn rotate_sidecar_log_if_full(path: &Path, incoming: u64) -> bool {
 /// `tauri_plugin_log` alone, which writes to an OS log directory no
 /// `JUSTSAY_DATA_DIR` override touches — so the file spec 131 put beside the
 /// user's data answered "why will it not start" only when it had started. The
-/// app log keeps its copy. Which sites report here, and which deliberately do
-/// not, is `specs/135-startup-diagnosis-outside-data-dir/fix.md`.
+/// app log keeps its copy, and `last_failure()` hands it to the window that
+/// shows the backend is down. Which sites report here, and which deliberately
+/// do not, is `specs/135-startup-diagnosis-outside-data-dir/fix.md`.
 pub fn report_backend_failure(message: &str) {
     if is_shutdown_requested() {
         log::error!("{}", message);
         return;
     }
+    record_failure(Some(message.to_string()));
     report_backend_failure_to(message, startup_log_dir().as_deref());
 }
 
@@ -707,44 +734,57 @@ fn resolve_sidecar(app: &AppHandle) -> Option<PathBuf> {
     }
 }
 
-/// Retry budget for re-testing `PORT` after an orphan was reaped.
+/// Retry budget for re-testing `PREFERRED_PORT` after an orphan was reaped.
 const PORT_REAP_POLL_MAX_ATTEMPTS: u32 = 20;
 const PORT_REAP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Check if the port is available before spawning.
+/// The port `spawn()` starts the backend on.
 ///
-/// The previous `tauri dev` / installed-app session may have orphaned its
-/// sidecar — `tauri-plugin-shell` does not create a Job Object, and macOS has
-/// no equivalent to fall back on — so a parent crash or a failed in-process
-/// `CommandChild::kill()` can leave the sidecar running and squatting on
-/// `PORT`. If we detect an orphan that's clearly ours, reap it and retry
-/// instead of punishing the user with a startup error. Deliberately carries no
-/// `#[cfg]` of its own: which platforms can reap is `reap_orphan_sidecar()`'s
-/// question alone, so a platform added there needs no second edit here. See
-/// `docs/adr/069-an-orphaned-backend-is-cleared-at-the-next-launch.md`.
-fn check_port_available() -> Result<(), String> {
-    if try_bind_port() {
-        return Ok(());
+/// `PREFERRED_PORT` when it binds, after reaping an orphaned sidecar of ours
+/// squatting on it (ADR 069). Otherwise a port the OS hands out, because
+/// another program, or a range Windows reserves for Hyper-V, can hold the
+/// preferred one for as long as it likes.
+fn choose_port() -> Result<u16, String> {
+    choose_port_from(PREFERRED_PORT, reap_orphan_sidecar)
+}
+
+/// `choose_port()` with the preferred port and the reaper passed in, so a test
+/// can hold a port of its own and never touch a real backend. Carries no
+/// `#[cfg]`: which platforms can reap is `reap_orphan_sidecar()`'s question.
+fn choose_port_from(preferred: u16, reap: impl FnOnce() -> bool) -> Result<u16, String> {
+    if port_binds(preferred) {
+        return Ok(preferred);
     }
 
-    if reap_orphan_sidecar() {
+    if reap() {
         for _ in 0..PORT_REAP_POLL_MAX_ATTEMPTS {
             std::thread::sleep(PORT_REAP_POLL_INTERVAL);
-            if try_bind_port() {
-                log::info!("Reaped orphan sidecar; port {} freed", PORT);
-                return Ok(());
+            if port_binds(preferred) {
+                log::info!("Reaped orphan sidecar; port {} freed", preferred);
+                return Ok(preferred);
             }
         }
     }
 
-    Err(format!(
-        "Port {} is already in use. Another JustSay instance may be running.",
-        PORT
-    ))
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .and_then(|listener| listener.local_addr())
+        .map(|address| address.port())
+        .map_err(|e| {
+            format!(
+                "Port {} cannot be bound and the OS handed out no other: {}",
+                preferred, e
+            )
+        })?;
+    log::warn!(
+        "Port {} cannot be bound; starting the backend on port {}",
+        preferred,
+        port
+    );
+    Ok(port)
 }
 
-fn try_bind_port() -> bool {
-    std::net::TcpListener::bind(format!("127.0.0.1:{}", PORT)).is_ok()
+fn port_binds(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
 /// On Windows: if our PyInstaller sidecar is running, kill it with
@@ -783,7 +823,7 @@ fn reap_orphan_sidecar() -> bool {
 
 /// On macOS: the same next-launch reap Windows has had since ADR 023. There is
 /// no Job Object here, so a force-quit of the shell leaves the sidecar holding
-/// `PORT` and the next launch fails until the user ends it by hand — see
+/// `PREFERRED_PORT` and running beside the next launch's backend — see
 /// `docs/adr/069-an-orphaned-backend-is-cleared-at-the-next-launch.md`.
 #[cfg(target_os = "macos")]
 fn reap_orphan_sidecar() -> bool {
@@ -844,7 +884,7 @@ fn reap_orphan_sidecar() -> bool {
 /// job handle and never closes it. When the parent dies by ANY means —
 /// `taskkill /F`, Task Manager "End Task", a hard crash, `TerminateProcess` —
 /// the OS closes that last handle and the kernel terminates every process still
-/// in the job, freeing `PORT` for the next launch. This is the one backstop
+/// in the job, freeing `PREFERRED_PORT` for the next launch. This is the one backstop
 /// that survives a kill running no in-process code (the panic hook, console
 /// handler, `RunEvent::Exit` and the next-launch reap are all in-process) — see
 /// `docs/adr/023-force-kill-orphaned-backend.md`.
@@ -933,19 +973,20 @@ fn assign_pid_to_job(job: isize, pid: u32) -> bool {
 /// `JUSTSAY_USE_FROZEN_SIDECAR=1` before launching.
 ///
 /// Refuses to start once a quit has been requested (`is_shutdown_requested()`
-/// checked before `check_port_available()`): without this, a watchdog retry
-/// racing a quit would reach `check_port_available()` while the quitting
-/// thread's graceful stop still has the port bound, `try_bind_port()` would
-/// fail, and `reap_orphan_sidecar()`'s `taskkill /F /T /IM
-/// justsay-backend.exe` would kill the backend mid-`lifespan` — by image
-/// name, so it hits the very process being torn down. See
+/// checked before `choose_port()`): without this, a watchdog retry racing a
+/// quit would reach `choose_port()` while the quitting thread's graceful stop
+/// still has the port bound, `port_binds()` would fail, and
+/// `reap_orphan_sidecar()`'s `taskkill /F /T /IM justsay-backend.exe` would
+/// kill the backend mid-`lifespan` — by image name, so it hits the very
+/// process being torn down. See
 /// `docs/adr/032-production-quit-runs-backend-teardown.md` point 8.
 pub fn spawn(app: AppHandle) -> Result<(), String> {
     if is_shutdown_requested() {
         return Err("Shutdown already requested; refusing to spawn a new backend".to_string());
     }
 
-    check_port_available()?;
+    let port = choose_port()?;
+    CURRENT_PORT.store(port, Ordering::Release);
 
     let prefer_python_source =
         cfg!(debug_assertions) && std::env::var("JUSTSAY_USE_FROZEN_SIDECAR").is_err();
@@ -960,9 +1001,13 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
     };
 
     let backend = if let Some(sidecar) = resolved_sidecar {
-        log::info!("Starting backend sidecar via shell plugin: {:?}", sidecar);
+        log::info!(
+            "Starting backend sidecar via shell plugin on port {}: {:?}",
+            port,
+            sidecar
+        );
         let sidecar_str = sidecar.to_string_lossy().to_string();
-        let port_str = PORT.to_string();
+        let port_str = port.to_string();
         let mut shell_cmd = app
             .shell()
             .command(sidecar_str)
@@ -1030,7 +1075,8 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         let python = find_python()?;
         let backend_dir = find_backend_dir()?;
         log::info!(
-            "Starting backend (dev mode): {} -m uvicorn (dir: {:?})",
+            "Starting backend (dev mode) on port {}: {} -m uvicorn (dir: {:?})",
+            port,
             python,
             backend_dir
         );
@@ -1042,7 +1088,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
             "--host",
             "127.0.0.1",
             "--port",
-            &PORT.to_string(),
+            &port.to_string(),
             "--log-level",
             "warning",
         ])
@@ -1142,9 +1188,10 @@ fn is_process_alive() -> bool {
     matches!(backend_liveness(), BackendLiveness::Running)
 }
 
-/// Poll /health until the backend responds or timeout.
+/// Poll /health until the backend responds or timeout. A backend that answers
+/// clears the reason `last_failure()` held.
 pub async fn wait_for_ready() -> Result<(), String> {
-    let url = format!("http://127.0.0.1:{}/health", PORT);
+    let url = format!("http://127.0.0.1:{}/health", current_port());
     let client = http_client()?;
 
     for attempt in 1..=HEALTH_POLL_MAX_ATTEMPTS {
@@ -1170,6 +1217,7 @@ pub async fn wait_for_ready() -> Result<(), String> {
         {
             Ok(resp) if resp.status().is_success() => {
                 log::info!("Backend ready (attempt {})", attempt);
+                record_failure(None);
                 return Ok(());
             }
             _ => {
@@ -1312,7 +1360,7 @@ enum GracefulStop {
     ForceKillOnly,
 }
 
-/// POST `http://127.0.0.1:{PORT}/shutdown` with the per-launch token and
+/// POST `/shutdown` on `current_port()` with the per-launch token and
 /// return whether the response was a `2xx`.
 ///
 /// **Must** run the request on a dedicated `std::thread` that is
@@ -1333,7 +1381,7 @@ fn request_sidecar_shutdown() -> bool {
             Ok(c) => c,
             Err(_) => return false,
         };
-        let url = format!("http://127.0.0.1:{}/shutdown", PORT);
+        let url = format!("http://127.0.0.1:{}/shutdown", current_port());
         client
             .post(&url)
             .header("X-JustSay-Token", api_token())
@@ -1620,6 +1668,19 @@ fn kill_current_process(wait: LockWait, sidecar_stop: GracefulStop) {
 const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_RESPAWN_ATTEMPTS: u32 = 3;
 
+/// The watchdog's last report, carrying the failure before it: "giving up"
+/// alone would replace the one reason a reader can act on.
+fn gave_up_after(attempts: u32, last: Option<String>) -> String {
+    let given_up = format!(
+        "Backend watchdog: giving up after {} consecutive failed respawns",
+        attempts
+    );
+    match last {
+        Some(reason) => format!("{}; the last: {}", given_up, reason),
+        None => given_up,
+    }
+}
+
 fn respawn_backoff(attempt: u32) -> Duration {
     Duration::from_secs(2u64.pow(attempt + 1))
 }
@@ -1677,10 +1738,7 @@ pub fn spawn_watchdog(app: AppHandle) {
             }
 
             if attempt >= MAX_RESPAWN_ATTEMPTS {
-                report_backend_failure(&format!(
-                    "Backend watchdog: giving up after {} consecutive failed respawns",
-                    MAX_RESPAWN_ATTEMPTS
-                ));
+                report_backend_failure(&gave_up_after(MAX_RESPAWN_ATTEMPTS, last_failure()));
                 return;
             }
 
@@ -2303,11 +2361,11 @@ mod tests {
             .find("is_shutdown_requested()")
             .expect("spawn() must call is_shutdown_requested()");
         let port_check_index = spawn_body
-            .find("check_port_available()")
-            .expect("spawn() must call check_port_available()");
+            .find("choose_port()")
+            .expect("spawn() must call choose_port()");
         assert!(
             shutdown_check_index < port_check_index,
-            "spawn()'s is_shutdown_requested() check must run before check_port_available()"
+            "spawn()'s is_shutdown_requested() check must run before choose_port()"
         );
 
         assert_eq!(
@@ -2719,6 +2777,78 @@ mod tests {
             !reap_processes_named(&absent),
             "no process carries {}, so the reaper must report nothing and issue no kill",
             absent
+        );
+    }
+
+    fn held_port() -> (std::net::TcpListener, u16) {
+        let listener =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).expect("the OS hands out a port");
+        let port = listener.local_addr().expect("a bound listener has an address").port();
+        (listener, port)
+    }
+
+    #[test]
+    fn a_free_preferred_port_is_the_one_the_backend_starts_on() {
+        let (listener, port) = held_port();
+        drop(listener);
+        assert_eq!(
+            choose_port_from(port, || panic!("a free port has nothing to reap")),
+            Ok(port)
+        );
+    }
+
+    #[test]
+    fn a_port_another_program_holds_moves_the_backend_to_one_the_os_hands_out() {
+        let (_held, port) = held_port();
+        let chosen = choose_port_from(port, || false)
+            .expect("a taken preferred port is not a reason the backend cannot start");
+        assert_ne!(chosen, port);
+        assert!(
+            port_binds(chosen),
+            "the port handed to the backend must be one it can bind"
+        );
+    }
+
+    #[test]
+    fn a_preferred_port_the_reaper_freed_is_kept_rather_than_moved_off() {
+        let (held, port) = held_port();
+        let chosen = choose_port_from(port, move || {
+            drop(held);
+            true
+        });
+        assert_eq!(
+            chosen,
+            Ok(port),
+            "an orphan of ours reaped off the preferred port gives it back (ADR 069)"
+        );
+    }
+
+    #[test]
+    fn a_watchdog_that_gives_up_still_names_the_failure_before_it() {
+        assert_eq!(
+            gave_up_after(3, Some("Backend watchdog: respawn failed: boom".to_string())),
+            "Backend watchdog: giving up after 3 consecutive failed respawns; \
+             the last: Backend watchdog: respawn failed: boom"
+        );
+        assert_eq!(
+            gave_up_after(3, None),
+            "Backend watchdog: giving up after 3 consecutive failed respawns"
+        );
+    }
+
+    #[test]
+    fn the_reason_a_window_shows_is_set_by_a_report_and_cleared_by_an_answer() {
+        let backend_source = strip_doc_comment_lines(include_str!("backend.rs"));
+        assert!(
+            extract_fn_body(&backend_source, "report_backend_failure")
+                .contains("record_failure(Some("),
+            "every reason the backend is down reaches the log through report_backend_failure, \
+             so that is where the window's copy of it has to be kept"
+        );
+        assert!(
+            extract_fn_body(&backend_source, "wait_for_ready").contains("record_failure(None)"),
+            "a backend that answered /health is running, and the window must stop saying \
+             it is not"
         );
     }
 }

@@ -100,7 +100,7 @@ async def lifespan(app: FastAPI):
     )
     from app.transcripts import history
 
-    log.info("Backend startup: version=%s port=%s", __version__, settings.port)
+    log.info("Backend startup: version=%s", __version__)
     settings.audio.temp_dir.mkdir(parents=True, exist_ok=True)
 
     repaired_dir = _run_optional_step(

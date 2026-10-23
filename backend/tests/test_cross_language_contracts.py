@@ -67,10 +67,7 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 _PORT_SITES: dict[Path, str] = {
     CONFIG_PY: r"^    port: int = (\d+)$",
     CONTRACTS_TS: r"^export const BACKEND_PORT = (\d+);$",
-    BACKEND_RS: r"^pub const PORT: u16 = (\d+);$",
-    REPO_ROOT / "src-tauri" / "tauri.conf.json": (
-        r'connect-src [^";]*http://127\.0\.0\.1:(\d+) http://localhost:(\d+)'
-    ),
+    BACKEND_RS: r"^pub const PREFERRED_PORT: u16 = (\d+);$",
     REPO_ROOT / "package.json": r"--port (\d+)",
     REPO_ROOT / "backend" / ".env.example": r"^JUSTSAY_PORT=(\d+)$",
     REPO_ROOT / "backend" / "scripts" / "smoke_sidecar.py": r'"--port", type=int, default=(\d+)',
@@ -88,7 +85,7 @@ _PORT_SCAN_PATTERNS: tuple[str, ...] = (
 _NON_BACKEND_PORTS: dict[str, str] = {
     "5173": "Vite dev server -- vite.config.ts, the tauri.conf.json devUrl, and the CORS origins",
     "11434": "Ollama's default host, written out at every provider and settings default",
-    "8878": "the local whisper.cpp server in app/stt/local_whisper_cpp.py, single-language",
+    "8878": "an example port the whisper-server argv tests pass; the server takes a free one",
 }
 
 _SCAN_GLOBS: tuple[tuple[str, str], ...] = (
@@ -388,7 +385,7 @@ def test_the_backend_port_is_the_same_number_everywhere() -> None:
     """Every nominated declaration of the backend port carries one number.
 
     Mutation-checked: changing the default in app/config.py and nothing
-    else fails this test, and the message names all nine declaring files.
+    else fails this test, and the message names all eight declaring files.
     """
     declared = {path: _extract(path, pattern) for path, pattern in _PORT_SITES.items()}
     canonical = declared[CONFIG_PY][0]
@@ -408,7 +405,7 @@ def test_the_backend_port_is_the_same_number_everywhere() -> None:
 def test_no_undeclared_port_literal_exists() -> None:
     """No file in the scanned set writes a loopback number the table does not own.
 
-    Rust declares its port as ``pub const PORT: u16 = 9377;``, which the
+    Rust declares its port as ``pub const PREFERRED_PORT: u16 = 9377;``, which the
     ``port[ =:]+`` pattern cannot reach because ``[ =:]`` does not match ``u``,
     so an unsigned-integer assignment is scanned as well. That pattern accepts
     any of Rust's unsigned widths and tolerates missing spaces, because

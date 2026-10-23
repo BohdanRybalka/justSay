@@ -29,6 +29,17 @@
   font-size: 13px;
 }
 
+.panel-details {
+  color: var(--muted);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.panel-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .account-card {
   padding: 26px;
   display: flex;

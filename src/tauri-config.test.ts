@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { BACKEND_PORT } from "./contracts";
 
 const REQUIRED_SOURCES: Record<string, string[]> = {
   "default-src": ["'self'"],
@@ -14,8 +13,7 @@ const EXACT_CONNECT_SRC = [
   "'self'",
   "ipc:",
   "http://ipc.localhost",
-  `http://127.0.0.1:${BACKEND_PORT}`,
-  `http://localhost:${BACKEND_PORT}`,
+  "http://127.0.0.1:*",
 ];
 
 type ShippedWindow = Record<string, unknown> & { label?: string; dragDropEnabled?: boolean };
@@ -72,12 +70,12 @@ describe("shipped CSP (src-tauri/tauri.conf.json)", () => {
     });
   }
 
-  it("connect-src is exactly the backend loopback origins and the IPC transport", () => {
+  it("connect-src is exactly this computer's loopback address and the IPC transport", () => {
     expect(
       [...(directives["connect-src"] ?? [])].sort(),
-      "connect-src must match this list exactly — a widened network allowlist is a " +
-        "zero-leak regression, and both loopback origins are derived from BACKEND_PORT " +
-        "so a port change cannot leave the CSP behind (ADR 028, ADR 045)",
+      "connect-src must match this list exactly — any origin off this computer is a " +
+        "zero-leak regression. Every port on 127.0.0.1 is allowed because the shell starts " +
+        "the backend on one the OS hands out when its preferred port is taken (ADR 028)",
     ).toEqual([...EXACT_CONNECT_SRC].sort());
   });
 });

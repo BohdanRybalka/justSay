@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BACKEND_PORT } from "./contracts";
 
 const invokeMock = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
@@ -28,6 +29,15 @@ function errJson(status: number, detail: string) {
 function headerOf(callIndex: number): Record<string, string> {
   const opts = fetchMock.mock.calls[callIndex][1] as RequestInit;
   return (opts.headers ?? {}) as Record<string, string>;
+}
+
+/** A shell that answers the port command with `port` and the token command with `token`. */
+function shellAnswering(token: string, port = 9377) {
+  return async (command: string) => (command === "get_backend_port" ? port : token);
+}
+
+function callsOf(command: string): number {
+  return invokeMock.mock.calls.filter(([called]) => called === command).length;
 }
 
 /** A session id of the shape the backend validates against, so a request built
@@ -77,7 +87,7 @@ afterEach(() => {
 
 describe("token injection when a backend token is available", () => {
   beforeEach(() => {
-    invokeMock.mockResolvedValue("secret-token");
+    invokeMock.mockImplementation(shellAnswering("secret-token"));
   });
 
   it("request() attaches X-JustSay-Token", async () => {
@@ -145,9 +155,12 @@ describe("token cache does not poison on a transient failure", () => {
   it("retries invoke on a later request after a failed invoke (does not cache null forever)", async () => {
     const { api } = await import("./api");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    invokeMock
-      .mockRejectedValueOnce(new Error("transient"))
-      .mockResolvedValue("recovered-token");
+    const shell = shellAnswering("recovered-token");
+    let tokenAsked = 0;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_backend_token" && tokenAsked++ === 0) throw new Error("transient");
+      return shell(command);
+    });
     fetchMock.mockResolvedValue(okJson({ status: "ok" }));
 
     await api.health();
@@ -155,7 +168,7 @@ describe("token cache does not poison on a transient failure", () => {
     expect(warnSpy).toHaveBeenCalled();
 
     await api.health();
-    expect(invokeMock).toHaveBeenCalledTimes(2);
+    expect(callsOf("get_backend_token")).toBe(2);
     expect(headerOf(1)["X-JustSay-Token"]).toBe("recovered-token");
 
     warnSpy.mockRestore();
@@ -163,15 +176,94 @@ describe("token cache does not poison on a transient failure", () => {
 
   it("caches a successful token: invoke runs once across multiple requests", async () => {
     const { api } = await import("./api");
-    invokeMock.mockResolvedValue("secret-token");
+    invokeMock.mockImplementation(shellAnswering("secret-token"));
     fetchMock.mockResolvedValue(okJson({ status: "ok" }));
 
     await api.health();
     await api.health();
     await api.audioStatus();
 
-    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(callsOf("get_backend_token")).toBe(1);
+    expect(callsOf("get_backend_port")).toBe(1);
     expect(headerOf(2)["X-JustSay-Token"]).toBe("secret-token");
+  });
+});
+
+describe("the port the backend listens on", () => {
+  const MOVED_PORT = BACKEND_PORT + 1;
+  const MOVED_AGAIN_PORT = BACKEND_PORT + 2;
+
+  it("is the one the shell names, asked once", async () => {
+    const { api } = await import("./api");
+    invokeMock.mockImplementation(shellAnswering("secret-token", MOVED_PORT));
+    fetchMock.mockResolvedValue(okJson({ status: "ok" }));
+
+    await api.health();
+    await api.jobs();
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `http://127.0.0.1:${MOVED_PORT}/health`,
+      `http://127.0.0.1:${MOVED_PORT}/jobs`,
+    ]);
+    expect(callsOf("get_backend_port")).toBe(1);
+  });
+
+  it("is asked for again after a request reached nothing, so a backend started elsewhere is followed", async () => {
+    const { api } = await import("./api");
+    let port = MOVED_PORT;
+    invokeMock.mockImplementation(async (command: string) =>
+      command === "get_backend_port" ? port : "secret-token",
+    );
+    fetchMock
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValue(okJson({ status: "ok" }));
+
+    await expect(api.health()).rejects.toThrow("Failed to fetch");
+    port = MOVED_AGAIN_PORT;
+    await api.health();
+
+    expect(fetchMock.mock.calls[1][0]).toBe(`http://127.0.0.1:${MOVED_AGAIN_PORT}/health`);
+  });
+
+  it("is kept when the request was abandoned, because an abort says nothing about the port", async () => {
+    vi.useFakeTimers();
+    const { api, REQUEST_TIMEOUT_MS } = await import("./api");
+    invokeMock.mockImplementation(shellAnswering("secret-token", MOVED_PORT));
+    fetchMock.mockImplementationOnce(deafFetch()).mockResolvedValue(okJson({ status: "ok" }));
+
+    const abandoned = api.health();
+    const settled = expect(abandoned).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS);
+    await settled;
+    await api.health();
+
+    expect(callsOf("get_backend_port")).toBe(1);
+    expect(fetchMock.mock.calls[1][0]).toBe(`http://127.0.0.1:${MOVED_PORT}/health`);
+  });
+
+  it("is the default outside Tauri, without asking a shell that is not there", async () => {
+    removeBridge();
+    const { api } = await import("./api");
+    fetchMock.mockResolvedValue(okJson({ status: "ok" }));
+
+    await api.health();
+
+    expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:9377/health");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("is the default while the shell does not answer, and the request still goes out", async () => {
+    const { api } = await import("./api");
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_backend_port") throw new Error("command get_backend_port not found");
+      return "secret-token";
+    });
+    fetchMock.mockResolvedValue(okJson({ status: "ok" }));
+
+    await api.health();
+
+    expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:9377/health");
+    expect(headerOf(0)["X-JustSay-Token"]).toBe("secret-token");
   });
 });
 
@@ -190,7 +282,8 @@ describe("a hung IPC transport strands at most one token call", () => {
     }
 
     expect(lastBridgeDiagnosis()).toEqual({ kind: "invoke-timeout" });
-    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(callsOf("get_backend_token")).toBe(1);
+    expect(callsOf("get_backend_port")).toBe(1);
     warnSpy.mockRestore();
   });
 
@@ -220,7 +313,8 @@ describe("a hung IPC transport strands at most one token call", () => {
     const first = api.health();
     await vi.advanceTimersByTimeAsync(3000);
     await first;
-    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(callsOf("get_backend_token")).toBe(1);
+    expect(callsOf("get_backend_port")).toBe(1);
 
     await vi.advanceTimersByTimeAsync(60_000);
 
@@ -228,7 +322,8 @@ describe("a hung IPC transport strands at most one token call", () => {
     await vi.advanceTimersByTimeAsync(3000);
     await later;
 
-    expect(invokeMock).toHaveBeenCalledTimes(2);
+    expect(callsOf("get_backend_token")).toBe(2);
+    expect(callsOf("get_backend_port")).toBe(2);
     warnSpy.mockRestore();
   });
 

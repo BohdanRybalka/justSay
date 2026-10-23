@@ -52,6 +52,20 @@ fn get_backend_token() -> String {
     backend::api_token().to_string()
 }
 
+/// The port the backend listens on now; a respawn can move it, so a window
+/// asks again after a request that reached nothing.
+#[tauri::command]
+fn get_backend_port() -> u16 {
+    backend::current_port()
+}
+
+/// Why the backend is not running, for the screen that says it is down; `None`
+/// while nothing has gone wrong since it last answered.
+#[tauri::command]
+fn backend_failure_reason() -> Option<String> {
+    backend::last_failure()
+}
+
 /// The tray icon: the coloured app mark on Windows, a monochrome template on
 /// macOS so the menu bar tints it for its light and dark appearance.
 #[cfg(target_os = "macos")]
@@ -329,11 +343,7 @@ pub fn run() {
                     .build(),
             )?;
 
-            log::info!(
-                "JustSay {} starting up (backend port {})",
-                app.package_info().version,
-                backend::PORT
-            );
+            log::info!("JustSay {} starting up", app.package_info().version);
 
             if let Err(e) = backend::spawn(app.handle().clone()) {
                 backend::report_backend_failure(&format!("Backend spawn failed: {}", e));
@@ -409,6 +419,8 @@ pub fn run() {
             ring_window::open_ring,
             ring_window::close_ring,
             get_backend_token,
+            get_backend_port,
+            backend_failure_reason,
             set_meeting_recording,
             set_meetings_allowed,
             show_settings_window,

@@ -11,6 +11,7 @@ import asyncio
 import atexit
 import ctypes
 import logging
+import socket
 import subprocess
 import sys
 import threading
@@ -48,7 +49,6 @@ from app.stt.local_whisper_cpp_cmd import (
 log = logging.getLogger(__name__)
 
 _HOST = "127.0.0.1"
-_PORT = 8878
 
 _HEALTH_POLL_INTERVAL = 0.5
 _HEALTH_POLL_MAX_ATTEMPTS = 240
@@ -244,6 +244,28 @@ def _assign_to_job_object(process: subprocess.Popen) -> None:
         )
 
 
+def _free_port() -> int:
+    """A port on `_HOST` the OS has just handed out, so no other program is listening there.
+
+    whisper-server loads its model before it binds, so on a fixed port whatever else listens
+    there answers `/health` meanwhile and would be sent the audio.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind((_HOST, 0))
+        return probe.getsockname()[1]
+
+
+def _answers_ready(response: httpx.Response) -> bool:
+    """Whether a `/health` answer is whisper-server's own ready reply, `200 {"status":"ok"}`."""
+    if response.status_code != 200:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("status") == "ok"
+
+
 def _readable_by_server(audio_path: Path) -> Path:
     """``audio_path`` when whisper-server decodes its format, else a 16 kHz mono WAV copy beside it.
 
@@ -274,6 +296,7 @@ class WhisperCppServerSTTProvider(STTProvider):
     def __init__(self, settings: STTSettings):
         self._settings = settings
         self._process: subprocess.Popen | None = None
+        self._port: int | None = None
         self._server_ready: bool = False
         self._loaded_model_size: str | None = None
         self._last_load_error: str | None = None
@@ -332,7 +355,7 @@ class WhisperCppServerSTTProvider(STTProvider):
                 self._server_ready = True
                 self._loaded_model_size = model_size
                 self._last_load_error = None
-                log.info("whisper-server ready: model=%s port=%d", model_size, _PORT)
+                log.info("whisper-server ready: model=%s port=%d", model_size, self._port)
             except Exception as e:
                 self._last_load_error = None
                 if not isinstance(e, ModelNotInstalledError):
@@ -345,7 +368,8 @@ class WhisperCppServerSTTProvider(STTProvider):
                 raise
 
     def _spawn_server(self, binary_path: Path, model_path: Path) -> None:
-        argv = build_server_argv(binary_path, model_path, _HOST, _PORT)
+        self._port = _free_port()
+        argv = build_server_argv(binary_path, model_path, _HOST, self._port)
         creationflags = 0
         if sys.platform == "win32":
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -394,7 +418,7 @@ class WhisperCppServerSTTProvider(STTProvider):
         child exits early, or the attempt budget is exhausted.
         """
         assert self._process is not None
-        url = f"http://{_HOST}:{_PORT}/health"
+        url = f"http://{_HOST}:{self._port}/health"
         with httpx.Client(timeout=_HEALTH_REQUEST_TIMEOUT) as client:
             for _ in range(_HEALTH_POLL_MAX_ATTEMPTS):
                 if self._process.poll() is not None:
@@ -402,8 +426,7 @@ class WhisperCppServerSTTProvider(STTProvider):
                         f"whisper-server exited early (code {self._process.returncode})"
                     )
                 try:
-                    r = client.get(url)
-                    if r.status_code == 200:
+                    if _answers_ready(client.get(url)):
                         return
                 except httpx.HTTPError:
                     pass
@@ -429,7 +452,7 @@ class WhisperCppServerSTTProvider(STTProvider):
             self._use.leave()
 
     async def _infer(self, audio_path: Path, language: str) -> TranscriptionResult:
-        url = f"http://{_HOST}:{_PORT}/inference"
+        url = f"http://{_HOST}:{self._port}/inference"
         response_format = "verbose_json" if language == "auto" else "json"
         glossary, dropped_terms = whisper_glossary(self._settings.initial_prompt)
         data = {

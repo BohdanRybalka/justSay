@@ -42,6 +42,7 @@ import { mountIconSprite } from "../ui/icons";
 import { detectShortcutPlatform } from "../accelerator";
 import { renderTitlebar, wireTitlebar } from "./shell/titlebar";
 import { displayName, readOsDisplayName } from "./shell/account-name";
+import { readBackendFailure, restartJustSay } from "./shell/backend-down";
 import {
   backendStateOf,
   renderAccountRow,
@@ -61,16 +62,22 @@ let historySource: EntrySource | null = null;
 let fileTranscription: FileTranscription | null = null;
 let settingsError: string | null = null;
 let backendReachable = false;
+let backendFailure: string | null = null;
 let settingsLoadInFlight = false;
 let settingsWindowHidden = true;
 let backendProbeInterval: ReturnType<typeof setInterval> | null = null;
 let handledVisibilityEdges = 0;
 let answeredLoadFailures = 0;
-let renderedUnavailable: { screen: BackendStartupScreen; retryDisabled: boolean } | null = null;
+let renderedUnavailable: {
+  screen: BackendStartupScreen;
+  retryDisabled: boolean;
+  failure: string | null;
+} | null = null;
 
 const startupWaitStartedAt = performance.now();
 const BACKEND_PROBE_INTERVAL_MS = 5000;
 const BACKEND_STILL_STARTING_MESSAGE = `The backend has not finished starting in ${BACKEND_WAIT_BUDGET_MS / 1000} seconds. It may still be coming up — try again, or restart JustSay.`;
+const BACKEND_NOT_RUNNING_MESSAGE = "JustSay's backend is not running. Restart JustSay to start it again.";
 
 
 const titlebar = document.getElementById("titlebar")!;
@@ -180,26 +187,33 @@ function settingsUnavailableMessage(error: unknown, reachable: boolean): string 
       : `The backend did not answer this window's request in time (${error.subject}, ${error.budgetMs / 1000} s). It may still be starting up — try again.`;
   }
   if (!reachable) {
-    return "The backend was not responding. Make sure it is running, then try again.";
+    return "The backend was not responding. Try again, or restart JustSay.";
   }
   return `The backend answered, but loading settings failed: ${error instanceof Error ? error.message : String(error)}.`;
+}
+
+/** The shell's reason the backend is down, shown on the failure screen only and
+ *  only while the backend is not answering. */
+function shownFailure(screen: BackendStartupScreen): string | null {
+  return screen === "starting" || backendReachable ? null : backendFailure;
 }
 
 /** The waiting screen and the failure screen, with the way out of both
  *  (ADR 092).
  *
  *  `starting` says the backend has not answered yet; `failed` names what went
- *  wrong. **Try again** is live unless a load is already in flight, so a press
- *  always issues a request. */
+ *  wrong, the shell's own reason first when the backend is not answering, and
+ *  offers a restart. **Try again** is live unless a load is already in flight,
+ *  so a press always issues a request. */
 function renderSettingsUnavailable(container: HTMLElement, screen: BackendStartupScreen) {
   if (activeTab) {
     activeTab.destroy();
     activeTab = null;
   }
   const panel = renderEmptyPanel(container);
-  renderedUnavailable = { screen, retryDisabled: settingsLoadInFlight };
-
   const starting = screen === "starting";
+  const failure = shownFailure(screen);
+  renderedUnavailable = { screen, retryDisabled: settingsLoadInFlight, failure };
 
   const title = document.createElement("h2");
   title.className = "panel-title";
@@ -207,11 +221,21 @@ function renderSettingsUnavailable(container: HTMLElement, screen: BackendStartu
 
   const explanation = document.createElement("p");
   explanation.className = "panel-subtitle";
-  explanation.textContent = starting
-    ? "Waiting for the backend to start."
-    : settingsError ?? BACKEND_STILL_STARTING_MESSAGE;
+  if (starting) {
+    explanation.textContent = "Waiting for the backend to start.";
+  } else if (failure !== null) {
+    const details = document.createElement("span");
+    details.className = "panel-details";
+    details.textContent = `Details: ${failure}`;
+    explanation.append(BACKEND_NOT_RUNNING_MESSAGE, document.createElement("br"), details);
+  } else {
+    explanation.textContent = settingsError ?? BACKEND_STILL_STARTING_MESSAGE;
+  }
 
   panel.append(title, explanation);
+
+  const actions = document.createElement("div");
+  actions.className = "panel-actions";
 
   const retry = document.createElement("button");
   retry.type = "button";
@@ -224,7 +248,25 @@ function renderSettingsUnavailable(container: HTMLElement, screen: BackendStartu
     retry.textContent = "Retrying…";
     void loadSettingsIntoUi();
   });
-  panel.append(retry);
+  actions.append(retry);
+
+  if (!starting) {
+    const restart = document.createElement("button");
+    restart.type = "button";
+    restart.className = "btn";
+    restart.id = "btn-restart-app";
+    restart.textContent = "Restart JustSay";
+    restart.addEventListener("click", () => {
+      restart.disabled = true;
+      restartJustSay().catch((e) => {
+        console.error("Restarting JustSay failed:", e);
+        restart.disabled = false;
+      });
+    });
+    actions.append(restart);
+  }
+
+  panel.append(actions);
 }
 
 /** Empty the pane and put one `.panel` in it, scrolled to the top. */
@@ -307,7 +349,8 @@ function applyStartupDecision() {
 function refreshUnavailableScreen(screen: BackendStartupScreen) {
   if (
     renderedUnavailable?.screen === screen &&
-    renderedUnavailable.retryDisabled === settingsLoadInFlight
+    renderedUnavailable.retryDisabled === settingsLoadInFlight &&
+    renderedUnavailable.failure === shownFailure(screen)
   ) {
     return;
   }
@@ -429,9 +472,22 @@ async function probeBackend(): Promise<boolean> {
   }
   if (isStaleStatusResponse(token, latestBackendProbeToken)) return reachable;
   backendReachable = reachable;
+  if (reachable) backendFailure = null;
   renderBackendStatus(backendReachable);
   applyStartupDecision();
+  if (!reachable) void refreshBackendFailure(token);
   return reachable;
+}
+
+/** Ask the shell why the backend is down and repaint the failure screen with
+ *  the answer, unless a newer probe has answered since. The badge never waits
+ *  on this read. */
+async function refreshBackendFailure(probe: number): Promise<void> {
+  const failure = await readBackendFailure();
+  if (isStaleStatusResponse(probe, latestBackendProbeToken) || failure === backendFailure) return;
+  backendFailure = failure;
+  const screen = currentStartupScreen();
+  if (screen !== "ready") refreshUnavailableScreen(screen);
 }
 
 async function initAppVersion() {
