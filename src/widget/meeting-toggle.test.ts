@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiRequestError } from "../api";
 import {
+  DICTATION_IN_PROGRESS_MESSAGE,
   DISCLOSURE_MISSING_MESSAGE,
   type MeetingToggleActions,
   runMeetingToggle,
@@ -250,6 +251,47 @@ describe("the meeting recording toggle", () => {
     expect(deps.setTrayRecording).toHaveBeenCalledWith(true);
     expect(deps.reportError.mock.calls[0][0]).toContain("already being recorded");
     expect(deps.openMeetings).not.toHaveBeenCalled();
+  });
+
+  it("keeps the indicator down when a start is refused because a dictation is recording", async () => {
+    const deps = actions({
+      startRecording: vi.fn(async () => {
+        throw new ApiRequestError("A dictation recording is in progress", 409, "dictation_in_progress");
+      }),
+    });
+
+    await runMeetingToggle(deps);
+
+    expect(deps.showIndicator).not.toHaveBeenCalled();
+    expect(deps.hideIndicator).toHaveBeenCalledOnce();
+    expect(deps.setTrayRecording).toHaveBeenCalledOnce();
+    expect(deps.setTrayRecording).toHaveBeenCalledWith(false);
+    expect(deps.reportError).toHaveBeenCalledOnce();
+    expect(deps.reportError).toHaveBeenCalledWith(DICTATION_IN_PROGRESS_MESSAGE);
+    expect(deps.openMeetings).not.toHaveBeenCalled();
+  });
+
+  it("leaves the next click on the start branch after a start refused mid-dictation", async () => {
+    let recording = false;
+    const deps = actions({
+      isRecording: vi.fn(() => recording),
+      startRecording: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new ApiRequestError("A dictation recording is in progress", 409, "dictation_in_progress")
+        )
+        .mockResolvedValueOnce({}),
+      showIndicator: vi.fn(() => {
+        recording = true;
+      }),
+    });
+
+    await runMeetingToggle(deps);
+    await runMeetingToggle(deps);
+
+    expect(deps.startRecording).toHaveBeenCalledTimes(2);
+    expect(deps.stopRecording).not.toHaveBeenCalled();
+    expect(deps.showIndicator).toHaveBeenCalledOnce();
   });
 
   it("leaves the indicator up and the toggle usable when a stop fails, so a second press stops again", async () => {

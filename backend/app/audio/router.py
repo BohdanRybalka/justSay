@@ -2,9 +2,10 @@
 
 The `HTTPException` raises left here are this layer's own guards -- consent,
 "already recording", "not recording" -- decided from state the router can read
-before it calls anything. Every refusal the recorders themselves produce
-carries its own status on its exception class and reaches the client through
-the error handler, so those statuses are documented where they are raised.
+before it calls anything; a guard a client must tell apart from another 409
+raises a named refusal for its `code`. Every refusal the recorders themselves
+produce carries its own status on its exception class and reaches the client
+through the error handler, so those statuses are documented where they are raised.
 """
 
 import asyncio
@@ -23,7 +24,11 @@ from app.audio.dependencies import (
     get_recording_queue,
 )
 from app.audio.meeting_recorder import MEETING_BUSY_DETAIL, MeetingRecorder
-from app.audio.recorder import MicrophoneRecorder, default_input_name
+from app.audio.recorder import (
+    DictationInProgressError,
+    MicrophoneRecorder,
+    default_input_name,
+)
 from app.audio.recording_queue import RecordingQueue
 from app.audio.session import SessionRef
 from app.core.utils import sse_event
@@ -223,7 +228,7 @@ async def start_meeting_recording(
     if not get_user_settings().meeting_consent_acknowledged:
         raise HTTPException(status_code=403, detail=_DISCLOSURE_NOT_ACKNOWLEDGED_DETAIL)
     if dictation_recorder is not None and dictation_recorder.is_recording:
-        raise HTTPException(status_code=409, detail="A dictation recording is in progress")
+        raise DictationInProgressError("A dictation recording is in progress")
     if recorder.is_busy:
         raise HTTPException(status_code=409, detail=MEETING_BUSY_DETAIL)
     await recorder.start()
