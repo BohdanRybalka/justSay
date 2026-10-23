@@ -44,15 +44,27 @@ FASTER_WHISPER_REVISIONS: dict[str, str] = {
 
 
 _REQUIRED_MODEL_FILES = ("model.bin", "config.json", "tokenizer.json")
+_SIZES_WITH_FEATURE_CONFIG = ("large-v3", "large-v3-turbo")
+
+
+def _required_files(model_size: str) -> tuple[str, ...]:
+    """The files the engine reads; the 128-mel sizes also need their feature config."""
+    if model_size in _SIZES_WITH_FEATURE_CONFIG:
+        return (*_REQUIRED_MODEL_FILES, "preprocessor_config.json")
+    return _REQUIRED_MODEL_FILES
 
 
 def cached_model_folder(model_size: str) -> str | None:
     """The complete cached folder of ``model_size``, or ``None``; never touches the network.
 
     The pinned snapshot is looked up first, then the one an older version cached under
-    ``main``. A folder missing any file the engine reads counts as not cached.
+    ``main``. A folder missing any file the engine reads counts as not cached, and so does
+    a computer without the faster-whisper package.
     """
-    from faster_whisper.utils import download_model
+    try:
+        from faster_whisper.utils import download_model
+    except ImportError:
+        return None
 
     pinned = FASTER_WHISPER_REVISIONS.get(model_size)
     for revision in dict.fromkeys((pinned, None)):
@@ -60,7 +72,7 @@ def cached_model_folder(model_size: str) -> str | None:
             folder = download_model(model_size, local_files_only=True, revision=revision)
         except Exception:
             continue
-        if all((Path(folder) / name).is_file() for name in _REQUIRED_MODEL_FILES):
+        if all((Path(folder) / name).is_file() for name in _required_files(model_size)):
             return folder
     return None
 

@@ -199,10 +199,10 @@ def test_sync_to_runtime_ollama_host_change_invalidates_embeddings_cache(monkeyp
         "app.embeddings.clear_cache", lambda: cleared.append("emb")
     )
 
-    us = user_settings.UserSettings(stt_mode="cloud", ollama_host="http://127.0.0.1:11500")
+    us = user_settings.UserSettings(stt_mode="cloud", ollama_host="http://127.0.0.1:11434")
     assert user_settings.sync_to_runtime(us) is False
     assert cleared == ["emb"]
-    assert runtime_settings.embeddings.ollama_host == "http://127.0.0.1:11500"
+    assert runtime_settings.embeddings.ollama_host == "http://127.0.0.1:11434"
 
 
 def test_sync_to_runtime_propagates_initial_prompt_and_touches_no_engine(monkeypatch):
@@ -330,7 +330,7 @@ def test_a_settings_file_written_before_the_llm_field_was_removed_still_loads(
                 "shortcut": "Ctrl+Alt+KeyQ",
                 "stt_mode": "local",
                 "llm_mode": "cloud",
-                "ollama_host": "http://127.0.0.1:11500",
+                "ollama_host": "http://127.0.0.1:11434",
                 "ollama_model": "qwen3:1.7b",
                 "gemini_api_key": "AIza-stored",
                 "groq_api_key": "gsk-stored",
@@ -347,7 +347,7 @@ def test_a_settings_file_written_before_the_llm_field_was_removed_still_loads(
     assert loaded.language == "en"
     assert loaded.shortcut == "Ctrl+Alt+KeyQ"
     assert loaded.stt_mode == "local"
-    assert loaded.ollama_host == "http://127.0.0.1:11500"
+    assert loaded.ollama_host == "http://127.0.0.1:11434"
     assert loaded.gemini_api_key == "AIza-stored"
     assert loaded.groq_api_key == "gsk-stored"
     assert not hasattr(loaded, "llm_mode")
@@ -358,7 +358,7 @@ def test_a_settings_file_written_before_the_llm_field_was_removed_still_loads(
     on_disk = json.loads(settings_path.read_text(encoding="utf-8"))
     assert "llm_mode" not in on_disk
     assert "ollama_model" not in on_disk
-    assert on_disk["ollama_host"] == "http://127.0.0.1:11500"
+    assert on_disk["ollama_host"] == "http://127.0.0.1:11434"
     assert on_disk["stt_mode"] == "local"
 
 
@@ -975,7 +975,7 @@ def test_an_ollama_host_off_this_computer_is_refused_and_nothing_changes(host):
     assert user_settings.get_user_settings().ollama_host == before
 
 
-@pytest.mark.parametrize("host", ["http://localhost:11500", "http://127.0.0.1:11434", "http://[::1]:11434"])
+@pytest.mark.parametrize("host", ["https://localhost:11434", "http://127.0.0.1:11434", "http://[::1]:11434"])
 def test_an_ollama_host_on_this_computer_is_accepted(host):
     result = user_settings.update_user_settings({"ollama_host": host})
 

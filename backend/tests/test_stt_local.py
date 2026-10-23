@@ -8,7 +8,7 @@ import pytest
 
 from app.core.errors import ResourceUnavailableError
 from app.stt.config import STTSettings
-from app.stt.local import FASTER_WHISPER_REVISIONS, LocalSTTProvider
+from app.stt.local import FASTER_WHISPER_REVISIONS, LocalSTTProvider, cached_model_folder
 from tests.conftest import wait_until
 
 
@@ -247,6 +247,33 @@ def test_a_cached_folder_missing_a_file_is_downloaded_again_at_the_pinned_revisi
         "local_files_only": False,
         "revision": FASTER_WHISPER_REVISIONS["small"],
     }
+
+
+def test_a_128_mel_model_without_its_feature_config_is_downloaded_again(monkeypatch, tmp_path):
+    loaded_from = []
+    incomplete = _cache_folder(tmp_path, "incomplete")
+    calls = _fake_faster_whisper(
+        monkeypatch,
+        tmp_path,
+        _loader(loaded_from),
+        _cached_only_at(
+            tmp_path, {None: incomplete, FASTER_WHISPER_REVISIONS["large-v3"]: incomplete}
+        ),
+    )
+    provider = LocalSTTProvider(
+        STTSettings(whisper_model_size="large-v3", whisper_device="cpu")
+    )
+
+    provider._get_model()
+
+    assert loaded_from == [str(tmp_path / "downloaded-large-v3")]
+    assert calls[-1]["local_files_only"] is False
+
+
+def test_a_missing_faster_whisper_package_means_nothing_is_cached(monkeypatch):
+    monkeypatch.setitem(sys.modules, "faster_whisper.utils", None)
+
+    assert cached_model_folder("small") is None
 
 
 def test_a_missing_model_is_downloaded_once_at_its_pinned_revision(monkeypatch, tmp_path):
