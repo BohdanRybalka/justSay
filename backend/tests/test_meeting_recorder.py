@@ -48,6 +48,7 @@ from app.audio.meeting_recorder import (
     write_recording,
 )
 from app.audio.meeting_spool import MeetingSpool
+from app.audio.recorder import DictationInProgressError
 from app.audio.system_source import (
     SystemAudioSource,
     SystemAudioUnavailableError,
@@ -57,6 +58,8 @@ from app.audio.system_source import (
 from app.main import app
 
 BLOCK_FRAMES = 1024
+
+MEETING_TOGGLE_TS = Path(__file__).resolve().parents[2] / "src" / "widget" / "meeting-toggle.ts"
 
 NO_CALLBACK_FLAGS = sd.CallbackFlags()
 """What PortAudio hands a healthy microphone callback.
@@ -1255,7 +1258,11 @@ async def test_meeting_start_returns_501_where_no_system_source_exists(client):
 
 @pytest.mark.anyio
 async def test_meeting_start_is_409_while_dictation_is_recording(client):
-    """AC: the microphone is never opened twice."""
+    """AC: the microphone is never opened twice.
+
+    The `code` is what keeps the widget from reading this 409 as a meeting
+    already being recorded and putting its marker up.
+    """
     meeting = _FakeRecorder()
     app.dependency_overrides[get_meeting_recorder] = lambda: meeting
     app.dependency_overrides[get_active_recorder] = lambda: _FakeRecorder(is_recording=True)
@@ -1263,7 +1270,19 @@ async def test_meeting_start_is_409_while_dictation_is_recording(client):
     resp = await client.post("/audio/meeting/start")
 
     assert resp.status_code == 409
+    assert resp.json()["code"] == "dictation_in_progress"
     assert meeting.started is False
+
+
+def test_the_widget_branches_on_the_dictation_refusal_s_own_code():
+    """The two halves of one literal, across the language boundary.
+
+    Renaming either alone leaves both suites green while a meeting started
+    mid-dictation lights the meeting marker again.
+    """
+    toggle = MEETING_TOGGLE_TS.read_text(encoding="utf-8")
+
+    assert f'"{DictationInProgressError.code}"' in toggle
 
 
 @pytest.mark.anyio

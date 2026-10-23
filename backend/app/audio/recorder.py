@@ -32,6 +32,15 @@ class NotRecordingError(NotReadyError):
     code: ClassVar[str] = "not_recording"
 
 
+class DictationInProgressError(NotReadyError):
+    """A meeting start refused because a dictation holds the microphone.
+
+    Its own `code` tells it apart from the meeting recorder's busy refusal,
+    which also answers 409: this one leaves no meeting capture behind it.
+    """
+
+    code: ClassVar[str] = "dictation_in_progress"
+
 
 MME_NAME_LIMIT = 31
 

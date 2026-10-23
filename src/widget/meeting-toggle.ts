@@ -41,6 +41,10 @@
  * broke ADR 040 obligation 2 and left the recording unstoppable, because the
  * next click would take the start branch again and get the same 409.
  *
+ * A dictation holding the microphone also refuses a start with 409, told apart
+ * by its `code`. No meeting is being recorded then, so it takes the ordinary
+ * failure branch, with a sentence that says what to do instead.
+ *
  * The sentence a user reads is written here and the backend detail is appended
  * to it as its cause, which is why the 507 detail carries the write error alone
  * and not a second sentence of its own.
@@ -56,6 +60,10 @@ import { describeMeetingIncident } from "./meeting-health";
 
 export const DISCLOSURE_MISSING_MESSAGE =
   "Open Meetings and press Start recording first — it shows what you agree to.";
+
+export const DICTATION_IN_PROGRESS_MESSAGE = "Finish the dictation first, then start the meeting.";
+
+const DICTATION_IN_PROGRESS_CODE = "dictation_in_progress";
 
 const DISCLOSURE_MISSING_STATUS = 403;
 const ALREADY_STOPPED_STATUS = 409;
@@ -95,6 +103,18 @@ function stoppedWithIncidentMessage(incident: string): string {
 
 function alreadyRecordingMessage(error: unknown): string {
   return `A call is already being recorded: ${describeFailure(error)}`;
+}
+
+function isRefusedForDictation(error: unknown): boolean {
+  return error instanceof ApiRequestError && error.code === DICTATION_IN_PROGRESS_CODE;
+}
+
+function isMeetingAlreadyRecording(error: unknown): boolean {
+  return (
+    error instanceof ApiRequestError &&
+    error.status === ALREADY_RECORDING_STATUS &&
+    !isRefusedForDictation(error)
+  );
 }
 
 function captureOverMessage(error: ApiRequestError): string {
@@ -146,7 +166,7 @@ export async function runMeetingToggle(actions: MeetingToggleActions): Promise<v
   try {
     await actions.startRecording();
   } catch (e) {
-    if (e instanceof ApiRequestError && e.status === ALREADY_RECORDING_STATUS) {
+    if (isMeetingAlreadyRecording(e)) {
       actions.showIndicator();
       await actions.setTrayRecording(true);
       actions.reportError(alreadyRecordingMessage(e));
@@ -154,6 +174,10 @@ export async function runMeetingToggle(actions: MeetingToggleActions): Promise<v
     }
     actions.hideIndicator();
     await actions.setTrayRecording(false);
+    if (isRefusedForDictation(e)) {
+      actions.reportError(DICTATION_IN_PROGRESS_MESSAGE);
+      return;
+    }
     if (e instanceof ApiRequestError && e.status === DISCLOSURE_MISSING_STATUS) {
       await actions.openMeetings();
       actions.reportError(DISCLOSURE_MISSING_MESSAGE);
