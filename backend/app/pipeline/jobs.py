@@ -267,7 +267,7 @@ class JobQueue:
     """Jobs by id; a failed one stays until dismissed, a done or cancelled one a minute.
 
     A meeting and a file run on the chosen engine and each on its own language, read when their
-    turn comes; a cloud run stops before its next send once Local is chosen.
+    turn comes; a cloud run stops before each piece it sends once Local is chosen.
     A failed dictation stays for ``FAILED_DICTATION_KEEP_SECONDS`` and then its audio goes.
     """
 
