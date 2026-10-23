@@ -89,7 +89,5 @@ ignore_names = [
     "vocabulary", "peak_hour", "share", "meetings_week", "is_filler", "minutes_between", "fillers_in_top", "top_size",
     "row_factory", "LimitFlags", "settings_customise_sources",
     "log_file_path", "_reset_library_cache",
-    "_meetings_start_in_the_dictation_language",
-    "_files_follow_the_dictation_engine_unless_kept_apart",
-    "_files_follow_dictation_while_they_follow", "_ollama_runs_on_this_computer",
+    "_meetings_start_in_the_dictation_language", "_ollama_runs_on_this_computer",
 ]

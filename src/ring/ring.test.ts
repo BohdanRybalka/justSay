@@ -19,10 +19,7 @@ const SETTINGS = {
   language: "uk",
   previous_language: "en",
   meeting_consent_acknowledged: true,
-  meetings_engine: "local",
   meetings_language: "uk",
-  files_engine: "cloud",
-  files_follow_dictation: true,
   files_language: "auto",
 };
 

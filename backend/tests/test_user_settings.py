@@ -418,98 +418,33 @@ def test_a_chosen_meeting_language_reaches_the_meeting_jobs(isolated):
     assert stt_settings.meetings_language == "auto"
 
 
-@pytest.mark.parametrize(
-    ("stored", "files"),
-    [
-        ({"stt_mode": "local"}, "local"),
-        ({"stt_mode": "cloud"}, "cloud"),
-        ({"stt_mode": "local", "files_engine": "cloud"}, "local"),
-        ({"stt_mode": "cloud", "files_engine": "local"}, "local"),
-        ({"stt_mode": "local", "files_engine": "local"}, "local"),
-        ({}, "cloud"),
-    ],
-)
-def test_a_stored_file_engine_is_kept_unless_it_sends_files_to_the_cloud_under_local_dictation(
-    isolated, stored, files
-):
+def test_engine_choices_stored_by_earlier_versions_are_ignored_and_not_written_back(isolated):
     settings_path = isolated["settings_dir"] / "settings.json"
+    stored = {"stt_mode": "local", "meetings_engine": "cloud", "files_engine": "cloud"}
     settings_path.write_text(json.dumps(stored), encoding="utf-8")
     user_settings._settings = None
 
-    assert user_settings.get_user_settings().files_engine == files
+    assert user_settings.get_user_settings().stt_mode == "local"
+    user_settings.update_user_settings({"theme": "dark"})
 
-
-def test_files_follow_dictation_to_local_and_back(isolated):
-    user_settings.update_user_settings({"stt_mode": "local"})
-    assert user_settings.get_user_settings().files_engine == "local"
-
-    user_settings.update_user_settings({"stt_mode": "cloud"})
-
-    user_settings._settings = None
-    loaded = user_settings.get_user_settings()
-    assert (loaded.stt_mode, loaded.files_engine) == ("cloud", "cloud")
-
-
-def test_a_dropped_file_goes_local_the_moment_dictation_does(isolated):
-    user_settings.sync_to_runtime(user_settings.get_user_settings())
-    assert stt_settings.files_mode == ProviderMode.CLOUD
-
-    user_settings.update_user_settings({"stt_mode": "local"})
-    user_settings.sync_to_runtime(user_settings.get_user_settings())
-
-    assert stt_settings.files_mode == ProviderMode.LOCAL
-
-
-def test_a_files_engine_chosen_apart_from_dictation_stays_when_dictation_changes(isolated):
-    user_settings.update_user_settings({"files_engine": "local"})
-    user_settings.update_user_settings({"stt_mode": "local"})
-    user_settings.update_user_settings({"stt_mode": "cloud"})
-
-    user_settings._settings = None
-    loaded = user_settings.get_user_settings()
-    assert (loaded.stt_mode, loaded.files_engine, loaded.files_follow_dictation) == (
-        "cloud", "local", False,
-    )
-
-
-def test_choosing_the_dictation_engine_for_files_makes_them_follow_again(isolated):
-    user_settings.update_user_settings({"files_engine": "local"})
-    user_settings.update_user_settings({"files_engine": "cloud"})
-    user_settings.update_user_settings({"stt_mode": "local"})
-
-    assert user_settings.get_user_settings().files_engine == "local"
-
-
-def test_a_files_engine_sent_with_a_dictation_change_is_judged_against_the_new_dictation(isolated):
-    user_settings.update_user_settings({"stt_mode": "local", "files_engine": "cloud"})
-
-    loaded = user_settings.get_user_settings()
-    assert (loaded.files_engine, loaded.files_follow_dictation) == ("cloud", False)
-
-
-def test_a_files_engine_differing_from_dictation_is_kept_when_chosen(isolated):
-    user_settings.update_user_settings({"stt_mode": "local"})
-    user_settings.update_user_settings({"files_engine": "cloud"})
-
-    user_settings._settings = None
-    loaded = user_settings.get_user_settings()
-    assert (loaded.stt_mode, loaded.files_engine) == ("local", "cloud")
+    written = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert written["stt_mode"] == "local"
+    assert "meetings_engine" not in written
+    assert "files_engine" not in written
 
 
 def test_files_are_detected_by_language_until_one_is_chosen(isolated):
     assert user_settings.UserSettings(language="en").files_language == "auto"
 
 
-def test_a_chosen_files_engine_and_language_reach_the_file_jobs(isolated):
-    user_settings.update_user_settings(
-        {"language": "uk", "files_engine": "local", "files_language": "en"}
-    )
+def test_a_chosen_files_language_reaches_the_file_jobs(isolated):
+    user_settings.update_user_settings({"language": "uk", "files_language": "en"})
 
     user_settings._settings = None
     loaded = user_settings.get_user_settings()
     user_settings.sync_to_runtime(loaded)
 
-    assert (stt_settings.files_mode, stt_settings.files_language) == (ProviderMode.LOCAL, "en")
+    assert stt_settings.files_language == "en"
     assert stt_settings.mode == ProviderMode.CLOUD
 
 

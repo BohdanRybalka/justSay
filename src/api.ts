@@ -579,14 +579,8 @@ export interface UserSettings {
   /** Whether the user has acknowledged the meeting-recording disclosure.
    *  `POST /audio/meeting/start` answers `403` until it is true. */
   meeting_consent_acknowledged: boolean;
-  /** Where a stopped meeting becomes text, apart from `stt_mode`. */
-  meetings_engine: "cloud" | "local";
   /** A dictation language code, or "auto" to detect each part of a meeting apart. */
   meetings_language: string;
-  /** Where a file becomes text; it is `stt_mode` while `files_follow_dictation` is true. */
-  files_engine: "cloud" | "local";
-  /** True until the user picks a files engine other than the dictation one on the Files page. */
-  files_follow_dictation: boolean;
   /** A dictation language code, or "auto" to detect each file's language. */
   files_language: string;
   theme: ThemePreference;
@@ -1090,8 +1084,7 @@ export const api = {
       UNRECONCILED,
     ),
 
-  setSttMode: (mode: "cloud" | "local") =>
-    request<{ files_engine: UserSettings["files_engine"] }>("PUT", "/stt/mode", { mode }, UNRECONCILED),
+  setSttMode: (mode: "cloud" | "local") => request("PUT", "/stt/mode", { mode }, UNRECONCILED),
 
   /** "May take minutes on first run (model download)", and it leaves a loaded
    *  provider behind whether or not this window waited for the answer. */

@@ -135,14 +135,8 @@ const panels: Record<PanelName, PanelRenderer> = {
   },
   meetings: (container, loaded, windowHidden) =>
     renderMeetings(container, loaded, windowHidden, openHistoryOf),
-  files: (container, loaded, windowHidden) => {
-    filesPanel = renderFiles(
-      container,
-      loaded,
-      () => fileTranscription?.pick(),
-      openHistoryOf,
-      windowHidden,
-    );
+  files: (container, loaded) => {
+    filesPanel = renderFiles(container, loaded, () => fileTranscription?.pick(), openHistoryOf);
     return filesPanel;
   },
   settings: renderSettingsPanel,
@@ -376,10 +370,6 @@ export async function saveSettings(updates: Partial<UserSettings>): Promise<{ se
 
 export function getSettings(): UserSettings | null {
   return settings;
-}
-
-export function cacheFilesEngine(files_engine: UserSettings["files_engine"]): void {
-  if (settings) settings = { ...settings, files_engine };
 }
 
 export function cachePersistedShortcut(shortcut: string): void {

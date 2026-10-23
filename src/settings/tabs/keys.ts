@@ -47,15 +47,8 @@ function rowState(settings: UserSettings, field: KeyField, cloud: CloudKeyStatus
   return cloudFlag(cloud, field) ? "env" : "unset";
 }
 
-function keyUnused(settings: UserSettings, spec: KeyRowSpec): boolean {
-  if (spec.provider === "gemini") return settings.stt_mode === "local";
-  return [settings.stt_mode, settings.meetings_engine, settings.files_engine].every(
-    (engine) => engine === "local",
-  );
-}
-
 function useHint(settings: UserSettings, spec: KeyRowSpec): string {
-  return keyUnused(settings, spec) ? LOCAL_HINT : spec.use;
+  return settings.stt_mode === "local" ? LOCAL_HINT : spec.use;
 }
 
 function keyControls(spec: KeyRowSpec, state: KeyRowState): string {

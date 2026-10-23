@@ -18,10 +18,8 @@ vi.mock("../../api", () => ({
 }));
 
 const cloudStatusMock = vi.fn((): CloudKeyStatus | null => ({ gemini_key_set: true, groq_key_set: true }));
-const cacheFilesEngineMock = vi.fn();
 vi.mock("../settings", () => ({
   loadSettings: vi.fn(async () => {}),
-  cacheFilesEngine: (engine: string) => cacheFilesEngineMock(engine),
   getCloudKeyStatus: () => cloudStatusMock(),
 }));
 
@@ -52,10 +50,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     gemini_api_key: "",
     groq_api_key: "",
     meeting_consent_acknowledged: false,
-    meetings_engine: "local",
     meetings_language: "uk",
-    files_engine: "cloud",
-    files_follow_dictation: true,
     files_language: "auto",
     theme: "system",
     display_name: "",
@@ -117,7 +112,7 @@ function failureShown(container: HTMLElement): boolean {
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
-  apiMock.setSttMode.mockResolvedValue({ files_engine: "cloud" });
+  apiMock.setSttMode.mockResolvedValue({});
   apiMock.sttLocalPrewarm.mockResolvedValue({ started: true });
   apiMock.sttLocalModel.mockResolvedValue(buildDownload());
 });
@@ -512,16 +507,6 @@ describe("renderDictationMode — the two rows", () => {
 
     expect(row(container, "cloud").getAttribute("aria-checked")).toBe("true");
     await vi.waitFor(() => expect(apiMock.setSttMode).toHaveBeenCalledWith("cloud"));
-  });
-
-  it("hands the Files page the engine files now use, which can differ from the mode picked", async () => {
-    apiMock.setSttMode.mockResolvedValue({ files_engine: "cloud" });
-    const container = await render(buildStatus({ model_loaded: true }), { stt_mode: "cloud" });
-    await vi.waitFor(() => expect(action(container)).toBe("Ready"));
-
-    row(container, "local").click();
-
-    await vi.waitFor(() => expect(cacheFilesEngineMock).toHaveBeenCalledExactlyOnceWith("cloud"));
   });
 
   it("puts the row back and says why when the mode could not be saved", async () => {

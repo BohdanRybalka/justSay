@@ -34,10 +34,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     gemini_api_key: "",
     groq_api_key: "",
     meeting_consent_acknowledged: false,
-    meetings_engine: "local",
     meetings_language: "uk",
-    files_engine: "cloud",
-    files_follow_dictation: true,
     files_language: "auto",
     theme: "system",
     display_name: "",
@@ -226,23 +223,11 @@ describe("What each key is for", () => {
     });
   });
 
-  it("with dictation, meetings and files all Local each key says it is not used", () => {
-    const container = render(buildSettings({ stt_mode: "local", meetings_engine: "local", files_engine: "local" }));
+  it("with Local on, each key says it is not used", () => {
+    const container = render(buildSettings({ stt_mode: "local" }));
 
     expect(useHints(container)).toEqual({
       Groq: "Not used while Local is on",
-      Google: "Not used while Local is on",
-    });
-  });
-
-  it.each([
-    ["files", { files_engine: "cloud", meetings_engine: "local" }],
-    ["meetings", { files_engine: "local", meetings_engine: "cloud" }],
-  ] as const)("keeps the Groq key in use while dictation is Local but %s go to the cloud", (_kind, engines) => {
-    const container = render(buildSettings({ stt_mode: "local", ...engines }));
-
-    expect(useHints(container)).toEqual({
-      Groq: "Turns your recordings into text",
       Google: "Not used while Local is on",
     });
   });

@@ -7,6 +7,21 @@ import { icon } from "../../ui/icons";
 export const CLOUD_KEY_MISSING = "Add a Groq key in Settings";
 export const CLOUD_HINT = "Your API keys · fastest and most accurate";
 
+const WHERE_IT_BECOMES_TEXT = {
+  cloud: "in the cloud",
+  local: "on this computer",
+} as const;
+
+/** Where `mode` turns speech into text, as a phrase that ends a sentence. */
+export function whereItBecomesText(mode: "cloud" | "local"): string {
+  return WHERE_IT_BECOMES_TEXT[mode];
+}
+
+/** The line on Meetings and Files that says where their audio becomes text and where that is chosen. */
+export function modelNoteHtml(mode: "cloud" | "local"): string {
+  return `<p class="panel-subtitle" id="model-note">Turned into text ${whereItBecomesText(mode)}. Change this on the Dictation page.</p>`;
+}
+
 /** Whether Cloud's only engine, Groq, has no key; an unread key status is not missing. */
 export function cloudKeyMissing(cloud: CloudKeyStatus | null): boolean {
   return cloud !== null && !cloud.groq_key_set;

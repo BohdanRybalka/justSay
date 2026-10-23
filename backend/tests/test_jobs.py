@@ -608,14 +608,11 @@ async def test_cancel_answers_404_for_an_unknown_job_and_409_while_saving(client
 
 
 @pytest.mark.parametrize("engine", [ProviderMode.LOCAL, ProviderMode.CLOUD])
-async def test_a_file_runs_on_the_files_engine_and_language_not_dictations_or_meetings(
+async def test_a_file_runs_on_the_chosen_engine_and_its_own_language_not_the_meetings(
     queue, fakes, monkeypatch, engine
 ):
-    other = ProviderMode.CLOUD if engine == ProviderMode.LOCAL else ProviderMode.LOCAL
-    monkeypatch.setattr(settings.stt, "files_mode", engine)
+    monkeypatch.setattr(settings.stt, "mode", engine)
     monkeypatch.setattr(settings.stt, "files_language", "en")
-    monkeypatch.setattr(settings.stt, "mode", other)
-    monkeypatch.setattr(settings.stt, "meetings_mode", other)
     monkeypatch.setattr(settings.stt, "meetings_language", "pl")
     pipeline = _FakePipeline()
 
@@ -627,12 +624,11 @@ async def test_a_file_runs_on_the_files_engine_and_language_not_dictations_or_me
     assert (call["source"], call["mode"], call["language"]) == ("file", engine, "en")
 
 
-async def test_a_meeting_keeps_its_own_engine_and_language_beside_a_files_choice(
+async def test_a_meeting_keeps_its_own_language_beside_a_files_choice(
     queue, fakes, tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(settings.stt, "files_mode", ProviderMode.LOCAL)
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
     monkeypatch.setattr(settings.stt, "files_language", "en")
-    monkeypatch.setattr(settings.stt, "meetings_mode", ProviderMode.CLOUD)
     monkeypatch.setattr(settings.stt, "meetings_language", "pl")
     pipeline = _FakePipeline()
     recording = _recording(tmp_path, fakes, pipeline)
@@ -648,14 +644,14 @@ async def test_a_meeting_keeps_its_own_engine_and_language_beside_a_files_choice
 async def test_a_file_made_in_local_is_never_tried_again_in_the_cloud(
     queue, fakes, monkeypatch
 ):
-    monkeypatch.setattr(settings.stt, "files_mode", ProviderMode.LOCAL)
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.LOCAL)
     failing = _FakePipeline(outcome="unsaved")
     job_id = _start(queue, fakes, failing)
     failing.release.set()
     await _settle(queue, job_id)
     working = _FakePipeline()
     fakes[next(name for name, fake in fakes.items() if fake is failing)] = working
-    monkeypatch.setattr(settings.stt, "files_mode", ProviderMode.CLOUD)
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
 
     queue.retry(job_id)
     working.release.set()
@@ -665,10 +661,10 @@ async def test_a_file_made_in_local_is_never_tried_again_in_the_cloud(
 
 
 @pytest.mark.parametrize("engine", [ProviderMode.LOCAL, ProviderMode.CLOUD])
-async def test_a_stopped_meeting_becomes_a_meeting_entry_on_the_meetings_engine(
+async def test_a_stopped_meeting_becomes_a_meeting_entry_on_the_chosen_engine(
     queue, fakes, tmp_path, monkeypatch, engine
 ):
-    monkeypatch.setattr(settings.stt, "meetings_mode", engine)
+    monkeypatch.setattr(settings.stt, "mode", engine)
     monkeypatch.setattr(settings.stt, "meetings_language", "pl")
     pipeline = _FakePipeline()
     recording = _recording(tmp_path, fakes, pipeline)
@@ -696,7 +692,7 @@ async def test_a_stopped_meeting_becomes_a_meeting_entry_on_the_meetings_engine(
 async def test_a_failed_meeting_keeps_its_recording_until_a_retry_saves_it(
     queue, fakes, tmp_path, monkeypatch, engine, reason
 ):
-    monkeypatch.setattr(settings.stt, "meetings_mode", engine)
+    monkeypatch.setattr(settings.stt, "mode", engine)
     failing = _FakePipeline(outcome=ResourceUnavailableError("engine down"))
     recording = _recording(tmp_path, fakes, failing)
     job_id = queue.add_meeting(recording)
@@ -847,7 +843,7 @@ def test_a_meeting_a_past_run_cut_off_says_so_and_can_be_tried_again(queue, tmp_
     assert queue.kept_recording_names() == {rebuilt.name}
 
 
-async def test_a_meeting_runs_the_real_pipeline_on_its_own_engine(
+async def test_a_meeting_runs_the_real_pipeline_on_the_chosen_engine(
     client, queue, tmp_path, monkeypatch, noise_is_voice
 ):
     monkeypatch.setattr(history, "_output_dir", tmp_path)
@@ -855,8 +851,7 @@ async def test_a_meeting_runs_the_real_pipeline_on_its_own_engine(
     history.bootstrap(tmp_path)
     stt = MagicMock(model_name="mock/local", is_local=True, longest_piece_seconds=600.0)
     stt.transcribe = AsyncMock(return_value=TranscriptionResult(text="from the call"))
-    monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
-    monkeypatch.setattr(settings.stt, "meetings_mode", ProviderMode.LOCAL)
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.LOCAL)
     monkeypatch.setattr(jobs, "process_audio", service.process_audio)
     recording = tmp_path / "meeting_0123456789ab.wav"
     recording.write_bytes(_wav(tmp_path))
@@ -871,7 +866,6 @@ async def test_a_meeting_runs_the_real_pipeline_on_its_own_engine(
 
         assert route.call_args.args[0] == ProviderMode.LOCAL
         assert ready.await_args.args[0].mode == ProviderMode.LOCAL
-        assert settings.stt.mode == ProviderMode.CLOUD
         entry = history.get_page(limit=5).entries[0]
         assert (entry.source, entry.source_name, entry.text) == ("meeting", None, "from the call")
         assert (await client.get("/jobs")).json()[0]["entry_id"] == entry.id

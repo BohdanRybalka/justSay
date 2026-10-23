@@ -206,10 +206,7 @@ function buildSettings(overrides: Partial<UserSettings> = {}): UserSettings {
     gemini_api_key: "",
     groq_api_key: "",
     meeting_consent_acknowledged: false,
-    meetings_engine: "local",
     meetings_language: "uk",
-    files_engine: "cloud",
-    files_follow_dictation: true,
     files_language: "auto",
     theme: "system",
     display_name: "",
@@ -619,15 +616,14 @@ describe("the sidebar", () => {
     await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#files-language")!.value).toBe("en"));
   });
 
-  it("shows on the Files panel the engine files use after dictation is switched, before settings are read again", async () => {
-    await bootWithSettingsLoaded({ stt_mode: "cloud", files_engine: "cloud" });
-    const settingsModule = await import("./settings");
+  it("tells on the Files panel where files become text, from the dictation mode", async () => {
+    await bootWithSettingsLoaded({ stt_mode: "local" });
 
-    settingsModule.cacheFilesEngine("local");
     openPanel("files");
 
-    expect(document.querySelector("#files-local")!.getAttribute("aria-checked")).toBe("true");
-    expect(settingsModule.getSettings()!.files_engine).toBe("local");
+    expect(document.querySelector("#model-note")!.textContent).toBe(
+      "Turned into text on this computer. Change this on the Dictation page.",
+    );
   });
 
   it("leaves the panel alone when a change elsewhere did not touch the language", async () => {
