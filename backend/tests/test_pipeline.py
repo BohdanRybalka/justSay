@@ -112,8 +112,8 @@ def _make_stt_mock(text: str = "hello world", tokens: int | None = None):
 @pytest.mark.parametrize(
     ("mode", "single"), [(ProviderMode.CLOUD, True), (ProviderMode.LOCAL, False)]
 )
-async def test_a_cloud_send_is_one_request_so_the_route_is_checked_before_every_send(
-    sample_wav, _isolate_side_effects, source, mode, single
+async def test_every_cloud_send_of_a_dictation_file_or_meeting_is_a_single_request(
+    sample_wav, cloud_mode, _isolate_side_effects, source, mode, single
 ):
     seen = []
 
