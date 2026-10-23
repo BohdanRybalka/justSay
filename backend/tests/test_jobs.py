@@ -59,7 +59,9 @@ class _FakePipeline:
         outcome: object = "saved",
         pieces: int = 1,
         pause: float | None = None,
+        sends: bool = False,
     ) -> None:
+        self.sends = sends
         self.duration = duration
         self.pause = pause
         self.outcome = outcome
@@ -76,6 +78,8 @@ class _FakePipeline:
         await observer.before_transcribe("mock/model", self.duration)
         for index in range(self.pieces):
             await observer.before_piece(index, self.pieces)
+            if self.sends:
+                await observer.before_send()
             self.piece = index
             if self.pause is not None:
                 await observer.pause(self.pause)
@@ -624,7 +628,7 @@ async def test_a_file_runs_on_the_chosen_engine_and_its_own_language_not_the_mee
     assert (call["source"], call["mode"], call["language"]) == ("file", engine, "en")
 
 
-async def test_a_meeting_keeps_its_own_language_beside_a_files_choice(
+async def test_a_meeting_keeps_its_own_language_beside_a_files_language(
     queue, fakes, tmp_path, monkeypatch
 ):
     monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
@@ -658,6 +662,46 @@ async def test_a_file_made_in_local_is_never_tried_again_in_the_cloud(
     await _settle(queue, job_id)
 
     assert working.calls[0]["mode"] == ProviderMode.LOCAL
+
+
+@pytest.mark.parametrize("kind", ["file", "meeting"])
+async def test_a_cloud_run_sends_nothing_more_once_local_is_chosen(
+    queue, fakes, tmp_path, monkeypatch, kind
+):
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
+    pipeline = _FakePipeline(pieces=2, sends=True)
+    if kind == "file":
+        job_id = _start(queue, fakes, pipeline)
+    else:
+        job_id = queue.add_meeting(_recording(tmp_path, fakes, pipeline))
+    await asyncio.wait_for(pipeline.transcribing.wait(), 1)
+    assert pipeline.piece == 0
+
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.LOCAL)
+    pipeline.next_piece.set()
+    pipeline.release.set()
+    await _settle(queue, job_id)
+
+    assert pipeline.piece == 0
+    assert _view(queue, job_id).stage == "failed"
+
+
+@pytest.mark.parametrize("kind", ["file", "meeting"])
+async def test_a_local_run_goes_on_when_cloud_is_chosen(queue, fakes, tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.LOCAL)
+    pipeline = _FakePipeline(pieces=2, sends=True)
+    if kind == "file":
+        job_id = _start(queue, fakes, pipeline)
+    else:
+        job_id = queue.add_meeting(_recording(tmp_path, fakes, pipeline))
+    await asyncio.wait_for(pipeline.transcribing.wait(), 1)
+
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
+    pipeline.next_piece.set()
+    pipeline.release.set()
+    await _settle(queue, job_id)
+
+    assert _view(queue, job_id).stage == "done"
 
 
 @pytest.mark.parametrize("engine", [ProviderMode.LOCAL, ProviderMode.CLOUD])
