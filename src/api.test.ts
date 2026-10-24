@@ -1708,6 +1708,17 @@ describe("startFileJob — a file upload that reports its progress and gives up 
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
   });
 
+  it("sends nothing when its caller stopped it while the token was still on its way", async () => {
+    const { api } = await import("./api");
+    const stop = new AbortController();
+    stop.abort();
+
+    const pending = api.startFileJob(new Blob(["abcd"]), "clip.wav", { onProgress: vi.fn(), signal: stop.signal });
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(FakeXhr.sent).toHaveLength(0);
+  });
+
   it("carries the backend's reason when it refuses the file", async () => {
     const { api, ApiRequestError } = await import("./api");
 

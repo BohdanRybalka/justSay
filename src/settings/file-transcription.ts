@@ -86,7 +86,7 @@ function readFailure(err: unknown): string {
 
 /** What the window does as files move: `onTaken` when files join the queue, so the
  *  Files page is on screen; `onSent` once the backend has queued one as a job, resolving
- *  when its job card is drawn so the upload's card can give way to it. */
+ *  once the jobs have been read again so the upload's card can give way to the job's. */
 export interface UploadHooks {
   onTaken: () => void;
   onSent: () => Promise<void>;
@@ -193,7 +193,7 @@ export function mountFileTranscription(root: HTMLElement, hooks: UploadHooks): F
     try {
       body = await withTimeout(transfer.body(), UPLOAD_STALL_MS);
     } catch (err) {
-      if (!stop.signal.aborted) fail(transfer, readFailure(err), false);
+      if (!stop.signal.aborted) fail(transfer, readFailure(err), err instanceof TimedOutError);
       return;
     }
     if (stop.signal.aborted) return;

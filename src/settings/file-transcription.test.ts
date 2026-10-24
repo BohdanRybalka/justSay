@@ -566,8 +566,25 @@ describe("a file picked from the ring or the tray", () => {
 
     await vi.advanceTimersByTimeAsync(UPLOAD_STALL_MS);
 
-    expect(uploads()[0]).toMatchObject({ state: "failed", error: UPLOAD_STOPPED, retryable: false });
+    expect(uploads()[0]).toMatchObject({ state: "failed", error: UPLOAD_STOPPED, retryable: true });
     expect(apiMock.startFileJob).not.toHaveBeenCalled();
+  });
+
+  it("sends the bytes the shell handed over late when Try again is pressed, without asking twice", async () => {
+    vi.useFakeTimers();
+    let read: (bytes: ArrayBuffer) => void = () => {};
+    invokeMock.mockReturnValue(new Promise((resolve) => (read = resolve)));
+    await vi.advanceTimersByTimeAsync(0);
+    shellListeners.get(EVENT_FILE_PICKED)!({ payload: { token: "token-1", name: "Interview 3.m4a", size: 2048 } });
+    await vi.advanceTimersByTimeAsync(UPLOAD_STALL_MS);
+    expect(uploads()[0].state).toBe("failed");
+
+    read(new ArrayBuffer(4));
+    mounted.uploads.retry(uploads()[0]);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(apiMock.startFileJob).toHaveBeenCalledOnce();
+    expect(invokeMock).toHaveBeenCalledOnce();
   });
 
   it("refuses a file over the cap in the drop's words without reading it", async () => {

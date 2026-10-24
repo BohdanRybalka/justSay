@@ -438,7 +438,7 @@ describe("mountRecent — files still uploading", () => {
     );
   }
 
-  it("draws them before any read answers, above the jobs and entries, three in all", async () => {
+  it("draws them before any read answers, above the jobs and entries", async () => {
     apiMock.getHistory.mockResolvedValue(pageOf([entryOf("e1", "file")], 1, null));
     apiMock.jobs.mockResolvedValue([jobOf("j1", { kind: "file", name: "queued.mp3" })]);
     const uploads = uploadsOf([uploading("a.m4a"), uploading("b.mp3", { state: "waiting" })]);
@@ -447,7 +447,34 @@ describe("mountRecent — files still uploading", () => {
     expect(names(container)).toEqual(["a.m4a", "b.mp3"]);
     await flush();
 
-    expect(names(container)).toEqual(["a.m4a", "b.mp3", "queued.mp3"]);
+    expect(names(container)).toEqual(["a.m4a", "b.mp3", "queued.mp3", "e1"]);
+  });
+
+  it("draws every upload however many there are, and leaves the jobs and entries their three", async () => {
+    apiMock.getHistory.mockResolvedValue(pageOf([entryOf("e1", "file"), entryOf("e2", "file")], 2, null));
+    apiMock.jobs.mockResolvedValue([jobOf("j1", { kind: "file", name: "queued.mp3" })]);
+    const files = ["a.m4a", "b.mp3", "c.ogg", "d.wav"];
+    const uploads = uploadsOf(files.map((name, i) => uploading(name, { state: i === 0 ? "uploading" : "waiting" })));
+
+    const { container } = mountWith(uploads);
+    await flush();
+
+    expect(names(container)).toEqual([...files, "queued.mp3", "e1", "e2"]);
+  });
+
+  it("moves an upload's bar without drawing the list again, so focus stays where it is", async () => {
+    const upload = uploading("a.m4a");
+    const uploads = uploadsOf([upload]);
+    const { container } = mountWith(uploads);
+    await flush();
+    const rows = container.querySelector<HTMLElement>(".timeline")!;
+    const redrawn = vi.spyOn(rows, "replaceChildren");
+
+    Object.assign(upload, { sentFraction: 0.7 });
+    uploads.set([upload]);
+
+    expect(redrawn).not.toHaveBeenCalled();
+    expect(rows.querySelector(".entry-job-status")!.textContent).toBe("Uploading · 70%");
   });
 
   it("moves the same card on as the upload moves on, and drops it when the upload goes", async () => {

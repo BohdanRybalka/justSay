@@ -72,15 +72,16 @@ export const REQUEST_TIMEOUT_MS = 15_000;
  *  on a request whose abandonment costs the user nothing, and a state-mutating
  *  request is never one of those. Every entry in `api` states its own row, and
  *  there is no default, so a new endpoint has to be placed rather than inherit a
- *  number nobody chose. */
+ *  number nobody chose. The file upload is the one exception: it is bounded by
+ *  `UPLOAD_STALL_MS` of silence instead. */
 type Budget = { readonly ms: number } | { readonly ms: null };
 
 /** A read the UI can simply ask for again. Abandoning costs one more press;
  *  waiting forever costs a screen that never resolves. */
 const REREADABLE: Budget = { ms: REQUEST_TIMEOUT_MS };
 
-/** Everything that changes state on the backend, plus the two reads whose own
- *  degradation path a budget would preempt.
+/** Everything that changes state on the backend but the file upload, plus the
+ *  two reads whose own degradation path a budget would preempt.
  *
  *  The third amendment briefly put the dictation path on a budget, on the claim
  *  that abandoning a start is a strict subset of waiting on one. It is not:
@@ -585,7 +586,8 @@ async function upload<T>(path: string, form: FormData, watch: UploadWatch): Prom
 /** `budget` is an object rather than a fourth positional argument because the
  *  third is `body?: unknown`: a bare number in that slot type-checks, ships the
  *  budget as the request body, and silently keeps the default budget. It has no
- *  default at all, so every endpoint below names the class it is in. */
+ *  default at all, so every endpoint below that sends through it names the
+ *  class it is in. */
 function request<T>(
   method: string,
   path: string,

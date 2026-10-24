@@ -1,7 +1,7 @@
 /**
- * The latest meetings or files under a section's top card: files still uploading, then running
- * and failed jobs of that kind, then the newest finished entries, three in all, with a link into
- * History. Until the first read answers it shows a card shape empty; if that read fails, one
+ * The latest meetings or files under a section's top card: every file still uploading, then
+ * running and failed jobs of that kind and the newest finished entries, three in all, with a link
+ * into History. Until the first read answers it shows a card shape empty; if that read fails, one
  * muted line with Try again.
  */
 import { api, type EntrySource, type HistoryEntry } from "../api";
@@ -21,7 +21,7 @@ const HEADINGS: Record<SectionKind, string> = {
 };
 
 export interface Recent extends Required<TabLifecycle> {
-  /** A job was just queued elsewhere in the window; resolves once its card is drawn. */
+  /** A job was just queued elsewhere in the window; reads the jobs again and resolves once that read is over. */
   jobStarted(): Promise<void>;
 }
 
@@ -73,8 +73,8 @@ export function mountRecent(
   });
 
   function paint(): void {
-    const running = [...uploadCards.values(), ...jobCards].slice(0, RECENT_SHOWN);
-    const shown = [...running, ...entryRows.slice(0, RECENT_SHOWN - running.length)];
+    const jobsShown = jobCards.slice(0, RECENT_SHOWN);
+    const shown = [...uploadCards.values(), ...jobsShown, ...entryRows.slice(0, RECENT_SHOWN - jobsShown.length)];
     const waiting = shown.length === 0 && !loaded && !firstReadFailed;
     rows.replaceChildren(...(waiting ? [skeleton] : shown));
     rows.hidden = shown.length === 0 && !waiting;
@@ -132,8 +132,10 @@ export function mountRecent(
       renderUploadCard(card, upload);
       drawn.set(upload, card);
     }
+    const before = [...uploadCards.values()];
+    const after = [...drawn.values()];
     uploadCards = drawn;
-    paint();
+    if (before.length !== after.length || after.some((card, i) => before[i] !== card)) paint();
   }
 
   const stopWatchingUploads = uploads?.watch(drawUploads);
