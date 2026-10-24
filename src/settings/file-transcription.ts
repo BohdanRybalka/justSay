@@ -116,12 +116,11 @@ export interface FileTranscription {
 }
 
 /**
- * Every way a file reaches the window: `pick` opens the system file dialog, a drag carrying
- * files dims the window under "Drop to transcribe" (ADR 087) or, while a `.drop-area` is on
- * screen, lights that area instead, and the shell hands over a file picked from the ring or
- * the tray. Every file taken joins `uploads` and is sent one at a time; a lone refused file,
- * one still uploading or being transcribed, or a pick the shell could not hand over is
- * explained on the overlay instead.
+ * Every way a file reaches the window: `pick` opens the system file dialog, a drag carrying files
+ * dims the window under "Drop to transcribe" (ADR 087) or lights a `.drop-area` on screen, and the
+ * shell hands over a file picked from the ring or the tray. Every file taken joins `uploads` and is
+ * sent one at a time; a lone refused file, one already uploading or being transcribed, or a pick
+ * the shell could not hand over is explained on the overlay instead.
  */
 export function mountFileTranscription(root: HTMLElement, hooks: UploadHooks): FileTranscription {
   const overlay = document.createElement("div");

@@ -181,6 +181,7 @@ export function createEntryCards(deleted: (card: HTMLElement) => void): EntryCar
     textFit.observe(el.querySelector(".entry-text")!);
     let starred = entry.starred;
     let starSaving = false;
+    let deleting = false;
     paintStar(el.querySelector<HTMLButtonElement>('[data-action="star"]')!, starred);
 
     el.addEventListener("click", async (e) => {
@@ -218,6 +219,8 @@ export function createEntryCards(deleted: (card: HTMLElement) => void): EntryCar
         }, COPIED_FLASH_MS);
       } else if (button.dataset.action === "delete") {
         closeMenu(true);
+        if (deleting) return;
+        deleting = true;
         el.querySelector(".entry-refusal")?.remove();
         try {
           await api.deleteHistoryEntry(entry.id);
@@ -229,6 +232,8 @@ export function createEntryCards(deleted: (card: HTMLElement) => void): EntryCar
           }
           console.error(err);
           sayDeleteRefused(el);
+        } finally {
+          deleting = false;
         }
       }
     });

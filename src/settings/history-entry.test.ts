@@ -74,6 +74,21 @@ describe("Delete on a card", () => {
     expect(card.querySelectorAll(".entry-refusal")).toHaveLength(1);
   });
 
+  it("sends no second Delete while the first is on its way", async () => {
+    let answer!: () => void;
+    deleteHistoryEntryMock.mockReturnValueOnce(new Promise<void>((resolve) => (answer = resolve)));
+    deleteHistoryEntryMock.mockRejectedValue(new ApiRequestError("Entry not found", 404));
+    const card = createEntryCards(deleted).create(buildEntry("1"));
+    document.body.append(card);
+
+    pickDelete(card);
+    pickDelete(card);
+    answer();
+
+    await vi.waitFor(() => expect(deleted).toHaveBeenCalledOnce());
+    expect(deleteHistoryEntryMock).toHaveBeenCalledOnce();
+  });
+
   it("lets the card go with no message when the entry is already gone", async () => {
     deleteHistoryEntryMock.mockRejectedValue(new ApiRequestError("Entry not found", 404));
     const card = createEntryCards(deleted).create(buildEntry("1"));

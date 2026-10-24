@@ -91,12 +91,11 @@ export interface JobCards {
 }
 
 /**
- * The cards of files, meetings and dictations being transcribed. `show` receives them newest first
- * whenever the set changes. A failed job offers Try again. A finished job's card
- * stays, asking `entrySaved` to paint its row, until
+ * The cards of files, meetings and dictations being transcribed, newest first to `show`. A failed
+ * job offers Try again. A finished job's card stays, asking `entrySaved` to paint its row, until
  * `entryShown` says the row is painted, so the card turns into the entry where it stood. A job this
  * page removed is never painted again; a failed read is tried again a second later. A refused × or
- * Try again is said on the card's status line until the job moves on or the card is clicked again.
+ * Try again stays on the status line until the job moves on or × or Try again is pressed again.
  */
 export function createJobCards(
   show: (cards: HTMLElement[]) => void,

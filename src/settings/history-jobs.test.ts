@@ -230,6 +230,28 @@ describe("createJobCards", () => {
     expect(status(shown[0])).toBe("Saving");
   });
 
+  it("takes the refusal off the card when × is pressed again", async () => {
+    apiMock.jobs.mockResolvedValue([job({ stage: "failed", progress: null, error: "Add an API key in Settings" })]);
+    apiMock.removeJob.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const cards = createJobCards(show, entrySaved, entryShown);
+    await cards.refresh();
+    const remove = shown[0].querySelector<HTMLButtonElement>('[data-action="remove"]')!;
+    remove.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(status(shown[0])).toBe(REMOVE_REFUSED);
+
+    let answer!: (err: unknown) => void;
+    apiMock.removeJob.mockReturnValueOnce(new Promise((_, reject) => (answer = reject)));
+    remove.click();
+    await cards.refresh();
+    expect(status(shown[0])).toBe("Add an API key in Settings");
+
+    answer(new TypeError("Failed to fetch"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(status(shown[0])).toBe(REMOVE_REFUSED);
+  });
+
   it("lets a card go when its × finds the job already gone", async () => {
     apiMock.jobs.mockResolvedValue([job({ stage: "failed", progress: null, error: "Add an API key in Settings" })]);
     apiMock.removeJob.mockRejectedValue(new ApiRequestError("No such job", 404));
