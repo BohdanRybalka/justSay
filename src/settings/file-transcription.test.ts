@@ -4,6 +4,7 @@ import { EVENT_FILE_PICKED, MAX_UPLOAD_BYTES } from "../contracts";
 
 const apiMock = {
   startFileJob: vi.fn(),
+  jobs: vi.fn(),
 };
 
 vi.mock("../api", async (importOriginal) => ({
@@ -27,6 +28,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 const {
   mountFileTranscription,
   refusalOf,
+  ALREADY_TRANSCRIBING,
   ALREADY_UPLOADING,
   DROP_AREA_CLASS,
   DROP_HINT,
@@ -37,6 +39,7 @@ const { ApiRequestError, UPLOAD_STALL_MS } = await import("../api");
 const { TimedOutError } = await import("../timeout");
 type FileTranscription = import("./file-transcription").FileTranscription;
 type UploadWatch = import("../api").UploadWatch;
+type TranscriptionJob = import("../api").TranscriptionJob;
 
 const onTaken = vi.fn();
 const onSent = vi.fn(async () => {});
@@ -103,6 +106,7 @@ function shownText(): string {
 beforeEach(() => {
   vi.clearAllMocks();
   apiMock.startFileJob.mockResolvedValue({ id: "job-1" });
+  apiMock.jobs.mockResolvedValue([]);
   document.body.innerHTML = `<main id="pane"><div id="child"><span id="grandchild"></span></div></main>`;
   mounted = mountFileTranscription(document.body, { onTaken, onSent });
 });
@@ -702,5 +706,82 @@ describe("teardown", () => {
     mounted = idle;
 
     expect(document.body.classList.contains("dragging-file")).toBe(false);
+  });
+});
+
+describe("dropping a file whose job is still on its way", () => {
+  function fileJob(stage: TranscriptionJob["stage"]): TranscriptionJob {
+    return { id: "job-1", kind: "file", name: "interview.m4a", stage, progress: null, error: null, entry_id: null };
+  }
+
+  async function sentOnce(): Promise<void> {
+    drag("drop", document.body, ["Files"], [buildFile("interview.m4a", 2048)]);
+    await vi.waitFor(() => expect(uploads()).toEqual([]));
+    expect(onSent).toHaveBeenCalledOnce();
+  }
+
+  it("reads no jobs for a file when nothing was sent before it", async () => {
+    await sentOnce();
+
+    expect(apiMock.jobs).not.toHaveBeenCalled();
+  });
+
+  it.each(["queued", "transcribing", "saving"] as const)(
+    "says it is already being transcribed while its job is %s, and makes no second job",
+    async (stage) => {
+      await sentOnce();
+      apiMock.jobs.mockResolvedValue([fileJob(stage)]);
+
+      drag("drop", document.body, ["Files"], [buildFile("interview.m4a", 2048)]);
+
+      await vi.waitFor(() => expect(shownText()).toBe(ALREADY_TRANSCRIBING));
+      expect(overlay().classList.contains("drop-overlay--refused")).toBe(true);
+      expect(apiMock.startFileJob).toHaveBeenCalledOnce();
+      expect(uploads()).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["done", [fileJob("done")]],
+    ["failed", [fileJob("failed")]],
+    ["gone from the list", []],
+  ])("takes it again once its job is %s", async (_state, jobs) => {
+    await sentOnce();
+    apiMock.jobs.mockResolvedValue(jobs);
+
+    drag("drop", document.body, ["Files"], [buildFile("interview.m4a", 2048)]);
+
+    await vi.waitFor(() => expect(apiMock.startFileJob).toHaveBeenCalledTimes(2));
+    expect(overlay().hidden).toBe(true);
+  });
+
+  it("counts it as being transcribed when the jobs cannot be read, rather than send it twice", async () => {
+    await sentOnce();
+    apiMock.jobs.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    drag("drop", document.body, ["Files"], [buildFile("interview.m4a", 2048)]);
+
+    await vi.waitFor(() => expect(shownText()).toBe(ALREADY_TRANSCRIBING));
+    expect(apiMock.startFileJob).toHaveBeenCalledOnce();
+  });
+
+  it("takes a different file of the same name", async () => {
+    await sentOnce();
+    apiMock.jobs.mockResolvedValue([fileJob("queued")]);
+
+    drag("drop", document.body, ["Files"], [buildFile("interview.m4a", 4096)]);
+
+    await vi.waitFor(() => expect(apiMock.startFileJob).toHaveBeenCalledTimes(2));
+  });
+
+  it("takes the others of several files and skips the one being transcribed", async () => {
+    await sentOnce();
+    apiMock.jobs.mockResolvedValue([fileJob("transcribing")]);
+
+    drag("drop", document.body, ["Files"], [buildFile("interview.m4a", 2048), buildFile("b.mp3", 20)]);
+
+    await vi.waitFor(() => expect(apiMock.startFileJob).toHaveBeenCalledTimes(2));
+    expect(lastSent().name).toBe("b.mp3");
+    expect(overlay().hidden).toBe(true);
   });
 });

@@ -3,11 +3,13 @@ import { ACCEPTED_AUDIO_EXTENSIONS, EVENT_FILE_PICKED, MAX_UPLOAD_BYTES } from "
 import { loadEventApi } from "../event-api";
 import { TimedOutError, withTimeout } from "../timeout";
 import { icon } from "../ui/icons";
+import { jobIsRunning } from "./history-jobs";
 
 export const REFUSAL_SHOWN_MS = 4000;
 export const DROP_AREA_CLASS = "drop-area";
 export const UPLOAD_STOPPED = "The upload stopped";
 export const ALREADY_UPLOADING = "This file is already uploading";
+export const ALREADY_TRANSCRIBING = "This file is already being transcribed";
 
 const DRAGGING_FILE_CLASS = "dragging-file";
 const MAX_MB = MAX_UPLOAD_BYTES / (1024 * 1024);
@@ -117,8 +119,8 @@ export interface FileTranscription {
  * Every way a file reaches the window: `pick` opens the system file dialog, a drag carrying
  * files dims the window under "Drop to transcribe" (ADR 087) or, while a `.drop-area` is on
  * screen, lights that area instead, and the shell hands over a file picked from the ring or
- * the tray. Every file taken joins `uploads` and is sent one at a time; a lone refused or
- * already uploading file is explained on the overlay instead.
+ * the tray. Every file taken joins `uploads` and is sent one at a time; a lone refused file,
+ * or one still uploading or being transcribed, is explained on the overlay instead.
  */
 export function mountFileTranscription(root: HTMLElement, hooks: UploadHooks): FileTranscription {
   const overlay = document.createElement("div");
@@ -166,6 +168,7 @@ export function mountFileTranscription(root: HTMLElement, hooks: UploadHooks): F
   let transfers: Transfer[] = [];
   const listeners = new Set<() => void>();
   let sending = false;
+  const sentJobs = new Map<string, string>();
 
   function changed(): void {
     for (const listener of listeners) listener();
@@ -199,13 +202,14 @@ export function mountFileTranscription(root: HTMLElement, hooks: UploadHooks): F
     }
     if (stop.signal.aborted) return;
     try {
-      await api.startFileJob(body, transfer.name, {
+      const { id } = await api.startFileJob(body, transfer.name, {
         signal: stop.signal,
         onProgress: (sentFraction) => {
           transfer.sentFraction = sentFraction;
           changed();
         },
       });
+      sentJobs.set(transfer.key, id);
     } catch (err) {
       if (!stop.signal.aborted) fail(transfer, uploadFailure(err), true);
       return;
@@ -236,21 +240,52 @@ export function mountFileTranscription(root: HTMLElement, hooks: UploadHooks): F
     };
   }
 
+  /** Forgets the files sent from here whose jobs are no longer waiting or being transcribed;
+   *  when the jobs cannot be read, every sent file still counts as being transcribed. */
+  async function forgetFinishedJobs(): Promise<void> {
+    const asked = new Map(sentJobs);
+    let running: Set<string>;
+    try {
+      running = new Set((await api.jobs()).filter(jobIsRunning).map((job) => job.id));
+    } catch {
+      return;
+    }
+    for (const [key, id] of asked) {
+      if (!running.has(id) && sentJobs.get(key) === id) sentJobs.delete(key);
+    }
+  }
+
   function take(files: AudioToSend[]): void {
     const lone = files.length === 1 ? refusalOf(files[0]) : null;
     if (lone) {
       refuse(lone);
       return;
     }
+    if (sentJobs.size === 0) {
+      accept(files);
+      return;
+    }
+    void forgetFinishedJobs().then(() => {
+      if (!tornDown) accept(files);
+    });
+  }
+
+  function accept(files: AudioToSend[]): void {
     let taken = false;
+    let duplicate = ALREADY_UPLOADING;
     for (const audio of files) {
-      const same = transfers.find((t) => t.key === keyOf(audio));
+      const key = keyOf(audio);
+      const same = transfers.find((t) => t.key === key);
       if (same && same.state !== "failed") continue;
+      if (!same && sentJobs.has(key)) {
+        duplicate = ALREADY_TRANSCRIBING;
+        continue;
+      }
       transfers = [...transfers.filter((t) => t !== same), transferOf(audio)];
       taken = true;
     }
     if (!taken) {
-      refuse(ALREADY_UPLOADING);
+      refuse(duplicate);
       return;
     }
     changed();

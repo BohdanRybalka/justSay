@@ -13,7 +13,7 @@ vi.mock("../api", async (importOriginal) => {
   return { ...actual, api: apiMock };
 });
 
-const { createJobCards, createUploadCard, jobStatusText, renderUploadCard, uploadStatusText, JOBS_POLL_MS } =
+const { createJobCards, createUploadCard, jobIsRunning, jobStatusText, renderUploadCard, uploadStatusText, JOBS_POLL_MS } =
   await import("./history-jobs");
 type Upload = import("./file-transcription").Upload;
 const { icon } = await import("../ui/icons");
@@ -294,6 +294,21 @@ describe("createJobCards", () => {
     await reading;
 
     expect(shown).toEqual([]);
+  });
+});
+
+describe("jobIsRunning", () => {
+  it("is true while a job waits or is being turned into text, and false once it ended", () => {
+    expect(["queued", "transcribing", "saving"].map((stage) => jobIsRunning(job({ stage } as Partial<TranscriptionJob>)))).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    expect(["done", "failed", "cancelled"].map((stage) => jobIsRunning(job({ stage } as Partial<TranscriptionJob>)))).toEqual([
+      false,
+      false,
+      false,
+    ]);
   });
 });
 

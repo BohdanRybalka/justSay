@@ -13,6 +13,11 @@ const KIND_ICONS: Record<TranscriptionJob["kind"], IconName> = {
 
 const RUNNING: ReadonlySet<TranscriptionJob["stage"]> = new Set(["queued", "transcribing", "saving"]);
 
+/** Whether the job is still waiting or being turned into text. */
+export function jobIsRunning(job: TranscriptionJob): boolean {
+  return RUNNING.has(job.stage);
+}
+
 /** What the card's × says it does: a meeting's or dictation's recording is deleted with its card, a file is cancelled or dismissed. */
 export function removeLabel(job: TranscriptionJob): string {
   if (job.kind !== "file") return "Delete this recording";
@@ -179,7 +184,7 @@ export function createJobCards(
     for (const job of jobs) {
       if (gone.has(job.id)) continue;
       const existing = cards.get(job.id);
-      if (!RUNNING.has(job.stage) && job.stage !== "failed") {
+      if (!jobIsRunning(job) && job.stage !== "failed") {
         if (lingers(job, existing)) {
           order.push(existing);
           waiting = true;
@@ -196,7 +201,7 @@ export function createJobCards(
       for (const card of order) cards.set(card.dataset.job!, card);
       publish();
     }
-    if (waiting || jobs.some((job) => RUNNING.has(job.stage))) readAgainSoon();
+    if (waiting || jobs.some(jobIsRunning)) readAgainSoon();
   }
 
   function pause(): void {
