@@ -774,7 +774,7 @@ describe("dropping a file whose job is still on its way", () => {
     await vi.waitFor(() => expect(apiMock.startFileJob).toHaveBeenCalledTimes(2));
   });
 
-  it("takes the others of several files and skips the one being transcribed", async () => {
+  it("takes the others of several files and says it skipped the one being transcribed", async () => {
     await sentOnce();
     apiMock.jobs.mockResolvedValue([fileJob("transcribing")]);
 
@@ -782,6 +782,64 @@ describe("dropping a file whose job is still on its way", () => {
 
     await vi.waitFor(() => expect(apiMock.startFileJob).toHaveBeenCalledTimes(2));
     expect(lastSent().name).toBe("b.mp3");
-    expect(overlay().hidden).toBe(true);
+    expect(shownText()).toBe(ALREADY_TRANSCRIBING);
+  });
+
+  it("says it is being transcribed, not uploading, once the backend has queued it", async () => {
+    let drawn = () => {};
+    onSent.mockImplementationOnce(() => new Promise<void>((resolve) => (drawn = resolve)));
+    drag("drop", document.body, ["Files"], [buildFile("interview.m4a", 2048)]);
+    await vi.waitFor(() => expect(onSent).toHaveBeenCalledOnce());
+    apiMock.jobs.mockResolvedValue([fileJob("queued")]);
+
+    drag("drop", document.body, ["Files"], [buildFile("interview.m4a", 2048)]);
+
+    await vi.waitFor(() => expect(shownText()).toBe(ALREADY_TRANSCRIBING));
+    drawn();
+  });
+
+  it("keeps a file sent while the jobs were being read, so it is not sent twice", async () => {
+    apiMock.startFileJob.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    drag("drop", document.body, ["Files"], [buildFile("late.wav", 30)]);
+    await vi.waitFor(() => expect(uploads()[0]?.state).toBe("failed"));
+    apiMock.startFileJob.mockResolvedValueOnce({ id: "job-a" });
+    drag("drop", document.body, ["Files"], [buildFile("first.wav", 10)]);
+    await vi.waitFor(() => expect(onSent).toHaveBeenCalledOnce());
+    let answerRead: (jobs: TranscriptionJob[]) => void = () => {};
+    apiMock.jobs.mockReturnValueOnce(new Promise((resolve) => (answerRead = resolve)));
+    drag("drop", document.body, ["Files"], [buildFile("other.wav", 20)]);
+    await vi.waitFor(() => expect(apiMock.jobs).toHaveBeenCalledOnce());
+
+    apiMock.startFileJob.mockResolvedValueOnce({ id: "job-late" });
+    mounted.uploads.retry(uploads().find((u) => u.name === "late.wav")!);
+    await vi.waitFor(() => expect(onSent).toHaveBeenCalledTimes(2));
+    answerRead([]);
+    await vi.waitFor(() => expect(apiMock.startFileJob).toHaveBeenCalledTimes(4));
+    apiMock.jobs.mockResolvedValue([{ ...fileJob("queued"), id: "job-late", name: "late.wav" }]);
+
+    drag("drop", document.body, ["Files"], [buildFile("late.wav", 30)]);
+
+    await vi.waitFor(() => expect(shownText()).toBe(ALREADY_TRANSCRIBING));
+    expect(apiMock.startFileJob).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not let a slow read of the old job forget the file's newer one", async () => {
+    await sentOnce();
+    let answerSlow: (jobs: TranscriptionJob[]) => void = () => {};
+    apiMock.jobs.mockReturnValueOnce(new Promise((resolve) => (answerSlow = resolve)));
+    drag("drop", document.body, ["Files"], [buildFile("other.wav", 20)]);
+    apiMock.jobs.mockResolvedValueOnce([]);
+    apiMock.startFileJob.mockResolvedValueOnce({ id: "job-2" });
+    drag("drop", document.body, ["Files"], [buildFile("interview.m4a", 2048)]);
+    await vi.waitFor(() => expect(apiMock.startFileJob).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(onSent).toHaveBeenCalledTimes(2));
+
+    answerSlow([]);
+    await vi.waitFor(() => expect(apiMock.startFileJob).toHaveBeenCalledTimes(3));
+    apiMock.jobs.mockResolvedValue([{ ...fileJob("transcribing"), id: "job-2" }]);
+    drag("drop", document.body, ["Files"], [buildFile("interview.m4a", 2048)]);
+
+    await vi.waitFor(() => expect(shownText()).toBe(ALREADY_TRANSCRIBING));
+    expect(apiMock.startFileJob).toHaveBeenCalledTimes(3);
   });
 });

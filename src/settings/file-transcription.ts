@@ -272,25 +272,27 @@ export function mountFileTranscription(root: HTMLElement, hooks: UploadHooks): F
 
   function accept(files: AudioToSend[]): void {
     let taken = false;
-    let duplicate = ALREADY_UPLOADING;
+    let duplicate: string | null = null;
     for (const audio of files) {
       const key = keyOf(audio);
       const same = transfers.find((t) => t.key === key);
-      if (same && same.state !== "failed") continue;
-      if (!same && sentJobs.has(key)) {
+      if (sentJobs.has(key)) {
         duplicate = ALREADY_TRANSCRIBING;
+        continue;
+      }
+      if (same && same.state !== "failed") {
+        duplicate ??= ALREADY_UPLOADING;
         continue;
       }
       transfers = [...transfers.filter((t) => t !== same), transferOf(audio)];
       taken = true;
     }
-    if (!taken) {
-      refuse(duplicate);
-      return;
+    if (taken) {
+      changed();
+      hooks.onTaken();
+      void sendWaiting();
     }
-    changed();
-    hooks.onTaken();
-    void sendWaiting();
+    if (duplicate) refuse(duplicate);
   }
 
   const uploads: Uploads = {
