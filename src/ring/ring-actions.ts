@@ -61,3 +61,20 @@ export function stepFor(action: RingAction, state: RingState): RingStep {
       return { kind: "open-panel", target: { panel: "settings" } };
   }
 }
+
+/** What the system notification says when `step` failed; the ring has closed by then,
+ *  so no window is left to say it in. */
+export function failureText(step: RingStep, state: RingState): string {
+  switch (step.kind) {
+    case "toggle-meeting":
+      return state.meetingRecording
+        ? "Couldn't stop the meeting — try again."
+        : "Couldn't start the meeting — try again.";
+    case "pick-file":
+      return "Couldn't open the file picker — try again.";
+    case "switch-language":
+      return `Couldn't switch to ${languageName(step.language)} — try again.`;
+    case "open-panel":
+      return "Couldn't open JustSay — try again.";
+  }
+}

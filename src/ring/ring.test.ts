@@ -23,7 +23,8 @@ const SETTINGS = {
   files_language: "auto",
 };
 
-const { invokeMock, emitMock, getSettingsMock, getMeetingStatusMock, updateSettingsMock } = vi.hoisted(() => ({
+const { invokeMock, emitMock, getSettingsMock, getMeetingStatusMock, updateSettingsMock, notifyErrorMock } = vi.hoisted(() => ({
+  notifyErrorMock: vi.fn(async (_body: string) => {}),
   invokeMock: vi.fn(async (_command: string) => {}),
   emitMock: vi.fn(async (_event: string, _payload?: unknown) => {}),
   getSettingsMock: vi.fn(async (): Promise<Record<string, unknown>> => ({})),
@@ -31,6 +32,7 @@ const { invokeMock, emitMock, getSettingsMock, getMeetingStatusMock, updateSetti
   updateSettingsMock: vi.fn(async (_updates: Record<string, unknown>) => ({})),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+vi.mock("../notify", () => ({ notifyError: notifyErrorMock }));
 vi.mock("@tauri-apps/api/event", () => ({
   emit: emitMock,
   listen: vi.fn(async (event: string, handler: (payload: unknown) => unknown) => {
@@ -198,5 +200,28 @@ describe("the ring window", () => {
       expect(emitMock).toHaveBeenCalledWith(EVENT_NAVIGATE_PANEL, { panel: "settings" }),
     );
     expect(invokeMock).toHaveBeenCalledWith("show_settings_window");
+  });
+
+  it("says in a notification that the language did not switch, the ring being closed by then", async () => {
+    updateSettingsMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const ring = await loadRing();
+    await vi.waitFor(() => expect(petal(ring, 2).getAttribute("aria-label")).toBe("Language · Ukrainian"));
+
+    petal(ring, 2).click();
+
+    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("Couldn't switch to English — try again."));
+    expect(invokeMock).toHaveBeenCalledWith("close_ring");
+    expect(emitMock).not.toHaveBeenCalledWith(EVENT_SETTINGS_CHANGED);
+  });
+
+  it("raises no notification for a petal that worked", async () => {
+    const ring = await loadRing();
+    await vi.waitFor(() => expect(petal(ring, 2).getAttribute("aria-label")).toBe("Language · Ukrainian"));
+
+    petal(ring, 2).click();
+
+    await vi.waitFor(() => expect(emitMock).toHaveBeenCalledWith(EVENT_SETTINGS_CHANGED));
+    expect(notifyErrorMock).not.toHaveBeenCalled();
   });
 });

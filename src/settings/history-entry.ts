@@ -2,7 +2,7 @@
  * One recording as a card, the same in History and in the Meetings and Files sections:
  * its text, its meta line, and Copy, Star and the menu with Delete.
  */
-import { api, type HistoryEntry } from "../api";
+import { api, ApiRequestError, type HistoryEntry } from "../api";
 import { copyToClipboard } from "../clipboard";
 import { icon, type IconName } from "../ui/icons";
 import { countOf, formatClock, formatDuration } from "./history-timeline";
@@ -10,6 +10,7 @@ import { escapeHtml } from "./html";
 
 const COPIED_FLASH_MS = 1500;
 const EXCERPT_LEAD_CHARS = 80;
+export const DELETE_REFUSED = "Couldn't delete this — try again";
 
 export const SOURCE_ICONS: Record<HistoryEntry["source"], IconName> = {
   dictation: "mic",
@@ -80,6 +81,15 @@ function metaLine(entry: HistoryEntry): string {
   return parts.map((part) => `<span>${part}</span>`).join(metaSeparator());
 }
 
+/** Says on the card, beside its meta line, that its Delete was refused. */
+function sayDeleteRefused(card: HTMLElement): void {
+  const line = document.createElement("span");
+  line.className = "entry-refusal";
+  line.setAttribute("role", "alert");
+  line.textContent = DELETE_REFUSED;
+  card.querySelector(".entry-actions")!.before(line);
+}
+
 function paintStar(button: HTMLButtonElement, starred: boolean): void {
   button.setAttribute("aria-pressed", String(starred));
   button.classList.toggle("entry-star--on", starred);
@@ -91,7 +101,8 @@ export interface EntryCards {
 }
 
 /** Builds the cards of one list. One menu is open at a time; `deleted` runs with a card
- *  once the backend has deleted its entry. */
+ *  once the backend has deleted its entry or says it is already gone. A refused Delete is
+ *  said on the card until Delete is picked again. */
 export function createEntryCards(deleted: (card: HTMLElement) => void): EntryCards {
   const textFit = new ResizeObserver(markLongTexts);
   let openMenu: { menu: HTMLElement; trigger: HTMLButtonElement } | null = null;
@@ -207,11 +218,17 @@ export function createEntryCards(deleted: (card: HTMLElement) => void): EntryCar
         }, COPIED_FLASH_MS);
       } else if (button.dataset.action === "delete") {
         closeMenu(true);
+        el.querySelector(".entry-refusal")?.remove();
         try {
           await api.deleteHistoryEntry(entry.id);
           deleted(el);
         } catch (err) {
+          if (err instanceof ApiRequestError && err.status === 404) {
+            deleted(el);
+            return;
+          }
           console.error(err);
+          sayDeleteRefused(el);
         }
       }
     });

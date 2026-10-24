@@ -1,5 +1,5 @@
 import { api, ApiAuthError, ApiRequestError, UPLOAD_STALL_MS } from "../api";
-import { ACCEPTED_AUDIO_EXTENSIONS, EVENT_FILE_PICKED, MAX_UPLOAD_BYTES } from "../contracts";
+import { ACCEPTED_AUDIO_EXTENSIONS, EVENT_FILE_PICK_REFUSED, EVENT_FILE_PICKED, MAX_UPLOAD_BYTES } from "../contracts";
 import { loadEventApi } from "../event-api";
 import { TimedOutError, withTimeout } from "../timeout";
 import { icon } from "../ui/icons";
@@ -120,7 +120,8 @@ export interface FileTranscription {
  * files dims the window under "Drop to transcribe" (ADR 087) or, while a `.drop-area` is on
  * screen, lights that area instead, and the shell hands over a file picked from the ring or
  * the tray. Every file taken joins `uploads` and is sent one at a time; a lone refused file,
- * or one still uploading or being transcribed, is explained on the overlay instead.
+ * one still uploading or being transcribed, or a pick the shell could not hand over is
+ * explained on the overlay instead.
  */
 export function mountFileTranscription(root: HTMLElement, hooks: UploadHooks): FileTranscription {
   const overlay = document.createElement("div");
@@ -361,16 +362,19 @@ export function mountFileTranscription(root: HTMLElement, hooks: UploadHooks): F
     if (files.length > 0) take(files.map(fromPage));
   };
 
-  let stopHearingShell: (() => void) | null = null;
+  let stopHearingShell: (() => void)[] = [];
   let tornDown = false;
   void hearShell();
 
   async function hearShell(): Promise<void> {
     try {
       const { listen } = await loadEventApi();
-      const stop = await listen<ShellPickedFile>(EVENT_FILE_PICKED, ({ payload }) => take([fromShell(payload)]));
-      if (tornDown) stop();
-      else stopHearingShell = stop;
+      const stops = [
+        await listen<ShellPickedFile>(EVENT_FILE_PICKED, ({ payload }) => take([fromShell(payload)])),
+        await listen<string>(EVENT_FILE_PICK_REFUSED, ({ payload }) => refuse(payload)),
+      ];
+      if (tornDown) for (const stop of stops) stop();
+      else stopHearingShell = stops;
     } catch {
     }
   }
@@ -390,7 +394,7 @@ export function mountFileTranscription(root: HTMLElement, hooks: UploadHooks): F
       for (const transfer of transfers) transfer.stop?.abort();
       transfers = [];
       listeners.clear();
-      stopHearingShell?.();
+      for (const stop of stopHearingShell) stop();
       dragEnded();
       window.removeEventListener("dragenter", onEnter);
       window.removeEventListener("dragover", onOver);

@@ -1,9 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "ring",
-  "description": "The right-click ring hears the shell's events and passes picked actions to the other windows",
+  "description": "The right-click ring hears the shell's events, passes picked actions to the other windows, and raises a notification when one fails",
   "windows": ["ring"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission",
+    "notification:allow-notify"
   ]
 }

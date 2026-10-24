@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { petalLabel, stepFor, UNREAD_RING_STATE, type RingState } from "./ring-actions";
+import { failureText, petalLabel, stepFor, UNREAD_RING_STATE, type RingState } from "./ring-actions";
 
 function read(overrides: Partial<NonNullable<RingState["settings"]>> = {}, meetingRecording = false): RingState {
   return {
@@ -85,5 +85,27 @@ describe("what a petal does", () => {
       kind: "open-panel",
       target: { panel: "settings" },
     });
+  });
+});
+
+describe("what a failed petal says", () => {
+  it("names the language it could not switch to", () => {
+    expect(failureText({ kind: "switch-language", language: "en" }, read())).toBe(
+      "Couldn't switch to English — try again.",
+    );
+  });
+
+  it("says whether the meeting failed to start or to stop", () => {
+    const toggle = { kind: "toggle-meeting" } as const;
+
+    expect(failureText(toggle, read())).toBe("Couldn't start the meeting — try again.");
+    expect(failureText(toggle, read({}, true))).toBe("Couldn't stop the meeting — try again.");
+  });
+
+  it("names the file picker and the main window", () => {
+    expect(failureText({ kind: "pick-file" }, read())).toBe("Couldn't open the file picker — try again.");
+    expect(failureText({ kind: "open-panel", target: { panel: "settings" } }, read())).toBe(
+      "Couldn't open JustSay — try again.",
+    );
   });
 });

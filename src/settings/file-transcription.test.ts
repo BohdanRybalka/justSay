@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EVENT_FILE_PICKED, MAX_UPLOAD_BYTES } from "../contracts";
+import { EVENT_FILE_PICK_REFUSED, EVENT_FILE_PICKED, MAX_UPLOAD_BYTES } from "../contracts";
 
 const apiMock = {
   startFileJob: vi.fn(),
@@ -610,13 +610,23 @@ describe("a file picked from the ring or the tray", () => {
     expect(onSent).not.toHaveBeenCalled();
   });
 
+  it("explains a pick the shell could not hand over, the way it explains a refused drop", async () => {
+    await vi.waitFor(() => expect(shellListeners.get(EVENT_FILE_PICK_REFUSED)).toBeTypeOf("function"));
+
+    shellListeners.get(EVENT_FILE_PICK_REFUSED)!({ payload: "This file can't be read" });
+
+    expect(shownText()).toBe("This file can't be read");
+    expect(overlay().classList.contains("drop-overlay--refused")).toBe(true);
+    expect(uploads()).toEqual([]);
+  });
+
   it("stops hearing the shell on teardown", async () => {
-    await vi.waitFor(() => expect(shellListeners.get(EVENT_FILE_PICKED)).toBeTypeOf("function"));
+    await vi.waitFor(() => expect(shellListeners.get(EVENT_FILE_PICK_REFUSED)).toBeTypeOf("function"));
 
     mounted.destroy();
     mounted = idle;
 
-    expect(stopHearing).toHaveBeenCalledOnce();
+    expect(stopHearing).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -1,7 +1,8 @@
 //! An audio file the user picks in the system dialog, opened from the ring or
 //! the tray. The main window is told the file's name and size under a token
 //! and fetches the bytes with that token once it accepts the file, so the page
-//! never holds a path and has no filesystem permission (ADR 087).
+//! never holds a path and has no filesystem permission (ADR 087). A pick that
+//! cannot be handed over is told to the main window as a refusal.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -26,6 +27,14 @@ pub struct PickedFile {
     size: u64,
 }
 
+/// What the main window is told about a pick: the file under its token, or the
+/// sentence its refusal overlay shows.
+#[derive(Debug, PartialEq)]
+enum Handover {
+    Picked(PickedFile),
+    Refused(&'static str),
+}
+
 /// The one file picked last, waiting for the main window to take it. A newer
 /// pick replaces an older one nobody took.
 #[derive(Default)]
@@ -47,6 +56,16 @@ impl PickedFiles {
         Ok(PickedFile { token, name, size })
     }
 
+    fn hand_over(&self, picked: Result<PathBuf, String>) -> Handover {
+        match picked.and_then(|path| self.keep(&path)) {
+            Ok(file) => Handover::Picked(file),
+            Err(e) => {
+                log::warn!("The picked file cannot be handed to the main window: {}", e);
+                Handover::Refused(UNREADABLE)
+            }
+        }
+    }
+
     fn take(&self, token: &str) -> Option<PathBuf> {
         let mut waiting = self.lock();
         match waiting.as_ref() {
@@ -61,7 +80,8 @@ impl PickedFiles {
 }
 
 /// Bring the main window forward and open the system file dialog over it.
-/// A picked file is announced to that window; a cancelled dialog does nothing.
+/// A picked file, or why it cannot be had, is told to that window; a cancelled
+/// dialog does nothing.
 pub fn pick(app: &AppHandle) {
     crate::show_settings(app);
     let Some(window) = app.get_webview_window("settings") else {
@@ -78,20 +98,17 @@ pub fn pick(app: &AppHandle) {
             let Some(picked) = picked else {
                 return;
             };
-            let announced = picked
+            let picked = picked
                 .into_path()
-                .map_err(|e| format!("the pick is not a file path — {}", e))
-                .and_then(|path| announce(&app, &path));
-            if let Err(e) = announced {
-                log::warn!("The picked file was not handed to the main window: {}", e);
+                .map_err(|e| format!("the pick is not a file path — {}", e));
+            let told = match app.state::<PickedFiles>().hand_over(picked) {
+                Handover::Picked(file) => app.emit_to("settings", "file-picked", file),
+                Handover::Refused(reason) => app.emit_to("settings", "file-pick-refused", reason),
+            };
+            if let Err(e) = told {
+                log::warn!("Telling the main window about the picked file failed: {}", e);
             }
         });
-}
-
-fn announce(app: &AppHandle, path: &Path) -> Result<(), String> {
-    let file = app.state::<PickedFiles>().keep(path)?;
-    app.emit_to("settings", "file-picked", file)
-        .map_err(|e| format!("telling the main window failed — {}", e))
 }
 
 /// The ring's "Transcribe a file" petal.
@@ -117,7 +134,7 @@ fn read_picked(path: &Path) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_picked, PickedFiles, UNREADABLE};
+    use super::{read_picked, Handover, PickedFiles, UNREADABLE};
     use std::path::PathBuf;
 
     fn audio_file(bytes: &[u8]) -> (PathBuf, PathBuf) {
@@ -170,6 +187,32 @@ mod tests {
 
         assert!(PickedFiles::default().keep(&path).is_err());
         assert_eq!(read_picked(&path), Err(UNREADABLE.to_string()));
+    }
+
+    #[test]
+    fn a_pick_that_cannot_be_kept_is_handed_over_as_a_refusal() {
+        let (folder, path) = audio_file(b"audio");
+        std::fs::remove_dir_all(&folder).unwrap();
+        let files = PickedFiles::default();
+
+        assert_eq!(files.hand_over(Ok(path)), Handover::Refused(UNREADABLE));
+        assert_eq!(
+            files.hand_over(Err("the pick is not a file path".to_string())),
+            Handover::Refused(UNREADABLE)
+        );
+    }
+
+    #[test]
+    fn a_readable_pick_is_handed_over_under_a_token_that_takes_it() {
+        let (folder, path) = audio_file(b"audio");
+        let files = PickedFiles::default();
+
+        let Handover::Picked(picked) = files.hand_over(Ok(path.clone())) else {
+            panic!("a readable pick was refused");
+        };
+        assert_eq!(picked.name, "Interview 3.m4a");
+        assert_eq!(files.take(&picked.token), Some(path));
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]
