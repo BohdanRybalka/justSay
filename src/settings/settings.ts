@@ -143,7 +143,7 @@ const panels: Record<PanelName, PanelRenderer> = {
   meetings: (container, loaded, windowHidden) =>
     renderMeetings(container, loaded, windowHidden, openHistoryOf),
   files: (container, loaded) => {
-    filesPanel = renderFiles(container, loaded, () => fileTranscription?.pick(), openHistoryOf);
+    filesPanel = renderFiles(container, loaded, () => fileTranscription?.pick(), openHistoryOf, fileTranscription?.uploads);
     return filesPanel;
   },
   settings: renderSettingsPanel,
@@ -562,14 +562,18 @@ sidebar.querySelectorAll<HTMLButtonElement>("[data-panel]").forEach((item) => {
 });
 
 
-/** A file picked or dropped on the window is now a job: show its card on the Files page. */
-function showStartedJob() {
+/** A file picked or dropped on the window is uploading: show its card at the top of the Files page. */
+function showFileUploads() {
   if (currentPanel === "files" && settings) {
     pane.scrollTop = 0;
-    filesPanel?.jobStarted();
     return;
   }
   switchPanel("files");
+}
+
+/** An upload is now a job: resolves once its card is on the Files page, if that page is open. */
+async function showSentFile() {
+  await filesPanel?.jobStarted();
 }
 
 
@@ -683,7 +687,7 @@ function init() {
   applyThemePreference("system");
   mountIconSprite(document);
   renderTitlebar(titlebar, detectShortcutPlatform(navigator));
-  fileTranscription = mountFileTranscription(document.body, showStartedJob);
+  fileTranscription = mountFileTranscription(document.body, { onTaken: showFileUploads, onSent: showSentFile });
   void connectTitlebarToWindow();
   void initAppVersion();
   void initAccountName();

@@ -65,14 +65,17 @@ vi.mock("./tabs/insights", () => ({
   }),
 }));
 
-const fileTranscriptionMounts: { root: HTMLElement; onStarted: () => void; pick: () => void }[] = [];
+type UploadHooks = import("./file-transcription").UploadHooks;
+type Uploads = import("./file-transcription").Uploads;
+const fileTranscriptionMounts: { root: HTMLElement; hooks: UploadHooks; pick: () => void; uploads: Uploads }[] = [];
 
 vi.mock("./file-transcription", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./file-transcription")>()),
-  mountFileTranscription: vi.fn((root: HTMLElement, onStarted: () => void) => {
+  mountFileTranscription: vi.fn((root: HTMLElement, hooks: UploadHooks) => {
     const pick = vi.fn();
-    fileTranscriptionMounts.push({ root, onStarted, pick });
-    return { pick, destroy: () => {} };
+    const uploads: Uploads = { current: () => [], watch: () => () => {}, remove: vi.fn(), retry: vi.fn() };
+    fileTranscriptionMounts.push({ root, hooks, pick, uploads });
+    return { pick, uploads, destroy: () => {} };
   }),
 }));
 
@@ -95,13 +98,14 @@ vi.mock("./tabs/history", () => ({
 const recentLists: {
   kind: string;
   openHistory: (source: string) => void;
+  uploads: Uploads | undefined;
   tab: { destroy: Mock; releaseResources: Mock; resumeResources: Mock; jobStarted: Mock };
 }[] = [];
 
 vi.mock("./recent", () => ({
-  mountRecent: vi.fn((container: HTMLElement, kind: string, openHistory: (source: string) => void) => {
-    const tab = { destroy: vi.fn(), releaseResources: vi.fn(), resumeResources: vi.fn(), jobStarted: vi.fn() };
-    recentLists.push({ kind, openHistory, tab });
+  mountRecent: vi.fn((container: HTMLElement, kind: string, openHistory: (source: string) => void, uploads?: Uploads) => {
+    const tab = { destroy: vi.fn(), releaseResources: vi.fn(), resumeResources: vi.fn(), jobStarted: vi.fn(async () => {}) };
+    recentLists.push({ kind, openHistory, uploads, tab });
     container.insertAdjacentHTML("beforeend", `<div class="recent-stub" data-kind="${kind}"></div>`);
     return tab;
   }),
@@ -1720,7 +1724,7 @@ describe("the Settings window being dismissed", () => {
 });
 
 describe("a file picked or dropped on the window", () => {
-  async function bootOn(panel: string): Promise<() => void> {
+  async function bootOn(panel: string): Promise<UploadHooks> {
     apiMock.health.mockResolvedValue({ status: "ok", version: "0.0.0", stt_mode: "cloud" });
     apiMock.getSettings.mockResolvedValue(buildSettings());
     apiMock.cloudKeyStatus.mockResolvedValue({ gemini_key_set: false, groq_key_set: false });
@@ -1731,7 +1735,7 @@ describe("a file picked or dropped on the window", () => {
     await vi.waitFor(() => expect(document.getElementById("insights-body")).not.toBeNull());
     document.querySelector<HTMLButtonElement>(`[data-panel="${panel}"]`)!.click();
     expect(fileTranscriptionMounts).toHaveLength(1);
-    return fileTranscriptionMounts[0].onStarted;
+    return fileTranscriptionMounts[0].hooks;
   }
 
   const currentPanel = () =>
@@ -1752,34 +1756,58 @@ describe("a file picked or dropped on the window", () => {
     expect(fileTranscriptionMounts[0].pick).toHaveBeenCalledOnce();
   });
 
-  it("opens Files once its job has started", async () => {
-    const jobStarted = await bootOn("dictation");
+  it("opens Files as soon as a file is taken, with the uploads in its list", async () => {
+    const { onTaken } = await bootOn("dictation");
 
-    jobStarted();
+    onTaken();
 
     expect(currentPanel()).toBe("files");
     expect(document.querySelector(".recent-stub[data-kind='file']")).not.toBeNull();
+    const files = recentLists.find((list) => list.kind === "file")!;
+    expect(files.uploads).toBe(fileTranscriptionMounts[0].uploads);
   });
 
   it("opens Files from Meetings too, where its card is, not History", async () => {
-    const jobStarted = await bootOn("meetings");
+    const { onTaken } = await bootOn("meetings");
 
-    jobStarted();
+    onTaken();
 
     expect(currentPanel()).toBe("files");
   });
 
-  it("on Files already, shows the new job at the top instead of drawing the panel again", async () => {
-    const jobStarted = await bootOn("files");
+  it("on Files already, shows the new upload at the top instead of drawing the panel again", async () => {
+    const { onTaken } = await bootOn("files");
     const pane = document.getElementById("pane")!;
     pane.scrollTop = 400;
     const files = recentLists.find((list) => list.kind === "file")!.tab;
 
-    jobStarted();
+    onTaken();
 
-    expect(files.jobStarted).toHaveBeenCalledOnce();
     expect(files.destroy).not.toHaveBeenCalled();
     expect(pane.scrollTop).toBe(0);
+  });
+
+  it("has the Files list draw the job of a sent file, and answers once it is drawn", async () => {
+    const { onSent } = await bootOn("files");
+    const files = recentLists.find((list) => list.kind === "file")!.tab;
+    let drawn = () => {};
+    files.jobStarted.mockReturnValueOnce(new Promise<void>((resolve) => (drawn = resolve)));
+    const answered = vi.fn();
+
+    void onSent().then(answered);
+    await Promise.resolve();
+    expect(files.jobStarted).toHaveBeenCalledOnce();
+    expect(answered).not.toHaveBeenCalled();
+
+    drawn();
+
+    await vi.waitFor(() => expect(answered).toHaveBeenCalledOnce());
+  });
+
+  it("answers a sent file at once when Files is not open", async () => {
+    const { onSent } = await bootOn("insights");
+
+    await expect(onSent()).resolves.toBeUndefined();
   });
 });
 

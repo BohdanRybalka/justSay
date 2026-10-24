@@ -5,19 +5,20 @@
  * of it and says in which language and where a file becomes text (the Dictation page's choice).
  */
 import type { EntrySource, UserSettings } from "../../api";
-import { DROP_AREA_CLASS, DROP_HINT } from "../file-transcription";
+import { DROP_AREA_CLASS, DROP_HINT, type Uploads } from "../file-transcription";
 import { mountRecent, type Recent } from "../recent";
 import { icon } from "../../ui/icons";
 import { mountLanguageCard } from "./language-card";
 import { modelNoteHtml } from "./mode-rows";
 
-/** Adds the Files page to the end of `container`; Choose a file calls `pick`, and All in
- *  History calls `openHistory` with the files filter. */
+/** Adds the Files page to the end of `container`; Choose a file calls `pick`, All in
+ *  History calls `openHistory` with the files filter, and `uploads` head the latest files. */
 export function renderFiles(
   container: HTMLElement,
   settings: UserSettings,
   pick: () => void,
   openHistory: (source: EntrySource) => void,
+  uploads?: Uploads,
 ): Recent {
   container.insertAdjacentHTML(
     "beforeend",
@@ -35,7 +36,7 @@ export function renderFiles(
   );
 
   container.querySelector<HTMLButtonElement>("#files-choose")!.addEventListener("click", pick);
-  const recent = mountRecent(container, "file", openHistory);
+  const recent = mountRecent(container, "file", openHistory, uploads);
   const language = mountLanguageCard(container, settings, {
     idPrefix: "files",
     field: "files_language",

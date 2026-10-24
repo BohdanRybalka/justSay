@@ -13,7 +13,9 @@ vi.mock("../api", async (importOriginal) => {
   return { ...actual, api: apiMock };
 });
 
-const { createJobCards, jobStatusText, JOBS_POLL_MS } = await import("./history-jobs");
+const { createJobCards, createUploadCard, jobStatusText, renderUploadCard, uploadStatusText, JOBS_POLL_MS } =
+  await import("./history-jobs");
+type Upload = import("./file-transcription").Upload;
 const { icon } = await import("../ui/icons");
 
 function job(overrides: Partial<TranscriptionJob> = {}): TranscriptionJob {
@@ -292,5 +294,77 @@ describe("createJobCards", () => {
     await reading;
 
     expect(shown).toEqual([]);
+  });
+});
+
+describe("upload cards", () => {
+  function upload(overrides: Partial<Upload> = {}): Upload {
+    return { name: "interview.m4a", state: "uploading", sentFraction: 0.45, error: null, retryable: false, ...overrides };
+  }
+
+  function drawn(of: Upload) {
+    const actions = { remove: vi.fn(), retry: vi.fn() };
+    const card = createUploadCard(of, actions);
+    renderUploadCard(card, of);
+    return { card, actions };
+  }
+
+  const retryButton = (card: HTMLElement) => card.querySelector<HTMLButtonElement>('[data-action="retry"]')!;
+  const removeButton = (card: HTMLElement) => card.querySelector<HTMLButtonElement>('[data-action="remove"]')!;
+
+  it("says how much has gone, that it waits its turn, or why it failed", () => {
+    expect(uploadStatusText(upload({ sentFraction: 0.456 }))).toBe("Uploading · 46%");
+    expect(uploadStatusText(upload({ state: "waiting", sentFraction: 0 }))).toBe("Waiting");
+    expect(uploadStatusText(upload({ state: "failed", error: "The upload stopped" }))).toBe("The upload stopped");
+  });
+
+  it("is drawn as a file job's card, with its bar as full as the upload", () => {
+    const { card } = drawn(upload());
+
+    expect(card.classList.contains("entry--job")).toBe(true);
+    expect(card.dataset.kind).toBe("file");
+    expect(card.querySelector(".entry-job-name")!.textContent).toBe("interview.m4a");
+    expect(status(card)).toBe("Uploading · 45%");
+    expect(card.querySelector<HTMLElement>(".entry-progress i")!.style.width).toBe("45%");
+    expect(retryButton(card).hidden).toBe(true);
+    expect(removeButton(card).getAttribute("aria-label")).toBe("Cancel");
+  });
+
+  it("cancels the upload from the ×", () => {
+    const of = upload();
+    const { card, actions } = drawn(of);
+
+    removeButton(card).click();
+
+    expect(actions.remove).toHaveBeenCalledWith(of);
+  });
+
+  it("offers Try again on a failed upload, and the × dismisses it", () => {
+    const of = upload({ state: "failed", error: "The upload stopped", retryable: true });
+    const { card, actions } = drawn(of);
+
+    expect(card.classList.contains("entry--job-failed")).toBe(true);
+    expect(retryButton(card).hidden).toBe(false);
+    expect(removeButton(card).getAttribute("aria-label")).toBe("Dismiss");
+    retryButton(card).click();
+    expect(actions.retry).toHaveBeenCalledWith(of);
+  });
+
+  it("offers no Try again on a file that was refused", () => {
+    const { card } = drawn(upload({ name: "notes.txt", state: "failed", error: "That's not an audio file" }));
+
+    expect(status(card)).toBe("That's not an audio file");
+    expect(retryButton(card).hidden).toBe(true);
+  });
+
+  it("goes back to an uploading card when Try again sends it", () => {
+    const of = { ...upload({ state: "failed", error: "The upload stopped", retryable: true }) };
+    const { card } = drawn(of);
+
+    renderUploadCard(card, { ...of, state: "uploading", sentFraction: 0, error: null });
+
+    expect(card.classList.contains("entry--job-failed")).toBe(false);
+    expect(status(card)).toBe("Uploading · 0%");
+    expect(retryButton(card).hidden).toBe(true);
   });
 });

@@ -515,17 +515,71 @@ async function fetchJsonUntilAnswered<T>(
   return fetchJson<T>(path, await buildRequest());
 }
 
-/** The one place a `Budget` decides which of the two mechanisms runs, so a call
- *  that builds its own request — `startFileJob` and its `FormData` — is placed
- *  by the same object every other endpoint is placed by. */
-function send<T>(
-  path: string,
-  buildRequest: () => Promise<Outgoing>,
-  budget: Budget,
-): Promise<T> {
-  return budget.ms === null
-    ? fetchJsonUntilAnswered<T>(path, buildRequest)
-    : fetchJsonWithin<T>(path, buildRequest, budget.ms);
+/** How long an upload may go with no byte moving and no answer arriving before
+ *  it is given up, the rule and the number of Uppy's XHR uploader; the upload as
+ *  a whole may take as long as it needs. */
+export const UPLOAD_STALL_MS = 30_000;
+
+/** What an upload reports while it runs, and the signal that stops it. */
+export interface UploadWatch {
+  onProgress: (sentFraction: number) => void;
+  signal: AbortSignal;
+}
+
+function cancelled(): DOMException {
+  return new DOMException("The upload was cancelled.", "AbortError");
+}
+
+/** Posts `form` through `XMLHttpRequest`, the one transport that reports upload
+ *  progress in both webviews, and answers the JSON reply. Rejects with
+ *  `TimedOutError` after `UPLOAD_STALL_MS` of silence, a `TypeError` as `fetch`
+ *  would when nothing answers, the refusal `responseError` reads, or an
+ *  `AbortError` once `watch.signal` aborts. */
+async function upload<T>(path: string, form: FormData, watch: UploadWatch): Promise<T> {
+  const { token, baseUrl } = await backendAddress();
+  if (watch.signal.aborted) throw cancelled();
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let stall: ReturnType<typeof setTimeout> | undefined;
+    let stalled = false;
+    const cancel = () => xhr.abort();
+    const waitForProgress = () => {
+      clearTimeout(stall);
+      stall = setTimeout(() => {
+        stalled = true;
+        xhr.abort();
+      }, UPLOAD_STALL_MS);
+    };
+    const settle = () => {
+      clearTimeout(stall);
+      watch.signal.removeEventListener("abort", cancel);
+    };
+    xhr.upload.onprogress = (event) => {
+      waitForProgress();
+      if (event.lengthComputable) watch.onProgress(event.loaded / event.total);
+    };
+    xhr.onload = () => {
+      settle();
+      const resp = new Response(xhr.responseText, { status: xhr.status, statusText: xhr.statusText });
+      recordAuthOutcome(path, resp);
+      if (resp.ok) resp.json().then(resolve, reject);
+      else responseError(resp).then(reject, reject);
+    };
+    xhr.onerror = () => {
+      settle();
+      portStale = true;
+      reject(new TypeError("Failed to fetch"));
+    };
+    xhr.onabort = () => {
+      settle();
+      reject(stalled ? new TimedOutError(UPLOAD_STALL_MS, path) : cancelled());
+    };
+    xhr.open("POST", `${baseUrl}${path}`);
+    if (token) xhr.setRequestHeader("X-JustSay-Token", token);
+    watch.signal.addEventListener("abort", cancel, { once: true });
+    waitForProgress();
+    xhr.send(form);
+  });
 }
 
 /** `budget` is an object rather than a fourth positional argument because the
@@ -550,7 +604,9 @@ function request<T>(
     }
     return { baseUrl, init };
   };
-  return send<T>(path, buildRequest, budget);
+  return budget.ms === null
+    ? fetchJsonUntilAnswered<T>(path, buildRequest)
+    : fetchJsonWithin<T>(path, buildRequest, budget.ms);
 }
 
 
@@ -1128,25 +1184,14 @@ export const api = {
       UNRECONCILED,
     ),
 
-  /** Queues an audio file and answers its job id at once; the text lands in
-   *  History and never on the clipboard. `UNRECONCILED`: abandoning it could
-   *  leave a job running that the caller never learned the id of. */
-  startFileJob: (fileBytes: ArrayBuffer, filename: string): Promise<{ id: string }> => {
+  /** Uploads an audio file and answers its job id once the backend has queued
+   *  it; the text lands in History and never on the clipboard. Bounded by
+   *  `UPLOAD_STALL_MS` of silence rather than by a `Budget`: giving up is safe
+   *  because a job the backend did queue still shows in `jobs()`. */
+  startFileJob: (file: Blob, filename: string, watch: UploadWatch): Promise<{ id: string }> => {
     const form = new FormData();
-    const blob = new Blob([fileBytes], { type: "application/octet-stream" });
-    form.append("file", blob, filename);
-    return send<{ id: string }>(
-      "/jobs/file",
-      async () => {
-        const { token, baseUrl } = await backendAddress();
-        const headers: Record<string, string> = {};
-        if (token) {
-          headers["X-JustSay-Token"] = token;
-        }
-        return { baseUrl, init: { method: "POST", body: form, headers } };
-      },
-      UNRECONCILED,
-    );
+    form.append("file", file, filename);
+    return upload<{ id: string }>("/jobs/file", form, watch);
   },
 
   /** Running jobs, failed ones until dismissed, and those finished in the last minute, newest first. */

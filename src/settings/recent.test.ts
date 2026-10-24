@@ -18,6 +18,7 @@ vi.mock("../api", async (importOriginal) => {
 });
 
 const { mountRecent, RECENT_POLL_MS, RECENT_SHOWN } = await import("./recent");
+type Upload = import("./file-transcription").Upload;
 const { JOBS_POLL_MS } = await import("./history-jobs");
 
 function entryOf(id: string, source: HistoryEntry["source"] = "meeting"): HistoryEntry {
@@ -397,5 +398,102 @@ describe("mountRecent — All in History", () => {
     container.querySelector<HTMLButtonElement>(".see-all")!.click();
 
     expect(openHistory).toHaveBeenCalledExactlyOnceWith("file");
+  });
+});
+
+describe("mountRecent — files still uploading", () => {
+  function uploading(name: string, overrides: Partial<Upload> = {}): Upload {
+    return { name, state: "uploading", sentFraction: 0, error: null, retryable: false, ...overrides };
+  }
+
+  function uploadsOf(first: Upload[]) {
+    const listeners = new Set<() => void>();
+    let current = first;
+    return {
+      current: () => current,
+      watch: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      remove: vi.fn(),
+      retry: vi.fn(),
+      set(next: Upload[]) {
+        current = next;
+        for (const listener of listeners) listener();
+      },
+      watchers: () => listeners.size,
+    };
+  }
+
+  function mountWith(uploads: ReturnType<typeof uploadsOf>) {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const recent = mountRecent(container, "file", vi.fn(), uploads);
+    return { container, recent };
+  }
+
+  function names(container: HTMLElement): string[] {
+    return Array.from(container.querySelectorAll<HTMLElement>(".timeline > .entry")).map(
+      (card) => card.querySelector(".entry-job-name")?.textContent ?? card.dataset.id!,
+    );
+  }
+
+  it("draws them before any read answers, above the jobs and entries, three in all", async () => {
+    apiMock.getHistory.mockResolvedValue(pageOf([entryOf("e1", "file")], 1, null));
+    apiMock.jobs.mockResolvedValue([jobOf("j1", { kind: "file", name: "queued.mp3" })]);
+    const uploads = uploadsOf([uploading("a.m4a"), uploading("b.mp3", { state: "waiting" })]);
+
+    const { container } = mountWith(uploads);
+    expect(names(container)).toEqual(["a.m4a", "b.mp3"]);
+    await flush();
+
+    expect(names(container)).toEqual(["a.m4a", "b.mp3", "queued.mp3"]);
+  });
+
+  it("moves the same card on as the upload moves on, and drops it when the upload goes", async () => {
+    const upload = uploading("a.m4a");
+    const uploads = uploadsOf([upload]);
+    const { container } = mountWith(uploads);
+    await flush();
+    const card = container.querySelector(".timeline > .entry")!;
+
+    Object.assign(upload, { sentFraction: 0.5 });
+    uploads.set([upload]);
+
+    expect(container.querySelector(".timeline > .entry")).toBe(card);
+    expect(card.querySelector(".entry-job-status")!.textContent).toBe("Uploading · 50%");
+
+    uploads.set([]);
+
+    expect(names(container)).toEqual([]);
+  });
+
+  it("answers a job started only once the read that shows its card is drawn", async () => {
+    const uploads = uploadsOf([uploading("a.m4a")]);
+    const { container, recent } = mountWith(uploads);
+    await flush();
+    let answer: (jobs: TranscriptionJob[]) => void = () => {};
+    apiMock.jobs.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    const drawn = vi.fn();
+
+    void recent.jobStarted().then(drawn);
+    await flush();
+    expect(drawn).not.toHaveBeenCalled();
+
+    answer([jobOf("j1", { kind: "file", name: "a.m4a" })]);
+    await flush();
+
+    expect(drawn).toHaveBeenCalledOnce();
+    expect(container.querySelector('[data-job="j1"]')).not.toBeNull();
+  });
+
+  it("stops watching the uploads once destroyed", async () => {
+    const uploads = uploadsOf([]);
+    const { recent } = mountWith(uploads);
+    expect(uploads.watchers()).toBe(1);
+
+    recent.destroy();
+
+    expect(uploads.watchers()).toBe(0);
   });
 });
