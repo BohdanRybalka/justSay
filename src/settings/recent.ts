@@ -1,14 +1,15 @@
 /**
- * The latest meetings or files under a section's top card: running and failed jobs of that
- * kind first, then the newest finished entries, three in all, with a link into History.
- * Until the first read answers it shows a card shape empty; if that read fails, one muted
- * line with Try again.
+ * The latest meetings or files under a section's top card: every file still uploading, then
+ * running and failed jobs of that kind and the newest finished entries, three in all, with a link
+ * into History. Until the first read answers it shows a card shape empty; if that read fails, one
+ * muted line with Try again.
  */
 import { api, type EntrySource, type HistoryEntry } from "../api";
 import { renderReadFailure } from "../ui/controls";
 import { icon } from "../ui/icons";
+import type { Upload, Uploads } from "./file-transcription";
 import { createEntryCards, EMPTY_KIND, SKELETON_CARD, type SectionKind } from "./history-entry";
-import { createJobCards } from "./history-jobs";
+import { createJobCards, createUploadCard, renderUploadCard } from "./history-jobs";
 import type { TabLifecycle } from "./settings";
 
 export const RECENT_POLL_MS = 5000;
@@ -20,15 +21,17 @@ const HEADINGS: Record<SectionKind, string> = {
 };
 
 export interface Recent extends Required<TabLifecycle> {
-  /** A job was just queued elsewhere in the window; its card should appear now. */
-  jobStarted(): void;
+  /** A job was just queued elsewhere in the window; reads the jobs again and resolves once that read is over. */
+  jobStarted(): Promise<void>;
 }
 
-/** Adds the list to the end of `container` and keeps it current while the window is on screen. */
+/** Adds the list to the end of `container` and keeps it current while the window is on screen;
+ *  `uploads`, when given, are drawn above the jobs. */
 export function mountRecent(
   container: HTMLElement,
   kind: SectionKind,
   openHistory: (source: EntrySource) => void,
+  uploads?: Uploads,
 ): Recent {
   const root = document.createElement("div");
   root.className = "recent";
@@ -54,6 +57,7 @@ export function mountRecent(
   let entries: HistoryEntry[] = [];
   let entryRows: HTMLElement[] = [];
   let jobCards: readonly HTMLElement[] = [];
+  let uploadCards = new Map<Upload, HTMLElement>();
   let loaded = false;
   let firstReadFailed = false;
   let readSucceeded = false;
@@ -70,7 +74,7 @@ export function mountRecent(
 
   function paint(): void {
     const jobsShown = jobCards.slice(0, RECENT_SHOWN);
-    const shown = [...jobsShown, ...entryRows.slice(0, RECENT_SHOWN - jobsShown.length)];
+    const shown = [...uploadCards.values(), ...jobsShown, ...entryRows.slice(0, RECENT_SHOWN - jobsShown.length)];
     const waiting = shown.length === 0 && !loaded && !firstReadFailed;
     rows.replaceChildren(...(waiting ? [skeleton] : shown));
     rows.hidden = shown.length === 0 && !waiting;
@@ -120,6 +124,23 @@ export function mountRecent(
     () => readSucceeded,
   );
 
+  function drawUploads(): void {
+    if (!uploads) return;
+    const drawn = new Map<Upload, HTMLElement>();
+    for (const upload of uploads.current()) {
+      const card = uploadCards.get(upload) ?? createUploadCard(upload, uploads);
+      renderUploadCard(card, upload);
+      drawn.set(upload, card);
+    }
+    const before = [...uploadCards.values()];
+    const after = [...drawn.values()];
+    uploadCards = drawn;
+    if (before.length !== after.length || after.some((card, i) => before[i] !== card)) paint();
+  }
+
+  const stopWatchingUploads = uploads?.watch(drawUploads);
+  drawUploads();
+
   function startPolling(): void {
     if (pollTimer === null) {
       pollTimer = window.setInterval(() => {
@@ -141,6 +162,7 @@ export function mountRecent(
   return {
     destroy() {
       destroyed = true;
+      stopWatchingUploads?.();
       stopPolling();
       jobs.pause();
       cards.destroy();
@@ -154,8 +176,8 @@ export function mountRecent(
       void jobs.refresh();
       startPolling();
     },
-    jobStarted() {
-      if (!destroyed) void jobs.refresh();
+    async jobStarted() {
+      if (!destroyed) await jobs.refresh();
     },
   };
 }

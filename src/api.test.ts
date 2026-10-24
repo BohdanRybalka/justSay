@@ -8,6 +8,68 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 const fetchMock = vi.fn();
 vi.stubGlobal("fetch", fetchMock);
 
+/** An `XMLHttpRequest` the test drives by hand: it records what was sent and
+ *  settles only when `progress`, `answer`, `fail` or an `abort()` says so. */
+class FakeXhr {
+  static sent: FakeXhr[] = [];
+  upload: { onprogress: ((event: { loaded: number; total: number; lengthComputable: boolean }) => void) | null } =
+    { onprogress: null };
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  onabort: (() => void) | null = null;
+  status = 0;
+  statusText = "";
+  responseText = "";
+  url = "";
+  headers: Record<string, string> = {};
+  body: unknown = null;
+  aborted = false;
+
+  open(_method: string, url: string) {
+    this.url = url;
+  }
+  setRequestHeader(name: string, value: string) {
+    this.headers[name] = value;
+  }
+  send(body: unknown) {
+    this.body = body;
+    FakeXhr.sent.push(this);
+  }
+  abort() {
+    this.aborted = true;
+    this.onabort?.();
+  }
+  progress(loaded: number, total: number) {
+    this.upload.onprogress?.({ loaded, total, lengthComputable: true });
+  }
+  answer(status: number, body: unknown) {
+    this.status = status;
+    this.statusText = status === 200 ? "OK" : "Error";
+    this.responseText = JSON.stringify(body);
+    this.onload?.();
+  }
+  fail() {
+    this.onerror?.();
+  }
+}
+vi.stubGlobal("XMLHttpRequest", FakeXhr);
+
+function watching() {
+  return { onProgress: vi.fn(), signal: new AbortController().signal };
+}
+
+async function sentUpload(): Promise<FakeXhr> {
+  await vi.waitFor(() => expect(FakeXhr.sent).toHaveLength(1));
+  return FakeXhr.sent[0];
+}
+
+/** `sentUpload` for a test on fake timers, where `vi.waitFor` would move the clock. */
+async function sentUploadAtOnce(): Promise<FakeXhr> {
+  await vi.advanceTimersByTimeAsync(0);
+  expect(FakeXhr.sent).toHaveLength(1);
+  return FakeXhr.sent[0];
+}
+
 function installBridge() {
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
 }
@@ -77,6 +139,7 @@ beforeEach(() => {
   vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
   invokeMock.mockReset();
   fetchMock.mockReset();
+  FakeXhr.sent = [];
   installBridge();
 });
 
@@ -102,14 +165,15 @@ describe("token injection when a backend token is available", () => {
 
   it("startFileJob() posts the file as a job with X-JustSay-Token", async () => {
     const { api } = await import("./api");
-    fetchMock.mockResolvedValue(okJson({ id: "job-1" }));
 
-    await expect(api.startFileJob(new ArrayBuffer(4), "clip.wav")).resolves.toEqual({ id: "job-1" });
+    const pending = api.startFileJob(new Blob(["abcd"]), "clip.wav", watching());
+    const xhr = await sentUpload();
+    xhr.answer(200, { id: "job-1" });
 
-    expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:9377/jobs/file");
-    expect(headerOf(0)["X-JustSay-Token"]).toBe("secret-token");
-    const body = (fetchMock.mock.calls[0][1] as RequestInit).body as FormData;
-    expect((body.get("file") as File).name).toBe("clip.wav");
+    await expect(pending).resolves.toEqual({ id: "job-1" });
+    expect(xhr.url).toBe("http://127.0.0.1:9377/jobs/file");
+    expect(xhr.headers["X-JustSay-Token"]).toBe("secret-token");
+    expect(((xhr.body as FormData).get("file") as File).name).toBe("clip.wav");
   });
 
   it("levelStream() attaches X-JustSay-Token", async () => {
@@ -628,14 +692,15 @@ describe("401 handling", () => {
     expect(error.diagnosis).toEqual({ kind: "bridge-missing" });
   });
 
-  it("startFileJob() throws ApiAuthError on 401 too", async () => {
-    const { api, ApiAuthError } = await import("./api");
+  it("startFileJob() throws ApiAuthError on 401 too, and marks the auth failure", async () => {
+    const { api, ApiAuthError, sawAuthFailure } = await import("./api");
     invokeMock.mockResolvedValue("secret-token");
-    fetchMock.mockResolvedValue(errJson(401, "Missing or invalid API token"));
 
-    await expect(api.startFileJob(new ArrayBuffer(4), "clip.wav")).rejects.toBeInstanceOf(
-      ApiAuthError,
-    );
+    const pending = api.startFileJob(new Blob(["abcd"]), "clip.wav", watching());
+    (await sentUpload()).answer(401, { detail: "Missing or invalid API token" });
+
+    await expect(pending).rejects.toBeInstanceOf(ApiAuthError);
+    expect(sawAuthFailure()).toBe(true);
   });
 
   it("a non-401 failure stays a plain Error and does not flip sawAuthFailure()", async () => {
@@ -765,7 +830,6 @@ describe("a backend that accepts a request and never answers", () => {
     ["startMeetingRecording", (a: Api) => a.startMeetingRecording()],
     ["stopMeetingRecording", (a: Api) => a.stopMeetingRecording()],
     ["dictate", (a: Api) => a.dictate(SESSION_ID, "uk")],
-    ["startFileJob", (a: Api) => a.startFileJob(new ArrayBuffer(8), "call.wav")],
     ["removeJob", (a: Api) => a.removeJob("job-1")],
     ["retryJob", (a: Api) => a.retryJob("job-1")],
     ["updateSettings", (a: Api) => a.updateSettings({ language: "uk" })],
@@ -1567,5 +1631,115 @@ describe("what a search reply has to look like before a count is painted from it
     expect((error as Error).name).toBe("MalformedResponseError");
     expect(error).not.toBeInstanceOf(SidecarTooOldError);
     expect(error).toBeInstanceOf(MalformedResponseError);
+  });
+});
+
+describe("startFileJob — a file upload that reports its progress and gives up on silence", () => {
+  beforeEach(() => {
+    invokeMock.mockImplementation(shellAnswering("secret-token"));
+  });
+
+  it("sends the file itself rather than a copy of its bytes", async () => {
+    const { api } = await import("./api");
+    const file = new File(["audio"], "talk.m4a");
+
+    void api.startFileJob(file, "talk.m4a", watching()).catch(() => {});
+    const sent = (await sentUpload()).body as FormData;
+
+    expect((sent.get("file") as File).size).toBe(file.size);
+    expect((sent.get("file") as File).name).toBe("talk.m4a");
+  });
+
+  it("reports how much of the file has gone", async () => {
+    const { api } = await import("./api");
+    const watch = watching();
+
+    const pending = api.startFileJob(new Blob(["abcd"]), "clip.wav", watch);
+    const xhr = await sentUpload();
+    xhr.progress(25, 100);
+    xhr.progress(100, 100);
+    xhr.answer(200, { id: "job-1" });
+    await pending;
+
+    expect(watch.onProgress.mock.calls).toEqual([[0.25], [1]]);
+  });
+
+  it("gives up after the stall limit with no progress, as a timeout", async () => {
+    vi.useFakeTimers();
+    const { api, UPLOAD_STALL_MS } = await import("./api");
+    const { TimedOutError } = await import("./timeout");
+
+    const pending = api.startFileJob(new Blob(["abcd"]), "clip.wav", watching());
+    pending.catch(() => {});
+    const xhr = await sentUploadAtOnce();
+    await vi.advanceTimersByTimeAsync(UPLOAD_STALL_MS - 1);
+    expect(xhr.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(xhr.aborted).toBe(true);
+    await expect(pending).rejects.toBeInstanceOf(TimedOutError);
+  });
+
+  it("keeps going for as long as bytes keep moving", async () => {
+    vi.useFakeTimers();
+    const { api, UPLOAD_STALL_MS } = await import("./api");
+
+    const pending = api.startFileJob(new Blob(["abcd"]), "clip.wav", watching());
+    const xhr = await sentUploadAtOnce();
+    for (let step = 1; step <= 4; step += 1) {
+      await vi.advanceTimersByTimeAsync(UPLOAD_STALL_MS - 1);
+      xhr.progress(step, 4);
+    }
+    xhr.answer(200, { id: "job-1" });
+
+    expect(xhr.aborted).toBe(false);
+    await expect(pending).resolves.toEqual({ id: "job-1" });
+  });
+
+  it("stops when its caller says so, with an AbortError rather than a timeout", async () => {
+    const { api } = await import("./api");
+    const stop = new AbortController();
+
+    const pending = api.startFileJob(new Blob(["abcd"]), "clip.wav", { onProgress: vi.fn(), signal: stop.signal });
+    const xhr = await sentUpload();
+    stop.abort();
+
+    expect(xhr.aborted).toBe(true);
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("sends nothing when its caller stopped it while the token was still on its way", async () => {
+    const { api } = await import("./api");
+    const stop = new AbortController();
+    stop.abort();
+
+    const pending = api.startFileJob(new Blob(["abcd"]), "clip.wav", { onProgress: vi.fn(), signal: stop.signal });
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(FakeXhr.sent).toHaveLength(0);
+  });
+
+  it("carries the backend's reason when it refuses the file", async () => {
+    const { api, ApiRequestError } = await import("./api");
+
+    const pending = api.startFileJob(new Blob(["abcd"]), "clip.wav", watching());
+    (await sentUpload()).answer(413, { detail: "File too large (max 500MB)" });
+
+    const error = await pending.catch((e) => e);
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect(error.message).toBe("File too large (max 500MB)");
+    expect(error.status).toBe(413);
+  });
+
+  it("fails the way fetch does when nothing answers, and asks for the port again", async () => {
+    const { api } = await import("./api");
+
+    const pending = api.startFileJob(new Blob(["abcd"]), "clip.wav", watching());
+    (await sentUpload()).fail();
+    await expect(pending).rejects.toBeInstanceOf(TypeError);
+
+    fetchMock.mockResolvedValue(okJson([]));
+    await api.jobs();
+    expect(callsOf("get_backend_port")).toBe(2);
   });
 });

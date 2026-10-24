@@ -1,5 +1,6 @@
 import { api, type TranscriptionJob } from "../api";
 import { icon, type IconName } from "../ui/icons";
+import type { Upload, Uploads } from "./file-transcription";
 import { escapeHtml } from "./html";
 
 export const JOBS_POLL_MS = 1000;
@@ -11,6 +12,11 @@ const KIND_ICONS: Record<TranscriptionJob["kind"], IconName> = {
 };
 
 const RUNNING: ReadonlySet<TranscriptionJob["stage"]> = new Set(["queued", "transcribing", "saving"]);
+
+/** Whether the job is still waiting or being turned into text. */
+export function jobIsRunning(job: TranscriptionJob): boolean {
+  return RUNNING.has(job.stage);
+}
 
 /** What the card's × says it does: a meeting's or dictation's recording is deleted with its card, a file is cancelled or dismissed. */
 export function removeLabel(job: TranscriptionJob): string {
@@ -30,6 +36,48 @@ export function jobStatusText(job: TranscriptionJob): string {
     default:
       return job.progress === null ? "Transcribing" : `Transcribing · ${Math.round(job.progress * 100)}%`;
   }
+}
+
+/** The card a job is drawn on, without its stage: name, bar, status line, Try again and ×. */
+function jobCardShell(kind: TranscriptionJob["kind"], name: string): HTMLElement {
+  const card = document.createElement("article");
+  card.className = "entry entry--job";
+  card.dataset.kind = kind;
+  card.innerHTML = `
+    <span class="entry-dot">${icon(KIND_ICONS[kind], "small")}</span>
+    <p class="entry-job-name num">${escapeHtml(name)}</p>
+    <div class="entry-progress"><i></i></div>
+    <div class="entry-meta"><span class="entry-job-status" role="status"></span><span class="entry-actions">
+      <button type="button" class="entry-retry" data-action="retry" hidden>Try again</button>
+      <button type="button" data-action="remove">${icon("x", "small")}</button>
+    </span></div>
+  `;
+  return card;
+}
+
+/** What an upload's card says under its bar. */
+export function uploadStatusText(upload: Upload): string {
+  if (upload.state === "waiting") return "Waiting";
+  if (upload.state === "failed") return upload.error ?? "";
+  return `Uploading · ${Math.round(upload.sentFraction * 100)}%`;
+}
+
+/** The card of a file still on its way to the backend, drawn as a job's card: × stops or
+ *  clears it, Try again sends it once more. `renderUploadCard` paints its state. */
+export function createUploadCard(upload: Upload, uploads: Pick<Uploads, "remove" | "retry">): HTMLElement {
+  const card = jobCardShell("file", upload.name);
+  card.querySelector('[data-action="remove"]')!.addEventListener("click", () => uploads.remove(upload));
+  card.querySelector('[data-action="retry"]')!.addEventListener("click", () => uploads.retry(upload));
+  return card;
+}
+
+export function renderUploadCard(card: HTMLElement, upload: Upload): void {
+  const failed = upload.state === "failed";
+  card.classList.toggle("entry--job-failed", failed);
+  card.querySelector(".entry-job-status")!.textContent = uploadStatusText(upload);
+  card.querySelector<HTMLElement>('[data-action="retry"]')!.hidden = !(failed && upload.retryable);
+  card.querySelector('[data-action="remove"]')!.setAttribute("aria-label", failed ? "Dismiss" : "Cancel");
+  card.querySelector<HTMLElement>(".entry-progress i")!.style.width = `${upload.sentFraction * 100}%`;
 }
 
 export interface JobCards {
@@ -66,19 +114,8 @@ export function createJobCards(
   }
 
   function createCard(job: TranscriptionJob): HTMLElement {
-    const card = document.createElement("article");
-    card.className = "entry entry--job";
+    const card = jobCardShell(job.kind, job.name);
     card.dataset.job = job.id;
-    card.dataset.kind = job.kind;
-    card.innerHTML = `
-      <span class="entry-dot">${icon(KIND_ICONS[job.kind], "small")}</span>
-      <p class="entry-job-name num">${escapeHtml(job.name)}</p>
-      <div class="entry-progress"><i></i></div>
-      <div class="entry-meta"><span class="entry-job-status" role="status"></span><span class="entry-actions">
-        <button type="button" class="entry-retry" data-action="retry" hidden>Try again</button>
-        <button type="button" data-action="remove">${icon("x", "small")}</button>
-      </span></div>
-    `;
     card.querySelector('[data-action="remove"]')!.addEventListener("click", async () => {
       try {
         await api.removeJob(job.id);
@@ -147,7 +184,7 @@ export function createJobCards(
     for (const job of jobs) {
       if (gone.has(job.id)) continue;
       const existing = cards.get(job.id);
-      if (!RUNNING.has(job.stage) && job.stage !== "failed") {
+      if (!jobIsRunning(job) && job.stage !== "failed") {
         if (lingers(job, existing)) {
           order.push(existing);
           waiting = true;
@@ -164,7 +201,7 @@ export function createJobCards(
       for (const card of order) cards.set(card.dataset.job!, card);
       publish();
     }
-    if (waiting || jobs.some((job) => RUNNING.has(job.stage))) readAgainSoon();
+    if (waiting || jobs.some(jobIsRunning)) readAgainSoon();
   }
 
   function pause(): void {

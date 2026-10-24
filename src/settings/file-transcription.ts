@@ -1,10 +1,15 @@
-import { api } from "../api";
+import { api, ApiAuthError, ApiRequestError, UPLOAD_STALL_MS } from "../api";
 import { ACCEPTED_AUDIO_EXTENSIONS, EVENT_FILE_PICKED, MAX_UPLOAD_BYTES } from "../contracts";
 import { loadEventApi } from "../event-api";
+import { TimedOutError, withTimeout } from "../timeout";
 import { icon } from "../ui/icons";
+import { jobIsRunning } from "./history-jobs";
 
 export const REFUSAL_SHOWN_MS = 4000;
 export const DROP_AREA_CLASS = "drop-area";
+export const UPLOAD_STOPPED = "The upload stopped";
+export const ALREADY_UPLOADING = "This file is already uploading";
+export const ALREADY_TRANSCRIBING = "This file is already being transcribed";
 
 const DRAGGING_FILE_CLASS = "dragging-file";
 const MAX_MB = MAX_UPLOAD_BYTES / (1024 * 1024);
@@ -20,22 +25,74 @@ export interface ShellPickedFile {
 interface AudioToSend {
   name: string;
   size: number;
-  bytes: () => Promise<ArrayBuffer>;
+  body: () => Promise<Blob>;
 }
 
 function fromPage(file: File): AudioToSend {
-  return { name: file.name, size: file.size, bytes: () => file.arrayBuffer() };
+  return { name: file.name, size: file.size, body: async () => file };
 }
 
 function fromShell(picked: ShellPickedFile): AudioToSend {
-  return {
-    name: picked.name,
-    size: picked.size,
-    bytes: async () => {
-      const { invoke } = await import("@tauri-apps/api/core");
-      return invoke<ArrayBuffer>("take_picked_file", { token: picked.token });
-    },
+  let read: Promise<Blob> | null = null;
+  const readOnce = async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return new Blob([await invoke<ArrayBuffer>("take_picked_file", { token: picked.token })]);
   };
+  return { name: picked.name, size: picked.size, body: () => (read ??= readOnce()) };
+}
+
+export type UploadState = "waiting" | "uploading" | "failed";
+
+/** A file on its way to becoming a job. `error` says why a failed one failed, and
+ *  `retryable` whether Try again can send it once more. */
+export interface Upload {
+  readonly name: string;
+  readonly state: UploadState;
+  readonly sentFraction: number;
+  readonly error: string | null;
+  readonly retryable: boolean;
+}
+
+/** The files this window is sending, in the order they go, for the Files page to draw. */
+export interface Uploads {
+  current(): readonly Upload[];
+  /** Calls `listener` whenever an upload is added, moves on or goes; answers how to stop. */
+  watch(listener: () => void): () => void;
+  /** Stops a waiting or uploading file, or clears a failed one. */
+  remove(upload: Upload): void;
+  retry(upload: Upload): void;
+}
+
+interface Transfer extends Upload {
+  key: string;
+  state: UploadState;
+  sentFraction: number;
+  error: string | null;
+  retryable: boolean;
+  body: () => Promise<Blob>;
+  stop: AbortController | null;
+}
+
+function keyOf(audio: Pick<AudioToSend, "name" | "size">): string {
+  return `${audio.size}:${audio.name}`;
+}
+
+function uploadFailure(err: unknown): string {
+  return err instanceof ApiRequestError || err instanceof ApiAuthError ? err.message : UPLOAD_STOPPED;
+}
+
+function readFailure(err: unknown): string {
+  if (err instanceof TimedOutError) return UPLOAD_STOPPED;
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** What the window does as files move: `onTaken` when files join the queue, so the
+ *  Files page is on screen; `onSent` once the backend has queued one as a job, resolving
+ *  once the Files page, if open, has tried to read the jobs again, so the upload's card can
+ *  give way to the job's. */
+export interface UploadHooks {
+  onTaken: () => void;
+  onSent: () => Promise<void>;
 }
 
 /** Why this file cannot be transcribed, in the words the overlay shows, or `null` when it can. */
@@ -54,6 +111,7 @@ function carriesFiles(event: DragEvent): boolean {
 
 export interface FileTranscription {
   pick: () => void;
+  uploads: Uploads;
   destroy: () => void;
 }
 
@@ -61,10 +119,10 @@ export interface FileTranscription {
  * Every way a file reaches the window: `pick` opens the system file dialog, a drag carrying
  * files dims the window under "Drop to transcribe" (ADR 087) or, while a `.drop-area` is on
  * screen, lights that area instead, and the shell hands over a file picked from the ring or
- * the tray. The file is sent off as a job before `onStarted` runs; a refusal is explained on
- * the overlay.
+ * the tray. Every file taken joins `uploads` and is sent one at a time; a lone refused file,
+ * or one still uploading or being transcribed, is explained on the overlay instead.
  */
-export function mountFileTranscription(root: HTMLElement, onStarted: () => void): FileTranscription {
+export function mountFileTranscription(root: HTMLElement, hooks: UploadHooks): FileTranscription {
   const overlay = document.createElement("div");
   overlay.className = "drop-overlay";
   overlay.hidden = true;
@@ -80,6 +138,7 @@ export function mountFileTranscription(root: HTMLElement, onStarted: () => void)
   const picker = document.createElement("input");
   picker.type = "file";
   picker.accept = ACCEPTED_AUDIO_EXTENSIONS.join(",");
+  picker.multiple = true;
   picker.hidden = true;
   root.append(overlay, picker);
 
@@ -106,20 +165,158 @@ export function mountFileTranscription(root: HTMLElement, onStarted: () => void)
     refusalTimer = window.setTimeout(hide, REFUSAL_SHOWN_MS);
   }
 
-  async function send(audio: AudioToSend): Promise<void> {
-    const reason = refusalOf(audio);
-    if (reason) {
-      refuse(reason);
-      return;
-    }
-    try {
-      await api.startFileJob(await audio.bytes(), audio.name);
-    } catch (err) {
-      refuse(err instanceof Error ? err.message : String(err));
-      return;
-    }
-    onStarted();
+  let transfers: Transfer[] = [];
+  const listeners = new Set<() => void>();
+  let sending = false;
+  const sentJobs = new Map<string, string>();
+
+  function changed(): void {
+    for (const listener of listeners) listener();
   }
+
+  function fail(transfer: Transfer, error: string, retryable: boolean): void {
+    transfer.state = "failed";
+    transfer.error = error;
+    transfer.retryable = retryable;
+    transfer.stop = null;
+    changed();
+  }
+
+  function forget(transfer: Transfer): void {
+    transfers = transfers.filter((other) => other !== transfer);
+    changed();
+  }
+
+  async function sendOne(transfer: Transfer): Promise<void> {
+    const stop = new AbortController();
+    transfer.stop = stop;
+    transfer.state = "uploading";
+    transfer.sentFraction = 0;
+    changed();
+    let body: Blob;
+    try {
+      body = await withTimeout(transfer.body(), UPLOAD_STALL_MS);
+    } catch (err) {
+      if (!stop.signal.aborted) fail(transfer, readFailure(err), err instanceof TimedOutError);
+      return;
+    }
+    if (stop.signal.aborted) return;
+    try {
+      const { id } = await api.startFileJob(body, transfer.name, {
+        signal: stop.signal,
+        onProgress: (sentFraction) => {
+          transfer.sentFraction = sentFraction;
+          changed();
+        },
+      });
+      sentJobs.set(transfer.key, id);
+    } catch (err) {
+      if (!stop.signal.aborted) fail(transfer, uploadFailure(err), true);
+      return;
+    }
+    await hooks.onSent().catch(() => {});
+    forget(transfer);
+  }
+
+  async function sendWaiting(): Promise<void> {
+    if (sending) return;
+    sending = true;
+    const nextWaiting = () => transfers.find((t) => t.state === "waiting");
+    for (let next = nextWaiting(); next; next = nextWaiting()) await sendOne(next);
+    sending = false;
+  }
+
+  function transferOf(audio: AudioToSend): Transfer {
+    const reason = refusalOf(audio);
+    return {
+      key: keyOf(audio),
+      name: audio.name,
+      state: reason ? "failed" : "waiting",
+      sentFraction: 0,
+      error: reason,
+      retryable: false,
+      body: audio.body,
+      stop: null,
+    };
+  }
+
+  /** Forgets the files sent from here whose jobs are no longer waiting or being transcribed;
+   *  when the jobs cannot be read, every sent file still counts as being transcribed. */
+  async function forgetFinishedJobs(): Promise<void> {
+    const asked = new Map(sentJobs);
+    let running: Set<string>;
+    try {
+      running = new Set((await api.jobs()).filter(jobIsRunning).map((job) => job.id));
+    } catch {
+      return;
+    }
+    for (const [key, id] of asked) {
+      if (!running.has(id) && sentJobs.get(key) === id) sentJobs.delete(key);
+    }
+  }
+
+  function take(files: AudioToSend[]): void {
+    const lone = files.length === 1 ? refusalOf(files[0]) : null;
+    if (lone) {
+      refuse(lone);
+      return;
+    }
+    if (sentJobs.size === 0) {
+      accept(files);
+      return;
+    }
+    void forgetFinishedJobs().then(() => {
+      if (!tornDown) accept(files);
+    });
+  }
+
+  function accept(files: AudioToSend[]): void {
+    let taken = false;
+    let duplicate: string | null = null;
+    for (const audio of files) {
+      const key = keyOf(audio);
+      const same = transfers.find((t) => t.key === key);
+      if (sentJobs.has(key)) {
+        duplicate = ALREADY_TRANSCRIBING;
+        continue;
+      }
+      if (same && same.state !== "failed") {
+        duplicate ??= ALREADY_UPLOADING;
+        continue;
+      }
+      transfers = [...transfers.filter((t) => t !== same), transferOf(audio)];
+      taken = true;
+    }
+    if (taken) {
+      changed();
+      hooks.onTaken();
+      void sendWaiting();
+    }
+    if (duplicate) refuse(duplicate);
+  }
+
+  const uploads: Uploads = {
+    current: () => transfers,
+    watch(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    remove(upload) {
+      const transfer = transfers.find((t) => t === upload);
+      if (!transfer) return;
+      transfer.stop?.abort();
+      forget(transfer);
+    },
+    retry(upload) {
+      const transfer = transfers.find((t) => t === upload);
+      if (!transfer || transfer.state !== "failed" || !transfer.retryable) return;
+      transfer.state = "waiting";
+      transfer.error = null;
+      transfer.sentFraction = 0;
+      changed();
+      void sendWaiting();
+    },
+  };
 
   function dragStarted(): void {
     if (root.querySelector(`.${DROP_AREA_CLASS}`)) {
@@ -154,14 +351,14 @@ export function mountFileTranscription(root: HTMLElement, onStarted: () => void)
     event.preventDefault();
     depth = 0;
     dragEnded();
-    const file = event.dataTransfer?.files?.[0];
-    if (file) void send(fromPage(file));
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    if (files.length > 0) take(files.map(fromPage));
   };
 
   const onPicked = () => {
-    const file = picker.files?.[0];
+    const files = Array.from(picker.files ?? []);
     picker.value = "";
-    if (file) void send(fromPage(file));
+    if (files.length > 0) take(files.map(fromPage));
   };
 
   let stopHearingShell: (() => void) | null = null;
@@ -171,7 +368,7 @@ export function mountFileTranscription(root: HTMLElement, onStarted: () => void)
   async function hearShell(): Promise<void> {
     try {
       const { listen } = await loadEventApi();
-      const stop = await listen<ShellPickedFile>(EVENT_FILE_PICKED, ({ payload }) => void send(fromShell(payload)));
+      const stop = await listen<ShellPickedFile>(EVENT_FILE_PICKED, ({ payload }) => take([fromShell(payload)]));
       if (tornDown) stop();
       else stopHearingShell = stop;
     } catch {
@@ -187,8 +384,12 @@ export function mountFileTranscription(root: HTMLElement, onStarted: () => void)
 
   return {
     pick: () => picker.click(),
+    uploads,
     destroy: () => {
       tornDown = true;
+      for (const transfer of transfers) transfer.stop?.abort();
+      transfers = [];
+      listeners.clear();
       stopHearingShell?.();
       dragEnded();
       window.removeEventListener("dragenter", onEnter);
