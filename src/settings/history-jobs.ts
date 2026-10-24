@@ -1,4 +1,4 @@
-import { api, type TranscriptionJob } from "../api";
+import { api, ApiRequestError, type TranscriptionJob } from "../api";
 import { icon, type IconName } from "../ui/icons";
 import type { Upload, Uploads } from "./file-transcription";
 import { escapeHtml } from "./html";
@@ -12,6 +12,9 @@ const KIND_ICONS: Record<TranscriptionJob["kind"], IconName> = {
 };
 
 const RUNNING: ReadonlySet<TranscriptionJob["stage"]> = new Set(["queued", "transcribing", "saving"]);
+
+export const REMOVE_REFUSED = "Couldn't remove this — try again";
+export const RETRY_REFUSED = "Couldn't restart this — try again";
 
 /** Whether the job is still waiting or being turned into text. */
 export function jobIsRunning(job: TranscriptionJob): boolean {
@@ -88,11 +91,11 @@ export interface JobCards {
 }
 
 /**
- * The cards of files, meetings and dictations being transcribed. `show` receives them newest first
- * whenever the set changes. A failed job offers Try again. A finished job's card
- * stays, asking `entrySaved` to paint its row, until
+ * The cards of files, meetings and dictations being transcribed, newest first to `show`. A failed
+ * job offers Try again. A finished job's card stays, asking `entrySaved` to paint its row, until
  * `entryShown` says the row is painted, so the card turns into the entry where it stood. A job this
- * page removed is never painted again; a failed read is tried again a second later.
+ * page removed is never painted again; a failed read is tried again a second later. A refused × or
+ * Try again stays on the status line until the job moves on or × or Try again is pressed again.
  */
 export function createJobCards(
   show: (cards: HTMLElement[]) => void,
@@ -101,6 +104,7 @@ export function createJobCards(
 ): JobCards {
   const cards = new Map<string, HTMLElement>();
   const gone = new Set<string>();
+  const refusals = new Map<string, { stage: string; text: string }>();
   let timer: number | null = null;
   let generation = 0;
 
@@ -110,25 +114,39 @@ export function createJobCards(
 
   function removeCard(id: string): void {
     gone.add(id);
+    refusals.delete(id);
     if (cards.delete(id)) publish();
+  }
+
+  function sayRefused(card: HTMLElement, id: string, text: string): void {
+    refusals.set(id, { stage: card.dataset.stage!, text });
+    card.querySelector(".entry-job-status")!.textContent = text;
   }
 
   function createCard(job: TranscriptionJob): HTMLElement {
     const card = jobCardShell(job.kind, job.name);
     card.dataset.job = job.id;
     card.querySelector('[data-action="remove"]')!.addEventListener("click", async () => {
+      refusals.delete(job.id);
       try {
         await api.removeJob(job.id);
         removeCard(job.id);
       } catch (err) {
+        if (err instanceof ApiRequestError && err.status === 404) {
+          removeCard(job.id);
+          return;
+        }
         console.error(err);
+        sayRefused(card, job.id, REMOVE_REFUSED);
       }
     });
     card.querySelector('[data-action="retry"]')!.addEventListener("click", async () => {
+      refusals.delete(job.id);
       try {
         await api.retryJob(job.id);
       } catch (err) {
         console.error(err);
+        sayRefused(card, job.id, RETRY_REFUSED);
       }
       await refresh();
     });
@@ -136,8 +154,10 @@ export function createJobCards(
   }
 
   function paint(card: HTMLElement, job: TranscriptionJob): void {
+    if (refusals.get(job.id)?.stage !== job.stage) refusals.delete(job.id);
+    card.dataset.stage = job.stage;
     card.classList.toggle("entry--job-failed", job.stage === "failed");
-    card.querySelector(".entry-job-status")!.textContent = jobStatusText(job);
+    card.querySelector(".entry-job-status")!.textContent = refusals.get(job.id)?.text ?? jobStatusText(job);
     card.querySelector<HTMLElement>('[data-action="retry"]')!.hidden = job.stage !== "failed";
     card.querySelector<HTMLElement>('[data-action="remove"]')!.hidden =
       job.kind === "dictation" && job.stage === "transcribing";

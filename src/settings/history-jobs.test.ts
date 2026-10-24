@@ -13,8 +13,18 @@ vi.mock("../api", async (importOriginal) => {
   return { ...actual, api: apiMock };
 });
 
-const { createJobCards, createUploadCard, jobIsRunning, jobStatusText, renderUploadCard, uploadStatusText, JOBS_POLL_MS } =
-  await import("./history-jobs");
+const {
+  createJobCards,
+  createUploadCard,
+  jobIsRunning,
+  jobStatusText,
+  renderUploadCard,
+  uploadStatusText,
+  JOBS_POLL_MS,
+  REMOVE_REFUSED,
+  RETRY_REFUSED,
+} = await import("./history-jobs");
+const { ApiRequestError } = await import("../api");
 type Upload = import("./file-transcription").Upload;
 const { icon } = await import("../ui/icons");
 
@@ -197,6 +207,81 @@ describe("createJobCards", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(shown).toHaveLength(1);
+    expect(status(shown[0])).toBe(REMOVE_REFUSED);
+  });
+
+  it("keeps saying the × was refused while the job stays where it was, and lets go once it moves on", async () => {
+    apiMock.jobs.mockResolvedValue([job()]);
+    apiMock.removeJob.mockRejectedValue(new TypeError("Failed to fetch"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const cards = createJobCards(show, entrySaved, entryShown);
+    await cards.refresh();
+
+    shown[0].querySelector<HTMLButtonElement>('[data-action="remove"]')!.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(status(shown[0])).toBe(REMOVE_REFUSED);
+
+    apiMock.jobs.mockResolvedValue([job({ progress: 0.5 })]);
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS);
+    expect(status(shown[0])).toBe(REMOVE_REFUSED);
+
+    apiMock.jobs.mockResolvedValue([job({ stage: "saving", progress: null })]);
+    await vi.advanceTimersByTimeAsync(JOBS_POLL_MS);
+    expect(status(shown[0])).toBe("Saving");
+  });
+
+  it("takes the refusal off the card when × is pressed again", async () => {
+    apiMock.jobs.mockResolvedValue([job({ stage: "failed", progress: null, error: "Add an API key in Settings" })]);
+    apiMock.removeJob.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const cards = createJobCards(show, entrySaved, entryShown);
+    await cards.refresh();
+    const remove = shown[0].querySelector<HTMLButtonElement>('[data-action="remove"]')!;
+    remove.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(status(shown[0])).toBe(REMOVE_REFUSED);
+
+    let answer!: (err: unknown) => void;
+    apiMock.removeJob.mockReturnValueOnce(new Promise((_, reject) => (answer = reject)));
+    remove.click();
+    await cards.refresh();
+    expect(status(shown[0])).toBe("Add an API key in Settings");
+
+    answer(new TypeError("Failed to fetch"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(status(shown[0])).toBe(REMOVE_REFUSED);
+  });
+
+  it("lets a card go when its × finds the job already gone", async () => {
+    apiMock.jobs.mockResolvedValue([job({ stage: "failed", progress: null, error: "Add an API key in Settings" })]);
+    apiMock.removeJob.mockRejectedValue(new ApiRequestError("No such job", 404));
+    const cards = createJobCards(show, entrySaved, entryShown);
+    await cards.refresh();
+
+    shown[0].querySelector<HTMLButtonElement>('[data-action="remove"]')!.click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(shown).toEqual([]);
+  });
+
+  it("says on the card that Try again was refused, until it is clicked again", async () => {
+    const failed = job({ kind: "meeting", stage: "failed", progress: null, error: "Couldn't turn this meeting into text" });
+    apiMock.jobs.mockResolvedValue([failed]);
+    apiMock.retryJob.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const cards = createJobCards(show, entrySaved, entryShown);
+    await cards.refresh();
+    const retry = shown[0].querySelector<HTMLButtonElement>('[data-action="retry"]')!;
+
+    retry.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(status(shown[0])).toBe(RETRY_REFUSED);
+    expect(retry.hidden).toBe(false);
+
+    apiMock.retryJob.mockResolvedValueOnce({ id: "j1" });
+    retry.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(status(shown[0])).toBe("Couldn't turn this meeting into text");
   });
 
   it("shows a failure's reason with a Dismiss that removes it", async () => {

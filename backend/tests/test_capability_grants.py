@@ -33,6 +33,14 @@ WINDOW_CONTROL_PERMISSIONS = frozenset(
 )
 MAIN_WINDOW_LABEL = "settings"
 APP_THEME_PERMISSION = "core:app:allow-set-app-theme"
+RING_WINDOW_LABEL = "ring"
+NOTIFY_PERMISSIONS = frozenset(
+    {
+        "notification:allow-is-permission-granted",
+        "notification:allow-request-permission",
+        "notification:allow-notify",
+    }
+)
 
 RUST_BUILT_WINDOWS = {
     "widget": (WIDGET_WINDOW_RS, "src/widget/widget.ts"),
@@ -194,4 +202,19 @@ def test_the_main_window_may_set_the_app_theme():
     assert APP_THEME_PERMISSION in granted_to_main, (
         "the main window cannot set the app theme, so a chosen Light or Dark stops at the page: "
         "scrollbars and the macOS title area keep following the OS."
+    )
+
+
+def test_the_ring_may_raise_a_notification():
+    granted_to_ring = set()
+    for path in sorted(CAPABILITIES_DIR.glob("*.json")):
+        capability = json.loads(path.read_text(encoding="utf-8"))
+        if RING_WINDOW_LABEL in capability.get("windows", []):
+            granted_to_ring.update(_permission_identifiers(capability))
+
+    missing = NOTIFY_PERMISSIONS - granted_to_ring
+    assert not missing, (
+        f"the ring lost {sorted(missing)}. It closes before a picked petal runs, so a notification "
+        "is the only place a failed petal can be told; without the grant it is refused at the IPC "
+        "boundary and the click does nothing, with no message."
     )

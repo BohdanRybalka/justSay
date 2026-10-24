@@ -9,9 +9,17 @@ import {
   type NavigatePanel,
   type RingPointer,
 } from "../contracts";
+import { notifyError } from "../notify";
 import { mountIconSprite } from "../ui/icons";
 import { applyThemePreference } from "../ui/theme";
-import { petalLabel, stepFor, UNREAD_RING_STATE, type RingAction, type RingState } from "./ring-actions";
+import {
+  failureText,
+  petalLabel,
+  stepFor,
+  UNREAD_RING_STATE,
+  type RingAction,
+  type RingState,
+} from "./ring-actions";
 import { closeRing, followPointer, mountRing, openRing, renderPetalLabels } from "./ring-view";
 
 const ring = document.getElementById("ring")!;
@@ -46,7 +54,8 @@ async function switchLanguage(language: string) {
 }
 
 async function carryOut(action: RingAction) {
-  const step = stepFor(action, state);
+  const seen = state;
+  const step = stepFor(action, seen);
   try {
     if (step.kind === "toggle-meeting") {
       const { emit } = await import("@tauri-apps/api/event");
@@ -61,6 +70,7 @@ async function carryOut(action: RingAction) {
     }
   } catch (e) {
     console.warn(`The ring's ${action} petal failed:`, e);
+    void notifyError(failureText(step, seen));
   }
 }
 

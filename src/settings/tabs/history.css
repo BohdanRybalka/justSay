@@ -307,6 +307,11 @@
   opacity: .45;
 }
 
+.entry-refusal {
+  color: var(--orange);
+  font-weight: 560;
+}
+
 .entry-source {
   display: inline-flex;
   align-items: center;
