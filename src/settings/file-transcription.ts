@@ -86,7 +86,8 @@ function readFailure(err: unknown): string {
 
 /** What the window does as files move: `onTaken` when files join the queue, so the
  *  Files page is on screen; `onSent` once the backend has queued one as a job, resolving
- *  once the jobs have been read again so the upload's card can give way to the job's. */
+ *  once the Files page, if open, has tried to read the jobs again, so the upload's card can
+ *  give way to the job's. */
 export interface UploadHooks {
   onTaken: () => void;
   onSent: () => Promise<void>;

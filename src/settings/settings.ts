@@ -571,7 +571,7 @@ function showFileUploads() {
   switchPanel("files");
 }
 
-/** An upload is now a job: resolves once the Files page, if it is open, has read its jobs again. */
+/** An upload is now a job: resolves once the Files page, if it is open, has tried to read its jobs again. */
 async function showSentFile() {
   await filesPanel?.jobStarted();
 }
