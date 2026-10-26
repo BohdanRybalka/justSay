@@ -337,6 +337,8 @@ def test_the_release_verifies_the_signature_of_the_built_macos_download():
     assert "codesign --verify --deep --strict" in verify
     assert "Sealed Resources version=2" in verify
     assert "Info.plist entries=" in verify
+    field_check = verify.split('if ! grep -q "^$FIELD"', 1)[1].split("fi", 1)[0]
+    assert "exit 1" in field_check
     assert _failure_swallowing_constructs(verify) == []
 
 

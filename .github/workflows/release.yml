@@ -5,11 +5,12 @@
 # NSIS -setup.exe (Windows) and .dmg (macOS arm64) installers, plus the update
 # packages, their .sig files and latest.json that installed copies update from.
 #
-# The macOS bundle is always ad-hoc signed ("signingIdentity": "-" in
+# The macOS bundle is ad-hoc signed ("signingIdentity": "-" in
 # tauri.macos.conf.json): Apple Silicon calls an unsigned browser download
 # damaged, while an ad-hoc signed one opens after Open Anyway. A Developer ID
-# signature and notarisation stay OPT-IN: they run only when the
-# MACOS_NOTARIZE_* repository secrets exist. The Windows installer is unsigned.
+# signature and notarisation stay OPT-IN: they replace the ad-hoc identity only
+# when the MACOS_NOTARIZE_* repository secrets exist. The Windows installer is
+# unsigned.
 
 name: Release
 
@@ -352,7 +353,9 @@ jobs:
       # When the secret is missing tauri-action sees no APPLE_* env at all and
       # signs ad-hoc with the config's "-" identity — what we want until Plan
       # 008 Phase B (paid Apple Developer onboarding). APPLE_SIGNING_IDENTITY
-      # overrides that config value once the secrets exist.
+      # overrides that config value once the secrets exist; notarisation then
+      # also needs "hardenedRuntime" back on, with an entitlements file that
+      # grants com.apple.security.device.audio-input.
       #
       # Multi-line secret values (base64 .p12 certs commonly have newlines every
       # 76 chars) require the heredoc form for $GITHUB_ENV — a plain
@@ -468,7 +471,7 @@ jobs:
       # fields, and --deep --strict fails if anything inside the bundle (the
       # frozen backend, whisper-server, the audio tap helper) no longer matches
       # the signature. tauri-action has already uploaded the draft by now; a red
-      # step here is what keeps /release from publishing it.
+      # step here is the signal that this draft must not be published.
       - name: Verify the macOS download is signed
         if: runner.os == 'macOS'
         shell: bash
