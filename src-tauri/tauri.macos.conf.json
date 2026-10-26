@@ -28,7 +28,9 @@
       "resources/justsay-audiotap": "justsay-audiotap"
     },
     "macOS": {
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "signingIdentity": "-",
+      "hardenedRuntime": false
     }
   }
 }

@@ -281,16 +281,87 @@ def test_the_audio_tap_deployment_floor_matches_the_bundle_floor():
     assert f'.macOS("{floor}")' in package
 
 
+def _macos_bundle_settings() -> dict:
+    return json.loads(TAURI_MACOS_CONF.read_text(encoding="utf-8"))["bundle"]["macOS"]
+
+
+def _macos_info_plist() -> str:
+    plist_name = _macos_bundle_settings()["infoPlist"]
+    return (TAURI_MACOS_CONF.parent / plist_name).read_text(encoding="utf-8")
+
+
 def test_the_macos_bundle_declares_the_narrow_audio_capture_permission():
     """"System Audio Recording Only", not screen recording — the whole reason
     ADR 041 chose a Core Audio tap over ScreenCaptureKit. Without the key the
     tap is denied at runtime and meeting recording captures silence."""
-    macos = json.loads(TAURI_MACOS_CONF.read_text(encoding="utf-8"))
-    plist_name = macos["bundle"]["macOS"]["infoPlist"]
-    plist = (TAURI_MACOS_CONF.parent / plist_name).read_text(encoding="utf-8")
+    plist = _macos_info_plist()
 
     assert "NSAudioCaptureUsageDescription" in plist
     assert "NSScreenCaptureUsageDescription" not in plist
+
+
+def test_the_macos_bundle_declares_the_microphone_permission():
+    """Apple requires this key from any app that uses the microphone, and the
+    backend the app starts asks on the app's behalf; without it dictation and
+    the "You" side of a meeting record silence."""
+    assert "NSMicrophoneUsageDescription" in _macos_info_plist()
+
+
+def test_the_macos_bundle_is_signed_ad_hoc():
+    """Apple Silicon calls an unsigned browser download damaged; an ad-hoc
+    signed one opens after Open Anyway. A Developer ID arrives through
+    APPLE_SIGNING_IDENTITY, which overrides this value."""
+    assert _macos_bundle_settings().get("signingIdentity") == "-"
+
+
+def test_a_hardened_macos_bundle_still_grants_the_microphone():
+    """The hardened runtime is Tauri's default, and under it macOS grants the
+    microphone only with the audio-input entitlement."""
+    macos = _macos_bundle_settings()
+    if macos.get("hardenedRuntime", True):
+        assert "entitlements" in macos, "a hardened bundle needs an entitlements file"
+        entitlements = (TAURI_MACOS_CONF.parent / macos["entitlements"]).read_text(encoding="utf-8")
+        assert "com.apple.security.device.audio-input" in entitlements
+
+
+def test_the_release_verifies_the_signature_of_the_built_macos_download():
+    """Signing happens inside `tauri build`, so only a check of the built .dmg
+    proves the signature covers everything the bundle carries."""
+    text = _release_workflow_text()
+    verify = _step_named("Verify the macOS download is signed")
+
+    assert text.index("- name: Verify the macOS download is signed") > text.index(
+        "- name: Build Tauri app"
+    )
+    assert "if: runner.os == 'macOS'" in verify
+    assert "codesign --verify --deep --strict" in verify
+    assert "Sealed Resources version=2" in verify
+    assert "Info.plist entries=" in verify
+    assert _failure_swallowing_constructs(verify) == []
+
+
+def _release_body() -> str:
+    lines = _step_named("- name: Build Tauri app").splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == "releaseBody: |")
+    key_indent = len(lines[start]) - len(lines[start].lstrip())
+    body = []
+    for line in lines[start + 1 :]:
+        if line.strip() and len(line) - len(line.lstrip()) <= key_indent:
+            break
+        body.append(line.strip())
+    return "\n".join(body)
+
+
+def test_the_release_page_names_the_installer_to_download_for_each_platform():
+    """`docs/` never reaches the public repository, so a page pointing there
+    points nowhere; the two endings are what the nsis and dmg targets name."""
+    body = _release_body()
+    targets = json.loads(TAURI_SHARED_CONF.read_text(encoding="utf-8"))["bundle"]["targets"]
+
+    assert {"nsis", "dmg"} <= set(targets)
+    assert "x64-setup.exe" in body
+    assert "aarch64.dmg" in body
+    assert "docs/" not in body
 
 
 def test_only_the_macos_config_ships_the_audio_tap_helper():
