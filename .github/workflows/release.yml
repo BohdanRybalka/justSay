@@ -9,8 +9,8 @@
 # tauri.macos.conf.json): Apple Silicon calls an unsigned browser download
 # damaged, while an ad-hoc signed one opens after Open Anyway. A Developer ID
 # signature and notarisation stay OPT-IN: they replace the ad-hoc identity only
-# when the MACOS_NOTARIZE_* repository secrets exist. The Windows installer is
-# unsigned.
+# when the MACOS_NOTARIZE_CERT repository secret exists. The Windows installer
+# is unsigned.
 
 name: Release
 
