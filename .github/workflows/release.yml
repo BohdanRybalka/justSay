@@ -1,13 +1,16 @@
 # Cross-platform release build for JustSay (Plan 008).
 #
 # Triggered on git tag pushes (v*). Builds the PyInstaller sidecar per platform,
-# then runs `tauri build` which embeds it as `bundle.externalBin` and produces
-# the .msi (Windows) and .dmg (macOS arm64) artifacts.
+# then runs `tauri build` which ships it as a bundle resource and produces the
+# NSIS -setup.exe (Windows) and .dmg (macOS arm64) installers, plus the update
+# packages, their .sig files and latest.json that installed copies update from.
 #
-# Code signing is OPT-IN: the workflow looks for repository secrets
-# (WIN_AZURE_TS_*, MACOS_NOTARIZE_*) and only runs the signing/notarization
-# steps when they exist. Without secrets you still get unsigned installers,
-# fine for local testing.
+# The macOS bundle is ad-hoc signed ("signingIdentity": "-" in
+# tauri.macos.conf.json): Apple Silicon calls an unsigned browser download
+# damaged, while an ad-hoc signed one opens after Open Anyway. A Developer ID
+# signature and notarisation stay OPT-IN: they replace the ad-hoc identity only
+# when the MACOS_NOTARIZE_CERT repository secret exists. The Windows installer
+# is unsigned.
 
 name: Release
 
@@ -347,9 +350,12 @@ jobs:
       # Export Apple signing env ONLY when the cert secret is non-empty.
       # Previously these were set unconditionally; an empty `APPLE_CERTIFICATE`
       # made `security import` fail with "One or more parameters... were not valid".
-      # When the secret is missing tauri-action now sees no APPLE_* env at all
-      # and gracefully skips signing — producing an unsigned .app, which is
-      # what we want until Plan 008 Phase B (paid Apple Developer onboarding).
+      # When the secret is missing tauri-action sees no APPLE_* env at all and
+      # signs ad-hoc with the config's "-" identity — what we want until Plan
+      # 008 Phase B (paid Apple Developer onboarding). APPLE_SIGNING_IDENTITY
+      # overrides that config value once the secrets exist; notarisation then
+      # also needs "hardenedRuntime" back on, with an entitlements file that
+      # grants com.apple.security.device.audio-input.
       #
       # Multi-line secret values (base64 .p12 certs commonly have newlines every
       # 76 chars) require the heredoc form for $GITHUB_ENV — a plain
@@ -423,7 +429,7 @@ jobs:
           # `src-tauri/resources/justsay-backend/` dir does not break dev.
           # Apple signing env vars are exported by the previous step when
           # MACOS_NOTARIZE_CERT secret is non-empty. Until Plan 008 Phase B,
-          # those secrets are unset → unsigned .app is the expected output.
+          # those secrets are unset → an ad-hoc signed .app is the output.
           # Windows: Azure Trusted Signing wires in as a separate step
           # (Plan 008 Phase B, $10/mo onboarding).
         with:
@@ -435,7 +441,20 @@ jobs:
           args: --verbose
           tagName: ${{ github.ref_name }}
           releaseName: "JustSay ${{ github.ref_name }}"
-          releaseBody: "See `docs/release-notes/` for what changed."
+          # What a visitor of the Releases page reads first. /release replaces
+          # it with that version's notes before the draft is published.
+          releaseBody: |
+            **Which file to download**
+
+            - Windows: the file ending in `x64-setup.exe`.
+            - Mac with an Apple chip (M1 or newer) and macOS 14.4 or later: the file ending in `aarch64.dmg`.
+
+            The other files are what installed copies of JustSay download when they update; you do not need them.
+
+            **First launch**
+
+            - Windows shows "Windows protected your PC": click More info, then Run anyway.
+            - Mac: drag JustSay to Applications and open it. When macOS says it cannot verify the app, open System Settings → Privacy & Security and click Open Anyway.
           releaseDraft: true
           prerelease: false
           # Publish the Tauri 2.x updater manifest (latest.json) next to
@@ -444,4 +463,36 @@ jobs:
           # this path. Without this, tauri-action only writes the .sig
           # files and the updater plugin has no manifest URL to fetch.
           updaterJsonPreferNsis: true
+
+      # Apple Silicon calls a quarantined download "damaged" unless the whole
+      # bundle is signed: v0.13.1's main binary carried only the linker's
+      # signature, with no sealed resources and no bound Info.plist. This checks
+      # the copy people download, inside the .dmg, for exactly those two
+      # fields, and --deep --strict fails if anything inside the bundle (the
+      # frozen backend, whisper-server, the audio tap helper) no longer matches
+      # the signature. tauri-action has already uploaded the draft by now; a red
+      # step here is the signal that this draft must not be published.
+      - name: Verify the macOS download is signed
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          DMGS=(src-tauri/target/release/bundle/dmg/*.dmg)
+          if [ "${#DMGS[@]}" -ne 1 ]; then
+            echo "ERROR: expected one .dmg, found ${#DMGS[@]}: ${DMGS[*]}"
+            exit 1
+          fi
+          MOUNT="$(mktemp -d)"
+          hdiutil attach "${DMGS[0]}" -readonly -nobrowse -mountpoint "$MOUNT"
+          trap 'hdiutil detach "$MOUNT"' EXIT
+          APP="$MOUNT/JustSay.app"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          DETAILS="$(codesign --display --verbose=4 "$APP" 2>&1)"
+          echo "$DETAILS"
+          for FIELD in "Sealed Resources version=2" "Info.plist entries="; do
+            if ! grep -q "^$FIELD" <<<"$DETAILS"; then
+              echo "ERROR: JustSay.app has no '$FIELD' line — macOS would call this download damaged."
+              exit 1
+            fi
+          done
 

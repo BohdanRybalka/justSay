@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>JustSay records your voice so it can turn your dictation and your side of a meeting into text.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>JustSay records the audio your Mac is playing so it can transcribe meetings you take part in.</string>
 </dict>
