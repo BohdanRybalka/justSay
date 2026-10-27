@@ -19,11 +19,12 @@ export function physicalPillRect(box: DOMRectReadOnly, pixelRatio: number): Pill
 }
 
 /** Hands `report` the pill's rectangle now, and again whenever its size or the
- *  pixel ratio changes — the two things that move it inside a fixed window. */
+ *  pixel ratio changes — the two things that move it inside a fixed window.
+ *  The size is the border box, so a padding animation is followed too. */
 export function watchPillRect(pill: Element, report: (rect: PillRect) => void): void {
   const send = () =>
     report(physicalPillRect(pill.getBoundingClientRect(), window.devicePixelRatio));
-  new ResizeObserver(send).observe(pill);
+  new ResizeObserver(send).observe(pill, { box: "border-box" });
 
   const followPixelRatio = () =>
     window

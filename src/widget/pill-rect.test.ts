@@ -7,20 +7,22 @@ interface FakeResolutionQuery {
   change: () => void;
 }
 
-function stubResizeObserver(): { resize: () => void } {
+function stubResizeObserver(): { resize: () => void; boxes: (string | undefined)[] } {
   let callback: () => void = () => {};
+  const boxes: (string | undefined)[] = [];
   vi.stubGlobal(
     "ResizeObserver",
     class {
       constructor(onResize: () => void) {
         callback = onResize;
       }
-      observe() {
+      observe(_target: Element, options?: ResizeObserverOptions) {
+        boxes.push(options?.box);
         callback();
       }
     },
   );
-  return { resize: () => callback() };
+  return { resize: () => callback(), boxes };
 }
 
 function stubResolutionQueries(): FakeResolutionQuery[] {
@@ -67,6 +69,15 @@ describe("watchPillRect", () => {
       { x: 80, y: 24, width: 320, height: 80 },
       { x: 80, y: 24, width: 320, height: 80 },
     ]);
+  });
+
+  it("watches the border box, so a padding change that keeps the content size is reported", () => {
+    const observer = stubResizeObserver();
+    stubResolutionQueries();
+
+    watchPillRect(pillAt(40, 12, 160, 40), () => {});
+
+    expect(observer.boxes).toEqual(["border-box"]);
   });
 
   it("reports again in the new ratio after each pixel-ratio change", () => {
