@@ -287,3 +287,26 @@ body {
   width: 9px;
   height: 9px;
 }
+
+.pill--live:not(.pill--hover),
+.pill.meeting:not(.pill--hover):not(:has(.pill-lost)) {
+  padding: 6px 7px 6px 9px;
+  gap: 4px;
+  background: var(--orange);
+  border-color: transparent;
+  opacity: 1;
+}
+
+.pill--live:not(.pill--hover) :is(.pill-dot, .pill-readout),
+.pill.meeting:not(.pill--hover):not(:has(.pill-lost)) :is(.pill-readout, .pill-divider, .pill-stop, .pill-meter[data-side="system"], .pill-meter .icon) {
+  display: none;
+}
+
+.pill--live:not(.pill--hover) .pill-wave i:is(:nth-child(-n+2), :nth-child(n+6)) {
+  display: none;
+}
+
+.pill--live:not(.pill--hover) .pill-wave i,
+.pill.meeting:not(.pill--hover):not(:has(.pill-lost)) :is(.pill-dot, .pill-meter-bars i) {
+  background: #fff;
+}
