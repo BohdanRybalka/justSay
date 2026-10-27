@@ -29,7 +29,8 @@ const WINDOW_HEIGHT: f64 = 64.0;
 /// a little below the middle, beside the text being read rather than over it.
 const PILL_CENTRE_DOWN_THE_WORK_AREA: f64 = 0.6;
 
-/// How far the hover zone reaches past the pill on the left and right, logical.
+/// How far the hover zone reaches left of the pill, logical. Right of it lies
+/// the screen edge the pill docks on, and the zone stops there.
 const HOVER_MARGIN_X: f64 = 24.0;
 
 /// How far the hover zone reaches past the pill above and below, logical.
@@ -261,7 +262,7 @@ fn pointer_over(
     let y = cursor.y - f64::from(origin.y);
     let within = |margin_x: f64, margin_y: f64| {
         x >= pill.x - margin_x
-            && x < pill.x + pill.width + margin_x
+            && x < pill.x + pill.width
             && y >= pill.y - margin_y
             && y < pill.y + pill.height + margin_y
     };
@@ -310,13 +311,14 @@ mod tests {
     }
 
     #[test]
-    fn the_hover_zone_reaches_the_margin_scaled_to_physical_pixels() {
+    fn the_hover_zone_reaches_the_margin_scaled_to_physical_pixels_and_stops_at_the_edge() {
         assert!(over(1080.0 - 48.0, 524.0 - 32.0, 2.0).in_hover_zone);
         assert!(!over(1080.0 - 49.0, 540.0, 2.0).in_hover_zone);
         assert!(!over(1150.0, 524.0 - 33.0, 2.0).in_hover_zone);
-        assert!(over(1240.0 + 23.0, 540.0, 1.0).in_hover_zone);
-        assert!(!over(1240.0 + 24.0, 540.0, 1.0).in_hover_zone);
-        assert!(!over(1240.0 + 24.0, 540.0, 1.0).on_pill);
+        assert!(over(1080.0 - 24.0, 540.0, 1.0).in_hover_zone);
+        assert!(over(1239.0, 563.0 + 16.0, 1.0).in_hover_zone);
+        assert!(!over(1240.0, 540.0, 1.0).in_hover_zone, "past the edge the pill docks on");
+        assert!(!over(1240.0, 540.0, 1.0).on_pill);
     }
 
     #[test]

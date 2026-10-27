@@ -19,11 +19,11 @@ body {
   height: 29px;
   padding: 6px 11px;
   border-radius: 999px 0 0 999px;
-  border-right-width: 0;
   background: var(--pill-glass);
   backdrop-filter: blur(14px) saturate(1.2);
   -webkit-backdrop-filter: blur(14px) saturate(1.2);
   border: 1px solid var(--glass-edge);
+  border-right-width: 0;
   box-shadow: var(--sh-glass);
   white-space: nowrap;
   opacity: .82;
