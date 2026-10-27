@@ -9,7 +9,7 @@ html, body {
 body {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end;
 }
 
 .pill {
@@ -18,7 +18,8 @@ body {
   gap: 7px;
   height: 29px;
   padding: 6px 11px;
-  border-radius: 999px;
+  border-radius: 999px 0 0 999px;
+  border-right-width: 0;
   background: var(--pill-glass);
   backdrop-filter: blur(14px) saturate(1.2);
   -webkit-backdrop-filter: blur(14px) saturate(1.2);
@@ -35,14 +36,30 @@ body {
 }
 
 .pill--rest {
-  padding: 6px;
+  min-width: 8px;
+  padding: 6px 0;
   gap: 0;
-  opacity: .4;
+  opacity: .6;
+  background: var(--orange);
+  border-color: transparent;
 }
 
 .pill--rest.pill--hover {
   opacity: 1;
   padding: 6px 12px 6px 9px;
+  background: var(--pill-glass);
+  border-color: var(--glass-edge);
+}
+
+.pill--rest .pill-content .icon {
+  width: 0;
+  opacity: 0;
+  transition: width .28s cubic-bezier(.3,.9,.3,1), opacity .18s;
+}
+
+.pill--rest.pill--hover .pill-content .icon {
+  width: 15px;
+  opacity: 1;
 }
 
 .pill--live {
@@ -184,6 +201,7 @@ body {
   padding: 6px 11px;
   gap: 7px;
   opacity: .82;
+  background: var(--pill-glass);
   border-color: color-mix(in srgb, var(--orange) 50%, transparent);
 }
 
