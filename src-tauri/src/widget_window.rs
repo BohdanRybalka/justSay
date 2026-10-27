@@ -25,11 +25,12 @@ const WINDOW_WIDTH: f64 = 240.0;
 /// The window's logical height: the pill plus the hover zone around it.
 const WINDOW_HEIGHT: f64 = 64.0;
 
-/// Logical distance from the bottom of the work area up to the pill's centre.
-/// With Windows' 48px taskbar it puts the pill where it has always been.
-const PILL_CENTRE_ABOVE_WORK_AREA_BOTTOM: f64 = 192.0;
+/// How far down the work area the pill's centre sits, as a share of its height:
+/// a little below the middle, beside the text being read rather than over it.
+const PILL_CENTRE_DOWN_THE_WORK_AREA: f64 = 0.6;
 
-/// How far the hover zone reaches past the pill on the left and right, logical.
+/// How far the hover zone reaches left of the pill, logical. Right of it lies
+/// the screen edge the pill docks on, and the zone stops there.
 const HOVER_MARGIN_X: f64 = 24.0;
 
 /// How far the hover zone reaches past the pill above and below, logical.
@@ -221,14 +222,14 @@ fn follow_the_cursor(app: &AppHandle) {
     });
 }
 
-/// Where the window's top-left corner goes so the pill, centred in the window,
-/// sits centred across the work area and a fixed distance above its bottom.
+/// Where the window's top-left corner goes so the pill, flush with the window's
+/// right side, docks against the work area's right edge a little below its middle.
 fn window_origin(work_area: &PhysicalRect<i32, u32>, scale: f64) -> PhysicalPosition<i32> {
-    let centre_x = f64::from(work_area.position.x) + f64::from(work_area.size.width) / 2.0;
-    let centre_y = f64::from(work_area.position.y) + f64::from(work_area.size.height)
-        - PILL_CENTRE_ABOVE_WORK_AREA_BOTTOM * scale;
+    let right = f64::from(work_area.position.x) + f64::from(work_area.size.width);
+    let centre_y = f64::from(work_area.position.y)
+        + f64::from(work_area.size.height) * PILL_CENTRE_DOWN_THE_WORK_AREA;
     PhysicalPosition::new(
-        (centre_x - WINDOW_WIDTH * scale / 2.0).round() as i32,
+        (right - WINDOW_WIDTH * scale).round() as i32,
         (centre_y - WINDOW_HEIGHT * scale / 2.0).round() as i32,
     )
 }
@@ -261,7 +262,7 @@ fn pointer_over(
     let y = cursor.y - f64::from(origin.y);
     let within = |margin_x: f64, margin_y: f64| {
         x >= pill.x - margin_x
-            && x < pill.x + pill.width + margin_x
+            && x < pill.x + pill.width
             && y >= pill.y - margin_y
             && y < pill.y + pill.height + margin_y
     };
@@ -310,13 +311,14 @@ mod tests {
     }
 
     #[test]
-    fn the_hover_zone_reaches_the_margin_scaled_to_physical_pixels() {
+    fn the_hover_zone_reaches_the_margin_scaled_to_physical_pixels_and_stops_at_the_edge() {
         assert!(over(1080.0 - 48.0, 524.0 - 32.0, 2.0).in_hover_zone);
         assert!(!over(1080.0 - 49.0, 540.0, 2.0).in_hover_zone);
         assert!(!over(1150.0, 524.0 - 33.0, 2.0).in_hover_zone);
-        assert!(over(1240.0 + 23.0, 540.0, 1.0).in_hover_zone);
-        assert!(!over(1240.0 + 24.0, 540.0, 1.0).in_hover_zone);
-        assert!(!over(1240.0 + 24.0, 540.0, 1.0).on_pill);
+        assert!(over(1080.0 - 24.0, 540.0, 1.0).in_hover_zone);
+        assert!(over(1239.0, 563.0 + 16.0, 1.0).in_hover_zone);
+        assert!(!over(1240.0, 540.0, 1.0).in_hover_zone, "past the edge the pill docks on");
+        assert!(!over(1240.0, 540.0, 1.0).on_pill);
     }
 
     #[test]
@@ -371,13 +373,13 @@ mod tests {
     }
 
     #[test]
-    fn the_pill_centre_sits_centred_and_above_the_work_area_bottom() {
+    fn the_pill_docks_on_the_right_edge_a_little_below_the_middle() {
         let work_area = PhysicalRect {
             position: PhysicalPosition::new(0, 0),
             size: PhysicalSize::new(3840, 2064),
         };
         let origin = window_origin(&work_area, 1.5);
-        assert_eq!(origin, PhysicalPosition::new(1920 - 180, 2064 - 288 - 48));
+        assert_eq!(origin, PhysicalPosition::new(3840 - 360, 1238 - 48));
 
         let second_monitor = PhysicalRect {
             position: PhysicalPosition::new(-1920, 100),
@@ -385,7 +387,7 @@ mod tests {
         };
         assert_eq!(
             window_origin(&second_monitor, 1.0),
-            PhysicalPosition::new(-1920 + 960 - 120, 100 + 1032 - 192 - 32)
+            PhysicalPosition::new(-240, 100 + 619 - 32)
         );
     }
 }
