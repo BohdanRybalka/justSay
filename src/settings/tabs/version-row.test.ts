@@ -2,10 +2,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dropFocusWhenDisabled } from "../../ui/browser-focus.test-helper";
 
-const { checkMock, invokeMock, relaunchMock } = vi.hoisted(() => ({
+const { checkMock, invokeMock, relaunchMock, apiMock } = vi.hoisted(() => ({
   checkMock: vi.fn(),
   invokeMock: vi.fn(),
   relaunchMock: vi.fn(),
+  apiMock: { audioStatus: vi.fn(), getMeetingStatus: vi.fn(), jobs: vi.fn() },
+}));
+
+vi.mock("../../api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api")>()),
+  api: apiMock,
 }));
 
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: checkMock }));
@@ -13,7 +19,13 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: relaunchMock }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn(async () => "0.13.1") }));
 
-import { renderVersionRow } from "./version-row";
+import type { MeetingStatus, RecordingStatus, TranscriptionJob } from "../../api";
+import {
+  renderVersionRow,
+  UPDATE_WAITS_FOR_DICTATION,
+  UPDATE_WAITS_FOR_MEETING,
+  UPDATE_WAITS_FOR_TRANSCRIPTION,
+} from "./version-row";
 
 const LAST_UP_TO_DATE_KEY = "justsay.updates.lastUpToDateAt";
 
@@ -33,9 +45,26 @@ function installCalls(): number {
   return invokeMock.mock.calls.filter(([command]) => command === "install_update").length;
 }
 
+const IDLE_DICTATION: RecordingStatus = { is_recording: false, duration_seconds: 0, level_db: null, session_id: null };
+const IDLE_MEETING: MeetingStatus = {
+  is_recording: false,
+  duration_seconds: 0,
+  level_db: null,
+  system_endpoint: null,
+  system_level_db: null,
+  capture_incident: null,
+};
+
+function job(kind: TranscriptionJob["kind"], stage: TranscriptionJob["stage"]): TranscriptionJob {
+  return { id: `${kind}-${stage}`, kind, name: "talk.m4a", stage, progress: null, error: null, entry_id: null };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   invokeMock.mockResolvedValue(undefined);
+  apiMock.audioStatus.mockResolvedValue(IDLE_DICTATION);
+  apiMock.getMeetingStatus.mockResolvedValue(IDLE_MEETING);
+  apiMock.jobs.mockResolvedValue([job("file", "done"), job("meeting", "failed")]);
   localStorage.clear();
 });
 
@@ -143,6 +172,48 @@ describe("Version row — check, install and restart", () => {
     finishInstall();
     await vi.waitFor(() => expect(relaunchMock).toHaveBeenCalledTimes(1));
     expect(installCalls()).toBe(1);
+  });
+
+  it.each([
+    ["a dictation", () => apiMock.audioStatus.mockResolvedValue({ ...IDLE_DICTATION, is_recording: true }), UPDATE_WAITS_FOR_DICTATION],
+    ["a meeting recording", () => apiMock.getMeetingStatus.mockResolvedValue({ ...IDLE_MEETING, is_recording: true }), UPDATE_WAITS_FOR_MEETING],
+    ["a file transcription", () => apiMock.jobs.mockResolvedValue([job("file", "transcribing")]), UPDATE_WAITS_FOR_TRANSCRIPTION],
+    ["a meeting being turned into text", () => apiMock.jobs.mockResolvedValue([job("meeting", "queued")]), UPDATE_WAITS_FOR_TRANSCRIPTION],
+  ])("does not install during %s, says what it waits for, and installs once that ends", async (_work, start, message) => {
+    checkMock.mockResolvedValue(READY_UPDATE);
+    const { button, status } = renderRow();
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Install and restart"));
+    start();
+
+    button.click();
+    await vi.waitFor(() => expect(status.textContent).toBe(message));
+    expect(installCalls()).toBe(0);
+    expect(relaunchMock).not.toHaveBeenCalled();
+    expect(button.textContent).toBe("Install and restart");
+    expect(button.disabled).toBe(false);
+
+    apiMock.audioStatus.mockResolvedValue(IDLE_DICTATION);
+    apiMock.getMeetingStatus.mockResolvedValue(IDLE_MEETING);
+    apiMock.jobs.mockResolvedValue([]);
+    button.click();
+    await vi.waitFor(() => expect(relaunchMock).toHaveBeenCalledTimes(1));
+    expect(installCalls()).toBe(1);
+  });
+
+  it("does not install when it cannot tell whether a recording is running", async () => {
+    apiMock.jobs.mockRejectedValue(new Error("backend timed out"));
+    checkMock.mockResolvedValue(READY_UPDATE);
+    const { button, status } = renderRow();
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Install and restart"));
+
+    button.click();
+    await vi.waitFor(() =>
+      expect(status.textContent).toBe("Couldn't check whether a recording is running, so the update waits: backend timed out"),
+    );
+    expect(installCalls()).toBe(0);
+    expect(button.disabled).toBe(false);
   });
 
   it("a failed install offers a retry that installs, not checks", async () => {

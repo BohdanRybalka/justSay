@@ -1,14 +1,21 @@
 /**
  * The Version row of the Settings card: the running version, when updates were
- * last found to be none, and the updater's check, install and restart. The
- * install runs in the shell, which on Windows closes JustSay the way Quit does
- * before the installer starts. The time of the last "up to date" answer is UI
- * state kept in `localStorage`.
+ * last found to be none, and the updater's check, install and restart. An install
+ * waits while a dictation, a meeting recording or a transcription runs; otherwise
+ * it runs in the shell, which on Windows closes JustSay the way Quit does before
+ * the installer starts. The time of the last "up to date" answer is UI state kept
+ * in `localStorage`.
  */
+import { api } from "../../api";
 import { setDisabled } from "../../ui/controls";
 import { icon } from "../../ui/icons";
+import { jobIsRunning } from "../history-jobs";
 
 const LAST_UP_TO_DATE_KEY = "justsay.updates.lastUpToDateAt";
+
+export const UPDATE_WAITS_FOR_MEETING = "Stop the meeting recording first, then install the update.";
+export const UPDATE_WAITS_FOR_DICTATION = "Finish the dictation first, then install the update.";
+export const UPDATE_WAITS_FOR_TRANSCRIPTION = "Wait until the transcription finishes, then install the update.";
 
 function describeFailure(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -37,6 +44,20 @@ function describeUpdateCheckFailure(err: unknown): string {
     );
   }
   return `Check failed: ${raw}`;
+}
+
+/** What the update has to wait for, or `null` when nothing is being recorded or
+ *  turned into text. A status that cannot be read is treated as work in progress. */
+async function workTheUpdateWaitsFor(): Promise<string | null> {
+  try {
+    const [meeting, dictation, jobs] = await Promise.all([api.getMeetingStatus(), api.audioStatus(), api.jobs()]);
+    if (meeting.is_recording) return UPDATE_WAITS_FOR_MEETING;
+    if (dictation.is_recording) return UPDATE_WAITS_FOR_DICTATION;
+    if (jobs.some(jobIsRunning)) return UPDATE_WAITS_FOR_TRANSCRIPTION;
+    return null;
+  } catch (err) {
+    return `Couldn't check whether a recording is running, so the update waits: ${describeFailure(err)}`;
+  }
 }
 
 function readLastUpToDate(): number | null {
@@ -123,7 +144,16 @@ export function renderVersionRow(row: HTMLElement, isDestroyed: () => boolean): 
   }
 
   async function install(): Promise<void> {
-    busy("Installing…", "Downloading and installing update…");
+    const label = action.textContent ?? "";
+    busy("Installing…", "Checking that nothing is being recorded…");
+    const waitsFor = await workTheUpdateWaitsFor();
+    if (isDestroyed()) return;
+    if (waitsFor !== null) {
+      status.textContent = waitsFor;
+      offerInstall(label);
+      return;
+    }
+    status.textContent = "Downloading and installing update…";
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("install_update");
