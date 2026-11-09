@@ -289,7 +289,6 @@ async def test_a_paused_job_resumes_after_the_wait_it_was_given(queue, fakes):
     await asyncio.wait_for(pipeline.transcribing.wait(), 1)
 
     assert slept == [12.0]
-    assert queue._jobs[job_id].paused is False
     pipeline.release.set()
     await _settle(queue, job_id)
     assert _view(queue, job_id).stage == "done"
@@ -317,16 +316,17 @@ async def test_a_job_cancelled_during_a_piece_never_starts_the_pause_it_is_asked
 
 
 async def test_a_paused_job_stops_at_once_when_cancelled(queue, fakes):
-    never = asyncio.Event()
+    asleep, never = asyncio.Event(), asyncio.Event()
 
     async def sleep(seconds: float) -> None:
+        asleep.set()
         await never.wait()
 
     queue.sleep = sleep
     paused, after = _FakePipeline(pause=3600.0), _FakePipeline()
     job_id = _start(queue, fakes, paused)
     _start(queue, fakes, after)
-    await _until(lambda: queue._jobs[job_id].paused)
+    await asyncio.wait_for(asleep.wait(), 1)
 
     assert queue.cancel_or_dismiss(job_id) == "cancelled"
     await asyncio.wait_for(after.transcribing.wait(), 1)
@@ -367,25 +367,24 @@ async def test_cancelling_a_queued_job_never_transcribes_it(queue, fakes):
     first.release.set()
 
 
-async def test_a_cancelled_transcription_holds_the_turn_until_its_answer_then_saves_nothing(
-    queue, fakes
+async def test_a_cancelled_transcription_stops_at_once_gives_up_its_turn_and_saves_nothing(
+    queue, fakes, caplog
 ):
+    """The piece in flight is not waited for: a local engine would stay busy until it ended."""
     cancelled, after = _FakePipeline(), _FakePipeline()
     job_id = _start(queue, fakes, cancelled)
     _start(queue, fakes, after)
     await asyncio.wait_for(cancelled.transcribing.wait(), 1)
 
-    assert queue.cancel_or_dismiss(job_id) == "cancelled"
-    await asyncio.sleep(0.02)
-    assert _view(queue, job_id).stage == "cancelled"
-    assert after.calls == []
+    with caplog.at_level("INFO", logger="app.pipeline.jobs"):
+        assert queue.cancel_or_dismiss(job_id) == "cancelled"
+        await asyncio.wait_for(after.transcribing.wait(), 1)
 
-    cancelled.release.set()
-    await _settle(queue, job_id)
     view = _view(queue, job_id)
     assert (view.stage, view.entry_id) == ("cancelled", None)
     assert not cancelled.calls[0]["path"].exists()
-    await asyncio.wait_for(after.transcribing.wait(), 1)
+    assert [r.levelname for r in caplog.records if "was cancelled" in r.getMessage()] == ["INFO"]
+    assert not [r for r in caplog.records if r.levelname in ("ERROR", "CRITICAL")]
     after.release.set()
 
 
@@ -584,6 +583,36 @@ async def test_a_file_whose_every_piece_is_silent_is_never_sent(
     view = _view(queue, job_id)
     assert (view.stage, view.error) == ("failed", jobs.NO_SPEECH_REASON)
     stt.transcribe.assert_not_called()
+
+
+async def test_a_file_cancelled_mid_piece_stops_and_logs_a_cancel_not_a_failure(
+    client, queue, tmp_path, monkeypatch, noise_is_voice, caplog
+):
+    """Over the real pipeline: the piece the engine holds is dropped, and nothing logs an error."""
+    asked = asyncio.Event()
+
+    async def never_answers(*args, **kwargs) -> TranscriptionResult:
+        asked.set()
+        await asyncio.Event().wait()
+
+    stt = MagicMock(model_name="mock/provider", is_local=False, longest_piece_seconds=600.0)
+    stt.transcribe = never_answers
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
+    monkeypatch.setattr(jobs, "process_audio", service.process_audio)
+    with (
+        patch("app.pipeline.service.get_provider", return_value=stt),
+        patch("app.pipeline.service.analyze_vad", return_value=None),
+        caplog.at_level("INFO"),
+    ):
+        upload = {"file": ("long.wav", _wav(tmp_path), "audio/wav")}
+        job_id = (await client.post("/jobs/file", files=upload)).json()["id"]
+        await asyncio.wait_for(asked.wait(), 5)
+        assert queue.cancel_or_dismiss(job_id) == "cancelled"
+        await asyncio.wait_for(_settle(queue, job_id), 1)
+
+    assert _view(queue, job_id).stage == "cancelled"
+    assert not [r for r in caplog.records if r.levelname in ("ERROR", "CRITICAL")]
+    assert any("was cancelled" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.parametrize(

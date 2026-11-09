@@ -1,8 +1,8 @@
 """Tests for `app.stt.local_whisper_cpp.WhisperCppServerSTTProvider`.
 
-`subprocess.Popen` and `httpx.Client` are fully mocked -- no real process is
-spawned and no real network call is made. `resolve_binary_path`/
-`resolve_model_path` are monkeypatched per-test to point at `tmp_path`.
+`subprocess.Popen`, `httpx.Client` and `httpx.AsyncClient` are mocked -- no real process is
+spawned, and the one real connection goes to a socket server the test runs on 127.0.0.1.
+`resolve_binary_path`/`resolve_model_path` are monkeypatched per-test to point at `tmp_path`.
 """
 
 import asyncio
@@ -148,6 +148,24 @@ class _FakeHttpxClient:
         return self._stream_impl(method, url)
 
 
+class _FakeAsyncHttpxClient:
+    """Runs `post_impl` on a thread, so one that blocks holds its request, not the loop."""
+
+    def __init__(self, post_impl=None, **kwargs):
+        self._post_impl = post_impl
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, data=None, files=None):
+        if self._post_impl is None:
+            raise AssertionError("POST not expected in this test")
+        return await asyncio.to_thread(self._post_impl, url, data, files)
+
+
 def _install_fake_httpx(monkeypatch, *, get_impl=None, post_impl=None, stream_impl=None):
     """Default `get_impl`: always healthy (`_ready()`). Callers override for
     failure-path tests."""
@@ -160,6 +178,11 @@ def _install_fake_httpx(monkeypatch, *, get_impl=None, post_impl=None, stream_im
         lambda *a, **kw: _FakeHttpxClient(
             get_impl=get_impl, post_impl=post_impl, stream_impl=stream_impl
         ),
+    )
+    monkeypatch.setattr(
+        local_whisper_cpp_module.httpx,
+        "AsyncClient",
+        lambda *a, **kw: _FakeAsyncHttpxClient(post_impl=post_impl),
     )
 
 
@@ -1436,6 +1459,41 @@ def test_load_failure_leaves_through_the_original_exception(monkeypatch, tmp_pat
 
 _OVER_BUDGET_HEAD = ", ".join(["Tauri"] * 69)
 _OVER_BUDGET_GLOSSARY = f"{_OVER_BUDGET_HEAD}, Pydantic"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_transcription_closes_its_request_so_whisper_server_stops(
+    monkeypatch, tmp_path
+):
+    """whisper-server's abort callback stops an inference once its client's connection closes.
+
+    So a cancelled transcription must close that connection at once; a request left running on
+    a thread holds it open until the answer comes, and the engine works on to the end.
+    """
+    received, closed = asyncio.Event(), asyncio.Event()
+
+    async def never_answer(reader, writer):
+        request = b""
+        while chunk := await reader.read(65536):
+            request += chunk
+            if request.endswith(b"--\r\n"):
+                received.set()
+        closed.set()
+        writer.close()
+
+    server = await asyncio.start_server(never_answer, "127.0.0.1", 0)
+    provider, _model_path = _make_provider(tmp_path, monkeypatch)
+    provider._port = server.sockets[0].getsockname()[1]
+    try:
+        request = asyncio.ensure_future(provider._infer(_wav(tmp_path), "uk"))
+        await asyncio.wait_for(received.wait(), 5)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        await asyncio.wait_for(closed.wait(), 2)
+    finally:
+        server.close()
+        await server.wait_closed()
 
 
 def _capture_post(monkeypatch, captured: dict):

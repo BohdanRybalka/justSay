@@ -126,7 +126,6 @@ class _Job:
     piece_started_at: float | None = None
     pieces_done: int = 0
     pieces_total: int = 1
-    paused: bool = False
     expected_seconds: float | None = None
     finished_at: float | None = None
     task: asyncio.Task | None = None
@@ -159,11 +158,7 @@ class _JobObserver:
 
     async def pause(self, seconds: float) -> None:
         self._stop_if_cancelled()
-        self._job.paused = True
-        try:
-            await self._queue.sleep(seconds)
-        finally:
-            self._job.paused = False
+        await self._queue.sleep(seconds)
         await self._queue.gate.wait_for_none()
         self._stop_if_cancelled()
 
@@ -442,9 +437,9 @@ class JobQueue:
     def cancel_or_dismiss(self, job_id: str) -> RemovalOutcome | None:
         """Cancel a queued or transcribing job, forget a finished one; ``None`` for an unknown id.
 
-        A piece already sent cannot be recalled, so a transcribing job keeps its turn until that
-        answer comes and then stops unsaved; a paused one stops at once. ``NotReadyError`` while
-        saving.
+        A cancelled job stops at once, unsaved: its task is cancelled, which also closes the
+        request a transcribing job is waiting on, and a local engine stops on that. A dictation
+        being transcribed, or any job being saved, raises ``NotReadyError``.
         """
         job = self._jobs.get(job_id)
         if job is None:
@@ -454,7 +449,7 @@ class JobQueue:
         if job.stage == "saving":
             raise NotReadyError(f"This {job.kind} is already being saved to History")
         if job.stage in _CANCELLABLE:
-            if (job.stage == "queued" or job.paused) and job.task is not None:
+            if job.task is not None:
                 job.task.cancel()
             if job.stage == "queued":
                 discard_scratch_file(job.path)
@@ -545,8 +540,10 @@ class JobQueue:
                 job.stage = "done"
                 job.finished_at = self.clock()
                 self._spawn_indexer()
-        except _JobCancelledError:
+        except (_JobCancelledError, asyncio.CancelledError) as stop:
             log.info("The %s job %s was cancelled; its answer was not saved", job.kind, job.id)
+            if isinstance(stop, asyncio.CancelledError):
+                raise
         except Exception as failure:
             self._fail_on(job, failure)
         finally:
