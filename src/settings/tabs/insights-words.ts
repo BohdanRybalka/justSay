@@ -87,7 +87,7 @@ function podiumItem({ word, count, is_filler }: WordCount, index: number): strin
   return `
     <div class="podium-item${is_filler ? " podium-item--filler" : ""}">
       <span class="podium-rank num">${index + 1}</span>
-      <div class="podium-word">${escapeHtml(word)}</div>
+      <div class="podium-word" title="${escapeHtml(word)}">${escapeHtml(word)}</div>
       <div class="podium-count"><b class="num">${number(count)}</b> ${count === 1 ? "time" : "times"}${is_filler ? " · filler" : ""}</div>
     </div>
   `;
@@ -97,7 +97,7 @@ function wordRow({ word, count, is_filler }: WordCount, index: number): string {
   return `
     <div class="word-row">
       <span class="word-row-rank num">${index + PODIUM + 1}</span>
-      <span class="word-row-word">${escapeHtml(word)}${is_filler ? ` <span class="chip">filler</span>` : ""}</span>
+      <span class="word-row-word"><span class="word-row-text" title="${escapeHtml(word)}">${escapeHtml(word)}</span>${is_filler ? ` <span class="chip">filler</span>` : ""}</span>
       <span class="word-row-track"><i${is_filler ? ` class="word-row-fill--filler"` : ""} style="width:0"></i></span>
       <span class="word-row-count num">${number(count)}</span>
     </div>

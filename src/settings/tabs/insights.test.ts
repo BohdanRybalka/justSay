@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FillerNote, Insights, TopWordsResponse, WordCount } from "../../api";
 import { dropFocusWhenDisabled } from "../../ui/browser-focus.test-helper";
@@ -340,6 +342,23 @@ describe("the Insights panel", () => {
     expect(container.querySelector(".fact-grid")!.compareDocumentPosition(container.querySelector(".favourite-words")!)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
+  });
+
+  it("keeps a long word on one line, cut short, with the whole word on hover", async () => {
+    const long = "internationalisation";
+    const favourites = [long, "by", "so", long].map((word, index) => ({ word, count: 50 - index, is_filler: false }));
+    await mount(buildInsights(), false, favourites);
+
+    const podiumWord = container.querySelector<HTMLElement>(".podium-word")!;
+    const rowWord = container.querySelector<HTMLElement>(".word-row-text")!;
+    expect([podiumWord.title, podiumWord.textContent, rowWord.title, rowWord.textContent]).toEqual([long, long, long, long]);
+    const css = readFileSync(resolve(__dirname, "insights.css"), "utf-8");
+    for (const selector of [".podium-word", ".word-row-text"]) {
+      const rule = css.match(new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`))![1];
+      expect(rule).toMatch(/white-space:\s*nowrap/);
+      expect(rule).toMatch(/overflow:\s*hidden/);
+      expect(rule).toMatch(/text-overflow:\s*ellipsis/);
+    }
   });
 
   it("grows each bar from zero to its count against the most said word", async () => {
