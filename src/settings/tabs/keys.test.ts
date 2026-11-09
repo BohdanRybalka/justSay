@@ -127,7 +127,7 @@ describe("renderKeys — Replace and Cancel", () => {
     expect(input.readOnly).toBe(false);
     expect(document.activeElement).toBe(input);
     expect(container.querySelector("#groq-cancel")).not.toBeNull();
-    expect(container.querySelector<HTMLButtonElement>("#groq-save")!.disabled).toBe(false);
+    expect(container.querySelector<HTMLButtonElement>("#groq-save")!.disabled).toBe(true);
 
     container.querySelector<HTMLButtonElement>("#groq-cancel")!.click();
 
@@ -167,6 +167,47 @@ describe("renderKeys — removing a stored key", () => {
     expect(input.readOnly).toBe(false);
     expect(container.querySelector("#groq-cancel")).toBeNull();
     expect(container.querySelector("#groq-status")!.textContent).toBe("");
+  });
+
+  it("a second click where Replace was does not remove the key", () => {
+    const container = render(buildSettings({ groq_api_key: "***" }));
+
+    container.querySelector<HTMLButtonElement>("#groq-replace")!.click();
+    container.querySelector<HTMLButtonElement>("#groq-save")!.click();
+
+    expect(saveSettingsMock).not.toHaveBeenCalled();
+  });
+
+  it("after the removal, keyboard focus lands on the empty field", async () => {
+    saveSettingsMock.mockResolvedValue({ settings: buildSettings(), warning: null });
+    getCloudKeyStatusMock.mockReturnValue(NO_KEYS);
+    const container = render(buildSettings({ groq_api_key: "***" }));
+
+    container.querySelector<HTMLButtonElement>("#groq-replace")!.click();
+    const input = container.querySelector<HTMLInputElement>("#groq-key-input")!;
+    input.value = "";
+    input.dispatchEvent(new Event("input"));
+    const save = container.querySelector<HTMLButtonElement>("#groq-save")!;
+    save.focus();
+    save.click();
+
+    await vi.waitFor(() => expect(container.querySelector("#groq-cancel")).toBeNull());
+    expect(document.activeElement).toBe(container.querySelector("#groq-key-input"));
+  });
+
+  it("Replace with a new key typed saves that key", async () => {
+    saveSettingsMock.mockResolvedValue({ settings: buildSettings({ groq_api_key: "***" }), warning: null });
+    getCloudKeyStatusMock.mockReturnValue(NO_KEYS);
+    const container = render(buildSettings({ groq_api_key: "***" }));
+
+    container.querySelector<HTMLButtonElement>("#groq-replace")!.click();
+    const input = container.querySelector<HTMLInputElement>("#groq-key-input")!;
+    input.value = " gsk-replacement ";
+    input.dispatchEvent(new Event("input"));
+    container.querySelector<HTMLButtonElement>("#groq-save")!.click();
+
+    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledWith({ groq_api_key: "gsk-replacement" }));
+    await vi.waitFor(() => expect(container.querySelector("#groq-replace")).not.toBeNull());
   });
 
   it("a removed key that the environment still gives says so beside the empty field", async () => {

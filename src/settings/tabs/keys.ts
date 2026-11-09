@@ -1,9 +1,9 @@
 /**
  * The API keys fold: one row per cloud key. A row is stored, env, unset,
  * unknown or editing, and is redrawn alone; only a key stored here shows hidden,
- * and Save on its emptied Replace field removes it. The subtitle says what the
- * key is for, or that it is not used while Local is on: the Groq key serves
- * dictation, meetings and files, the Google key History search.
+ * and Save on its Replace field, once typed in and left blank, removes it. The
+ * subtitle says what the key is for, or that it is not used while Local is on:
+ * the Groq key serves dictation, meetings and files, the Google key History search.
  */
 import { type CloudKeyStatus, type UserSettings } from "../../api";
 import { MASKED_API_KEY } from "../../contracts";
@@ -61,13 +61,12 @@ function keyControls(spec: KeyRowSpec, state: KeyRowState): string {
       <button type="button" class="btn" id="${p}-replace">Replace</button>
     `;
   }
-  const editing = state === "editing";
-  const cancel = editing ? `<button type="button" class="btn" id="${p}-cancel">Cancel</button>` : "";
+  const cancel = state === "editing" ? `<button type="button" class="btn" id="${p}-cancel">Cancel</button>` : "";
   return `
     <input class="masked-field" type="password" id="${p}-key-input" autocomplete="off" spellcheck="false"
       placeholder="Paste your ${spec.label} key" aria-label="${spec.label} key" />
     ${cancel}
-    <button type="button" class="btn btn-primary" id="${p}-save"${editing ? "" : " disabled"}>Save</button>
+    <button type="button" class="btn btn-primary" id="${p}-save" disabled>Save</button>
   `;
 }
 
@@ -94,7 +93,7 @@ export function renderKeys(container: HTMLElement, settings: UserSettings, cloud
     `;
     wireKey(spec, state, row);
     if (state === "editing") row.querySelector<HTMLInputElement>("input")!.focus();
-    else if (hadFocus) row.querySelector<HTMLElement>("button")?.focus();
+    else if (hadFocus) (row.querySelector<HTMLElement>("button:not([disabled])") ?? row.querySelector("input"))?.focus();
   };
 
   const wireKey = (spec: KeyRowSpec, state: KeyRowState, row: HTMLElement): void => {
