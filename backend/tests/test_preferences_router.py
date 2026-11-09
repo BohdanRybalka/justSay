@@ -65,6 +65,20 @@ async def test_put_settings_response_masks_key(client):
 
 
 @pytest.mark.anyio
+async def test_saving_an_empty_key_removes_it_from_storage_and_from_cloud_use(client, monkeypatch):
+    monkeypatch.setitem(user_settings._environment_keys, "groq_api_key", "")
+    await client.put("/settings", json={"groq_api_key": "gsk-stored"})
+    assert (await client.get("/settings/cloud-status")).json()["groq_key_set"] is True
+
+    resp = await client.put("/settings", json={"groq_api_key": ""})
+
+    assert resp.json()["settings"]["groq_api_key"] == ""
+    assert user_settings.get_user_settings().groq_api_key == ""
+    assert runtime_settings.stt.groq_api_key == ""
+    assert (await client.get("/settings/cloud-status")).json()["groq_key_set"] is False
+
+
+@pytest.mark.anyio
 async def test_put_settings_placeholder_does_not_overwrite(client, monkeypatch):
     monkeypatch.setattr(user_settings, "_settings", None)
     user_settings.update_user_settings({"gemini_api_key": "AIza-original"})
