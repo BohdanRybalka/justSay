@@ -69,7 +69,7 @@ _SERVER_FAILED = "The local engine could not turn this audio into text"
 _ILLEGAL_INSTRUCTION_EXIT_CODES = frozenset({0xC000001D, -signal.SIGILL})
 PROCESSOR_NOT_SUPPORTED = (
     "The local speech engine does not support this computer's processor, "
-    "so Local mode cannot start. Cloud mode still works."
+    "so Local mode cannot start. You can use Cloud mode instead."
 )
 
 
@@ -298,6 +298,7 @@ def _early_exit_error(returncode: int) -> ResourceUnavailableError:
     instructions this CPU lacks, so it names the processor rather than a bare exit code.
     """
     if returncode in _ILLEGAL_INSTRUCTION_EXIT_CODES:
+        log.error("whisper-server died of an illegal instruction (code %s)", returncode)
         return ResourceUnavailableError(
             PROCESSOR_NOT_SUPPORTED,
             diagnostic=f"whisper-server died of an illegal instruction (code {returncode})",
@@ -389,6 +390,7 @@ class WhisperCppServerSTTProvider(STTProvider):
                 raise
 
     def _spawn_server(self, binary_path: Path, model_path: Path) -> None:
+        binary_path = binary_path.resolve()
         self._port = _free_port()
         argv = build_server_argv(binary_path, model_path, _HOST, self._port)
         creationflags = 0

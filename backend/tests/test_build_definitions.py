@@ -165,7 +165,7 @@ def _vulkan_configure_flags() -> set[str]:
 
 
 def test_the_vulkan_engine_picks_its_cpu_code_when_it_loads_not_when_it_compiles():
-    """GGML_NATIVE's default compiled ggml-cpu for the CI runner's CPU and shipped AVX-512.
+    """GGML_NATIVE's default compiles ggml-cpu for the build machine's CPU only.
 
     One ggml-cpu variant per CPU level, scored at load time, runs on any x86-64 CPU; a
     fixed GGML_AVX*/FMA/F16C level would exclude every CPU below it.
@@ -183,7 +183,8 @@ def test_the_vulkan_engine_picks_its_cpu_code_when_it_loads_not_when_it_compiles
     assert not [flag for flag in flags if flag.startswith(fixed_levels)]
 
 
-def test_the_vulkan_build_fails_when_its_installed_engine_breaks_the_cpu_dispatch_contract():
+def test_the_vulkan_build_runs_its_cpu_dispatch_check_on_the_installed_engine():
+    """The check itself needs dumpbin, so only the Windows release build can run it."""
     text = VULKAN_BUILD_SCRIPT.read_text(encoding="utf-8")
     lines = [line.strip() for line in text.splitlines()]
 

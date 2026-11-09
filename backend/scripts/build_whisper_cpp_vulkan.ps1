@@ -295,6 +295,11 @@ if ($LASTEXITCODE -ne 0) { throw "CMake configure failed (exit $LASTEXITCODE)." 
 
 Write-Step "Building whisper-server (this can take several minutes)"
 
+# Every DLL is relinked into an emptied bin folder, so one an older recipe
+# left behind in a reused build tree (a plain ggml-cpu.dll) cannot be shipped.
+Get-ChildItem -Path (Join-Path $BuildDir "bin") -Filter "*.dll" -ErrorAction SilentlyContinue |
+    Remove-Item -Force
+
 $buildCmd = @"
 call "$($vs.VcVars)" >nul
 set VULKAN_SDK=$vulkanSdk

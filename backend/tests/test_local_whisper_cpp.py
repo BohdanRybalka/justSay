@@ -1394,11 +1394,11 @@ def test_early_exit_latches_the_status_text_the_settings_indicator_shows(monkeyp
 
 @pytest.mark.parametrize("returncode", [0xC000001D, -signal.SIGILL])
 def test_an_illegal_instruction_exit_names_the_processor_not_an_exit_code(
-    monkeypatch, tmp_path, returncode
+    monkeypatch, tmp_path, returncode, caplog
 ):
     """A binary using instructions this CPU lacks dies with 0xC000001D (Windows) or SIGILL.
 
-    The user is told the engine does not support the processor; the code stays in the log only,
+    The user is told the engine does not support the processor while the code goes to the log,
     and the refusal is the same retryable 503 as any other early exit, so the mode is untouched.
     """
     provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
@@ -1414,6 +1414,7 @@ def test_an_illegal_instruction_exit_names_the_processor_not_an_exit_code(
     assert str(excinfo.value) == PROCESSOR_NOT_SUPPORTED
     assert excinfo.value.status_code == 503
     assert str(returncode) in excinfo.value.diagnostic
+    assert f"illegal instruction (code {returncode})" in caplog.text
     assert provider.last_load_error == PROCESSOR_NOT_SUPPORTED
 
 
