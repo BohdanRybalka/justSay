@@ -56,9 +56,6 @@ class _Pacer:
     async def pause(self, seconds: float) -> None:
         self.events.append(("pause", seconds))
 
-    async def stoppable(self, request):
-        return await request
-
     def piece_done(self, done: int, total: int) -> None:
         self.events.append(("done", done, total))
 

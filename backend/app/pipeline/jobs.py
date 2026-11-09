@@ -168,8 +168,9 @@ class _JobObserver:
     async def stoppable(
         self, request: Awaitable[TranscriptionResult]
     ) -> TranscriptionResult:
-        self._stop_if_cancelled()
         self._job.sending = asyncio.ensure_future(request)  # background-task-ok: awaited below
+        if self._job.stage == "cancelled":
+            self._job.sending.cancel()
         try:
             return await self._job.sending
         finally:
@@ -453,7 +454,7 @@ class JobQueue:
 
         A queued or paused job stops at once, and so does a request the engine stops on when it
         is dropped; any other request already sent runs to its answer, which is not saved.
-        ``NotReadyError`` while saving.
+        ``NotReadyError`` while saving, or for a dictation being transcribed.
         """
         job = self._jobs.get(job_id)
         if job is None:

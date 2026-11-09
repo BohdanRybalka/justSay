@@ -417,6 +417,25 @@ async def test_a_cancelled_stoppable_send_is_dropped_at_once_and_the_turn_moves_
     after.release.set()
 
 
+async def test_a_stoppable_send_made_after_the_cancel_never_starts(queue, fakes):
+    """A cancel that lands while the piece is cut leaves no send to drop, so none may begin."""
+    pipeline = _FakePipeline()
+    job_id = _start(queue, fakes, pipeline)
+    await asyncio.wait_for(pipeline.transcribing.wait(), 1)
+    queue.cancel_or_dismiss(job_id)
+    started: list[bool] = []
+
+    async def request() -> TranscriptionResult:
+        started.append(True)
+        return TranscriptionResult(text="late")
+
+    with pytest.raises(asyncio.CancelledError):
+        await jobs._JobObserver(queue, queue._jobs[job_id]).stoppable(request())
+    assert started == []
+    pipeline.release.set()
+    await _settle(queue, job_id)
+
+
 async def test_a_cancelled_job_stays_cancelled_when_its_answer_is_a_failure(queue, fakes):
     pipeline = _FakePipeline(outcome=ResourceUnavailableError("the provider said no"))
     job_id = _start(queue, fakes, pipeline)
@@ -621,10 +640,15 @@ async def test_a_file_cancelled_mid_send_leaves_no_scratch_and_logs_no_error(
     """Over the real pipeline. An engine that stops on a dropped request is dropped at once;
     any other answer is waited for and not saved. Neither logs an error or leaves a file."""
     asked, answer = asyncio.Event(), asyncio.Event()
+    dropped: list[bool] = []
 
     async def transcribe(*args, **kwargs) -> TranscriptionResult:
         asked.set()
-        await answer.wait()
+        try:
+            await answer.wait()
+        except asyncio.CancelledError:
+            dropped.append(True)
+            raise
         return TranscriptionResult(text="not saved")
 
     stt = MagicMock(model_name="mock/provider", is_local=False, longest_piece_seconds=600.0)
@@ -648,6 +672,7 @@ async def test_a_file_cancelled_mid_send_leaves_no_scratch_and_logs_no_error(
     view = _view(queue, job_id)
     assert (view.stage, view.entry_id) == ("cancelled", None)
     assert list(queue._temp_dir.iterdir()) == []
+    assert dropped == ([True] if stops_when_dropped else [])
     assert not [r for r in caplog.records if r.levelname in ("ERROR", "CRITICAL")]
     assert any("was cancelled" in r.getMessage() for r in caplog.records)
 
