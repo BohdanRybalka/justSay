@@ -423,8 +423,12 @@ mod tests {
         assert_eq!(&dib[14..16], &32u16.to_le_bytes());
         assert_eq!(&dib[16..20], &3u32.to_le_bytes());
         assert_eq!(&dib[20..24], &8u32.to_le_bytes());
-        assert_eq!(&dib[40..44], &0x00FF_0000u32.to_le_bytes());
-        assert_eq!(&dib[52..56], &0xFF00_0000u32.to_le_bytes());
+        assert_eq!(&dib[12..14], &1u16.to_le_bytes());
+        let masks: Vec<u8> = [0x00FF_0000u32, 0x0000_FF00, 0x0000_00FF, 0xFF00_0000]
+            .iter()
+            .flat_map(|mask| mask.to_le_bytes())
+            .collect();
+        assert_eq!(&dib[40..56], masks.as_slice());
         assert_eq!(&dib[56..60], b"BGRs");
         assert_eq!(&dib[108..112], &4u32.to_le_bytes());
         assert_eq!(&dib[124..], &[255, 255, 255, 0, 0, 0, 255, 255]);
