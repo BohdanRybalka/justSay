@@ -1,10 +1,10 @@
 /**
  * The Version row of the Settings card: the running version, when updates were
  * last found to be none, and the updater's check, install and restart. An install
- * waits while a dictation, a meeting recording or a transcription runs; otherwise
- * it runs in the shell, which on Windows closes JustSay the way Quit does before
- * the installer starts. The time of the last "up to date" answer is UI state kept
- * in `localStorage`.
+ * waits while the backend reports a dictation or a meeting being recorded, or a
+ * transcription job running; otherwise it runs in the shell, which on Windows closes
+ * JustSay the way Quit does before the installer starts. The time of the last "up
+ * to date" answer is UI state kept in `localStorage`.
  */
 import { api } from "../../api";
 import { setDisabled } from "../../ui/controls";
@@ -46,8 +46,9 @@ function describeUpdateCheckFailure(err: unknown): string {
   return `Check failed: ${raw}`;
 }
 
-/** What the update has to wait for, or `null` when nothing is being recorded or
- *  turned into text. A status that cannot be read is treated as work in progress. */
+/** What the update has to wait for, or `null` when the backend reports no dictation
+ *  or meeting being recorded and no job running. A status that cannot be read is
+ *  treated as work in progress. */
 async function workTheUpdateWaitsFor(): Promise<string | null> {
   try {
     const [meeting, dictation, jobs] = await Promise.all([api.getMeetingStatus(), api.audioStatus(), api.jobs()]);

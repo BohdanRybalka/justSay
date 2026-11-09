@@ -201,8 +201,8 @@ describe("Version row — check, install and restart", () => {
     expect(installCalls()).toBe(1);
   });
 
-  it("does not install when it cannot tell whether a recording is running", async () => {
-    apiMock.jobs.mockRejectedValue(new Error("backend timed out"));
+  it.each(["audioStatus", "getMeetingStatus", "jobs"] as const)("does not install when %s cannot be read", async (read) => {
+    apiMock[read].mockRejectedValue(new Error("backend timed out"));
     checkMock.mockResolvedValue(READY_UPDATE);
     const { button, status } = renderRow();
     button.click();
