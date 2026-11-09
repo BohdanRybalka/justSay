@@ -455,14 +455,9 @@
 }
 
 .word-row-text {
-  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.word-row-word .chip {
-  flex: none;
 }
 
 .word-row-track {

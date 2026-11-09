@@ -359,6 +359,7 @@ describe("the Insights panel", () => {
       expect(rule).toMatch(/overflow:\s*hidden/);
       expect(rule).toMatch(/text-overflow:\s*ellipsis/);
     }
+    expect(css.match(/\.podium-item\s*\{([^}]*)\}/)![1]).toMatch(/overflow:\s*hidden/);
   });
 
   it("grows each bar from zero to its count against the most said word", async () => {
