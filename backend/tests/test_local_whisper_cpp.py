@@ -7,6 +7,7 @@ spawned and no real network call is made. `resolve_binary_path`/
 
 import asyncio
 import ctypes
+import signal
 import socket
 import subprocess
 import sys
@@ -23,7 +24,7 @@ from app.core.errors import ResourceUnavailableError
 from app.stt.base import LOAD_FAILED_WITHOUT_A_MESSAGE
 from app.stt.config import STTSettings
 from app.stt.glossary import WHISPER_PROMPT_CHAR_BUDGET
-from app.stt.local_whisper_cpp import WhisperCppServerSTTProvider
+from app.stt.local_whisper_cpp import PROCESSOR_NOT_SUPPORTED, WhisperCppServerSTTProvider
 from tests.conftest import wait_until, write_aac_m4a
 
 _requires_windows = pytest.mark.skipif(
@@ -1389,6 +1390,53 @@ def test_early_exit_latches_the_status_text_the_settings_indicator_shows(monkeyp
 
     assert provider.last_load_error == "whisper-server exited early (code 3)"
     assert str(excinfo.value) == "whisper-server exited early (code 3)"
+
+
+@pytest.mark.parametrize("returncode", [0xC000001D, -signal.SIGILL])
+def test_an_illegal_instruction_exit_names_the_processor_not_an_exit_code(
+    monkeypatch, tmp_path, returncode
+):
+    """A binary using instructions this CPU lacks dies with 0xC000001D (Windows) or SIGILL.
+
+    The user is told the engine does not support the processor; the code stays in the log only,
+    and the refusal is the same retryable 503 as any other early exit, so the mode is untouched.
+    """
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    dead = _FakeProcess()
+    dead.returncode = returncode
+    monkeypatch.setattr(local_whisper_cpp_module.subprocess, "Popen", lambda argv, **k: dead)
+    _install_fake_httpx(monkeypatch, get_impl=lambda url: _ready())
+    monkeypatch.setattr(local_whisper_cpp_module.time, "sleep", lambda _s: None)
+
+    with pytest.raises(ResourceUnavailableError) as excinfo:
+        provider._get_model()
+
+    assert str(excinfo.value) == PROCESSOR_NOT_SUPPORTED
+    assert excinfo.value.status_code == 503
+    assert str(returncode) in excinfo.value.diagnostic
+    assert provider.last_load_error == PROCESSOR_NOT_SUPPORTED
+
+
+def test_whisper_server_starts_in_its_own_directory_so_ggml_loads_its_backends_only_from_there(
+    monkeypatch, tmp_path
+):
+    """ggml's backend loader searches the executable's directory and the working directory.
+
+    Starting the server in its own directory leaves one place a ggml-cpu-*.dll can come from.
+    """
+    provider, _model_path = _make_provider(tmp_path, monkeypatch, model_exists=True)
+    spawned: dict = {}
+
+    def _fake_popen(argv, **kwargs):
+        spawned.update(kwargs)
+        return _FakeProcess()
+
+    monkeypatch.setattr(local_whisper_cpp_module.subprocess, "Popen", _fake_popen)
+    _install_fake_httpx(monkeypatch, get_impl=lambda url: _ready())
+
+    provider._get_model()
+
+    assert spawned["cwd"] == tmp_path
 
 
 def test_load_failure_without_a_message_still_latches_something(monkeypatch, tmp_path):

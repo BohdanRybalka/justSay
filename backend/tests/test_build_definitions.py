@@ -157,6 +157,42 @@ def test_the_two_build_scripts_pin_the_same_whisper_cpp_tag():
     assert vulkan.group(1) == metal.group(1)
 
 
+def _vulkan_configure_flags() -> set[str]:
+    text = VULKAN_BUILD_SCRIPT.read_text(encoding="utf-8")
+    configure = [line for line in text.splitlines() if " -G Ninja " in line]
+    assert len(configure) == 1, "expected exactly one CMake configure line in the Vulkan script"
+    return set(re.findall(r"-D\w+=\S+", configure[0]))
+
+
+def test_the_vulkan_engine_picks_its_cpu_code_when_it_loads_not_when_it_compiles():
+    """GGML_NATIVE's default compiled ggml-cpu for the CI runner's CPU and shipped AVX-512.
+
+    One ggml-cpu variant per CPU level, scored at load time, runs on any x86-64 CPU; a
+    fixed GGML_AVX*/FMA/F16C level would exclude every CPU below it.
+    """
+    flags = _vulkan_configure_flags()
+
+    assert {
+        "-DGGML_NATIVE=OFF",
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DGGML_BACKEND_DL=ON",
+        "-DGGML_CPU_ALL_VARIANTS=ON",
+        "-DGGML_VULKAN=ON",
+    } <= flags
+    fixed_levels = ("-DGGML_AVX", "-DGGML_FMA", "-DGGML_F16C", "-DGGML_BMI2", "-DGGML_SSE")
+    assert not [flag for flag in flags if flag.startswith(fixed_levels)]
+
+
+def test_the_vulkan_build_fails_when_its_installed_engine_breaks_the_cpu_dispatch_contract():
+    text = VULKAN_BUILD_SCRIPT.read_text(encoding="utf-8")
+    lines = [line.strip() for line in text.splitlines()]
+
+    assert "function Assert-CpuDispatch([string]$Dir) {" in lines
+    assert lines.count("Assert-CpuDispatch $VendorDir") == 1
+    installed = lines.index("Copy-Item -Path $serverExe -Destination $VendorDir -Force")
+    assert lines.index("Assert-CpuDispatch $VendorDir") > installed
+
+
 def test_the_metal_build_script_is_a_strict_bash_script():
     text = METAL_BUILD_SCRIPT.read_text(encoding="utf-8")
 

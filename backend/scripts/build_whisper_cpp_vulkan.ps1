@@ -13,6 +13,19 @@
     See docs/adr/011-whisper-cpp-vulkan-stt-provider.md for the full
     design rationale.
 
+    The CPU code is built for every x86-64 processor, not for the build
+    machine's: GGML_NATIVE=OFF plus GGML_BACKEND_DL=ON and
+    GGML_CPU_ALL_VARIANTS=ON compile one ggml-cpu-<variant>.dll per CPU
+    level (x64, sse42, sandybridge, haswell, skylakex, icelake, alderlake),
+    and whisper-server's ggml_backend_load_all() asks each variant's
+    ggml_backend_score() -- compiled without the variant's arch flags --
+    whether this CPU has its instructions, then loads the best one that
+    does. The default GGML_NATIVE=ON compiled ggml-cpu.dll for the GitHub
+    runner's CPU, so v1.0.1 shipped AVX-512 code that died with 0xC000001D
+    (illegal instruction) on CPUs without AVX-512, e.g. a Ryzen 5 5600.
+    This is the same recipe llama.cpp's own Windows release builds use.
+    Assert-CpuDispatch below fails the build when that guarantee breaks.
+
     Prerequisites (not installed by this script):
       - git
       - A Visual Studio 2022 C++ toolchain (Build Tools or full IDE) with
@@ -188,13 +201,94 @@ function Invoke-VcEnvBatch([string]$Script) {
     try { cmd /c "`"$bat`"" } finally { Remove-Item $bat -Force -ErrorAction SilentlyContinue }
 }
 
+# The CPU-dispatch contract the shipped engine must keep:
+#   - no plain ggml-cpu.dll (one CPU level, loaded unconditionally);
+#   - the x64 baseline variant exists, so every x86-64 CPU gets a backend;
+#   - every variant exports ggml_backend_score, the gate the loader asks
+#     before it keeps a variant;
+#   - AVX-512 code appears only in the variants whose score demands AVX-512;
+#     whisper-server.exe, whisper.dll, ggml*.dll and the other variants are
+#     loaded on every CPU and must hold none.
+# The scan matches what only AVX-512 (EVEX) code can contain: zmm registers,
+# opmask registers and their k* instructions, and the extra xmm16-31/ymm16-31
+# registers. ymm alone is not a finding: the MSVC STL's vectorized algorithms
+# ship AVX2 paths behind their own CPUID check, even in the x64 variant. The
+# scan must find AVX-512 in the AVX-512 variants, or the scan itself is broken.
+$BaselineCpuVariant = "ggml-cpu-x64.dll"
+$Avx512CpuVariants = @("ggml-cpu-skylakex.dll", "ggml-cpu-icelake.dll")
+$Avx512Pattern = '\bzmm\d+\b|\{k[1-7]\}|\b[xy]mm(1[6-9]|2\d|3[01])\b|' +
+    '\bk(and|andn|or|xor|xnor|not|test|ortest|shiftl|shiftr|unpck|add|mov)(b|w|d|q|bw|wd|dq)\b'
+
+function Get-Avx512LineCount([string]$Binary) {
+    $listing = Join-Path ([System.IO.Path]::GetTempPath()) ("justsay-disasm-" + [guid]::NewGuid().ToString("N") + ".txt")
+    try {
+        Invoke-VcEnvBatch @"
+call "$($vs.VcVars)" >nul 2>&1
+dumpbin /nologo /disasm /out:"$listing" "$Binary"
+"@ | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $listing)) {
+            throw "dumpbin could not disassemble $Binary (exit $LASTEXITCODE)."
+        }
+        return @(Select-String -Path $listing -Pattern $Avx512Pattern -CaseSensitive).Count
+    } finally {
+        Remove-Item $listing -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-ExportsScore([string]$Binary) {
+    $lines = Invoke-VcEnvBatch @"
+call "$($vs.VcVars)" >nul 2>&1
+dumpbin /nologo /exports "$Binary"
+"@
+    return @($lines | Where-Object { $_ -match '\sggml_backend_score$' }).Count -gt 0
+}
+
+function Assert-CpuDispatch([string]$Dir) {
+    if (Test-Path (Join-Path $Dir "ggml-cpu.dll")) {
+        throw "ggml-cpu.dll was built: the CPU backend is fixed to one CPU level instead of " +
+              "being chosen at load time. Build with GGML_BACKEND_DL=ON and GGML_CPU_ALL_VARIANTS=ON."
+    }
+    if (-not (Test-Path (Join-Path $Dir $BaselineCpuVariant))) {
+        throw "$BaselineCpuVariant is missing: a CPU without SSE4.2/AVX would get no CPU backend."
+    }
+    $variants = Get-ChildItem -Path $Dir -Filter "ggml-cpu-*.dll"
+    foreach ($variant in $variants) {
+        if (-not (Test-ExportsScore $variant.FullName)) {
+            throw "$($variant.Name) exports no ggml_backend_score, so the loader cannot tell " +
+                  "whether this CPU can run it."
+        }
+    }
+    foreach ($name in $Avx512CpuVariants) {
+        $path = Join-Path $Dir $name
+        if (-not (Test-Path $path)) {
+            throw "$name is missing: the AVX-512 variant list no longer matches what ggml builds."
+        }
+        $count = Get-Avx512LineCount $path
+        Write-Host "  $name (kept only on AVX-512 CPUs): $count AVX-512 instructions"
+        if ($count -eq 0) {
+            throw "The AVX-512 scan found nothing in $name, which is built for AVX-512, " +
+                  "so the scan is broken and cannot vouch for the other files."
+        }
+    }
+    $loadedEverywhere = Get-ChildItem -Path $Dir -File |
+        Where-Object { $_.Extension -in ".exe", ".dll" -and $Avx512CpuVariants -notcontains $_.Name }
+    foreach ($binary in $loadedEverywhere) {
+        $count = Get-Avx512LineCount $binary.FullName
+        Write-Host "  $($binary.Name): $count AVX-512 instructions"
+        if ($count -ne 0) {
+            throw "$($binary.Name) contains $count AVX-512 instructions but can be loaded on a " +
+                  "CPU without AVX-512, where it would crash with 0xC000001D (illegal instruction)."
+        }
+    }
+}
+
 Write-Step "Configuring (CMake + Ninja, GGML_VULKAN=ON)"
 
 $configureCmd = @"
 call "$($vs.VcVars)" >nul
 set VULKAN_SDK=$vulkanSdk
 set PATH=%VULKAN_SDK%\Bin;%PATH%
-"$($vs.Cmake)" -S "$SrcDir" -B "$BuildDir" -G Ninja -DCMAKE_MAKE_PROGRAM="$($vs.Ninja)" -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DWHISPER_SDL2=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_SERVER=ON
+"$($vs.Cmake)" -S "$SrcDir" -B "$BuildDir" -G Ninja -DCMAKE_MAKE_PROGRAM="$($vs.Ninja)" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DGGML_VULKAN=ON -DWHISPER_SDL2=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_SERVER=ON
 "@
 Invoke-VcEnvBatch $configureCmd
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed (exit $LASTEXITCODE)." }
@@ -217,12 +311,18 @@ if (-not (Test-Path $serverExe)) {
 }
 
 Write-Step "Installing binary + DLLs into $VendorDir"
+# Emptied first: a DLL left over from an older recipe (a plain ggml-cpu.dll
+# built for one CPU) would otherwise ship beside the new variants.
+if (Test-Path $VendorDir) { Remove-Item -Recurse -Force $VendorDir }
 New-Item -ItemType Directory -Force -Path $VendorDir | Out-Null
 Copy-Item -Path $serverExe -Destination $VendorDir -Force
 Get-ChildItem -Path $binDir -Filter "*.dll" | ForEach-Object {
     Copy-Item -Path $_.FullName -Destination $VendorDir -Force
     Write-Host "  Copied $($_.Name)"
 }
+
+Write-Step "Verifying the CPU code runs on every x86-64 processor"
+Assert-CpuDispatch $VendorDir
 
 Write-Step "Verifying the build is Vulkan-capable"
 Write-Host "(startup log below should name a Vulkan device -- e.g. an AMD/Intel/NVIDIA GPU)" -ForegroundColor Yellow
