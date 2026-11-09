@@ -40,6 +40,7 @@ from app.core.scratch import RECORDING_FILE_PREFIX, discard_scratch_file
 from app.core.types import ProviderMode
 from app.pipeline.chunking import FinishedPieces, RouteStoppedError
 from app.pipeline.service import process_audio
+from app.stt.base import TranscriptionResult
 from app.stt.config import stt_settings
 from app.stt.local_whisper_cpp_cmd import ModelNotInstalledError
 from app.transcripts import history
@@ -126,16 +127,14 @@ class _Job:
     piece_started_at: float | None = None
     pieces_done: int = 0
     pieces_total: int = 1
+    paused: bool = False
     expected_seconds: float | None = None
     finished_at: float | None = None
     task: asyncio.Task | None = None
+    sending: asyncio.Future | None = None
     mode: ProviderMode | None = None
     language: str = "uk"
     finished: FinishedPieces = field(default_factory=FinishedPieces)
-
-
-class _JobCancelledError(Exception):
-    pass
 
 
 class _JobObserver:
@@ -158,9 +157,23 @@ class _JobObserver:
 
     async def pause(self, seconds: float) -> None:
         self._stop_if_cancelled()
-        await self._queue.sleep(seconds)
+        self._job.paused = True
+        try:
+            await self._queue.sleep(seconds)
+        finally:
+            self._job.paused = False
         await self._queue.gate.wait_for_none()
         self._stop_if_cancelled()
+
+    async def stoppable(
+        self, request: Awaitable[TranscriptionResult]
+    ) -> TranscriptionResult:
+        self._stop_if_cancelled()
+        self._job.sending = asyncio.ensure_future(request)  # background-task-ok: awaited below
+        try:
+            return await self._job.sending
+        finally:
+            self._job.sending = None
 
     def piece_done(self, done: int, total: int) -> None:
         self._job.pieces_done = done
@@ -170,8 +183,9 @@ class _JobObserver:
         self._job.stage = "saving"
 
     def _stop_if_cancelled(self) -> None:
+        """A cancelled job stops as a cancelled task does, so nothing logs it as a failure."""
         if self._job.stage == "cancelled":
-            raise _JobCancelledError
+            raise asyncio.CancelledError
 
     def saved(self, entry_id: str) -> None:
         self._job.entry_id = entry_id
@@ -437,9 +451,9 @@ class JobQueue:
     def cancel_or_dismiss(self, job_id: str) -> RemovalOutcome | None:
         """Cancel a queued or transcribing job, forget a finished one; ``None`` for an unknown id.
 
-        A cancelled job stops at once, unsaved: its task is cancelled, which also closes the
-        request a transcribing job is waiting on, and a local engine stops on that. A dictation
-        being transcribed, or any job being saved, raises ``NotReadyError``.
+        A queued or paused job stops at once, and so does a request the engine stops on when it
+        is dropped; any other request already sent runs to its answer, which is not saved.
+        ``NotReadyError`` while saving.
         """
         job = self._jobs.get(job_id)
         if job is None:
@@ -449,7 +463,9 @@ class JobQueue:
         if job.stage == "saving":
             raise NotReadyError(f"This {job.kind} is already being saved to History")
         if job.stage in _CANCELLABLE:
-            if job.task is not None:
+            if job.sending is not None:
+                job.sending.cancel()
+            elif (job.stage == "queued" or job.paused) and job.task is not None:
                 job.task.cancel()
             if job.stage == "queued":
                 discard_scratch_file(job.path)
@@ -540,10 +556,9 @@ class JobQueue:
                 job.stage = "done"
                 job.finished_at = self.clock()
                 self._spawn_indexer()
-        except (_JobCancelledError, asyncio.CancelledError) as stop:
+        except asyncio.CancelledError:
             log.info("The %s job %s was cancelled; its answer was not saved", job.kind, job.id)
-            if isinstance(stop, asyncio.CancelledError):
-                raise
+            raise
         except Exception as failure:
             self._fail_on(job, failure)
         finally:

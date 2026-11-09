@@ -267,14 +267,14 @@ def _answers_ready(response: httpx.Response) -> bool:
 
 
 async def _post_inference(url: str, data: dict[str, str], sendable: Path) -> dict:
-    """whisper-server's JSON answer for ``sendable``; cancelling the await closes the connection.
+    """whisper-server's JSON answer for ``sendable``, never through a proxy; a cancel closes it.
 
     The server's abort callback polls that connection between its encoder and decoder steps, so
-    a cancelled transcription stops there instead of keeping the engine busy to its end.
+    a cancelled transcription stops there, and ``sendable`` is closed before the cancel ends.
     """
     with open(sendable, "rb") as f:
         files = {"file": (sendable.name, f, "audio/wav")}
-        async with httpx.AsyncClient(timeout=_INFERENCE_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_INFERENCE_TIMEOUT, trust_env=False) as client:
             resp = await client.post(url, data=data, files=files)
     resp.raise_for_status()
     return resp.json()
@@ -306,6 +306,7 @@ class WhisperCppServerSTTProvider(STTProvider):
 
     is_local = True
     longest_piece_seconds = WHISPER_WINDOW_SECONDS
+    stops_when_dropped = True
 
     def __init__(self, settings: STTSettings):
         self._settings = settings

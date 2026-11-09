@@ -121,9 +121,8 @@ class _FakeStreamContext:
 
 
 class _FakeHttpxClient:
-    def __init__(self, get_impl=None, post_impl=None, stream_impl=None, **kwargs):
+    def __init__(self, get_impl=None, stream_impl=None, **kwargs):
         self._get_impl = get_impl
-        self._post_impl = post_impl
         self._stream_impl = stream_impl
 
     def __enter__(self):
@@ -136,11 +135,6 @@ class _FakeHttpxClient:
         if self._get_impl is None:
             raise AssertionError("GET not expected in this test")
         return self._get_impl(url)
-
-    def post(self, url, data=None, files=None):
-        if self._post_impl is None:
-            raise AssertionError("POST not expected in this test")
-        return self._post_impl(url, data, files)
 
     def stream(self, method, url, headers=None):
         if self._stream_impl is None:
@@ -175,9 +169,7 @@ def _install_fake_httpx(monkeypatch, *, get_impl=None, post_impl=None, stream_im
     monkeypatch.setattr(
         local_whisper_cpp_module.httpx,
         "Client",
-        lambda *a, **kw: _FakeHttpxClient(
-            get_impl=get_impl, post_impl=post_impl, stream_impl=stream_impl
-        ),
+        lambda *a, **kw: _FakeHttpxClient(get_impl=get_impl, stream_impl=stream_impl),
     )
     monkeypatch.setattr(
         local_whisper_cpp_module.httpx,
@@ -1491,9 +1483,30 @@ async def test_a_cancelled_transcription_closes_its_request_so_whisper_server_st
         with pytest.raises(asyncio.CancelledError):
             await request
         await asyncio.wait_for(closed.wait(), 2)
+        assert WhisperCppServerSTTProvider.stops_when_dropped
     finally:
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_the_audio_never_goes_through_a_proxy_the_environment_names(monkeypatch, tmp_path):
+    """httpx honours HTTP(S)_PROXY and ALL_PROXY even for 127.0.0.1; Local mode must not."""
+    provider, _model_path = _make_provider(tmp_path, monkeypatch)
+    _install_fake_httpx(monkeypatch, post_impl=lambda url, data, files: _FakeResponse(200, {}))
+    _install_fake_popen(monkeypatch)
+    built: list[dict] = []
+    fake_client = local_whisper_cpp_module.httpx.AsyncClient
+
+    def _recording_client(*args, **kwargs):
+        built.append(kwargs)
+        return fake_client(*args, **kwargs)
+
+    monkeypatch.setattr(local_whisper_cpp_module.httpx, "AsyncClient", _recording_client)
+
+    await provider.transcribe(_wav(tmp_path), language="uk")
+
+    assert [kwargs.get("trust_env") for kwargs in built] == [False]
 
 
 def _capture_post(monkeypatch, captured: dict):

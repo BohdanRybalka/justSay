@@ -106,12 +106,14 @@ class STTProvider(ABC):
     """Contract: Audio file in -> transcribed text out.
 
     ``longest_piece_seconds`` is the longest audio one request transcribes without dropping text.
+    ``stops_when_dropped``: cancelling ``transcribe`` stops the engine and leaves no file open.
     A local provider owes the further members that the factory enforces through
     :data:`app.stt.local_factory.LOCAL_STATUS_CONTRACT` (ADR 075).
     """
 
     is_local: ClassVar[bool] = False
     longest_piece_seconds: ClassVar[float] = 600.0
+    stops_when_dropped: ClassVar[bool] = False
 
     @property
     @abstractmethod

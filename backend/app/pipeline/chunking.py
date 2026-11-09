@@ -62,13 +62,20 @@ class RouteStoppedError(NotReadyError):
 
 
 class PiecePacer(Protocol):
-    """What the caller hears around each piece; it may hold a piece back or stop the work."""
+    """What the caller hears around each piece; it may hold a piece back or stop the work.
+
+    ``stoppable`` awaits a send that leaves nothing behind when dropped, so a stop may cancel it.
+    """
 
     async def before_piece(self, index: int, total: int) -> None: ...
 
     async def before_send(self) -> None: ...
 
     async def pause(self, seconds: float) -> None: ...
+
+    async def stoppable(
+        self, request: Awaitable[TranscriptionResult]
+    ) -> TranscriptionResult: ...
 
     def piece_done(self, done: int, total: int) -> None: ...
 
@@ -92,6 +99,9 @@ class UnpacedPieces:
 
     async def pause(self, seconds: float) -> None:
         await asyncio.sleep(seconds)
+
+    async def stoppable(self, request: Awaitable[TranscriptionResult]) -> TranscriptionResult:
+        return await request
 
     def piece_done(self, done: int, total: int) -> None:
         return None
@@ -331,7 +341,10 @@ async def transcribe_with_pauses(
     while True:
         await pacer.before_send()
         try:
-            return await stt.transcribe(path, language=language, audio_duration=duration)
+            request = stt.transcribe(path, language=language, audio_duration=duration)
+            if stt.stops_when_dropped:
+                return await pacer.stoppable(request)
+            return await request
         except Exception as failure:
             unanswered = retry_delays and getattr(failure, "message", None) == NO_ANSWER_MESSAGE
             wait = (
