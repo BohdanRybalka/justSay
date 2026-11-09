@@ -8,7 +8,6 @@ from app.core.types import ProviderMode
 from app.pipeline import cleanup
 from app.pipeline.cleanup import clean_dictation, is_faithful_cleanup, system_prompt
 from app.stt.config import STTSettings
-from app.transcripts.words import FILLERS
 
 UNPATCHED_CLIENT = cleanup._client
 
@@ -99,9 +98,9 @@ def test_a_sentence_deleted_from_a_long_dictation_is_caught_though_the_rest_is_k
 
 
 def test_a_dictionary_spelling_may_replace_what_was_heard():
-    raw = "ну запусти тести в плей райт і кей шість"
-    answer = "Запусти тести в Playwright і K6."
-    assert is_faithful_cleanup(raw, answer, "K6, Playwright")
+    raw = "ну запусти тести в плей райт і кубернетес для укр залізниці"
+    answer = "Запусти тести в Playwright і Kubernetes для Укрзалізниці"
+    assert is_faithful_cleanup(raw, answer, "Kubernetes, Playwright, Укрзалізниці")
     assert not is_faithful_cleanup(raw, answer)
 
 
@@ -111,10 +110,26 @@ def test_a_dictionary_spelling_may_replace_what_was_heard():
         ("запусти тести в плей райт", "Запусти Playwright."),
         ("запусти тести", "Запусти тести Playwright."),
         ("запусти тести в плей райт", "Запусти тести у Playwright."),
+        ("тести", "K6, Playwright"),
+        ("тепер кубернетес", "Kubernetes."),
+        ("кубернетес тепер", "Kubernetes."),
+        ("пуш ні гітхаб", "Пуш GitHub."),
+        ("постав не кафку", "Постав Kafka."),
     ],
 )
 def test_a_dictionary_spelling_may_not_swallow_or_add_other_words(raw, answer):
-    assert not is_faithful_cleanup(raw, answer, "Playwright")
+    assert not is_faithful_cleanup(raw, answer, "K6, Playwright, Kubernetes, GitHub, Kafka")
+
+
+@pytest.mark.parametrize(
+    "raw, answer",
+    [
+        ("turn right at the lights", "Turn at the lights."),
+        ("я думаю, ось файл", "Я думаю, файл."),
+    ],
+)
+def test_a_word_that_is_a_filler_only_sometimes_may_not_go(raw, answer):
+    assert not is_faithful_cleanup(raw, answer)
 
 
 def test_an_answer_to_the_dictation_is_caught():
@@ -158,9 +173,10 @@ def test_scattered_deletions_that_summarise_are_caught():
     assert not is_faithful_cleanup(raw, summary)
 
 
-def test_the_prompt_names_every_filler_and_keeps_self_corrections():
+def test_the_prompt_names_only_the_removable_fillers_and_keeps_self_corrections():
     prompt = system_prompt(None)
-    assert all(filler in prompt for filler in FILLERS)
+    assert f"filler words: {', '.join(cleanup.CLEANUP_FILLERS)};" in prompt
+    assert "right" not in prompt
     assert "including self-corrections" in prompt
     assert "keep only the corrected version" not in prompt
 
