@@ -89,6 +89,9 @@ async function mount(figures: Insights, windowHidden = false, favourites: WordCo
 
 const text = (selector: string) => container.querySelector(selector)?.textContent?.replace(/\s+/g, " ").trim();
 
+const INSIGHTS_CSS = readFileSync(resolve(__dirname, "insights.css"), "utf-8");
+const cssRule = (selector: string) => INSIGHTS_CSS.match(new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`))![1];
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(2026, 8, 29, 20, 15));
@@ -352,25 +355,25 @@ describe("the Insights panel", () => {
     const podiumWord = container.querySelector<HTMLElement>(".podium-word")!;
     const rowWord = container.querySelector<HTMLElement>(".word-row-text")!;
     expect([podiumWord.title, podiumWord.textContent, rowWord.title, rowWord.textContent]).toEqual([long, long, long, long]);
-    const css = readFileSync(resolve(__dirname, "insights.css"), "utf-8");
     for (const selector of [".podium-word", ".word-row-text"]) {
-      const rule = css.match(new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`))![1];
+      const rule = cssRule(selector);
       expect(rule).toMatch(/white-space:\s*nowrap/);
       expect(rule).toMatch(/overflow:\s*hidden/);
       expect(rule).toMatch(/text-overflow:\s*ellipsis/);
     }
-    expect(css.match(/\.podium-item\s*\{([^}]*)\}/)![1]).toMatch(/overflow:\s*hidden/);
+    expect(cssRule(".podium-item")).toMatch(/overflow:\s*hidden/);
   });
 
   it("ends a cut-short podium word before the rank digit in the card's corner", () => {
-    const css = readFileSync(resolve(__dirname, "insights.css"), "utf-8");
-    const rule = (selector: string) => css.match(new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`))![1];
     const px = (block: string, property: string) => Number(block.match(new RegExp(`(?:^|\\s)${property}:\\s*([\\d.]+)px`))![1]);
-    const item = rule(".podium-item").match(/padding:\s*[\d.]+px\s+([\d.]+)px/)!;
+    const item = cssRule(".podium-item");
+    const rank = cssRule(".podium-rank");
     const monoDigitEm = 0.6;
-    const rankLeftEdge = px(rule(".podium-rank"), "right") + px(rule(".podium-rank"), "font-size") * monoDigitEm;
-    const wordRightEdge = Number(item[1]) + px(rule(".podium-word"), "margin-right");
+    const rankLeftEdge = px(rank, "right") + px(rank, "font-size") * monoDigitEm;
+    const wordRightEdge = Number(item.match(/padding:\s*[\d.]+px\s+([\d.]+)px/)![1]) + px(cssRule(".podium-word"), "margin-right");
 
+    expect(item).toMatch(/position:\s*relative/);
+    expect(rank).toMatch(/position:\s*absolute/);
     expect(wordRightEdge).toBeGreaterThanOrEqual(rankLeftEdge + 4);
   });
 
