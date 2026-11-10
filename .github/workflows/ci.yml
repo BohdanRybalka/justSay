@@ -12,12 +12,12 @@
 #   frontend-test — Node only: vitest.
 #   backend-lint  — Node entry point + Python[dev]: ruff + vulture.
 #   backend-test  — Node entry point + Python[dev,audio,cloud]: pytest, on a
-#                   windows-latest + macos-14 matrix. Spec 156 moved it off
+#                   windows-latest + macos-15 matrix. Spec 156 moved it off
 #                   ubuntu-latest: the app ships on those two platforms and on
 #                   no other, and the Linux-only gate was hiding a live macOS
 #                   hole in the output-directory guard. See
 #                   docs/adr/064-a-gate-runs-on-the-platforms-that-ship.md.
-#   shell-test    — Node entry point + Rust, on a windows-latest + macos-14
+#   shell-test    — Node entry point + Rust, on a windows-latest + macos-15
 #                   matrix: cargo test. Added by spec 151; see its own comment
 #                   block at the job for why both legs are required.
 #
@@ -161,7 +161,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [windows-latest, macos-14] # macos-14 is the arm64 Apple Silicon runner
+        platform: [windows-latest, macos-15] # macos-15 is the arm64 Apple Silicon runner
 
     runs-on: ${{ matrix.platform }}
 
@@ -261,7 +261,7 @@ jobs:
       # by an autouse reset fixture), while on Windows this step alone was
       # measured at 332s of the job's 654s.
       - name: Run backend tests in a randomised order
-        if: matrix.platform == 'macos-14'
+        if: matrix.platform == 'macos-15'
         run: cd backend && python -m pytest tests/ -m "not slow" -p randomly
 
   # The Rust shell (spec 151). It starts the engine, owns the tray and the
@@ -286,7 +286,7 @@ jobs:
         include:
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
-          - platform: macos-14 # arm64 Apple Silicon runner
+          - platform: macos-15 # arm64 Apple Silicon runner
             target: aarch64-apple-darwin
 
     runs-on: ${{ matrix.platform }}
@@ -318,7 +318,7 @@ jobs:
       # the error now lands on the pull request that causes it. It builds the
       # helper and bundles nothing.
       - name: Build the macOS system-audio tap helper
-        if: matrix.platform == 'macos-14'
+        if: matrix.platform == 'macos-15'
         shell: bash
         run: bash backend/scripts/build_macos_audio_tap.sh
 
