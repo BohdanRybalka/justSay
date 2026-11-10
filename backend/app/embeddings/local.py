@@ -9,15 +9,19 @@ import logging
 
 import httpx
 
-from app.core.constants import OLLAMA_CLIENT_TIMEOUT_SECONDS
-from app.embeddings.ollama_models import CONNECT_TIMEOUT, READ_TIMEOUT, list_models
+from app.embeddings.ollama_models import (
+    CLIENT_READ_TIMEOUT,
+    CONNECT_TIMEOUT,
+    READ_TIMEOUT,
+    list_models,
+)
 
 log = logging.getLogger(__name__)
 
 _PROBE_TIMEOUT = httpx.Timeout(
     connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=READ_TIMEOUT
 )
-_CLIENT_TIMEOUT = httpx.Timeout(OLLAMA_CLIENT_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT)
+_CLIENT_TIMEOUT = httpx.Timeout(CLIENT_READ_TIMEOUT, connect=CONNECT_TIMEOUT)
 
 
 async def is_model_available(ollama_host: str, model: str) -> bool:

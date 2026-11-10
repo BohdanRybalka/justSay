@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core.constants import GEMINI_EMBEDDING_TIMEOUT_SECONDS, OLLAMA_CLIENT_TIMEOUT_SECONDS
+from app.core.constants import GEMINI_EMBEDDING_TIMEOUT_SECONDS
 from app.core.errors import ConfigurationError
 from app.core.types import ProviderMode
 from app.embeddings import LOCAL_MISSING_MODEL_REASON, clear_cache, resolve_embedding_provider
@@ -585,7 +585,7 @@ def test_the_ollama_client_gives_up_on_a_host_that_stops_answering(monkeypatch):
     provider._get_client()
 
     timeout = built["timeout"]
-    assert (timeout.connect, timeout.read) == (CONNECT_TIMEOUT, OLLAMA_CLIENT_TIMEOUT_SECONDS)
+    assert (timeout.connect, timeout.read) == (CONNECT_TIMEOUT, 60.0)
     assert None not in (timeout.write, timeout.pool)
 
 
