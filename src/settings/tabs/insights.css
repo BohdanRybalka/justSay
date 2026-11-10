@@ -399,6 +399,7 @@
 }
 
 .podium-word {
+  margin-right: 18px;
   font-size: 19px;
   font-weight: 660;
   letter-spacing: -.02em;

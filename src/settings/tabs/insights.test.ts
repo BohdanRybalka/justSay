@@ -362,6 +362,18 @@ describe("the Insights panel", () => {
     expect(css.match(/\.podium-item\s*\{([^}]*)\}/)![1]).toMatch(/overflow:\s*hidden/);
   });
 
+  it("ends a cut-short podium word before the rank digit in the card's corner", () => {
+    const css = readFileSync(resolve(__dirname, "insights.css"), "utf-8");
+    const rule = (selector: string) => css.match(new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`))![1];
+    const px = (block: string, property: string) => Number(block.match(new RegExp(`(?:^|\\s)${property}:\\s*([\\d.]+)px`))![1]);
+    const item = rule(".podium-item").match(/padding:\s*[\d.]+px\s+([\d.]+)px/)!;
+    const monoDigitEm = 0.6;
+    const rankLeftEdge = px(rule(".podium-rank"), "right") + px(rule(".podium-rank"), "font-size") * monoDigitEm;
+    const wordRightEdge = Number(item[1]) + px(rule(".podium-word"), "margin-right");
+
+    expect(wordRightEdge).toBeGreaterThanOrEqual(rankLeftEdge + 4);
+  });
+
   it("grows each bar from zero to its count against the most said word", async () => {
     await mount(buildInsights());
     const fills = () => [...container.querySelectorAll<HTMLElement>(".word-row-track i")].map((fill) => fill.style.width);
