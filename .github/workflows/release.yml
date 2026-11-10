@@ -32,7 +32,7 @@ jobs:
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             sidecar_ext: .exe
-          - platform: macos-14 # arm64 Apple Silicon runner
+          - platform: macos-15 # arm64 Apple Silicon runner
             target: aarch64-apple-darwin
             sidecar_ext: ""
 
@@ -91,7 +91,7 @@ jobs:
       # interpreter that pip + PyInstaller run against. The venv (built --seed so
       # it carries pip) goes on PATH, so every later step's python/pip/pyinstaller
       # resolves to it and PyInstaller freezes THAT interpreter. arm64 is
-      # preserved (uv installs the arm64 build on macos-14). Windows keeps the
+      # preserved (uv installs the arm64 build on macos-15). Windows keeps the
       # actions/setup-python interpreter above, so this step stays macOS-gated.
       - name: Install Python via uv (macOS)
         if: runner.os == 'macOS'
