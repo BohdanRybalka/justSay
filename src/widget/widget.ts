@@ -10,11 +10,14 @@ import { hasOutlastedStartupBudget } from "../backend-startup";
 import { deliverDictation } from "../clipboard";
 import {
   EVENT_MEETING_TOGGLE,
+  EVENT_MEETING_TOGGLE_FAILED,
   EVENT_NAVIGATE_PANEL,
   EVENT_SETTINGS_CHANGED,
   EVENT_SHORTCUT_APPLIED,
   EVENT_SHORTCUT_REQUESTED,
   EVENT_WIDGET_HOVER,
+  type MeetingToggleFailed,
+  type MeetingToggleRequest,
   type NavigatePanel,
   type ShortcutApplied,
   type ShortcutRequested,
@@ -489,11 +492,24 @@ const meetingToggleActions: MeetingToggleActions = {
   },
 };
 
-async function toggleMeetingRecording() {
+async function answerMeetingToggle(failed: MeetingToggleFailed) {
+  await withinShellBudget("Answering the meeting toggle", async () => {
+    const { emit } = await import("@tauri-apps/api/event");
+    await emit(EVENT_MEETING_TOGGLE_FAILED, failed);
+  });
+}
+
+async function toggleMeetingRecording(request: string | null) {
   if (meetingBusy) return;
   meetingBusy = true;
   try {
-    await runMeetingToggle(meetingToggleActions);
+    await runMeetingToggle({
+      ...meetingToggleActions,
+      reportError: (message) => {
+        meetingToggleActions.reportError(message);
+        void answerMeetingToggle({ request, message });
+      },
+    });
   } finally {
     meetingBusy = false;
   }
@@ -519,7 +535,7 @@ async function syncMeetingIndicator() {
 
 widget.addEventListener("click", (event) => {
   if (meetingActive) {
-    if ((event.target as Element).closest(MEETING_STOP_SELECTOR)) void toggleMeetingRecording();
+    if ((event.target as Element).closest(MEETING_STOP_SELECTOR)) void toggleMeetingRecording(null);
     return;
   }
   void recordingIntent.request("toggle");
@@ -722,8 +738,8 @@ async function listenForSettingsChanges() {
     await listen<ShortcutRequested>(EVENT_SHORTCUT_REQUESTED, async ({ payload }) => {
       await applyRequestedShortcut(payload.shortcut);
     });
-    await listen(EVENT_MEETING_TOGGLE, async () => {
-      await toggleMeetingRecording();
+    await listen<MeetingToggleRequest | null>(EVENT_MEETING_TOGGLE, async ({ payload }) => {
+      await toggleMeetingRecording(payload?.request ?? null);
     });
     await listen<WidgetHover>(EVENT_WIDGET_HOVER, ({ payload }) => {
       setHovered(payload.inside);

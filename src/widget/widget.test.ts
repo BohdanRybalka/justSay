@@ -6,6 +6,7 @@ import { DEFAULT_SHORTCUT, detectShortcutPlatform, formatAccelerator } from "../
 import { BACKEND_WAIT_BUDGET_MS } from "../backend-startup";
 import {
   EVENT_MEETING_TOGGLE,
+  EVENT_MEETING_TOGGLE_FAILED,
   EVENT_NAVIGATE_PANEL,
   EVENT_SETTINGS_CHANGED,
   EVENT_SHORTCUT_REQUESTED,
@@ -456,6 +457,50 @@ describe("a start the backend refuses", () => {
     await vi.advanceTimersByTimeAsync(3000);
 
     expect(pillLabel()).toBe(REST_HINT);
+  });
+});
+
+describe("a meeting toggle the backend refuses", () => {
+  async function refuseForDictation() {
+    await loadWidget();
+    await vi.waitFor(() => expect(listeners.get(EVENT_MEETING_TOGGLE)).toBeTypeOf("function"));
+    const { ApiRequestError } = await import("../api");
+    apiMock.startMeetingRecording.mockRejectedValue(
+      new ApiRequestError("A dictation recording is in progress", 409, "dictation_in_progress"),
+    );
+    return (await import("./meeting-toggle")).DICTATION_IN_PROGRESS_MESSAGE;
+  }
+
+  it("answers the window that asked with the sentence it also notifies", async () => {
+    const message = await refuseForDictation();
+
+    await listeners.get(EVENT_MEETING_TOGGLE)!({ payload: { request: "card-press" } });
+
+    expect(notifyErrorMock).toHaveBeenCalledWith(message);
+    await vi.waitFor(() =>
+      expect(emitMock).toHaveBeenCalledWith(EVENT_MEETING_TOGGLE_FAILED, { request: "card-press", message }),
+    );
+  });
+
+  it("answers a toggle from the tray under no request, so no card takes it as its own", async () => {
+    const message = await refuseForDictation();
+
+    await listeners.get(EVENT_MEETING_TOGGLE)!({ payload: null });
+
+    await vi.waitFor(() =>
+      expect(emitMock).toHaveBeenCalledWith(EVENT_MEETING_TOGGLE_FAILED, { request: null, message }),
+    );
+  });
+
+  it("sends no answer when the meeting started", async () => {
+    await loadWidget();
+    await vi.waitFor(() => expect(listeners.get(EVENT_MEETING_TOGGLE)).toBeTypeOf("function"));
+    apiMock.startMeetingRecording.mockResolvedValue(recordingStatus());
+
+    await listeners.get(EVENT_MEETING_TOGGLE)!({ payload: { request: "card-press" } });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(emitMock).not.toHaveBeenCalledWith(EVENT_MEETING_TOGGLE_FAILED, expect.anything());
   });
 });
 
