@@ -166,7 +166,7 @@ describe("renderKeys — removing a stored key", () => {
     expect(input.value).toBe("");
     expect(input.readOnly).toBe(false);
     expect(container.querySelector("#groq-cancel")).toBeNull();
-    expect(container.querySelector("#groq-status")!.textContent).toBe("");
+    expect(container.querySelector("#groq-status")!.textContent).toBe("Key removed.");
   });
 
   it("a second click where Replace was does not remove the key", () => {
@@ -219,6 +219,7 @@ describe("renderKeys — removing a stored key", () => {
 
     await vi.waitFor(() => expect(container.querySelector("#groq-replace")).toBeNull());
     expect(container.querySelector("#groq-status")!.textContent).toContain("environment");
+    expect(container.querySelector("#groq-status")!.textContent).not.toContain("removed");
     expect(container.querySelector<HTMLInputElement>("#groq-key-input")!.value).toBe("");
   });
 

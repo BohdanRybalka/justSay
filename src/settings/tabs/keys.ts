@@ -32,6 +32,8 @@ const STATE_HINTS: Readonly<Partial<Record<KeyRowState, string>>> = {
   unknown: "Cannot verify key status — reopen Settings to retry.",
 };
 
+const REMOVED_HINT = "Key removed.";
+
 const MASKED_DISPLAY = "••••••••••••";
 
 function describeFailure(e: unknown): string {
@@ -124,7 +126,9 @@ export function renderKeys(container: HTMLElement, settings: UserSettings, cloud
         const { settings: fresh } = await saveSettings({ [spec.field]: value } as Partial<UserSettings>);
         current = fresh;
         knownCloud = getCloudKeyStatus();
-        draw(spec, storedState(), refocus);
+        const after = storedState();
+        draw(spec, after, refocus);
+        if (!value && after === "unset") rowOf(spec).querySelector(`#${p}-status`)!.textContent = REMOVED_HINT;
       } catch (err) {
         status.textContent = `Error: ${describeFailure(err)}`;
         setDisabled(false, ...locked);
