@@ -9,9 +9,15 @@ import logging
 
 import httpx
 
+from app.core.constants import OLLAMA_CLIENT_TIMEOUT_SECONDS
 from app.embeddings.ollama_models import CONNECT_TIMEOUT, READ_TIMEOUT, list_models
 
 log = logging.getLogger(__name__)
+
+_PROBE_TIMEOUT = httpx.Timeout(
+    connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=READ_TIMEOUT
+)
+_CLIENT_TIMEOUT = httpx.Timeout(OLLAMA_CLIENT_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT)
 
 
 async def is_model_available(ollama_host: str, model: str) -> bool:
@@ -20,11 +26,8 @@ async def is_model_available(ollama_host: str, model: str) -> bool:
     Any connectivity failure — Ollama not running, unreachable host — reads as
     "not available" rather than distinguishing failure modes here.
     """
-    timeout = httpx.Timeout(
-        connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=READ_TIMEOUT
-    )
     try:
-        async with httpx.AsyncClient(base_url=ollama_host, timeout=timeout) as client:
+        async with httpx.AsyncClient(base_url=ollama_host, timeout=_PROBE_TIMEOUT) as client:
             _, downloaded, _ = await list_models(client, model)
             return downloaded
     except Exception:
@@ -53,7 +56,7 @@ class LocalEmbeddingProvider:
         if self._client is None:
             from ollama import Client
 
-            self._client = Client(host=self._host)
+            self._client = Client(host=self._host, timeout=_CLIENT_TIMEOUT)
         return self._client
 
     async def embed(self, text: str) -> list[float]:
