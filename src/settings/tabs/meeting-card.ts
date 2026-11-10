@@ -172,8 +172,9 @@ export function mountMeetingCard(
     if (!destroyed) draw();
   }
 
-  /** Puts `message` in the hint line and lets go of the press, writing into the
-   *  line already on screen so a screen reader announces it. */
+  /** Lets go of the press and puts `message` in the start view's hint line,
+   *  writing into the line on screen so a screen reader announces it; the
+   *  recording view has no hint line and only releases the press. */
   function showRefusal(message: string) {
     refusal = message;
     settlePress();
@@ -189,9 +190,11 @@ export function mountMeetingCard(
   async function answerRefusal({ request, message }: MeetingToggleFailed) {
     if (destroyed || request === null || request !== pendingRequest) return;
     pendingRequest = null;
+    showRefusal(message);
+    if (pollTimer === null) return;
     const current = await api.getMeetingStatus().catch(() => null);
-    if (destroyed) return;
-    if (current !== null) applyStatus(current);
+    if (destroyed || current === null || current.is_recording === recording) return;
+    applyStatus(current);
     showRefusal(message);
   }
 

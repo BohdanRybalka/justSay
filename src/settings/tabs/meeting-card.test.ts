@@ -507,6 +507,42 @@ describe("a meeting changed from somewhere else", () => {
 });
 
 describe("a press the widget refused", () => {
+  it("shows the sentence and lets go of the button before the status read answers", async () => {
+    const { button, card } = await mountReady();
+    button("meeting-start").click();
+    await settle();
+    getMeetingStatusMock.mockReturnValue(new Promise(() => {}));
+
+    await widgetRefuses(DICTATION_IN_PROGRESS_MESSAGE);
+
+    expect(hint(card)).toBe(DICTATION_IN_PROGRESS_MESSAGE);
+    expect(button("meeting-start").disabled).toBe(false);
+  });
+
+  it("reads no status and opens no level stream for a refusal that arrives while the window is hidden", async () => {
+    const { button, mounted } = await mountReady();
+    button("meeting-start").click();
+    await settle();
+    mounted.releaseResources!();
+    getMeetingStatusMock.mockClear();
+    getMeetingStatusMock.mockResolvedValue(status(true, 3));
+
+    await widgetRefuses(DICTATION_IN_PROGRESS_MESSAGE);
+
+    expect(getMeetingStatusMock).not.toHaveBeenCalled();
+    expect(levelStreams).toHaveLength(0);
+  });
+
+  it("stops listening for refusals when the page is gone before the listener is in place", async () => {
+    const { mounted } = mount();
+
+    mounted.destroy();
+    await settle();
+
+    expect(listenMock).toHaveBeenCalledOnce();
+    expect(unlistenMock).toHaveBeenCalledOnce();
+  });
+
   it("shows the widget's sentence in the hint line and lets go of the button at once", async () => {
     const { button, card } = await mountReady();
     button("meeting-start").click();
