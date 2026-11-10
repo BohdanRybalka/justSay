@@ -172,10 +172,10 @@ export function mountMeetingCard(
     if (!destroyed) draw();
   }
 
-  /** Lets go of the press and puts `message` in the start view's hint line,
-   *  writing into the line on screen so a screen reader announces it; the
-   *  recording view has no hint line and only releases the press. */
-  function showRefusal(message: string) {
+  /** Lets go of a refused press and puts `message` in the hint line on screen,
+   *  so a screen reader announces it. The recording view has no hint line, so a
+   *  refused stop is told by the notification alone. */
+  function refusePress(message: string) {
     refusal = message;
     settlePress();
     if (destroyed) return;
@@ -187,15 +187,10 @@ export function mountMeetingCard(
     restoreFocus(currentView());
   }
 
-  async function answerRefusal({ request, message }: MeetingToggleFailed) {
+  function answerRefusal({ request, message }: MeetingToggleFailed) {
     if (destroyed || request === null || request !== pendingRequest) return;
     pendingRequest = null;
-    showRefusal(message);
-    if (pollTimer === null) return;
-    const current = await api.getMeetingStatus().catch(() => null);
-    if (destroyed || current === null || current.is_recording === recording) return;
-    applyStatus(current);
-    showRefusal(message);
+    refusePress(message);
   }
 
   async function requestToggle() {
@@ -220,7 +215,7 @@ export function mountMeetingCard(
     } catch (e) {
       pendingRequest = null;
       notifyError(errorText(e));
-      showRefusal(errorText(e));
+      refusePress(errorText(e));
     }
   }
 
@@ -338,7 +333,7 @@ export function mountMeetingCard(
     try {
       const { listen } = await loadEventApi();
       const unlisten = await listen<MeetingToggleFailed>(EVENT_MEETING_TOGGLE_FAILED, ({ payload }) => {
-        void answerRefusal(payload);
+        answerRefusal(payload);
       });
       if (destroyed) unlisten();
       else unlistenRefusals = unlisten;

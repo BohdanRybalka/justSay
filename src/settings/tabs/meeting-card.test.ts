@@ -507,7 +507,7 @@ describe("a meeting changed from somewhere else", () => {
 });
 
 describe("a press the widget refused", () => {
-  it("shows the sentence and lets go of the button before the status read answers", async () => {
+  it("shows the sentence and lets go of the button without waiting for a status read", async () => {
     const { button, card } = await mountReady();
     button("meeting-start").click();
     await settle();
@@ -519,17 +519,17 @@ describe("a press the widget refused", () => {
     expect(button("meeting-start").disabled).toBe(false);
   });
 
-  it("reads no status and opens no level stream for a refusal that arrives while the window is hidden", async () => {
-    const { button, mounted } = await mountReady();
+  it("still shows a refused start once the hidden window is shown again", async () => {
+    const { button, card, mounted } = await mountReady();
     button("meeting-start").click();
     await settle();
     mounted.releaseResources!();
-    getMeetingStatusMock.mockClear();
-    getMeetingStatusMock.mockResolvedValue(status(true, 3));
 
     await widgetRefuses(DICTATION_IN_PROGRESS_MESSAGE);
+    mounted.resumeResources!();
+    await vi.advanceTimersByTimeAsync(1000);
 
-    expect(getMeetingStatusMock).not.toHaveBeenCalled();
+    expect(hint(card)).toBe(DICTATION_IN_PROGRESS_MESSAGE);
     expect(levelStreams).toHaveLength(0);
   });
 
@@ -592,18 +592,18 @@ describe("a press the widget refused", () => {
     expect(hint(card)).toBe(meetingCardHint("local"));
   });
 
-  it("keeps the sentence when the refused stop had already ended the meeting", async () => {
+  it("leaves a refused stop to the notification, so no stale sentence waits under Start", async () => {
     getMeetingStatusMock.mockResolvedValue(status(true, 20));
-    const { button, card, title } = await mountReady();
+    const { button, card, title } = await mountReady({ stt_mode: "local" });
     button("meeting-stop").click();
     await settle();
-    getMeetingStatusMock.mockResolvedValue(status(false));
 
-    await widgetRefuses("The call ended with no audio and nothing was saved: empty");
+    await widgetRefuses("The call is still being recorded — stopping it failed: offline");
+    getMeetingStatusMock.mockResolvedValue(status(false));
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(title()).toBe("Record a meeting");
-    expect(hint(card)).toBe("The call ended with no audio and nothing was saved: empty");
+    expect(hint(card)).toBe(meetingCardHint("local"));
   });
 
   it("lets go of Stop at once when the stop failed and the meeting is still recording", async () => {
