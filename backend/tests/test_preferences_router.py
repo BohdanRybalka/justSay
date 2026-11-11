@@ -156,6 +156,8 @@ async def test_a_removed_key_reads_as_not_set_at_once(client):
     resp = await client.put("/settings", json={"groq_api_key": "", "gemini_api_key": ""})
 
     assert resp.status_code == 200
+    assert resp.json()["settings"]["groq_api_key"] == ""
+    assert user_settings.get_user_settings().groq_api_key == ""
     assert (await client.get("/settings/cloud-status")).json() == {
         "gemini_key_set": False,
         "groq_key_set": False,
