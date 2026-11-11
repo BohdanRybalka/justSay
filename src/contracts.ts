@@ -42,6 +42,10 @@ export const EVENT_SHORTCUT_REQUESTED = "shortcut-requested";
 export const EVENT_SHORTCUT_APPLIED = "shortcut-applied";
 export const EVENT_MEETING_TOGGLE = "meeting-toggle";
 
+/** The widget's answer to a meeting toggle it could not carry out, sent beside
+ *  the notification and carrying the same sentence. */
+export const EVENT_MEETING_TOGGLE_FAILED = "meeting-toggle-failed";
+
 /** The pointer entered or left the zone around the widget's pill. The shell
  *  reads the cursor itself: the zone reaches past the pill, and the page gets
  *  no mouse events where its window lets clicks through. */
@@ -113,6 +117,19 @@ export type CaptureIncident = (typeof CAPTURE_INCIDENTS)[number];
  *  owns the global-shortcut registration, to take a new accelerator. */
 export interface ShortcutRequested {
   shortcut: string;
+}
+
+/** Payload of `EVENT_MEETING_TOGGLE` when a window sends it: the id its answer
+ *  comes back under. The shell and the ring send none. */
+export interface MeetingToggleRequest {
+  request: string;
+}
+
+/** Payload of `EVENT_MEETING_TOGGLE_FAILED`: the request it answers, `null` for
+ *  a toggle that named none, and the sentence the user reads. */
+export interface MeetingToggleFailed {
+  request: string | null;
+  message: string;
 }
 
 /** Payload of `EVENT_WIDGET_HOVER`. */

@@ -2,15 +2,23 @@
  * The card at the top of Meetings. It captures nothing itself: the widget owns
  * the capture, so a press goes to it as `EVENT_MEETING_TOGGLE`, and the card
  * shows what the backend reports once a second while the window is on screen.
- * A first start turns the card into the meeting disclosure (ADR 040 obligation
- * 3); the toggle is sent only after "I understand" is saved.
+ * The widget's refusal of this card's own press comes back as
+ * `EVENT_MEETING_TOGGLE_FAILED` and replaces the hint until the next press or
+ * status change. A first start turns the card into the meeting disclosure (ADR
+ * 040 obligation 3); the toggle is sent only after "I understand" is saved.
  */
 import { api, meetingLevelStream, type MeetingStatus, type UserSettings } from "../../api";
-import { EVENT_MEETING_TOGGLE } from "../../contracts";
+import {
+  EVENT_MEETING_TOGGLE,
+  EVENT_MEETING_TOGGLE_FAILED,
+  type MeetingToggleFailed,
+  type MeetingToggleRequest,
+} from "../../contracts";
 import { loadEventApi } from "../../event-api";
 import { formatElapsedClock } from "../../format";
 import { levelFromDb } from "../../level";
 import { notifyError } from "../../notify";
+import { newSessionId } from "../../session";
 import { icon } from "../../ui/icons";
 import { saveSettings, type TabLifecycle } from "../settings";
 import { emitSettingsChanged } from "./dictation";
@@ -45,6 +53,9 @@ export function mountMeetingCard(
   let startedAt = 0;
   let pressedWhileRecording: boolean | null = null;
   let pressTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingRequest: string | null = null;
+  let refusal: string | null = null;
+  let unlistenRefusals: (() => void) | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let levels: AbortController | null = null;
   let latestRead = 0;
@@ -62,7 +73,7 @@ export function mountMeetingCard(
       <span class="brand-mark">${icon("users")}</span>
       <span class="meeting-card-text">
         <b>Record a meeting</b>
-        <small id="meeting-hint">${meetingCardHint(engine)}</small>
+        <small id="meeting-hint" aria-live="polite"></small>
       </span>
       <button type="button" class="btn btn-primary" id="meeting-start">${icon("mic", "small")}Start recording</button>
     `;
@@ -124,6 +135,7 @@ export function mountMeetingCard(
     card.className = `card meeting-card meeting-card--${view}`;
     card.innerHTML =
       view === "recording" ? recordingHtml() : view === "disclosure" ? disclosureHtml() : startHtml();
+    renderHint();
     if (pressedWhileRecording !== null || !statusKnown) disableButtons();
     card.querySelector("#meeting-start")?.addEventListener("click", begin);
     card.querySelector("#meeting-accept")?.addEventListener("click", () => void accept());
@@ -143,16 +155,49 @@ export function mountMeetingCard(
     if (timer) timer.textContent = formatElapsedClock((Date.now() - startedAt) / 1000);
   }
 
-  function releasePress() {
+  function renderHint(): boolean {
+    const hint = card.querySelector("#meeting-hint");
+    if (hint) hint.textContent = refusal ?? meetingCardHint(engine);
+    return hint !== null;
+  }
+
+  function settlePress() {
     if (pressTimer !== null) clearTimeout(pressTimer);
     pressTimer = null;
     pressedWhileRecording = null;
+  }
+
+  function releasePress() {
+    settlePress();
     if (!destroyed) draw();
+  }
+
+  /** Lets go of a refused press and puts `message` in the hint line on screen,
+   *  so a screen reader announces it. The recording view has no hint line, so a
+   *  refused stop is told by the notification alone. */
+  function refusePress(message: string) {
+    refusal = message;
+    settlePress();
+    if (destroyed) return;
+    if (!renderHint()) {
+      draw();
+      return;
+    }
+    card.querySelectorAll<HTMLButtonElement>("button").forEach((button) => (button.disabled = false));
+    restoreFocus(currentView());
+  }
+
+  function answerRefusal({ request, message }: MeetingToggleFailed) {
+    if (destroyed || request === null || request !== pendingRequest) return;
+    pendingRequest = null;
+    refusePress(message);
   }
 
   async function requestToggle() {
     const shownAtPress = recording;
     pressedWhileRecording = shownAtPress;
+    pendingRequest = null;
+    refusal = null;
     if (pressTimer !== null) clearTimeout(pressTimer);
     pressTimer = setTimeout(releasePress, PRESS_SETTLE_MS);
     draw();
@@ -162,12 +207,15 @@ export function mountMeetingCard(
       releasePress();
       return;
     }
+    const request = newSessionId();
+    pendingRequest = request;
     try {
       const { emit } = await loadEventApi();
-      await emit(EVENT_MEETING_TOGGLE);
+      await emit(EVENT_MEETING_TOGGLE, { request } satisfies MeetingToggleRequest);
     } catch (e) {
+      pendingRequest = null;
       notifyError(errorText(e));
-      releasePress();
+      refusePress(errorText(e));
     }
   }
 
@@ -240,13 +288,10 @@ export function mountMeetingCard(
     if (recording && (!wasRecording || Math.abs(Date.now() - startedAt - elapsedMs) > CLOCK_DRIFT_MS)) {
       startedAt = Date.now() - elapsedMs;
     }
-    if (pressedWhileRecording !== null && recording !== pressedWhileRecording) {
-      pressedWhileRecording = null;
-      if (pressTimer !== null) clearTimeout(pressTimer);
-      pressTimer = null;
-    }
+    if (pressedWhileRecording !== null && recording !== pressedWhileRecording) settlePress();
     if (recording !== wasRecording || !wasKnown) {
       disclosureOpen = false;
+      refusal = null;
       draw();
     }
     if (recording) openLevels();
@@ -284,6 +329,16 @@ export function mountMeetingCard(
     const cancelButton = card.querySelector<HTMLButtonElement>("#meeting-cancel");
     if (event.key === "Escape" && cancelButton?.disabled === false) cancel();
   });
+  void (async () => {
+    try {
+      const { listen } = await loadEventApi();
+      const unlisten = await listen<MeetingToggleFailed>(EVENT_MEETING_TOGGLE_FAILED, ({ payload }) => {
+        answerRefusal(payload);
+      });
+      if (destroyed) unlisten();
+      else unlistenRefusals = unlisten;
+    } catch {}
+  })();
   draw();
   if (!windowHidden) resumeResources();
 
@@ -293,6 +348,7 @@ export function mountMeetingCard(
     destroy: () => {
       destroyed = true;
       if (pressTimer !== null) clearTimeout(pressTimer);
+      unlistenRefusals?.();
       releaseResources();
     },
   };
