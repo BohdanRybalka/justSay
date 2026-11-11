@@ -129,8 +129,8 @@ class STTProvider(ABC):
 
         ``language`` is a BCP-47 code or ``"auto"``; ``**kwargs`` may carry ``audio_duration``
         in seconds, ``dictation=True`` for a push-to-talk piece, whose ``doubts`` count signs of a
-        wrong answer and which comes back empty when it holds no speech, and
-        ``second_opinion=True`` to ask a stronger model. Unreported fields are ``None``.
+        wrong answer, and ``second_opinion=True`` to ask a stronger model. Unreported fields are
+        ``None``.
         """
 
     def cleanup(self) -> None:

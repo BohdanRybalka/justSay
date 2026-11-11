@@ -190,9 +190,55 @@ async def test_what_the_voice_detector_hears_is_kept_however_quiet(tmp_path, mon
     assert _seconds(provider) == [5.0]
 
 
-@pytest.mark.parametrize("unheard", [_said("Дякую.", doubts=1, no_speech_prob=0.9), _said("")])
-async def test_a_piece_heard_as_no_speech_adds_nothing_and_is_not_asked_again(tmp_path, unheard):
-    provider = _Provider([unheard, _said("друга частина")])
+@pytest.mark.parametrize(
+    ("second", "kept"),
+    [
+        (_said("Дякую за перегляд.", no_speech_prob=0.1), "Дякую за перегляд."),
+        (_said("Дякую за перегляд.", no_speech_prob=0.9), ""),
+        (_said(""), ""),
+    ],
+)
+async def test_confident_speech_that_sounds_like_no_speech_is_dropped_only_when_both_agree(
+    tmp_path, second, kept
+):
+    provider = _Provider([_said("Дякую за перегляд.", no_speech_prob=0.8), second])
+
+    result = await _run(provider, _recording(tmp_path, _tone(3.0)))
+
+    assert result.text == kept
+    assert (result.no_speech_prob is None) == bool(kept)
+    assert [sent["second_opinion"] for sent in provider.sent] == [False, True]
+
+
+async def test_speech_that_sounds_like_no_speech_is_kept_when_asking_again_fails(tmp_path):
+    provider = _Provider(
+        [_said("вперед", no_speech_prob=0.8), ResourceUnavailableError("Groq did not answer.")]
+    )
+
+    result = await _run(provider, _recording(tmp_path, _tone(3.0)))
+
+    assert result.text == "вперед"
+
+
+async def test_a_dictation_over_the_window_only_before_the_trim_goes_whole(tmp_path):
+    provider = _Provider([_said("усе")])
+
+    await _run(provider, _recording(tmp_path, _quiet(3.0), _tone(27.0), _quiet(3.0)))
+
+    assert _seconds(provider) == [29.0]
+
+
+async def test_a_recording_with_no_sound_at_all_is_sent_untrimmed(tmp_path):
+    provider = _Provider([_said("")])
+
+    result = await _run(provider, _recording(tmp_path, _quiet(5.0)))
+
+    assert _seconds(provider) == [5.0]
+    assert result.no_speech_prob == 1.0
+
+
+async def test_a_piece_without_text_adds_nothing_and_is_not_asked_again(tmp_path):
+    provider = _Provider([_said(""), _said("друга частина")])
 
     result = await _run(provider, _recording(tmp_path, _tone(40.0)))
 
@@ -204,7 +250,15 @@ async def test_a_piece_heard_as_no_speech_adds_nothing_and_is_not_asked_again(tm
 @pytest.mark.parametrize(
     ("answers", "no_speech_prob"),
     [
-        ([_said("Дякую.", no_speech_prob=0.9), _said("Дякую.", no_speech_prob=0.7)], 0.9),
+        (
+            [
+                _said("Дякую.", no_speech_prob=0.9),
+                _said("Дякую.", no_speech_prob=0.95),
+                _said("Дякую.", no_speech_prob=0.7),
+                _said(""),
+            ],
+            0.95,
+        ),
         ([_said(""), _said("")], 1.0),
     ],
 )

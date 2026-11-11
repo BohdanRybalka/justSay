@@ -13,6 +13,7 @@ import asyncio
 import logging
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -68,9 +69,23 @@ def _sound_of(mono: Path, total: float) -> tuple[float, float]:
     return sound_span(levels, audio_settings) or (0.0, total)
 
 
-def _is_heard(result: TranscriptionResult, no_speech_threshold: float) -> bool:
+@dataclass(frozen=True)
+class _PieceAnswer:
+    result: TranscriptionResult
+    is_heard: bool
+
+
+def _is_unlikely_speech(result: TranscriptionResult, no_speech_threshold: float) -> bool:
     prob = result.no_speech_prob
-    return bool(result.text) and not (prob is not None and prob > no_speech_threshold)
+    return prob is not None and prob > no_speech_threshold
+
+
+def _hears_no_speech(result: TranscriptionResult, no_speech_threshold: float) -> bool:
+    return not result.text or _is_unlikely_speech(result, no_speech_threshold)
+
+
+def _doubts(result: TranscriptionResult, no_speech_threshold: float) -> int:
+    return (result.doubts or 0) + _is_unlikely_speech(result, no_speech_threshold)
 
 
 async def _send(
@@ -101,45 +116,46 @@ async def _transcribe_piece(
     seconds: float | None,
     pacer: PiecePacer,
     no_speech_threshold: float,
-) -> TranscriptionResult:
-    """One piece's answer; a heard one with doubts is asked again and the surer answer kept.
+) -> _PieceAnswer:
+    """One piece's answer, asked again when it raises doubts or sounds like no speech.
 
-    A second answer hearing no speech wins; one with text wins only with fewer doubts; one that
-    fails keeps the first.
+    A piece adds nothing when its first answer has no text, or when the second hears no speech
+    either; else the answer with fewer doubts is kept, the first on a tie or a failure.
     """
     first = await _send(stt, piece, language, seconds, pacer, second_opinion=False)
-    if not (_is_heard(first, no_speech_threshold) and first.doubts):
-        return first
-    log.warning("%s: a dictation piece raised %d doubts; again", stt.model_name, first.doubts)
+    doubts = _doubts(first, no_speech_threshold)
+    if not first.text or not doubts:
+        return _PieceAnswer(first, bool(first.text))
+    log.warning("%s: a dictation piece raised %d doubts; again", stt.model_name, doubts)
     try:
         second = await _send(stt, piece, language, seconds, pacer, second_opinion=True)
     except RouteStoppedError:
         raise
     except Exception:
         log.warning("Asking again failed; keeping the first answer", exc_info=True)
-        return first
-    if not _is_heard(second, no_speech_threshold):
-        log.info("The second answer hears no speech; the piece adds nothing")
-        return second
-    if (second.doubts or 0) < first.doubts:
-        return second
-    log.info("The second answer is no surer (%s doubts); keeping the first", second.doubts)
-    return first
+        return _PieceAnswer(first, True)
+    if _hears_no_speech(second, no_speech_threshold):
+        log.info("The second answer hears no speech either; the piece adds nothing")
+        return _PieceAnswer(second, False)
+    if _doubts(second, no_speech_threshold) < doubts:
+        return _PieceAnswer(second, True)
+    log.info("The second answer is no surer; keeping the first")
+    return _PieceAnswer(first, True)
 
 
 def _joined(
-    results: list[TranscriptionResult], language: str, no_speech_threshold: float
+    answers: list[_PieceAnswer], language: str, no_speech_threshold: float
 ) -> TranscriptionResult:
     """The heard pieces' texts joined; with none heard, ``no_speech_prob`` says so."""
-    heard = [result for result in results if _is_heard(result, no_speech_threshold)]
-    tokens = [result.tokens_used for result in results if result.tokens_used is not None]
+    heard = [answer.result for answer in answers if answer.is_heard]
+    unheard = [
+        answer.result.no_speech_prob
+        for answer in answers
+        if _is_unlikely_speech(answer.result, no_speech_threshold)
+    ]
+    tokens = [a.result.tokens_used for a in answers if a.result.tokens_used is not None]
     languages = Counter(result.detected_language for result in heard if result.detected_language)
     spoken = reported_language(language, languages)
-    unheard = [
-        result.no_speech_prob
-        for result in results
-        if result.no_speech_prob is not None and result.no_speech_prob > no_speech_threshold
-    ]
     return TranscriptionResult(
         text=("" if spoken in UNSPACED_LANGUAGES else " ").join(result.text for result in heard),
         tokens_used=sum(tokens) if tokens else None,
@@ -159,11 +175,11 @@ async def transcribe_dictation(
 ) -> TranscriptionResult:
     """Transcribe one dictation in pieces; scratch files sit beside ``audio_path`` and are removed.
 
-    A piece whose ``no_speech_prob`` exceeds ``no_speech_threshold``, or with no text, adds
-    nothing. The route is checked before every send; a provider's wait is paced as for a short file.
+    A piece adds nothing when it has no text, or when both answers hear no speech: a
+    ``no_speech_prob`` over ``no_speech_threshold``. The route is checked before every send.
     """
 
-    async def piece_answer(piece: Path, seconds: float | None) -> TranscriptionResult:
+    async def piece_answer(piece: Path, seconds: float | None) -> _PieceAnswer:
         return await _transcribe_piece(stt, piece, language, seconds, pacer, no_speech_threshold)
 
     async def whole() -> TranscriptionResult:
@@ -177,7 +193,7 @@ async def transcribe_dictation(
             lambda start, stop: _pause_relative_to(mono, begin, start, stop),
         )
         log.info("Dictation: %.1fs of %.1fs sent in %d pieces", end - begin, total, len(pieces))
-        results: list[TranscriptionResult] = []
+        answers: list[_PieceAnswer] = []
         for index, (start, stop) in enumerate(pieces):
             piece = audio_path.with_name(f"{audio_path.stem}-piece{index}.flac")
             try:
@@ -185,9 +201,9 @@ async def transcribe_dictation(
                     _read_seconds, mono, begin + start, begin + stop
                 )
                 await asyncio.to_thread(_write_flac, piece, samples)
-                results.append(await piece_answer(piece, stop - start))
+                answers.append(await piece_answer(piece, stop - start))
             finally:
                 discard_scratch_file(piece)
-        return _joined(results, language, no_speech_threshold)
+        return _joined(answers, language, no_speech_threshold)
 
     return await on_mono_audio(audio_path, whole, cut)

@@ -343,15 +343,18 @@ async def test_only_a_cloud_dictation_is_sent_as_dictation_pieces(
 async def test_a_cloud_dictation_whose_every_piece_hears_no_speech_is_discarded_as_silence(
     tmp_path, cloud_mode, _isolate_side_effects
 ):
+    """The gate before the engine is told to abstain, so the engine's verdict alone decides."""
     path = tmp_path / "long.wav"
-    noise = np.random.default_rng(0).uniform(-0.1, 0.1, 40 * 16000).astype(np.float32)
-    sf.write(str(path), noise, 16000)
+    sf.write(str(path), np.zeros(40 * 16000, dtype=np.float32), 16000)
     stt = _stt_mock_with_no_speech("Дякую за перегляд!", 0.9)
 
-    with patch("app.pipeline.service.get_provider", return_value=stt):
+    with (
+        patch("app.pipeline.service._silence_note", return_value=None),
+        patch("app.pipeline.service.get_provider", return_value=stt),
+    ):
         result = await process_audio(path, language="uk", source="dictation")
 
-    assert stt.transcribe.await_count == 2
+    assert stt.transcribe.await_count == 4
     assert result.discarded_reason == "silence"
     assert result.text == ""
     _isolate_side_effects.assert_not_called()

@@ -84,18 +84,20 @@ def dictation_prompt(raw: str, language: str) -> tuple[str | None, int]:
 
 
 def without_prompt_echo(text: str, language: str) -> str:
-    """``text`` without the dictation sentence of ``language`` that an engine wrote into it.
+    """``text`` without the dictation sentence of ``language`` an engine wrote at its start or end.
 
-    The sentence is matched whole, ignoring case and punctuation; the rest is left as it was.
+    The sentence is matched as whole words, ignoring case and the punctuation and spaces around
+    it; one anywhere else stays, and the rest of ``text`` is left exactly as it was.
     """
     sentence = LANGUAGE_SENTENCES.get(language)
     if sentence is None:
         return text
-    words = r"\W*".join(re.escape(word) for word in re.findall(r"\w+", sentence))
-    if language not in UNSPACED_LANGUAGES:
-        words = rf"(?<!\w){words}(?!\w)"
-    kept, echoes = re.subn(rf"{words}[^\w\s]*", "", text, flags=re.IGNORECASE)
-    return re.sub(r"\s{2,}", " ", kept).strip() if echoes else text
+    unspaced = language in UNSPACED_LANGUAGES
+    gap = r"\W*" if unspaced else r"\W+"
+    echo = gap.join(re.escape(word) for word in re.findall(r"\w+", sentence))
+    before, after = ("", "") if unspaced else (r"(?<!\w)", r"(?!\w)")
+    text = re.sub(rf"\A\W*{echo}{after}\W*", "", text, flags=re.IGNORECASE)
+    return re.sub(rf"\s*{before}{echo}\W*\Z", "", text, flags=re.IGNORECASE)
 
 
 def glossary_summary(text: str | None, cut: int = 0) -> str:
