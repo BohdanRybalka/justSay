@@ -1,10 +1,11 @@
 //! A memory ceiling over the backend and every process it starts.
 //!
 //! Past `SOFT_LIMIT_BYTES` for the whole tree the guard logs which processes
-//! held what, ends the tree and leaves the restart to the watchdog, which reads
-//! `take_restart_delay()`. Windows counts the tree's commit in the backend's Job
-//! Object, which also carries `HARD_LIMIT_BYTES`; macOS polls each process's
-//! physical footprint every `POLL_INTERVAL`. Nothing reaches the user.
+//! held what, ends the tree and leaves the restart to the watchdog. Every
+//! backend instance has a generation, and the guard's verdict names the one it
+//! ended. Windows counts commit in a Job Object per instance, which also carries
+//! `HARD_LIMIT_BYTES`; macOS polls each process's physical footprint every
+//! `POLL_INTERVAL`. Nothing reaches the user.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -77,34 +78,42 @@ fn restart_delay(streak: u32) -> Duration {
         .min(MAX_RESTART_DELAY)
 }
 
-/// The wait the guard set for the backend it ended, read at most once.
-struct RestartMarker(Mutex<Option<Duration>>);
+/// The backend generation the guard last ended and the wait it set before its restart.
+struct RestartMarker(Mutex<Option<(u64, Duration)>>);
 
 impl RestartMarker {
-    fn set(&self, delay: Duration) {
+    fn set(&self, generation: u64, delay: Duration) {
         if let Ok(mut pending) = self.0.lock() {
-            *pending = Some(delay);
+            *pending = Some((generation, delay));
         }
     }
 
-    fn take(&self) -> Option<Duration> {
-        self.0.lock().ok().and_then(|mut pending| pending.take())
+    /// Whether the guard ended `generation`; reading leaves the marker in place.
+    fn ended(&self, generation: u64) -> bool {
+        self.0.lock().ok().is_some_and(|pending| matches!(*pending, Some((ended, _)) if ended == generation))
+    }
+
+    /// The wait owed before restarting after `generation`, once; a marker for
+    /// any other generation is dropped and owes nothing.
+    fn take_for(&self, generation: u64) -> Option<Duration> {
+        let taken = self.0.lock().ok().and_then(|mut pending| pending.take())?;
+        (taken.0 == generation).then_some(taken.1)
     }
 }
 
 static BACKOFF: Mutex<RestartBackoff> = Mutex::new(RestartBackoff { last: None, streak: 0 });
 static PENDING_RESTART: RestartMarker = RestartMarker(Mutex::new(None));
 
-/// The extra wait before restarting the backend the guard ended; `None` when
-/// the running backend's exit was not the guard's doing. Read once per ending.
-pub fn take_restart_delay() -> Option<Duration> {
-    PENDING_RESTART.take()
+/// Whether backend `generation` was ended by the guard rather than failing:
+/// such an end is neither reported nor counted toward giving up.
+pub fn ended_by_guard(generation: u64) -> bool {
+    PENDING_RESTART.ended(generation)
 }
 
-/// Drop the marker of a backend that is being replaced, so it never stands for
-/// the exit of the one starting now.
-pub fn forget_restart() {
-    PENDING_RESTART.take();
+/// The extra wait before the backend that follows `generation` starts, owed
+/// once when the guard ended `generation`; zero otherwise.
+pub fn wait_owed_after(generation: u64) -> Duration {
+    PENDING_RESTART.take_for(generation).unwrap_or(Duration::ZERO)
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -130,35 +139,36 @@ fn describe(limit: MemoryLimit, reached: u64, processes: &[ProcessMemory]) -> St
     )
 }
 
-/// Log `report`, arm the watchdog's restart and run `end_tree`, unless the
-/// crossing repeats one already acted on.
-fn act_on_crossing(report: &str, end_tree: impl FnOnce()) {
+/// Log `report`, mark `generation` as ended by the guard and run `end_tree`,
+/// unless the crossing repeats one already acted on.
+fn act_on_crossing(generation: u64, report: &str, end_tree: impl FnOnce()) {
     let delay = BACKOFF.lock().ok().and_then(|mut backoff| backoff.record(Instant::now()));
     let Some(delay) = delay else {
         log::info!("{}; already ending them", report);
         return;
     };
     log::warn!("{}; ending them and restarting the backend after {:?} more", report, delay);
-    PENDING_RESTART.set(delay);
+    PENDING_RESTART.set(generation, delay);
     end_tree();
 }
 
 #[cfg(windows)]
-pub use self::windows_job::watch_job;
+pub use self::windows_job::instance_job;
 
 #[cfg(windows)]
 mod windows_job {
     use super::{act_on_crossing, describe, MemoryLimit, ProcessMemory, SOFT_LIMIT_BYTES};
     use core::ffi::c_void;
+    use std::sync::{Mutex, OnceLock, PoisonError};
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::JobObjects::{
-        JobObjectAssociateCompletionPortInformation, JobObjectBasicProcessIdList,
+        CreateJobObjectW, JobObjectAssociateCompletionPortInformation, JobObjectBasicProcessIdList,
         JobObjectExtendedLimitInformation, JobObjectLimitViolationInformation,
         JobObjectNotificationLimitInformation, QueryInformationJobObject,
         SetInformationJobObject, TerminateJobObject, JOBOBJECTINFOCLASS,
         JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOBOBJECT_LIMIT_VIOLATION_INFORMATION, JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_JOB_MEMORY,
+        JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus};
     use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
@@ -178,57 +188,119 @@ mod windows_job {
         ids: [usize; LISTED_PROCESSES_MAX],
     }
 
-    /// Arm `job` to report the tree passing `SOFT_LIMIT_BYTES` and start the
-    /// thread that ends the tree when it does. On failure the job keeps its
-    /// hard limit and kill-on-close, and nothing restarts the backend for memory.
-    pub fn watch_job(job: isize) {
-        let Some(port) = arm_job(job, SOFT_LIMIT_BYTES) else {
-            log::warn!("Memory guard: the backend's job could not be armed; no memory restart this session");
-            return;
-        };
-        let started = std::thread::Builder::new()
-            .name("memory-guard".to_string())
-            .spawn(move || {
-                while let Some(limit) = next_limit_crossing(port, INFINITE) {
-                    let report = crossing_report(job, limit);
-                    act_on_crossing(&report, || unsafe {
-                        TerminateJobObject(job as HANDLE, 1);
-                    });
-                }
-                log::warn!("Memory guard: the job's completion port failed; no memory restart from now on");
-            });
-        if started.is_err() {
-            log::warn!("Memory guard: its thread could not start; no memory restart this session");
+    static PORT: OnceLock<Option<isize>> = OnceLock::new();
+    static LIVE_JOB: Mutex<Option<(u64, InstanceJob)>> = Mutex::new(None);
+
+    /// A job handle owned by one backend instance; dropping it ends whatever
+    /// of that instance's tree still runs.
+    struct InstanceJob(isize);
+
+    impl Drop for InstanceJob {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0 as HANDLE);
+            }
         }
     }
 
-    /// Give `job` a completion port and a soft limit of `soft_limit` committed bytes.
-    pub(super) fn arm_job(job: isize, soft_limit: u64) -> Option<isize> {
+    /// A kill-on-close job for backend `generation` with both memory limits.
+    /// Only the shell holds it, so the tree dies with the shell however it dies
+    /// (ADR 023); it replaces, and so ends, the previous instance's job. `None`
+    /// when no job can be made.
+    pub fn instance_job(generation: u64) -> Option<isize> {
+        let job = create_job(super::HARD_LIMIT_BYTES)?;
+        let armed = watch_port().is_some_and(|port| arm_job(job, port, generation, SOFT_LIMIT_BYTES));
+        if !armed {
+            log::warn!("Memory guard: backend {} has no soft memory limit", generation);
+        }
+        let mut live = LIVE_JOB.lock().unwrap_or_else(PoisonError::into_inner);
+        *live = Some((generation, InstanceJob(job)));
+        Some(job)
+    }
+
+    /// A job that ends its processes when its last handle closes and refuses
+    /// commit past `hard_limit` bytes.
+    pub(super) fn create_job(hard_limit: u64) -> Option<isize> {
         unsafe {
-            let port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, std::ptr::null_mut(), 0, 1);
-            if port.is_null() {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                log::warn!("CreateJobObjectW failed; force-kill orphan protection unavailable for this backend");
                 return None;
             }
-            let link = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
-                CompletionKey: job as *mut c_void,
-                CompletionPort: port,
-            };
-            let mut notify: JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION = std::mem::zeroed();
-            notify.JobMemoryLimit = soft_limit;
-            notify.LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY;
-            if !set(job, JobObjectAssociateCompletionPortInformation, &link)
-                || !set(job, JobObjectNotificationLimitInformation, &notify)
-            {
-                CloseHandle(port);
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY;
+            info.JobMemoryLimit = hard_limit as usize;
+            if !set(job as isize, JobObjectExtendedLimitInformation, &info) {
+                log::warn!("SetInformationJobObject failed; force-kill orphan protection unavailable for this backend");
+                CloseHandle(job);
                 return None;
             }
-            Some(port as isize)
+            Some(job as isize)
         }
     }
 
-    /// Wait up to `timeout_ms` for the next memory-limit message on `port`,
-    /// skipping every other job message; `None` on a timeout or a failed port.
-    pub(super) fn next_limit_crossing(port: isize, timeout_ms: u32) -> Option<MemoryLimit> {
+    /// The one port every instance job reports to, with the thread that acts on it.
+    fn watch_port() -> Option<isize> {
+        *PORT.get_or_init(|| {
+            let port = new_port()?;
+            let started = std::thread::Builder::new()
+                .name("memory-guard".to_string())
+                .spawn(move || {
+                    while let Some((limit, generation)) = next_limit_crossing(port, INFINITE) {
+                        let live = LIVE_JOB.lock().unwrap_or_else(PoisonError::into_inner);
+                        let owner = live.as_ref().map(|(owner, job)| (*owner, job.0));
+                        let Some(job) = job_to_end(owner, generation) else {
+                            log::info!(
+                                "Memory guard: ended backend {} crossed the {:?} limit; nothing to end",
+                                generation,
+                                limit
+                            );
+                            continue;
+                        };
+                        let report = crossing_report(job, limit);
+                        act_on_crossing(generation, &report, || unsafe {
+                            TerminateJobObject(job as HANDLE, 1);
+                        });
+                    }
+                    log::warn!("Memory guard: the completion port failed; no memory restart from now on");
+                });
+            if started.is_err() {
+                log::warn!("Memory guard: its thread could not start; no memory restart this session");
+                return None;
+            }
+            Some(port)
+        })
+    }
+
+    /// The job to end for a crossing reported by `generation`: the live one,
+    /// and only while it still belongs to `generation`.
+    pub(super) fn job_to_end(live: Option<(u64, isize)>, generation: u64) -> Option<isize> {
+        live.filter(|(owner, _)| *owner == generation).map(|(_, job)| job)
+    }
+
+    pub(super) fn new_port() -> Option<isize> {
+        let port = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, std::ptr::null_mut(), 0, 1) };
+        (!port.is_null()).then_some(port as isize)
+    }
+
+    /// Have `job` report to `port` under `generation` once its commit passes `soft_limit` bytes.
+    pub(super) fn arm_job(job: isize, port: isize, generation: u64, soft_limit: u64) -> bool {
+        let link = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+            CompletionKey: generation as usize as *mut c_void,
+            CompletionPort: port as HANDLE,
+        };
+        let mut notify: JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        notify.JobMemoryLimit = soft_limit;
+        notify.LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY;
+        set(job, JobObjectAssociateCompletionPortInformation, &link)
+            && set(job, JobObjectNotificationLimitInformation, &notify)
+    }
+
+    /// Wait up to `timeout_ms` for the next memory-limit message on `port` and
+    /// the generation whose job sent it, skipping every other job message;
+    /// `None` on a timeout or a failed port.
+    pub(super) fn next_limit_crossing(port: isize, timeout_ms: u32) -> Option<(MemoryLimit, u64)> {
         loop {
             let mut message = 0u32;
             let mut key = 0usize;
@@ -240,8 +312,8 @@ mod windows_job {
                 return None;
             }
             match message {
-                JOB_OBJECT_MSG_NOTIFICATION_LIMIT => return Some(MemoryLimit::Soft),
-                JOB_OBJECT_MSG_JOB_MEMORY_LIMIT => return Some(MemoryLimit::Hard),
+                JOB_OBJECT_MSG_NOTIFICATION_LIMIT => return Some((MemoryLimit::Soft, key as u64)),
+                JOB_OBJECT_MSG_JOB_MEMORY_LIMIT => return Some((MemoryLimit::Hard, key as u64)),
                 _ => {}
             }
         }
@@ -343,7 +415,7 @@ mod macos_tree {
             .name("memory-guard".to_string())
             .spawn(|| loop {
                 std::thread::sleep(POLL_INTERVAL);
-                let Some(root) = crate::backend::backend_tree_root() else {
+                let Some((root, generation)) = crate::backend::backend_tree_root() else {
                     continue;
                 };
                 let pids = tree(root as i32);
@@ -360,7 +432,7 @@ mod macos_tree {
                     .map(|process| ProcessMemory { name: name(process.pid as i32), ..process })
                     .collect();
                 let report = describe(MemoryLimit::Soft, total, &named);
-                act_on_crossing(&report, || end_tree(root as i32, &pids));
+                act_on_crossing(generation, &report, || end_tree(root as i32, &pids));
             });
         if started.is_err() {
             log::warn!("Memory guard: its thread could not start; no memory restart this session");
@@ -522,12 +594,34 @@ mod tests {
         assert_eq!(backoff.record(start + Duration::from_secs(60)), Some(REPEAT_RESTART_DELAY));
     }
 
-    #[test]
-    fn a_memory_restart_marker_answers_once() {
+    fn marker_for(generation: u64, delay: Duration) -> RestartMarker {
         let marker = RestartMarker(Mutex::new(None));
-        marker.set(REPEAT_RESTART_DELAY);
-        assert_eq!(marker.take(), Some(REPEAT_RESTART_DELAY));
-        assert_eq!(marker.take(), None, "a second exit must not read the first one's marker");
+        marker.set(generation, delay);
+        marker
+    }
+
+    #[test]
+    fn the_generation_the_guard_ended_is_not_a_failure_and_owes_its_wait_once() {
+        let marker = marker_for(7, REPEAT_RESTART_DELAY);
+        assert!(marker.ended(7), "the end the guard caused must not be counted or reported");
+        assert_eq!(marker.take_for(7), Some(REPEAT_RESTART_DELAY));
+        assert_eq!(marker.take_for(7), None, "the wait is owed once");
+    }
+
+    #[test]
+    fn a_marker_for_an_earlier_generation_leaves_the_next_failure_a_failure() {
+        let marker = marker_for(7, REPEAT_RESTART_DELAY);
+        assert!(!marker.ended(8), "generation 8 failing on its own must be counted and reported");
+        assert_eq!(marker.take_for(8), None, "generation 8 owes no wait for 7's crossing");
+        assert!(!marker.ended(7), "the stale marker is gone once read");
+    }
+
+    #[test]
+    fn a_respawn_the_guard_ended_still_owes_its_wait_before_the_next_spawn() {
+        let marker = marker_for(7, REPEAT_RESTART_DELAY);
+        assert!(marker.ended(7));
+        assert!(marker.ended(7), "deciding not to count the end must not use up the wait");
+        assert_eq!(marker.take_for(7), Some(REPEAT_RESTART_DELAY));
     }
 
     #[test]
@@ -563,53 +657,53 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn a_child_past_the_soft_limit_is_reported_on_the_jobs_port() {
+    fn a_crossing_of_an_ended_instance_never_ends_the_live_one() {
+        let live = Some((8, 0x80));
+        assert_eq!(windows_job::job_to_end(live, 7), None);
+        assert_eq!(windows_job::job_to_end(live, 8), Some(0x80));
+        assert_eq!(windows_job::job_to_end(None, 8), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_child_past_the_soft_limit_is_reported_on_the_jobs_port_under_its_generation() {
         use std::os::windows::io::AsRawHandle;
         use std::os::windows::process::CommandExt;
         use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-        use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        };
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, TerminateJobObject};
 
         const MIB: u64 = 1 << 20;
+        let job = windows_job::create_job(768 * MIB).expect("the test job is made");
+        let port = windows_job::new_port().expect("the test port is made");
+        assert!(windows_job::arm_job(job, port, 7, 192 * MIB));
+
+        let mut child = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Milliseconds 500; $held = New-Object byte[] (384MB); Start-Sleep 30",
+            ])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .expect("powershell starts");
         unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            assert!(!job.is_null());
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags =
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY;
-            info.JobMemoryLimit = (768 * MIB) as usize;
-            let size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
-            assert_ne!(
-                SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info as *const _ as *const _, size),
-                0
-            );
-            let port = windows_job::arm_job(job as isize, 192 * MIB).expect("the test job arms");
-
-            let mut child = std::process::Command::new("powershell")
-                .args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    "Start-Sleep -Milliseconds 500; $held = New-Object byte[] (384MB); Start-Sleep 30",
-                ])
-                .creation_flags(0x0800_0000)
-                .spawn()
-                .expect("powershell starts");
-            assert_ne!(AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE), 0);
-
-            let crossing = windows_job::next_limit_crossing(port, 20_000);
-            let report = windows_job::crossing_report(job as isize, MemoryLimit::Soft);
-            TerminateJobObject(job, 1);
-            let _ = child.wait();
-            CloseHandle(port as HANDLE);
-            CloseHandle(job);
-
-            assert_eq!(crossing, Some(MemoryLimit::Soft));
-            assert!(report.contains(&format!("{} powershell.exe", child.id())), "{}", report);
+            assert_ne!(AssignProcessToJobObject(job as HANDLE, child.as_raw_handle() as HANDLE), 0);
         }
+
+        let crossing = windows_job::next_limit_crossing(port, 20_000);
+        let report = windows_job::crossing_report(job, MemoryLimit::Soft);
+        unsafe {
+            TerminateJobObject(job as HANDLE, 1);
+        }
+        let _ = child.wait();
+        unsafe {
+            CloseHandle(port as HANDLE);
+            CloseHandle(job as HANDLE);
+        }
+
+        assert_eq!(crossing, Some((MemoryLimit::Soft, 7)));
+        assert!(report.contains(&format!("{} powershell.exe", child.id())), "{}", report);
     }
 
     #[cfg(target_os = "macos")]
