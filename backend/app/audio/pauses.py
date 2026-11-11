@@ -19,6 +19,7 @@ MIN_SILENCE_SECONDS = 2.0
 SPEECH_PAD_SECONDS = 0.4
 SURE_SILENCE_MARGIN_DB = 20.0
 SOUND_PAD_SECONDS = 1.0
+EDGE_SCAN_SECONDS = 1.0
 
 
 def _hop_dbfs(samples: np.ndarray) -> np.ndarray:
@@ -34,24 +35,47 @@ def _hop_levels(samples: np.ndarray, settings: AudioSettings) -> tuple[np.ndarra
     return _hop_dbfs(samples), settings.silence_frame_dbfs
 
 
-def sound_span(samples: np.ndarray, settings: AudioSettings) -> tuple[float, float] | None:
-    """``(start, end)`` seconds of the sound in 16 kHz mono ``samples``, ``None`` if all is silent.
-
-    A hop is surely silent only when it is ``SURE_SILENCE_MARGIN_DB`` under ``silence_frame_dbfs``
-    and, when TEN VAD loads, it hears no speech there. The span keeps ``SOUND_PAD_SECONDS`` of
-    what lies around it, within the audio.
-    """
+def _sound_hops(samples: np.ndarray, settings: AudioSettings) -> np.ndarray:
     sound = _hop_dbfs(samples) >= settings.silence_frame_dbfs - SURE_SILENCE_MARGIN_DB
     probabilities = vad.speech_probabilities(samples, settings)
     if probabilities is not None:
         sound |= probabilities >= settings.silence_vad_probability
-    heard = np.flatnonzero(sound)
-    if not heard.size:
+    return np.flatnonzero(sound)
+
+
+def _first_sound_hop(samples: np.ndarray, settings: AudioSettings) -> int | None:
+    hop, window = vad._HOP_SAMPLES, round(EDGE_SCAN_SECONDS / vad.HOP_SECONDS)
+    for start in range(0, samples.size // hop, window):
+        heard = _sound_hops(samples[start * hop : (start + window) * hop], settings)
+        if heard.size:
+            return start + int(heard[0])
+    return None
+
+
+def _last_sound_hop(samples: np.ndarray, settings: AudioSettings, first: int) -> int:
+    hop, window = vad._HOP_SAMPLES, round(EDGE_SCAN_SECONDS / vad.HOP_SECONDS)
+    for end in range(samples.size // hop, first, -window):
+        start = max(end - window, first)
+        heard = _sound_hops(samples[start * hop : end * hop], settings)
+        if heard.size:
+            return start + int(heard[-1])
+    return first
+
+
+def sound_span(samples: np.ndarray, settings: AudioSettings) -> tuple[float, float] | None:
+    """``(start, end)`` seconds of the sound in 16 kHz mono ``samples``, ``None`` if all is silent.
+
+    A hop is surely silent only when it is ``SURE_SILENCE_MARGIN_DB`` under ``silence_frame_dbfs``
+    and, when TEN VAD loads, it hears no speech there. Hops are judged ``EDGE_SCAN_SECONDS`` at a
+    time from each edge inward, up to the first sound. The span keeps ``SOUND_PAD_SECONDS`` around.
+    """
+    first = _first_sound_hop(samples, settings)
+    if first is None:
         return None
-    duration = samples.size / vad._VAD_SAMPLE_RATE
+    last = _last_sound_hop(samples, settings, first)
     return (
-        max(heard[0] * vad.HOP_SECONDS - SOUND_PAD_SECONDS, 0.0),
-        min((heard[-1] + 1) * vad.HOP_SECONDS + SOUND_PAD_SECONDS, duration),
+        max(first * vad.HOP_SECONDS - SOUND_PAD_SECONDS, 0.0),
+        min((last + 1) * vad.HOP_SECONDS + SOUND_PAD_SECONDS, samples.size / vad._VAD_SAMPLE_RATE),
     )
 
 

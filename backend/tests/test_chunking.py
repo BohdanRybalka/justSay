@@ -282,6 +282,28 @@ async def test_a_long_recording_goes_as_flac_pieces_joined_at_the_seams(tmp_path
     assert sorted(p.name for p in tmp_path.iterdir()) == ["job_x.wav"]
 
 
+async def test_a_16_khz_mono_recording_is_cut_as_it_is_with_no_copy(tmp_path, monkeypatch):
+    path = _audio(tmp_path, 2.0, rate=16000, channels=1)
+    decoded: list[Path] = []
+    monkeypatch.setattr(
+        chunking, "decode_to_mono_wav", lambda source, target, rate: decoded.append(source)
+    )
+    cut: list[tuple[Path, float]] = []
+
+    async def whole() -> TranscriptionResult:
+        raise AssertionError("a decodable recording went whole")
+
+    async def record_cut(mono: Path, total: float) -> TranscriptionResult:
+        cut.append((mono, total))
+        return TranscriptionResult("")
+
+    await chunking.on_mono_audio(path, whole, record_cut)
+
+    assert cut == [(path, 2.0)]
+    assert decoded == []
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["job_x.wav"]
+
+
 async def test_each_provider_gets_pieces_no_longer_than_it_reads_whole(tmp_path, short_pieces):
     path = _audio(tmp_path, 60.0)
     provider = _Provider([TranscriptionResult("a")] * 3, longest=25.0)

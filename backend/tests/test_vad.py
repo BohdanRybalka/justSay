@@ -39,6 +39,8 @@ from app.audio.vad import (
     resolve_ten_vad_lib,
 )
 from app.pipeline import service as service_module
+from app.pipeline.chunking import UnpacedPieces
+from app.pipeline.dictation import transcribe_dictation
 from app.pipeline.service import process_audio
 from app.stt.base import TranscriptionResult
 
@@ -869,19 +871,28 @@ def test_cold_cache_stampede_loads_the_library_exactly_once(tmp_path, monkeypatc
 _MIN_CONTENTION_SCAN_S = 0.05
 
 
-async def _median_gate_ms(path: Path, duration: float, runs: int = 5) -> float:
-    """Median wall time of `process_audio` over `path`, gate work only.
-
-    Routing and history are patched out, and ``audio_duration`` is
-    passed explicitly so `detect_duration` never runs — what is left inside
-    the timed region is the silence gate plus mock overhead."""
+def _instant_provider() -> MagicMock:
     stt = MagicMock()
     stt.transcribe = AsyncMock(return_value=TranscriptionResult(text="ok"))
     stt.model_name = "mock/provider"
     stt.is_local = False
+    return stt
+
+
+async def _median_gate_ms(path: Path, duration: float, runs: int = 5) -> float:
+    """Median wall time of `process_audio` over `path`, gate work only.
+
+    Routing, the dictation's own preparation, cleanup and history are patched
+    out, and ``audio_duration`` is passed explicitly so `detect_duration` never
+    runs — what is left inside the timed region is the silence gate plus mock
+    overhead."""
+    stt = _instant_provider()
+    heard = AsyncMock(return_value=TranscriptionResult(text="ok"))
 
     samples: list[float] = []
     with patch("app.pipeline.service.get_provider", return_value=stt), \
+            patch("app.pipeline.service.transcribe_dictation", heard), \
+            patch("app.pipeline.service.clean_dictation", AsyncMock(return_value="ok")), \
             patch("app.pipeline.service.save_entry"):
         await process_audio(path, language="uk", audio_duration=duration, source="dictation")
         for _ in range(runs):
@@ -988,6 +999,49 @@ async def test_gate_latency_on_dictation_length_clip(tmp_path):
     assert median_ms <= 250.0, (
         f"AC 8 VIOLATED — a 3s dictation-length clip took {median_ms:.1f}ms (median of 5) "
         "through the pre-model gate, against spec 033's own 250ms bound."
+    )
+
+
+async def _median_preparation_ms(path: Path, runs: int = 5) -> float:
+    """Median wall time of a Cloud dictation over `path` with a provider that answers at once.
+
+    The recording is the microphone's 16 kHz mono WAV, so what is timed is the
+    dictation's own preparation: trimming its edges, finding its cuts, encoding its pieces."""
+    stt = _instant_provider()
+    duration = sf.info(str(path)).duration
+
+    async def prepare() -> None:
+        await transcribe_dictation(
+            stt, path, "uk", duration, UnpacedPieces(), no_speech_threshold=0.6
+        )
+
+    await prepare()
+    samples: list[float] = []
+    for _ in range(runs):
+        started = time.perf_counter()
+        await prepare()
+        samples.append((time.perf_counter() - started) * 1000)
+    return statistics.median(samples)
+
+
+@_requires_dll
+@_requires_sample
+@pytest.mark.slow
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("seconds", "budget_ms"), [(35, 150.0), (None, 2500.0)])
+async def test_a_long_cloud_dictation_is_prepared_within_its_budget(tmp_path, seconds, budget_ms):
+    """A dictation just past the 30 s window, and the whole ~6.4 min sample.
+
+    The budgets hold only while silent edges are looked for near the edges
+    alone and each cut only inside its own window."""
+    audio = _speech_16k_mono()
+    path = _write_wav(tmp_path / "dictation.wav", audio[: 16000 * seconds] if seconds else audio)
+
+    median_ms = await _median_preparation_ms(path)
+
+    assert median_ms <= budget_ms, (
+        f"preparing a {sf.info(str(path)).duration:.0f}s Cloud dictation took "
+        f"{median_ms:.1f}ms (median of 5), over its {budget_ms:.0f}ms budget"
     )
 
 

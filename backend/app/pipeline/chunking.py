@@ -298,6 +298,21 @@ def _frames(mono: Path) -> int:
     return sf.info(str(mono)).frames
 
 
+def _is_piece_wav(path: Path) -> bool:
+    import soundfile as sf
+
+    try:
+        info = sf.info(str(path))
+    except RuntimeError:
+        return False
+    return (info.format, info.subtype, info.samplerate, info.channels) == (
+        "WAV",
+        "PCM_16",
+        PIECE_RATE,
+        1,
+    )
+
+
 def _pause_in(mono: Path, start: float, end: float) -> float | None:
     import soundfile as sf
 
@@ -582,8 +597,11 @@ async def on_mono_audio(
 ) -> TranscriptionResult:
     """``cut`` of a 16 kHz mono copy of ``audio_path`` and its seconds; ``whole`` if undecodable.
 
-    The copy sits beside ``audio_path`` and is removed once ``cut`` is done.
+    A 16 kHz mono 16-bit WAV is cut as it is. Any other copy sits beside ``audio_path`` and is
+    removed once ``cut`` is done.
     """
+    if await asyncio.to_thread(_is_piece_wav, audio_path):
+        return await cut(audio_path, await asyncio.to_thread(_frames, audio_path) / PIECE_RATE)
     mono = audio_path.with_name(f"{audio_path.stem}-16k.wav")
     try:
         await asyncio.to_thread(decode_to_mono_wav, audio_path, mono, PIECE_RATE)

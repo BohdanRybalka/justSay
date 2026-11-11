@@ -1,10 +1,10 @@
 """A Cloud dictation sent in Whisper-window pieces: silent edges trimmed, long speech cut in pauses.
 
-Only what is surely silent before the first sound and after the last is cut off. Up to
-``WHISPER_WINDOW_SECONDS`` the rest goes whole; longer, it is cut at its longest pause between
-``SHORTEST_PIECE_SECONDS`` and ``DICTATION_PIECE_SECONDS`` into the piece, else hard there, never
-overlapping. A doubted piece is asked once more and the surer answer kept; a piece either answer
-hears as no speech adds nothing. Texts join with a space, or none in a language written without.
+Up to ``WHISPER_WINDOW_SECONDS`` a recording goes as recorded. A longer one loses what is surely
+silent before its first sound and after its last; if still longer than the window, it is cut at
+its longest pause ``SHORTEST_PIECE_SECONDS`` to ``DICTATION_PIECE_SECONDS`` into each piece, else
+hard there, never overlapping. A doubted piece is asked once more and the surer answer kept; a
+piece either answer hears as no speech adds nothing. Texts join with a space, or none unspaced.
 """
 
 from __future__ import annotations
@@ -175,8 +175,9 @@ async def transcribe_dictation(
 ) -> TranscriptionResult:
     """Transcribe one dictation in pieces; scratch files sit beside ``audio_path`` and are removed.
 
-    A piece adds nothing when it has no text, or when both answers hear no speech: a
-    ``no_speech_prob`` over ``no_speech_threshold``. The route is checked before every send.
+    A ``duration`` up to ``WHISPER_WINDOW_SECONDS`` sends ``audio_path`` as recorded. A piece adds
+    nothing when it has no text, or when both answers hear no speech: a ``no_speech_prob`` over
+    ``no_speech_threshold``. The route is checked before every send.
     """
 
     async def piece_answer(piece: Path, seconds: float | None) -> _PieceAnswer:
@@ -206,4 +207,6 @@ async def transcribe_dictation(
                 discard_scratch_file(piece)
         return _joined(answers, language, no_speech_threshold)
 
+    if duration is not None and duration <= WHISPER_WINDOW_SECONDS:
+        return await whole()
     return await on_mono_audio(audio_path, whole, cut)
