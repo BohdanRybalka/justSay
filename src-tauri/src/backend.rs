@@ -992,6 +992,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         return Err("Shutdown already requested; refusing to spawn a new backend".to_string());
     }
 
+    crate::memory_guard::forget_restart();
     #[cfg(target_os = "macos")]
     crate::memory_guard::reap_orphaned_engines(&engine_roots(&app));
 
@@ -2392,6 +2393,19 @@ mod tests {
              records of why it died out of the file. spawn_watchdog reports at the one \
              place a live backend becomes dead"
         );
+    }
+
+    #[test]
+    fn a_new_backend_starts_without_the_memory_marker_of_the_one_before() {
+        let backend_source = strip_doc_comment_lines(include_str!("backend.rs"));
+        let spawn_body = extract_fn_body(&backend_source, "spawn");
+        let forgotten = spawn_body
+            .find("crate::memory_guard::forget_restart();")
+            .expect("spawn() must drop the previous backend's memory marker, or a later real failure is neither counted nor reported");
+        let started = spawn_body
+            .find(".spawn()")
+            .expect("spawn() must start a process");
+        assert!(forgotten < started, "the marker must be dropped before the new backend can be ended");
     }
 
     #[test]

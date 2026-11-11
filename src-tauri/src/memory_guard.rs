@@ -22,7 +22,7 @@ pub const HARD_LIMIT_BYTES: u64 = 10 * GIB;
 #[cfg(target_os = "macos")]
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
-/// A second signal this soon after a restart reports the same crossing.
+/// A second signal this soon after the crossing last acted on reports that same crossing.
 const DUPLICATE_SIGNAL_WINDOW: Duration = Duration::from_secs(1);
 
 /// A crossing this soon after the previous one lengthens the wait before the next restart.
@@ -77,13 +77,34 @@ fn restart_delay(streak: u32) -> Duration {
         .min(MAX_RESTART_DELAY)
 }
 
-static BACKOFF: Mutex<RestartBackoff> = Mutex::new(RestartBackoff { last: None, streak: 0 });
-static PENDING_RESTART: Mutex<Option<Duration>> = Mutex::new(None);
+/// The wait the guard set for the backend it ended, read at most once.
+struct RestartMarker(Mutex<Option<Duration>>);
 
-/// The extra wait before restarting a backend the guard ended, once per ending;
-/// `None` when the backend's exit was not the guard's doing.
+impl RestartMarker {
+    fn set(&self, delay: Duration) {
+        if let Ok(mut pending) = self.0.lock() {
+            *pending = Some(delay);
+        }
+    }
+
+    fn take(&self) -> Option<Duration> {
+        self.0.lock().ok().and_then(|mut pending| pending.take())
+    }
+}
+
+static BACKOFF: Mutex<RestartBackoff> = Mutex::new(RestartBackoff { last: None, streak: 0 });
+static PENDING_RESTART: RestartMarker = RestartMarker(Mutex::new(None));
+
+/// The extra wait before restarting the backend the guard ended; `None` when
+/// the running backend's exit was not the guard's doing. Read once per ending.
 pub fn take_restart_delay() -> Option<Duration> {
-    PENDING_RESTART.lock().ok().and_then(|mut pending| pending.take())
+    PENDING_RESTART.take()
+}
+
+/// Drop the marker of a backend that is being replaced, so it never stands for
+/// the exit of the one starting now.
+pub fn forget_restart() {
+    PENDING_RESTART.take();
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -118,9 +139,7 @@ fn act_on_crossing(report: &str, end_tree: impl FnOnce()) {
         return;
     };
     log::warn!("{}; ending them and restarting the backend after {:?} more", report, delay);
-    if let Ok(mut pending) = PENDING_RESTART.lock() {
-        *pending = Some(delay);
-    }
+    PENDING_RESTART.set(delay);
     end_tree();
 }
 
@@ -159,8 +178,9 @@ mod windows_job {
         ids: [usize; LISTED_PROCESSES_MAX],
     }
 
-    /// Arm `job` to report the tree passing `soft_limit` and start the thread
-    /// that ends the tree when it does. Failing to arm leaves the job as it was.
+    /// Arm `job` to report the tree passing `SOFT_LIMIT_BYTES` and start the
+    /// thread that ends the tree when it does. On failure the job keeps its
+    /// hard limit and kill-on-close, and nothing restarts the backend for memory.
     pub fn watch_job(job: isize) {
         let Some(port) = arm_job(job, SOFT_LIMIT_BYTES) else {
             log::warn!("Memory guard: the backend's job could not be armed; no memory restart this session");
@@ -500,6 +520,14 @@ mod tests {
         backoff.record(start);
         assert_eq!(backoff.record(start + Duration::from_millis(5)), None);
         assert_eq!(backoff.record(start + Duration::from_secs(60)), Some(REPEAT_RESTART_DELAY));
+    }
+
+    #[test]
+    fn a_memory_restart_marker_answers_once() {
+        let marker = RestartMarker(Mutex::new(None));
+        marker.set(REPEAT_RESTART_DELAY);
+        assert_eq!(marker.take(), Some(REPEAT_RESTART_DELAY));
+        assert_eq!(marker.take(), None, "a second exit must not read the first one's marker");
     }
 
     #[test]
