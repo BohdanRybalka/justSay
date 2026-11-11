@@ -1,16 +1,16 @@
 """The stored glossary turned into what one engine family may receive (ADR 081).
 
 The stored string is never truncated. `glossary_text` reads a blank one as no
-glossary, and `whisper_glossary` fits it into a budget of characters, never
-answering nothing for a glossary that has text in it and never rewriting one that
-fits. `dictation_prompt` puts a sentence in the dictation language after it. The
-budget is a character count standing in for a token window, so a dense script can
-still overflow it. `glossary_summary` is the only shape a glossary may take in a log line.
+glossary; `whisper_glossary` fits it into a budget of characters, never answering
+nothing for a glossary with text in it and never rewriting one that fits. The budget
+counts characters for a token window, so a dense script can still overflow it.
+`dictation_prompt` adds a sentence in the dictation language, which `without_prompt_echo`
+takes back out of a transcript. `glossary_summary` is a glossary's only shape in a log line.
 """
 
 import re
 
-from app.stt.languages import LANGUAGE_SENTENCES
+from app.stt.languages import LANGUAGE_SENTENCES, UNSPACED_LANGUAGES
 
 WHISPER_PROMPT_CHAR_BUDGET = 487
 
@@ -81,6 +81,21 @@ def dictation_prompt(raw: str, language: str) -> tuple[str | None, int]:
     room = WHISPER_PROMPT_CHAR_BUDGET - len(sentence) - len(_SENTENCE_JOIN)
     glossary, cut = whisper_glossary(raw, room)
     return (sentence if glossary is None else f"{glossary}{_SENTENCE_JOIN}{sentence}"), cut
+
+
+def without_prompt_echo(text: str, language: str) -> str:
+    """``text`` without the dictation sentence of ``language`` that an engine wrote into it.
+
+    The sentence is matched whole, ignoring case and punctuation; the rest is left as it was.
+    """
+    sentence = LANGUAGE_SENTENCES.get(language)
+    if sentence is None:
+        return text
+    words = r"\W*".join(re.escape(word) for word in re.findall(r"\w+", sentence))
+    if language not in UNSPACED_LANGUAGES:
+        words = rf"(?<!\w){words}(?!\w)"
+    kept, echoes = re.subn(rf"{words}[^\w\s]*", "", text, flags=re.IGNORECASE)
+    return re.sub(r"\s{2,}", " ", kept).strip() if echoes else text
 
 
 def glossary_summary(text: str | None, cut: int = 0) -> str:

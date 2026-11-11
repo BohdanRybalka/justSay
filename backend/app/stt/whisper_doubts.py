@@ -1,9 +1,10 @@
-"""Signs that a Whisper ``verbose_json`` answer for one dictation piece went wrong.
+"""Signs that a Whisper ``verbose_json`` answer for one dictation piece may be wrong.
 
-A segment is non-speech when its ``no_speech_prob`` is over `NO_SPEECH_PROB` and its
-``avg_logprob`` under `LOW_AVG_LOGPROB`, Whisper's own skip rule; it loops when its
+A segment is doubted when its ``no_speech_prob`` is over `NO_SPEECH_PROB` and its
+``avg_logprob`` under `LOW_AVG_LOGPROB`, Whisper's own skip rule, and when its
 ``compression_ratio`` is over `LOOPING_COMPRESSION_RATIO`. Ukrainian text holding a letter
 only Russian uses has drifted into Russian. A field missing from a segment raises no doubt.
+Doubts ask for a second answer; they never drop one.
 """
 
 from __future__ import annotations
@@ -18,16 +19,11 @@ RUSSIAN_ONLY_LETTERS = frozenset("ыэъёЫЭЪЁ")
 
 @dataclass(frozen=True)
 class AnswerDoubts:
-    """How many segments an answer has, how many are non-speech, and whether it loops or drifts."""
+    """How many segments of an answer sound like no speech, and whether it loops or drifts."""
 
-    segments: int
     non_speech_segments: int
     is_looping: bool
     is_russian: bool
-
-    @property
-    def is_non_speech(self) -> bool:
-        return self.segments > 0 and self.non_speech_segments == self.segments
 
     @property
     def signals(self) -> int:
@@ -63,7 +59,6 @@ def read_doubts(text: str, segments: object, language: str) -> AnswerDoubts:
     """
     listed = list(segments) if isinstance(segments, (list, tuple)) else []
     return AnswerDoubts(
-        segments=len(listed),
         non_speech_segments=sum(_is_non_speech(segment) for segment in listed),
         is_looping=any(_is_looping(segment) for segment in listed),
         is_russian=language == "uk" and not RUSSIAN_ONLY_LETTERS.isdisjoint(text),

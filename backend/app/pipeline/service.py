@@ -160,7 +160,14 @@ async def process_audio(
     short = observer is None and not (duration is not None and duration > LONG_DICTATION_SECONDS)
     try:
         if short and cloud_dictation:
-            result = await transcribe_dictation(stt, audio_path, language, duration, pacer)
+            result = await transcribe_dictation(
+                stt,
+                audio_path,
+                language,
+                duration,
+                pacer,
+                no_speech_threshold=stt_settings.no_speech_prob_threshold,
+            )
         elif short:
             result = await transcribe_with_pauses(
                 stt,

@@ -254,14 +254,21 @@ async def test_files_meetings_and_local_dictations_are_not_cleaned(
 async def test_pipeline_respects_explicit_audio_duration(
     sample_wav, cloud_mode, _isolate_side_effects
 ):
-    """When caller provides audio_duration, pipeline must not re-detect it."""
+    """When caller provides audio_duration, pipeline must not re-detect it.
+
+    A Local dictation is sent whole, so the provider hears the caller's duration.
+    """
     stt = _make_stt_mock("ok")
+    stt.is_local = True
 
     with (
         patch("app.pipeline.service.detect_duration") as detect,
         patch("app.pipeline.service.get_provider", return_value=stt),
+        patch("app.stt.local_setup.await_local_ready", new=AsyncMock()),
     ):
-        await process_audio(sample_wav, audio_duration=12.5, source="file")
+        await process_audio(
+            sample_wav, audio_duration=12.5, source="dictation", mode=ProviderMode.LOCAL
+        )
 
     detect.assert_not_called()
     assert stt.transcribe.call_args.kwargs["audio_duration"] == 12.5
@@ -330,6 +337,24 @@ async def test_only_a_cloud_dictation_is_sent_as_dictation_pieces(
         await process_audio(sample_wav, source="dictation", mode=mode)
 
     assert [(path == sample_wav, dictated) for path, dictated in sent] == [(not piece, piece)]
+
+
+@pytest.mark.asyncio
+async def test_a_cloud_dictation_whose_every_piece_hears_no_speech_is_discarded_as_silence(
+    tmp_path, cloud_mode, _isolate_side_effects
+):
+    path = tmp_path / "long.wav"
+    noise = np.random.default_rng(0).uniform(-0.1, 0.1, 40 * 16000).astype(np.float32)
+    sf.write(str(path), noise, 16000)
+    stt = _stt_mock_with_no_speech("Дякую за перегляд!", 0.9)
+
+    with patch("app.pipeline.service.get_provider", return_value=stt):
+        result = await process_audio(path, language="uk", source="dictation")
+
+    assert stt.transcribe.await_count == 2
+    assert result.discarded_reason == "silence"
+    assert result.text == ""
+    _isolate_side_effects.assert_not_called()
 
 
 async def test_the_result_names_the_history_entry_it_saved(
@@ -1265,7 +1290,7 @@ async def test_high_no_speech_prob_discards_after_model(
         patch("app.pipeline.service.get_provider", return_value=stt),
     ):
         result = await process_audio(
-            sample_wav, language="uk", background_tasks=bt, source="file"
+            sample_wav, language="uk", background_tasks=bt, source="dictation"
         )
 
     assert result.discarded_reason == "silence"
@@ -1284,7 +1309,7 @@ async def test_no_speech_prob_exactly_at_threshold_is_kept(
     stt = _stt_mock_with_no_speech("реальні слова", 0.6)
 
     with patch("app.pipeline.service.get_provider", return_value=stt):
-        result = await process_audio(sample_wav, language="uk", source="file")
+        result = await process_audio(sample_wav, language="uk", source="dictation")
 
     assert result.discarded_reason is None
     assert result.text == "реальні слова"
@@ -1298,7 +1323,7 @@ async def test_no_speech_prob_none_is_kept(sample_wav, cloud_mode, _isolate_side
     stt = _stt_mock_with_no_speech("реальні слова", None)
 
     with patch("app.pipeline.service.get_provider", return_value=stt):
-        result = await process_audio(sample_wav, language="uk", source="file")
+        result = await process_audio(sample_wav, language="uk", source="dictation")
 
     assert result.discarded_reason is None
     assert result.text == "реальні слова"
@@ -1315,7 +1340,7 @@ async def test_mixed_segments_min_keeps_transcription(
     stt = _stt_mock_with_no_speech("справжні слова плюс галюцинація", 0.1)
 
     with patch("app.pipeline.service.get_provider", return_value=stt):
-        result = await process_audio(sample_wav, language="uk", source="file")
+        result = await process_audio(sample_wav, language="uk", source="dictation")
 
     assert result.discarded_reason is None
     assert result.text == "справжні слова плюс галюцинація"
@@ -1337,7 +1362,7 @@ async def test_no_speech_discard_logs_layer_and_never_the_text(
         patch("app.pipeline.service.get_provider", return_value=stt),
         caplog.at_level(logging.WARNING, logger="app.pipeline.service"),
     ):
-        await process_audio(sample_wav, language="uk", source="file")
+        await process_audio(sample_wav, language="uk", source="dictation")
 
     full_log = "\n".join(r.getMessage() for r in caplog.records)
     assert "layer=provider-metadata" in full_log
@@ -1355,7 +1380,7 @@ async def test_no_speech_threshold_is_settings_driven(
     monkeypatch.setattr(settings.stt, "no_speech_prob_threshold", 0.9)
 
     with patch("app.pipeline.service.get_provider", return_value=stt):
-        result = await process_audio(sample_wav, language="uk", source="file")
+        result = await process_audio(sample_wav, language="uk", source="dictation")
 
     assert result.discarded_reason is None
     assert result.text == "гранична впевненість"

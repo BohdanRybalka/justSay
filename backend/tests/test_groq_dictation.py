@@ -15,7 +15,7 @@ import pytest
 import soundfile as sf
 
 from app.stt.config import STTSettings
-from app.stt.glossary import WHISPER_PROMPT_CHAR_BUDGET, dictation_prompt
+from app.stt.glossary import WHISPER_PROMPT_CHAR_BUDGET, dictation_prompt, without_prompt_echo
 from app.stt.groq_whisper import GroqWhisperSTTProvider
 from app.stt.languages import LANGUAGE_SENTENCES
 from app.stt.whisper_doubts import read_doubts
@@ -74,11 +74,22 @@ def test_a_piece_is_doubted_for_non_speech_loops_and_russian_letters(
 
 
 @pytest.mark.parametrize(
-    ("segments", "non_speech"),
-    [([NON_SPEECH, NON_SPEECH], True), ([NON_SPEECH, SPEECH], False), ([], False)],
+    ("text", "language", "kept"),
+    [
+        ("Це запис українською мовою.", "uk", ""),
+        ("це запис, українською мовою", "uk", ""),
+        ("Привіт. Це запис українською мовою.", "uk", "Привіт."),
+        ("Це запис українською мовою. Привіт, друже.", "uk", "Привіт, друже."),
+        ("Це записи українською мовою.", "uk", "Це записи українською мовою."),
+        ("Оце запис українською мовою.", "uk", "Оце запис українською мовою."),
+        ("これは日本語の録音です。", "ja", ""),
+        ("こんにちはこれは日本語の録音です。", "ja", "こんにちは"),
+        ("This is a recording in English.", "uk", "This is a recording in English."),
+        ("Це запис українською мовою.", "auto", "Це запис українською мовою."),
+    ],
 )
-def test_only_a_piece_whose_every_segment_is_non_speech_holds_no_speech(segments, non_speech):
-    assert read_doubts("дякую", segments, "uk").is_non_speech is non_speech
+def test_the_prompt_sentence_an_engine_writes_back_is_taken_out(text, language, kept):
+    assert without_prompt_echo(text, language) == kept
 
 
 def test_the_dictation_sentence_comes_after_the_glossary():
@@ -131,8 +142,15 @@ async def test_a_dictation_piece_reports_how_many_doubts_its_answer_raised(tmp_p
     assert result.doubts == 2
 
 
-async def test_a_piece_whose_every_segment_is_non_speech_comes_back_empty(tmp_path):
-    result, _asked = await _send(tmp_path, _answer("Дякую за перегляд!", NON_SPEECH))
+async def test_a_piece_reports_its_least_no_speech_for_the_pipeline_to_judge(tmp_path):
+    result, _asked = await _send(tmp_path, _answer("Дякую за перегляд!", NON_SPEECH, LOOPING))
+
+    assert result.text == "Дякую за перегляд!"
+    assert result.no_speech_prob == 0.1
+
+
+async def test_a_piece_that_only_echoes_the_prompt_sentence_comes_back_empty(tmp_path):
+    result, _asked = await _send(tmp_path, _answer(LANGUAGE_SENTENCES["uk"], NON_SPEECH))
 
     assert result.text == ""
 

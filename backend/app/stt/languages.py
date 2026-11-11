@@ -1,4 +1,6 @@
-"""Language names shared by the STT providers, and the sentence that ends a dictation prompt."""
+"""Language names shared by the STT providers, the sentence that ends a dictation prompt, and
+the languages written without spaces between words.
+"""
 
 LANGUAGE_NAMES = {
     "uk": "Ukrainian",
@@ -21,3 +23,5 @@ LANGUAGE_SENTENCES = {
     "ja": "これは日本語の録音です。",
     "zh": "这是一段中文录音。",
 }
+
+UNSPACED_LANGUAGES = frozenset({"ja", "zh"})

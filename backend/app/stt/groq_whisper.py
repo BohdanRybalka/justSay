@@ -1,7 +1,7 @@
 """Cloud STT provider — Groq Whisper (whisper-large-v3-turbo).
 
 Cloud mode's only transcription engine. A dictation piece is asked as ``verbose_json`` with the
-dictation sentence in its prompt, and its answer is read for signs that it went wrong.
+dictation sentence in its prompt, and its answer is read for signs that it may be wrong.
 """
 
 import asyncio
@@ -21,7 +21,12 @@ from app.stt.base import (
     normalize_detected_language,
 )
 from app.stt.config import STTSettings
-from app.stt.glossary import dictation_prompt, glossary_summary, whisper_glossary
+from app.stt.glossary import (
+    dictation_prompt,
+    glossary_summary,
+    whisper_glossary,
+    without_prompt_echo,
+)
 from app.stt.whisper_doubts import read_doubts
 
 log = logging.getLogger(__name__)
@@ -115,7 +120,7 @@ class GroqWhisperSTTProvider(STTProvider):
     ) -> TranscriptionResult:
         """One push-to-talk piece; ``second_opinion`` sends it to the stronger model.
 
-        A piece whose every segment is non-speech comes back with no text.
+        The prompt's sentence is taken out of the text again if the engine wrote it there.
         """
         model = (
             self._settings.groq_second_opinion_model
@@ -134,19 +139,18 @@ class GroqWhisperSTTProvider(STTProvider):
         except Exception:
             log.exception("Groq Whisper call failed")
             raise
-        text = clean_transcript_text(
+        heard = clean_transcript_text(
             response if isinstance(response, str) else getattr(response, "text", None)
         )
+        text = without_prompt_echo(heard, language)
+        if text != heard:
+            log.info("Groq Whisper: took the prompt's sentence out of a piece's text")
         segments = getattr(response, "segments", None)
-        doubts = read_doubts(text, segments, language)
-        if doubts.is_non_speech:
-            log.info("Groq Whisper: a piece held no speech; dropped %d chars", len(text))
-            text = ""
         return TranscriptionResult(
             text=text,
             detected_language=normalize_detected_language(getattr(response, "language", None)),
             no_speech_prob=min_no_speech_prob(segments),
-            doubts=doubts.signals,
+            doubts=read_doubts(text, segments, language).signals,
         )
 
     def cleanup(self) -> None:
