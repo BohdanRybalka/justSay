@@ -26,6 +26,7 @@ from app.embeddings import LOCAL_MISSING_MODEL_REASON, clear_cache, resolve_embe
 from app.embeddings.cloud import CloudEmbeddingProvider
 from app.embeddings.config import EmbeddingSettings
 from app.embeddings.local import LocalEmbeddingProvider
+from app.embeddings.ollama_models import CONNECT_TIMEOUT
 from app.stt.config import STTSettings
 from tests.conftest import drop_frames
 
@@ -35,6 +36,14 @@ def _clear_embeddings_cache():
     clear_cache()
     yield
     clear_cache()
+
+
+def _join_releases() -> None:
+    import app.embeddings as embeddings_module
+
+    for thread in threading.enumerate():
+        if thread.name == embeddings_module._RELEASE_THREAD_NAME:
+            thread.join(timeout=5)
 
 
 def _settings(stt_mode: ProviderMode):
@@ -219,6 +228,7 @@ async def test_available_cache_reprobes_and_flips_to_unavailable():
     assert provider2 is None
     assert reason2 == LOCAL_MISSING_MODEL_REASON
     assert avail.call_count == 2
+    _join_releases()
     fake_local.cleanup.assert_called_once()
 
 
@@ -294,6 +304,7 @@ async def test_concurrent_local_calls_serialize_and_stay_consistent():
 
     assert max_in_flight == 1
     assert {result1, result2} == {(fake_local, None), (None, LOCAL_MISSING_MODEL_REASON)}
+    _join_releases()
     fake_local.cleanup.assert_called_once()
 
 
@@ -558,6 +569,58 @@ def test_local_embedding_cleanup_unloads_model_and_clears_client():
     assert provider._client is None
 
 
+def test_the_ollama_client_gives_up_on_a_host_that_stops_answering(monkeypatch):
+    """The SDK client defaults to no timeout, so a stuck Ollama would hold its caller forever."""
+    built = {}
+
+    def _fake_client(**kwargs):
+        built.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setitem(sys.modules, "ollama", MagicMock(Client=_fake_client))
+    provider = LocalEmbeddingProvider(
+        ollama_host="http://localhost:11434", model="nomic-embed-text"
+    )
+
+    provider._get_client()
+
+    timeout = built["timeout"]
+    assert (timeout.connect, timeout.read) == (CONNECT_TIMEOUT, 60.0)
+    assert None not in (timeout.write, timeout.pool)
+
+
+@pytest.mark.asyncio
+async def test_a_stale_local_provider_whose_unload_hangs_does_not_hold_up_the_reprobe():
+    """The model left Ollama, so the cached provider is dropped; its blocking unload must not
+    run on the event loop the re-probe answers from."""
+    import app.embeddings as embeddings_module
+
+    stt, emb = _settings(ProviderMode.LOCAL)
+    ollama_answers = threading.Event()
+    unload_returned = threading.Event()
+
+    def _hung_unload():
+        ollama_answers.wait(timeout=3)
+        unload_returned.set()
+
+    stale = MagicMock()
+    stale.cleanup.side_effect = _hung_unload
+    embeddings_module._cached_provider = stale
+    embeddings_module._cached_key = ProviderMode.LOCAL
+
+    try:
+        with patch("app.embeddings.local.is_model_available", new=AsyncMock(return_value=False)):
+            provider, reason = await resolve_embedding_provider(stt, emb)
+        unload_still_hanging = not unload_returned.is_set()
+    finally:
+        ollama_answers.set()
+        _join_releases()
+
+    assert (provider, reason) == (None, LOCAL_MISSING_MODEL_REASON)
+    assert unload_still_hanging
+    stale.cleanup.assert_called_once()
+
+
 def test_local_embedding_cleanup_swallows_errors():
     """A failed unload call (Ollama already stopped, connection refused)
     must not raise — cleanup is best-effort, same contract as
@@ -586,6 +649,7 @@ def test_clear_cache_records_a_provider_cleanup_failure(caplog):
 
     with caplog.at_level(logging.DEBUG, logger="app.embeddings"):
         clear_cache()
+        _join_releases()
 
     failures = [r for r in caplog.records if r.name == "app.embeddings" and r.exc_info]
     assert len(failures) == 1
@@ -610,6 +674,7 @@ async def test_a_stale_local_provider_that_refuses_to_release_is_recorded(caplog
         caplog.at_level(logging.DEBUG, logger="app.embeddings"),
     ):
         provider, reason = await resolve_embedding_provider(stt, emb)
+        _join_releases()
 
     assert provider is None
     assert reason == LOCAL_MISSING_MODEL_REASON
