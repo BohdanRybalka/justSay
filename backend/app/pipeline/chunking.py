@@ -15,7 +15,7 @@ import asyncio
 import logging
 import re
 from collections import Counter
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import ClassVar, Protocol
@@ -269,16 +269,26 @@ def _speech_only(samples: np.ndarray) -> tuple[np.ndarray, PieceSpeech]:
     return speech, PieceSpeech(speech.size / PIECE_RATE, profile.voiced_seconds)
 
 
-def _write_piece(mono: Path, piece: Path, start: float, end: float) -> PieceSpeech:
-    """Write the speech of ``mono`` from ``start`` to ``end`` to ``piece``; how much it holds."""
+def _read_seconds(mono: Path, start: float, end: float) -> np.ndarray:
+    """The 16-bit samples of the 16 kHz ``mono`` file from ``start`` to ``end`` seconds."""
     import soundfile as sf
 
     with sf.SoundFile(str(mono)) as source:
         first = round(start * PIECE_RATE)
         source.seek(first)
-        samples = source.read(round(end * PIECE_RATE) - first, dtype="int16")
-    speech, held = _speech_only(samples)
-    sf.write(str(piece), speech, PIECE_RATE, format="FLAC", subtype="PCM_16")
+        return source.read(round(end * PIECE_RATE) - first, dtype="int16")
+
+
+def _write_flac(piece: Path, samples: np.ndarray) -> None:
+    import soundfile as sf
+
+    sf.write(str(piece), samples, PIECE_RATE, format="FLAC", subtype="PCM_16")
+
+
+def _write_piece(mono: Path, piece: Path, start: float, end: float) -> PieceSpeech:
+    """Write the speech of ``mono`` from ``start`` to ``end`` to ``piece``; how much it holds."""
+    speech, held = _speech_only(_read_seconds(mono, start, end))
+    _write_flac(piece, speech)
     return held
 
 
@@ -331,17 +341,21 @@ async def transcribe_with_pauses(
     max_pause: float = MAX_PAUSE_SECONDS,
     max_pauses: int = MAX_PAUSES_PER_PIECE,
     retry_delays: Sequence[float] = (),
+    provider_options: Mapping[str, object] | None = None,
 ) -> TranscriptionResult:
     """One answer for one audio file: waits out Retry-After, checking the route before each send.
 
     Any other failure worth another try is sent again after each of ``retry_delays`` in turn;
     with ``retry_delays`` given, a send nobody answered counts as such a failure, not as a pause.
+    ``provider_options`` reach the provider's ``transcribe`` as keyword arguments.
     """
     pauses = failures = 0
     while True:
         await pacer.before_send()
         try:
-            request = stt.transcribe(path, language=language, audio_duration=duration)
+            request = stt.transcribe(
+                path, language=language, audio_duration=duration, **(provider_options or {})
+            )
             if stt.stops_when_dropped:
                 return await pacer.stoppable(request)
             return await request
@@ -535,11 +549,8 @@ async def transcribe_in_pieces(
     Audio that cannot be cut here goes whole. Otherwise see ``transcribe_stretch``, applied to
     all of it.
     """
-    mono = audio_path.with_name(f"{audio_path.stem}-16k.wav")
-    try:
-        await asyncio.to_thread(decode_to_mono_wav, audio_path, mono, PIECE_RATE)
-    except UndecodableAudioError:
-        log.info("%s cannot be cut here; sending it whole", audio_path.suffix)
+
+    async def whole() -> TranscriptionResult:
         await pacer.before_piece(0, 1)
         result = await transcribe_with_pauses(
             stt, audio_path, language, duration, pacer, retry_delays=PIECE_RETRY_DELAYS
@@ -547,8 +558,7 @@ async def transcribe_in_pieces(
         pacer.piece_done(1, 1)
         return result
 
-    try:
-        total = await asyncio.to_thread(_frames, mono) / PIECE_RATE
+    async def cut(mono: Path, total: float) -> TranscriptionResult:
         return await transcribe_stretch(
             stt,
             audio_path,
@@ -561,5 +571,26 @@ async def transcribe_in_pieces(
             pacer=pacer,
             finished=finished,
         )
+
+    return await on_mono_audio(audio_path, whole, cut)
+
+
+async def on_mono_audio(
+    audio_path: Path,
+    whole: Callable[[], Awaitable[TranscriptionResult]],
+    cut: Callable[[Path, float], Awaitable[TranscriptionResult]],
+) -> TranscriptionResult:
+    """``cut`` of a 16 kHz mono copy of ``audio_path`` and its seconds; ``whole`` if undecodable.
+
+    The copy sits beside ``audio_path`` and is removed once ``cut`` is done.
+    """
+    mono = audio_path.with_name(f"{audio_path.stem}-16k.wav")
+    try:
+        await asyncio.to_thread(decode_to_mono_wav, audio_path, mono, PIECE_RATE)
+    except UndecodableAudioError:
+        log.info("%s cannot be cut here; sending it whole", audio_path.suffix)
+        return await whole()
+    try:
+        return await cut(mono, await asyncio.to_thread(_frames, mono) / PIECE_RATE)
     finally:
         discard_scratch_file(mono)

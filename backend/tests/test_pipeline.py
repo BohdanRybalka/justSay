@@ -254,14 +254,21 @@ async def test_files_meetings_and_local_dictations_are_not_cleaned(
 async def test_pipeline_respects_explicit_audio_duration(
     sample_wav, cloud_mode, _isolate_side_effects
 ):
-    """When caller provides audio_duration, pipeline must not re-detect it."""
+    """When caller provides audio_duration, pipeline must not re-detect it.
+
+    A Local dictation is sent whole, so the provider hears the caller's duration.
+    """
     stt = _make_stt_mock("ok")
+    stt.is_local = True
 
     with (
         patch("app.pipeline.service.detect_duration") as detect,
         patch("app.pipeline.service.get_provider", return_value=stt),
+        patch("app.stt.local_setup.await_local_ready", new=AsyncMock()),
     ):
-        await process_audio(sample_wav, audio_duration=12.5, source="dictation")
+        await process_audio(
+            sample_wav, audio_duration=12.5, source="dictation", mode=ProviderMode.LOCAL
+        )
 
     detect.assert_not_called()
     assert stt.transcribe.call_args.kwargs["audio_duration"] == 12.5
@@ -304,6 +311,53 @@ async def test_a_dictation_goes_in_pieces_only_when_it_is_long(
     assert stt.transcribe.await_count == (0 if goes_in_pieces else 1)
     if goes_in_pieces:
         assert isinstance(pieces.call_args.kwargs["pacer"], chunking.UnpacedPieces)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "piece"), [(ProviderMode.CLOUD, True), (ProviderMode.LOCAL, False)]
+)
+async def test_only_a_cloud_dictation_is_sent_as_dictation_pieces(
+    sample_wav, cloud_mode, _isolate_side_effects, mode, piece
+):
+    sent: list[tuple[Path, bool]] = []
+
+    async def transcribe(path, **kwargs):
+        sent.append((path, bool(kwargs.get("dictation"))))
+        return TranscriptionResult(text="ok")
+
+    stt = _make_stt_mock()
+    stt.transcribe = transcribe
+    stt.is_local = mode == ProviderMode.LOCAL
+
+    with (
+        patch("app.pipeline.service.get_provider", return_value=stt),
+        patch("app.stt.local_setup.await_local_ready", new=AsyncMock()),
+    ):
+        await process_audio(sample_wav, source="dictation", mode=mode)
+
+    assert [(path == sample_wav, dictated) for path, dictated in sent] == [(not piece, piece)]
+
+
+@pytest.mark.asyncio
+async def test_a_cloud_dictation_whose_every_piece_hears_no_speech_is_discarded_as_silence(
+    tmp_path, cloud_mode, _isolate_side_effects
+):
+    """The gate before the engine is told to abstain, so the engine's verdict alone decides."""
+    path = tmp_path / "long.wav"
+    sf.write(str(path), np.zeros(40 * 16000, dtype=np.float32), 16000)
+    stt = _stt_mock_with_no_speech("Дякую за перегляд!", 0.9)
+
+    with (
+        patch("app.pipeline.service._silence_note", return_value=None),
+        patch("app.pipeline.service.get_provider", return_value=stt),
+    ):
+        result = await process_audio(path, language="uk", source="dictation")
+
+    assert stt.transcribe.await_count == 4
+    assert result.discarded_reason == "silence"
+    assert result.text == ""
+    _isolate_side_effects.assert_not_called()
 
 
 async def test_the_result_names_the_history_entry_it_saved(

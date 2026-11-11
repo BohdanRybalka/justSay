@@ -3,6 +3,7 @@
 A pause is at least ``PAUSE_SECONDS`` in which no 16 ms hop holds speech. TEN VAD's probability
 decides speech when the library loads; otherwise a hop louder than ``silence_frame_dbfs`` does.
 Speech stretches follow faster-whisper's VAD defaults: 2 s of silence splits, 0.4 s pads.
+A recording's sound runs from its first hop to its last that is not surely silent.
 """
 
 from dataclasses import dataclass
@@ -16,16 +17,42 @@ from app.audio.config import AudioSettings
 PAUSE_SECONDS = 0.4
 MIN_SILENCE_SECONDS = 2.0
 SPEECH_PAD_SECONDS = 0.4
+SURE_SILENCE_MARGIN_DB = 20.0
+SOUND_PAD_SECONDS = 1.0
+
+
+def _hop_dbfs(samples: np.ndarray) -> np.ndarray:
+    hop = vad._HOP_SAMPLES
+    hops = samples[: samples.size // hop * hop].reshape(-1, hop).astype(np.float64)
+    return np.array([to_dbfs(rms) for rms in np.sqrt(np.mean(hops**2, axis=1))])
 
 
 def _hop_levels(samples: np.ndarray, settings: AudioSettings) -> tuple[np.ndarray, float]:
     probabilities = vad.speech_probabilities(samples, settings)
     if probabilities is not None:
         return probabilities, settings.silence_vad_probability
-    hop = vad._HOP_SAMPLES
-    hops = samples[: samples.size // hop * hop].reshape(-1, hop).astype(np.float64)
-    levels = np.array([to_dbfs(rms) for rms in np.sqrt(np.mean(hops**2, axis=1))])
-    return levels, settings.silence_frame_dbfs
+    return _hop_dbfs(samples), settings.silence_frame_dbfs
+
+
+def sound_span(samples: np.ndarray, settings: AudioSettings) -> tuple[float, float] | None:
+    """``(start, end)`` seconds of the sound in 16 kHz mono ``samples``, ``None`` if all is silent.
+
+    A hop is surely silent only when it is ``SURE_SILENCE_MARGIN_DB`` under ``silence_frame_dbfs``
+    and, when TEN VAD loads, it hears no speech there. The span keeps ``SOUND_PAD_SECONDS`` of
+    what lies around it, within the audio.
+    """
+    sound = _hop_dbfs(samples) >= settings.silence_frame_dbfs - SURE_SILENCE_MARGIN_DB
+    probabilities = vad.speech_probabilities(samples, settings)
+    if probabilities is not None:
+        sound |= probabilities >= settings.silence_vad_probability
+    heard = np.flatnonzero(sound)
+    if not heard.size:
+        return None
+    duration = samples.size / vad._VAD_SAMPLE_RATE
+    return (
+        max(heard[0] * vad.HOP_SECONDS - SOUND_PAD_SECONDS, 0.0),
+        min((heard[-1] + 1) * vad.HOP_SECONDS + SOUND_PAD_SECONDS, duration),
+    )
 
 
 def longest_pause(samples: np.ndarray, settings: AudioSettings) -> float | None:
