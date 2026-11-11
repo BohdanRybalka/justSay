@@ -77,7 +77,6 @@ LIMIT_REACHED_REASON = "Your API key has used up its limit for now. Try again in
 LIMIT_REACHED_SECONDS = 3600.0
 
 _CANCELLABLE: frozenset[JobStage] = frozenset({"queued", "transcribing"})
-_RUNNING: frozenset[JobStage] = frozenset({"queued", "transcribing", "saving"})
 _EXPIRING: frozenset[JobStage] = frozenset({"done", "cancelled"})
 
 
@@ -303,8 +302,10 @@ class JobQueue:
 
     @property
     def is_working(self) -> bool:
-        """Whether a file or a recording is still arriving, or a job waits, runs or saves."""
-        return self._receiving > 0 or any(job.stage in _RUNNING for job in self._jobs.values())
+        """Whether a file or a recording is still arriving, or a job's worker has not finished."""
+        return self._receiving > 0 or any(
+            job.task is not None and not job.task.done() for job in self._jobs.values()
+        )
 
     def add_file(self, content: bytes, name: str) -> str:
         """Keep ``content`` in a scratch file and queue it for transcription; answer the job id."""

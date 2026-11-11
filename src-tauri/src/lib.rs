@@ -288,6 +288,7 @@ enum Work {
 
 #[derive(serde::Deserialize)]
 struct WorkInProgressView {
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     work: Option<Work>,
 }
 
@@ -306,7 +307,7 @@ fn failed(e: impl ToString) -> InstallRefusal {
 }
 
 /// Whether the backend's work-in-progress answer lets an install go ahead; an answer
-/// that is missing or not understood holds it.
+/// that is missing, lacks `work` or is not understood holds it.
 fn nothing_running(answer: Result<String, String>) -> Result<(), InstallRefusal> {
     let body = answer.map_err(InstallRefusal::CouldNotCheck)?;
     let view: WorkInProgressView = serde_json::from_str(&body).map_err(|_| {
@@ -585,12 +586,15 @@ mod tests {
                 Err(InstallRefusal::WaitsFor(work))
             );
         }
-        assert_eq!(
-            nothing_running(Ok(r#"{"work":"podcast"}"#.into())),
-            Err(InstallRefusal::CouldNotCheck(
-                "the backend's answer was not understood".into()
-            ))
-        );
+        for unreadable in [r#"{"work":"podcast"}"#, "{}", r#"{"work":1}"#, "not json"] {
+            assert_eq!(
+                nothing_running(Ok(unreadable.into())),
+                Err(InstallRefusal::CouldNotCheck(
+                    "the backend's answer was not understood".into()
+                )),
+                "{unreadable}"
+            );
+        }
         assert_eq!(
             nothing_running(Err("the backend did not answer".into())),
             Err(InstallRefusal::CouldNotCheck("the backend did not answer".into()))
@@ -633,7 +637,6 @@ mod tests {
 
     #[test]
     fn a_dock_or_finder_relaunch_on_macos_brings_the_window_forward() {
-
         assert!(
             run_source().contains("RunEvent::Reopen { .. } => show_settings("),
             "macOS reactivates a running app with Reopen rather than a second process, \

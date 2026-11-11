@@ -200,7 +200,6 @@ describe("Version row — check, install and restart", () => {
 
   it("a failed install offers a retry that installs, not checks", async () => {
     invokeMock.mockRejectedValueOnce("disk full");
-
     checkMock.mockResolvedValue(READY_UPDATE);
     const { button, status } = renderRow();
 

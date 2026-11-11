@@ -1209,7 +1209,6 @@ pub async fn work_in_progress() -> Result<String, String> {
 }
 
 /// Poll /health until the backend responds or timeout. A backend that answers
-
 /// clears the reason `last_failure()` held.
 pub async fn wait_for_ready() -> Result<(), String> {
     let url = format!("http://127.0.0.1:{}/health", current_port());
