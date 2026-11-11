@@ -336,7 +336,7 @@ async def test_only_a_cloud_dictation_is_sent_as_dictation_pieces(
     ):
         await process_audio(sample_wav, source="dictation", mode=mode)
 
-    assert [(path == sample_wav, dictated) for path, dictated in sent] == [(not piece, piece)]
+    assert sent == [(sample_wav, piece)]
 
 
 @pytest.mark.asyncio

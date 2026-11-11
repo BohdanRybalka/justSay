@@ -38,6 +38,7 @@ class _Provider(STTProvider):
     async def transcribe(self, audio_path: Path, language: str = "uk", **kwargs):
         self.sent.append(
             {
+                "path": audio_path,
                 "seconds": sf.info(str(audio_path)).duration,
                 "language": language,
                 "second_opinion": kwargs.get("second_opinion"),
@@ -64,15 +65,20 @@ def _quiet(seconds: float) -> np.ndarray:
     return np.zeros(round(seconds * RATE))
 
 
-def _recording(tmp_path: Path, *parts: np.ndarray) -> Path:
+def _recording(tmp_path: Path, *parts: np.ndarray, rate: int = RATE) -> Path:
     path = tmp_path / "dictation.wav"
-    sf.write(str(path), np.concatenate(parts).astype(np.float32), RATE)
+    sf.write(str(path), np.repeat(np.concatenate(parts), rate // RATE).astype(np.float32), rate)
     return path
 
 
 async def _run(provider: _Provider, path: Path, language: str = "uk") -> TranscriptionResult:
     return await transcribe_dictation(
-        provider, path, language, None, UnpacedPieces(), no_speech_threshold=THRESHOLD
+        provider,
+        path,
+        language,
+        sf.info(str(path)).duration,
+        UnpacedPieces(),
+        no_speech_threshold=THRESHOLD,
     )
 
 
@@ -115,12 +121,38 @@ def test_a_cut_is_searched_from_ten_seconds_in_up_to_the_limit():
     assert pieces == [(0.0, 12.0), (12.0, 24.0), (24.0, 45.0)]
 
 
-async def test_a_dictation_of_29_seconds_without_a_pause_goes_whole(tmp_path):
+@pytest.mark.parametrize("sound", [2.0, 24.0])
+async def test_a_dictation_up_to_the_window_reaches_the_provider_as_recorded(
+    tmp_path, monkeypatch, sound
+):
+    decoded: list[Path] = []
+    monkeypatch.setattr(
+        chunking, "decode_to_mono_wav", lambda source, target, rate: decoded.append(source)
+    )
+    path = _recording(tmp_path, _quiet(3.0), _tone(sound), _quiet(3.0), rate=48000)
     provider = _Provider([_said("усе")])
 
-    await _run(provider, _recording(tmp_path, _tone(29.0)))
+    await _run(provider, path)
 
-    assert _seconds(provider) == [29.0]
+    assert [sent["path"] for sent in provider.sent] == [path]
+    assert _seconds(provider) == [sound + 6.0]
+    assert decoded == []
+
+
+@pytest.mark.parametrize(("told", "seconds"), [(29.98, [20.0, 10.0]), (None, [28.0, 12.0])])
+async def test_a_recording_whose_file_runs_past_the_window_is_cut_whatever_it_was_told(
+    tmp_path, told, seconds
+):
+    path = _recording(tmp_path, _tone(30.02 if told else 40.0))
+    provider = _Provider([_said("перша"), _said("друга")])
+
+    result = await transcribe_dictation(
+        provider, path, "uk", told, UnpacedPieces(), no_speech_threshold=THRESHOLD
+    )
+
+    assert all(sent["path"] != path for sent in provider.sent)
+    assert _seconds(provider) == seconds
+    assert result.text == "перша друга"
 
 
 async def test_a_35_second_dictation_is_cut_in_its_pause(tmp_path):
@@ -153,19 +185,22 @@ async def test_a_long_dictation_is_cut_in_its_longest_pause_with_nothing_sent_tw
     assert all(sent["dictation"] and sent["language"] == "uk" for sent in provider.sent)
 
 
-async def test_silence_before_and_after_the_sound_is_not_sent(tmp_path):
-    provider = _Provider([_said("привіт")])
+async def test_silence_before_and_after_a_long_dictation_is_not_sent(tmp_path):
+    path = _recording(
+        tmp_path, _quiet(4.0), _tone(15.0), _quiet(1.0), _tone(15.0), _quiet(4.0)
+    )
+    provider = _Provider([_said("перша"), _said("друга")])
 
-    await _run(provider, _recording(tmp_path, _quiet(3.0), _tone(5.0), _quiet(4.0)))
+    await _run(provider, path)
 
-    assert _seconds(provider) == [7.0]
+    assert _seconds(provider) == [16.5, 16.5]
 
 
 @pytest.mark.parametrize(
     "parts",
     [
-        (_tone(1.0, -55.0), _quiet(0.8), _tone(2.0, -20.0)),
-        (_tone(2.0, -20.0), _quiet(0.8), _tone(1.0, -55.0)),
+        (_quiet(4.0), _tone(1.0, -55.0), _quiet(0.8), _tone(26.0, -20.0), _quiet(4.0)),
+        (_quiet(4.0), _tone(26.0, -20.0), _quiet(0.8), _tone(1.0, -55.0), _quiet(4.0)),
     ],
 )
 async def test_a_quiet_first_or_last_word_is_kept(tmp_path, parts):
@@ -173,21 +208,23 @@ async def test_a_quiet_first_or_last_word_is_kept(tmp_path, parts):
 
     await _run(provider, _recording(tmp_path, *parts))
 
-    assert _seconds(provider) == [3.8]
+    assert _seconds(provider) == [29.8]
 
 
 async def test_what_the_voice_detector_hears_is_kept_however_quiet(tmp_path, monkeypatch):
-    def voice_from_2_seconds(samples, settings):
-        hops = np.zeros(samples.size // 256, dtype=np.float32)
-        hops[round(2.0 / vad.HOP_SECONDS) : round(2.5 / vad.HOP_SECONDS)] = 0.9
-        return hops
+    def voice_wherever_anything_sounds(samples, settings):
+        hops = samples[: samples.size // 256 * 256].reshape(-1, 256)
+        return np.where(np.abs(hops).max(axis=1) > 0, 0.9, 0.0).astype(np.float32)
 
-    monkeypatch.setattr(vad, "speech_probabilities", voice_from_2_seconds)
+    monkeypatch.setattr(vad, "speech_probabilities", voice_wherever_anything_sounds)
+    path = _recording(
+        tmp_path, _quiet(3.0), _tone(0.5, -80.0), _quiet(1.0), _tone(25.0), _quiet(3.0)
+    )
     provider = _Provider([_said("шепіт")])
 
-    await _run(provider, _recording(tmp_path, _quiet(4.0), _tone(2.0)))
+    await _run(provider, path)
 
-    assert _seconds(provider) == [5.0]
+    assert _seconds(provider) == [28.5]
 
 
 @pytest.mark.parametrize(
@@ -228,12 +265,12 @@ async def test_a_dictation_over_the_window_only_before_the_trim_goes_whole(tmp_p
     assert _seconds(provider) == [29.0]
 
 
-async def test_a_recording_with_no_sound_at_all_is_sent_untrimmed(tmp_path):
-    provider = _Provider([_said("")])
+async def test_a_long_recording_with_no_sound_at_all_is_sent_untrimmed(tmp_path):
+    provider = _Provider([_said(""), _said("")])
 
-    result = await _run(provider, _recording(tmp_path, _quiet(5.0)))
+    result = await _run(provider, _recording(tmp_path, _quiet(35.0)))
 
-    assert _seconds(provider) == [5.0]
+    assert sum(_seconds(provider)) == pytest.approx(35.0)
     assert result.no_speech_prob == 1.0
 
 
@@ -326,7 +363,7 @@ async def test_no_scratch_file_is_left_beside_the_recording(tmp_path):
 
 
 async def test_audio_that_cannot_be_cut_here_goes_whole(tmp_path, monkeypatch):
-    path = _recording(tmp_path, _tone(40.0))
+    path = _recording(tmp_path, _tone(40.0), rate=48000)
 
     def undecodable(source, target, rate):
         raise chunking.UndecodableAudioError("no decoder")

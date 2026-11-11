@@ -104,3 +104,36 @@ def test_no_voice_heard_is_zero_voiced_seconds(monkeypatch):
     samples = _probabilities(monkeypatch, [(0.0, 10.0)])
 
     assert pauses.speech_profile(samples, SETTINGS).voiced_seconds == 0.0
+
+
+def _tone_between(seconds: float, start: float, end: float) -> np.ndarray:
+    samples = np.zeros(round(seconds * RATE), dtype=np.float32)
+    span = np.arange(round(start * RATE), round(end * RATE))
+    samples[span] = 0.3 * np.sin(2 * np.pi * 220 * span / RATE)
+    return samples
+
+
+def test_the_sound_span_keeps_its_pad_across_a_long_silence_at_either_edge(monkeypatch):
+    monkeypatch.setattr(vad, "speech_probabilities", lambda samples, settings: None)
+
+    span = pauses.sound_span(_tone_between(9.0, 3.5, 5.5), SETTINGS)
+
+    pad = pauses.SOUND_PAD_SECONDS
+    assert span == pytest.approx((3.5 - pad, 5.5 + pad), abs=0.02)
+
+
+def test_the_sound_span_judges_only_the_audio_nearest_each_edge(monkeypatch):
+    judged: list[int] = []
+
+    def no_voice(samples, settings):
+        judged.append(samples.size)
+        return np.zeros(samples.size // vad._HOP_SAMPLES, dtype=np.float32)
+
+    monkeypatch.setattr(vad, "speech_probabilities", no_voice)
+
+    samples = _tone_between(60.0, 0.0, 60.0)
+
+    span = pauses.sound_span(samples, SETTINGS)
+
+    assert span == pytest.approx((0.0, 60.0), abs=0.02)
+    assert sum(judged) <= samples.size / 10
