@@ -20,6 +20,7 @@ SPEECH_PAD_SECONDS = 0.4
 SURE_SILENCE_MARGIN_DB = 20.0
 SOUND_PAD_SECONDS = 1.0
 EDGE_SCAN_SECONDS = 1.0
+_EDGE_SCAN_HOPS = round(EDGE_SCAN_SECONDS / vad.HOP_SECONDS)
 
 
 def _hop_dbfs(samples: np.ndarray) -> np.ndarray:
@@ -35,30 +36,29 @@ def _hop_levels(samples: np.ndarray, settings: AudioSettings) -> tuple[np.ndarra
     return _hop_dbfs(samples), settings.silence_frame_dbfs
 
 
-def _sound_hops(samples: np.ndarray, settings: AudioSettings) -> np.ndarray:
-    sound = _hop_dbfs(samples) >= settings.silence_frame_dbfs - SURE_SILENCE_MARGIN_DB
-    probabilities = vad.speech_probabilities(samples, settings)
+def _sound_hops(samples: np.ndarray, settings: AudioSettings, start: int, end: int) -> np.ndarray:
+    """The hops from ``start`` up to ``end`` of ``samples`` that are not surely silent."""
+    stretch = samples[start * vad._HOP_SAMPLES : end * vad._HOP_SAMPLES]
+    sound = _hop_dbfs(stretch) >= settings.silence_frame_dbfs - SURE_SILENCE_MARGIN_DB
+    probabilities = vad.speech_probabilities(stretch, settings)
     if probabilities is not None:
         sound |= probabilities >= settings.silence_vad_probability
-    return np.flatnonzero(sound)
+    return start + np.flatnonzero(sound)
 
 
 def _first_sound_hop(samples: np.ndarray, settings: AudioSettings) -> int | None:
-    hop, window = vad._HOP_SAMPLES, round(EDGE_SCAN_SECONDS / vad.HOP_SECONDS)
-    for start in range(0, samples.size // hop, window):
-        heard = _sound_hops(samples[start * hop : (start + window) * hop], settings)
+    for start in range(0, samples.size // vad._HOP_SAMPLES, _EDGE_SCAN_HOPS):
+        heard = _sound_hops(samples, settings, start, start + _EDGE_SCAN_HOPS)
         if heard.size:
-            return start + int(heard[0])
+            return int(heard[0])
     return None
 
 
 def _last_sound_hop(samples: np.ndarray, settings: AudioSettings, first: int) -> int:
-    hop, window = vad._HOP_SAMPLES, round(EDGE_SCAN_SECONDS / vad.HOP_SECONDS)
-    for end in range(samples.size // hop, first, -window):
-        start = max(end - window, first)
-        heard = _sound_hops(samples[start * hop : end * hop], settings)
+    for end in range(samples.size // vad._HOP_SAMPLES, first, -_EDGE_SCAN_HOPS):
+        heard = _sound_hops(samples, settings, max(end - _EDGE_SCAN_HOPS, first), end)
         if heard.size:
-            return start + int(heard[-1])
+            return int(heard[-1])
     return first
 
 

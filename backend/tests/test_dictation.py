@@ -139,6 +139,22 @@ async def test_a_dictation_up_to_the_window_reaches_the_provider_as_recorded(
     assert decoded == []
 
 
+@pytest.mark.parametrize(("told", "seconds"), [(29.98, [20.0, 10.0]), (None, [28.0, 12.0])])
+async def test_a_recording_whose_file_runs_past_the_window_is_cut_whatever_it_was_told(
+    tmp_path, told, seconds
+):
+    path = _recording(tmp_path, _tone(30.02 if told else 40.0))
+    provider = _Provider([_said("перша"), _said("друга")])
+
+    result = await transcribe_dictation(
+        provider, path, "uk", told, UnpacedPieces(), no_speech_threshold=THRESHOLD
+    )
+
+    assert all(sent["path"] != path for sent in provider.sent)
+    assert _seconds(provider) == seconds
+    assert result.text == "перша друга"
+
+
 async def test_a_35_second_dictation_is_cut_in_its_pause(tmp_path):
     provider = _Provider([_said("перша"), _said("друга")])
 

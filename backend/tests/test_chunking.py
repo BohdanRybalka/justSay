@@ -304,6 +304,31 @@ async def test_a_16_khz_mono_recording_is_cut_as_it_is_with_no_copy(tmp_path, mo
     assert sorted(p.name for p in tmp_path.iterdir()) == ["job_x.wav"]
 
 
+@pytest.mark.parametrize(("channels", "subtype"), [(2, "PCM_16"), (1, "FLOAT")])
+async def test_any_other_16_khz_wav_is_cut_from_a_16_bit_mono_copy(tmp_path, channels, subtype):
+    path = tmp_path / "job_x.wav"
+    voice = np.random.default_rng(0).uniform(-0.4, 0.4, 2 * 16000).astype(np.float32)
+    sf.write(str(path), np.stack([voice, voice / 2][:channels], axis=1), 16000, subtype=subtype)
+    heard = sf.read(str(path), dtype="float32")[0].reshape(-1, channels).mean(axis=1)
+    copies: list[tuple[str, str, int, int, np.ndarray]] = []
+
+    async def whole() -> TranscriptionResult:
+        raise AssertionError("a decodable recording went whole")
+
+    async def record_cut(mono: Path, total: float) -> TranscriptionResult:
+        info = sf.info(str(mono))
+        samples = sf.read(str(mono), dtype="float32")[0]
+        copies.append((mono.name, info.subtype, info.samplerate, info.channels, samples))
+        return TranscriptionResult("")
+
+    await chunking.on_mono_audio(path, whole, record_cut)
+
+    [(name, copy_subtype, rate, copy_channels, samples)] = copies
+    assert (name, copy_subtype, rate, copy_channels) == ("job_x-16k.wav", "PCM_16", 16000, 1)
+    assert samples == pytest.approx(heard, abs=2 / 32768)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["job_x.wav"]
+
+
 async def test_each_provider_gets_pieces_no_longer_than_it_reads_whole(tmp_path, short_pieces):
     path = _audio(tmp_path, 60.0)
     provider = _Provider([TranscriptionResult("a")] * 3, longest=25.0)

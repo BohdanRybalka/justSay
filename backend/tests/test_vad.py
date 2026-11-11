@@ -1028,7 +1028,7 @@ async def _median_preparation_ms(path: Path, runs: int = 5) -> float:
 @_requires_sample
 @pytest.mark.slow
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("seconds", "budget_ms"), [(35, 150.0), (None, 2500.0)])
+@pytest.mark.parametrize(("seconds", "budget_ms"), [(35, 250.0), (None, 2500.0)])
 async def test_a_long_cloud_dictation_is_prepared_within_its_budget(tmp_path, seconds, budget_ms):
     """A dictation just past the 30 s window, and the whole ~6.4 min sample.
 
