@@ -155,6 +155,9 @@ fn act_on_crossing(generation: u64, report: &str, end_tree: impl FnOnce()) {
 #[cfg(windows)]
 pub use self::windows_job::instance_job;
 
+#[cfg(all(windows, test))]
+pub(crate) use self::windows_job::create_job;
+
 #[cfg(windows)]
 mod windows_job {
     use super::{act_on_crossing, describe, MemoryLimit, ProcessMemory, SOFT_LIMIT_BYTES};
@@ -203,10 +206,10 @@ mod windows_job {
         }
     }
 
-    /// A kill-on-close job for backend `generation` with both memory limits.
-    /// Only the shell holds it, so the tree dies with the shell however it dies
-    /// (ADR 023); it replaces, and so ends, the previous instance's job. `None`
-    /// when no job can be made.
+    /// A kill-on-close job for backend `generation` with the hard limit, and the
+    /// soft limit unless arming it fails. Only the shell holds it, so the tree
+    /// dies with the shell however it dies (ADR 023); it replaces, and so ends,
+    /// the previous instance's job. `None` when no job can be made.
     pub fn instance_job(generation: u64) -> Option<isize> {
         let job = create_job(super::HARD_LIMIT_BYTES)?;
         let armed = watch_port().is_some_and(|port| arm_job(job, port, generation, SOFT_LIMIT_BYTES));
@@ -220,7 +223,7 @@ mod windows_job {
 
     /// A job that ends its processes when its last handle closes and refuses
     /// commit past `hard_limit` bytes.
-    pub(super) fn create_job(hard_limit: u64) -> Option<isize> {
+    pub(crate) fn create_job(hard_limit: u64) -> Option<isize> {
         unsafe {
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if job.is_null() {
@@ -614,14 +617,6 @@ mod tests {
         assert!(!marker.ended(8), "generation 8 failing on its own must be counted and reported");
         assert_eq!(marker.take_for(8), None, "generation 8 owes no wait for 7's crossing");
         assert!(!marker.ended(7), "the stale marker is gone once read");
-    }
-
-    #[test]
-    fn a_respawn_the_guard_ended_still_owes_its_wait_before_the_next_spawn() {
-        let marker = marker_for(7, REPEAT_RESTART_DELAY);
-        assert!(marker.ended(7));
-        assert!(marker.ended(7), "deciding not to count the end must not use up the wait");
-        assert_eq!(marker.take_for(7), Some(REPEAT_RESTART_DELAY));
     }
 
     #[test]

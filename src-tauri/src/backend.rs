@@ -879,8 +879,9 @@ fn reap_orphan_sidecar() -> bool {
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 static RUNNING_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// The generation of the backend `BACKEND_PROCESS` holds: each `spawn()` takes
-/// a new one, so the memory guard's verdict names exactly one instance.
+/// The generation of the backend last stored in `BACKEND_PROCESS`; it stays
+/// after `guard.take()` empties it. Each `spawn()` takes a new one, so the
+/// memory guard's verdict names exactly one instance.
 fn running_generation() -> u64 {
     RUNNING_GENERATION.load(Ordering::Acquire)
 }
@@ -956,6 +957,9 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         resolve_sidecar(&app)
     };
 
+    #[cfg(windows)]
+    let instance_job = crate::memory_guard::instance_job(generation);
+
     let backend = if let Some(sidecar) = resolved_sidecar {
         log::info!(
             "Starting backend sidecar via shell plugin on port {}: {:?}",
@@ -977,7 +981,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
             .map_err(|e| format!("Failed to start backend sidecar: {}", e))?;
 
         #[cfg(windows)]
-        if let Some(job) = crate::memory_guard::instance_job(generation) {
+        if let Some(job) = instance_job {
             let pid = child.pid();
             if !assign_pid_to_job(job, pid) {
                 log::warn!(
@@ -1068,7 +1072,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
             .map_err(|e| format!("Failed to start backend: {}", e))?;
 
         #[cfg(windows)]
-        if let Some(job) = crate::memory_guard::instance_job(generation) {
+        if let Some(job) = instance_job {
             if !assign_child_to_job(job, &child) {
                 log::warn!(
                     "Failed to assign dev backend (PID {}) to the kill-on-close job; \
@@ -2554,29 +2558,12 @@ mod tests {
         );
     }
 
-    /// Create a throwaway kill-on-close job for a single test. Never a backend
-    /// instance's job — a test must be able to `CloseHandle` it (the kill
-    /// trigger) and must not leak process-lifetime state into the test binary.
+    /// A job made the way every backend instance's job is, but owned by one
+    /// test, which closes it (the kill trigger) and leaks no state.
     #[cfg(windows)]
     fn create_test_job() -> isize {
-        use windows_sys::Win32::System::JobObjects::{
-            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        };
-        unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            assert!(!job.is_null(), "CreateJobObjectW failed in test");
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            let configured = SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const core::ffi::c_void,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            );
-            assert_ne!(configured, 0, "SetInformationJobObject failed in test");
-            job as isize
-        }
+        crate::memory_guard::create_job(crate::memory_guard::HARD_LIMIT_BYTES)
+            .expect("the production job could not be made in a test")
     }
 
     /// Spawn a short-lived throwaway child that stays alive long enough to
