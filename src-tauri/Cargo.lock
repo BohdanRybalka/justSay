@@ -70,6 +70,7 @@ version = "1.0.1"
 dependencies = [
  "clipboard-win",
  "enigo",
+ "libc",
  "log",
  "objc2-app-kit",
  "objc2-foundation",

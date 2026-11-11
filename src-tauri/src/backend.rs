@@ -40,7 +40,7 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
     JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
@@ -890,6 +890,9 @@ fn reap_orphan_sidecar() -> bool {
 /// handler, `RunEvent::Exit` and the next-launch reap are all in-process) — see
 /// `docs/adr/023-force-kill-orphaned-backend.md`.
 ///
+/// The same job carries `memory_guard::HARD_LIMIT_BYTES` and is armed by
+/// `memory_guard::watch_job` with the soft limit that restarts the backend.
+///
 /// `Option`: a failed create/configure stores `None` once, logs once, and every
 /// caller degrades to the existing `reap_orphan_sidecar()` fallback rather than
 /// failing startup. The raw `HANDLE` (`*mut c_void`, not `Send`/`Sync`) is
@@ -915,7 +918,9 @@ fn backend_job() -> Option<isize> {
                 return None;
             }
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            info.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY;
+            info.JobMemoryLimit = crate::memory_guard::HARD_LIMIT_BYTES as usize;
             let configured = SetInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,
@@ -929,6 +934,7 @@ fn backend_job() -> Option<isize> {
                 CloseHandle(job);
                 return None;
             }
+            crate::memory_guard::watch_job(job as isize);
             Some(job as isize)
         }
     })
@@ -985,6 +991,9 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
     if is_shutdown_requested() {
         return Err("Shutdown already requested; refusing to spawn a new backend".to_string());
     }
+
+    #[cfg(target_os = "macos")]
+    crate::memory_guard::reap_orphaned_engines(&engine_roots(&app));
 
     let port = choose_port()?;
     CURRENT_PORT.store(port, Ordering::Release);
@@ -1182,6 +1191,26 @@ fn backend_liveness() -> BackendLiveness {
         },
         None => BackendLiveness::Missing,
     }
+}
+
+/// The pid of the running backend, the root of the tree the memory guard sums;
+/// `None` while none runs or another thread holds `BACKEND_PROCESS`.
+#[cfg(target_os = "macos")]
+pub fn backend_tree_root() -> Option<u32> {
+    let mut guard = lock_with_wait(&BACKEND_PROCESS, LockWait::Skip)?;
+    match guard.as_mut()? {
+        BackendProcess::Sidecar(s) => s.alive.load(Ordering::Acquire).then(|| s.child.pid()),
+        BackendProcess::Dev(child) => matches!(child.try_wait(), Ok(None)).then(|| child.id()),
+    }
+}
+
+/// Where an engine of ours can be installed: the bundle's resources and the
+/// developer's vendor folder.
+#[cfg(target_os = "macos")]
+fn engine_roots(app: &AppHandle) -> Vec<PathBuf> {
+    let bundled = app.path().resource_dir().ok();
+    let vendored = find_backend_dir().ok().map(|dir| dir.join("vendor"));
+    bundled.into_iter().chain(vendored).collect()
 }
 
 /// Check if the child process has exited unexpectedly.
@@ -1648,6 +1677,8 @@ fn kill_current_process(wait: LockWait, sidecar_stop: GracefulStop) {
                     },
                     sidecar_stop,
                 );
+                #[cfg(target_os = "macos")]
+                crate::memory_guard::end_process_group(pid);
             }
             BackendProcess::Dev(child) => {
                 let pid = child.id();
@@ -1725,15 +1756,20 @@ fn respawn_backoff(attempt: u32) -> Duration {
 /// `kill_current_process()` so the fresh spawn doesn't collide with it on
 /// the port.
 pub fn spawn_watchdog(app: AppHandle) {
+    #[cfg(target_os = "macos")]
+    crate::memory_guard::watch_backend_tree();
     tauri::async_runtime::spawn(async move {
         let mut attempt: u32 = 0;
         let mut confirmed_healthy = match wait_for_ready().await {
             Ok(()) => true,
             Err(e) => {
-                report_backend_failure(&format!(
-                    "Backend watchdog: initial backend not ready: {}",
-                    e
-                ));
+                match crate::memory_guard::take_restart_delay() {
+                    Some(delay) => tokio::time::sleep(delay).await,
+                    None => report_backend_failure(&format!(
+                        "Backend watchdog: initial backend not ready: {}",
+                        e
+                    )),
+                }
                 false
             }
         };
@@ -1745,13 +1781,17 @@ pub fn spawn_watchdog(app: AppHandle) {
             }
 
             if confirmed_healthy {
-                match backend_liveness() {
-                    BackendLiveness::Running => continue,
-                    BackendLiveness::Exited(Some(status)) => report_backend_failure(&format!(
-                        "Backend (dev) exited with: {}",
-                        status
-                    )),
-                    BackendLiveness::Exited(None) | BackendLiveness::Missing => {}
+                let liveness = backend_liveness();
+                if matches!(liveness, BackendLiveness::Running) {
+                    continue;
+                }
+                match crate::memory_guard::take_restart_delay() {
+                    Some(delay) => tokio::time::sleep(delay).await,
+                    None => {
+                        if let BackendLiveness::Exited(Some(status)) = liveness {
+                            report_backend_failure(&format!("Backend (dev) exited with: {}", status));
+                        }
+                    }
                 }
                 confirmed_healthy = false;
                 attempt = 0;
@@ -1788,13 +1828,16 @@ pub fn spawn_watchdog(app: AppHandle) {
                         confirmed_healthy = true;
                         attempt = 0;
                     }
-                    Err(e) => {
-                        report_backend_failure(&format!(
-                            "Backend watchdog: respawn did not become ready: {}",
-                            e
-                        ));
-                        attempt += 1;
-                    }
+                    Err(e) => match crate::memory_guard::take_restart_delay() {
+                        Some(delay) => tokio::time::sleep(delay).await,
+                        None => {
+                            report_backend_failure(&format!(
+                                "Backend watchdog: respawn did not become ready: {}",
+                                e
+                            ));
+                            attempt += 1;
+                        }
+                    },
                 },
                 Err(e) => {
                     report_backend_failure(&format!("Backend watchdog: respawn failed: {}", e));
