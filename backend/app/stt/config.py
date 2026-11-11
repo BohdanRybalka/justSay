@@ -30,10 +30,9 @@ class STTSettings(PackageSettings):
         max_length=500,
         description=(
             "Custom vocabulary biasing transcription, stored whole and never truncated "
-            "on disk. The dictation cleanup receives all of it as a glossary; the "
-            "Whisper-family engines receive it unchanged when it fits their send-time "
-            "budget, and otherwise whole terms, then whole words, then a character cut "
-            "only inside a run the user wrote no boundary into."
+            "on disk. The Whisper-family engines receive it unchanged when it fits "
+            "their send-time budget, and otherwise whole terms, then whole words, then "
+            "a character cut only inside a run the user wrote no boundary into."
         ),
     )
 

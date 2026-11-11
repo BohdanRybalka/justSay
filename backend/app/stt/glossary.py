@@ -1,7 +1,7 @@
 """The stored glossary turned into what one engine family may receive (ADR 081).
 
-The stored string is never truncated. `glossary_text` hands it whole to a model
-that reads natural language, and `whisper_glossary` fits it into
+The stored string is never truncated. `glossary_text` reads a blank one as no
+glossary, and `whisper_glossary` fits it into
 `WHISPER_PROMPT_CHAR_BUDGET` characters, never answering nothing for a glossary
 that has text in it and never rewriting one that already fits. The budget is a
 character count standing in for a token window, so a dense script can still
