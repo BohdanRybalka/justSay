@@ -6,7 +6,7 @@ import pytest
 
 from app.core.types import ProviderMode
 from app.pipeline import cleanup
-from app.pipeline.cleanup import clean_dictation, is_faithful_cleanup, system_prompt
+from app.pipeline.cleanup import clean_dictation, is_faithful_cleanup
 from app.stt.config import STTSettings
 
 UNPATCHED_CLIENT = cleanup._client
@@ -97,28 +97,21 @@ def test_a_sentence_deleted_from_a_long_dictation_is_caught_though_the_rest_is_k
     assert not is_faithful_cleanup(f"{kept} {sentence}", kept)
 
 
-def test_a_dictionary_spelling_may_replace_what_was_heard():
-    raw = "ну запусти тести в плей райт і кубернетес для укр залізниці"
-    answer = "Запусти тести в Playwright і Kubernetes для Укрзалізниці"
-    assert is_faithful_cleanup(raw, answer, "Kubernetes, Playwright, Укрзалізниці")
-    assert not is_faithful_cleanup(raw, answer)
-
-
 @pytest.mark.parametrize(
     "raw, answer",
     [
-        ("запусти тести в плей райт", "Запусти Playwright."),
-        ("запусти тести", "Запусти тести Playwright."),
-        ("запусти тести в плей райт", "Запусти тести у Playwright."),
-        ("тести", "K6, Playwright"),
-        ("тепер кубернетес", "Kubernetes."),
-        ("кубернетес тепер", "Kubernetes."),
-        ("пуш ні гітхаб", "Пуш GitHub."),
-        ("постав не кафку", "Постав Kafka."),
+        ("я не хочу", "Я Node хочу."),
+        ("запусти тести в плей райт", "Запусти тести в Playwright."),
+        ("спитай у чат джіпіті", "Спитай у чат GPT."),
+        ("тести", "Тести Playwright."),
     ],
 )
-def test_a_dictionary_spelling_may_not_swallow_or_add_other_words(raw, answer):
-    assert not is_faithful_cleanup(raw, answer, "K6, Playwright, Kubernetes, GitHub, Kafka")
+def test_no_word_may_be_replaced_or_added_even_as_a_dictionary_spelling(raw, answer):
+    assert not is_faithful_cleanup(raw, answer)
+
+
+def test_a_dictionary_term_the_speaker_said_may_stay():
+    assert is_faithful_cleanup("ну запусти Playwright", "Запусти Playwright.")
 
 
 @pytest.mark.parametrize(
@@ -174,31 +167,60 @@ def test_scattered_deletions_that_summarise_are_caught():
 
 
 def test_the_prompt_names_only_the_removable_fillers_and_keeps_self_corrections():
-    prompt = system_prompt(None)
+    prompt = cleanup._SYSTEM_PROMPT
     assert f"filler words: {', '.join(cleanup.CLEANUP_FILLERS)};" in prompt
     assert "right" not in prompt
     assert "including self-corrections" in prompt
     assert "keep only the corrected version" not in prompt
 
 
-def test_the_dictionary_reaches_the_model_as_the_only_spellings_to_apply():
-    assert system_prompt("K6, Playwright").endswith("change nothing else: K6, Playwright")
-
-
 async def test_a_faithful_answer_replaces_the_transcript():
     with patch.object(cleanup, "_call_groq", return_value=SELF_CORRECTION_KEPT) as call:
-        text = await clean_dictation(SELF_CORRECTION, _settings(initial_prompt=" K6 "))
+        text = await clean_dictation(SELF_CORRECTION, _settings(initial_prompt="Kubernetes"))
 
     assert text == SELF_CORRECTION_KEPT
     api_key, model, system, transcript = call.call_args.args
     assert (api_key, model, transcript) == ("test-key", "openai/gpt-oss-20b", SELF_CORRECTION)
-    assert system == system_prompt("K6")
+    assert system == cleanup._SYSTEM_PROMPT
+    assert "Kubernetes" not in system
 
 
-async def test_an_answer_with_a_dictionary_spelling_replaces_the_transcript():
-    with patch.object(cleanup, "_call_groq", return_value="Тести в Playwright."):
-        text = await clean_dictation("тести в плей райт", _settings(initial_prompt="Playwright"))
-    assert text == "Тести в Playwright."
+async def test_an_answer_that_swaps_a_word_for_a_dictionary_term_keeps_the_transcript():
+    with patch.object(cleanup, "_call_groq", return_value="Я Node хочу."):
+        text = await clean_dictation("я не хочу", _settings(initial_prompt="Node, Kubernetes"))
+    assert text == "я не хочу"
+
+
+@pytest.mark.parametrize(
+    "raw, answer, text",
+    [
+        (
+            "Ну, е, зробимо до п'ятниці, ні, до четверга.",
+            "зробимо до п'ятниці, ні, до четверга.",
+            "Зробимо до п'ятниці, ні, до четверга.",
+        ),
+        ("Готово. Ну, е, відправ звіт.", "Готово. відправ звіт.", "Готово. Відправ звіт."),
+        ("Ну, е, як би піду.", "як би піду.", "Як би піду."),
+        ("Ну, зробимо, ну, гаразд.", "зробимо. гаразд.", "Зробимо. гаразд."),
+    ],
+)
+async def test_a_sentence_whose_leading_filler_went_gets_its_capital_back(raw, answer, text):
+    with patch.object(cleanup, "_call_groq", return_value=answer):
+        assert await clean_dictation(raw, _settings()) == text
+
+
+@pytest.mark.parametrize(
+    "raw, answer",
+    [
+        ("ну, е, зробимо до п'ятниці, ні, до четверга", "зробимо до п'ятниці, ні, до четверга"),
+        ("Так. Ну, зробимо.", "Так, зробимо."),
+        ("Ну, зробимо.", "ну, зробимо."),
+        ("Так. зробимо.", "Так. зробимо."),
+    ],
+)
+async def test_no_other_letter_changes_case(raw, answer):
+    with patch.object(cleanup, "_call_groq", return_value=answer):
+        assert await clean_dictation(raw, _settings()) == answer
 
 
 @pytest.mark.parametrize(

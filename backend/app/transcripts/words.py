@@ -58,6 +58,11 @@ def tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
+def token_spans(text: str) -> list[tuple[int, int]]:
+    """Where each token of ``text`` sits in it, as ``(start, end)`` offsets, in order."""
+    return [match.span() for match in _TOKEN_RE.finditer(text)]
+
+
 _PHRASES: dict[tuple[str, ...], str] = {
     tuple(tokenize(filler)): filler for filler in FILLERS if len(tokenize(filler)) > 1
 }
