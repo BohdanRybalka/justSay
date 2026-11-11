@@ -99,6 +99,28 @@ async def test_a_job_counts_until_its_worker_lets_go(client):
     assert await _work(client) is None
 
 
+async def test_a_cancelled_job_dropped_from_the_list_counts_until_its_worker_lets_go(client):
+    result = SimpleNamespace(discarded_reason="no speech")
+    release = asyncio.Event()
+
+    async def transcribe(*_args, **_kwargs):
+        await release.wait()
+        return result
+
+    with patch("app.pipeline.jobs.process_audio", transcribe):
+        job_id = app.state.jobs.add_file(b"RIFF", "a.wav")
+        worker = app.state.jobs._jobs[job_id].task
+        assert await _work(client) == "transcription"
+        assert app.state.jobs.cancel_or_dismiss(job_id) == "cancelled"
+        assert app.state.jobs.cancel_or_dismiss(job_id) == "dismissed"
+        assert job_id not in app.state.jobs._jobs
+        assert await _work(client) == "transcription"
+        release.set()
+        await asyncio.wait_for(worker, timeout=2)
+
+    assert await _work(client) is None
+
+
 async def test_a_job_with_no_worker_left_is_not_work_in_progress(client, tmp_path):
     failed = _Job(id="j", kind="file", name="a.wav", path=tmp_path, stage="failed")
     app.state.jobs._jobs["j"] = failed

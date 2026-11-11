@@ -285,6 +285,7 @@ class JobQueue:
         self._temp_dir = temp_dir
         self._jobs: dict[str, _Job] = {}
         self._receiving = 0
+        self._workers: set[asyncio.Task] = set()
         self._turn = asyncio.Lock()
         self.gate = gate
         self.clock = clock
@@ -303,9 +304,7 @@ class JobQueue:
     @property
     def is_working(self) -> bool:
         """Whether a file or a recording is still arriving, or a job's worker has not finished."""
-        return self._receiving > 0 or any(
-            job.task is not None and not job.task.done() for job in self._jobs.values()
-        )
+        return self._receiving > 0 or bool(self._workers)
 
     def add_file(self, content: bytes, name: str) -> str:
         """Keep ``content`` in a scratch file and queue it for transcription; answer the job id."""
@@ -435,6 +434,8 @@ class JobQueue:
 
     def _start(self, job: _Job) -> None:
         job.task = tasks.spawn_background_task(self._run(job), name=f"job-{job.id}")
+        self._workers.add(job.task)
+        job.task.add_done_callback(self._workers.discard)
 
     def views(self) -> list[JobView]:
         """Newest first."""
