@@ -16,7 +16,7 @@ SELF_CORRECTION = (
     "ну типу як би в пошту."
 )
 SELF_CORRECTION_KEPT = (
-    "Треба зробити звіт до п'ятниці, ні, до четверга, і надіслати його Олені в пошту."
+    "Треба зробити звіт до п'ятниці, ні, до четверга, і надіслати його Олені, як би в пошту."
 )
 SELF_CORRECTION_DROPPED = "Треба зробити звіт до четверга і надіслати його Олені в пошту."
 
@@ -114,24 +114,24 @@ def test_no_word_may_be_replaced_or_added(raw, answer):
 @pytest.mark.parametrize(
     "raw, answer",
     [
+        ("як би ти хотів", "Ти хотів?"),
+        ("я як би не знаю", "Я не знаю."),
         ("Це було як би добре", "Це було як добре."),
         ("Це було як би добре", "Це було би добре."),
     ],
 )
-def test_a_filler_of_two_words_may_not_lose_only_one(raw, answer):
+def test_as_if_is_never_dropped(raw, answer):
     assert not is_faithful_cleanup(raw, answer)
 
 
 @pytest.mark.parametrize(
     "raw, answer",
     [
-        ("Це було як би добре", "Це було добре."),
-        ("як би як завжди", "Як завжди."),
         ("е-е, ееее, еммм, ну, типу, зробимо", "Зробимо."),
         ("Е, зробимо. Ем, завтра.", "Зробимо. Завтра."),
     ],
 )
-def test_whole_fillers_and_drawn_out_hesitations_may_go(raw, answer):
+def test_fillers_and_drawn_out_hesitations_may_go(raw, answer):
     assert is_faithful_cleanup(raw, answer)
 
 
@@ -219,6 +219,7 @@ def test_the_prompt_names_only_the_removable_fillers_and_keeps_self_corrections(
     assert f"filler words: {', '.join(cleanup.CLEANUP_FILLERS)};" in prompt
     assert "remove the hesitation sounds е and ем," in prompt
     assert "um, uh" not in prompt
+    assert "як би" not in prompt
     assert "right" not in prompt
     assert "including self-corrections" in prompt
     assert "keep only the corrected version" not in prompt
@@ -233,6 +234,15 @@ async def test_a_faithful_answer_replaces_the_transcript():
     assert (api_key, model, transcript) == ("test-key", "openai/gpt-oss-20b", SELF_CORRECTION)
     assert system == cleanup._SYSTEM_PROMPT
     assert "Kubernetes" not in system
+
+
+@pytest.mark.parametrize(
+    "raw, answer",
+    [("як би ти хотів", "Ти хотів?"), ("я як би не знаю", "Я не знаю.")],
+)
+async def test_an_answer_that_drops_as_if_keeps_the_transcript(raw, answer):
+    with patch.object(cleanup, "_call_groq", return_value=answer):
+        assert await clean_dictation(raw, _settings()) == raw
 
 
 async def test_an_answer_that_swaps_a_word_for_a_dictionary_term_keeps_the_transcript():

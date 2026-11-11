@@ -20,10 +20,9 @@ from app.transcripts.words import TOKEN_PATTERN, tokenize
 log = logging.getLogger(__name__)
 
 CLEANUP_TIMEOUT_SECONDS = 4.0
-CLEANUP_FILLERS = ("ну", "типу", "як би")
+CLEANUP_FILLERS = ("ну", "типу")
 
 _HESITATION = re.compile(r"е+м*")
-_FILLER_PHRASES = tuple(tuple(tokenize(filler)) for filler in CLEANUP_FILLERS)
 _APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'"})
 _TOKEN = re.compile(rf"{TOKEN_PATTERN}|[^\s.,;:!?…'\"«»„“”()\[\]\-‐‑–—]")
 _SENTENCE_END = re.compile(r"[.!?…\n]")
@@ -61,31 +60,27 @@ def _words(text: str) -> _Words:
     return _Words(normalized, tokens, spans, opens)
 
 
-def _filler_ends(said: _Words) -> dict[int, int]:
-    """Where each removable filler starts, mapped to where it ends: a whole `CLEANUP_FILLERS`
-    entry, or an е/ем sound written lower-case, or capitalised where it opens a sentence."""
-    ends: dict[int, int] = {}
+def _filler_positions(said: _Words) -> set[int]:
+    """Positions a cleanup may drop: a `CLEANUP_FILLERS` word, or an е/ем sound written
+    lower-case, or capitalised where it opens a sentence."""
+    fillers: set[int] = set()
     for index, token in enumerate(said.tokens):
-        phrase = next(
-            (p for p in _FILLER_PHRASES if tuple(said.tokens[index : index + len(p)]) == p), None
-        )
-        if phrase is not None:
-            ends[index] = index + len(phrase)
-            continue
         start, end = said.spans[index]
         written = said.text[start:end]
         tail_lower = written[1:] == written[1:].lower()
-        if _HESITATION.fullmatch(token) and tail_lower and (
-            written[0].islower() or said.opens_sentence[index]
+        if token in CLEANUP_FILLERS or (
+            _HESITATION.fullmatch(token)
+            and tail_lower
+            and (written[0].islower() or said.opens_sentence[index])
         ):
-            ends[index] = index + 1
-    return ends
+            fillers.add(index)
+    return fillers
 
 
 def _kept_positions(said: _Words, written: list[str]) -> dict[int, int] | None:
     """Each kept position of ``said`` mapped to its place in ``written``, or ``None`` when
-    ``written`` is not ``said`` with only whole fillers dropped. Dropping is tried first."""
-    fillers = _filler_ends(said)
+    ``written`` is not ``said`` with only fillers dropped. Dropping is tried first."""
+    fillers = _filler_positions(said)
     goal = (len(said.tokens), len(written))
     came_from: dict[tuple[int, int], tuple[int, int] | None] = {(0, 0): None}
     pending = [(0, 0)]
@@ -108,7 +103,7 @@ def _kept_positions(said: _Words, written: list[str]) -> dict[int, int] | None:
         ):
             moves.append((said_at + 1, written_at + 1))
         if said_at in fillers:
-            moves.append((fillers[said_at], written_at))
+            moves.append((said_at + 1, written_at))
         for move in moves:
             if move not in came_from:
                 came_from[move] = state
@@ -117,7 +112,7 @@ def _kept_positions(said: _Words, written: list[str]) -> dict[int, int] | None:
 
 
 def is_faithful_cleanup(raw: str, cleaned: str) -> bool:
-    """Whether ``cleaned`` is ``raw``'s words and symbols in order with only whole fillers removed.
+    """Whether ``cleaned`` is ``raw``'s words and symbols in order with only fillers removed.
 
     Case, punctuation and the apostrophe's spelling may change; nothing may be added or replaced,
     and an answer with no word left is never faithful.
