@@ -107,6 +107,10 @@ class DictationGate:
         finally:
             self._in_flight -= 1
 
+    @property
+    def is_processing(self) -> bool:
+        return self._in_flight > 0
+
     async def wait_for_none(self) -> None:
         while self._in_flight:
             await asyncio.sleep(DICTATION_POLL_SECONDS)
@@ -290,10 +294,27 @@ class JobQueue:
     ) -> None:
         self._temp_dir = temp_dir
         self._jobs: dict[str, _Job] = {}
+        self._receiving = 0
+        self._workers: set[asyncio.Task] = set()
         self._turn = asyncio.Lock()
         self.gate = gate
         self.clock = clock
         self.sleep = sleep
+
+    @contextmanager
+    def receiving(self) -> Generator[None, None, None]:
+        """Count an uploaded file or a stopped meeting's recording, still arriving, as work in
+        progress until it is queued or refused."""
+        self._receiving += 1
+        try:
+            yield
+        finally:
+            self._receiving -= 1
+
+    @property
+    def is_working(self) -> bool:
+        """Whether a file or a recording is still arriving, or a job's worker has not finished."""
+        return self._receiving > 0 or bool(self._workers)
 
     def add_file(self, content: bytes, name: str) -> str:
         """Keep ``content`` in a scratch file and queue it for transcription; answer the job id."""
@@ -423,6 +444,8 @@ class JobQueue:
 
     def _start(self, job: _Job) -> None:
         job.task = tasks.spawn_background_task(self._run(job), name=f"job-{job.id}")
+        self._workers.add(job.task)
+        job.task.add_done_callback(self._workers.discard)
 
     def views(self) -> list[JobView]:
         """Newest first."""

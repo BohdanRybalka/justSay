@@ -13,7 +13,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: relaunchMock }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn(async () => "0.13.1") }));
 
-import { renderVersionRow } from "./version-row";
+import { renderVersionRow, UPDATE_WAITS_FOR } from "./version-row";
 
 const LAST_UP_TO_DATE_KEY = "justsay.updates.lastUpToDateAt";
 
@@ -143,6 +143,59 @@ describe("Version row — check, install and restart", () => {
     finishInstall();
     await vi.waitFor(() => expect(relaunchMock).toHaveBeenCalledTimes(1));
     expect(installCalls()).toBe(1);
+  });
+
+  it.each([
+    ["meeting", "Stop the meeting recording first, then install the update."],
+    ["dictation", "Finish the dictation first, then install the update."],
+    ["transcription", "Wait until the transcription finishes, then install the update."],
+  ] as const)("when the shell waits for a %s it says so and offers the same install again", async (work, message) => {
+    expect(UPDATE_WAITS_FOR[work]).toBe(message);
+    invokeMock.mockRejectedValueOnce({ waits_for: work });
+    checkMock.mockResolvedValue(READY_UPDATE);
+    const { button, status } = renderRow();
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Install and restart"));
+
+    button.click();
+    await vi.waitFor(() => expect(status.textContent).toBe(message));
+    expect(relaunchMock).not.toHaveBeenCalled();
+    expect(button.textContent).toBe("Install and restart");
+    expect(button.disabled).toBe(false);
+
+    button.click();
+    await vi.waitFor(() => expect(relaunchMock).toHaveBeenCalledTimes(1));
+    expect(installCalls()).toBe(2);
+  });
+
+  it("when the shell could not check for work it says why the update waits", async () => {
+    invokeMock.mockRejectedValueOnce({ could_not_check: "the backend did not answer" });
+    checkMock.mockResolvedValue(READY_UPDATE);
+    const { button, status } = renderRow();
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Install and restart"));
+
+    button.click();
+    await vi.waitFor(() =>
+      expect(status.textContent).toBe(
+        "Couldn't check whether a recording is running, so the update waits: the backend did not answer",
+      ),
+    );
+    expect(relaunchMock).not.toHaveBeenCalled();
+    expect(button.textContent).toBe("Install and restart");
+    expect(button.disabled).toBe(false);
+  });
+
+  it("names the updater's own failure the shell reports", async () => {
+    invokeMock.mockRejectedValueOnce({ failed: "signature mismatch" });
+    checkMock.mockResolvedValue(READY_UPDATE);
+    const { button, status } = renderRow();
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Install and restart"));
+
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Try again"));
+    expect(status.textContent).toBe("Install failed: signature mismatch");
   });
 
   it("a failed install offers a retry that installs, not checks", async () => {

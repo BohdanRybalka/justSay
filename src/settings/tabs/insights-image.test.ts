@@ -5,6 +5,7 @@ const CHAR_WIDTH = 7;
 
 function recordingContext() {
   const drawn: { text: string; font: string; x: number; y: number; alpha: number }[] = [];
+  const calls: string[] = [];
   const gradient = { addColorStop: () => {} };
   const ctx = {
     font: "",
@@ -14,19 +15,20 @@ function recordingContext() {
     textBaseline: "alphabetic",
     measureText: (text: string) => ({ width: text.length * CHAR_WIDTH }),
     fillText(text: string, x: number, y: number) {
+      calls.push("fillText");
       drawn.push({ text, font: ctx.font, x, y, alpha: ctx.globalAlpha });
     },
     createLinearGradient: () => gradient,
-    save() {},
-    restore() {},
-    beginPath() {},
-    roundRect() {},
-    clip() {},
-    fillRect() {},
-    arc() {},
-    fill() {},
+    save: () => calls.push("save"),
+    restore: () => calls.push("restore"),
+    beginPath: () => calls.push("beginPath"),
+    roundRect: (...args: number[]) => calls.push(`roundRect ${args.join(" ")}`),
+    clip: () => calls.push("clip"),
+    fillRect: () => calls.push("fillRect"),
+    arc: () => calls.push("arc"),
+    fill: () => calls.push("fill"),
   };
-  return { ctx: ctx as unknown as CanvasRenderingContext2D, drawn };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, drawn, calls };
 }
 
 const VIEW: SavedCardView = {
@@ -78,6 +80,17 @@ describe("the card drawn as an image", () => {
 
     const starts = ["10,666", "8 days", "118 wpm"].map((value) => drawn.find((run) => run.text === value)!.x);
     expect(starts).toEqual([32, 32 + 23 * CHAR_WIDTH + 38, 32 + 23 * CHAR_WIDTH + 38 + 21 * CHAR_WIDTH + 38]);
+  });
+
+  it("clips to the rounded card before it paints, so the corners stay clear", () => {
+    const { ctx, calls } = recordingContext();
+    const layout = layoutSavedCard(ctx, VIEW);
+
+    drawSavedCard(ctx, VIEW, layout);
+
+    const firstPaint = calls.findIndex((call) => ["fillRect", "fill", "fillText"].includes(call));
+    expect(calls.slice(0, firstPaint)).toEqual(["save", "beginPath", `roundRect 0 0 600 ${layout.height} 18`, "clip"]);
+    expect(calls[calls.length - 1]).toBe("restore");
   });
 
   it("is shorter by the bars when the card has none", () => {

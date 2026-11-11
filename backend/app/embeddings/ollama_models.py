@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT = 3.0
 READ_TIMEOUT = 5.0
+CLIENT_READ_TIMEOUT = 60.0
 
 
 class OllamaModel(BaseModel):

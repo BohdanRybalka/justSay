@@ -210,6 +210,7 @@ async def test_a_refused_dictate_transcribes_nothing(client, tmp_path):
     assert resp.status_code == 403
     assert resp.json() == {"detail": "not yours", "code": "session_mismatch"}
     mock_process_audio.assert_not_awaited()
+    assert not dictation_gate.is_processing
 
 
 @pytest.mark.anyio
@@ -326,6 +327,7 @@ async def test_a_dictation_cut_off_by_shutdown_keeps_its_audio_for_try_again(
     assert (card.kind, card.stage) == ("dictation", "failed")
     [kept] = (tmp_path / "scratch").glob("dictation_*_de.wav")
     assert kept.read_bytes() == _wav_bytes()
+    assert not dictation_gate.is_processing
 
 
 def test_the_dictate_response_carries_every_processing_result_field() -> None:

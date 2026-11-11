@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+import app.embeddings as embeddings
 from app.config import settings as runtime_settings
+from app.core.types import ProviderMode
+from app.embeddings.local import LocalEmbeddingProvider
 from app.main import app
 from app.preferences import user_settings
 
@@ -156,12 +161,56 @@ async def test_a_removed_key_reads_as_not_set_at_once(client):
     resp = await client.put("/settings", json={"groq_api_key": "", "gemini_api_key": ""})
 
     assert resp.status_code == 200
+    assert resp.json()["settings"]["groq_api_key"] == ""
+    assert user_settings.get_user_settings().groq_api_key == ""
     assert (await client.get("/settings/cloud-status")).json() == {
         "gemini_key_set": False,
         "groq_key_set": False,
     }
     with pytest.raises(ConfigurationError):
         GroqWhisperSTTProvider(runtime_settings.stt)._get_client()
+
+
+class _FakeHungOllamaClient:
+    def __init__(self) -> None:
+        self.unload_started = threading.Event()
+        self.ollama_answers = threading.Event()
+        self.unload_returned = threading.Event()
+
+    def embeddings(self, **kwargs):
+        self.unload_started.set()
+        self.ollama_answers.wait(timeout=3)
+        self.unload_returned.set()
+
+
+@pytest.mark.anyio
+async def test_a_hung_ollama_unload_after_saving_a_key_leaves_other_requests_answered(
+    client, monkeypatch
+):
+    """Saving a key drops the cached local embedding provider, whose unload is a blocking Ollama
+    call. While that call hangs the save still answers, the cache is already empty, and the app
+    keeps answering other requests."""
+    hung = _FakeHungOllamaClient()
+    provider = LocalEmbeddingProvider(
+        ollama_host="http://localhost:11434", model="nomic-embed-text"
+    )
+    provider._client = hung
+    monkeypatch.setattr(embeddings, "_cached_provider", provider)
+    monkeypatch.setattr(embeddings, "_cached_key", ProviderMode.LOCAL)
+
+    try:
+        saved = await client.put("/settings", json={"gemini_api_key": "AIza-new"})
+        assert hung.unload_started.wait(timeout=3)
+        health = await client.get("/health")
+        unload_still_hanging = not hung.unload_returned.is_set()
+    finally:
+        hung.ollama_answers.set()
+
+    assert saved.status_code == 200
+    assert saved.json()["settings"]["gemini_api_key"] == "***"
+    assert embeddings._cached_provider is None
+    assert health.status_code == 200
+    assert unload_still_hanging
 
 
 def _counting_spy(counter: dict):

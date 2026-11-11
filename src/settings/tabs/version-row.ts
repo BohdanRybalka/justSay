@@ -1,14 +1,23 @@
 /**
  * The Version row of the Settings card: the running version, when updates were
- * last found to be none, and the updater's check, install and restart. The
- * install runs in the shell, which on Windows closes JustSay the way Quit does
- * before the installer starts. The time of the last "up to date" answer is UI
- * state kept in `localStorage`.
+ * last found to be none, and the updater's check, install and restart. The install
+ * runs in the shell, which refuses it while the backend reports a recording or a
+ * transcription in progress, asking before the download and again right before
+ * installing; on Windows it closes JustSay the way Quit does before the installer
+ * starts. The time of the last "up to date" answer is UI state kept in `localStorage`.
  */
 import { setDisabled } from "../../ui/controls";
 import { icon } from "../../ui/icons";
 
 const LAST_UP_TO_DATE_KEY = "justsay.updates.lastUpToDateAt";
+
+type Work = "meeting" | "dictation" | "transcription";
+
+export const UPDATE_WAITS_FOR: Readonly<Record<Work, string>> = {
+  meeting: "Stop the meeting recording first, then install the update.",
+  dictation: "Finish the dictation first, then install the update.",
+  transcription: "Wait until the transcription finishes, then install the update.",
+};
 
 function describeFailure(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -37,6 +46,22 @@ function describeUpdateCheckFailure(err: unknown): string {
     );
   }
   return `Check failed: ${raw}`;
+}
+
+/** What the status line says when `install_update` rejects, and whether the button then
+ *  offers a retry: the shell refuses with `{waits_for}`, `{could_not_check}` or `{failed}`. */
+function describeInstallRefusal(err: unknown): { text: string; retry: boolean } {
+  if (typeof err === "object" && err !== null) {
+    if ("waits_for" in err) return { text: UPDATE_WAITS_FOR[err.waits_for as Work], retry: false };
+    if ("could_not_check" in err) {
+      return {
+        text: `Couldn't check whether a recording is running, so the update waits: ${String(err.could_not_check)}`,
+        retry: false,
+      };
+    }
+    if ("failed" in err) return { text: `Install failed: ${String(err.failed)}`, retry: true };
+  }
+  return { text: `Install failed: ${describeFailure(err)}`, retry: true };
 }
 
 function readLastUpToDate(): number | null {
@@ -123,14 +148,16 @@ export function renderVersionRow(row: HTMLElement, isDestroyed: () => boolean): 
   }
 
   async function install(): Promise<void> {
+    const label = action.textContent ?? "";
     busy("Installing…", "Downloading and installing update…");
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("install_update");
     } catch (err) {
       if (isDestroyed()) return;
-      status.textContent = `Install failed: ${describeFailure(err)}`;
-      offerInstall("Try again");
+      const refusal = describeInstallRefusal(err);
+      status.textContent = refusal.text;
+      offerInstall(refusal.retry ? "Try again" : label);
       return;
     }
     try {

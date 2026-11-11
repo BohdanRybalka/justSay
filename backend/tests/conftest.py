@@ -17,9 +17,10 @@ import shutil
 import threading
 import time
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future
 from concurrent.futures import wait as wait_for_futures
+from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import patch
@@ -463,6 +464,15 @@ class StubRecordingQueue:
     def __init__(self) -> None:
         self.added: list[Path] = []
         self.kept: frozenset[str] = frozenset()
+        self.arriving = 0
+
+    @contextmanager
+    def receiving(self) -> Iterator[None]:
+        self.arriving += 1
+        try:
+            yield
+        finally:
+            self.arriving -= 1
 
     def add_meeting(self, recording: Path) -> str:
         self.added.append(recording)

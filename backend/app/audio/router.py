@@ -248,15 +248,16 @@ async def stop_meeting_recording(
     """
     if not recorder.is_busy:
         raise HTTPException(status_code=409, detail="Not recording")
-    recording = await recorder.stop()
-    return MeetingStopResponse(
-        filename=recording.path.name,
-        duration_seconds=recording.duration_seconds,
-        capture_incident=(
-            None if recording.incident is None else recording.incident.value
-        ),
-        job_id=queue.add_meeting(recording.path),
-    )
+    with queue.receiving():
+        recording = await recorder.stop()
+        return MeetingStopResponse(
+            filename=recording.path.name,
+            duration_seconds=recording.duration_seconds,
+            capture_incident=(
+                None if recording.incident is None else recording.incident.value
+            ),
+            job_id=queue.add_meeting(recording.path),
+        )
 
 
 @router.get("/meeting/status", response_model=MeetingStatus)

@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UserSettings } from "../../api";
-import { EVENT_MEETING_TOGGLE } from "../../contracts";
+import {
+  EVENT_MEETING_TOGGLE,
+  EVENT_MEETING_TOGGLE_FAILED,
+  SESSION_ID_PATTERN,
+  type MeetingToggleFailed,
+} from "../../contracts";
 import { dropFocusWhenDisabled } from "../../ui/browser-focus.test-helper";
 
 const calls: string[] = [];
@@ -16,7 +21,15 @@ const notifyErrorMock = vi.fn();
 vi.mock("../../notify", () => ({ notifyError: notifyErrorMock }));
 
 const emitMock = vi.fn();
-vi.mock("../../event-api", () => ({ loadEventApi: async () => ({ emit: emitMock }) }));
+const listeners = new Map<string, (event: { payload: unknown }) => void>();
+const unlistenMock = vi.fn();
+const listenMock = vi.fn(async (event: string, handler: (event: { payload: unknown }) => void) => {
+  listeners.set(event, handler);
+  return unlistenMock;
+});
+vi.mock("../../event-api", () => ({
+  loadEventApi: async () => ({ emit: emitMock, listen: listenMock }),
+}));
 
 interface LevelStream {
   onLevel: (data: { mic_db: number | null; system_db: number | null }) => void;
@@ -48,6 +61,7 @@ vi.mock("../../api", async (importOriginal) => {
 });
 
 const { mountMeetingCard, meetingCardHint } = await import("./meeting-card");
+const { DICTATION_IN_PROGRESS_MESSAGE } = await import("../../widget/meeting-toggle");
 
 function status(isRecording: boolean, durationSeconds = 0) {
   return { is_recording: isRecording, duration_seconds: durationSeconds };
@@ -72,6 +86,21 @@ async function settle() {
   await vi.advanceTimersByTimeAsync(0);
 }
 
+function sentRequest(): string {
+  const [, payload] = emitMock.mock.calls[emitMock.mock.calls.length - 1];
+  return (payload as { request: string }).request;
+}
+
+async function widgetRefuses(message: string, request: string | null = sentRequest()) {
+  const failed: MeetingToggleFailed = { request, message };
+  listeners.get(EVENT_MEETING_TOGGLE_FAILED)!({ payload: failed });
+  await settle();
+}
+
+function hint(card: HTMLElement): string | null | undefined {
+  return card.querySelector("#meeting-hint")?.textContent;
+}
+
 async function mountReady(overrides: Partial<UserSettings> = {}) {
   const view = mount(overrides);
   await settle();
@@ -82,6 +111,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   calls.length = 0;
   levelStreams.length = 0;
+  listeners.clear();
   vi.clearAllMocks();
   getMeetingStatusMock.mockResolvedValue(status(false));
   saveSettingsMock.mockImplementation(async () => void calls.push("save"));
@@ -127,7 +157,7 @@ describe("the start card", () => {
     button("meeting-start").click();
     await settle();
 
-    expect(emitMock).toHaveBeenCalledExactlyOnceWith(EVENT_MEETING_TOGGLE);
+    expect(emitMock).toHaveBeenCalledExactlyOnceWith(EVENT_MEETING_TOGGLE, { request: expect.stringMatching(SESSION_ID_PATTERN) });
     expect(saveSettingsMock).not.toHaveBeenCalled();
   });
 
@@ -146,12 +176,13 @@ describe("the start card", () => {
 
   it("lets go at once when the widget could not be reached", async () => {
     emitMock.mockRejectedValue(new Error("no bridge"));
-    const { button } = await mountReady();
+    const { button, card } = await mountReady();
 
     button("meeting-start").click();
     await settle();
 
     expect(notifyErrorMock).toHaveBeenCalledWith("no bridge");
+    expect(hint(card)).toBe("no bridge");
     expect(button("meeting-start").disabled).toBe(false);
   });
 });
@@ -217,7 +248,7 @@ describe("the first start (ADR 040 obligation 3)", () => {
     await settle();
 
     expect(title()).toBe("Record a meeting");
-    expect(emitMock).toHaveBeenCalledExactlyOnceWith(EVENT_MEETING_TOGGLE);
+    expect(emitMock).toHaveBeenCalledExactlyOnceWith(EVENT_MEETING_TOGGLE, { request: expect.stringMatching(SESSION_ID_PATTERN) });
   });
 });
 
@@ -299,7 +330,7 @@ describe("keyboard focus", () => {
     finishSaving();
     await settle();
 
-    expect(emitMock).toHaveBeenCalledExactlyOnceWith(EVENT_MEETING_TOGGLE);
+    expect(emitMock).toHaveBeenCalledExactlyOnceWith(EVENT_MEETING_TOGGLE, { request: expect.stringMatching(SESSION_ID_PATTERN) });
   });
 
   it("does not pull focus back once the user moved it elsewhere while the buttons were held", async () => {
@@ -360,7 +391,7 @@ describe("a meeting that is recording", () => {
 
     button("meeting-stop").click();
     await settle();
-    expect(emitMock).toHaveBeenCalledExactlyOnceWith(EVENT_MEETING_TOGGLE);
+    expect(emitMock).toHaveBeenCalledExactlyOnceWith(EVENT_MEETING_TOGGLE, { request: expect.stringMatching(SESSION_ID_PATTERN) });
     expect(button("meeting-stop").disabled).toBe(true);
 
     getMeetingStatusMock.mockResolvedValue(status(false));
@@ -472,6 +503,142 @@ describe("a meeting changed from somewhere else", () => {
     await vi.advanceTimersByTimeAsync(1300);
 
     expect(title()).toBe("Recording · 0:05");
+  });
+});
+
+describe("a press the widget refused", () => {
+  it("shows the sentence and lets go of the button without waiting for a status read", async () => {
+    const { button, card } = await mountReady();
+    button("meeting-start").click();
+    await settle();
+    getMeetingStatusMock.mockReturnValue(new Promise(() => {}));
+
+    await widgetRefuses(DICTATION_IN_PROGRESS_MESSAGE);
+
+    expect(hint(card)).toBe(DICTATION_IN_PROGRESS_MESSAGE);
+    expect(button("meeting-start").disabled).toBe(false);
+  });
+
+  it("still shows a refused start once the hidden window is shown again", async () => {
+    const { button, card, mounted } = await mountReady();
+    button("meeting-start").click();
+    await settle();
+    mounted.releaseResources!();
+
+    await widgetRefuses(DICTATION_IN_PROGRESS_MESSAGE);
+    mounted.resumeResources!();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(hint(card)).toBe(DICTATION_IN_PROGRESS_MESSAGE);
+    expect(levelStreams).toHaveLength(0);
+  });
+
+  it("stops listening for refusals when the page is gone before the listener is in place", async () => {
+    const { mounted } = mount();
+
+    mounted.destroy();
+    await settle();
+
+    expect(listenMock).toHaveBeenCalledOnce();
+    expect(unlistenMock).toHaveBeenCalledOnce();
+  });
+
+  it("shows the widget's sentence in the hint line and lets go of the button at once", async () => {
+    const { button, card } = await mountReady();
+    button("meeting-start").click();
+    await settle();
+
+    await widgetRefuses(DICTATION_IN_PROGRESS_MESSAGE);
+
+    expect(hint(card)).toBe(DICTATION_IN_PROGRESS_MESSAGE);
+    expect(card.querySelector("#meeting-hint")!.getAttribute("aria-live")).toBe("polite");
+    expect(button("meeting-start").disabled).toBe(false);
+  });
+
+  it("writes the sentence into the hint line already on screen, so it is announced", async () => {
+    const { button, card } = await mountReady();
+    button("meeting-start").click();
+    await settle();
+    const line = card.querySelector("#meeting-hint");
+
+    await widgetRefuses(DICTATION_IN_PROGRESS_MESSAGE);
+
+    expect(card.querySelector("#meeting-hint")).toBe(line);
+  });
+
+  it("puts the hint back on the next press", async () => {
+    const { button, card } = await mountReady({ stt_mode: "local" });
+    button("meeting-start").click();
+    await settle();
+    await widgetRefuses(DICTATION_IN_PROGRESS_MESSAGE);
+
+    button("meeting-start").click();
+    await settle();
+
+    expect(hint(card)).toBe(meetingCardHint("local"));
+  });
+
+  it("puts the hint back once the meeting status changes", async () => {
+    const { button, card } = await mountReady({ stt_mode: "local" });
+    button("meeting-start").click();
+    await settle();
+    await widgetRefuses(DICTATION_IN_PROGRESS_MESSAGE);
+
+    getMeetingStatusMock.mockResolvedValue(status(true, 1));
+    await vi.advanceTimersByTimeAsync(1000);
+    getMeetingStatusMock.mockResolvedValue(status(false));
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(hint(card)).toBe(meetingCardHint("local"));
+  });
+
+  it("leaves a refused stop to the notification, so no stale sentence waits under Start", async () => {
+    getMeetingStatusMock.mockResolvedValue(status(true, 20));
+    const { button, card, title } = await mountReady({ stt_mode: "local" });
+    button("meeting-stop").click();
+    await settle();
+
+    await widgetRefuses("The call is still being recorded — stopping it failed: offline");
+    getMeetingStatusMock.mockResolvedValue(status(false));
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(title()).toBe("Record a meeting");
+    expect(hint(card)).toBe(meetingCardHint("local"));
+  });
+
+  it("lets go of Stop at once when the stop failed and the meeting is still recording", async () => {
+    getMeetingStatusMock.mockResolvedValue(status(true, 20));
+    const { button } = await mountReady();
+    button("meeting-stop").click();
+    await settle();
+
+    await widgetRefuses("The call is still being recorded — stopping it failed: offline");
+
+    expect(button("meeting-stop").disabled).toBe(false);
+  });
+
+  it("leaves the card alone when the refused toggle came from the tray or the hotkey", async () => {
+    const { button, card } = await mountReady({ stt_mode: "local" });
+    await widgetRefuses(DICTATION_IN_PROGRESS_MESSAGE, null);
+    expect(hint(card)).toBe(meetingCardHint("local"));
+
+    button("meeting-start").click();
+    await settle();
+    const ours = sentRequest();
+
+    await widgetRefuses(DICTATION_IN_PROGRESS_MESSAGE, null);
+    await widgetRefuses(DICTATION_IN_PROGRESS_MESSAGE, `${ours.slice(1)}0`);
+
+    expect(hint(card)).toBe(meetingCardHint("local"));
+    expect(button("meeting-start").disabled).toBe(true);
+  });
+
+  it("stops listening for refusals once the page is gone", async () => {
+    const { mounted } = await mountReady();
+
+    mounted.destroy();
+
+    expect(unlistenMock).toHaveBeenCalledOnce();
   });
 });
 

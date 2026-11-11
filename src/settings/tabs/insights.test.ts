@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FillerNote, Insights, TopWordsResponse, WordCount } from "../../api";
 import { dropFocusWhenDisabled } from "../../ui/browser-focus.test-helper";
@@ -86,6 +88,9 @@ async function mount(figures: Insights, windowHidden = false, favourites: WordCo
 }
 
 const text = (selector: string) => container.querySelector(selector)?.textContent?.replace(/\s+/g, " ").trim();
+
+const INSIGHTS_CSS = readFileSync(resolve(__dirname, "insights.css"), "utf-8");
+const cssRule = (selector: string) => INSIGHTS_CSS.match(new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`))![1];
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -340,6 +345,36 @@ describe("the Insights panel", () => {
     expect(container.querySelector(".fact-grid")!.compareDocumentPosition(container.querySelector(".favourite-words")!)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
+  });
+
+  it("keeps a long word on one line, cut short, with the whole word on hover", async () => {
+    const long = "internationalisation";
+    const favourites = [long, "by", "so", long].map((word, index) => ({ word, count: 50 - index, is_filler: false }));
+    await mount(buildInsights(), false, favourites);
+
+    const podiumWord = container.querySelector<HTMLElement>(".podium-word")!;
+    const rowWord = container.querySelector<HTMLElement>(".word-row-text")!;
+    expect([podiumWord.title, podiumWord.textContent, rowWord.title, rowWord.textContent]).toEqual([long, long, long, long]);
+    for (const selector of [".podium-word", ".word-row-text"]) {
+      const rule = cssRule(selector);
+      expect(rule).toMatch(/white-space:\s*nowrap/);
+      expect(rule).toMatch(/overflow:\s*hidden/);
+      expect(rule).toMatch(/text-overflow:\s*ellipsis/);
+    }
+    expect(cssRule(".podium-item")).toMatch(/overflow:\s*hidden/);
+  });
+
+  it("ends a cut-short podium word before the rank digit in the card's corner", () => {
+    const px = (block: string, property: string) => Number(block.match(new RegExp(`(?:^|\\s)${property}:\\s*([\\d.]+)px`))![1]);
+    const item = cssRule(".podium-item");
+    const rank = cssRule(".podium-rank");
+    const monoDigitEm = 0.6;
+    const rankLeftEdge = px(rank, "right") + px(rank, "font-size") * monoDigitEm;
+    const wordRightEdge = Number(item.match(/padding:\s*[\d.]+px\s+([\d.]+)px/)![1]) + px(cssRule(".podium-word"), "margin-right");
+
+    expect(item).toMatch(/position:\s*relative/);
+    expect(rank).toMatch(/position:\s*absolute/);
+    expect(wordRightEdge).toBeGreaterThanOrEqual(rankLeftEdge + 4);
   });
 
   it("grows each bar from zero to its count against the most said word", async () => {

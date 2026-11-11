@@ -1,8 +1,9 @@
 /**
  * The API keys fold: one row per cloud key. A row is stored, env, unset,
- * unknown or editing, and is redrawn alone; its subtitle says what the key is
- * used for, and when everything it serves runs Local that it is not used: the Groq
- * key serves dictation, meetings and files, the Google key History search.
+ * unknown or editing, and is redrawn alone; only a key stored here shows hidden,
+ * and Save on its Replace field, once typed in and left blank, removes it. The
+ * subtitle says what the key is for, or that it is not used while Local is on:
+ * the Groq key serves dictation, meetings and files, the Google key History search.
  */
 import { type CloudKeyStatus, type UserSettings } from "../../api";
 import { MASKED_API_KEY } from "../../contracts";
@@ -31,6 +32,8 @@ const STATE_HINTS: Readonly<Partial<Record<KeyRowState, string>>> = {
   unknown: "Cannot verify key status — reopen Settings to retry.",
 };
 
+const REMOVED_HINT = "Key removed.";
+
 const MASKED_DISPLAY = "••••••••••••";
 
 function describeFailure(e: unknown): string {
@@ -53,7 +56,7 @@ function useHint(settings: UserSettings, spec: KeyRowSpec): string {
 
 function keyControls(spec: KeyRowSpec, state: KeyRowState): string {
   const p = spec.provider;
-  if (state === "stored" || state === "env") {
+  if (state === "stored") {
     return `
       <input class="masked-field num" id="${p}-key-input" value="${MASKED_DISPLAY}" readonly
         aria-label="${spec.label} key, hidden" />
@@ -92,16 +95,17 @@ export function renderKeys(container: HTMLElement, settings: UserSettings, cloud
     `;
     wireKey(spec, state, row);
     if (state === "editing") row.querySelector<HTMLInputElement>("input")!.focus();
-    else if (hadFocus) row.querySelector<HTMLElement>("button")?.focus();
+    else if (hadFocus) (row.querySelector<HTMLElement>("button:not([disabled])") ?? row.querySelector("input"))?.focus();
   };
 
   const wireKey = (spec: KeyRowSpec, state: KeyRowState, row: HTMLElement): void => {
     const p = spec.provider;
     const storedState = (): KeyRowState => rowState(current, spec.field, knownCloud);
-    if (state === "stored" || state === "env") {
+    if (state === "stored") {
       row.querySelector(`#${p}-replace`)!.addEventListener("click", () => draw(spec, "editing"));
       return;
     }
+    const removes = state === "editing";
     row.querySelector(`#${p}-cancel`)?.addEventListener("click", () => draw(spec, storedState()));
 
     const input = row.querySelector<HTMLInputElement>(`#${p}-key-input`)!;
@@ -109,11 +113,11 @@ export function renderKeys(container: HTMLElement, settings: UserSettings, cloud
     const status = row.querySelector<HTMLElement>(`#${p}-status`)!;
     const locked = [input, save, ...row.querySelectorAll<HTMLButtonElement>(`#${p}-cancel`)];
     input.addEventListener("input", () => {
-      save.disabled = input.value.trim() === "";
+      save.disabled = !removes && input.value.trim() === "";
     });
     save.addEventListener("click", async () => {
       const value = input.value.trim();
-      if (!value) return;
+      if (!value && !removes) return;
       const refocus = row.contains(document.activeElement);
       setDisabled(true, ...locked);
       save.textContent = "Saving…";
@@ -122,7 +126,9 @@ export function renderKeys(container: HTMLElement, settings: UserSettings, cloud
         const { settings: fresh } = await saveSettings({ [spec.field]: value } as Partial<UserSettings>);
         current = fresh;
         knownCloud = getCloudKeyStatus();
-        draw(spec, storedState(), refocus);
+        const after = storedState();
+        draw(spec, after, refocus);
+        if (!value && after === "unset") rowOf(spec).querySelector(`#${p}-status`)!.textContent = REMOVED_HINT;
       } catch (err) {
         status.textContent = `Error: ${describeFailure(err)}`;
         setDisabled(false, ...locked);

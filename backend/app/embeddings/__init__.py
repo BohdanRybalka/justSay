@@ -48,6 +48,8 @@ LOCAL_MISSING_MODEL_REASON = (
     "`ollama pull nomic-embed-text`"
 )
 
+_RELEASE_THREAD_NAME = "embedding-provider-release"
+
 _cache_lock = threading.Lock()
 _local_reprobe_lock = asyncio.Lock()
 _cached_provider: EmbeddingProvider | None = None
@@ -81,12 +83,7 @@ async def resolve_embedding_provider(
                 reason: str | None = None
             else:
                 if stale_local_provider is not None:
-                    try:
-                        stale_local_provider.cleanup()
-                    except Exception:
-                        log.warning(
-                            "Releasing the stale local embedding provider failed", exc_info=True
-                        )
+                    _release_off_the_loop(stale_local_provider)
                 provider = None
                 reason = LOCAL_MISSING_MODEL_REASON
 
@@ -115,16 +112,28 @@ async def resolve_embedding_provider(
 def clear_cache() -> None:
     """Invalidate the cached provider. Call on mode, key or Ollama-host change.
 
-    Calls the cached provider's ``cleanup()`` before dropping the reference. A
-    cleanup failure is logged and does not propagate.
+    The cache is empty when this returns; the dropped provider's ``cleanup()`` runs on
+    a worker thread, so a slow or hung Ollama never holds up the caller.
     """
     global _cached_provider, _cached_reason, _cached_key
     with _cache_lock:
-        if _cached_provider is not None:
-            try:
-                _cached_provider.cleanup()
-            except Exception:
-                log.warning("Releasing the cached embedding provider failed", exc_info=True)
+        dropped = _cached_provider
         _cached_provider = None
         _cached_reason = None
         _cached_key = None
+    if dropped is not None:
+        _release_off_the_loop(dropped)
+
+
+def _release_off_the_loop(provider: EmbeddingProvider) -> None:
+    """Run ``provider.cleanup()`` on its own non-daemon thread, so exit still waits for it."""
+    threading.Thread(
+        target=_release, args=(provider,), name=_RELEASE_THREAD_NAME, daemon=False
+    ).start()
+
+
+def _release(provider: EmbeddingProvider) -> None:
+    try:
+        provider.cleanup()
+    except Exception:
+        log.warning("Releasing an embedding provider failed", exc_info=True)

@@ -67,14 +67,16 @@ beforeEach(() => {
 });
 
 describe("renderKeys — env-sourced key indicator (Bug 1)", () => {
-  it("a key present only via cloud-status (.env) renders as key-present, not as unset", () => {
+  it("a key present only via cloud-status (.env) shows an empty field and says it comes from the environment", () => {
     const container = render(buildSettings(), { gemini_key_set: true, groq_key_set: false });
 
     expect(container.querySelector("#gemini-status")!.textContent).toContain("environment");
     const input = container.querySelector<HTMLInputElement>("#gemini-key-input")!;
-    expect(input.readOnly).toBe(true);
-    expect(container.querySelector("#gemini-replace")).not.toBeNull();
-    expect(container.querySelector("#gemini-save")).toBeNull();
+    expect(input.readOnly).toBe(false);
+    expect(input.value).toBe("");
+    expect(input.type).toBe("password");
+    expect(container.querySelector("#gemini-replace")).toBeNull();
+    expect(container.querySelector<HTMLButtonElement>("#gemini-save")!.disabled).toBe(true);
   });
 
   it("a key stored in settings.json renders masked with Replace and no status line", () => {
@@ -139,6 +141,100 @@ describe("renderKeys — Replace and Cancel", () => {
     container.querySelector<HTMLButtonElement>("#groq-replace")!.click();
 
     expect(container.querySelector("#gemini-replace")).not.toBeNull();
+  });
+});
+
+describe("renderKeys — removing a stored key", () => {
+  function emptyAndSave(container: HTMLElement, provider: string): void {
+    container.querySelector<HTMLButtonElement>(`#${provider}-replace`)!.click();
+    const input = container.querySelector<HTMLInputElement>(`#${provider}-key-input`)!;
+    input.value = "   ";
+    input.dispatchEvent(new Event("input"));
+    container.querySelector<HTMLButtonElement>(`#${provider}-save`)!.click();
+  }
+
+  it("Save on the emptied Replace field removes the key and leaves an empty field", async () => {
+    saveSettingsMock.mockResolvedValue({ settings: buildSettings(), warning: null });
+    getCloudKeyStatusMock.mockReturnValue(NO_KEYS);
+    const container = render(buildSettings({ groq_api_key: "***" }), { gemini_key_set: false, groq_key_set: true });
+
+    emptyAndSave(container, "groq");
+
+    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledWith({ groq_api_key: "" }));
+    await vi.waitFor(() => expect(container.querySelector("#groq-replace")).toBeNull());
+    const input = container.querySelector<HTMLInputElement>("#groq-key-input")!;
+    expect(input.value).toBe("");
+    expect(input.readOnly).toBe(false);
+    expect(container.querySelector("#groq-cancel")).toBeNull();
+    expect(container.querySelector("#groq-status")!.textContent).toBe("Key removed.");
+  });
+
+  it("a second click where Replace was does not remove the key", () => {
+    const container = render(buildSettings({ groq_api_key: "***" }));
+
+    container.querySelector<HTMLButtonElement>("#groq-replace")!.click();
+    container.querySelector<HTMLButtonElement>("#groq-save")!.click();
+
+    expect(saveSettingsMock).not.toHaveBeenCalled();
+  });
+
+  it("after the removal, keyboard focus lands on the empty field", async () => {
+    saveSettingsMock.mockResolvedValue({ settings: buildSettings(), warning: null });
+    getCloudKeyStatusMock.mockReturnValue(NO_KEYS);
+    const container = render(buildSettings({ groq_api_key: "***" }));
+
+    container.querySelector<HTMLButtonElement>("#groq-replace")!.click();
+    const input = container.querySelector<HTMLInputElement>("#groq-key-input")!;
+    input.value = "";
+    input.dispatchEvent(new Event("input"));
+    const save = container.querySelector<HTMLButtonElement>("#groq-save")!;
+    save.focus();
+    save.click();
+
+    await vi.waitFor(() => expect(container.querySelector("#groq-cancel")).toBeNull());
+    expect(document.activeElement).toBe(container.querySelector("#groq-key-input"));
+  });
+
+  it("Replace with a new key typed saves that key", async () => {
+    saveSettingsMock.mockResolvedValue({ settings: buildSettings({ groq_api_key: "***" }), warning: null });
+    getCloudKeyStatusMock.mockReturnValue(NO_KEYS);
+    const container = render(buildSettings({ groq_api_key: "***" }));
+
+    container.querySelector<HTMLButtonElement>("#groq-replace")!.click();
+    const input = container.querySelector<HTMLInputElement>("#groq-key-input")!;
+    input.value = " gsk-replacement ";
+    input.dispatchEvent(new Event("input"));
+    container.querySelector<HTMLButtonElement>("#groq-save")!.click();
+
+    await vi.waitFor(() => expect(saveSettingsMock).toHaveBeenCalledWith({ groq_api_key: "gsk-replacement" }));
+    await vi.waitFor(() => expect(container.querySelector("#groq-replace")).not.toBeNull());
+  });
+
+  it("a removed key that the environment still gives says so beside the empty field", async () => {
+    saveSettingsMock.mockResolvedValue({ settings: buildSettings(), warning: null });
+    getCloudKeyStatusMock.mockReturnValue({ gemini_key_set: false, groq_key_set: true });
+    const container = render(buildSettings({ groq_api_key: "***" }), { gemini_key_set: false, groq_key_set: true });
+
+    emptyAndSave(container, "groq");
+
+    await vi.waitFor(() => expect(container.querySelector("#groq-replace")).toBeNull());
+    expect(container.querySelector("#groq-status")!.textContent).toContain("environment");
+    expect(container.querySelector("#groq-status")!.textContent).not.toContain("removed");
+    expect(container.querySelector<HTMLInputElement>("#groq-key-input")!.value).toBe("");
+  });
+
+  it("with no key stored, Save stays off for an empty or blank field", () => {
+    const container = render(buildSettings(), { gemini_key_set: false, groq_key_set: true });
+
+    const input = container.querySelector<HTMLInputElement>("#groq-key-input")!;
+    input.value = "   ";
+    input.dispatchEvent(new Event("input"));
+    const save = container.querySelector<HTMLButtonElement>("#groq-save")!;
+    expect(save.disabled).toBe(true);
+
+    save.disabled = false;
+    save.click();
+    expect(saveSettingsMock).not.toHaveBeenCalled();
   });
 });
 

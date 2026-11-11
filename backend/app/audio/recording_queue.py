@@ -4,11 +4,14 @@
 ``app.state.jobs``, which meets this protocol.
 """
 
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Protocol
 
 
 class RecordingQueue(Protocol):
+    def receiving(self) -> AbstractContextManager[None]: ...
+
     def add_meeting(self, recording: Path) -> str: ...
 
     def kept_recording_names(self) -> frozenset[str]: ...

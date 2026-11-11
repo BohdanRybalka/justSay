@@ -37,7 +37,7 @@ mod platform {
     /// The operations a write makes on an open clipboard.
     pub(super) trait Board {
         fn set_text(&mut self, text: &str) -> Result<(), String>;
-        fn set_image(&mut self, png: &[u8], dib: &[u8]) -> Result<(), String>;
+        fn set_image(&mut self, png: &[u8], dib: &[u8], dib_v5: &[u8]) -> Result<(), String>;
         fn set_format(&mut self, name: &str, data: &[u8]) -> Result<(), String>;
         fn empty(&mut self);
     }
@@ -53,15 +53,18 @@ mod platform {
         mark_kept_on_this_device(board)
     }
 
-    /// Replace the clipboard with an image as `PNG` and as a device-independent
-    /// bitmap, then mark it as text is marked. An image written in part is
+    /// Replace the clipboard with an image as `PNG` and as two device-independent
+    /// bitmaps, then mark it as text is marked. An image written in part is
     /// taken off again.
     pub(super) fn write_image_kept_on_this_device(
         board: &mut impl Board,
         png: &[u8],
         dib: &[u8],
+        dib_v5: &[u8],
     ) -> Result<(), String> {
-        board.set_image(png, dib).inspect_err(|_| board.empty())?;
+        board
+            .set_image(png, dib, dib_v5)
+            .inspect_err(|_| board.empty())?;
         mark_kept_on_this_device(board)
     }
 
@@ -71,35 +74,70 @@ mod platform {
             .inspect_err(|_| board.empty())
     }
 
+    const INFO_HEADER_SIZE: u32 = 40;
+    const V5_HEADER_SIZE: u32 = 124;
+    const BI_RGB: u32 = 0;
+    const BI_BITFIELDS: u32 = 3;
+    const LCS_SRGB: u32 = 0x7352_4742;
+    const LCS_GM_IMAGES: u32 = 4;
+
     /// A `CF_DIB` of the straight-alpha RGBA `pixels`, laid over white: GDI
     /// readers such as Paint ignore alpha and would paint clear pixels black.
     pub(super) fn dib_on_white(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
-        const HEADER_SIZE: u32 = 40;
-        let image_size = width * height * 4;
-        let mut dib = Vec::with_capacity((HEADER_SIZE + image_size) as usize);
-        dib.extend_from_slice(&HEADER_SIZE.to_le_bytes());
-        dib.extend_from_slice(&(width as i32).to_le_bytes());
-        dib.extend_from_slice(&(height as i32).to_le_bytes());
-        dib.extend_from_slice(&1u16.to_le_bytes());
-        dib.extend_from_slice(&32u16.to_le_bytes());
-        dib.extend_from_slice(&0u32.to_le_bytes());
-        dib.extend_from_slice(&image_size.to_le_bytes());
-        dib.extend_from_slice(&[0; 16]);
         let over_white = |channel: u8, alpha: u8| {
             ((channel as u32 * alpha as u32 + 255 * (255 - alpha as u32) + 127) / 255) as u8
         };
-        for row in pixels.chunks_exact(width as usize * 4).rev() {
-            for pixel in row.chunks_exact(4) {
-                let alpha = pixel[3];
-                dib.extend_from_slice(&[
-                    over_white(pixel[2], alpha),
-                    over_white(pixel[1], alpha),
-                    over_white(pixel[0], alpha),
-                    255,
-                ]);
-            }
-        }
+        let mut dib = info_header(INFO_HEADER_SIZE, width, height, BI_RGB);
+        dib.extend(bottom_up_bgra(pixels, width, |[r, g, b, a]| {
+            [over_white(b, a), over_white(g, a), over_white(r, a), 255]
+        }));
         dib
+    }
+
+    /// A `CF_DIBV5` of the straight-alpha RGBA `pixels` that keeps their alpha,
+    /// so readers that ask for it see clear pixels as clear; without it Windows
+    /// derives this format from the `CF_DIB`. A clear pixel is white, for a
+    /// reader that ignores alpha.
+    pub(super) fn dib_v5_with_alpha(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
+        let mut dib = info_header(V5_HEADER_SIZE, width, height, BI_BITFIELDS);
+        for mask in [0x00FF_0000u32, 0x0000_FF00, 0x0000_00FF, 0xFF00_0000] {
+            dib.extend_from_slice(&mask.to_le_bytes());
+        }
+        dib.extend_from_slice(&LCS_SRGB.to_le_bytes());
+        dib.extend_from_slice(&[0; 48]);
+        dib.extend_from_slice(&LCS_GM_IMAGES.to_le_bytes());
+        dib.extend_from_slice(&[0; 12]);
+        dib.extend(bottom_up_bgra(pixels, width, |[r, g, b, a]| match a {
+            0 => [255, 255, 255, 0],
+            _ => [b, g, r, a],
+        }));
+        dib
+    }
+
+    /// The first forty bytes every bitmap header shares, for a bottom-up
+    /// 32-bit image of `width` by `height`.
+    fn info_header(size: u32, width: u32, height: u32, compression: u32) -> Vec<u8> {
+        let mut header = Vec::with_capacity((size + width * height * 4) as usize);
+        header.extend_from_slice(&size.to_le_bytes());
+        header.extend_from_slice(&(width as i32).to_le_bytes());
+        header.extend_from_slice(&(height as i32).to_le_bytes());
+        header.extend_from_slice(&1u16.to_le_bytes());
+        header.extend_from_slice(&32u16.to_le_bytes());
+        header.extend_from_slice(&compression.to_le_bytes());
+        header.extend_from_slice(&(width * height * 4).to_le_bytes());
+        header.extend_from_slice(&[0; 16]);
+        header
+    }
+
+    /// The rows of RGBA `pixels` from the bottom up, each pixel mapped to the
+    /// four bytes `pixel` returns for it.
+    fn bottom_up_bgra(pixels: &[u8], width: u32, pixel: impl Fn([u8; 4]) -> [u8; 4]) -> Vec<u8> {
+        pixels
+            .chunks_exact(width as usize * 4)
+            .rev()
+            .flat_map(|row| row.chunks_exact(4))
+            .flat_map(|rgba| pixel([rgba[0], rgba[1], rgba[2], rgba[3]]))
+            .collect()
     }
 
     /// The system clipboard, open for as long as this value lives.
@@ -131,10 +169,12 @@ mod platform {
                 .map_err(|e| format!("writing the text failed — {}", e))
         }
 
-        fn set_image(&mut self, png: &[u8], dib: &[u8]) -> Result<(), String> {
+        fn set_image(&mut self, png: &[u8], dib: &[u8], dib_v5: &[u8]) -> Result<(), String> {
             clipboard_win::raw::empty()
                 .map_err(|e| format!("emptying the clipboard failed — {}", e))?;
             self.set_format(PNG_FORMAT, png)?;
+            clipboard_win::raw::set_without_clear(clipboard_win::formats::CF_DIBV5, dib_v5)
+                .map_err(|e| format!("writing the bitmap with alpha failed — {}", e))?;
             clipboard_win::raw::set_without_clear(clipboard_win::formats::CF_DIB, dib)
                 .map_err(|e| format!("writing the bitmap failed — {}", e))
         }
@@ -160,8 +200,10 @@ mod platform {
     pub(super) fn write_png(png: &[u8]) -> Result<(), String> {
         let image = tauri::image::Image::from_bytes(png)
             .map_err(|e| format!("reading the image failed — {}", e))?;
-        let dib = dib_on_white(image.rgba(), image.width(), image.height());
-        write_image_kept_on_this_device(&mut OpenClipboard::open()?, png, &dib)
+        let (pixels, width, height) = (image.rgba(), image.width(), image.height());
+        let dib = dib_on_white(pixels, width, height);
+        let dib_v5 = dib_v5_with_alpha(pixels, width, height);
+        write_image_kept_on_this_device(&mut OpenClipboard::open()?, png, &dib, &dib_v5)
     }
 }
 
@@ -241,13 +283,14 @@ mod platform {
 #[cfg(all(test, windows))]
 mod tests {
     use super::platform::{
-        dib_on_white, write_image_kept_on_this_device, write_kept_on_this_device, Board,
+        dib_on_white, dib_v5_with_alpha, write_image_kept_on_this_device,
+        write_kept_on_this_device, Board,
     };
 
     #[derive(Debug, PartialEq)]
     enum Call {
         Text(String),
-        Image(Vec<u8>, Vec<u8>),
+        Image(Vec<u8>, Vec<u8>, Vec<u8>),
         Format(String, Vec<u8>),
         Empty,
     }
@@ -269,11 +312,12 @@ mod tests {
             Ok(())
         }
 
-        fn set_image(&mut self, png: &[u8], dib: &[u8]) -> Result<(), String> {
+        fn set_image(&mut self, png: &[u8], dib: &[u8], dib_v5: &[u8]) -> Result<(), String> {
             if self.refuse_image {
                 return Err("refused".into());
             }
-            self.calls.push(Call::Image(png.into(), dib.into()));
+            self.calls
+                .push(Call::Image(png.into(), dib.into(), dib_v5.into()));
             Ok(())
         }
 
@@ -326,11 +370,11 @@ mod tests {
     #[test]
     fn the_image_is_written_then_marked_out_of_cloud_clipboard() {
         let mut board = RecordingBoard::default();
-        write_image_kept_on_this_device(&mut board, b"png", b"dib").unwrap();
+        write_image_kept_on_this_device(&mut board, b"png", b"dib", b"v5").unwrap();
         assert_eq!(
             board.calls,
             vec![
-                Call::Image(b"png".to_vec(), b"dib".to_vec()),
+                Call::Image(b"png".to_vec(), b"dib".to_vec(), b"v5".to_vec()),
                 Call::Format("CanUploadToCloudClipboard".into(), vec![0, 0, 0, 0]),
             ]
         );
@@ -342,7 +386,7 @@ mod tests {
             refuse_image: true,
             ..Default::default()
         };
-        assert!(write_image_kept_on_this_device(&mut board, b"png", b"dib").is_err());
+        assert!(write_image_kept_on_this_device(&mut board, b"png", b"dib", b"v5").is_err());
         assert_eq!(board.calls, vec![Call::Empty]);
     }
 
@@ -365,6 +409,35 @@ mod tests {
     fn a_half_clear_pixel_is_blended_halfway_to_white() {
         let dib = dib_on_white(&[0, 0, 0, 128], 1, 1);
         assert_eq!(&dib[40..], &[127, 127, 127, 255]);
+    }
+
+    #[test]
+    fn the_bitmap_with_alpha_keeps_a_clear_corner_clear() {
+        let top_red_opaque = [255, 0, 0, 255];
+        let bottom_clear = [0, 0, 0, 0];
+        let dib = dib_v5_with_alpha(&[top_red_opaque, bottom_clear].concat(), 1, 2);
+
+        assert_eq!(dib.len(), 124 + 8);
+        assert_eq!(&dib[0..4], &124u32.to_le_bytes());
+        assert_eq!(&dib[8..12], &2i32.to_le_bytes());
+        assert_eq!(&dib[14..16], &32u16.to_le_bytes());
+        assert_eq!(&dib[16..20], &3u32.to_le_bytes());
+        assert_eq!(&dib[20..24], &8u32.to_le_bytes());
+        assert_eq!(&dib[12..14], &1u16.to_le_bytes());
+        let masks: Vec<u8> = [0x00FF_0000u32, 0x0000_FF00, 0x0000_00FF, 0xFF00_0000]
+            .iter()
+            .flat_map(|mask| mask.to_le_bytes())
+            .collect();
+        assert_eq!(&dib[40..56], masks.as_slice());
+        assert_eq!(&dib[56..60], b"BGRs");
+        assert_eq!(&dib[108..112], &4u32.to_le_bytes());
+        assert_eq!(&dib[124..], &[255, 255, 255, 0, 0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn a_half_clear_pixel_keeps_its_colour_and_its_alpha() {
+        let dib = dib_v5_with_alpha(&[10, 20, 30, 128], 1, 1);
+        assert_eq!(&dib[124..], &[30, 20, 10, 128]);
     }
 }
 

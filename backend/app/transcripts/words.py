@@ -31,7 +31,8 @@ FILLERS: frozenset[str] = FILLERS_UK | FILLERS_EN
 
 WordFilter = Literal["all", "fillers"]
 
-_TOKEN_RE = re.compile(r"[\wЀ-ӿ]+(?:['’][\wЀ-ӿ]+)*", re.UNICODE)
+TOKEN_PATTERN = r"[\wЀ-ӿ]+(?:['’][\wЀ-ӿ]+)*"
+_TOKEN_RE = re.compile(TOKEN_PATTERN, re.UNICODE)
 
 _DICTATIONS_SQL = (
     "SELECT raw_text, audio_duration_seconds FROM entries WHERE source = 'dictation'"

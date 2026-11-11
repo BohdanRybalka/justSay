@@ -11,6 +11,7 @@ import asyncio
 import atexit
 import ctypes
 import logging
+import signal
 import socket
 import subprocess
 import sys
@@ -64,6 +65,12 @@ _SERVER_DECODES = frozenset({".wav", ".mp3", ".flac", ".aiff", ".aif"})
 _SERVER_RATE = 16000
 _SERVER_CANNOT_READ = "failed to read audio data"
 _SERVER_FAILED = "The local engine could not turn this audio into text"
+
+_ILLEGAL_INSTRUCTION_EXIT_CODES = frozenset({0xC000001D, -signal.SIGILL})
+PROCESSOR_NOT_SUPPORTED = (
+    "The local speech engine does not support this computer's processor, "
+    "so Local mode cannot start. You can use Cloud mode instead."
+)
 
 
 
@@ -298,6 +305,21 @@ def _readable_by_server(audio_path: Path) -> Path:
     return target
 
 
+def _early_exit_error(returncode: int) -> ResourceUnavailableError:
+    """The refusal for a whisper-server that exited before answering `/health`.
+
+    An illegal-instruction exit (Windows 0xC000001D, POSIX SIGILL) means the binary holds
+    instructions this CPU lacks, so it names the processor rather than a bare exit code.
+    """
+    if returncode in _ILLEGAL_INSTRUCTION_EXIT_CODES:
+        log.error("whisper-server died of an illegal instruction (code %s)", returncode)
+        return ResourceUnavailableError(
+            PROCESSOR_NOT_SUPPORTED,
+            diagnostic=f"whisper-server died of an illegal instruction (code {returncode})",
+        )
+    return ResourceUnavailableError(f"whisper-server exited early (code {returncode})")
+
+
 class WhisperCppServerSTTProvider(STTProvider):
     """whisper.cpp `whisper-server` -- local privacy-first STT on Windows
     AMD/Intel (Vulkan) and macOS Apple Silicon (Metal). The GGML model
@@ -383,6 +405,7 @@ class WhisperCppServerSTTProvider(STTProvider):
                 raise
 
     def _spawn_server(self, binary_path: Path, model_path: Path) -> None:
+        binary_path = binary_path.resolve()
         self._port = _free_port()
         argv = build_server_argv(binary_path, model_path, _HOST, self._port)
         creationflags = 0
@@ -394,6 +417,7 @@ class WhisperCppServerSTTProvider(STTProvider):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
+            cwd=binary_path.parent,
             creationflags=creationflags,
         )
         _register_child(self._process)
@@ -437,9 +461,7 @@ class WhisperCppServerSTTProvider(STTProvider):
         with httpx.Client(timeout=_HEALTH_REQUEST_TIMEOUT) as client:
             for _ in range(_HEALTH_POLL_MAX_ATTEMPTS):
                 if self._process.poll() is not None:
-                    raise ResourceUnavailableError(
-                        f"whisper-server exited early (code {self._process.returncode})"
-                    )
+                    raise _early_exit_error(self._process.returncode)
                 try:
                     if _answers_ready(client.get(url)):
                         return
