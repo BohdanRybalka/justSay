@@ -273,6 +273,20 @@ def _answers_ready(response: httpx.Response) -> bool:
     return isinstance(body, dict) and body.get("status") == "ok"
 
 
+async def _post_inference(url: str, data: dict[str, str], sendable: Path) -> dict:
+    """whisper-server's JSON answer for ``sendable``, never through a proxy; a cancel closes it.
+
+    The server's abort callback polls that connection between its encoder and decoder steps, so
+    a cancelled transcription stops there, and ``sendable`` is closed before the cancel ends.
+    """
+    with open(sendable, "rb") as f:
+        files = {"file": (sendable.name, f, "audio/wav")}
+        async with httpx.AsyncClient(timeout=_INFERENCE_TIMEOUT, trust_env=False) as client:
+            resp = await client.post(url, data=data, files=files)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def _readable_by_server(audio_path: Path) -> Path:
     """``audio_path`` when whisper-server decodes its format, else a 16 kHz mono WAV copy beside it.
 
@@ -314,6 +328,7 @@ class WhisperCppServerSTTProvider(STTProvider):
 
     is_local = True
     longest_piece_seconds = WHISPER_WINDOW_SECONDS
+    stops_when_dropped = True
 
     def __init__(self, settings: STTSettings):
         self._settings = settings
@@ -490,36 +505,24 @@ class WhisperCppServerSTTProvider(STTProvider):
             glossary_summary(glossary, dropped_terms),
         )
 
-        def _post() -> tuple[str, str | None, float | None]:
-            sendable = _readable_by_server(audio_path)
-            try:
-                with open(sendable, "rb") as f:
-                    files = {"file": (sendable.name, f, "audio/wav")}
-                    with httpx.Client(timeout=_INFERENCE_TIMEOUT) as client:
-                        resp = client.post(url, data=data, files=files)
-            finally:
-                if sendable != audio_path:
-                    discard_scratch_file(sendable)
-            resp.raise_for_status()
-            body = resp.json()
-            error = body.get("error")
-            if error is not None:
-                message = UNREADABLE_HERE if error == _SERVER_CANNOT_READ else _SERVER_FAILED
-                raise ResourceUnavailableError(message, diagnostic=f"whisper-server: {error}")
-            raw_text = body.get("text", "")
-            text = "".join(raw_text.splitlines()).strip()
-            no_speech_prob = (
-                min_no_speech_prob(body.get("segments"))
-                if response_format == "verbose_json"
-                else None
-            )
-            return text, body.get("language"), no_speech_prob
-
-        text, detected_raw, no_speech_prob = await asyncio.to_thread(_post)
+        sendable = await asyncio.to_thread(_readable_by_server, audio_path)
+        try:
+            body = await _post_inference(url, data, sendable)
+        finally:
+            if sendable != audio_path:
+                discard_scratch_file(sendable)
+        error = body.get("error")
+        if error is not None:
+            message = UNREADABLE_HERE if error == _SERVER_CANNOT_READ else _SERVER_FAILED
+            raise ResourceUnavailableError(message, diagnostic=f"whisper-server: {error}")
+        raw_text = body.get("text", "")
+        no_speech_prob = (
+            min_no_speech_prob(body.get("segments")) if response_format == "verbose_json" else None
+        )
         return TranscriptionResult(
-            text=text,
+            text="".join(raw_text.splitlines()).strip(),
             tokens_used=None,
-            detected_language=normalize_detected_language(detected_raw),
+            detected_language=normalize_detected_language(body.get("language")),
             no_speech_prob=no_speech_prob,
         )
 

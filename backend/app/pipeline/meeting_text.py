@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
@@ -72,6 +72,9 @@ class _TurnPacer:
 
     async def pause(self, seconds: float) -> None:
         await self._pacer.pause(seconds)
+
+    async def stoppable(self, request: Awaitable[TranscriptionResult]) -> TranscriptionResult:
+        return await self._pacer.stoppable(request)
 
     def piece_done(self, done: int, total: int) -> None:
         self._pieces = total

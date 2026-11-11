@@ -1379,6 +1379,9 @@ class _Observer:
     async def pause(self, seconds):
         return None
 
+    async def stoppable(self, request):
+        return await request
+
     def piece_done(self, done, total):
         return None
 

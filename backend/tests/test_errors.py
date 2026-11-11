@@ -61,7 +61,6 @@ _DELIBERATELY_OUTSIDE_THE_HIERARCHY = frozenset(
     {
         "app.audio.analysis.MalformedCaptureBlockError",
         "app.core.audio_formats.UndecodableAudioError",
-        "app.pipeline.jobs._JobCancelledError",
     }
 )
 _BUILTIN_EXCEPTION_BASES = frozenset(
@@ -69,7 +68,7 @@ _BUILTIN_EXCEPTION_BASES = frozenset(
     for name, value in vars(builtins).items()
     if isinstance(value, type) and issubclass(value, BaseException)
 )
-_DECLARED_EXCEPTION_CLASS_COUNT = 19
+_DECLARED_EXCEPTION_CLASS_COUNT = 18
 _HIERARCHY_MEMBER_COUNT = 16
 _WEB_FRAMEWORK_ROOTS = frozenset({"fastapi", "starlette"})
 

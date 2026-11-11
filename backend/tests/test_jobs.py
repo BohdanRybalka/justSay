@@ -60,8 +60,10 @@ class _FakePipeline:
         pieces: int = 1,
         pause: float | None = None,
         sends: bool = False,
+        stoppable: bool = False,
     ) -> None:
         self.sends = sends
+        self.stoppable = stoppable
         self.duration = duration
         self.pause = pause
         self.outcome = outcome
@@ -87,6 +89,8 @@ class _FakePipeline:
             if index + 1 < self.pieces:
                 await self.next_piece.wait()
                 self.next_piece.clear()
+            elif self.stoppable:
+                await observer.stoppable(self._answer())
             else:
                 await self.release.wait()
             observer.piece_done(index + 1, self.pieces)
@@ -98,6 +102,10 @@ class _FakePipeline:
         if self.outcome == "saved":
             observer.saved(f"entry-{len(self.calls)}")
         return ProcessingResult("hello", 5, model_name="mock/model")
+
+    async def _answer(self) -> TranscriptionResult:
+        await self.release.wait()
+        return TranscriptionResult(text="hello")
 
 
 @pytest.fixture
@@ -309,7 +317,7 @@ async def test_a_job_cancelled_during_a_piece_never_starts_the_pause_it_is_asked
     await asyncio.wait_for(pipeline.transcribing.wait(), 1)
     queue.cancel_or_dismiss(job_id)
 
-    with pytest.raises(jobs._JobCancelledError):
+    with pytest.raises(asyncio.CancelledError):
         await jobs._JobObserver(queue, queue._jobs[job_id]).pause(300.0)
     assert slept == []
     pipeline.release.set()
@@ -387,6 +395,45 @@ async def test_a_cancelled_transcription_holds_the_turn_until_its_answer_then_sa
     assert not cancelled.calls[0]["path"].exists()
     await asyncio.wait_for(after.transcribing.wait(), 1)
     after.release.set()
+
+
+async def test_a_cancelled_stoppable_send_is_dropped_at_once_and_the_turn_moves_on(
+    queue, fakes, caplog
+):
+    """A local engine stops on a dropped request, so its piece is not waited for."""
+    cancelled, after = _FakePipeline(stoppable=True), _FakePipeline()
+    job_id = _start(queue, fakes, cancelled)
+    _start(queue, fakes, after)
+    await asyncio.wait_for(cancelled.transcribing.wait(), 1)
+
+    with caplog.at_level("INFO", logger="app.pipeline.jobs"):
+        assert queue.cancel_or_dismiss(job_id) == "cancelled"
+        await asyncio.wait_for(after.transcribing.wait(), 1)
+
+    view = _view(queue, job_id)
+    assert (view.stage, view.entry_id) == ("cancelled", None)
+    assert not cancelled.calls[0]["path"].exists()
+    assert [r.levelname for r in caplog.records if "was cancelled" in r.getMessage()] == ["INFO"]
+    after.release.set()
+
+
+async def test_a_stoppable_send_made_after_the_cancel_never_starts(queue, fakes):
+    """A cancel that lands while the piece is cut leaves no send to drop, so none may begin."""
+    pipeline = _FakePipeline()
+    job_id = _start(queue, fakes, pipeline)
+    await asyncio.wait_for(pipeline.transcribing.wait(), 1)
+    queue.cancel_or_dismiss(job_id)
+    started: list[bool] = []
+
+    async def request() -> TranscriptionResult:
+        started.append(True)
+        return TranscriptionResult(text="late")
+
+    with pytest.raises(asyncio.CancelledError):
+        await jobs._JobObserver(queue, queue._jobs[job_id]).stoppable(request())
+    assert started == []
+    pipeline.release.set()
+    await _settle(queue, job_id)
 
 
 async def test_a_cancelled_job_stays_cancelled_when_its_answer_is_a_failure(queue, fakes):
@@ -584,6 +631,50 @@ async def test_a_file_whose_every_piece_is_silent_is_never_sent(
     view = _view(queue, job_id)
     assert (view.stage, view.error) == ("failed", jobs.NO_SPEECH_REASON)
     stt.transcribe.assert_not_called()
+
+
+@pytest.mark.parametrize("stops_when_dropped", [True, False])
+async def test_a_file_cancelled_mid_send_leaves_no_scratch_and_logs_no_error(
+    client, queue, tmp_path, monkeypatch, noise_is_voice, caplog, stops_when_dropped
+):
+    """Over the real pipeline. An engine that stops on a dropped request is dropped at once;
+    any other answer is waited for and not saved. Neither logs an error or leaves a file."""
+    asked, answer = asyncio.Event(), asyncio.Event()
+    dropped: list[bool] = []
+
+    async def transcribe(*args, **kwargs) -> TranscriptionResult:
+        asked.set()
+        try:
+            await answer.wait()
+        except asyncio.CancelledError:
+            dropped.append(True)
+            raise
+        return TranscriptionResult(text="not saved")
+
+    stt = MagicMock(model_name="mock/provider", is_local=False, longest_piece_seconds=600.0)
+    stt.transcribe = transcribe
+    stt.stops_when_dropped = stops_when_dropped
+    monkeypatch.setattr(settings.stt, "mode", ProviderMode.CLOUD)
+    monkeypatch.setattr(jobs, "process_audio", service.process_audio)
+    with (
+        patch("app.pipeline.service.get_provider", return_value=stt),
+        patch("app.pipeline.service.analyze_vad", return_value=None),
+        caplog.at_level("INFO"),
+    ):
+        upload = {"file": ("long.wav", _wav(tmp_path), "audio/wav")}
+        job_id = (await client.post("/jobs/file", files=upload)).json()["id"]
+        await asyncio.wait_for(asked.wait(), 5)
+        assert queue.cancel_or_dismiss(job_id) == "cancelled"
+        if not stops_when_dropped:
+            answer.set()
+        await asyncio.wait_for(_settle(queue, job_id), 1)
+
+    view = _view(queue, job_id)
+    assert (view.stage, view.entry_id) == ("cancelled", None)
+    assert list(queue._temp_dir.iterdir()) == []
+    assert dropped == ([True] if stops_when_dropped else [])
+    assert not [r for r in caplog.records if r.levelname in ("ERROR", "CRITICAL")]
+    assert any("was cancelled" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.parametrize(
