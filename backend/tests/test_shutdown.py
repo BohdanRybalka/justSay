@@ -122,6 +122,29 @@ def test_cli_passes_connection_drain_timeout_to_uvicorn(monkeypatch):
     assert captured["timeout_graceful_shutdown"] == SHUTDOWN_CONNECTION_DRAIN_SECONDS
 
 
+def _run_cli_recording_setpgid(monkeypatch, platform: str, frozen: bool) -> list[tuple]:
+    calls: list[tuple] = []
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: None)
+    monkeypatch.setattr("sys.argv", ["justsay-backend"])
+    monkeypatch.setattr("sys.platform", platform)
+    monkeypatch.setattr("sys.frozen", frozen, raising=False)
+    monkeypatch.setattr("os.setpgid", lambda *args: calls.append(args), raising=False)
+
+    from app.main import _cli
+
+    _cli()
+    return calls
+
+
+def test_the_frozen_macos_sidecar_leads_its_own_process_group(monkeypatch):
+    assert _run_cli_recording_setpgid(monkeypatch, "darwin", frozen=True) == [(0, 0)]
+
+
+@pytest.mark.parametrize(("platform", "frozen"), [("darwin", False), ("win32", True)])
+def test_no_other_backend_leaves_the_process_group_it_started_in(monkeypatch, platform, frozen):
+    assert _run_cli_recording_setpgid(monkeypatch, platform, frozen) == []
+
+
 def test_backend_teardown_budget_fits_inside_rust_shutdown_endpoint_poll_window():
     poll_max_attempts = _rust_u32_const("SIDECAR_SHUTDOWN_POLL_MAX_ATTEMPTS")
     poll_interval_seconds = _rust_duration_from_millis_const("GRACEFUL_POLL_INTERVAL")

@@ -13,6 +13,7 @@ mod account;
 mod backend;
 mod clipboard;
 mod image_export;
+mod memory_guard;
 mod paste;
 mod picked_file;
 mod ring_window;

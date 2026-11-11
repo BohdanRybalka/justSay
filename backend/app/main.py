@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import sys
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -13,6 +14,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from app import __version__
 from app.config import settings
 from app.core import tasks
+from app.core.frozen_build import is_frozen_build
 from app.core.logging_config import setup_logging
 
 setup_logging()
@@ -242,6 +244,15 @@ def _report_selftest(check: Callable[[], tuple[bool, str]]) -> NoReturn:
     sys.exit(0 if ok else 1)
 
 
+def _lead_own_process_group() -> None:
+    """Make the frozen macOS sidecar the leader of its own process group.
+
+    The shell ends that group, which reaches the local engine and the audio tap.
+    """
+    if sys.platform == "darwin" and is_frozen_build():
+        os.setpgid(0, 0)
+
+
 def _cli() -> None:
     """Entrypoint used by the PyInstaller-frozen sidecar.
 
@@ -252,6 +263,7 @@ def _cli() -> None:
 
     import uvicorn
 
+    _lead_own_process_group()
     parser = argparse.ArgumentParser(prog="justsay-backend")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=settings.port)

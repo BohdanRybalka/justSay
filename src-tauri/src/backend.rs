@@ -25,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -38,9 +38,7 @@ use std::os::windows::process::CommandExt;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 #[cfg(windows)]
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
-    JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    AssignProcessToJobObject,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
@@ -878,65 +876,19 @@ fn reap_orphan_sidecar() -> bool {
     false
 }
 
-/// Process-lifetime Windows Job Object carrying `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`,
-/// created lazily on first `spawn()` (mirrors the `HTTP_CLIENT` `OnceLock`
-/// pattern above). The backend child is assigned to it right after spawn (see
-/// `assign_child_to_job` / `assign_pid_to_job`); the Tauri parent holds the sole
-/// job handle and never closes it. When the parent dies by ANY means —
-/// `taskkill /F`, Task Manager "End Task", a hard crash, `TerminateProcess` —
-/// the OS closes that last handle and the kernel terminates every process still
-/// in the job, freeing `PREFERRED_PORT` for the next launch. This is the one backstop
-/// that survives a kill running no in-process code (the panic hook, console
-/// handler, `RunEvent::Exit` and the next-launch reap are all in-process) — see
-/// `docs/adr/023-force-kill-orphaned-backend.md`.
-///
-/// `Option`: a failed create/configure stores `None` once, logs once, and every
-/// caller degrades to the existing `reap_orphan_sidecar()` fallback rather than
-/// failing startup. The raw `HANDLE` (`*mut c_void`, not `Send`/`Sync`) is
-/// stored as `isize` and cast back on use so the static stays thread-safe.
-#[cfg(windows)]
-static BACKEND_JOB: OnceLock<Option<isize>> = OnceLock::new();
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+static RUNNING_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Create (once) the kill-on-close job and return its handle as `isize`, or
-/// `None` if creation/configuration failed (logged once; never fatal).
-///
-/// `CreateJobObjectW(NULL, NULL)` returns a NON-inheritable handle by default —
-/// required, so no spawned child can inherit a handle to the job and keep it
-/// open past the parent's death, which would defeat KILL_ON_JOB_CLOSE.
-#[cfg(windows)]
-fn backend_job() -> Option<isize> {
-    *BACKEND_JOB.get_or_init(|| {
-        unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job.is_null() {
-                log::warn!(
-                    "CreateJobObjectW failed; force-kill orphan protection unavailable this session"
-                );
-                return None;
-            }
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            let configured = SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const core::ffi::c_void,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            );
-            if configured == 0 {
-                log::warn!(
-                    "SetInformationJobObject failed; force-kill orphan protection unavailable this session"
-                );
-                CloseHandle(job);
-                return None;
-            }
-            Some(job as isize)
-        }
-    })
+/// The generation of the backend last stored in `BACKEND_PROCESS`; it stays
+/// after `guard.take()` empties it. Each `spawn()` takes a new one, so the
+/// memory guard's verdict names exactly one instance.
+fn running_generation() -> u64 {
+    RUNNING_GENERATION.load(Ordering::Acquire)
 }
 
 /// Assign the Dev-branch backend child to `job` via its raw OS process handle.
 /// Returns `false` on failure so the caller can log-and-continue. `job` is a
-/// handle from `backend_job()` (or a test-local job).
+/// handle from `memory_guard::instance_job()` (or a test-local job).
 #[cfg(windows)]
 fn assign_child_to_job(job: isize, child: &Child) -> bool {
     unsafe { AssignProcessToJobObject(job as HANDLE, child.as_raw_handle() as HANDLE) != 0 }
@@ -986,6 +938,10 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         return Err("Shutdown already requested; refusing to spawn a new backend".to_string());
     }
 
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::AcqRel);
+    #[cfg(target_os = "macos")]
+    crate::memory_guard::reap_orphaned_engines(&engine_roots(&app));
+
     let port = choose_port()?;
     CURRENT_PORT.store(port, Ordering::Release);
 
@@ -1000,6 +956,9 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
     } else {
         resolve_sidecar(&app)
     };
+
+    #[cfg(windows)]
+    let instance_job = crate::memory_guard::instance_job(generation);
 
     let backend = if let Some(sidecar) = resolved_sidecar {
         log::info!(
@@ -1022,7 +981,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
             .map_err(|e| format!("Failed to start backend sidecar: {}", e))?;
 
         #[cfg(windows)]
-        if let Some(job) = backend_job() {
+        if let Some(job) = instance_job {
             let pid = child.pid();
             if !assign_pid_to_job(job, pid) {
                 log::warn!(
@@ -1113,7 +1072,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
             .map_err(|e| format!("Failed to start backend: {}", e))?;
 
         #[cfg(windows)]
-        if let Some(job) = backend_job() {
+        if let Some(job) = instance_job {
             if !assign_child_to_job(job, &child) {
                 log::warn!(
                     "Failed to assign dev backend (PID {}) to the kill-on-close job; \
@@ -1129,6 +1088,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
     {
         let mut guard = BACKEND_PROCESS.lock().map_err(|e| e.to_string())?;
         *guard = Some(backend);
+        RUNNING_GENERATION.store(generation, Ordering::Release);
     }
 
     if is_shutdown_requested() {
@@ -1182,6 +1142,27 @@ fn backend_liveness() -> BackendLiveness {
         },
         None => BackendLiveness::Missing,
     }
+}
+
+/// The pid and generation of the running backend, the root of the tree the
+/// memory guard sums; `None` while none runs or another thread holds `BACKEND_PROCESS`.
+#[cfg(target_os = "macos")]
+pub fn backend_tree_root() -> Option<(u32, u64)> {
+    let mut guard = lock_with_wait(&BACKEND_PROCESS, LockWait::Skip)?;
+    let pid = match guard.as_mut()? {
+        BackendProcess::Sidecar(s) => s.alive.load(Ordering::Acquire).then(|| s.child.pid()),
+        BackendProcess::Dev(child) => matches!(child.try_wait(), Ok(None)).then(|| child.id()),
+    }?;
+    Some((pid, running_generation()))
+}
+
+/// Where an engine of ours can be installed: the bundle's resources and the
+/// developer's vendor folder.
+#[cfg(target_os = "macos")]
+fn engine_roots(app: &AppHandle) -> Vec<PathBuf> {
+    let bundled = app.path().resource_dir().ok();
+    let vendored = find_backend_dir().ok().map(|dir| dir.join("vendor"));
+    bundled.into_iter().chain(vendored).collect()
 }
 
 /// Check if the child process has exited unexpectedly.
@@ -1648,6 +1629,8 @@ fn kill_current_process(wait: LockWait, sidecar_stop: GracefulStop) {
                     },
                     sidecar_stop,
                 );
+                #[cfg(target_os = "macos")]
+                crate::memory_guard::end_process_group(pid);
             }
             BackendProcess::Dev(child) => {
                 let pid = child.id();
@@ -1725,15 +1708,19 @@ fn respawn_backoff(attempt: u32) -> Duration {
 /// `kill_current_process()` so the fresh spawn doesn't collide with it on
 /// the port.
 pub fn spawn_watchdog(app: AppHandle) {
+    #[cfg(target_os = "macos")]
+    crate::memory_guard::watch_backend_tree();
     tauri::async_runtime::spawn(async move {
         let mut attempt: u32 = 0;
         let mut confirmed_healthy = match wait_for_ready().await {
             Ok(()) => true,
             Err(e) => {
-                report_backend_failure(&format!(
-                    "Backend watchdog: initial backend not ready: {}",
-                    e
-                ));
+                if !crate::memory_guard::ended_by_guard(running_generation()) {
+                    report_backend_failure(&format!(
+                        "Backend watchdog: initial backend not ready: {}",
+                        e
+                    ));
+                }
                 false
             }
         };
@@ -1745,13 +1732,14 @@ pub fn spawn_watchdog(app: AppHandle) {
             }
 
             if confirmed_healthy {
-                match backend_liveness() {
-                    BackendLiveness::Running => continue,
-                    BackendLiveness::Exited(Some(status)) => report_backend_failure(&format!(
-                        "Backend (dev) exited with: {}",
-                        status
-                    )),
-                    BackendLiveness::Exited(None) | BackendLiveness::Missing => {}
+                let liveness = backend_liveness();
+                if matches!(liveness, BackendLiveness::Running) {
+                    continue;
+                }
+                if let BackendLiveness::Exited(Some(status)) = liveness {
+                    if !crate::memory_guard::ended_by_guard(running_generation()) {
+                        report_backend_failure(&format!("Backend (dev) exited with: {}", status));
+                    }
                 }
                 confirmed_healthy = false;
                 attempt = 0;
@@ -1774,6 +1762,15 @@ pub fn spawn_watchdog(app: AppHandle) {
                 return;
             }
 
+            let owed = crate::memory_guard::wait_owed_after(running_generation());
+            if !owed.is_zero() {
+                log::warn!("Backend watchdog: waiting {:?} more after a memory restart", owed);
+                tokio::time::sleep(owed).await;
+                if is_shutdown_requested() {
+                    return;
+                }
+            }
+
             if is_process_alive() {
                 log::warn!(
                     "Backend watchdog: previous backend never became ready; terminating before respawn"
@@ -1789,11 +1786,15 @@ pub fn spawn_watchdog(app: AppHandle) {
                         attempt = 0;
                     }
                     Err(e) => {
-                        report_backend_failure(&format!(
-                            "Backend watchdog: respawn did not become ready: {}",
-                            e
-                        ));
-                        attempt += 1;
+                        if crate::memory_guard::ended_by_guard(running_generation()) {
+                            log::warn!("Backend watchdog: the memory guard ended the respawned backend");
+                        } else {
+                            report_backend_failure(&format!(
+                                "Backend watchdog: respawn did not become ready: {}",
+                                e
+                            ));
+                            attempt += 1;
+                        }
                     }
                 },
                 Err(e) => {
@@ -2557,25 +2558,12 @@ mod tests {
         );
     }
 
-    /// Create a throwaway kill-on-close job for a single test. Never the shared
-    /// `BACKEND_JOB` static — a test must be able to `CloseHandle` it (the kill
-    /// trigger) and must not leak process-lifetime state into the test binary.
+    /// A job made the way every backend instance's job is, but owned by one
+    /// test, which closes it (the kill trigger) and leaks no state.
     #[cfg(windows)]
     fn create_test_job() -> isize {
-        unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            assert!(!job.is_null(), "CreateJobObjectW failed in test");
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            let configured = SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const core::ffi::c_void,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            );
-            assert_ne!(configured, 0, "SetInformationJobObject failed in test");
-            job as isize
-        }
+        crate::memory_guard::create_job(crate::memory_guard::HARD_LIMIT_BYTES)
+            .expect("the production job could not be made in a test")
     }
 
     /// Spawn a short-lived throwaway child that stays alive long enough to
