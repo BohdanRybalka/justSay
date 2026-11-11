@@ -22,9 +22,11 @@ log = logging.getLogger(__name__)
 CLEANUP_TIMEOUT_SECONDS = 4.0
 CLEANUP_FILLERS = ("ну", "типу")
 
-_HESITATION = re.compile(r"е+м*")
+_HESITATION = re.compile(r"е+м*(?:[-‐‑]е+м*)*")
 _APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'"})
-_TOKEN = re.compile(rf"{TOKEN_PATTERN}|[^\s.,;:!?…'\"«»„“”()\[\]\-‐‑–—]")
+_TOKEN = re.compile(
+    rf"(?:{TOKEN_PATTERN})(?:[-‐‑](?:{TOKEN_PATTERN}))*|[^\s.,;:!?…'\"«»„“”()\[\]\-‐‑–—]"
+)
 _SENTENCE_END = re.compile(r"[.!?…\n]")
 _MAX_ALIGNMENT_STATES = 500_000
 
@@ -80,10 +82,11 @@ def _filler_positions(said: _Words) -> set[int]:
 
 def _kept_positions(said: _Words, written: list[str]) -> dict[int, int] | None:
     """Each kept position of ``said`` mapped to its place in ``written``, or ``None`` when
-    ``written`` is not ``said`` with only fillers dropped, or when checking would need more
-    than `_MAX_ALIGNMENT_STATES` steps. Dropping is tried first."""
+    ``written`` is not ``said`` with only fillers dropped, or when (tokens + 1) × (drops + 1),
+    the most states the check could hold, passes `_MAX_ALIGNMENT_STATES`. Dropping is tried
+    first."""
     drops = len(said.tokens) - len(written)
-    if drops < 0 or (len(said.tokens) + 1) * (drops + 1) > _MAX_ALIGNMENT_STATES:
+    if (len(said.tokens) + 1) * (drops + 1) > _MAX_ALIGNMENT_STATES:
         return None
     fillers = _filler_positions(said)
     goal = (len(said.tokens), len(written))

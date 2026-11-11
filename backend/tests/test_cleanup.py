@@ -379,3 +379,27 @@ def test_a_dictation_too_long_to_check_keeps_its_transcript():
     kept = " ".join(f"слово{index}" for index in range(20000))
     raw = "ну, " * 30 + kept
     assert not is_faithful_cleanup(raw, kept)
+
+
+@pytest.mark.parametrize(
+    "raw, answer",
+    [
+        ("Надішли е-mail завтра", "Надішли mail завтра."),
+        ("Е-mail працює", "Mail працює."),
+        ("5-е листопада", "5 листопада."),
+        ("нуль градусів", "Градусів."),
+        ("експорт звіту", "Звіту."),
+    ],
+)
+def test_a_word_that_only_contains_a_filler_may_not_go(raw, answer):
+    assert not is_faithful_cleanup(raw, answer)
+
+
+def test_a_drawn_out_hyphenated_hesitation_may_go():
+    assert is_faithful_cleanup("Е-е-е, зробимо до четверга", "Зробимо до четверга.")
+
+
+def test_a_long_dictation_with_many_fillers_is_still_checked():
+    words = [f"слово{index}" for index in range(1500)]
+    raw = " ".join(word if index % 15 else f"ну, {word}" for index, word in enumerate(words))
+    assert is_faithful_cleanup(raw, " ".join(words))
