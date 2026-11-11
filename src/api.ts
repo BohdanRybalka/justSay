@@ -699,8 +699,8 @@ export interface UserSettings {
   ollama_host: string;
   /** Custom vocabulary / glossary, plumbed into all three STT providers. Stored
    *  whole under a backend-enforced 500-character ceiling and never truncated on
-   *  disk. The dictation cleanup receives the stored value whole; the Whisper-family engines
-   *  (faster-whisper, whisper.cpp, Groq) receive it unchanged when it fits their
+   *  disk. The Whisper-family engines (faster-whisper, whisper.cpp, Groq) receive
+   *  it unchanged when it fits their
    *  send-time budget, and otherwise whole terms, then whole words, then a
    *  character cut only inside a run with no boundary in it. */
   initial_prompt: string;

@@ -31,7 +31,8 @@ FILLERS: frozenset[str] = FILLERS_UK | FILLERS_EN
 
 WordFilter = Literal["all", "fillers"]
 
-_TOKEN_RE = re.compile(r"[\wЀ-ӿ]+(?:['’][\wЀ-ӿ]+)*", re.UNICODE)
+TOKEN_PATTERN = r"[\wЀ-ӿ]+(?:['’][\wЀ-ӿ]+)*"
+_TOKEN_RE = re.compile(TOKEN_PATTERN, re.UNICODE)
 
 _DICTATIONS_SQL = (
     "SELECT raw_text, audio_duration_seconds FROM entries WHERE source = 'dictation'"
@@ -56,11 +57,6 @@ def tokenize(text: str) -> list[str]:
     if not text:
         return []
     return _TOKEN_RE.findall(text.lower())
-
-
-def token_spans(text: str) -> list[tuple[int, int]]:
-    """Where each token of ``text`` sits in it, as ``(start, end)`` offsets, in order."""
-    return [match.span() for match in _TOKEN_RE.finditer(text)]
 
 
 _PHRASES: dict[tuple[str, ...], str] = {

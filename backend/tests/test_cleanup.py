@@ -88,6 +88,7 @@ def test_punctuation_and_case_alone_pass():
 def test_any_apostrophe_spelling_passes():
     assert is_faithful_cleanup("до п'ятниці", "До пʼятниці.")
     assert is_faithful_cleanup("до п’ятниці", "До п'ятниці.")
+    assert is_faithful_cleanup("до п‘ятниці", "До п'ятниці.")
 
 
 def test_a_sentence_deleted_from_a_long_dictation_is_caught_though_the_rest_is_kept():
@@ -106,8 +107,55 @@ def test_a_sentence_deleted_from_a_long_dictation_is_caught_though_the_rest_is_k
         ("тести", "Тести Playwright."),
     ],
 )
-def test_no_word_may_be_replaced_or_added_even_as_a_dictionary_spelling(raw, answer):
+def test_no_word_may_be_replaced_or_added(raw, answer):
     assert not is_faithful_cleanup(raw, answer)
+
+
+@pytest.mark.parametrize(
+    "raw, answer",
+    [
+        ("Це було як би добре", "Це було як добре."),
+        ("Це було як би добре", "Це було би добре."),
+    ],
+)
+def test_a_filler_of_two_words_may_not_lose_only_one(raw, answer):
+    assert not is_faithful_cleanup(raw, answer)
+
+
+@pytest.mark.parametrize(
+    "raw, answer",
+    [
+        ("Це було як би добре", "Це було добре."),
+        ("як би як завжди", "Як завжди."),
+        ("е-е, ееее, еммм, ну, типу, зробимо", "Зробимо."),
+        ("Е, зробимо. Ем, завтра.", "Зробимо. Завтра."),
+    ],
+)
+def test_whole_fillers_and_drawn_out_hesitations_may_go(raw, answer):
+    assert is_faithful_cleanup(raw, answer)
+
+
+@pytest.mark.parametrize(
+    "raw, answer",
+    [
+        ("товщина 5 мм", "Товщина 5."),
+        ("відстань 5 м від дому", "Відстань 5 від дому."),
+        ("вітамін Е", "Вітамін."),
+        ("зробимо, Е, завтра", "Зробимо, завтра."),
+        ("ЕМ працює", "Працює."),
+        ("I err on the side of caution", "I on the side of caution."),
+        ("ммм, добре", "Добре."),
+        ("um, okay", "Okay."),
+        ("відсоток 5%", "Відсоток 5."),
+        ("ціна 100 ₴", "Ціна 100."),
+    ],
+)
+def test_a_unit_letter_symbol_or_other_sound_may_not_go(raw, answer):
+    assert not is_faithful_cleanup(raw, answer)
+
+
+def test_an_answer_with_no_word_left_is_caught():
+    assert not is_faithful_cleanup("ну", ".")
 
 
 def test_a_dictionary_term_the_speaker_said_may_stay():
@@ -169,6 +217,8 @@ def test_scattered_deletions_that_summarise_are_caught():
 def test_the_prompt_names_only_the_removable_fillers_and_keeps_self_corrections():
     prompt = cleanup._SYSTEM_PROMPT
     assert f"filler words: {', '.join(cleanup.CLEANUP_FILLERS)};" in prompt
+    assert "remove the hesitation sounds е and ем," in prompt
+    assert "um, uh" not in prompt
     assert "right" not in prompt
     assert "including self-corrections" in prompt
     assert "keep only the corrected version" not in prompt
@@ -202,6 +252,13 @@ async def test_an_answer_that_swaps_a_word_for_a_dictionary_term_keeps_the_trans
         ("Готово. Ну, е, відправ звіт.", "Готово. відправ звіт.", "Готово. Відправ звіт."),
         ("Ну, е, як би піду.", "як би піду.", "Як би піду."),
         ("Ну, зробимо, ну, гаразд.", "зробимо. гаразд.", "Зробимо. гаразд."),
+        ("Готово? Ну, відправ.", "Готово? відправ.", "Готово? Відправ."),
+        ("Готово! Ну, відправ.", "Готово! відправ.", "Готово! Відправ."),
+        ("Готово… Ну, відправ.", "Готово… відправ.", "Готово… Відправ."),
+        ("Готово\nНу, відправ.", "Готово\nвідправ.", "Готово\nВідправ."),
+        ("Ну... зробимо", "зробимо", "Зробимо"),
+        ("Ну, е. зробимо", "зробимо.", "Зробимо."),
+        ("Ну ну зробимо", "ну зробимо", "Ну зробимо"),
     ],
 )
 async def test_a_sentence_whose_leading_filler_went_gets_its_capital_back(raw, answer, text):
@@ -216,6 +273,8 @@ async def test_a_sentence_whose_leading_filler_went_gets_its_capital_back(raw, a
         ("Так. Ну, зробимо.", "Так, зробимо."),
         ("Ну, зробимо.", "ну, зробимо."),
         ("Так. зробимо.", "Так. зробимо."),
+        ("Ну, iPhone зламався.", "iPhone зламався."),
+        ("Ну, eBay працює.", "eBay працює."),
     ],
 )
 async def test_no_other_letter_changes_case(raw, answer):
@@ -245,6 +304,11 @@ async def test_a_dropped_self_correction_keeps_the_transcript():
 async def test_an_empty_answer_keeps_even_a_transcript_of_fillers_alone():
     with patch.object(cleanup, "_call_groq", return_value=""):
         assert await clean_dictation("Ну е", _settings()) == "Ну е"
+
+
+async def test_an_answer_with_no_word_left_keeps_the_transcript():
+    with patch.object(cleanup, "_call_groq", return_value="."):
+        assert await clean_dictation("Ну", _settings()) == "Ну"
 
 
 async def test_local_mode_makes_no_call():
