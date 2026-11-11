@@ -277,11 +277,51 @@ fn close_before_the_installer(app: &AppHandle) {
     app.cleanup_before_exit();
 }
 
-/// Download and install the newest update; the page restarts into it after.
-/// An install that fails once JustSay is closed restarts it, since its backend,
-/// tray icon and windows are gone by then.
+/// What an update waits for, as the backend's `/pipeline/work-in-progress` names it.
+#[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Work {
+    Meeting,
+    Dictation,
+    Transcription,
+}
+
+#[derive(serde::Deserialize)]
+struct WorkInProgressView {
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    work: Option<Work>,
+}
+
+/// Why `install_update` did not install: work still running, a check that could not
+/// be made, or the updater's own failure.
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum InstallRefusal {
+    WaitsFor(Work),
+    CouldNotCheck(String),
+    Failed(String),
+}
+
+fn failed(e: impl ToString) -> InstallRefusal {
+    InstallRefusal::Failed(e.to_string())
+}
+
+/// Whether the backend's work-in-progress answer lets an install go ahead; an answer
+/// that is missing, lacks `work` or is not understood holds it.
+fn nothing_running(answer: Result<String, String>) -> Result<(), InstallRefusal> {
+    let body = answer.map_err(InstallRefusal::CouldNotCheck)?;
+    let view: WorkInProgressView = serde_json::from_str(&body).map_err(|_| {
+        InstallRefusal::CouldNotCheck("the backend's answer was not understood".to_string())
+    })?;
+    view.work.map_or(Ok(()), |work| Err(InstallRefusal::WaitsFor(work)))
+}
+
+/// Download and install the newest update; the page restarts into it after. Refuses
+/// while the backend reports work running, asked before the download and again right
+/// before the install. An install that fails once JustSay is closed restarts it.
 #[tauri::command]
-async fn install_update(app: AppHandle) -> Result<(), String> {
+async fn install_update(app: AppHandle) -> Result<(), InstallRefusal> {
+    nothing_running(backend::work_in_progress().await)?;
     let closed = Arc::new(AtomicBool::new(false));
     let hook_app = app.clone();
     let hook_closed = Arc::clone(&closed);
@@ -292,20 +332,22 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
             hook_closed.store(true, Ordering::Release);
         })
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(failed)?;
     let update = updater
         .check()
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "No update is available any more".to_string())?;
-    let installed = update.download_and_install(|_, _| {}, || {}).await;
+        .map_err(failed)?
+        .ok_or_else(|| failed("No update is available any more"))?;
+    let downloaded = update.download(|_, _| {}, || {}).await.map_err(failed)?;
+    nothing_running(backend::work_in_progress().await)?;
+    let installed = update.install(downloaded);
     if let Err(e) = &installed {
         if closed.load(Ordering::Acquire) {
             log::error!("The installer did not start after JustSay closed; restarting: {}", e);
             app.request_restart();
         }
     }
-    installed.map_err(|e| e.to_string())
+    installed.map_err(failed)
 }
 
 /// A second launch lands here, in the copy already running, which brings its
@@ -450,8 +492,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        meeting_item_shown, settings_is_on_screen, settings_on_screen_from_window_event,
-        settings_visibility_to_announce,
+        meeting_item_shown, nothing_running, settings_is_on_screen,
+        settings_on_screen_from_window_event, settings_visibility_to_announce, InstallRefusal,
+        Work,
     };
     use tauri::{PhysicalSize, WindowEvent};
 
@@ -528,6 +571,68 @@ mod tests {
             "a closed JustSay with no installer running has no backend or tray left, while a \
              failed download keeps the running app and shows the error"
         );
+    }
+
+    #[test]
+    fn an_install_goes_ahead_only_when_the_backend_reports_nothing_running() {
+        assert_eq!(nothing_running(Ok(r#"{"work":null}"#.into())), Ok(()));
+        for (name, work) in [
+            ("meeting", Work::Meeting),
+            ("dictation", Work::Dictation),
+            ("transcription", Work::Transcription),
+        ] {
+            assert_eq!(
+                nothing_running(Ok(format!(r#"{{"work":"{name}"}}"#))),
+                Err(InstallRefusal::WaitsFor(work))
+            );
+        }
+        for unreadable in [r#"{"work":"podcast"}"#, "{}", r#"{"work":1}"#, "not json"] {
+            assert_eq!(
+                nothing_running(Ok(unreadable.into())),
+                Err(InstallRefusal::CouldNotCheck(
+                    "the backend's answer was not understood".into()
+                )),
+                "{unreadable}"
+            );
+        }
+        assert_eq!(
+            nothing_running(Err("the backend did not answer".into())),
+            Err(InstallRefusal::CouldNotCheck("the backend did not answer".into()))
+        );
+    }
+
+    #[test]
+    fn a_refusal_reaches_the_page_named_by_what_it_waits_for() {
+        let as_json = |refusal| serde_json::to_value(refusal).unwrap();
+        assert_eq!(
+            as_json(InstallRefusal::WaitsFor(Work::Dictation)),
+            serde_json::json!({ "waits_for": "dictation" })
+        );
+        assert_eq!(
+            as_json(InstallRefusal::CouldNotCheck("x".into())),
+            serde_json::json!({ "could_not_check": "x" })
+        );
+        assert_eq!(
+            as_json(InstallRefusal::Failed("x".into())),
+            serde_json::json!({ "failed": "x" })
+        );
+    }
+
+    #[test]
+    fn the_install_asks_the_backend_before_the_download_and_again_before_installing() {
+        let install = top_level_fn_source("async fn install_update(");
+        let ask = "nothing_running(backend::work_in_progress().await)?;";
+        let first = install.find(ask).expect("the install asks before downloading");
+        let download = install.find("update.download(").expect("the download is its own step");
+        let second = download
+            + install[download..]
+                .find(ask)
+                .expect("work that started during the download must hold the install");
+        let installing = install
+            .find("update.install(downloaded)")
+            .expect("installs what it downloaded");
+        assert!(first < download && second < installing);
+        assert_eq!(install.matches(ask).count(), 2);
     }
 
     #[test]

@@ -81,7 +81,9 @@ TOOLING_REMEDY = (
     "when that tooling is missing, because a gate that skips is green on the day it breaks"
 )
 
-ROUTES_NO_CLIENT_LITERAL_NAMES = frozenset({"/audio/stop", "/shutdown", "/stt/local/install"})
+ROUTES_NO_CLIENT_LITERAL_NAMES = frozenset(
+    {"/audio/stop", "/pipeline/work-in-progress", "/shutdown", "/stt/local/install"}
+)
 
 
 class ClientLiteral(NamedTuple):
@@ -300,7 +302,7 @@ def test_every_backend_request_is_composed_from_the_base_url_and_a_path():
     )
 
 
-def test_the_unnamed_routes_are_the_three_the_sibling_gate_allowlists():
+def test_the_unnamed_routes_are_the_ones_the_sibling_gate_allowlists():
     addressed = addressed_route_shapes()
     unnamed = frozenset(
         path for path in application_paths() if route_segments(path) not in addressed
@@ -308,7 +310,7 @@ def test_the_unnamed_routes_are_the_three_the_sibling_gate_allowlists():
 
     assert unnamed == ROUTES_NO_CLIENT_LITERAL_NAMES, (
         f"the routes src/api.ts names no literal for are {sorted(unnamed)}, not "
-        f"{sorted(ROUTES_NO_CLIENT_LITERAL_NAMES)}. These three are written here as "
+        f"{sorted(ROUTES_NO_CLIENT_LITERAL_NAMES)}. These are written here as "
         f"literals rather than imported from backend/tests/test_route_consumers.py, so "
         f"that two gates reading the pair in opposite directions agree by measurement "
         f"instead of by shared code. When this fails, that module's allowlists are the "

@@ -241,6 +241,7 @@ pub fn api_token() -> &'static str {
 }
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const WORK_IN_PROGRESS_TIMEOUT: Duration = Duration::from_secs(10);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(300);
 const HEALTH_POLL_MAX_ATTEMPTS: u32 = 100;
 
@@ -1186,6 +1187,25 @@ fn backend_liveness() -> BackendLiveness {
 /// Check if the child process has exited unexpectedly.
 fn is_process_alive() -> bool {
     matches!(backend_liveness(), BackendLiveness::Running)
+}
+
+/// The body of the backend's `GET /pipeline/work-in-progress`, or why it could not be read.
+pub async fn work_in_progress() -> Result<String, String> {
+    let url = format!("http://127.0.0.1:{}/pipeline/work-in-progress", current_port());
+    let response = http_client()?
+        .get(&url)
+        .header("X-JustSay-Token", api_token())
+        .timeout(WORK_IN_PROGRESS_TIMEOUT)
+        .send()
+        .await
+        .map_err(|_| "the backend did not answer".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("the backend answered {}", response.status()));
+    }
+    response
+        .text()
+        .await
+        .map_err(|_| "the backend's answer did not arrive".to_string())
 }
 
 /// Poll /health until the backend responds or timeout. A backend that answers

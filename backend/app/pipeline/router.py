@@ -2,11 +2,13 @@
 
 import asyncio
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.audio.dependencies import get_recorder
+from app.audio.dependencies import get_active_meeting_recorder, get_recorder
+from app.audio.meeting_recorder import MeetingRecorder
 from app.audio.recorder import MicrophoneRecorder
 from app.audio.session import SessionRef
 from app.core.errors import JustSayError
@@ -33,6 +35,14 @@ class DictateResponse(BaseModel):
     entry_id: str | None = None
 
 
+class WorkInProgressView(BaseModel):
+    """What is still being recorded or turned into text: a meeting being recorded, a dictation
+    being recorded or processed, or a transcription queued, running or saving; ``null`` for none.
+    """
+
+    work: Literal["meeting", "dictation", "transcription"] | None
+
+
 @router.post("/dictate", response_model=DictateResponse)
 async def dictate(
     background_tasks: BackgroundTasks,
@@ -49,16 +59,16 @@ async def dictate(
     if not recorder.is_recording:
         raise HTTPException(status_code=409, detail="Not recording. Call POST /audio/start first")
 
-    audio_path = await recorder.stop(ref.session_id if ref else None)
-    captured_duration = recorder.last_duration_seconds
-    log.info(
-        "Dictate: stopped recording. path=%s duration=%.2fs language=%s",
-        audio_path.name, captured_duration, language,
-    )
+    with dictation_gate.dictating():
+        audio_path = await recorder.stop(ref.session_id if ref else None)
+        captured_duration = recorder.last_duration_seconds
+        log.info(
+            "Dictate: stopped recording. path=%s duration=%.2fs language=%s",
+            audio_path.name, captured_duration, language,
+        )
 
-    mode = stt_settings.mode
-    try:
-        with dictation_gate.dictating():
+        mode = stt_settings.mode
+        try:
             result = await process_audio(
                 audio_path,
                 language=language,
@@ -66,15 +76,32 @@ async def dictate(
                 background_tasks=background_tasks,
                 source="dictation",
             )
-        return DictateResponse(**result.__dict__)
-    except (asyncio.CancelledError, Exception) as failure:
-        queue.keep_failed_dictation(audio_path, language=language, mode=mode)
-        if isinstance(failure, asyncio.CancelledError | JustSayError):
-            raise
-        log.exception("Pipeline failure")
-        raise HTTPException(
-            status_code=500,
-            detail=_PIPELINE_CRASHED_DETAIL,
-        )
-    finally:
-        discard_scratch_file(audio_path)
+            return DictateResponse(**result.__dict__)
+        except (asyncio.CancelledError, Exception) as failure:
+            queue.keep_failed_dictation(audio_path, language=language, mode=mode)
+            if isinstance(failure, asyncio.CancelledError | JustSayError):
+                raise
+            log.exception("Pipeline failure")
+            raise HTTPException(
+                status_code=500,
+                detail=_PIPELINE_CRASHED_DETAIL,
+            )
+        finally:
+            discard_scratch_file(audio_path)
+
+
+@router.get("/work-in-progress", response_model=WorkInProgressView)
+async def get_work_in_progress(
+    recorder: MicrophoneRecorder = Depends(get_recorder),
+    meeting_recorder: MeetingRecorder | None = Depends(get_active_meeting_recorder),
+    queue: JobQueue = Depends(get_job_queue),
+):
+    """The work still running that an update has to wait for, or ``null`` when there is none."""
+    meeting_busy = meeting_recorder is not None and meeting_recorder.is_busy
+    if meeting_recorder is not None and meeting_recorder.is_recording:
+        return WorkInProgressView(work="meeting")
+    if recorder.is_recording or dictation_gate.is_processing:
+        return WorkInProgressView(work="dictation")
+    if queue.is_working:
+        return WorkInProgressView(work="transcription")
+    return WorkInProgressView(work="meeting" if meeting_busy else None)
