@@ -2,16 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dropFocusWhenDisabled } from "../../ui/browser-focus.test-helper";
 
-const { checkMock, invokeMock, relaunchMock, apiMock } = vi.hoisted(() => ({
+const { checkMock, invokeMock, relaunchMock } = vi.hoisted(() => ({
   checkMock: vi.fn(),
   invokeMock: vi.fn(),
   relaunchMock: vi.fn(),
-  apiMock: { audioStatus: vi.fn(), getMeetingStatus: vi.fn(), jobs: vi.fn() },
-}));
-
-vi.mock("../../api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../api")>()),
-  api: apiMock,
 }));
 
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: checkMock }));
@@ -19,13 +13,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: relaunchMock }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn(async () => "0.13.1") }));
 
-import type { MeetingStatus, RecordingStatus, TranscriptionJob } from "../../api";
-import {
-  renderVersionRow,
-  UPDATE_WAITS_FOR_DICTATION,
-  UPDATE_WAITS_FOR_MEETING,
-  UPDATE_WAITS_FOR_TRANSCRIPTION,
-} from "./version-row";
+import { renderVersionRow, UPDATE_WAITS_FOR } from "./version-row";
 
 const LAST_UP_TO_DATE_KEY = "justsay.updates.lastUpToDateAt";
 
@@ -45,26 +33,9 @@ function installCalls(): number {
   return invokeMock.mock.calls.filter(([command]) => command === "install_update").length;
 }
 
-const IDLE_DICTATION: RecordingStatus = { is_recording: false, duration_seconds: 0, level_db: null, session_id: null };
-const IDLE_MEETING: MeetingStatus = {
-  is_recording: false,
-  duration_seconds: 0,
-  level_db: null,
-  system_endpoint: null,
-  system_level_db: null,
-  capture_incident: null,
-};
-
-function job(kind: TranscriptionJob["kind"], stage: TranscriptionJob["stage"]): TranscriptionJob {
-  return { id: `${kind}-${stage}`, kind, name: "talk.m4a", stage, progress: null, error: null, entry_id: null };
-}
-
 beforeEach(() => {
   vi.clearAllMocks();
   invokeMock.mockResolvedValue(undefined);
-  apiMock.audioStatus.mockResolvedValue(IDLE_DICTATION);
-  apiMock.getMeetingStatus.mockResolvedValue(IDLE_MEETING);
-  apiMock.jobs.mockResolvedValue([job("file", "done"), job("meeting", "failed")]);
   localStorage.clear();
 });
 
@@ -175,34 +146,30 @@ describe("Version row — check, install and restart", () => {
   });
 
   it.each([
-    ["a dictation", () => apiMock.audioStatus.mockResolvedValue({ ...IDLE_DICTATION, is_recording: true }), UPDATE_WAITS_FOR_DICTATION],
-    ["a meeting recording", () => apiMock.getMeetingStatus.mockResolvedValue({ ...IDLE_MEETING, is_recording: true }), UPDATE_WAITS_FOR_MEETING],
-    ["a file transcription", () => apiMock.jobs.mockResolvedValue([job("file", "transcribing")]), UPDATE_WAITS_FOR_TRANSCRIPTION],
-    ["a meeting being turned into text", () => apiMock.jobs.mockResolvedValue([job("meeting", "queued")]), UPDATE_WAITS_FOR_TRANSCRIPTION],
-  ])("does not install during %s, says what it waits for, and installs once that ends", async (_work, start, message) => {
+    ["meeting", "Stop the meeting recording first, then install the update."],
+    ["dictation", "Finish the dictation first, then install the update."],
+    ["transcription", "Wait until the transcription finishes, then install the update."],
+  ] as const)("when the shell waits for a %s it says so and offers the same install again", async (work, message) => {
+    expect(UPDATE_WAITS_FOR[work]).toBe(message);
+    invokeMock.mockRejectedValueOnce({ waits_for: work });
     checkMock.mockResolvedValue(READY_UPDATE);
     const { button, status } = renderRow();
     button.click();
     await vi.waitFor(() => expect(button.textContent).toBe("Install and restart"));
-    start();
 
     button.click();
     await vi.waitFor(() => expect(status.textContent).toBe(message));
-    expect(installCalls()).toBe(0);
     expect(relaunchMock).not.toHaveBeenCalled();
     expect(button.textContent).toBe("Install and restart");
     expect(button.disabled).toBe(false);
 
-    apiMock.audioStatus.mockResolvedValue(IDLE_DICTATION);
-    apiMock.getMeetingStatus.mockResolvedValue(IDLE_MEETING);
-    apiMock.jobs.mockResolvedValue([]);
     button.click();
     await vi.waitFor(() => expect(relaunchMock).toHaveBeenCalledTimes(1));
-    expect(installCalls()).toBe(1);
+    expect(installCalls()).toBe(2);
   });
 
-  it.each(["audioStatus", "getMeetingStatus", "jobs"] as const)("does not install when %s cannot be read", async (read) => {
-    apiMock[read].mockRejectedValue(new Error("backend timed out"));
+  it("when the shell could not check for work it says why the update waits", async () => {
+    invokeMock.mockRejectedValueOnce({ could_not_check: "the backend did not answer" });
     checkMock.mockResolvedValue(READY_UPDATE);
     const { button, status } = renderRow();
     button.click();
@@ -210,14 +177,30 @@ describe("Version row — check, install and restart", () => {
 
     button.click();
     await vi.waitFor(() =>
-      expect(status.textContent).toBe("Couldn't check whether a recording is running, so the update waits: backend timed out"),
+      expect(status.textContent).toBe(
+        "Couldn't check whether a recording is running, so the update waits: the backend did not answer",
+      ),
     );
-    expect(installCalls()).toBe(0);
+    expect(relaunchMock).not.toHaveBeenCalled();
+    expect(button.textContent).toBe("Install and restart");
     expect(button.disabled).toBe(false);
+  });
+
+  it("names the updater's own failure the shell reports", async () => {
+    invokeMock.mockRejectedValueOnce({ failed: "signature mismatch" });
+    checkMock.mockResolvedValue(READY_UPDATE);
+    const { button, status } = renderRow();
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Install and restart"));
+
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Try again"));
+    expect(status.textContent).toBe("Install failed: signature mismatch");
   });
 
   it("a failed install offers a retry that installs, not checks", async () => {
     invokeMock.mockRejectedValueOnce("disk full");
+
     checkMock.mockResolvedValue(READY_UPDATE);
     const { button, status } = renderRow();
 

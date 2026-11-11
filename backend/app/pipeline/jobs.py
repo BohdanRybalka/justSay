@@ -77,6 +77,7 @@ LIMIT_REACHED_REASON = "Your API key has used up its limit for now. Try again in
 LIMIT_REACHED_SECONDS = 3600.0
 
 _CANCELLABLE: frozenset[JobStage] = frozenset({"queued", "transcribing"})
+_RUNNING: frozenset[JobStage] = frozenset({"queued", "transcribing", "saving"})
 _EXPIRING: frozenset[JobStage] = frozenset({"done", "cancelled"})
 
 
@@ -105,6 +106,10 @@ class DictationGate:
             yield
         finally:
             self._in_flight -= 1
+
+    @property
+    def is_processing(self) -> bool:
+        return self._in_flight > 0
 
     async def wait_for_none(self) -> None:
         while self._in_flight:
@@ -280,10 +285,26 @@ class JobQueue:
     ) -> None:
         self._temp_dir = temp_dir
         self._jobs: dict[str, _Job] = {}
+        self._receiving = 0
         self._turn = asyncio.Lock()
         self.gate = gate
         self.clock = clock
         self.sleep = sleep
+
+    @contextmanager
+    def receiving(self) -> Generator[None, None, None]:
+        """Count an uploaded file or a stopped meeting's recording, still arriving, as work in
+        progress until it is queued or refused."""
+        self._receiving += 1
+        try:
+            yield
+        finally:
+            self._receiving -= 1
+
+    @property
+    def is_working(self) -> bool:
+        """Whether a file or a recording is still arriving, or a job waits, runs or saves."""
+        return self._receiving > 0 or any(job.stage in _RUNNING for job in self._jobs.values())
 
     def add_file(self, content: bytes, name: str) -> str:
         """Keep ``content`` in a scratch file and queue it for transcription; answer the job id."""

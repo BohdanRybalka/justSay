@@ -92,6 +92,12 @@ CONSUMED_OUTSIDE_TYPESCRIPT: dict[str, tuple[tuple[Path, str], ...]] = {
     "/shutdown": (
         (BACKEND_RS, r'format!\("http://127\.0\.0\.1:\{\}/shutdown", current_port\(\)\)'),
     ),
+    "/pipeline/work-in-progress": (
+        (
+            BACKEND_RS,
+            r'format!\("http://127\.0\.0\.1:\{\}/pipeline/work-in-progress", current_port\(\)\)',
+        ),
+    ),
 }
 
 UNCONSUMED_PENDING_A_DECISION: dict[str, str] = {

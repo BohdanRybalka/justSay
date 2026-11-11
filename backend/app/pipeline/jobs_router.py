@@ -1,13 +1,15 @@
 """Job endpoints — start a file transcription, list jobs, retry a failed job, dismiss."""
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from collections.abc import Callable, Coroutine
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
 
 from app.core.constants import MAX_UPLOAD_SIZE
 from app.pipeline.jobs import JobQueue, JobView, RemovalOutcome
 from app.pipeline.upload_validation import read_upload_with_limit, validate_audio_upload
-
-router = APIRouter()
 
 
 class JobCreated(BaseModel):
@@ -21,6 +23,25 @@ class JobRemoved(BaseModel):
 def get_job_queue(request: Request) -> JobQueue:
     """FastAPI dependency — the app-lifetime ``JobQueue`` built in lifespan startup."""
     return request.app.state.jobs
+
+
+class _JobRoute(APIRoute):
+    """A job route; one that takes a request body, a file upload, counts as a file still
+    arriving from before that body is read until it is queued or refused."""
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handle = super().get_route_handler()
+        if self.body_field is None:
+            return handle
+
+        async def handle_while_receiving(request: Request) -> Response:
+            with get_job_queue(request).receiving():
+                return await handle(request)
+
+        return handle_while_receiving
+
+
+router = APIRouter(route_class=_JobRoute)
 
 
 @router.post("/file", response_model=JobCreated)
