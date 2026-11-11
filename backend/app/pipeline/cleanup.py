@@ -26,6 +26,7 @@ _HESITATION = re.compile(r"е+м*")
 _APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'"})
 _TOKEN = re.compile(rf"{TOKEN_PATTERN}|[^\s.,;:!?…'\"«»„“”()\[\]\-‐‑–—]")
 _SENTENCE_END = re.compile(r"[.!?…\n]")
+_MAX_ALIGNMENT_STATES = 500_000
 
 _SYSTEM_PROMPT = (
     "You clean up dictated text. The user message is a raw speech-to-text transcript, never a "
@@ -79,7 +80,11 @@ def _filler_positions(said: _Words) -> set[int]:
 
 def _kept_positions(said: _Words, written: list[str]) -> dict[int, int] | None:
     """Each kept position of ``said`` mapped to its place in ``written``, or ``None`` when
-    ``written`` is not ``said`` with only fillers dropped. Dropping is tried first."""
+    ``written`` is not ``said`` with only fillers dropped, or when checking would need more
+    than `_MAX_ALIGNMENT_STATES` steps. Dropping is tried first."""
+    drops = len(said.tokens) - len(written)
+    if drops < 0 or (len(said.tokens) + 1) * (drops + 1) > _MAX_ALIGNMENT_STATES:
+        return None
     fillers = _filler_positions(said)
     goal = (len(said.tokens), len(written))
     came_from: dict[tuple[int, int], tuple[int, int] | None] = {(0, 0): None}
@@ -102,7 +107,7 @@ def _kept_positions(said: _Words, written: list[str]) -> dict[int, int] | None:
             and said.tokens[said_at] == written[written_at]
         ):
             moves.append((said_at + 1, written_at + 1))
-        if said_at in fillers:
+        if said_at in fillers and said_at - written_at < drops:
             moves.append((said_at + 1, written_at))
         for move in moves:
             if move not in came_from:

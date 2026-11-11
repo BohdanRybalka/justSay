@@ -1,5 +1,6 @@
 """Dictation cleanup: the guard on real model answers, and every way back to the transcript."""
 
+import tracemalloc
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -361,3 +362,20 @@ def test_the_call_asks_for_a_deterministic_low_effort_answer():
         {"role": "system", "content": "system"},
         {"role": "user", "content": "готово"},
     ]
+
+def test_a_long_dictation_is_checked_in_memory_that_grows_with_the_fillers_dropped():
+    raw = "ну " * 2000 + "кінець"
+    answer = "ну " * 1999 + "кінець"
+    tracemalloc.start()
+    try:
+        assert is_faithful_cleanup(raw, answer)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 20 * 1024 * 1024
+
+
+def test_a_dictation_too_long_to_check_keeps_its_transcript():
+    kept = " ".join(f"слово{index}" for index in range(20000))
+    raw = "ну, " * 30 + kept
+    assert not is_faithful_cleanup(raw, kept)
