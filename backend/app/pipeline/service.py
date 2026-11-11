@@ -28,6 +28,7 @@ from app.pipeline.chunking import (
     transcribe_with_pauses,
 )
 from app.pipeline.cleanup import clean_dictation
+from app.pipeline.dictation import transcribe_dictation
 from app.pipeline.meeting_text import has_two_tracks, spoken_word_count, transcribe_meeting
 from app.pipeline.utils import detect_duration
 from app.stt.base import SINGLE_ATTEMPT
@@ -111,7 +112,7 @@ async def process_audio(
     ``background_tasks`` schedules embedding generation after the response is sent. ``source``
     and ``source_name`` say where the history entry came from. Audio with an ``observer``, or
     longer than ``LONG_DICTATION_SECONDS``, goes in pieces; those ``finished`` already holds are
-    not sent again (not for a two-channel meeting).
+    not sent again (not for a two-channel meeting). A shorter Cloud dictation has its own pieces.
     """
     start = time.perf_counter()
 
@@ -156,8 +157,11 @@ async def process_audio(
     stays_on = _cloud_stays_on if cloud_dictation else None
     pacer: PiecePacer = observer if observer is not None else UnpacedPieces(stays_on)
     attempt_token = SINGLE_ATTEMPT.set(route_settings.mode == ProviderMode.CLOUD)
+    short = observer is None and not (duration is not None and duration > LONG_DICTATION_SECONDS)
     try:
-        if observer is None and not (duration is not None and duration > LONG_DICTATION_SECONDS):
+        if short and cloud_dictation:
+            result = await transcribe_dictation(stt, audio_path, language, duration, pacer)
+        elif short:
             result = await transcribe_with_pauses(
                 stt,
                 audio_path,

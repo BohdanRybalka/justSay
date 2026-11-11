@@ -20,6 +20,7 @@ class STTSettings(PackageSettings):
 
     groq_api_key: str = ""
     groq_whisper_model: str = "whisper-large-v3-turbo"
+    groq_second_opinion_model: str = "whisper-large-v3"
     groq_cleanup_model: str = "openai/gpt-oss-20b"
 
     whisper_model_size: str = Field(default="large-v3-turbo", pattern=r"\A[A-Za-z0-9._-]+\z")

@@ -15,7 +15,7 @@ import asyncio
 import logging
 import re
 from collections import Counter
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import ClassVar, Protocol
@@ -331,17 +331,21 @@ async def transcribe_with_pauses(
     max_pause: float = MAX_PAUSE_SECONDS,
     max_pauses: int = MAX_PAUSES_PER_PIECE,
     retry_delays: Sequence[float] = (),
+    provider_options: Mapping[str, object] | None = None,
 ) -> TranscriptionResult:
     """One answer for one audio file: waits out Retry-After, checking the route before each send.
 
     Any other failure worth another try is sent again after each of ``retry_delays`` in turn;
     with ``retry_delays`` given, a send nobody answered counts as such a failure, not as a pause.
+    ``provider_options`` reach the provider's ``transcribe`` as keyword arguments.
     """
     pauses = failures = 0
     while True:
         await pacer.before_send()
         try:
-            request = stt.transcribe(path, language=language, audio_duration=duration)
+            request = stt.transcribe(
+                path, language=language, audio_duration=duration, **(provider_options or {})
+            )
             if stt.stops_when_dropped:
                 return await pacer.stoppable(request)
             return await request
