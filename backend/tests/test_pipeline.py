@@ -1598,17 +1598,22 @@ def _noise_wav(path: Path, seconds: float) -> Path:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("source", "seconds", "sent"),
-    [("dictation", 0.08, False), ("dictation", 0.2, True), ("file", 0.08, True)],
+    ("source", "seconds", "pressed", "sent"),
+    [
+        ("dictation", 0.08, None, False),
+        ("dictation", 0.08, 0.2, False),
+        ("dictation", 0.2, None, True),
+        ("file", 0.08, None, True),
+    ],
 )
 async def test_a_dictation_too_short_to_hold_a_word_never_reaches_the_engine(
-    tmp_path, cloud_mode, _isolate_side_effects, source, seconds, sent
+    tmp_path, cloud_mode, _isolate_side_effects, source, seconds, pressed, sent
 ):
     stt = _make_stt_mock("Дякую.")
     path = _noise_wav(tmp_path / "tap.wav", seconds)
 
     with patch("app.pipeline.service.get_provider", return_value=stt):
-        result = await process_audio(path, language="uk", source=source)
+        result = await process_audio(path, language="uk", audio_duration=pressed, source=source)
 
     assert stt.transcribe.await_count == int(sent)
     assert (result.discarded_reason is None) is sent
@@ -1634,32 +1639,40 @@ async def test_a_dictation_needs_a_word_of_voice_from_the_vad(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("source", "seconds", "heard", "kept"),
+    ("source", "seconds", "pressed", "is_local", "heard", "kept"),
     [
-        ("dictation", 1.0, "Дякую за перегляд!", None),
-        ("dictation", 1.0, "Дякую за перегляд! А тепер до справи.", "А тепер до справи."),
-        ("dictation", 4.0, "Дякую за перегляд!", "Дякую за перегляд!"),
-        ("file", 1.0, "Дякую за перегляд!", "Дякую за перегляд!"),
+        ("dictation", 1.0, None, True, "Дякую за перегляд!", None),
+        ("dictation", 1.0, None, False, "Дякую за перегляд!", None),
+        ("dictation", 1.0, 4.0, True, "Дякую за перегляд!", None),
+        (
+            "dictation", 1.0, None, True,
+            "Дякую за перегляд! А тепер до справи.", "А тепер до справи.",
+        ),
+        ("dictation", 4.0, None, True, "Дякую за перегляд!", "Дякую за перегляд!"),
+        ("file", 1.0, None, True, "Дякую за перегляд!", "Дякую за перегляд!"),
     ],
 )
 async def test_a_short_dictation_loses_the_phrases_engines_make_up_over_silence(
-    sample_wav, cloud_mode, _isolate_side_effects, source, seconds, heard, kept
+    tmp_path, cloud_mode, _isolate_side_effects, source, seconds, pressed, is_local, heard, kept
 ):
     save_mock = _isolate_side_effects
     stt = _make_stt_mock(heard)
-    stt.is_local = True
+    stt.is_local = is_local
+    clean = AsyncMock(side_effect=lambda text, _settings: text)
+    path = _noise_wav(tmp_path / "dictation.wav", seconds)
 
     with (
         patch("app.pipeline.service.get_provider", return_value=stt),
+        patch("app.pipeline.service.clean_dictation", clean),
         patch("app.stt.local_setup.await_local_ready", AsyncMock()),
     ):
-        result = await process_audio(
-            sample_wav, language="uk", audio_duration=seconds, source=source
-        )
+        result = await process_audio(path, language="uk", audio_duration=pressed, source=source)
 
+    assert stt.transcribe.await_count == 1
     if kept is None:
         assert result.discarded_reason == "silence"
         save_mock.assert_not_called()
+        clean.assert_not_called()
     else:
         assert result.text == kept
         assert save_mock.call_args.kwargs["raw_text"] == kept

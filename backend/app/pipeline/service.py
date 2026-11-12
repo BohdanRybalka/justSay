@@ -2,7 +2,8 @@
 
 Cloud mode transcribes on Groq Whisper, Local mode on this machine's engine.
 A Cloud-mode dictation is cleaned of fillers before it is returned; history keeps both texts.
-A dictation needs a word's worth of voice, and a short one loses the phrases engines make up.
+A dictation shorter than a word, or with less voice than one by the VAD, is silence; a short one
+loses the phrases engines make up over silence.
 """
 
 import asyncio
@@ -105,6 +106,11 @@ def _holds_no_speech(audio_path: Path) -> bool:
     return note is not None
 
 
+def _shortest(*seconds: float | None) -> float | None:
+    known = [value for value in seconds if value is not None]
+    return min(known) if known else None
+
+
 def _discarded(start: float, model_name: str = "") -> ProcessingResult:
     return ProcessingResult(
         text="",
@@ -145,8 +151,13 @@ async def process_audio(
         and await asyncio.to_thread(has_two_tracks, audio_path)
     )
     dictation = source == "dictation"
-    if dictation and duration is not None and duration < SHORTEST_WORD_SECONDS:
-        log.warning("Discarding a %.3fs dictation: too short to hold a word", duration)
+    recorded = (
+        _shortest(duration, await asyncio.to_thread(detect_duration, audio_path))
+        if dictation
+        else None
+    )
+    if recorded is not None and recorded < SHORTEST_WORD_SECONDS:
+        log.warning("Discarding a %.3fs dictation: too short to hold a word", recorded)
         return _discarded(start)
     discard_log = (
         None
@@ -246,14 +257,19 @@ async def process_audio(
         return _discarded(start, stt.model_name)
 
     raw_text = result.text
-    if dictation and duration is not None and duration < LITTLE_SPEECH_SECONDS:
+    if recorded is not None and recorded < LITTLE_SPEECH_SECONDS:
         raw_text = without_invented_phrases(result.text)
         if result.text and not raw_text:
             log.warning(
                 "Discarding a %.1fs dictation: %s wrote only a phrase made up over silence",
-                duration, stt.model_name,
+                recorded, stt.model_name,
             )
             return _discarded(start, stt.model_name)
+        if raw_text != result.text:
+            log.info(
+                "Dropped made-up phrases from a %.1fs dictation (%d of %d chars kept)",
+                recorded, len(raw_text), len(result.text),
+            )
     text = raw_text
     if dictation and not is_local_provider(stt):
         text = await clean_dictation(raw_text, stt_settings)
