@@ -251,12 +251,14 @@ def speech_probabilities(samples: np.ndarray, settings: AudioSettings) -> np.nda
     return probabilities
 
 
-def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None:
+def analyze_vad(
+    audio_path: Path, settings: AudioSettings, *, min_speech_hops: int = 0
+) -> VadAnalysis | None:
     """Stream ``audio_path`` through TEN VAD and decide whether it is silent.
 
     Silent means fewer hops clearing ``silence_vad_probability`` than
-    `_required_speech_hops` asks for. ``None`` — never a raise, never a silent
-    verdict — means this layer abstains and the energy verdict decides.
+    `_required_speech_hops` asks for, or than ``min_speech_hops`` when that is more.
+    ``None`` — never a raise, never a silent verdict — means the energy verdict decides.
     """
     library = _get_library()
     if library is None:
@@ -273,7 +275,7 @@ def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None
         estimated_total_hops = max(
             1, int(info.frames * _VAD_SAMPLE_RATE / samplerate) // _HOP_SAMPLES
         )
-        required_hops = _required_speech_hops(estimated_total_hops, settings)
+        required_hops = max(_required_speech_hops(estimated_total_hops, settings), min_speech_hops)
 
         blocksize = max(_HOP_SAMPLES, int(_BLOCK_SECONDS * samplerate))
         carry = np.empty(0, dtype=np.float32)
@@ -330,7 +332,9 @@ def analyze_vad(audio_path: Path, settings: AudioSettings) -> VadAnalysis | None
                 decoded_ms, audio_path, settings.silence_min_analysis_ms,
             )
             return None
-        required_hops = _required_speech_hops(max(1, total_hops), settings)
+        required_hops = max(
+            _required_speech_hops(max(1, total_hops), settings), min_speech_hops
+        )
 
     return VadAnalysis(
         speech_hop_count=int(speech_hops),

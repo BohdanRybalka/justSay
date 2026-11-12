@@ -254,15 +254,15 @@ async def test_files_meetings_and_local_dictations_are_not_cleaned(
 async def test_pipeline_respects_explicit_audio_duration(
     sample_wav, cloud_mode, _isolate_side_effects
 ):
-    """When caller provides audio_duration, pipeline must not re-detect it.
+    """When caller provides audio_duration, the provider hears it, not the file's length.
 
-    A Local dictation is sent whole, so the provider hears the caller's duration.
+    A Local dictation is sent whole; the file's own length only decides how short it is judged.
     """
     stt = _make_stt_mock("ok")
     stt.is_local = True
 
     with (
-        patch("app.pipeline.service.detect_duration") as detect,
+        patch("app.pipeline.service.detect_duration", return_value=9.0),
         patch("app.pipeline.service.get_provider", return_value=stt),
         patch("app.stt.local_setup.await_local_ready", new=AsyncMock()),
     ):
@@ -270,7 +270,6 @@ async def test_pipeline_respects_explicit_audio_duration(
             sample_wav, audio_duration=12.5, source="dictation", mode=ProviderMode.LOCAL
         )
 
-    detect.assert_not_called()
     assert stt.transcribe.call_args.kwargs["audio_duration"] == 12.5
 
 
@@ -405,7 +404,7 @@ async def test_a_short_cloud_dictation_sends_nothing_after_cloud_is_switched_off
     """A route fixed to Cloud, as a retry fixes it, checks again right before it sends."""
     stt = _make_stt_mock("ok")
 
-    def switch_off(path):
+    def switch_off(path, min_speech_hops=0):
         settings.stt.mode = ProviderMode.LOCAL
         return None
 
@@ -1588,3 +1587,97 @@ async def test_a_short_cloud_dictation_gives_up_after_two_pauses(
 
     assert stt.transcribe.await_count == 3
     assert pause.await_count == 2
+
+
+def _noise_wav(path: Path, seconds: float) -> Path:
+    noise = np.random.uniform(-0.1, 0.1, round(16000 * seconds)).astype(np.float32)
+    sf.write(str(path), noise, 16000)
+    return path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "seconds", "pressed", "sent"),
+    [
+        ("dictation", 0.08, None, False),
+        ("dictation", 0.08, 0.2, False),
+        ("dictation", 0.2, None, True),
+        ("file", 0.08, None, True),
+    ],
+)
+async def test_a_dictation_too_short_to_hold_a_word_never_reaches_the_engine(
+    tmp_path, cloud_mode, _isolate_side_effects, source, seconds, pressed, sent
+):
+    stt = _make_stt_mock("Дякую.")
+    path = _noise_wav(tmp_path / "tap.wav", seconds)
+
+    with patch("app.pipeline.service.get_provider", return_value=stt):
+        result = await process_audio(path, language="uk", audio_duration=pressed, source=source)
+
+    assert stt.transcribe.await_count == int(sent)
+    assert (result.discarded_reason is None) is sent
+
+
+@pytest.mark.no_vad_stub
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("source", "hops"), [("dictation", 9), ("file", 0), ("meeting", 0)])
+async def test_a_dictation_needs_a_word_of_voice_from_the_vad(
+    sample_wav, cloud_mode, _isolate_side_effects, source, hops
+):
+    vad = MagicMock(return_value=_vad_analysis(False))
+
+    with (
+        patch("app.pipeline.service.analyze_vad", vad),
+        patch("app.pipeline.service.get_provider", return_value=_make_stt_mock()),
+    ):
+        await process_audio(sample_wav, language="uk", source=source)
+
+    assert service.DICTATION_SPEECH_HOPS * 0.016 >= 0.133
+    assert vad.call_args.kwargs["min_speech_hops"] == hops
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "seconds", "pressed", "is_local", "heard", "kept"),
+    [
+        ("dictation", 1.0, None, True, "Дякую за перегляд!", None),
+        ("dictation", 1.0, None, False, "Дякую за перегляд!", None),
+        ("dictation", 1.0, 4.0, True, "Дякую за перегляд!", None),
+        (
+            "dictation", 1.0, None, True,
+            "Дякую за перегляд! А тепер до справи.", "А тепер до справи.",
+        ),
+        (
+            "dictation", 1.0, None, False,
+            "Дякую за перегляд! А тепер до справи.", "А тепер до справи.",
+        ),
+        ("dictation", 4.0, None, True, "Дякую за перегляд!", "Дякую за перегляд!"),
+        ("file", 1.0, None, True, "Дякую за перегляд!", "Дякую за перегляд!"),
+    ],
+)
+async def test_a_short_dictation_loses_the_phrases_engines_make_up_over_silence(
+    tmp_path, cloud_mode, _isolate_side_effects, source, seconds, pressed, is_local, heard, kept
+):
+    save_mock = _isolate_side_effects
+    stt = _make_stt_mock(heard)
+    stt.is_local = is_local
+    clean = AsyncMock(side_effect=lambda text, _settings: text)
+    path = _noise_wav(tmp_path / "dictation.wav", seconds)
+
+    with (
+        patch("app.pipeline.service.get_provider", return_value=stt),
+        patch("app.pipeline.service.clean_dictation", clean),
+        patch("app.stt.local_setup.await_local_ready", AsyncMock()),
+    ):
+        result = await process_audio(path, language="uk", audio_duration=pressed, source=source)
+
+    assert stt.transcribe.await_count == 1
+    if kept is None:
+        assert result.discarded_reason == "silence"
+        save_mock.assert_not_called()
+        clean.assert_not_called()
+    else:
+        assert result.text == kept
+        assert save_mock.call_args.kwargs["raw_text"] == kept
+        if not is_local:
+            assert clean.call_args.args[0] == kept
