@@ -254,15 +254,15 @@ async def test_files_meetings_and_local_dictations_are_not_cleaned(
 async def test_pipeline_respects_explicit_audio_duration(
     sample_wav, cloud_mode, _isolate_side_effects
 ):
-    """When caller provides audio_duration, pipeline must not re-detect it.
+    """When caller provides audio_duration, the provider hears it, not the file's length.
 
-    A Local dictation is sent whole, so the provider hears the caller's duration.
+    A Local dictation is sent whole; the file's own length only decides whether it is too short.
     """
     stt = _make_stt_mock("ok")
     stt.is_local = True
 
     with (
-        patch("app.pipeline.service.detect_duration") as detect,
+        patch("app.pipeline.service.detect_duration", return_value=9.0),
         patch("app.pipeline.service.get_provider", return_value=stt),
         patch("app.stt.local_setup.await_local_ready", new=AsyncMock()),
     ):
@@ -270,7 +270,6 @@ async def test_pipeline_respects_explicit_audio_duration(
             sample_wav, audio_duration=12.5, source="dictation", mode=ProviderMode.LOCAL
         )
 
-    detect.assert_not_called()
     assert stt.transcribe.call_args.kwargs["audio_duration"] == 12.5
 
 
