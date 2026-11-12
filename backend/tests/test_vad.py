@@ -1138,3 +1138,40 @@ def test_selftest_never_raises_when_the_probe_write_fails(tmp_path, monkeypatch)
 
     assert ok is False
     assert "read-only file system" in message
+
+
+class _FirstHopsSpeak:
+    """A library that scores the first ``voiced`` hops of a scan as speech and the rest not."""
+
+    def __init__(self, voiced: int) -> None:
+        self.voiced = voiced
+        self.seen = 0
+
+    def create(self, threshold):
+        self.seen = 0
+        return ctypes.c_void_p(1)
+
+    def process(self, handle, hop):
+        self.seen += 1
+        return 0.9 if self.seen <= self.voiced else 0.0
+
+    def destroy(self, handle):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("voiced", "min_speech_hops", "is_silent"),
+    [(8, 0, False), (8, 9, True), (9, 9, False)],
+)
+def test_analyze_vad_holds_a_clip_to_the_speech_it_is_asked_for(
+    tmp_path, monkeypatch, voiced, min_speech_hops, is_silent
+):
+    library = _FirstHopsSpeak(voiced)
+    monkeypatch.setattr(vad_module, "_get_library", lambda: library)
+    path = _write_wav(tmp_path / "click.wav", np.random.uniform(-0.1, 0.1, 16000 * 2))
+
+    result = analyze_vad(path, AudioSettings(), min_speech_hops=min_speech_hops)
+
+    assert result is not None
+    assert result.is_silent is is_silent
+

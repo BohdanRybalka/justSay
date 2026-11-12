@@ -405,7 +405,7 @@ async def test_a_short_cloud_dictation_sends_nothing_after_cloud_is_switched_off
     """A route fixed to Cloud, as a retry fixes it, checks again right before it sends."""
     stt = _make_stt_mock("ok")
 
-    def switch_off(path):
+    def switch_off(path, min_speech_hops=0):
         settings.stt.mode = ProviderMode.LOCAL
         return None
 
@@ -1588,3 +1588,78 @@ async def test_a_short_cloud_dictation_gives_up_after_two_pauses(
 
     assert stt.transcribe.await_count == 3
     assert pause.await_count == 2
+
+
+def _noise_wav(path: Path, seconds: float) -> Path:
+    noise = np.random.uniform(-0.1, 0.1, round(16000 * seconds)).astype(np.float32)
+    sf.write(str(path), noise, 16000)
+    return path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "seconds", "sent"),
+    [("dictation", 0.08, False), ("dictation", 0.2, True), ("file", 0.08, True)],
+)
+async def test_a_dictation_too_short_to_hold_a_word_never_reaches_the_engine(
+    tmp_path, cloud_mode, _isolate_side_effects, source, seconds, sent
+):
+    stt = _make_stt_mock("Дякую.")
+    path = _noise_wav(tmp_path / "tap.wav", seconds)
+
+    with patch("app.pipeline.service.get_provider", return_value=stt):
+        result = await process_audio(path, language="uk", source=source)
+
+    assert stt.transcribe.await_count == int(sent)
+    assert (result.discarded_reason is None) is sent
+
+
+@pytest.mark.no_vad_stub
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("source", "hops"), [("dictation", 9), ("file", 0), ("meeting", 0)])
+async def test_a_dictation_needs_a_word_of_voice_from_the_vad(
+    sample_wav, cloud_mode, _isolate_side_effects, source, hops
+):
+    vad = MagicMock(return_value=_vad_analysis(False))
+
+    with (
+        patch("app.pipeline.service.analyze_vad", vad),
+        patch("app.pipeline.service.get_provider", return_value=_make_stt_mock()),
+    ):
+        await process_audio(sample_wav, language="uk", source=source)
+
+    assert service.DICTATION_SPEECH_HOPS * 0.016 >= 0.133
+    assert vad.call_args.kwargs["min_speech_hops"] == hops
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "seconds", "heard", "kept"),
+    [
+        ("dictation", 1.0, "Дякую за перегляд!", None),
+        ("dictation", 1.0, "Дякую за перегляд! А тепер до справи.", "А тепер до справи."),
+        ("dictation", 4.0, "Дякую за перегляд!", "Дякую за перегляд!"),
+        ("file", 1.0, "Дякую за перегляд!", "Дякую за перегляд!"),
+    ],
+)
+async def test_a_short_dictation_loses_the_phrases_engines_make_up_over_silence(
+    sample_wav, cloud_mode, _isolate_side_effects, source, seconds, heard, kept
+):
+    save_mock = _isolate_side_effects
+    stt = _make_stt_mock(heard)
+    stt.is_local = True
+
+    with (
+        patch("app.pipeline.service.get_provider", return_value=stt),
+        patch("app.stt.local_setup.await_local_ready", AsyncMock()),
+    ):
+        result = await process_audio(
+            sample_wav, language="uk", audio_duration=seconds, source=source
+        )
+
+    if kept is None:
+        assert result.discarded_reason == "silence"
+        save_mock.assert_not_called()
+    else:
+        assert result.text == kept
+        assert save_mock.call_args.kwargs["raw_text"] == kept

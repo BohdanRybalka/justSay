@@ -2,10 +2,12 @@
 
 Cloud mode transcribes on Groq Whisper, Local mode on this machine's engine.
 A Cloud-mode dictation is cleaned of fillers before it is returned; history keeps both texts.
+A dictation needs a word's worth of voice, and a short one loses the phrases engines make up.
 """
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,9 +17,10 @@ from fastapi import BackgroundTasks
 
 from app.audio.analysis import analyze_silence
 from app.audio.config import audio_settings
-from app.audio.vad import analyze_vad
+from app.audio.vad import HOP_SECONDS, analyze_vad
 from app.core.types import ProviderMode
 from app.pipeline.chunking import (
+    LITTLE_SPEECH_SECONDS,
     SHORT_MAX_PAUSE_SECONDS,
     SHORT_MAX_PAUSES,
     FinishedPieces,
@@ -29,6 +32,7 @@ from app.pipeline.chunking import (
 )
 from app.pipeline.cleanup import clean_dictation
 from app.pipeline.dictation import transcribe_dictation
+from app.pipeline.invented_phrases import SHORTEST_WORD_SECONDS, without_invented_phrases
 from app.pipeline.meeting_text import has_two_tracks, spoken_word_count, transcribe_meeting
 from app.pipeline.utils import detect_duration
 from app.stt.base import SINGLE_ATTEMPT
@@ -39,6 +43,7 @@ from app.transcripts.history import EntrySource, save_entry
 log = logging.getLogger(__name__)
 
 LONG_DICTATION_SECONDS = 600.0
+DICTATION_SPEECH_HOPS = math.ceil(SHORTEST_WORD_SECONDS / HOP_SECONDS)
 
 
 @dataclass
@@ -62,12 +67,17 @@ class PipelineObserver(PiecePacer, Protocol):
     def saved(self, entry_id: str) -> None: ...
 
 
-def _silence_note(audio_path: Path) -> tuple[str, tuple] | None:
+def _silence_note(audio_path: Path, min_speech_hops: int = 0) -> tuple[str, tuple] | None:
     """Why ``audio_path`` holds no speech, as a log format and its arguments; ``None`` if it does.
 
-    The VAD decides when it can run; the energy check only when it cannot.
+    The VAD decides when it can run, needing at least ``min_speech_hops`` of speech; the energy
+    check decides only when the VAD cannot.
     """
-    vad = analyze_vad(audio_path, audio_settings) if audio_settings.silence_vad_enabled else None
+    vad = (
+        analyze_vad(audio_path, audio_settings, min_speech_hops=min_speech_hops)
+        if audio_settings.silence_vad_enabled
+        else None
+    )
     if vad is not None:
         if not vad.is_silent:
             return None
@@ -93,6 +103,15 @@ def _holds_no_speech(audio_path: Path) -> bool:
     if note is not None:
         log.info(note[0], *note[1])
     return note is not None
+
+
+def _discarded(start: float, model_name: str = "") -> ProcessingResult:
+    return ProcessingResult(
+        text="",
+        duration_ms=int((time.perf_counter() - start) * 1000),
+        model_name=model_name,
+        discarded_reason="silence",
+    )
 
 
 async def process_audio(
@@ -125,14 +144,20 @@ async def process_audio(
         and observer is not None
         and await asyncio.to_thread(has_two_tracks, audio_path)
     )
-    discard_log = None if two_tracks else await asyncio.to_thread(_silence_note, audio_path)
+    dictation = source == "dictation"
+    if dictation and duration is not None and duration < SHORTEST_WORD_SECONDS:
+        log.warning("Discarding a %.3fs dictation: too short to hold a word", duration)
+        return _discarded(start)
+    discard_log = (
+        None
+        if two_tracks
+        else await asyncio.to_thread(
+            _silence_note, audio_path, DICTATION_SPEECH_HOPS if dictation else 0
+        )
+    )
     if discard_log is not None:
         log.warning(discard_log[0], *discard_log[1])
-        return ProcessingResult(
-            text="",
-            duration_ms=int((time.perf_counter() - start) * 1000),
-            discarded_reason="silence",
-        )
+        return _discarded(start)
 
     route_settings = stt_settings
     if mode is not None:
@@ -153,7 +178,7 @@ async def process_audio(
     if observer is not None:
         await observer.before_transcribe(stt.model_name, duration)
 
-    cloud_dictation = source == "dictation" and route_settings.mode == ProviderMode.CLOUD
+    cloud_dictation = dictation and route_settings.mode == ProviderMode.CLOUD
     stays_on = _cloud_stays_on if cloud_dictation else None
     pacer: PiecePacer = observer if observer is not None else UnpacedPieces(stays_on)
     attempt_token = SINGLE_ATTEMPT.set(route_settings.mode == ProviderMode.CLOUD)
@@ -218,16 +243,19 @@ async def process_audio(
             stt.model_name,
             len(result.text),
         )
-        return ProcessingResult(
-            text="",
-            duration_ms=int((time.perf_counter() - start) * 1000),
-            model_name=stt.model_name,
-            discarded_reason="silence",
-        )
+        return _discarded(start, stt.model_name)
 
     raw_text = result.text
+    if dictation and duration is not None and duration < LITTLE_SPEECH_SECONDS:
+        raw_text = without_invented_phrases(result.text)
+        if result.text and not raw_text:
+            log.warning(
+                "Discarding a %.1fs dictation: %s wrote only a phrase made up over silence",
+                duration, stt.model_name,
+            )
+            return _discarded(start, stt.model_name)
     text = raw_text
-    if source == "dictation" and not is_local_provider(stt):
+    if dictation and not is_local_provider(stt):
         text = await clean_dictation(raw_text, stt_settings)
 
     log.info(

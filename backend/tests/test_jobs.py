@@ -617,7 +617,7 @@ async def test_a_file_whose_every_piece_is_silent_is_never_sent(
     monkeypatch.setattr(service.audio_settings, "silence_vad_enabled", True)
     monkeypatch.setattr(jobs, "process_audio", service.process_audio)
 
-    def vad(path: Path, _settings) -> VadAnalysis:
+    def vad(path: Path, _settings, min_speech_hops=0) -> VadAnalysis:
         return VadAnalysis(1, 10, 0.2, is_silent="piece" in path.name)
 
     with (
