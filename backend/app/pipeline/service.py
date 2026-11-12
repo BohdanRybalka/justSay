@@ -151,11 +151,13 @@ async def process_audio(
         and await asyncio.to_thread(has_two_tracks, audio_path)
     )
     dictation = source == "dictation"
-    recorded = (
-        _shortest(duration, await asyncio.to_thread(detect_duration, audio_path))
-        if dictation
-        else None
-    )
+    recorded = None
+    if dictation:
+        recorded = (
+            duration
+            if audio_duration is None
+            else _shortest(duration, await asyncio.to_thread(detect_duration, audio_path))
+        )
     if recorded is not None and recorded < SHORTEST_WORD_SECONDS:
         log.warning("Discarding a %.3fs dictation: too short to hold a word", recorded)
         return _discarded(start)

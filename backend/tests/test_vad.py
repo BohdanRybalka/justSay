@@ -883,9 +883,8 @@ async def _median_gate_ms(path: Path, duration: float, runs: int = 5) -> float:
     """Median wall time of `process_audio` over `path`, gate work only.
 
     Routing, the dictation's own preparation, cleanup and history are patched
-    out, and ``audio_duration`` is passed explicitly so `detect_duration` never
-    runs — what is left inside the timed region is the silence gate plus mock
-    overhead."""
+    out, and ``audio_duration`` is passed explicitly — what is left inside the
+    timed region is the silence gate, one header read, plus mock overhead."""
     stt = _instant_provider()
     heard = AsyncMock(return_value=TranscriptionResult(text="ok"))
 

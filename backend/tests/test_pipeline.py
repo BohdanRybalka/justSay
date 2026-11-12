@@ -256,7 +256,7 @@ async def test_pipeline_respects_explicit_audio_duration(
 ):
     """When caller provides audio_duration, the provider hears it, not the file's length.
 
-    A Local dictation is sent whole; the file's own length only decides whether it is too short.
+    A Local dictation is sent whole; the file's own length only decides how short it is judged.
     """
     stt = _make_stt_mock("ok")
     stt.is_local = True
@@ -1647,6 +1647,10 @@ async def test_a_dictation_needs_a_word_of_voice_from_the_vad(
             "dictation", 1.0, None, True,
             "Дякую за перегляд! А тепер до справи.", "А тепер до справи.",
         ),
+        (
+            "dictation", 1.0, None, False,
+            "Дякую за перегляд! А тепер до справи.", "А тепер до справи.",
+        ),
         ("dictation", 4.0, None, True, "Дякую за перегляд!", "Дякую за перегляд!"),
         ("file", 1.0, None, True, "Дякую за перегляд!", "Дякую за перегляд!"),
     ],
@@ -1675,3 +1679,5 @@ async def test_a_short_dictation_loses_the_phrases_engines_make_up_over_silence(
     else:
         assert result.text == kept
         assert save_mock.call_args.kwargs["raw_text"] == kept
+        if not is_local:
+            assert clean.call_args.args[0] == kept
