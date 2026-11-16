@@ -273,9 +273,9 @@ def leftover_dictations(temp_dir: Path) -> list[Path]:
 class JobQueue:
     """Jobs by id; a failed one stays until dismissed, a done or cancelled one a minute.
 
-    A meeting, a file and a dictation run on the engine chosen when their turn comes; a cloud run
-    stops before each piece it sends once Local is chosen. A failed dictation is sent only by Try
-    again, and stays for ``FAILED_DICTATION_KEEP_SECONDS`` before its audio goes.
+    A meeting, a dictation and a file not yet run in Local go through the engine chosen when their
+    turn comes; a cloud run stops before each piece it sends once Local is chosen. A failed
+    dictation is sent only by Try again; its audio goes after ``FAILED_DICTATION_KEEP_SECONDS``.
     """
 
     def __init__(
@@ -523,8 +523,7 @@ class JobQueue:
         job.stage = "transcribing"
         mode = stt_settings.mode
         if job.mode != mode:
-            made_in = job.mode.value if job.mode else "?"
-            log.info("Dictation %s recorded in %s goes through %s", job.id, made_in, mode.value)
+            log.info("Dictation %s recorded in %s goes through %s", job.id, job.mode, mode)
         try:
             result = await process_audio(
                 job.path, language=job.language, source="dictation", mode=mode
