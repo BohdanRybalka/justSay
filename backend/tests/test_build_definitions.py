@@ -194,6 +194,37 @@ def test_the_vulkan_build_runs_its_cpu_dispatch_check_on_the_installed_engine():
     assert lines.index("Assert-CpuDispatch $VendorDir") > installed
 
 
+def test_the_windows_release_builds_the_engine_with_the_vs_2022_toolset():
+    """``windows-latest`` moved to VS 2026, whose compiler put AVX-512 into whisper-server.exe.
+
+    The ``windows-2022`` image keeps the VS 2022 toolset the CPU-dispatch check passes on.
+    """
+    legs = re.findall(
+        r"- platform: (\S+)\s*\n\s+target: (\S+)", _release_workflow_text()
+    )
+
+    assert ("windows-2022", "x86_64-pc-windows-msvc") in legs
+
+
+def _metal_configure_flags() -> set[str]:
+    text = METAL_BUILD_SCRIPT.read_text(encoding="utf-8")
+    configure = re.findall(r"^cmake -S (?:.*\\\n)*.*$", text, re.MULTILINE)
+    assert len(configure) == 1, "expected exactly one CMake configure command in the Metal script"
+    return set(re.findall(r"-D\w+=\S+", configure[0]))
+
+
+def test_the_metal_engine_is_built_for_every_apple_silicon_chip():
+    """GGML_NATIVE's default compiles the CPU code for the build runner's chip.
+
+    Off, clang targets the M1, whose instructions every later Apple Silicon chip has; a fixed
+    newer ARM level would exclude the M1.
+    """
+    flags = _metal_configure_flags()
+
+    assert "-DGGML_NATIVE=OFF" in flags
+    assert not [flag for flag in flags if flag.startswith("-DGGML_CPU_ARM_ARCH")]
+
+
 def test_the_metal_build_script_is_a_strict_bash_script():
     text = METAL_BUILD_SCRIPT.read_text(encoding="utf-8")
 

@@ -86,7 +86,15 @@ step "Configuring the CMake build (Metal, static)"
 # the binary is copied into JustSay.app's Resources. The two GGML_METAL
 # flags restate upstream defaults explicitly so a future upstream default
 # flip cannot silently ship a CPU-only binary.
+#
+# -DGGML_NATIVE=OFF builds the CPU code for every Apple Silicon Mac rather
+# than for the build machine's chip: with no -march, clang targets apple-m1,
+# whose instructions every later chip has. The default (ON) compiles for the
+# runner's chip, which would crash an M1 on instructions it lacks, and on the
+# macos-15 runner it does not even compile (ggml's i8mm code, whisper.cpp
+# #3427). whisper.cpp's own build-xcframework.sh passes the same flag.
 cmake -S "$SRC_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_NATIVE=OFF \
     -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DBUILD_SHARED_LIBS=OFF \
     -DWHISPER_SDL2=OFF -DWHISPER_BUILD_TESTS=OFF \
     -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_SERVER=ON
