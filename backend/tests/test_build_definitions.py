@@ -157,10 +157,9 @@ def test_the_two_build_scripts_pin_the_same_whisper_cpp_tag():
     assert vulkan.group(1) == metal.group(1)
 
 
-def _vulkan_configure_flags() -> set[str]:
-    text = VULKAN_BUILD_SCRIPT.read_text(encoding="utf-8")
-    configure = [line for line in text.splitlines() if " -G Ninja " in line]
-    assert len(configure) == 1, "expected exactly one CMake configure line in the Vulkan script"
+def _configure_flags(script: Path, command: str) -> set[str]:
+    configure = re.findall(command, script.read_text(encoding="utf-8"), re.MULTILINE)
+    assert len(configure) == 1, f"expected exactly one CMake configure command in {script.name}"
     return set(re.findall(r"-D\w+=\S+", configure[0]))
 
 
@@ -170,7 +169,7 @@ def test_the_vulkan_engine_picks_its_cpu_code_when_it_loads_not_when_it_compiles
     One ggml-cpu variant per CPU level, scored at load time, runs on any x86-64 CPU; a
     fixed GGML_AVX*/FMA/F16C level would exclude every CPU below it.
     """
-    flags = _vulkan_configure_flags()
+    flags = _configure_flags(VULKAN_BUILD_SCRIPT, r"^.* -G Ninja .*$")
 
     assert {
         "-DGGML_NATIVE=OFF",
@@ -195,9 +194,8 @@ def test_the_vulkan_build_runs_its_cpu_dispatch_check_on_the_installed_engine():
 
 
 def test_the_windows_release_builds_the_engine_with_the_vs_2022_toolset():
-    """``windows-latest`` moved to VS 2026, whose compiler put AVX-512 into whisper-server.exe.
-
-    The ``windows-2022`` image keeps the VS 2022 toolset the CPU-dispatch check passes on.
+    """The Windows release leg builds on ``windows-2022``, whose VS 2022 toolset yields an engine
+    the CPU-dispatch check passes; the VS 2026 build on ``windows-latest`` does not pass it.
     """
     legs = re.findall(
         r"- platform: (\S+)\s*\n\s+target: (\S+)", _release_workflow_text()
@@ -206,20 +204,13 @@ def test_the_windows_release_builds_the_engine_with_the_vs_2022_toolset():
     assert ("windows-2022", "x86_64-pc-windows-msvc") in legs
 
 
-def _metal_configure_flags() -> set[str]:
-    text = METAL_BUILD_SCRIPT.read_text(encoding="utf-8")
-    configure = re.findall(r"^cmake -S (?:.*\\\n)*.*$", text, re.MULTILINE)
-    assert len(configure) == 1, "expected exactly one CMake configure command in the Metal script"
-    return set(re.findall(r"-D\w+=\S+", configure[0]))
-
-
 def test_the_metal_engine_is_built_for_every_apple_silicon_chip():
     """GGML_NATIVE's default compiles the CPU code for the build runner's chip.
 
     Off, clang targets the M1, whose instructions every later Apple Silicon chip has; a fixed
     newer ARM level would exclude the M1.
     """
-    flags = _metal_configure_flags()
+    flags = _configure_flags(METAL_BUILD_SCRIPT, r"^cmake -S (?:.*\\\n)*.*$")
 
     assert "-DGGML_NATIVE=OFF" in flags
     assert not [flag for flag in flags if flag.startswith("-DGGML_CPU_ARM_ARCH")]
