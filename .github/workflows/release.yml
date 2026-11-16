@@ -29,7 +29,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: windows-latest
+          # windows-2022 keeps VS 2022 (toolset 14.44), whose engine build the
+          # CPU-dispatch check passes. Built with VS 2026 (MSVC 14.51) on
+          # windows-latest, whisper-server.exe held one AVX-512 instruction and
+          # the check refused it (JS-319). GitHub's own advice for staying on
+          # VS 2022 is this label. CI stays on windows-latest: it does not
+          # build the engine.
+          - platform: windows-2022
             target: x86_64-pc-windows-msvc
             sidecar_ext: .exe
           - platform: macos-15 # arm64 Apple Silicon runner

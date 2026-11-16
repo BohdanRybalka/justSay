@@ -7,7 +7,7 @@
 
 .DESCRIPTION
     Mirrors the exact build recipe .github/workflows/release.yml's
-    windows-latest leg uses for the shipped binary -- same pinned
+    windows-2022 leg uses for the shipped binary -- same pinned
     whisper.cpp tag/commit, same -DGGML_VULKAN=ON flag -- so local
     verification and CI never drift onto different whisper.cpp versions.
     See docs/adr/011-whisper-cpp-vulkan-stt-provider.md for the full
@@ -219,7 +219,7 @@ $Avx512CpuVariants = @("ggml-cpu-skylakex.dll", "ggml-cpu-icelake.dll")
 $Avx512Pattern = '\bzmm\d+\b|\{k[1-7]\}|\b[xy]mm(1[6-9]|2\d|3[01])\b|' +
     '\bk(and|andn|or|xor|xnor|not|test|ortest|shiftl|shiftr|unpck|add|mov)(b|w|d|q|bw|wd|dq)\b'
 
-function Get-Avx512LineCount([string]$Binary) {
+function Get-Avx512Lines([string]$Binary) {
     $listing = Join-Path ([System.IO.Path]::GetTempPath()) ("justsay-disasm-" + [guid]::NewGuid().ToString("N") + ".txt")
     try {
         Invoke-VcEnvBatch @"
@@ -229,7 +229,8 @@ dumpbin /nologo /disasm /out:"$listing" "$Binary"
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path $listing)) {
             throw "dumpbin could not disassemble $Binary (exit $LASTEXITCODE)."
         }
-        return @(Select-String -Path $listing -Pattern $Avx512Pattern -CaseSensitive).Count
+        return @(Select-String -Path $listing -Pattern $Avx512Pattern -CaseSensitive |
+            ForEach-Object { $_.Line.Trim() })
     } finally {
         Remove-Item $listing -Force -ErrorAction SilentlyContinue
     }
@@ -263,7 +264,7 @@ function Assert-CpuDispatch([string]$Dir) {
         if (-not (Test-Path $path)) {
             throw "$name is missing: the AVX-512 variant list no longer matches what ggml builds."
         }
-        $count = Get-Avx512LineCount $path
+        $count = @(Get-Avx512Lines $path).Count
         Write-Host "  $name (kept only on AVX-512 CPUs): $count AVX-512 instructions"
         if ($count -eq 0) {
             throw "The AVX-512 scan found nothing in $name, which is built for AVX-512, " +
@@ -273,9 +274,11 @@ function Assert-CpuDispatch([string]$Dir) {
     $loadedEverywhere = Get-ChildItem -Path $Dir -File |
         Where-Object { $_.Extension -in ".exe", ".dll" -and $Avx512CpuVariants -notcontains $_.Name }
     foreach ($binary in $loadedEverywhere) {
-        $count = Get-Avx512LineCount $binary.FullName
+        $found = @(Get-Avx512Lines $binary.FullName)
+        $count = $found.Count
         Write-Host "  $($binary.Name): $count AVX-512 instructions"
         if ($count -ne 0) {
+            $found | Select-Object -First 20 | ForEach-Object { Write-Host "    $_" }
             throw "$($binary.Name) contains $count AVX-512 instructions but can be loaded on a " +
                   "CPU without AVX-512, where it would crash with 0xC000001D (illegal instruction)."
         }
