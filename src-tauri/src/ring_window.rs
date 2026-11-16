@@ -160,7 +160,8 @@ pub fn open_ring(app: AppHandle) {
     follow_the_pointer(app, generation);
 }
 
-/// Close the column; the page calls this after a button is picked.
+/// Close the column; the page calls this after a button is picked and on a
+/// right click on the mic.
 #[tauri::command]
 pub fn close_ring(app: AppHandle) {
     close(&app, None);
