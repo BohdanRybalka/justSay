@@ -1,5 +1,7 @@
+import { detectShortcutPlatform } from "../accelerator";
 import { api } from "../api";
 import {
+  EVENT_DICTATION_TOGGLE,
   EVENT_MEETING_TOGGLE,
   EVENT_NAVIGATE_PANEL,
   EVENT_RING_CLOSED,
@@ -13,22 +15,27 @@ import { notifyError } from "../notify";
 import { mountIconSprite } from "../ui/icons";
 import { applyThemePreference } from "../ui/theme";
 import {
+  actionLabel,
   failureText,
-  petalLabel,
   stepFor,
   UNREAD_RING_STATE,
   type RingAction,
   type RingState,
 } from "./ring-actions";
-import { closeRing, followPointer, mountRing, openRing, renderPetalLabels } from "./ring-view";
+import { closeRing, followPointer, mountRing, openRing, renderLabels } from "./ring-view";
 
 const ring = document.getElementById("ring")!;
+const shortcutPlatform = detectShortcutPlatform(navigator);
 let state: RingState = UNREAD_RING_STATE;
 
 mountIconSprite(document);
 applyThemePreference("system");
-mountRing(ring, (action) => void askShellToClose().then(() => carryOut(action)));
-renderPetalLabels(ring, (action) => petalLabel(action, state));
+mountRing(
+  ring,
+  (action) => void askShellToClose().then(() => carryOut(action)),
+  () => void askShellToClose(),
+);
+renderLabels(ring, (action) => actionLabel(action, state, shortcutPlatform));
 document.addEventListener("contextmenu", (event) => event.preventDefault());
 
 async function askShellToClose() {
@@ -63,13 +70,16 @@ async function carryOut(action: RingAction) {
     } else if (step.kind === "pick-file") {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("pick_audio_file");
+    } else if (step.kind === "toggle-dictation") {
+      const { emit } = await import("@tauri-apps/api/event");
+      await emit(EVENT_DICTATION_TOGGLE);
     } else if (step.kind === "switch-language") {
       await switchLanguage(step.language);
     } else {
       await openPanel(step.target);
     }
   } catch (e) {
-    console.warn(`The ring's ${action} petal failed:`, e);
+    console.warn(`The ring's ${action} button failed:`, e);
     void notifyError(failureText(step, seen));
   }
 }
@@ -84,7 +94,7 @@ async function readState() {
     settings: settings.status === "fulfilled" ? settings.value : state.settings,
     meetingRecording: meeting.status === "fulfilled" ? meeting.value.is_recording : state.meetingRecording,
   };
-  renderPetalLabels(ring, (action) => petalLabel(action, state));
+  renderLabels(ring, (action) => actionLabel(action, state, shortcutPlatform));
 }
 
 async function listenToShell() {

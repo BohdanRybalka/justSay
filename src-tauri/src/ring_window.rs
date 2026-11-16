@@ -1,9 +1,10 @@
-//! The ring window: four actions around the cursor, opened by a right-click on
-//! the widget. It is built once and kept hidden, and like the widget it never
-//! takes focus. While it is open a loop sends the page the pointer's offset
-//! from the centre, which the page turns into the hovered petal, and closes the
-//! ring on a mouse press beyond its reach. Escape is a global shortcut held
-//! only while the ring is open, so the key never reaches the user's app.
+//! The ring window: the widget's actions in a slim column that opens in the
+//! widget's place on the screen edge, from a right-click on the widget. It is
+//! built once and kept hidden, and like the widget it never takes focus. While
+//! it is open a loop sends the page the pointer's offset from the column's
+//! anchor, which the page turns into the hovered button, and closes the column
+//! on a mouse press outside it. Escape is a global shortcut held only while the
+//! column is open, so the key never reaches the user's app.
 
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -20,26 +21,26 @@ use tauri_nspanel::tauri_panel;
 
 const RING_LABEL: &str = "ring";
 
-/// The window's logical side: the petals, the guide and the longest label.
-const WINDOW_SIZE: f64 = 200.0;
+const WIDGET_LABEL: &str = "widget";
 
-/// Logical distance kept between the ring's centre and the work area's top.
-const EDGE_MARGIN_TOP: f64 = 70.0;
+/// The window's logical width: the column and the longest label left of it.
+const WINDOW_WIDTH: f64 = 280.0;
 
-/// Logical distance kept from the sides and the bottom, where the label hangs
-/// 64px below the centre and is up to about 180px wide.
-const EDGE_MARGIN_SIDES_AND_BOTTOM: f64 = 96.0;
+/// The window's logical height: the column and room for its shadow.
+const WINDOW_HEIGHT: f64 = 180.0;
 
-/// Logical distance from the centre within which a press belongs to the ring:
-/// a petal's centre sits 38px out and a hovered petal's edge about 18px beyond.
-const RING_REACH: f64 = 56.0;
+/// The column's logical width, measured from the edge it docks on.
+const COLUMN_WIDTH: f64 = 37.0;
+
+/// How far the column reaches above and below the widget's centre line, logical.
+const COLUMN_HALF_HEIGHT: f64 = 77.0;
 
 /// The pointer loop's period, about 60 times a second.
 const POINTER_POLL: Duration = Duration::from_millis(16);
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
-/// The ring on screen, if any. `generation` tells one opening from the next,
+/// The column on screen, if any. `generation` tells one opening from the next,
 /// so a loop or a close meant for an earlier opening leaves a newer one alone.
 static OPEN_RING: Mutex<Option<OpenRing>> = Mutex::new(None);
 
@@ -62,7 +63,7 @@ struct Point {
     y: f64,
 }
 
-/// A monitor's work area in the same screen units as `Point`.
+/// A window's client area in the same screen units as `Point`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Area {
     x: f64,
@@ -71,31 +72,30 @@ struct Area {
     height: f64,
 }
 
-/// Where the ring window goes: its top-left corner and its side, in screen units.
+/// Where the ring window goes: its top-left corner and its size, in screen units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Frame {
     x: f64,
     y: f64,
-    size: f64,
+    width: f64,
+    height: f64,
 }
 
-/// The cursor and the work area of the monitor under it, with `scale` screen
-/// units per logical pixel.
-struct Screen {
-    cursor: Point,
-    work_area: Area,
+/// The widget's client area, with `scale` screen units per logical pixel.
+struct Widget {
+    area: Area,
     scale: f64,
 }
 
 #[derive(Clone, Copy)]
 struct OpenRing {
     generation: u64,
-    centre: Point,
+    anchor: Point,
     scale: f64,
 }
 
 /// Payload of the event that tells the page where the pointer is, in logical
-/// pixels from the ring's centre.
+/// pixels from the column's anchor.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 struct RingPointer {
     x: f64,
@@ -108,7 +108,7 @@ pub fn build(app: &tauri::App) -> tauri::Result<()> {
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     let ring = WebviewWindowBuilder::new(app, "ring", WebviewUrl::App("/ring.html".into()))
         .title("")
-        .inner_size(WINDOW_SIZE, WINDOW_SIZE)
+        .inner_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .resizable(false)
         .visible(false)
         .decorations(false)
@@ -134,33 +134,34 @@ pub fn build(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Open the ring centred on the cursor, kept inside the work area of the
-/// monitor under it. Opening it while it is open moves it to the cursor.
+/// Open the column in the widget's place: its right side on the widget's,
+/// centred on the widget's height. Opening it while it is open places it again.
 #[tauri::command]
 pub fn open_ring(app: AppHandle) {
     let Some(ring) = app.get_webview_window(RING_LABEL) else {
         return;
     };
-    let Some(screen) = platform::screen_under_cursor(&app) else {
-        log::warn!("Reading the cursor or its monitor failed, so the ring stays closed");
+    let Some(widget) = platform::widget(&app) else {
+        log::warn!("Reading where the widget is failed, so the actions stay closed");
         return;
     };
-    let centre = ring_centre(screen.cursor, screen.work_area, screen.scale);
-    if let Err(e) = platform::show_at(&app, &ring, ring_frame(centre, screen.scale)) {
-        log::warn!("Showing the ring failed: {}", e);
+    let anchor = column_anchor(widget.area);
+    if let Err(e) = platform::show_at(&app, &ring, ring_frame(anchor, widget.scale)) {
+        log::warn!("Showing the actions failed: {}", e);
         return;
     }
 
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::SeqCst);
-    *open_ring_state() = Some(OpenRing { generation, centre, scale: screen.scale });
+    *open_ring_state() = Some(OpenRing { generation, anchor, scale: widget.scale });
     hold_escape(&app);
-    if let Err(e) = app.emit_to("ring", "ring-opened", ()) {
-        log::warn!("Telling the ring it opened failed: {}", e);
+    if let Err(e) = app.emit("ring-opened", ()) {
+        log::warn!("Telling the windows the actions opened failed: {}", e);
     }
     follow_the_pointer(app, generation);
 }
 
-/// Close the ring; the page calls this after a petal is picked.
+/// Close the column; the page calls this after a button is picked and on a
+/// right click on the mic.
 #[tauri::command]
 pub fn close_ring(app: AppHandle) {
     close(&app, None);
@@ -170,7 +171,7 @@ fn open_ring_state() -> std::sync::MutexGuard<'static, Option<OpenRing>> {
     OPEN_RING.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Close the ring on the main thread, where the window and the shortcut live.
+/// Close the column on the main thread, where the window and the shortcut live.
 /// `generation` limits it to that opening; `None` closes whatever is open.
 fn close(app: &AppHandle, generation: Option<u64>) {
     let handle = app.clone();
@@ -184,16 +185,16 @@ fn close(app: &AppHandle, generation: Option<u64>) {
         }
         if let Some(ring) = handle.get_webview_window(RING_LABEL) {
             if let Err(e) = platform::hide(&handle, &ring) {
-                log::warn!("Hiding the ring failed: {}", e);
+                log::warn!("Hiding the actions failed: {}", e);
             }
         }
         release_escape(&handle);
-        if let Err(e) = handle.emit_to("ring", "ring-closed", ()) {
-            log::warn!("Telling the ring it closed failed: {}", e);
+        if let Err(e) = handle.emit("ring-closed", ()) {
+            log::warn!("Telling the windows the actions closed failed: {}", e);
         }
     });
     if let Err(e) = result {
-        log::warn!("Closing the ring failed: {}", e);
+        log::warn!("Closing the actions failed: {}", e);
     }
 }
 
@@ -201,7 +202,7 @@ fn escape() -> Shortcut {
     Shortcut::new(None, Code::Escape)
 }
 
-/// Take Escape for as long as the ring is open. The plugin runs the handler
+/// Take Escape for as long as the column is open. The plugin runs the handler
 /// under its own lock, which releasing the shortcut needs, so the close is
 /// handed to another thread.
 fn hold_escape(app: &AppHandle) {
@@ -216,7 +217,7 @@ fn hold_escape(app: &AppHandle) {
         }
     });
     if let Err(e) = registered {
-        log::warn!("Escape could not be taken, so only a click closes the ring: {}", e);
+        log::warn!("Escape could not be taken, so only a click closes the actions: {}", e);
     }
 }
 
@@ -226,12 +227,12 @@ fn release_escape(app: &AppHandle) {
         return;
     }
     if let Err(e) = shortcuts.unregister(escape()) {
-        log::warn!("Releasing Escape after the ring closed failed: {}", e);
+        log::warn!("Releasing Escape after the actions closed failed: {}", e);
     }
 }
 
 /// While this opening lasts, send the page the pointer whenever it moves, and
-/// close the ring when a mouse button goes down beyond its reach.
+/// close the column when a mouse button goes down outside it.
 fn follow_the_pointer(app: AppHandle, generation: u64) {
     std::thread::spawn(move || {
         let mut was_down = platform::mouse_button_down();
@@ -247,16 +248,16 @@ fn follow_the_pointer(app: AppHandle, generation: u64) {
             let Some(cursor) = platform::cursor(&app) else {
                 continue;
             };
-            let pointer = pointer_offset(cursor, ring.centre, ring.scale);
+            let pointer = pointer_offset(cursor, ring.anchor, ring.scale);
             let down = platform::mouse_button_down();
-            if pressed_beyond_reach(was_down, down, pointer) {
+            if pressed_outside_column(was_down, down, pointer) {
                 close(&app, Some(generation));
                 return;
             }
             was_down = down;
             if sent != Some(pointer) {
                 if let Err(e) = app.emit_to("ring", "ring-pointer", pointer) {
-                    log::warn!("Telling the ring where the pointer is failed: {}", e);
+                    log::warn!("Telling the actions where the pointer is failed: {}", e);
                 }
                 sent = Some(pointer);
             }
@@ -264,39 +265,36 @@ fn follow_the_pointer(app: AppHandle, generation: u64) {
     });
 }
 
-/// The ring's centre: the cursor, moved inside the work area far enough for
-/// the petals and the label to stay whole.
-fn ring_centre(cursor: Point, work_area: Area, scale: f64) -> Point {
-    let side = EDGE_MARGIN_SIDES_AND_BOTTOM * scale;
-    let left = work_area.x + side;
-    let right = work_area.x + work_area.width - side;
-    let top = work_area.y + EDGE_MARGIN_TOP * scale;
-    let bottom = work_area.y + work_area.height - side;
-    Point {
-        x: cursor.x.min(right).max(left),
-        y: cursor.y.min(bottom).max(top),
-    }
+/// Where the column docks: the widget's right side, on its centre line, where
+/// the page draws the pill.
+fn column_anchor(widget: Area) -> Point {
+    Point { x: widget.x + widget.width, y: widget.y + widget.height / 2.0 }
 }
 
-/// The window around a centre: the page draws the ring in the window's middle.
-fn ring_frame(centre: Point, scale: f64) -> Frame {
-    let size = WINDOW_SIZE * scale;
-    Frame { x: centre.x - size / 2.0, y: centre.y - size / 2.0, size }
+/// The window left of the anchor and centred on it: the page draws the column
+/// flush with the window's right side, in the middle of its height.
+fn ring_frame(anchor: Point, scale: f64) -> Frame {
+    let (width, height) = (WINDOW_WIDTH * scale, WINDOW_HEIGHT * scale);
+    Frame { x: anchor.x - width, y: anchor.y - height / 2.0, width, height }
 }
 
-/// The pointer's offset from the ring's centre in whole logical pixels, so
-/// sub-pixel jitter sends the page nothing.
-fn pointer_offset(cursor: Point, centre: Point, scale: f64) -> RingPointer {
+/// The pointer's offset from the anchor in whole logical pixels, so sub-pixel
+/// jitter sends the page nothing.
+fn pointer_offset(cursor: Point, anchor: Point, scale: f64) -> RingPointer {
     RingPointer {
-        x: ((cursor.x - centre.x) / scale).round(),
-        y: ((cursor.y - centre.y) / scale).round(),
+        x: ((cursor.x - anchor.x) / scale).round(),
+        y: ((cursor.y - anchor.y) / scale).round(),
     }
 }
 
-/// A button that went down on this tick, beyond the ring's reach. One already
-/// held when the ring opened, the right-click that opened it, does not count.
-fn pressed_beyond_reach(was_down: bool, down: bool, pointer: RingPointer) -> bool {
-    down && !was_down && pointer.x.hypot(pointer.y) > RING_REACH
+fn over_column(pointer: RingPointer) -> bool {
+    (-COLUMN_WIDTH..=0.0).contains(&pointer.x) && pointer.y.abs() <= COLUMN_HALF_HEIGHT
+}
+
+/// A button that went down on this tick, outside the column. One already held
+/// when the column opened, the right-click that opened it, does not count.
+fn pressed_outside_column(was_down: bool, down: bool, pointer: RingPointer) -> bool {
+    down && !was_down && !over_column(pointer)
 }
 
 /// Bring the ring's panel to the front without making it key, or take it away.
@@ -315,8 +313,8 @@ fn order_panel(app: &AppHandle, front: bool) -> Result<(), String> {
 
 #[cfg(windows)]
 mod platform {
-    use super::{Area, Frame, Point, Screen};
-    use tauri::{AppHandle, WebviewWindow};
+    use super::{Area, Frame, Point, Widget, WIDGET_LABEL};
+    use tauri::{AppHandle, Manager, WebviewWindow};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
     };
@@ -332,23 +330,19 @@ mod platform {
         Some(Point { x: cursor.x, y: cursor.y })
     }
 
-    pub(super) fn screen_under_cursor(app: &AppHandle) -> Option<Screen> {
-        let cursor = cursor(app)?;
-        let monitor = app
-            .monitor_from_point(cursor.x, cursor.y)
-            .ok()
-            .flatten()
-            .or_else(|| app.primary_monitor().ok().flatten())?;
-        let area = monitor.work_area();
-        Some(Screen {
-            cursor,
-            work_area: Area {
-                x: f64::from(area.position.x),
-                y: f64::from(area.position.y),
-                width: f64::from(area.size.width),
-                height: f64::from(area.size.height),
+    /// The widget's client area in physical pixels, at its monitor's scale.
+    pub(super) fn widget(app: &AppHandle) -> Option<Widget> {
+        let widget = app.get_webview_window(WIDGET_LABEL)?;
+        let origin = widget.inner_position().ok()?;
+        let size = widget.inner_size().ok()?;
+        Some(Widget {
+            area: Area {
+                x: f64::from(origin.x),
+                y: f64::from(origin.y),
+                width: f64::from(size.width),
+                height: f64::from(size.height),
             },
-            scale: monitor.scale_factor(),
+            scale: widget.scale_factor().ok()?,
         })
     }
 
@@ -356,30 +350,31 @@ mod platform {
     /// placed again: tao answers the move to a monitor of another scale by
     /// moving the window itself. Neither call activates it.
     pub(super) fn show_at(_app: &AppHandle, ring: &WebviewWindow, frame: Frame) -> Result<(), String> {
-        let (x, y, size) = (frame.x.round() as i32, frame.y.round() as i32, frame.size.round() as i32);
-        set_window_pos(ring, x, y, size, SWP_NOACTIVATE | SWP_SHOWWINDOW)?;
-        set_window_pos(ring, x, y, size, SWP_NOACTIVATE)
+        let place = (
+            frame.x.round() as i32,
+            frame.y.round() as i32,
+            frame.width.round() as i32,
+            frame.height.round() as i32,
+        );
+        set_window_pos(ring, place, SWP_NOACTIVATE | SWP_SHOWWINDOW)?;
+        set_window_pos(ring, place, SWP_NOACTIVATE)
     }
 
     pub(super) fn hide(_app: &AppHandle, ring: &WebviewWindow) -> Result<(), String> {
         set_window_pos(
             ring,
-            0,
-            0,
-            0,
+            (0, 0, 0, 0),
             SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_HIDEWINDOW,
         )
     }
 
     fn set_window_pos(
         ring: &WebviewWindow,
-        x: i32,
-        y: i32,
-        size: i32,
+        (x, y, width, height): (i32, i32, i32, i32),
         flags: SET_WINDOW_POS_FLAGS,
     ) -> Result<(), String> {
         let hwnd = ring.hwnd().map_err(|e| e.to_string())?;
-        let placed = unsafe { SetWindowPos(hwnd.0 as _, HWND_TOPMOST, x, y, size, size, flags) };
+        let placed = unsafe { SetWindowPos(hwnd.0 as _, HWND_TOPMOST, x, y, width, height, flags) };
         if placed == 0 {
             return Err(std::io::Error::last_os_error().to_string());
         }
@@ -395,9 +390,9 @@ mod platform {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::{Area, Frame, Point, Screen};
+    use super::{Area, Frame, Point, Widget, WIDGET_LABEL};
     use objc2_app_kit::NSEvent;
-    use tauri::{AppHandle, LogicalPosition, WebviewWindow};
+    use tauri::{AppHandle, LogicalPosition, Manager, WebviewWindow};
 
     /// The cursor in points. tao reports it scaled by the primary display's
     /// factor, whatever display it is on.
@@ -407,24 +402,19 @@ mod platform {
         Some(Point { x: cursor.x / scale, y: cursor.y / scale })
     }
 
-    /// Everything in points, where one logical pixel is one unit on every
-    /// display; tao reports a work area scaled by its own display's factor.
-    pub(super) fn screen_under_cursor(app: &AppHandle) -> Option<Screen> {
-        let cursor = cursor(app)?;
-        let monitor = app
-            .monitor_from_point(cursor.x, cursor.y)
-            .ok()
-            .flatten()
-            .or_else(|| app.primary_monitor().ok().flatten())?;
-        let scale = monitor.scale_factor();
-        let area = monitor.work_area();
-        Some(Screen {
-            cursor,
-            work_area: Area {
-                x: f64::from(area.position.x) / scale,
-                y: f64::from(area.position.y) / scale,
-                width: f64::from(area.size.width) / scale,
-                height: f64::from(area.size.height) / scale,
+    /// The widget's client area in points, where one logical pixel is one unit
+    /// on every display; tao reports a window scaled by its own display's factor.
+    pub(super) fn widget(app: &AppHandle) -> Option<Widget> {
+        let widget = app.get_webview_window(WIDGET_LABEL)?;
+        let scale = widget.scale_factor().ok()?;
+        let origin = widget.inner_position().ok()?;
+        let size = widget.inner_size().ok()?;
+        Some(Widget {
+            area: Area {
+                x: f64::from(origin.x) / scale,
+                y: f64::from(origin.y) / scale,
+                width: f64::from(size.width) / scale,
+                height: f64::from(size.height) / scale,
             },
             scale: 1.0,
         })
@@ -448,74 +438,78 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::{
-        pointer_offset, pressed_beyond_reach, ring_centre, ring_frame, Area, Frame, Point,
+        column_anchor, pointer_offset, pressed_outside_column, ring_frame, Area, Frame, Point,
         RingPointer,
     };
 
-    const FULL_HD: Area = Area { x: 0.0, y: 0.0, width: 1920.0, height: 1032.0 };
-
-    fn centre(x: f64, y: f64, area: Area, scale: f64) -> Point {
-        ring_centre(Point { x, y }, area, scale)
+    #[test]
+    fn the_column_docks_on_the_widgets_right_side_at_its_centre_line() {
+        let widget = Area { x: 1680.0, y: 587.0, width: 240.0, height: 64.0 };
+        assert_eq!(column_anchor(widget), Point { x: 1920.0, y: 619.0 });
     }
 
     #[test]
-    fn away_from_the_edges_the_ring_opens_on_the_cursor() {
-        assert_eq!(centre(900.0, 500.0, FULL_HD, 1.0), Point { x: 900.0, y: 500.0 });
-    }
-
-    #[test]
-    fn near_an_edge_the_ring_opens_far_enough_inside_to_be_whole() {
-        assert_eq!(centre(3.0, 2.0, FULL_HD, 1.0), Point { x: 96.0, y: 70.0 });
-        assert_eq!(centre(1919.0, 1031.0, FULL_HD, 1.0), Point { x: 1824.0, y: 936.0 });
-        assert_eq!(centre(96.0, 70.0, FULL_HD, 1.0), Point { x: 96.0, y: 70.0 });
-        assert_eq!(centre(95.0, 69.0, FULL_HD, 1.0), Point { x: 96.0, y: 70.0 });
-    }
-
-    #[test]
-    fn the_margins_scale_to_physical_pixels() {
-        let area = Area { x: 0.0, y: 0.0, width: 3840.0, height: 2064.0 };
-        assert_eq!(centre(0.0, 0.0, area, 1.5), Point { x: 144.0, y: 105.0 });
-        assert_eq!(centre(3840.0, 2064.0, area, 1.5), Point { x: 3696.0, y: 1920.0 });
+    fn the_window_hangs_left_of_the_anchor_centred_on_it() {
         assert_eq!(
-            ring_frame(Point { x: 1000.0, y: 600.0 }, 1.5),
-            Frame { x: 850.0, y: 450.0, size: 300.0 }
+            ring_frame(Point { x: 1920.0, y: 619.0 }, 1.0),
+            Frame { x: 1640.0, y: 529.0, width: 280.0, height: 180.0 }
         );
     }
 
     #[test]
-    fn a_monitor_left_of_or_above_the_primary_keeps_the_ring_on_itself() {
-        let left_monitor = Area { x: -1920.0, y: -300.0, width: 1920.0, height: 1080.0 };
-        assert_eq!(centre(-1.0, -299.0, left_monitor, 1.0), Point { x: -96.0, y: -230.0 });
-        assert_eq!(centre(-1900.0, 770.0, left_monitor, 1.0), Point { x: -1824.0, y: 684.0 });
+    fn the_window_scales_to_physical_pixels() {
+        let widget = Area { x: 3240.0, y: 1190.0, width: 360.0, height: 96.0 };
         assert_eq!(
-            ring_frame(Point { x: -96.0, y: -230.0 }, 1.0),
-            Frame { x: -196.0, y: -330.0, size: 200.0 }
+            ring_frame(column_anchor(widget), 1.5),
+            Frame { x: 3180.0, y: 1103.0, width: 420.0, height: 270.0 }
         );
     }
 
     #[test]
-    fn the_pointer_is_sent_in_whole_logical_pixels_from_the_centre() {
-        let centre = Point { x: 1000.0, y: 600.0 };
+    fn a_widget_on_a_monitor_left_of_the_primary_keeps_the_column_beside_it() {
+        let widget = Area { x: -240.0, y: 700.0, width: 240.0, height: 64.0 };
         assert_eq!(
-            pointer_offset(Point { x: 1000.0, y: 543.0 }, centre, 1.5),
-            RingPointer { x: 0.0, y: -38.0 }
-        );
-        assert_eq!(
-            pointer_offset(Point { x: 1000.4, y: 599.8 }, centre, 1.0),
-            RingPointer { x: 0.0, y: -0.0 }
+            ring_frame(column_anchor(widget), 1.0),
+            Frame { x: -280.0, y: 642.0, width: 280.0, height: 180.0 }
         );
     }
 
     #[test]
-    fn only_a_fresh_press_beyond_the_petals_closes_the_ring() {
-        let far = RingPointer { x: 60.0, y: 0.0 };
-        let on_a_petal = RingPointer { x: 0.0, y: -38.0 };
-        let hovered_petal_edge = RingPointer { x: 0.0, y: -56.0 };
+    fn the_pointer_is_sent_in_whole_logical_pixels_from_the_anchor() {
+        let anchor = Point { x: 2880.0, y: 900.0 };
+        assert_eq!(
+            pointer_offset(Point { x: 2851.5, y: 855.0 }, anchor, 1.5),
+            RingPointer { x: -19.0, y: -30.0 }
+        );
+        assert_eq!(
+            pointer_offset(Point { x: 2879.6, y: 900.2 }, anchor, 1.0),
+            RingPointer { x: -0.0, y: 0.0 }
+        );
+    }
 
-        assert!(pressed_beyond_reach(false, true, far));
-        assert!(!pressed_beyond_reach(true, true, far), "the right-click still held from opening");
-        assert!(!pressed_beyond_reach(false, false, far));
-        assert!(!pressed_beyond_reach(false, true, on_a_petal));
-        assert!(!pressed_beyond_reach(false, true, hovered_petal_edge));
+    #[test]
+    fn only_a_fresh_press_outside_the_column_closes_it() {
+        let on_the_mic = RingPointer { x: -19.0, y: 0.0 };
+        let on_the_top_button = RingPointer { x: -19.0, y: -60.0 };
+        let column_corners = [
+            RingPointer { x: -37.0, y: -77.0 },
+            RingPointer { x: 0.0, y: 77.0 },
+        ];
+        let beside_on_the_labels = RingPointer { x: -38.0, y: 0.0 };
+        let above = RingPointer { x: -19.0, y: -78.0 };
+        let below = RingPointer { x: -19.0, y: 78.0 };
+        let past_the_edge = RingPointer { x: 1.0, y: 0.0 };
+
+        for inside in [on_the_mic, on_the_top_button, column_corners[0], column_corners[1]] {
+            assert!(!pressed_outside_column(false, true, inside), "{inside:?} is on the column");
+        }
+        for outside in [beside_on_the_labels, above, below, past_the_edge] {
+            assert!(pressed_outside_column(false, true, outside), "{outside:?} is off the column");
+        }
+        assert!(
+            !pressed_outside_column(true, true, beside_on_the_labels),
+            "the right-click still held from opening"
+        );
+        assert!(!pressed_outside_column(false, false, beside_on_the_labels));
     }
 }

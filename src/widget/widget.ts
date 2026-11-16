@@ -9,9 +9,12 @@ import { api, levelStream, meetingLevelStream, REQUEST_TIMEOUT_MS } from "../api
 import { hasOutlastedStartupBudget } from "../backend-startup";
 import { deliverDictation } from "../clipboard";
 import {
+  EVENT_DICTATION_TOGGLE,
   EVENT_MEETING_TOGGLE,
   EVENT_MEETING_TOGGLE_FAILED,
   EVENT_NAVIGATE_PANEL,
+  EVENT_RING_CLOSED,
+  EVENT_RING_OPENED,
   EVENT_SETTINGS_CHANGED,
   EVENT_SHORTCUT_APPLIED,
   EVENT_SHORTCUT_REQUESTED,
@@ -41,7 +44,7 @@ import { applyThemePreference } from "../ui/theme";
 import { decideMeetingHealth } from "./meeting-health";
 import { MEETING_STOP_SELECTOR, renderMeetingIndicator } from "./meeting-indicator";
 import { type MeetingToggleActions, runMeetingToggle } from "./meeting-toggle";
-import { PILL_HOVER_CLASS, renderPill, type PillView } from "./pill";
+import { PILL_COVERED_CLASS, PILL_HOVER_CLASS, renderPill, type PillView } from "./pill";
 import { watchPillRect } from "./pill-rect";
 import { createRecordingIntentQueue } from "./recording-intent";
 import { CONNECTION_POLL_MS, createSettingsRetry } from "./settings-retry";
@@ -533,12 +536,18 @@ async function syncMeetingIndicator() {
   }
 }
 
+/** A click on the pill, or on the ring's mic: a meeting leaves dictation off. */
+function toggleDictation() {
+  if (meetingActive) return;
+  void recordingIntent.request("toggle");
+}
+
 widget.addEventListener("click", (event) => {
-  if (meetingActive) {
-    if ((event.target as Element).closest(MEETING_STOP_SELECTOR)) void toggleMeetingRecording(null);
+  if (meetingActive && (event.target as Element).closest(MEETING_STOP_SELECTOR)) {
+    void toggleMeetingRecording(null);
     return;
   }
-  void recordingIntent.request("toggle");
+  toggleDictation();
 });
 
 widget.addEventListener("contextmenu", (event) => {
@@ -744,6 +753,9 @@ async function listenForSettingsChanges() {
     await listen<WidgetHover>(EVENT_WIDGET_HOVER, ({ payload }) => {
       setHovered(payload.inside);
     });
+    await listen(EVENT_RING_OPENED, () => widget.classList.add(PILL_COVERED_CLASS));
+    await listen(EVENT_RING_CLOSED, () => widget.classList.remove(PILL_COVERED_CLASS));
+    await listen(EVENT_DICTATION_TOGGLE, () => toggleDictation());
   } catch {
   }
 }

@@ -2,26 +2,33 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ActionLabel, RingAction } from "./ring-actions";
 import {
+  BUTTON_HOVER_CLASS,
+  buttonAt,
   closeRing,
   followPointer,
   LABEL_SHOWN_CLASS,
   mountRing,
   openRing,
-  PETAL_HOVER_CLASS,
-  petalAt,
-  petalCentre,
-  renderPetalLabels,
+  renderLabels,
+  RING_BUTTONS,
   RING_OPEN_CLASS,
-  RING_PETALS,
 } from "./ring-view";
 
-const NAMES = {
-  meeting: "Record a meeting",
-  file: "Transcribe a file",
-  language: "Language · English",
-  settings: "Settings",
-} as const;
+const LABELS: Record<RingAction, ActionLabel> = {
+  meeting: { text: "Record a meeting", shortcut: null },
+  file: { text: "Transcribe a file", shortcut: null },
+  dictate: { text: "Dictate", shortcut: "Ctrl + Alt + V" },
+  language: { text: "Language · English", shortcut: null },
+  settings: { text: "Settings", shortcut: null },
+};
+
+const BUTTON_CENTRE_X = -19;
+
+function rowCentre(index: number): { x: number; y: number } {
+  return { x: BUTTON_CENTRE_X, y: (index - 2) * 30 };
+}
 
 function ringRoot(): HTMLElement {
   const html = readFileSync(resolve(__dirname, "../../ring.html"), "utf-8");
@@ -31,132 +38,169 @@ function ringRoot(): HTMLElement {
   return document.getElementById("ring")!;
 }
 
-function hoveredPetals(root: HTMLElement): number[] {
-  return [...root.querySelectorAll(".ring-petal")].flatMap((petal, index) =>
-    petal.classList.contains(PETAL_HOVER_CLASS) ? [index] : [],
-  );
+function buttons(root: HTMLElement): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>(".ring-button")];
 }
 
-function label(root: HTMLElement): { text: string | null; shown: boolean } {
-  const element = root.querySelector(".ring-label")!;
-  return { text: element.textContent, shown: element.classList.contains(LABEL_SHOWN_CLASS) };
+function hoveredButtons(root: HTMLElement): number[] {
+  return buttons(root).flatMap((button, index) => (button.classList.contains(BUTTON_HOVER_CLASS) ? [index] : []));
 }
 
-describe("the ring's geometry", () => {
-  it("puts four petals 38px out, 90° apart, the first straight above the centre", () => {
-    expect(RING_PETALS).toHaveLength(4);
-    const [top, second] = [petalCentre(0), petalCentre(1)];
-    expect(top.x).toBeCloseTo(0);
-    expect(top.y).toBeCloseTo(-38);
-    expect(Math.atan2(second.y, second.x) * (180 / Math.PI)).toBeCloseTo(0);
-    for (let i = 0; i < 4; i++) {
-      expect(Math.hypot(petalCentre(i).x, petalCentre(i).y)).toBeCloseTo(38);
+function label(root: HTMLElement): { text: string | null; shown: boolean; row: string } {
+  const element = root.querySelector<HTMLElement>(".ring-label")!;
+  return {
+    text: element.textContent,
+    shown: element.classList.contains(LABEL_SHOWN_CLASS),
+    row: element.style.getPropertyValue("--row"),
+  };
+}
+
+describe("the column's geometry", () => {
+  it("stacks five buttons with the mic in the middle, where the pill sits", () => {
+    expect(RING_BUTTONS.map((button) => button.action)).toEqual([
+      "meeting",
+      "file",
+      "dictate",
+      "language",
+      "settings",
+    ]);
+    expect(buttonAt({ x: BUTTON_CENTRE_X, y: 0 })).toBe(2);
+  });
+
+  it("finds the button on each row, 30px apart from the top one to the bottom one", () => {
+    for (let index = 0; index < 5; index++) {
+      expect(buttonAt(rowCentre(index))).toBe(index);
     }
+    expect(buttonAt({ x: BUTTON_CENTRE_X, y: -14 })).toBe(2);
+    expect(buttonAt({ x: BUTTON_CENTRE_X, y: -16 })).toBe(1);
   });
 
-  it("finds the petal under the pointer and none between them or at the centre", () => {
-    expect(petalAt({ x: 0, y: -38 }, null)).toBe(0);
-    expect(petalAt({ x: 0, y: -52 }, null)).toBe(0);
-    expect(petalAt({ x: 0, y: 0 }, null)).toBeNull();
-    const betweenFirstTwo = { x: 38 * Math.cos(-Math.PI / 4), y: 38 * Math.sin(-Math.PI / 4) };
-    expect(petalAt(betweenFirstTwo, null)).toBeNull();
+  it("keeps a button hovered across the column's whole width and its rounded ends", () => {
+    expect(buttonAt({ x: -37, y: 0 })).toBe(2);
+    expect(buttonAt({ x: 0, y: 0 })).toBe(2);
+    expect(buttonAt({ x: BUTTON_CENTRE_X, y: -77 })).toBe(0);
+    expect(buttonAt({ x: BUTTON_CENTRE_X, y: 77 })).toBe(4);
   });
 
-  it("keeps a grown petal hovered out to its enlarged edge", () => {
-    const pastRestingEdge = { x: 0, y: -38 - 16 };
-
-    expect(petalAt(pastRestingEdge, null)).toBeNull();
-    expect(petalAt(pastRestingEdge, 0)).toBe(0);
-    expect(petalAt(pastRestingEdge, 3)).toBeNull();
+  it("hovers nothing beside, above or below the column", () => {
+    expect(buttonAt({ x: -38, y: 0 })).toBeNull();
+    expect(buttonAt({ x: 1, y: 0 })).toBeNull();
+    expect(buttonAt({ x: BUTTON_CENTRE_X, y: -78 })).toBeNull();
+    expect(buttonAt({ x: BUTTON_CENTRE_X, y: 78 })).toBeNull();
   });
 });
 
-describe("the ring on the page", () => {
+describe("the column on the page", () => {
   let root: HTMLElement;
   const onPick = vi.fn();
+  const onDismiss = vi.fn();
 
   beforeEach(() => {
     onPick.mockClear();
+    onDismiss.mockClear();
     root = ringRoot();
-    mountRing(root, onPick);
-    renderPetalLabels(root, (action) => NAMES[action]);
+    mountRing(root, onPick, onDismiss);
+    renderLabels(root, (action) => LABELS[action]);
   });
 
-  it("draws one labelled button per action, in order, around the centre", () => {
-    const petals = [...root.querySelectorAll<HTMLElement>(".ring-petal")];
-
-    expect(petals.map((petal) => petal.getAttribute("aria-label"))).toEqual([
+  it("draws one labelled button per action, in order, with only the mic marked", () => {
+    expect(buttons(root).map((button) => button.getAttribute("aria-label"))).toEqual([
       "Record a meeting",
       "Transcribe a file",
+      "Dictate · Ctrl + Alt + V",
       "Language · English",
       "Settings",
     ]);
-    expect(petals.map((petal) => petal.style.getPropertyValue("--a"))).toEqual([
-      "-90deg",
-      "0deg",
-      "90deg",
-      "180deg",
+    expect(buttons(root).map((button) => button.style.getPropertyValue("--row"))).toEqual(["0", "1", "2", "3", "4"]);
+    expect(buttons(root).map((button) => button.classList.contains("ring-button--mic"))).toEqual([
+      false,
+      false,
+      true,
+      false,
+      false,
     ]);
-    expect(petals.map((petal) => petal.style.getPropertyValue("--i"))).toEqual(["0", "1", "2", "3"]);
   });
 
-  it("grows the petal under the pointer and names it in the label", () => {
+  it("marks the button under the pointer and names it beside that row", () => {
     openRing(root);
 
-    followPointer(root, { x: 0, y: -40 });
-    expect(hoveredPetals(root)).toEqual([0]);
-    expect(label(root)).toEqual({ text: "Record a meeting", shown: true });
+    followPointer(root, rowCentre(0));
+    expect(hoveredButtons(root)).toEqual([0]);
+    expect(label(root)).toEqual({ text: "Record a meeting", shown: true, row: "0" });
 
-    followPointer(root, petalCentre(3));
-    expect(hoveredPetals(root)).toEqual([3]);
-    expect(label(root)).toEqual({ text: "Settings", shown: true });
+    followPointer(root, rowCentre(4));
+    expect(hoveredButtons(root)).toEqual([4]);
+    expect(label(root)).toEqual({ text: "Settings", shown: true, row: "4" });
 
-    followPointer(root, { x: 0, y: 0 });
-    expect(hoveredPetals(root)).toEqual([]);
+    followPointer(root, { x: -60, y: 0 });
+    expect(hoveredButtons(root)).toEqual([]);
     expect(label(root).shown).toBe(false);
   });
 
-  it("hands the picked petal to its caller", () => {
+  it("sets the mic's shortcut apart in its label", () => {
     openRing(root);
 
-    root.querySelectorAll<HTMLElement>(".ring-petal")[2].click();
+    followPointer(root, rowCentre(2));
+
+    expect(label(root).text).toBe("Dictate · Ctrl + Alt + V");
+    expect(root.querySelector(".ring-label .ring-label-shortcut")?.textContent).toBe(" · Ctrl + Alt + V");
+  });
+
+  it("hands the picked button to its caller", () => {
+    openRing(root);
+
+    buttons(root)[3].click();
 
     expect(onPick).toHaveBeenCalledWith("language");
+    expect(onDismiss).not.toHaveBeenCalled();
   });
 
-  it("renames the hovered petal's label when its state changes", () => {
+  it("closes on a right click on the mic, and only there", () => {
     openRing(root);
-    followPointer(root, petalCentre(2));
 
-    renderPetalLabels(root, (action) => (action === "language" ? "Language · Ukrainian" : NAMES[action]));
+    buttons(root)[0].dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+    expect(onDismiss).not.toHaveBeenCalled();
 
-    expect(root.querySelectorAll(".ring-petal")[2].getAttribute("aria-label")).toBe("Language · Ukrainian");
-    expect(label(root)).toEqual({ text: "Language · Ukrainian", shown: true });
+    buttons(root)[2].dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+    expect(onDismiss).toHaveBeenCalledOnce();
+    expect(onPick).not.toHaveBeenCalled();
   });
 
-  it("closes back to rest, so the next opening fans out with nothing hovered", () => {
+  it("renames the hovered button's label when its state changes", () => {
     openRing(root);
-    followPointer(root, { x: 0, y: -38 });
+    followPointer(root, rowCentre(3));
+
+    renderLabels(root, (action) =>
+      action === "language" ? { text: "Language · Ukrainian", shortcut: null } : LABELS[action],
+    );
+
+    expect(buttons(root)[3].getAttribute("aria-label")).toBe("Language · Ukrainian");
+    expect(label(root)).toEqual({ text: "Language · Ukrainian", shown: true, row: "3" });
+  });
+
+  it("closes back to rest, so the next opening slides in with nothing hovered", () => {
+    openRing(root);
+    followPointer(root, rowCentre(0));
 
     closeRing(root);
 
     expect(root.classList.contains(RING_OPEN_CLASS)).toBe(false);
     expect(root.getAttribute("aria-hidden")).toBe("true");
-    expect(hoveredPetals(root)).toEqual([]);
+    expect(hoveredButtons(root)).toEqual([]);
     expect(label(root).shown).toBe(false);
 
     openRing(root);
     expect(root.classList.contains(RING_OPEN_CLASS)).toBe(true);
     expect(root.getAttribute("aria-hidden")).toBe("false");
-    expect(hoveredPetals(root)).toEqual([]);
+    expect(hoveredButtons(root)).toEqual([]);
   });
 
-  it("starts an opening from rest even when the ring was never told it closed", () => {
+  it("starts an opening from rest even when the column was never told it closed", () => {
     openRing(root);
-    followPointer(root, { x: 0, y: -38 });
+    followPointer(root, rowCentre(0));
 
     openRing(root);
 
-    expect(hoveredPetals(root)).toEqual([]);
+    expect(hoveredButtons(root)).toEqual([]);
   });
 });

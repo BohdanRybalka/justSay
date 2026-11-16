@@ -1,78 +1,85 @@
 /**
- * The ring's four petals around its centre: drawn once, opened and closed as
- * the shell says, and hovered from the pointer position the shell reports.
+ * The widget's actions as a slim column docked on the screen edge, the mic in
+ * the middle where the pill sits: drawn once, opened and closed as the shell
+ * says, and hovered from the pointer position the shell reports.
  */
 
 import type { RingPointer } from "../contracts";
 import { icon, type IconName } from "../ui/icons";
-import type { RingAction } from "./ring-actions";
+import { spokenLabel, type ActionLabel, type RingAction } from "./ring-actions";
 
-interface RingPetal {
+interface RingButton {
   icon: IconName;
   action: RingAction;
 }
 
-export const RING_PETALS: readonly RingPetal[] = [
+export const RING_BUTTONS: readonly RingButton[] = [
   { icon: "users", action: "meeting" },
   { icon: "upload", action: "file" },
+  { icon: "mic", action: "dictate" },
   { icon: "globe", action: "language" },
   { icon: "cog", action: "settings" },
 ];
 
-const RING_RADIUS = 38;
-const PETAL_RADIUS = 14;
-const HOVERED_PETAL_SCALE = 1.24;
+const MIC_ROW = RING_BUTTONS.findIndex((button) => button.action === "dictate");
+
+/** A 28px button and the 2px gap below it. */
+const ROW_PITCH = 30;
+
+const COLUMN_WIDTH = 37;
+const COLUMN_HALF_HEIGHT = 77;
 
 export const RING_OPEN_CLASS = "ring--open";
-export const PETAL_HOVER_CLASS = "ring-petal--hover";
+export const BUTTON_HOVER_CLASS = "ring-button--hover";
 export const LABEL_SHOWN_CLASS = "ring-label--shown";
 
-/** Degrees clockwise from the right; the first petal sits straight above. */
-function petalAngle(index: number): number {
-  return (index * 360) / RING_PETALS.length - 90;
+/** The button under the pointer, given in logical pixels from the column's
+ *  right side on the widget's centre line. A row takes in half of each gap,
+ *  so moving along the column never passes over nothing. */
+export function buttonAt(pointer: RingPointer): number | null {
+  if (pointer.x < -COLUMN_WIDTH || pointer.x > 0 || Math.abs(pointer.y) > COLUMN_HALF_HEIGHT) return null;
+  const row = Math.round(pointer.y / ROW_PITCH) + MIC_ROW;
+  return Math.min(Math.max(row, 0), RING_BUTTONS.length - 1);
 }
 
-export function petalCentre(index: number): RingPointer {
-  const radians = (petalAngle(index) * Math.PI) / 180;
-  return { x: RING_RADIUS * Math.cos(radians), y: RING_RADIUS * Math.sin(radians) };
+function buttons(root: HTMLElement): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>(".ring-button")];
 }
 
-/** The petal under the pointer, measured as drawn: the hovered one is grown,
- *  so the pointer leaves it where its enlarged edge is, not its resting one. */
-export function petalAt(pointer: RingPointer, hovered: number | null): number | null {
-  const index = RING_PETALS.findIndex((_, i) => {
-    const centre = petalCentre(i);
-    const reach = PETAL_RADIUS * (i === hovered ? HOVERED_PETAL_SCALE : 1);
-    return Math.hypot(pointer.x - centre.x, pointer.y - centre.y) <= reach;
-  });
-  return index === -1 ? null : index;
-}
-
-function petals(root: HTMLElement): HTMLElement[] {
-  return [...root.querySelectorAll<HTMLElement>(".ring-petal")];
-}
-
-export function mountRing(root: HTMLElement, onPick: (action: RingAction) => void): void {
-  RING_PETALS.forEach((petal, index) => {
+/** `onPick` gets a left click on any button; `onDismiss` a right click on
+ *  the mic, which closes the column the way a right click on the pill opened it. */
+export function mountRing(
+  root: HTMLElement,
+  onPick: (action: RingAction) => void,
+  onDismiss: () => void,
+): void {
+  const column = root.querySelector<HTMLElement>(".ring-column")!;
+  RING_BUTTONS.forEach((entry, index) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "ring-petal";
-    button.style.setProperty("--i", String(index));
-    button.style.setProperty("--a", `${petalAngle(index)}deg`);
-    button.innerHTML = icon(petal.icon);
-    button.addEventListener("click", () => onPick(petal.action));
-    root.appendChild(button);
+    button.className = index === MIC_ROW ? "ring-button ring-button--mic" : "ring-button";
+    button.style.setProperty("--row", String(index));
+    button.innerHTML = icon(entry.icon);
+    button.addEventListener("click", () => onPick(entry.action));
+    if (index === MIC_ROW) button.addEventListener("contextmenu", () => onDismiss());
+    column.appendChild(button);
   });
 }
 
-/** Names each petal; the label under the ring reads the hovered one's name. */
-export function renderPetalLabels(root: HTMLElement, labelOf: (action: RingAction) => string): void {
-  petals(root).forEach((petal, index) => petal.setAttribute("aria-label", labelOf(RING_PETALS[index].action)));
-  const hovered = petals(root).findIndex((petal) => petal.classList.contains(PETAL_HOVER_CLASS));
-  if (hovered !== -1) hoverPetal(root, hovered);
+const labels = new WeakMap<HTMLElement, ActionLabel>();
+
+/** Names each button; the label beside the column reads the hovered one's name. */
+export function renderLabels(root: HTMLElement, labelOf: (action: RingAction) => ActionLabel): void {
+  buttons(root).forEach((button, index) => {
+    const label = labelOf(RING_BUTTONS[index].action);
+    labels.set(button, label);
+    button.setAttribute("aria-label", spokenLabel(label));
+  });
+  const hovered = hoveredButton(root);
+  if (hovered !== null) hoverButton(root, hovered);
 }
 
-/** Starts from rest before opening, so every opening fans out again. */
+/** Starts from rest before opening, so every opening slides in again. */
 export function openRing(root: HTMLElement): void {
   closeRing(root);
   void root.offsetWidth;
@@ -83,17 +90,30 @@ export function openRing(root: HTMLElement): void {
 export function closeRing(root: HTMLElement): void {
   root.classList.remove(RING_OPEN_CLASS);
   root.setAttribute("aria-hidden", "true");
-  hoverPetal(root, null);
+  hoverButton(root, null);
 }
 
-export function hoverPetal(root: HTMLElement, hovered: number | null): void {
-  petals(root).forEach((petal, index) => petal.classList.toggle(PETAL_HOVER_CLASS, index === hovered));
-  const label = root.querySelector<HTMLElement>(".ring-label")!;
-  label.classList.toggle(LABEL_SHOWN_CLASS, hovered !== null);
-  if (hovered !== null) label.textContent = petals(root)[hovered].getAttribute("aria-label");
+function hoveredButton(root: HTMLElement): number | null {
+  const index = buttons(root).findIndex((button) => button.classList.contains(BUTTON_HOVER_CLASS));
+  return index === -1 ? null : index;
+}
+
+export function hoverButton(root: HTMLElement, hovered: number | null): void {
+  buttons(root).forEach((button, index) => button.classList.toggle(BUTTON_HOVER_CLASS, index === hovered));
+  const chip = root.querySelector<HTMLElement>(".ring-label")!;
+  chip.classList.toggle(LABEL_SHOWN_CLASS, hovered !== null);
+  if (hovered === null) return;
+  chip.style.setProperty("--row", String(hovered));
+  const label = labels.get(buttons(root)[hovered]);
+  chip.replaceChildren(label?.text ?? "");
+  if (label?.shortcut) {
+    const shortcut = document.createElement("span");
+    shortcut.className = "ring-label-shortcut";
+    shortcut.textContent = ` · ${label.shortcut}`;
+    chip.appendChild(shortcut);
+  }
 }
 
 export function followPointer(root: HTMLElement, pointer: RingPointer): void {
-  const hovered = petals(root).findIndex((petal) => petal.classList.contains(PETAL_HOVER_CLASS));
-  hoverPetal(root, petalAt(pointer, hovered === -1 ? null : hovered));
+  hoverButton(root, buttonAt(pointer));
 }

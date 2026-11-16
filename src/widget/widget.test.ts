@@ -5,14 +5,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SHORTCUT, detectShortcutPlatform, formatAccelerator } from "../accelerator";
 import { BACKEND_WAIT_BUDGET_MS } from "../backend-startup";
 import {
+  EVENT_DICTATION_TOGGLE,
   EVENT_MEETING_TOGGLE,
   EVENT_MEETING_TOGGLE_FAILED,
   EVENT_NAVIGATE_PANEL,
+  EVENT_RING_CLOSED,
+  EVENT_RING_OPENED,
   EVENT_SETTINGS_CHANGED,
   EVENT_SHORTCUT_REQUESTED,
   EVENT_WIDGET_HOVER,
 } from "../contracts";
-import { PILL_HOVER_CLASS } from "./pill";
+import { PILL_COVERED_CLASS, PILL_HOVER_CLASS } from "./pill";
 import { CONNECTION_POLL_MS } from "./settings-retry";
 
 /** What the pill offers at rest: the shortcut, since these tests never load
@@ -251,6 +254,18 @@ describe("the widget window's shape", () => {
 
     listeners.get(EVENT_WIDGET_HOVER)!({ payload: { inside: false } });
     expect(pill.classList.contains(PILL_HOVER_CLASS)).toBe(false);
+  });
+
+  it("hides the pill while the ring's column covers its place", async () => {
+    await loadWidget();
+    await vi.waitFor(() => expect(listeners.get(EVENT_RING_CLOSED)).toBeTypeOf("function"));
+    const pill = document.getElementById("widget")!;
+
+    listeners.get(EVENT_RING_OPENED)!({});
+    expect(pill.classList.contains(PILL_COVERED_CLASS)).toBe(true);
+
+    listeners.get(EVENT_RING_CLOSED)!({});
+    expect(pill.classList.contains(PILL_COVERED_CLASS)).toBe(false);
   });
 
   it("rests as the microphone offering the shortcut", async () => {
@@ -501,6 +516,43 @@ describe("a meeting toggle the backend refuses", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(emitMock).not.toHaveBeenCalledWith(EVENT_MEETING_TOGGLE_FAILED, expect.anything());
+  });
+});
+
+describe("the ring's mic", () => {
+  it("starts and stops a dictation, as a click on the pill does", async () => {
+    await loadWidget();
+    await vi.waitFor(() => expect(listeners.get(EVENT_DICTATION_TOGGLE)).toBeTypeOf("function"));
+    apiMock.audioStart.mockResolvedValue(recordingStatus());
+    apiMock.dictate.mockResolvedValue({ text: "one", duration_ms: 100 });
+
+    listeners.get(EVENT_DICTATION_TOGGLE)!({});
+    await vi.waitFor(() => expect(pillView()).toBe("listening"));
+    listeners.get(EVENT_DICTATION_TOGGLE)!({});
+    await vi.waitFor(() => expect(pillView()).toBe("done"));
+
+    expect(apiMock.audioStart).toHaveBeenCalledOnce();
+  });
+
+  it("leaves dictation off during a meeting, as the pill does", async () => {
+    await loadWidget();
+    await vi.waitFor(() => expect(listeners.get(EVENT_DICTATION_TOGGLE)).toBeTypeOf("function"));
+    apiMock.startMeetingRecording.mockResolvedValue({
+      is_recording: true,
+      duration_seconds: 0,
+      level_db: -60,
+      system_endpoint: null,
+      system_level_db: -60,
+      capture_incident: null,
+    });
+    await listeners.get(EVENT_MEETING_TOGGLE)!({});
+    await vi.advanceTimersByTimeAsync(0);
+
+    listeners.get(EVENT_DICTATION_TOGGLE)!({});
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(apiMock.audioStart).not.toHaveBeenCalled();
+    expect(apiMock.stopMeetingRecording).not.toHaveBeenCalled();
   });
 });
 
