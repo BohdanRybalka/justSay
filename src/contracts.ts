@@ -51,9 +51,10 @@ export const EVENT_MEETING_TOGGLE_FAILED = "meeting-toggle-failed";
  *  no mouse events where its window lets clicks through. */
 export const EVENT_WIDGET_HOVER = "widget-hover";
 
-/** The ring opened at the cursor, or closed. The shell shows and hides the
- *  ring's window itself, whatever closed it, and says so, so the page replays
- *  the fan-out on each opening and starts the next one from rest. */
+/** The ring, the widget's column of actions, opened in the widget's place or
+ *  closed. The shell shows and hides its window itself, whatever closed it,
+ *  and tells every window: the ring slides in again on each opening, and the
+ *  widget hides its pill under the open column. */
 export const EVENT_RING_OPENED = "ring-opened";
 export const EVENT_RING_CLOSED = "ring-closed";
 
@@ -61,6 +62,10 @@ export const EVENT_RING_CLOSED = "ring-closed";
  *  itself: a webview in a window of an app that is not active is not reliably
  *  told where the mouse is, and the ring never activates the app. */
 export const EVENT_RING_POINTER = "ring-pointer";
+
+/** The ring's mic asks the widget, which owns dictation, for what a click on
+ *  the pill does. */
+export const EVENT_DICTATION_TOGGLE = "dictation-toggle";
 
 /** Another window asks the main window to open one of its panels. The asker
  *  shows the window itself. */
@@ -142,7 +147,8 @@ export interface NavigatePanel {
   panel: PanelName;
 }
 
-/** Payload of `EVENT_RING_POINTER`: logical pixels from the ring's centre. */
+/** Payload of `EVENT_RING_POINTER`: logical pixels from the column's right
+ *  side on the widget's centre line. */
 export interface RingPointer {
   x: number;
   y: number;

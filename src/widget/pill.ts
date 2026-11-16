@@ -20,6 +20,10 @@ export type PillView =
  *  touched by `renderPill`. */
 export const PILL_HOVER_CLASS = "pill--hover";
 
+/** Set while the ring's column covers the pill's place; never touched by
+ *  `renderPill`. */
+export const PILL_COVERED_CLASS = "pill--covered";
+
 export const WAVE_BASE_HEIGHTS = [4, 8, 11, 6, 10, 5, 7] as const;
 
 const WAVE_FLOOR_PX = 2;

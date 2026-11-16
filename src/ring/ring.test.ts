@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  EVENT_DICTATION_TOGGLE,
   EVENT_MEETING_TOGGLE,
   EVENT_NAVIGATE_PANEL,
   EVENT_RING_CLOSED,
@@ -10,7 +11,7 @@ import {
   EVENT_RING_POINTER,
   EVENT_SETTINGS_CHANGED,
 } from "../contracts";
-import { PETAL_HOVER_CLASS, RING_OPEN_CLASS } from "./ring-view";
+import { BUTTON_HOVER_CLASS, RING_OPEN_CLASS } from "./ring-view";
 
 const listeners = new Map<string, (event: unknown) => unknown>();
 
@@ -19,6 +20,7 @@ const SETTINGS = {
   language: "uk",
   previous_language: "en",
   meeting_consent_acknowledged: true,
+  shortcut: "Ctrl+Alt+KeyV",
   meetings_language: "uk",
   files_language: "auto",
 };
@@ -63,8 +65,10 @@ function shell(event: string, payload?: unknown) {
   listeners.get(event)!({ payload });
 }
 
-function petal(ring: HTMLElement, index: number): HTMLElement {
-  return ring.querySelectorAll<HTMLElement>(".ring-petal")[index];
+const BUTTON = { meeting: 0, file: 1, dictate: 2, language: 3, settings: 4 } as const;
+
+function button(ring: HTMLElement, action: keyof typeof BUTTON): HTMLElement {
+  return ring.querySelectorAll<HTMLElement>(".ring-button")[BUTTON[action]];
 }
 
 beforeEach(() => {
@@ -82,7 +86,7 @@ beforeEach(() => {
 });
 
 describe("the ring window", () => {
-  it("fans out when the shell opens it and rests when the shell closes it", async () => {
+  it("slides in when the shell opens it and rests when the shell closes it", async () => {
     const ring = await loadRing();
 
     shell(EVENT_RING_OPENED);
@@ -92,22 +96,32 @@ describe("the ring window", () => {
     expect(ring.classList.contains(RING_OPEN_CLASS)).toBe(false);
   });
 
-  it("hovers the petal the shell reports the pointer over", async () => {
+  it("hovers the button the shell reports the pointer over", async () => {
     const ring = await loadRing();
     shell(EVENT_RING_OPENED);
 
-    shell(EVENT_RING_POINTER, { x: 0, y: -38 });
+    shell(EVENT_RING_POINTER, { x: -19, y: -60 });
 
-    expect(ring.querySelectorAll(".ring-petal")[0].classList.contains(PETAL_HOVER_CLASS)).toBe(true);
+    expect(button(ring, "meeting").classList.contains(BUTTON_HOVER_CLASS)).toBe(true);
   });
 
-  it("asks the shell to close it when a petal is picked", async () => {
+  it("asks the shell to close it when a button is picked", async () => {
     const ring = await loadRing();
     shell(EVENT_RING_OPENED);
 
-    ring.querySelectorAll<HTMLElement>(".ring-petal")[3].click();
+    button(ring, "settings").click();
 
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("close_ring"));
+  });
+
+  it("asks the shell to close it on a right click on the mic, doing nothing else", async () => {
+    const ring = await loadRing();
+    shell(EVENT_RING_OPENED);
+
+    button(ring, "dictate").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("close_ring"));
+    expect(emitMock).not.toHaveBeenCalled();
   });
 
   it("never shows the webview's own menu on a right-click inside the ring", async () => {
@@ -115,7 +129,7 @@ describe("the ring window", () => {
     shell(EVENT_RING_OPENED);
     const rightClick = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 });
 
-    ring.querySelectorAll<HTMLElement>(".ring-petal")[0].dispatchEvent(rightClick);
+    button(ring, "meeting").dispatchEvent(rightClick);
 
     expect(rightClick.defaultPrevented).toBe(true);
   });
@@ -142,21 +156,38 @@ describe("the ring window", () => {
     await vi.waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
   });
 
+  it("offers the mic with the shortcut that dictates without the ring", async () => {
+    const ring = await loadRing();
+
+    await vi.waitFor(() =>
+      expect(button(ring, "dictate").getAttribute("aria-label")).toBe("Dictate · Ctrl + Alt + V"),
+    );
+  });
+
+  it("hands a dictation to the widget, which owns dictation", async () => {
+    const ring = await loadRing();
+
+    button(ring, "dictate").click();
+
+    await vi.waitFor(() => expect(emitMock).toHaveBeenCalledWith(EVENT_DICTATION_TOGGLE));
+    expect(invokeMock).toHaveBeenCalledWith("close_ring");
+  });
+
   it("names the language in use and offers to stop a meeting being recorded", async () => {
     const ring = await loadRing();
-    await vi.waitFor(() => expect(petal(ring, 2).getAttribute("aria-label")).toBe("Language · Ukrainian"));
+    await vi.waitFor(() => expect(button(ring, "language").getAttribute("aria-label")).toBe("Language · Ukrainian"));
 
     getMeetingStatusMock.mockResolvedValueOnce({ is_recording: true });
     shell(EVENT_RING_OPENED);
 
-    await vi.waitFor(() => expect(petal(ring, 0).getAttribute("aria-label")).toBe("Stop the meeting"));
+    await vi.waitFor(() => expect(button(ring, "meeting").getAttribute("aria-label")).toBe("Stop the meeting"));
   });
 
   it("hands a meeting to the widget, which owns the meeting flow", async () => {
     const ring = await loadRing();
     await vi.waitFor(() => expect(getMeetingStatusMock).toHaveBeenCalled());
 
-    petal(ring, 0).click();
+    button(ring, "meeting").click();
 
     await vi.waitFor(() => expect(emitMock).toHaveBeenCalledWith(EVENT_MEETING_TOGGLE));
   });
@@ -164,9 +195,9 @@ describe("the ring window", () => {
   it("opens the Meetings page in the main window until the disclosure is acknowledged", async () => {
     getSettingsMock.mockResolvedValue({ ...SETTINGS, meeting_consent_acknowledged: false });
     const ring = await loadRing();
-    await vi.waitFor(() => expect(petal(ring, 2).getAttribute("aria-label")).toBe("Language · Ukrainian"));
+    await vi.waitFor(() => expect(button(ring, "language").getAttribute("aria-label")).toBe("Language · Ukrainian"));
 
-    petal(ring, 0).click();
+    button(ring, "meeting").click();
 
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("show_settings_window"));
     expect(emitMock).toHaveBeenCalledWith(EVENT_NAVIGATE_PANEL, { panel: "meetings" });
@@ -175,9 +206,9 @@ describe("the ring window", () => {
 
   it("switches to the language used before and tells the other windows", async () => {
     const ring = await loadRing();
-    await vi.waitFor(() => expect(petal(ring, 2).getAttribute("aria-label")).toBe("Language · Ukrainian"));
+    await vi.waitFor(() => expect(button(ring, "language").getAttribute("aria-label")).toBe("Language · Ukrainian"));
 
-    petal(ring, 2).click();
+    button(ring, "language").click();
 
     await vi.waitFor(() => expect(emitMock).toHaveBeenCalledWith(EVENT_SETTINGS_CHANGED));
     expect(updateSettingsMock).toHaveBeenCalledWith({ language: "en" });
@@ -186,7 +217,7 @@ describe("the ring window", () => {
   it("asks the shell to open the file dialog for a file", async () => {
     const ring = await loadRing();
 
-    petal(ring, 1).click();
+    button(ring, "file").click();
 
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("pick_audio_file"));
     expect(emitMock).not.toHaveBeenCalledWith(EVENT_NAVIGATE_PANEL, expect.anything());
@@ -195,7 +226,7 @@ describe("the ring window", () => {
   it("opens the main window on Settings for Settings", async () => {
     const ring = await loadRing();
 
-    petal(ring, 3).click();
+    button(ring, "settings").click();
     await vi.waitFor(() =>
       expect(emitMock).toHaveBeenCalledWith(EVENT_NAVIGATE_PANEL, { panel: "settings" }),
     );
@@ -206,20 +237,20 @@ describe("the ring window", () => {
     updateSettingsMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const ring = await loadRing();
-    await vi.waitFor(() => expect(petal(ring, 2).getAttribute("aria-label")).toBe("Language · Ukrainian"));
+    await vi.waitFor(() => expect(button(ring, "language").getAttribute("aria-label")).toBe("Language · Ukrainian"));
 
-    petal(ring, 2).click();
+    button(ring, "language").click();
 
     await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalledWith("Couldn't switch to English — try again."));
     expect(invokeMock).toHaveBeenCalledWith("close_ring");
     expect(emitMock).not.toHaveBeenCalledWith(EVENT_SETTINGS_CHANGED);
   });
 
-  it("raises no notification for a petal that worked", async () => {
+  it("raises no notification for a button that worked", async () => {
     const ring = await loadRing();
-    await vi.waitFor(() => expect(petal(ring, 2).getAttribute("aria-label")).toBe("Language · Ukrainian"));
+    await vi.waitFor(() => expect(button(ring, "language").getAttribute("aria-label")).toBe("Language · Ukrainian"));
 
-    petal(ring, 2).click();
+    button(ring, "language").click();
 
     await vi.waitFor(() => expect(emitMock).toHaveBeenCalledWith(EVENT_SETTINGS_CHANGED));
     expect(notifyErrorMock).not.toHaveBeenCalled();

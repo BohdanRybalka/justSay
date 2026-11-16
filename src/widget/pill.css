@@ -310,3 +310,7 @@ body {
 .pill.meeting:not(.pill--hover):not(:has(.pill-lost)) :is(.pill-dot, .pill-meter-bars i) {
   background: #fff;
 }
+
+.pill--covered {
+  visibility: hidden;
+}
