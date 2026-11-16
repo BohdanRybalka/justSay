@@ -1184,7 +1184,7 @@ def test_leftover_dictations_are_listed_as_failed_unless_kept_past_fourteen_days
     assert fresh.exists() and other.exists() and not stale.exists()
 
 
-async def test_a_kept_dictation_keeps_its_mode_and_language_across_a_restart(
+async def test_a_kept_dictation_keeps_its_language_across_a_restart(
     queue, tmp_path, monkeypatch
 ):
     queue.keep_failed_dictation(_dictation_audio(tmp_path), language="de", mode=ProviderMode.CLOUD)
@@ -1204,6 +1204,21 @@ async def test_a_kept_dictation_keeps_its_mode_and_language_across_a_restart(
     await _settle(restarted, card.id)
 
     assert sent == [{"language": "de", "source": "dictation", "mode": ProviderMode.CLOUD}]
+
+
+async def test_a_local_dictation_waits_for_try_again_while_cloud_is_on(
+    queue, tmp_path, monkeypatch
+):
+    sent = AsyncMock()
+    monkeypatch.setattr(jobs, "process_audio", sent)
+    monkeypatch.setattr(stt_settings, "mode", ProviderMode.CLOUD)
+    _keep_failed_dictation(queue, _dictation_audio(tmp_path), mode=ProviderMode.LOCAL)
+    restarted = JobQueue(queue._temp_dir, gate=queue.gate, clock=queue.clock)
+    restarted.add_leftover_dictations(jobs.leftover_dictations(queue._temp_dir))
+    await asyncio.sleep(0)
+
+    assert sent.await_count == 0
+    assert [v.stage for v in queue.views() + restarted.views()] == ["failed", "failed"]
 
 
 async def test_a_retry_that_fails_again_keeps_its_audio_as_a_card(queue, tmp_path, monkeypatch):
@@ -1230,11 +1245,11 @@ async def test_a_retry_that_fails_again_keeps_its_audio_as_a_card(queue, tmp_pat
     [
         (ProviderMode.CLOUD, ProviderMode.CLOUD, ProviderMode.CLOUD),
         (ProviderMode.CLOUD, ProviderMode.LOCAL, ProviderMode.LOCAL),
-        (ProviderMode.LOCAL, ProviderMode.CLOUD, ProviderMode.LOCAL),
+        (ProviderMode.LOCAL, ProviderMode.CLOUD, ProviderMode.CLOUD),
         (ProviderMode.LOCAL, ProviderMode.LOCAL, ProviderMode.LOCAL),
     ],
 )
-async def test_a_retry_goes_to_the_cloud_only_when_cloud_was_made_and_is_on(
+async def test_a_retry_goes_where_the_dictation_switch_points_when_pressed(
     queue, tmp_path, monkeypatch, made_in, now, sent_to
 ):
     indexer = MagicMock()

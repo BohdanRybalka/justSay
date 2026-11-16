@@ -270,19 +270,12 @@ def leftover_dictations(temp_dir: Path) -> list[Path]:
     return sorted(found, key=lambda entry: entry.stat().st_mtime)
 
 
-def _dictation_mode(made_in: ProviderMode | None) -> ProviderMode:
-    """Cloud only if the dictation was made in Cloud and Cloud is on now; else this computer."""
-    if made_in == ProviderMode.CLOUD and stt_settings.mode == ProviderMode.CLOUD:
-        return ProviderMode.CLOUD
-    return ProviderMode.LOCAL
-
-
 class JobQueue:
     """Jobs by id; a failed one stays until dismissed, a done or cancelled one a minute.
 
-    A meeting and a file run on the chosen engine and each on its own language, read when their
-    turn comes; a cloud run stops before each piece it sends once Local is chosen.
-    A failed dictation stays for ``FAILED_DICTATION_KEEP_SECONDS`` and then its audio goes.
+    A meeting, a file and a dictation run on the engine chosen when their turn comes; a cloud run
+    stops before each piece it sends once Local is chosen. A failed dictation is sent only by Try
+    again, and stays for ``FAILED_DICTATION_KEEP_SECONDS`` before its audio goes.
     """
 
     def __init__(
@@ -348,9 +341,9 @@ class JobQueue:
     def keep_failed_dictation(self, audio: Path, *, language: str, mode: ProviderMode) -> None:
         """Keep the audio of a dictation that failed as a card that Try again can send once more.
 
-        The name carries the mode and language, so a restart sends it again the same way. An
-        engine still reading the audio blocks a move on Windows, so it is copied then. Nothing is
-        kept when the audio is not on disk, since there is nothing to send.
+        The name carries the mode it was recorded in and its language, which a restart reads back.
+        An engine still reading the audio blocks a move on Windows, so it is copied then. Nothing
+        is kept when the audio is not on disk, since there is nothing to send.
         """
         job_id = uuid.uuid4().hex
         name = f"{DICTATION_FILE_PREFIX}{job_id}_{mode.value}_{language}.wav"
@@ -528,7 +521,10 @@ class JobQueue:
 
     async def _run_dictation(self, job: _Job) -> None:
         job.stage = "transcribing"
-        mode = _dictation_mode(job.mode)
+        mode = stt_settings.mode
+        if job.mode != mode:
+            made_in = job.mode.value if job.mode else "?"
+            log.info("Dictation %s recorded in %s goes through %s", job.id, made_in, mode.value)
         try:
             result = await process_audio(
                 job.path, language=job.language, source="dictation", mode=mode
