@@ -352,7 +352,7 @@ def test_a_dictation_being_recorded_at_quit_waits_in_history_with_try_again(monk
     assert (job["kind"], job["stage"], job["error"]) == (
         "dictation",
         "failed",
-        "Couldn't turn this dictation into text. Try again",
+        "Failed to transcribe this dictation into text",
     )
 
 

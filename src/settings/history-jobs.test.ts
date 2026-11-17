@@ -334,7 +334,7 @@ describe("createJobCards", () => {
   });
 
   it("offers a failed dictation Try again under a mic, and says Delete for the audio it keeps", async () => {
-    const failed = job({ kind: "dictation", name: "Dictation · 8 Oct 14:32", stage: "failed", progress: null, error: "Couldn't turn this dictation into text. Try again" });
+    const failed = job({ kind: "dictation", name: "Dictation · 8 Oct 14:32", stage: "failed", progress: null, error: "Failed to transcribe this dictation into text" });
     apiMock.jobs.mockResolvedValue([failed]);
     const cards = createJobCards(show, entrySaved, entryShown);
     await cards.refresh();
