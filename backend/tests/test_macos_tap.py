@@ -1428,6 +1428,28 @@ def test_a_helper_that_never_writes_a_newline_cannot_grow_the_buffer_without_bou
     assert max(len(line) for line in tail.split("\n")) <= _STDERR_MAX_LINE_BYTES
 
 
+def test_every_line_the_helper_writes_reaches_the_backend_log(tap_settings, caplog):
+    """The helper names the rates it captures at and every rebuild after a device change.
+
+    A meeting log is the only record of what the Mac did during a call, so a headset
+    that switched profile mid-call is visible there and not only when the helper fails.
+    """
+    lines = [
+        b"Capturing 2 ch at 48000 Hz from input buffer 0, writing 48000 Hz" + NEWLINE,
+        b"Rebuilt the capture after the default output device changed: "
+        b"48000 Hz before, 16000 Hz now" + NEWLINE,
+    ]
+    source = MacOSTapSource(tap_settings, Path("/nonexistent/justsay-audiotap"))
+
+    with caplog.at_level(logging.INFO, logger="app.audio.macos_tap"):
+        source._drain_stderr(io.BytesIO(b"".join(lines)))
+
+    logged = [record.getMessage() for record in caplog.records]
+    assert logged == [
+        "macOS system-audio helper: " + line.decode().rstrip() for line in lines
+    ]
+
+
 def test_the_drain_logs_a_failure_it_did_not_expect_instead_of_dying_silently(
     tap_settings, caplog
 ):

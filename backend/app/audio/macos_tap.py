@@ -325,7 +325,7 @@ class MacOSTapSource(SystemAudioSource):
         )
 
     def _drain_stderr(self, stream: object) -> None:
-        """Read the helper's stderr from the moment it is spawned, until EOF.
+        """Read the helper's stderr from the moment it is spawned, until EOF, into the log.
 
         A pipe nobody reads fills and the helper blocks inside its own write
         (ADR 052). Never close this stream from another thread: it deadlocks.
@@ -344,6 +344,7 @@ class MacOSTapSource(SystemAudioSource):
                     continue
                 text = chunk.decode("utf-8", errors="replace").rstrip()
                 if text:
+                    log.info("macOS system-audio helper: %s", text)
                     with self._stderr_lock:
                         self._stderr_tail.append(text)
         except (OSError, ValueError):
