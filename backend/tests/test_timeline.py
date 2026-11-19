@@ -743,19 +743,24 @@ def test_a_rejected_segment_is_truncated_at_its_neighbour_rather_than_summed_int
 
 
 def _tone_stream(stretches: list[tuple[float, float]], *, block_frames: int = 1024,
-                 late_by: float = 0.004) -> list[CapturedBlock]:
-    """A continuous 1 kHz tone from a device whose real rate changes between `stretches`.
+                 late_by: float = 0.004,
+                 pauses: tuple[tuple[float, float], ...] = ()) -> list[CapturedBlock]:
+    """A 1 kHz tone from a device whose real rate changes between `stretches`.
 
-    Each stretch is `(real_rate, seconds)`, with no gap between them. A block
+    Each stretch is `(real_rate, seconds)`, with no gap between them. A pause is
+    `(capture_second, seconds)` in which no frame is delivered at all. A block
     arrives once its last frame is captured, late by up to `late_by`, never early.
     """
     rng = np.random.default_rng(7)
     blocks: list[CapturedBlock] = []
     captured_until = 0.0
     phase = 0.0
+    waiting = sorted(pauses)
     for real_rate, seconds in stretches:
         step = 2 * np.pi * 1000.0 / real_rate
         for _ in range(int(seconds * real_rate / block_frames)):
+            while waiting and captured_until >= waiting[0][0]:
+                captured_until += waiting.pop(0)[1]
             angles = phase + step * np.arange(block_frames)
             phase = float(angles[-1] + step)
             captured_until += block_frames / real_rate
@@ -798,7 +803,7 @@ def test_16khz_audio_declared_as_48khz_keeps_its_length_and_pitch():
     """A headset in its call profile delivers 16 kHz while its header still says 48 kHz.
 
     Taken at its word, each block plays three times fast and fills a third of
-    its own time: a 3 kHz tone full of holes, the gibberish a real call came out as.
+    its own time: a 3 kHz tone full of holes.
     """
     blocks = _tone_stream([(16000.0, 20.0)])
 
@@ -832,20 +837,77 @@ def test_a_rate_switch_without_a_gap_splits_on_the_block_it_happened_at(before, 
     assert _audible_share(timeline, 1.0, blocks[-1].arrival - 1.0) > 0.98
 
 
-def test_a_short_run_after_a_stall_keeps_the_rate_measured_before_it():
-    """A stretch too short to measure takes the rate its neighbour held, not the header's."""
+def test_16khz_declared_as_48khz_is_measured_across_the_pauses_between_sounds():
+    """Windows delivers nothing while nothing plays, so the other side arrives in pieces.
+
+    A 150 ms pause every second is a stall at any rate the device might run at, and
+    no piece is long enough to measure alone; the rate is measured across them.
+    """
+    pauses = tuple((second + 0.5, 0.15) for second in range(20))
+    blocks = _tone_stream([(16000.0, 20.0)], pauses=pauses)
+
+    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
+    timeline = _place_tone(blocks, nominal_rate=48000)
+
+    assert [run.rate for run in runs] == [16000]
+    assert _dominant_hz(timeline, 10.6) == pytest.approx(1000.0, abs=10.0)
+
+
+def test_a_right_48khz_declaration_survives_frequent_pauses():
+    """Spans across a pause measure a slower clock than the device has.
+
+    With a 100 ms pause every 0.4 s most spans cross one; a span counts for a rate
+    only when no gap inside it is a stall at that rate, so 48 kHz is kept.
+    """
+    pauses = tuple((0.4 * pause + 0.2, 0.1) for pause in range(75))
+    blocks = _tone_stream([(48000.0, 30.0)], pauses=pauses)
+
+    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
+    timeline = _place_tone(blocks, nominal_rate=48000)
+
+    assert [run.rate for run in runs] == [48000]
+    assert _dominant_hz(timeline, 20.0) == pytest.approx(1000.0, abs=10.0)
+
+
+def test_a_pause_just_before_a_switch_does_not_move_it():
+    """The switch is found from the blocks' own durations, which a pause changes for one block."""
     block_frames = 1024
-    long_stretch = _tone_stream([(16000.0, 10.0)], block_frames=block_frames)
-    resume_at = long_stretch[-1].arrival + 5.0
-    short_stretch = [
-        CapturedBlock(arrival=resume_at + block.arrival, samples=block.samples)
-        for block in _tone_stream([(16000.0, 1.0)], block_frames=block_frames)
-    ]
-    index, _ = _spool_of(long_stretch + short_stretch)
+    blocks = _tone_stream(
+        [(48000.0, 10.0), (16000.0, 10.0)], block_frames=block_frames, pauses=((9.5, 0.3),)
+    )
+    first_row_after = int(10.0 * 48000 / block_frames)
 
-    segments = segment_spool(index, rate_runs_of(index, 48000), GAP_TOLERANCE)
+    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
 
-    assert [segment.running_rate for segment in segments] == [16000, 16000]
+    assert [run.rate for run in runs] == [48000, 16000]
+    assert abs(runs[1].start_row - first_row_after) <= 1
+
+
+def test_a_rate_heard_only_in_pieces_shorter_than_two_windows_still_holds():
+    """A sound, a pause, a sound: windows that only see a pause's edge say nothing.
+
+    Such a window is passed over, so the windows on either side of it still hold the
+    rate together even though no two labelled windows are neighbours.
+    """
+    pauses = tuple((2.2 * piece + 1.2, 1.0) for piece in range(15))
+    blocks = _tone_stream([(16000.0, 18.0)], pauses=pauses)
+
+    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
+
+    assert [run.rate for run in runs] == [16000]
+
+
+def test_one_window_at_another_rate_is_not_enough_to_change_it():
+    """A rate has to hold for two windows in a row before a stretch is played at it.
+
+    One window cannot tell a short stretch at another rate from a reader hiccup, and
+    playing 48 kHz audio at 16 kHz garbles it as surely as the other way round.
+    """
+    blocks = _tone_stream([(48000.0, 10.0), (16000.0, 1.3), (48000.0, 10.0)])
+
+    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
+
+    assert [run.rate for run in runs] == [48000]
 
 
 def test_the_log_line_names_each_measured_rate_and_when_it_began():

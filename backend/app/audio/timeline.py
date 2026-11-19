@@ -12,7 +12,7 @@ Everything works in chunks over a memmap and never holds a whole source (ADR 058
 from __future__ import annotations
 
 import itertools
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -26,14 +26,15 @@ STANDARD_RATES = (
     8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 88200, 96000, 176400, 192000,
 )
 _HELD_WINDOWS = 2
+_SPANS_PER_WINDOW = 4
 
 
 @dataclass(frozen=True)
 class RateRun:
     """Rows `[start_row, stop_row)` of a spool that its device delivered at `rate`.
 
-    `rate` is a standard rate the arrivals held, or the declared rate where
-    nothing could be measured.
+    `rate` is a standard rate the arrivals held, or the nominal rate when no
+    rate held anywhere in the spool.
     """
 
     start_row: int
@@ -60,6 +61,12 @@ class Segment:
         return self.stop_frame - self.start_frame
 
 
+def _spool_columns(index: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Arrivals, frames per block, and each block's first frame followed by the total."""
+    frames = index["frames"].astype(np.int64)
+    return index["arrival"], frames, np.concatenate(([0], np.cumsum(frames)))
+
+
 def _stall_rows(
     arrivals: np.ndarray, frames: np.ndarray, rates: np.ndarray, gap_tolerance_blocks: float
 ) -> np.ndarray:
@@ -71,95 +78,101 @@ def _stall_rows(
     return np.flatnonzero(np.diff(arrivals) > limits) + 1
 
 
-def _row_ranges(breaks: Iterable[int], start: int, stop: int) -> list[tuple[int, int]]:
-    edges = [start, *breaks, stop]
-    return list(zip(edges, edges[1:]))
-
-
 def _nearest_rate(measured: float, candidates: Sequence[int]) -> int:
     return min(candidates, key=lambda rate: abs(measured / rate - 1))
 
 
-def _window_bounds(arrivals: np.ndarray, start: int, stop: int, window_seconds: float) -> list[int]:
-    """The first row of each window spanning `window_seconds` of arrivals in `[start, stop)`.
+def _window_bounds(arrivals: np.ndarray, window_seconds: float) -> list[int]:
+    """The first row of each window of `window_seconds` of arrivals, then the row count.
 
-    Window `k` is rows `[bounds[k], bounds[k + 1])`; rows from the last bound on are unmeasured.
+    Window `k` is rows `[bounds[k], bounds[k + 1])`.
     """
-    bounds = [start]
-    while True:
-        following = start + int(
-            np.searchsorted(arrivals[start:stop], arrivals[bounds[-1]] + window_seconds)
-        )
-        if following >= stop:
-            return bounds
-        bounds.append(following)
+    bounds = [0]
+    while bounds[-1] < len(arrivals):
+        bounds.append(int(np.searchsorted(arrivals, arrivals[bounds[-1]] + window_seconds)))
+    return bounds
 
 
-def _held_groups(labels: list[int]) -> list[tuple[int, int, int]]:
-    """Runs of `_HELD_WINDOWS` or more windows nearest one rate, as `(first, stop, rate)`."""
+def _window_labels(
+    columns: tuple[np.ndarray, np.ndarray, np.ndarray],
+    bounds: list[int],
+    candidates: Sequence[int],
+    gap_tolerance_blocks: float,
+    window_seconds: float,
+) -> list[int | None]:
+    """Each window's rate: the first of `candidates` its own stall-free spans measure nearest to.
+
+    A row spans to the row a `_SPANS_PER_WINDOW`th of a window on, and counts for a candidate
+    only when no gap inside its span is a stall at that rate. None when no candidate agrees.
+    """
+    arrivals, frames, offsets = columns
+    count = len(arrivals)
+    rows = np.arange(count)
+    ends = np.searchsorted(arrivals, arrivals + window_seconds / _SPANS_PER_WINDOW)
+    spanned = ends < count
+    span_rates = np.full(count, np.nan)
+    block_ends = offsets[1:]
+    span_rates[spanned] = (block_ends[ends[spanned]] - block_ends[spanned]) / (
+        arrivals[ends[spanned]] - arrivals[spanned]
+    )
+    stall_free = {}
+    for rate in candidates:
+        stalls = _stall_rows(arrivals, frames, np.full(count, float(rate)), gap_tolerance_blocks)
+        piece_stops = np.append(stalls, count)[np.searchsorted(stalls, rows, side="right")]
+        stall_free[rate] = spanned & (ends < piece_stops)
+
+    labels: list[int | None] = []
+    for first, stop in zip(bounds, bounds[1:]):
+        agreed = None
+        for rate in candidates:
+            usable = stall_free[rate][first:stop]
+            if not usable.any():
+                continue
+            measured = float(np.median(span_rates[first:stop][usable]))
+            if _nearest_rate(measured, candidates) == rate:
+                agreed = rate
+                break
+        labels.append(agreed)
+    return labels
+
+
+def _held_groups(labels: list[int | None]) -> list[tuple[int, int, int]]:
+    """Runs of `_HELD_WINDOWS`+ labelled windows on one rate, as `(first, last, rate)`.
+
+    Unlabelled windows are passed over rather than ending a run.
+    """
+    labelled = [(window, rate) for window, rate in enumerate(labels) if rate is not None]
     groups: list[tuple[int, int, int]] = []
-    first = 0
-    for rate, members in itertools.groupby(labels):
-        count = len(list(members))
-        if count >= _HELD_WINDOWS:
-            groups.append((first, first + count, rate))
-        first += count
+    for rate, members in itertools.groupby(labelled, key=lambda item: item[1]):
+        windows = [window for window, _ in members]
+        if len(windows) >= _HELD_WINDOWS:
+            groups.append((windows[0], windows[-1], rate))
     return groups
 
 
 def _switch_row(
     arrivals: np.ndarray,
-    offsets: np.ndarray,
-    bounds: list[int],
-    before: tuple[int, int, int],
-    after: tuple[int, int, int],
+    frames: np.ndarray,
+    search: tuple[int, int],
+    rates: tuple[int, int],
 ) -> int:
-    """The first row of `after`'s rate, where the two clocks' lines meet.
+    """The row in `[low, high]` from which blocks last as long as the second rate says.
 
-    Each line runs through the earliest arrivals of a window wholly at its rate (an
-    arrival is only ever late); only the windows touching the switch are searched.
+    The least summed misfit of each block's duration decides, so a stall moves the switch
+    by at most its own block; a tie goes to the earlier row.
     """
-
-    def intercept(window: int, rate: int) -> float:
-        rows = slice(bounds[window], bounds[window + 1])
-        return float(np.min(arrivals[rows] - offsets[1:][rows] / rate))
-
-    _, before_stop, before_rate = before
-    after_first, _, after_rate = after
-    meeting_frame = (
-        intercept(after_first + 1, after_rate) - intercept(before_stop - 2, before_rate)
-    ) / (1 / before_rate - 1 / after_rate)
-    low, high = bounds[before_stop - 1], bounds[after_first + 1]
-    return low + int(np.argmin(np.abs(offsets[low:high + 1] - meeting_frame)))
-
-
-def _piece_runs(
-    arrivals: np.ndarray,
-    offsets: np.ndarray,
-    piece: tuple[int, int],
-    candidates: Sequence[int],
-    window_seconds: float,
-) -> list[tuple[int, int, int]]:
-    """A stall-free piece as `(start_row, stop_row, rate)` stretches, empty when no rate held."""
-    start, stop = piece
-    bounds = _window_bounds(arrivals, start, stop, window_seconds)
-    labels = [
-        _nearest_rate(
-            (offsets[last] - offsets[first]) / (arrivals[last] - arrivals[first]), candidates
-        )
-        for first, last in zip(bounds, bounds[1:])
-    ]
-    groups = _held_groups(labels)
-    stretches: list[tuple[int, int, int]] = []
-    stretch_start = start
-    for before, after in zip(groups, groups[1:]):
-        if before[2] != after[2]:
-            switch = _switch_row(arrivals, offsets, bounds, before, after)
-            stretches.append((stretch_start, switch, before[2]))
-            stretch_start = switch
-    if groups:
-        stretches.append((stretch_start, stop, groups[-1][2]))
-    return stretches
+    low, high = search
+    before_rate, after_rate = rates
+    rows = np.arange(max(low, 1), high)
+    if rows.size == 0:
+        return low
+    durations = arrivals[rows] - arrivals[rows - 1]
+    misfit_before = np.abs(durations - frames[rows] / before_rate)
+    misfit_after = np.abs(durations - frames[rows] / after_rate)
+    cost = np.concatenate(([0.0], np.cumsum(misfit_before))) + np.concatenate(
+        (np.cumsum(misfit_after[::-1])[::-1], [0.0])
+    )
+    return int(rows[0]) + int(np.argmin(cost))
 
 
 def find_rate_runs(
@@ -171,36 +184,38 @@ def find_rate_runs(
 ) -> list[RateRun]:
     """Every row of a spool assigned the rate its device really delivered at.
 
-    Measured over windows of `window_seconds`, never across a stall even at the slowest
-    standard rate; a rate holds when `_HELD_WINDOWS` windows in a row are nearest to it.
-    A piece where none held takes the rate before it, else after, else nominal.
+    A rate holds when `_HELD_WINDOWS` labelled windows in a row carry it, the nominal rate
+    tried first; a switch between held rates lands where block durations change. Rows
+    before the first held rate take it, and with none held every row takes the nominal rate.
     """
     if index.size == 0:
         return []
 
-    arrivals = index["arrival"]
-    frames = index["frames"].astype(np.int64)
-    offsets = np.concatenate(([0], np.cumsum(frames)))
-    candidates = sorted({*STANDARD_RATES, nominal_rate})
-    slowest = np.full(len(index), float(candidates[0]))
-    pieces = _row_ranges(
-        _stall_rows(arrivals, frames, slowest, gap_tolerance_blocks).tolist(), 0, len(index)
+    columns = _spool_columns(index)
+    arrivals, frames, _ = columns
+    candidates = [nominal_rate, *sorted(set(STANDARD_RATES) - {nominal_rate})]
+    bounds = _window_bounds(arrivals, window_seconds)
+    groups = _held_groups(
+        _window_labels(columns, bounds, candidates, gap_tolerance_blocks, window_seconds)
     )
-    measured = [
-        _piece_runs(arrivals, offsets, piece, candidates, window_seconds) for piece in pieces
-    ]
+    if not groups:
+        return [RateRun(0, len(index), nominal_rate)]
 
-    rate = next((stretches[0][2] for stretches in measured if stretches), nominal_rate)
+    edges = [(0, groups[0][2])]
+    for before, after in zip(groups, groups[1:]):
+        if before[2] != after[2]:
+            search = (bounds[before[1]], bounds[after[0] + 1])
+            switch = _switch_row(arrivals, frames, search, (before[2], after[2]))
+            edges.append((switch, after[2]))
+
     runs: list[RateRun] = []
-    for (start, stop), stretches in zip(pieces, measured):
-        for first, last, stretch_rate in stretches or [(start, stop, rate)]:
-            if last <= first:
-                continue
-            if runs and runs[-1].rate == stretch_rate:
-                runs[-1] = RateRun(runs[-1].start_row, last, stretch_rate)
-            else:
-                runs.append(RateRun(first, last, stretch_rate))
-        rate = runs[-1].rate
+    for (start, rate), (stop, _) in zip(edges, [*edges[1:], (len(index), 0)]):
+        if stop <= start:
+            continue
+        if runs and runs[-1].rate == rate:
+            runs[-1] = RateRun(runs[-1].start_row, stop, rate)
+        else:
+            runs.append(RateRun(start, stop, rate))
     return runs
 
 
@@ -216,9 +231,7 @@ def segment_spool(
     if index.size == 0:
         return []
 
-    arrivals = index["arrival"]
-    frames = index["frames"].astype(np.int64)
-    offsets = np.concatenate(([0], np.cumsum(frames)))
+    arrivals, frames, offsets = _spool_columns(index)
     rates = np.empty(len(index), dtype=np.float64)
     for run in runs:
         rates[run.start_row:run.stop_row] = run.rate
@@ -227,8 +240,9 @@ def segment_spool(
         *(run.start_row for run in runs[1:]),
     }
 
+    edges = [0, *sorted(breaks), len(index)]
     segments: list[Segment] = []
-    for first, stop in _row_ranges(sorted(breaks), 0, len(index)):
+    for first, stop in zip(edges, edges[1:]):
         last = stop - 1
         rate = int(rates[first])
         segments.append(
