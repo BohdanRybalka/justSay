@@ -4035,3 +4035,43 @@ async def test_a_level_from_a_dead_session_is_still_refused(
         assert recorder.system_level_db == float("-inf")
     finally:
         recorder.cleanup()
+
+
+def test_a_track_measured_away_from_its_declared_rate_is_logged_as_a_warning(
+    audio_settings, caplog
+):
+    """A future log of a garbled meeting has to show which side switched rate, and when."""
+    rates = {"microphone": (16000, 16000), "system": (48000, 16000)}
+    spools = {}
+    for source, (_, real_rate) in rates.items():
+        spool = MeetingSpool(audio_settings.temp_dir, "ratecafe", source)
+        for index in range(1, int(5.0 * real_rate / BLOCK_FRAMES) + 1):
+            spool.append(index * BLOCK_FRAMES / real_rate, np.zeros(BLOCK_FRAMES, np.float32))
+        spool.close()
+        spools[source] = spool
+    captured = _CapturedMeeting(
+        microphone_spool=spools["microphone"],
+        system_spool=spools["system"],
+        microphone_rate=rates["microphone"][0],
+        system_rate=rates["system"][0],
+        recording_start=0.0,
+        recording_stop=5.0,
+        incident=None,
+    )
+
+    try:
+        with caplog.at_level(logging.INFO, logger="app.audio.meeting_recorder"):
+            write_recording(audio_settings, captured).unlink()
+    finally:
+        for spool in spools.values():
+            spool.discard()
+
+    lines = {
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if "measured" in record.getMessage()
+    }
+    assert lines == {
+        (logging.INFO, "Meeting microphone audio declared 16000 Hz; measured: 16000 Hz from 0.1 s"),
+        (logging.WARNING, "Meeting system audio declared 48000 Hz; measured: 16000 Hz from 0.1 s"),
+    }

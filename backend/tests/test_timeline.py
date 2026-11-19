@@ -16,7 +16,10 @@ from app.audio.analysis import to_mono
 from app.audio.config import AudioSettings
 from app.audio.meeting_spool import INDEX_DTYPE
 from app.audio.timeline import (
+    RateRun,
     Segment,
+    describe_rate_runs,
+    find_rate_runs,
     normalize_in_place,
     place_on_timeline,
     resample_chunks,
@@ -27,6 +30,7 @@ from app.audio.timeline import (
 TARGET_RATE = 16000
 GAP_TOLERANCE = 1.5
 RATE_TOLERANCE = AudioSettings().meeting_rate_tolerance
+RATE_WINDOW_SECONDS = AudioSettings().meeting_rate_window_seconds
 CHUNK_FRAMES = AudioSettings().meeting_assembly_chunk_frames
 
 
@@ -58,7 +62,16 @@ def segment_blocks(
     blocks: list[CapturedBlock], nominal_rate: int, gap_tolerance_blocks: float
 ) -> list[Segment]:
     index, _ = _spool_of(blocks)
-    return segment_spool(index, nominal_rate, gap_tolerance_blocks)
+    return segment_spool(index, rate_runs_of(index, nominal_rate), gap_tolerance_blocks)
+
+
+def rate_runs_of(index: np.ndarray, nominal_rate: int) -> list[RateRun]:
+    return find_rate_runs(
+        index,
+        nominal_rate,
+        gap_tolerance_blocks=GAP_TOLERANCE,
+        window_seconds=RATE_WINDOW_SECONDS,
+    )
 
 
 def place_blocks_on_timeline(
@@ -88,6 +101,7 @@ def place_blocks_on_timeline(
         recording_start=recording_start,
         gap_tolerance_blocks=gap_tolerance_blocks,
         rate_tolerance=rate_tolerance,
+        rate_window_seconds=RATE_WINDOW_SECONDS,
         chunk_frames=CHUNK_FRAMES,
         out=out,
     )
@@ -112,7 +126,11 @@ def mix_and_normalize(microphone: np.ndarray, system: np.ndarray) -> np.ndarray:
 
 def _one_block_segment(end_arrival: float, frames: int) -> Segment:
     return Segment(
-        start_arrival=0.0, end_arrival=end_arrival, start_frame=0, stop_frame=frames
+        start_arrival=0.0,
+        end_arrival=end_arrival,
+        start_frame=0,
+        stop_frame=frames,
+        running_rate=TARGET_RATE,
     )
 
 
@@ -183,31 +201,29 @@ def test_measured_rate_recovers_the_real_device_clock():
     segments = segment_blocks(blocks, TARGET_RATE, GAP_TOLERANCE)
 
     assert len(segments) == 1
-    measured = segment_effective_rate(segments[0], TARGET_RATE, RATE_TOLERANCE)
+    measured = segment_effective_rate(segments[0], RATE_TOLERANCE)
     assert measured == pytest.approx(16020.0, rel=1e-3)
 
 
 @pytest.mark.parametrize("elapsed", [0.0, -1.0, 0.001, 60.0])
-def test_effective_rate_falls_back_to_nominal_when_measurement_is_absurd(elapsed):
+def test_effective_rate_falls_back_to_the_running_rate_when_measurement_is_absurd(elapsed):
     """A degenerate or wildly jittered segment must not resample by 100x.
 
-    The window is +/-`meeting_rate_tolerance` around nominal: 0.001 s for
-    16 000 samples measures 16 MHz, 60 s for 16 000 samples measures 267 Hz,
-    and a non-positive elapsed measures nothing at all. All three fall back
-    to nominal.
+    The window is +/-`meeting_rate_tolerance` around the segment's running
+    rate: 0.001 s for 16 000 samples measures 16 MHz, 60 s for 16 000 samples
+    measures 267 Hz, and a non-positive elapsed measures nothing at all. All
+    three fall back to the running rate.
     """
     segment = _one_block_segment(elapsed, TARGET_RATE)
 
-    assert segment_effective_rate(segment, TARGET_RATE, RATE_TOLERANCE) == pytest.approx(
-        TARGET_RATE
-    )
+    assert segment_effective_rate(segment, RATE_TOLERANCE) == pytest.approx(TARGET_RATE)
 
 
 def test_effective_rate_inside_the_window_is_used_as_measured():
     """The window must not swallow the real correction it exists to bound."""
     segment = _one_block_segment(1.0, 16020)
 
-    assert segment_effective_rate(segment, TARGET_RATE, RATE_TOLERANCE) == pytest.approx(16020.0)
+    assert segment_effective_rate(segment, RATE_TOLERANCE) == pytest.approx(16020.0)
 
 
 def test_a_20_second_capture_gap_becomes_silence_not_removed_time():
@@ -405,7 +421,7 @@ def test_a_spool_index_splits_at_exactly_the_gaps_its_arrivals_carry():
     ]
     index, _ = _spool_of(blocks)
 
-    segments = segment_spool(index, TARGET_RATE, GAP_TOLERANCE)
+    segments = segment_spool(index, rate_runs_of(index, TARGET_RATE), GAP_TOLERANCE)
 
     assert [(s.start_frame, s.stop_frame) for s in segments] == [
         (0, 3 * block_frames),
@@ -643,9 +659,7 @@ def test_burst_jitter_measures_outside_the_window_and_falls_back_to_nominal(arri
         "this pattern is inside the old [0.5x, 2x] clamp, which is why that "
         "clamp had to be replaced rather than kept alongside"
     )
-    assert segment_effective_rate(segments[0], nominal_rate, RATE_TOLERANCE) == pytest.approx(
-        nominal_rate
-    )
+    assert segment_effective_rate(segments[0], RATE_TOLERANCE) == pytest.approx(nominal_rate)
 
 
 def test_a_one_block_segment_measures_exactly_nominal_by_construction():
@@ -666,9 +680,7 @@ def test_a_one_block_segment_measures_exactly_nominal_by_construction():
     assert len(segments) == 1
     elapsed = segments[0].end_arrival - segments[0].start_arrival
     assert (segments[0].frames / elapsed) / nominal_rate == pytest.approx(1.0, abs=1e-12)
-    assert segment_effective_rate(segments[0], nominal_rate, RATE_TOLERANCE) == pytest.approx(
-        nominal_rate
-    )
+    assert segment_effective_rate(segments[0], RATE_TOLERANCE) == pytest.approx(nominal_rate)
 
 
 def test_real_clock_drift_stays_inside_the_rate_window():
@@ -728,3 +740,118 @@ def test_a_rejected_segment_is_truncated_at_its_neighbour_rather_than_summed_int
     )
 
     assert np.max(np.abs(timeline)) <= fill * 1.25
+
+
+def _tone_stream(stretches: list[tuple[float, float]], *, block_frames: int = 1024,
+                 late_by: float = 0.004) -> list[CapturedBlock]:
+    """A continuous 1 kHz tone from a device whose real rate changes between `stretches`.
+
+    Each stretch is `(real_rate, seconds)`, with no gap between them. A block
+    arrives once its last frame is captured, late by up to `late_by`, never early.
+    """
+    rng = np.random.default_rng(7)
+    blocks: list[CapturedBlock] = []
+    captured_until = 0.0
+    phase = 0.0
+    for real_rate, seconds in stretches:
+        step = 2 * np.pi * 1000.0 / real_rate
+        for _ in range(int(seconds * real_rate / block_frames)):
+            angles = phase + step * np.arange(block_frames)
+            phase = float(angles[-1] + step)
+            captured_until += block_frames / real_rate
+            blocks.append(
+                CapturedBlock(
+                    arrival=captured_until + float(rng.uniform(0.0, late_by)),
+                    samples=(0.5 * np.sin(angles)).astype(np.float32),
+                )
+            )
+    return blocks
+
+
+def _dominant_hz(timeline: np.ndarray, start_second: float) -> float:
+    window = timeline[int(start_second * TARGET_RATE):int((start_second + 1.0) * TARGET_RATE)]
+    spectrum = np.abs(np.fft.rfft(window * np.hanning(len(window))))
+    return float(np.fft.rfftfreq(len(window), 1 / TARGET_RATE)[int(np.argmax(spectrum))])
+
+
+def _audible_share(timeline: np.ndarray, start_second: float, stop_second: float) -> float:
+    """The share of 10 ms frames in the span that carry the tone at its own level."""
+    frame = TARGET_RATE // 100
+    span = timeline[int(start_second * TARGET_RATE):int(stop_second * TARGET_RATE)]
+    frames = span[: len(span) // frame * frame].reshape(-1, frame)
+    return float(np.mean(np.sqrt(np.mean(frames**2, axis=1)) > 0.2))
+
+
+def _place_tone(blocks: list[CapturedBlock], nominal_rate: int) -> np.ndarray:
+    return place_blocks_on_timeline(
+        blocks,
+        nominal_rate=nominal_rate,
+        target_rate=TARGET_RATE,
+        recording_start=0.0,
+        recording_stop=blocks[-1].arrival,
+        gap_tolerance_blocks=GAP_TOLERANCE,
+        rate_tolerance=RATE_TOLERANCE,
+    )
+
+
+def test_16khz_audio_declared_as_48khz_keeps_its_length_and_pitch():
+    """A headset in its call profile delivers 16 kHz while its header still says 48 kHz.
+
+    Taken at its word, each block plays three times fast and fills a third of
+    its own time: a 3 kHz tone full of holes, the gibberish a real call came out as.
+    """
+    blocks = _tone_stream([(16000.0, 20.0)])
+
+    timeline = _place_tone(blocks, nominal_rate=48000)
+
+    assert [run.rate for run in rate_runs_of(_spool_of(blocks)[0], 48000)] == [16000]
+    assert _dominant_hz(timeline, 10.0) == pytest.approx(1000.0, abs=10.0)
+    assert _audible_share(timeline, 1.0, blocks[-1].arrival - 1.0) > 0.98
+
+
+@pytest.mark.parametrize(
+    ("before", "after"), [(48000.0, 16000.0), (16000.0, 48000.0), (44100.0, 48000.0)]
+)
+def test_a_rate_switch_without_a_gap_splits_on_the_block_it_happened_at(before, after):
+    """A headset that changes profile mid-call changes rate with no stall to split on.
+
+    Both sides of the switch keep their pitch and their place, whichever way the
+    rate moves, including between the two closest standard rates.
+    """
+    block_frames = 1024
+    blocks = _tone_stream([(before, 10.0), (after, 10.0)], block_frames=block_frames)
+    first_row_after = int(10.0 * before / block_frames)
+
+    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
+    timeline = _place_tone(blocks, nominal_rate=48000)
+
+    assert [run.rate for run in runs] == [int(before), int(after)]
+    assert abs(runs[1].start_row - first_row_after) <= 1
+    assert _dominant_hz(timeline, 4.0) == pytest.approx(1000.0, abs=10.0)
+    assert _dominant_hz(timeline, 15.0) == pytest.approx(1000.0, abs=10.0)
+    assert _audible_share(timeline, 1.0, blocks[-1].arrival - 1.0) > 0.98
+
+
+def test_a_short_run_after_a_stall_keeps_the_rate_measured_before_it():
+    """A stretch too short to measure takes the rate its neighbour held, not the header's."""
+    block_frames = 1024
+    long_stretch = _tone_stream([(16000.0, 10.0)], block_frames=block_frames)
+    resume_at = long_stretch[-1].arrival + 5.0
+    short_stretch = [
+        CapturedBlock(arrival=resume_at + block.arrival, samples=block.samples)
+        for block in _tone_stream([(16000.0, 1.0)], block_frames=block_frames)
+    ]
+    index, _ = _spool_of(long_stretch + short_stretch)
+
+    segments = segment_spool(index, rate_runs_of(index, 48000), GAP_TOLERANCE)
+
+    assert [segment.running_rate for segment in segments] == [16000, 16000]
+
+
+def test_the_log_line_names_each_measured_rate_and_when_it_began():
+    blocks = _tone_stream([(48000.0, 9.0), (16000.0, 10.0)])
+    index, _ = _spool_of(blocks)
+
+    described = describe_rate_runs(index, rate_runs_of(index, 48000), recording_start=0.0)
+
+    assert described == "48000 Hz from 0.0 s, 16000 Hz from 9.0 s"
