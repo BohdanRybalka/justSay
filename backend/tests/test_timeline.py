@@ -19,6 +19,7 @@ from app.audio.timeline import (
     STANDARD_RATES,
     RateRun,
     Segment,
+    _spool_columns,
     describe_rate_runs,
     find_rate_runs,
     normalize_in_place,
@@ -909,6 +910,22 @@ def test_any_spool_gets_runs_from_its_first_row_in_order(seed):
     assert starts[0] == 0
     assert starts == sorted(starts)
     assert starts[-1] < count
+
+
+def test_arrivals_are_searched_as_a_contiguous_array():
+    """A spool index is a record array, and its arrival field is a strided view of it.
+
+    `np.searchsorted` copies a strided array on every call, and the measurement searches
+    once per window, so handing it the view makes a three-hour meeting take seconds to
+    write instead of a fraction of one.
+    """
+    index = _device_index([(48000.0, 2.0)])
+    assert not index["arrival"].flags.c_contiguous
+
+    arrivals, _, _ = _spool_columns(index)
+
+    assert arrivals.flags.c_contiguous
+    assert np.array_equal(arrivals, index["arrival"])
 
 
 def test_an_empty_spool_has_no_runs_and_says_so():

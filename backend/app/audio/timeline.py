@@ -4,7 +4,7 @@ Pure functions only — no device access, no I/O of its own. Both sources spill
 blocks to disk tagged with the `time.monotonic()` reading taken on arrival,
 and this module reconciles their two device clocks against that one shared
 wall clock (ADR 038). A meeting file keeps them apart, one channel each. The
-rate each source really ran at is measured for the log and never changes audio.
+rate a source's device delivered at is also measured, for the log; placement never reads it.
 
 Everything works in chunks over a memmap and never holds a whole source (ADR 058).
 """
@@ -64,8 +64,7 @@ class Segment:
 def _spool_columns(index: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Arrivals, frames per block, and each block's first frame followed by the total.
 
-    Arrivals are copied out of the record array: `np.searchsorted` copies a strided
-    view on every call, which made one search per window quadratic in meeting length.
+    Arrivals come back as a contiguous copy of the record array's field.
     """
     frames = index["frames"].astype(np.int64)
     arrivals = np.ascontiguousarray(index["arrival"])

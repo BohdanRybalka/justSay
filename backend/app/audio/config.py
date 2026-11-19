@@ -30,7 +30,7 @@ class AudioSettings(PackageSettings):
     meeting_stall_tolerance_seconds: float = Field(default=3.0, gt=0.0)
     meeting_gap_tolerance_blocks: float = Field(default=1.5, gt=1.0)
     meeting_rate_tolerance: float = Field(default=0.05, gt=0.0, lt=1.0)
-    meeting_rate_window_seconds: float = Field(default=1.0, ge=0.1)
+    meeting_rate_window_seconds: float = Field(default=1.0, ge=0.25)
 
     meeting_system_endpoint_role: EndpointRole = Field(default="communications")
     meeting_macos_tap_path: Path | None = Field(default=None)

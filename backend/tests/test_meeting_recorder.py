@@ -4037,13 +4037,13 @@ async def test_a_level_from_a_dead_session_is_still_refused(
         recorder.cleanup()
 
 
-def test_a_track_measured_away_from_its_declared_rate_is_logged_but_placed_as_declared(
+def test_a_track_measured_away_from_its_declared_rate_is_logged_and_never_placed_by_it(
     audio_settings, caplog, monkeypatch
 ):
     """A future log of a garbled meeting has to show which side ran at what rate, and when.
 
-    The measurement is a lead for whoever reads the log; the audio is still placed at
-    the rate each source declared, because arrivals cannot tell lost time from a slow clock.
+    The measurement is a lead for whoever reads the log; placement is still handed the
+    rate each source declared, because arrivals cannot tell lost time from a slow clock.
     """
     from app.audio import meeting_recorder
 
