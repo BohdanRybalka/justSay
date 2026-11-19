@@ -16,6 +16,7 @@ from app.audio.analysis import to_mono
 from app.audio.config import AudioSettings
 from app.audio.meeting_spool import INDEX_DTYPE
 from app.audio.timeline import (
+    STANDARD_RATES,
     RateRun,
     Segment,
     describe_rate_runs,
@@ -62,16 +63,7 @@ def segment_blocks(
     blocks: list[CapturedBlock], nominal_rate: int, gap_tolerance_blocks: float
 ) -> list[Segment]:
     index, _ = _spool_of(blocks)
-    return segment_spool(index, rate_runs_of(index, nominal_rate), gap_tolerance_blocks)
-
-
-def rate_runs_of(index: np.ndarray, nominal_rate: int) -> list[RateRun]:
-    return find_rate_runs(
-        index,
-        nominal_rate,
-        gap_tolerance_blocks=GAP_TOLERANCE,
-        window_seconds=RATE_WINDOW_SECONDS,
-    )
+    return segment_spool(index, nominal_rate, gap_tolerance_blocks)
 
 
 def place_blocks_on_timeline(
@@ -101,7 +93,6 @@ def place_blocks_on_timeline(
         recording_start=recording_start,
         gap_tolerance_blocks=gap_tolerance_blocks,
         rate_tolerance=rate_tolerance,
-        rate_window_seconds=RATE_WINDOW_SECONDS,
         chunk_frames=CHUNK_FRAMES,
         out=out,
     )
@@ -126,11 +117,7 @@ def mix_and_normalize(microphone: np.ndarray, system: np.ndarray) -> np.ndarray:
 
 def _one_block_segment(end_arrival: float, frames: int) -> Segment:
     return Segment(
-        start_arrival=0.0,
-        end_arrival=end_arrival,
-        start_frame=0,
-        stop_frame=frames,
-        running_rate=TARGET_RATE,
+        start_arrival=0.0, end_arrival=end_arrival, start_frame=0, stop_frame=frames
     )
 
 
@@ -201,29 +188,31 @@ def test_measured_rate_recovers_the_real_device_clock():
     segments = segment_blocks(blocks, TARGET_RATE, GAP_TOLERANCE)
 
     assert len(segments) == 1
-    measured = segment_effective_rate(segments[0], RATE_TOLERANCE)
+    measured = segment_effective_rate(segments[0], TARGET_RATE, RATE_TOLERANCE)
     assert measured == pytest.approx(16020.0, rel=1e-3)
 
 
 @pytest.mark.parametrize("elapsed", [0.0, -1.0, 0.001, 60.0])
-def test_effective_rate_falls_back_to_the_running_rate_when_measurement_is_absurd(elapsed):
+def test_effective_rate_falls_back_to_nominal_when_measurement_is_absurd(elapsed):
     """A degenerate or wildly jittered segment must not resample by 100x.
 
-    The window is +/-`meeting_rate_tolerance` around the segment's running
-    rate: 0.001 s for 16 000 samples measures 16 MHz, 60 s for 16 000 samples
-    measures 267 Hz, and a non-positive elapsed measures nothing at all. All
-    three fall back to the running rate.
+    The window is +/-`meeting_rate_tolerance` around nominal: 0.001 s for
+    16 000 samples measures 16 MHz, 60 s for 16 000 samples measures 267 Hz,
+    and a non-positive elapsed measures nothing at all. All three fall back
+    to nominal.
     """
     segment = _one_block_segment(elapsed, TARGET_RATE)
 
-    assert segment_effective_rate(segment, RATE_TOLERANCE) == pytest.approx(TARGET_RATE)
+    assert segment_effective_rate(segment, TARGET_RATE, RATE_TOLERANCE) == pytest.approx(
+        TARGET_RATE
+    )
 
 
 def test_effective_rate_inside_the_window_is_used_as_measured():
     """The window must not swallow the real correction it exists to bound."""
     segment = _one_block_segment(1.0, 16020)
 
-    assert segment_effective_rate(segment, RATE_TOLERANCE) == pytest.approx(16020.0)
+    assert segment_effective_rate(segment, TARGET_RATE, RATE_TOLERANCE) == pytest.approx(16020.0)
 
 
 def test_a_20_second_capture_gap_becomes_silence_not_removed_time():
@@ -421,7 +410,7 @@ def test_a_spool_index_splits_at_exactly_the_gaps_its_arrivals_carry():
     ]
     index, _ = _spool_of(blocks)
 
-    segments = segment_spool(index, rate_runs_of(index, TARGET_RATE), GAP_TOLERANCE)
+    segments = segment_spool(index, TARGET_RATE, GAP_TOLERANCE)
 
     assert [(s.start_frame, s.stop_frame) for s in segments] == [
         (0, 3 * block_frames),
@@ -659,7 +648,9 @@ def test_burst_jitter_measures_outside_the_window_and_falls_back_to_nominal(arri
         "this pattern is inside the old [0.5x, 2x] clamp, which is why that "
         "clamp had to be replaced rather than kept alongside"
     )
-    assert segment_effective_rate(segments[0], RATE_TOLERANCE) == pytest.approx(nominal_rate)
+    assert segment_effective_rate(segments[0], nominal_rate, RATE_TOLERANCE) == pytest.approx(
+        nominal_rate
+    )
 
 
 def test_a_one_block_segment_measures_exactly_nominal_by_construction():
@@ -680,7 +671,9 @@ def test_a_one_block_segment_measures_exactly_nominal_by_construction():
     assert len(segments) == 1
     elapsed = segments[0].end_arrival - segments[0].start_arrival
     assert (segments[0].frames / elapsed) / nominal_rate == pytest.approx(1.0, abs=1e-12)
-    assert segment_effective_rate(segments[0], RATE_TOLERANCE) == pytest.approx(nominal_rate)
+    assert segment_effective_rate(segments[0], nominal_rate, RATE_TOLERANCE) == pytest.approx(
+        nominal_rate
+    )
 
 
 def test_real_clock_drift_stays_inside_the_rate_window():
@@ -742,105 +735,63 @@ def test_a_rejected_segment_is_truncated_at_its_neighbour_rather_than_summed_int
     assert np.max(np.abs(timeline)) <= fill * 1.25
 
 
-def _tone_stream(stretches: list[tuple[float, float]], *, block_frames: int = 1024,
-                 late_by: float = 0.004,
-                 pauses: tuple[tuple[float, float], ...] = (),
-                 clock_tick: float = 0.0) -> list[CapturedBlock]:
-    """A 1 kHz tone from a device whose real rate changes between `stretches`.
-
-    Each stretch is `(real_rate, seconds)`, with no gap between them. A pause is
-    `(capture_second, seconds)` in which no frame is delivered at all. A block
-    arrives once its last frame is captured, late by up to `late_by`, never early,
-    read off a clock that only moves every `clock_tick` seconds when one is given.
-    """
-    rng = np.random.default_rng(7)
-    blocks: list[CapturedBlock] = []
-    captured_until = 0.0
-    phase = 0.0
-    waiting = sorted(pauses)
-    for real_rate, seconds in stretches:
-        step = 2 * np.pi * 1000.0 / real_rate
-        for _ in range(int(seconds * real_rate / block_frames)):
-            while waiting and captured_until >= waiting[0][0]:
-                captured_until += waiting.pop(0)[1]
-            angles = phase + step * np.arange(block_frames)
-            phase = float(angles[-1] + step)
-            captured_until += block_frames / real_rate
-            arrival = captured_until + float(rng.uniform(0.0, late_by))
-            if clock_tick:
-                arrival = np.floor(arrival / clock_tick) * clock_tick
-            blocks.append(
-                CapturedBlock(
-                    arrival=float(arrival),
-                    samples=(0.5 * np.sin(angles)).astype(np.float32),
-                )
-            )
-    return blocks
-
-
-def _dominant_hz(timeline: np.ndarray, start_second: float) -> float:
-    window = timeline[int(start_second * TARGET_RATE):int((start_second + 1.0) * TARGET_RATE)]
-    spectrum = np.abs(np.fft.rfft(window * np.hanning(len(window))))
-    return float(np.fft.rfftfreq(len(window), 1 / TARGET_RATE)[int(np.argmax(spectrum))])
-
-
-def _audible_share(timeline: np.ndarray, start_second: float, stop_second: float) -> float:
-    """The share of 10 ms frames in the span that carry the tone at its own level."""
-    frame = TARGET_RATE // 100
-    span = timeline[int(start_second * TARGET_RATE):int(stop_second * TARGET_RATE)]
-    frames = span[: len(span) // frame * frame].reshape(-1, frame)
-    return float(np.mean(np.sqrt(np.mean(frames**2, axis=1)) > 0.2))
-
-
-def _place_tone(blocks: list[CapturedBlock], nominal_rate: int) -> np.ndarray:
-    return place_blocks_on_timeline(
-        blocks,
-        nominal_rate=nominal_rate,
-        target_rate=TARGET_RATE,
-        recording_start=0.0,
-        recording_stop=blocks[-1].arrival,
+def rate_runs_of(index: np.ndarray, nominal_rate: int) -> list[RateRun]:
+    return find_rate_runs(
+        index,
+        nominal_rate,
         gap_tolerance_blocks=GAP_TOLERANCE,
-        rate_tolerance=RATE_TOLERANCE,
+        window_seconds=RATE_WINDOW_SECONDS,
     )
 
 
-def test_16khz_audio_declared_as_48khz_keeps_its_length_and_pitch():
-    """A headset in its call profile delivers 16 kHz while its header still says 48 kHz.
+def _device_index(stretches: list[tuple[float, float]], *, block_frames: int = 1024,
+                  late_by: float = 0.004,
+                  pauses: tuple[tuple[float, float], ...] = (),
+                  clock_tick: float = 0.0) -> np.ndarray:
+    """The spool index of a device whose real rate changes between `stretches`.
 
-    Taken at its word, each block plays three times fast and fills a third of
-    its own time: a 3 kHz tone full of holes.
+    Each stretch is `(real_rate, seconds)`, with no gap between them. A pause is
+    `(capture_second, seconds)` in which no frame is delivered at all. A block
+    arrives once its last frame is captured, late by up to `late_by`; with a
+    `clock_tick` the reading is floored to it, so it may read up to a tick early.
     """
-    blocks = _tone_stream([(16000.0, 20.0)])
+    rng = np.random.default_rng(7)
+    arrivals: list[float] = []
+    captured_until = 0.0
+    waiting = sorted(pauses)
+    for real_rate, seconds in stretches:
+        for _ in range(int(seconds * real_rate / block_frames)):
+            while waiting and captured_until >= waiting[0][0]:
+                captured_until += waiting.pop(0)[1]
+            captured_until += block_frames / real_rate
+            arrival = captured_until + float(rng.uniform(0.0, late_by))
+            if clock_tick:
+                arrival = float(np.floor(arrival / clock_tick) * clock_tick)
+            arrivals.append(arrival)
+    return np.array([(arrival, block_frames) for arrival in arrivals], dtype=INDEX_DTYPE)
 
-    timeline = _place_tone(blocks, nominal_rate=48000)
 
-    assert [run.rate for run in rate_runs_of(_spool_of(blocks)[0], 48000)] == [16000]
-    assert _dominant_hz(timeline, 10.0) == pytest.approx(1000.0, abs=10.0)
-    assert _audible_share(timeline, 1.0, blocks[-1].arrival - 1.0) > 0.98
+def test_16khz_audio_declared_as_48khz_is_measured_as_16khz_from_the_first_block():
+    """A headset in its call profile delivers 16 kHz while its header still says 48 kHz."""
+    index = _device_index([(16000.0, 20.0)])
+
+    assert rate_runs_of(index, 48000) == [RateRun(0, 16000)]
 
 
 @pytest.mark.parametrize(
     ("before", "after"),
     [(48000.0, 16000.0), (16000.0, 48000.0), (48000.0, 32000.0), (24000.0, 48000.0)],
 )
-def test_a_rate_switch_without_a_gap_splits_on_the_block_it_happened_at(before, after):
-    """A headset that changes profile mid-call changes rate with no stall to split on.
-
-    Both sides of the switch keep their pitch and their place, whichever way the
-    rate moves.
-    """
+def test_a_rate_switch_without_a_gap_is_found_on_the_block_it_happened_at(before, after):
+    """A headset that changes profile mid-call changes rate with no stall to split on."""
     block_frames = 1024
-    blocks = _tone_stream([(before, 10.0), (after, 10.0)], block_frames=block_frames)
+    index = _device_index([(before, 10.0), (after, 10.0)], block_frames=block_frames)
     first_row_after = int(10.0 * before / block_frames)
 
-    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
-    timeline = _place_tone(blocks, nominal_rate=48000)
+    runs = rate_runs_of(index, 48000)
 
     assert [run.rate for run in runs] == [int(before), int(after)]
     assert abs(runs[1].start_row - first_row_after) <= 1
-    assert _dominant_hz(timeline, 4.0) == pytest.approx(1000.0, abs=10.0)
-    assert _dominant_hz(timeline, 15.0) == pytest.approx(1000.0, abs=10.0)
-    assert _audible_share(timeline, 1.0, blocks[-1].arrival - 1.0) > 0.98
 
 
 def test_16khz_declared_as_48khz_is_measured_across_the_pauses_between_sounds():
@@ -849,43 +800,32 @@ def test_16khz_declared_as_48khz_is_measured_across_the_pauses_between_sounds():
     A 150 ms pause every second is a stall at any rate the device might run at, so
     the stream comes in pieces; the windows that measure it run across them.
     """
-    pauses = tuple((second + 0.5, 0.15) for second in range(20))
-    blocks = _tone_stream([(16000.0, 20.0)], pauses=pauses)
+    index = _device_index([(16000.0, 20.0)], pauses=tuple((s + 0.5, 0.15) for s in range(20)))
 
-    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
-    timeline = _place_tone(blocks, nominal_rate=48000)
-
-    assert [run.rate for run in runs] == [16000]
-    assert _dominant_hz(timeline, 10.6) == pytest.approx(1000.0, abs=10.0)
+    assert [run.rate for run in rate_runs_of(index, 48000)] == [16000]
 
 
-def test_a_right_48khz_declaration_survives_frequent_pauses():
+def test_a_right_48khz_declaration_is_measured_as_48khz_through_frequent_pauses():
     """Spans across a pause measure a slower clock than the device has.
 
     With a 200 ms pause every 0.6 s most spans cross one and measure about 24 kHz;
-    a span counts for a rate only when no gap inside it is a stall at that rate,
-    so 48 kHz is kept.
+    a span across a stall does not count, so 48 kHz is measured.
     """
-    pauses = tuple((0.6 * pause + 0.3, 0.2) for pause in range(50))
-    blocks = _tone_stream([(48000.0, 30.0)], pauses=pauses)
+    index = _device_index([(48000.0, 30.0)], pauses=tuple((0.6 * p + 0.3, 0.2) for p in range(50)))
 
-    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
-    timeline = _place_tone(blocks, nominal_rate=48000)
-
-    assert [run.rate for run in runs] == [48000]
-    assert _dominant_hz(timeline, 20.0) == pytest.approx(1000.0, abs=10.0)
+    assert [run.rate for run in rate_runs_of(index, 48000)] == [48000]
 
 
 @pytest.mark.parametrize("pause_at", [9.5, 9.97])
 def test_a_pause_before_a_switch_does_not_move_it(pause_at):
     """The switch is found from the blocks' own durations, which a pause changes for one block."""
     block_frames = 1024
-    blocks = _tone_stream(
+    index = _device_index(
         [(48000.0, 10.0), (16000.0, 10.0)], block_frames=block_frames, pauses=((pause_at, 0.3),)
     )
     first_row_after = int(10.0 * 48000 / block_frames)
 
-    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
+    runs = rate_runs_of(index, 48000)
 
     assert [run.rate for run in runs] == [48000, 16000]
     assert abs(runs[1].start_row - first_row_after) <= 1
@@ -895,41 +835,37 @@ def test_a_pause_before_a_switch_does_not_move_it(pause_at):
     ("rate", "every", "pause"), [(24000.0, 0.25, 0.02), (16000.0, 0.3, 0.05), (48000.0, 0.1, 0.011)]
 )
 def test_short_regular_pauses_never_pass_for_a_nearby_rate(rate, every, pause):
-    """A pause shorter than a stall still costs every span across it some time.
+    """Lost time inside a span reads as a slightly slower clock.
 
-    Spans across 8% of lost time measure a clock 8% slow, which is the distance
-    between neighbouring standard rates; only a rate far from the declared one is
-    ever believed, and only when the spans measure it closely.
+    Spans across 8% of lost time measure a clock 8% slow, the distance between
+    neighbouring standard rates; only a rate far from the declared one is ever
+    measured, and only when the spans land within a few percent of it.
     """
     pauses = tuple((every * index + every / 2, pause) for index in range(int(30 / every)))
-    blocks = _tone_stream([(rate, 30.0)], pauses=pauses)
+    index = _device_index([(rate, 30.0)], pauses=pauses)
 
-    runs = rate_runs_of(_spool_of(blocks)[0], int(rate))
-
-    assert [run.rate for run in runs] == [int(rate)]
+    assert [run.rate for run in rate_runs_of(index, int(rate))] == [int(rate)]
 
 
 @pytest.mark.parametrize("after", [16000.0, 24000.0])
 def test_a_windows_clock_that_ticks_every_15_6_ms_still_finds_the_switch(after):
-    """Windows' monotonic clock moves in 15.625 ms ticks, coarser than a 48 kHz block."""
+    """Windows' monotonic clock moves in 15.625 ms ticks, most of a 48 kHz block."""
     block_frames = 1024
-    blocks = _tone_stream(
+    index = _device_index(
         [(48000.0, 10.0), (after, 10.0)], block_frames=block_frames, clock_tick=0.015625
     )
     first_row_after = int(10.0 * 48000 / block_frames)
 
-    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
+    runs = rate_runs_of(index, 48000)
 
     assert [run.rate for run in runs] == [48000, int(after)]
     assert abs(runs[1].start_row - first_row_after) <= 1
 
 
-def test_a_right_48khz_declaration_survives_a_windows_clock():
-    blocks = _tone_stream([(48000.0, 20.0)], clock_tick=0.015625)
+def test_a_right_48khz_declaration_is_measured_as_48khz_on_a_windows_clock():
+    index = _device_index([(48000.0, 20.0)], clock_tick=0.015625)
 
-    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
-
-    assert [run.rate for run in runs] == [48000]
+    assert [run.rate for run in rate_runs_of(index, 48000)] == [48000]
 
 
 def test_a_rate_heard_only_in_pieces_shorter_than_two_windows_still_holds():
@@ -939,29 +875,44 @@ def test_a_rate_heard_only_in_pieces_shorter_than_two_windows_still_holds():
     rate together even though no two labelled windows are neighbours.
     """
     pauses = tuple((2.2 * piece + 1.2, 1.0) for piece in range(15))
-    blocks = _tone_stream([(16000.0, 18.0)], pauses=pauses)
+    index = _device_index([(16000.0, 18.0)], pauses=pauses)
 
-    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
-
-    assert [run.rate for run in runs] == [16000]
+    assert [run.rate for run in rate_runs_of(index, 48000)] == [16000]
 
 
-def test_one_window_at_another_rate_is_not_enough_to_change_it():
-    """A rate has to hold for two windows in a row before a stretch is played at it.
+def test_one_window_at_another_rate_is_not_enough_to_change_the_measurement():
+    """A rate has to hold for two windows in a row before it is reported.
 
-    One window cannot tell a short stretch at another rate from a reader hiccup, and
-    playing 48 kHz audio at 16 kHz garbles it as surely as the other way round.
+    One window cannot tell a short stretch at another rate from a reader hiccup.
     """
-    blocks = _tone_stream([(48000.0, 10.0), (16000.0, 1.3), (48000.0, 10.0)])
+    index = _device_index([(48000.0, 10.0), (16000.0, 1.3), (48000.0, 10.0)])
 
-    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
+    assert [run.rate for run in rate_runs_of(index, 48000)] == [48000]
 
-    assert [run.rate for run in runs] == [48000]
+
+@pytest.mark.parametrize("seed", range(6))
+def test_every_row_of_any_spool_is_measured_exactly_once(seed):
+    """The measurement runs on every meeting write, so it must answer for any spool.
+
+    Random block counts, rates, pauses, bursts and ties, including one block and
+    blocks that all arrive at once; the runs start at the first row and run in order.
+    """
+    rng = np.random.default_rng(seed)
+    count = int(rng.choice([1, 2, 5, 300, 3000]))
+    steps = rng.choice([0.0, 0.0213, 0.064, 0.2, 3.0], size=count, p=[0.2, 0.4, 0.3, 0.07, 0.03])
+    arrivals = np.cumsum(steps) if seed else np.zeros(count)
+    index = np.array([(arrival, 1024) for arrival in arrivals], dtype=INDEX_DTYPE)
+
+    runs = rate_runs_of(index, int(rng.choice(STANDARD_RATES)))
+
+    starts = [run.start_row for run in runs]
+    assert starts[0] == 0
+    assert starts == sorted(starts)
+    assert starts[-1] < count
 
 
 def test_the_log_line_names_each_measured_rate_and_when_it_began():
-    blocks = _tone_stream([(48000.0, 9.0), (16000.0, 10.0)])
-    index, _ = _spool_of(blocks)
+    index = _device_index([(48000.0, 9.0), (16000.0, 10.0)])
 
     described = describe_rate_runs(index, rate_runs_of(index, 48000), recording_start=0.0)
 

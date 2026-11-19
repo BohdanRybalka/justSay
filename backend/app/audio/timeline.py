@@ -3,8 +3,8 @@
 Pure functions only — no device access, no I/O of its own. Both sources spill
 blocks to disk tagged with the `time.monotonic()` reading taken on arrival,
 and this module reconciles their two device clocks against that one shared
-wall clock (ADR 038), trusting the rate those arrivals show over the rate a
-source declares. A meeting file keeps them apart, one channel each.
+wall clock (ADR 038). A meeting file keeps them apart, one channel each. The
+rate each source really ran at is measured for the log and never changes audio.
 
 Everything works in chunks over a memmap and never holds a whole source (ADR 058).
 """
@@ -33,20 +33,19 @@ _FAR_RATIO = 1.3
 
 @dataclass(frozen=True)
 class RateRun:
-    """Rows `[start_row, stop_row)` of a spool that its device delivered at `rate`.
+    """From `start_row` until the next run's, a spool's device delivered at `rate`.
 
     `rate` is a standard rate the arrivals held, or the nominal rate when no
     rate held anywhere in the spool.
     """
 
     start_row: int
-    stop_row: int
     rate: int
 
 
 @dataclass(frozen=True)
 class Segment:
-    """A contiguous run of frames at one running rate, with no capture gap inside it.
+    """A contiguous run of frames with no capture gap inside it.
 
     Named by its half-open frame range in the source's spool: the spool
     appends in arrival order, so a segment is a slice and never a rebuild.
@@ -56,7 +55,6 @@ class Segment:
     end_arrival: float
     start_frame: int
     stop_frame: int
-    running_rate: int
 
     @property
     def frames(self) -> int:
@@ -70,14 +68,54 @@ def _spool_columns(index: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarra
 
 
 def _stall_rows(
-    arrivals: np.ndarray, frames: np.ndarray, rates: np.ndarray, gap_tolerance_blocks: float
+    arrivals: np.ndarray, frames: np.ndarray, rate: float, gap_tolerance_blocks: float
 ) -> np.ndarray:
-    """Rows arriving more than `gap_tolerance_blocks` earlier blocks after the row before.
-
-    The earlier block lasts its frames at its own entry in `rates`.
-    """
-    limits = gap_tolerance_blocks * frames[:-1] / rates[:-1]
+    """Rows arriving more than `gap_tolerance_blocks` blocks at `rate` after the row before."""
+    limits = gap_tolerance_blocks * (frames[:-1] / rate)
     return np.flatnonzero(np.diff(arrivals) > limits) + 1
+
+
+def segment_spool(
+    index: np.ndarray, nominal_rate: int, gap_tolerance_blocks: float
+) -> list[Segment]:
+    """Split a spool's arrival records wherever capture stalled.
+
+    A stall becomes a hole in the timeline rather than shortening the
+    recording: a segment breaks when the gap to the next block exceeds
+    `gap_tolerance_blocks` times the earlier block's own duration.
+    """
+    if index.size == 0:
+        return []
+
+    arrivals, frames, offsets = _spool_columns(index)
+    stalls = _stall_rows(arrivals, frames, float(nominal_rate), gap_tolerance_blocks)
+    edges = [0, *stalls.tolist(), len(index)]
+    return [
+        Segment(
+            start_arrival=float(arrivals[first]),
+            end_arrival=float(arrivals[stop - 1]) + int(frames[stop - 1]) / nominal_rate,
+            start_frame=int(offsets[first]),
+            stop_frame=int(offsets[stop]),
+        )
+        for first, stop in zip(edges, edges[1:])
+    ]
+
+
+def segment_effective_rate(segment: Segment, nominal_rate: int, rate_tolerance: float) -> float:
+    """The rate the device really ran at over this segment.
+
+    `frames / elapsed_wall_clock`, measured rather than assumed. A
+    measurement further than `rate_tolerance` from nominal is burst jitter
+    rather than a crystal, and falls back to nominal.
+    """
+    elapsed = segment.end_arrival - segment.start_arrival
+    if elapsed <= 0:
+        return float(nominal_rate)
+
+    measured = segment.frames / elapsed
+    if abs(measured - nominal_rate) > nominal_rate * rate_tolerance:
+        return float(nominal_rate)
+    return measured
 
 
 def _window_bounds(arrivals: np.ndarray, window_seconds: float) -> list[int]:
@@ -116,7 +154,7 @@ def _window_labels(
     )
     stall_free = {}
     for rate in candidates:
-        stalls = _stall_rows(arrivals, frames, np.full(count, float(rate)), gap_tolerance_blocks)
+        stalls = _stall_rows(arrivals, frames, float(rate), gap_tolerance_blocks)
         piece_stops = np.append(stalls, count)[np.searchsorted(stalls, rows, side="right")]
         stall_free[rate] = spanned & (ends < piece_stops)
 
@@ -206,80 +244,15 @@ def find_rate_runs(
         _window_labels(columns, bounds, candidates, gap_tolerance_blocks, window_seconds)
     )
     if not groups:
-        return [RateRun(0, len(index), nominal_rate)]
+        return [RateRun(0, nominal_rate)]
 
-    edges = [(0, groups[0][2])]
+    runs = [RateRun(0, groups[0][2])]
     for before, after in zip(groups, groups[1:]):
         if before[2] != after[2]:
             search = (bounds[before[1]], bounds[after[0] + 1])
             switch = _switch_row(arrivals, frames, search, (before[2], after[2]))
-            edges.append((switch, after[2]))
-
-    runs: list[RateRun] = []
-    for (start, rate), (stop, _) in zip(edges, [*edges[1:], (len(index), 0)]):
-        if stop <= start:
-            continue
-        if runs and runs[-1].rate == rate:
-            runs[-1] = RateRun(runs[-1].start_row, stop, rate)
-        else:
-            runs.append(RateRun(start, stop, rate))
+            runs.append(RateRun(switch, after[2]))
     return runs
-
-
-def segment_spool(
-    index: np.ndarray, runs: Sequence[RateRun], gap_tolerance_blocks: float
-) -> list[Segment]:
-    """Split a spool's arrival records wherever capture stalled or its rate changed.
-
-    A stall becomes a hole in the timeline rather than shortening the
-    recording: a segment breaks when the gap to the next block exceeds
-    `gap_tolerance_blocks` times the earlier block's duration at its run's rate.
-    """
-    if index.size == 0:
-        return []
-
-    arrivals, frames, offsets = _spool_columns(index)
-    rates = np.empty(len(index), dtype=np.float64)
-    for run in runs:
-        rates[run.start_row:run.stop_row] = run.rate
-    breaks = {
-        *_stall_rows(arrivals, frames, rates, gap_tolerance_blocks).tolist(),
-        *(run.start_row for run in runs[1:]),
-    }
-
-    edges = [0, *sorted(breaks), len(index)]
-    segments: list[Segment] = []
-    for first, stop in zip(edges, edges[1:]):
-        last = stop - 1
-        rate = int(rates[first])
-        segments.append(
-            Segment(
-                start_arrival=float(arrivals[first]),
-                end_arrival=float(arrivals[last]) + int(frames[last]) / rate,
-                start_frame=int(offsets[first]),
-                stop_frame=int(offsets[stop]),
-                running_rate=rate,
-            )
-        )
-    return segments
-
-
-def segment_effective_rate(segment: Segment, rate_tolerance: float) -> float:
-    """The rate the device really ran at over this segment.
-
-    `frames / elapsed_wall_clock`, measured rather than assumed. A measurement
-    further than `rate_tolerance` from the segment's running rate is burst
-    jitter rather than a crystal, and falls back to that running rate.
-    """
-    running_rate = float(segment.running_rate)
-    elapsed = segment.end_arrival - segment.start_arrival
-    if elapsed <= 0:
-        return running_rate
-
-    measured = segment.frames / elapsed
-    if abs(measured - running_rate) > running_rate * rate_tolerance:
-        return running_rate
-    return measured
 
 
 def describe_rate_runs(index: np.ndarray, runs: Sequence[RateRun], recording_start: float) -> str:
@@ -324,30 +297,23 @@ def place_on_timeline(
     recording_start: float,
     gap_tolerance_blocks: float,
     rate_tolerance: float,
-    rate_window_seconds: float,
     chunk_frames: int,
     out: np.ndarray,
-) -> list[RateRun]:
-    """Add one source's frames to `out` at the offsets their arrivals imply; the rates found.
+) -> None:
+    """Add one source's frames to `out` at the offsets their arrivals imply.
 
     `out` spans the whole recording and is summed into, so a silent source
     still contributes its full length. Each segment is written at its own
     absolute offset and truncated at the next one's, so nothing accumulates.
     """
-    runs = find_rate_runs(
-        index,
-        nominal_rate,
-        gap_tolerance_blocks=gap_tolerance_blocks,
-        window_seconds=rate_window_seconds,
-    )
     total_samples = len(out)
     if total_samples == 0:
-        return runs
+        return
 
-    segments = segment_spool(index, runs, gap_tolerance_blocks)
+    segments = segment_spool(index, nominal_rate, gap_tolerance_blocks)
 
     for position, segment in enumerate(segments):
-        effective_rate = segment_effective_rate(segment, rate_tolerance)
+        effective_rate = segment_effective_rate(segment, nominal_rate, rate_tolerance)
         offset = int(round((segment.start_arrival - recording_start) * target_rate))
         if offset >= total_samples:
             continue
@@ -371,7 +337,6 @@ def place_on_timeline(
             if stop > start:
                 out[start:stop] += chunk[start - cursor:stop - cursor]
             cursor += chunk.size
-    return runs
 
 
 def normalize_in_place(timeline: np.ndarray, chunk_frames: int) -> None:

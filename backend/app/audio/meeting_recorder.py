@@ -50,6 +50,7 @@ from app.audio.timeline import (
     SYSTEM_TRACK,
     TRACK_COUNT,
     describe_rate_runs,
+    find_rate_runs,
     normalize_in_place,
     place_on_timeline,
 )
@@ -283,7 +284,6 @@ def _mix_into(
             "recording_start": captured.recording_start,
             "gap_tolerance_blocks": settings.meeting_gap_tolerance_blocks,
             "rate_tolerance": settings.meeting_rate_tolerance,
-            "rate_window_seconds": settings.meeting_rate_window_seconds,
             "chunk_frames": chunk_frames,
         }
         for track, name, spool, nominal_rate in (
@@ -293,12 +293,18 @@ def _mix_into(
             samples = spool.samples()
             mappings.callback(close_memmap, samples)
             index = spool.index()
-            runs = place_on_timeline(
+            place_on_timeline(
                 index,
                 samples,
                 nominal_rate=nominal_rate,
                 out=timeline[:, track],
                 **common,
+            )
+            runs = find_rate_runs(
+                index,
+                nominal_rate,
+                gap_tolerance_blocks=settings.meeting_gap_tolerance_blocks,
+                window_seconds=settings.meeting_rate_window_seconds,
             )
             log.log(
                 logging.INFO
