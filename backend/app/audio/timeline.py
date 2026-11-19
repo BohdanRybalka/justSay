@@ -27,6 +27,8 @@ STANDARD_RATES = (
 )
 _HELD_WINDOWS = 2
 _SPANS_PER_WINDOW = 4
+_MATCH_TOLERANCE = 0.03
+_FAR_RATIO = 1.3
 
 
 @dataclass(frozen=True)
@@ -78,10 +80,6 @@ def _stall_rows(
     return np.flatnonzero(np.diff(arrivals) > limits) + 1
 
 
-def _nearest_rate(measured: float, candidates: Sequence[int]) -> int:
-    return min(candidates, key=lambda rate: abs(measured / rate - 1))
-
-
 def _window_bounds(arrivals: np.ndarray, window_seconds: float) -> list[int]:
     """The first row of each window of `window_seconds` of arrivals, then the row count.
 
@@ -100,10 +98,11 @@ def _window_labels(
     gap_tolerance_blocks: float,
     window_seconds: float,
 ) -> list[int | None]:
-    """Each window's rate: the first of `candidates` its own stall-free spans measure nearest to.
+    """Each window's rate: the first of `candidates` its own stall-free spans measure.
 
     A row spans to the row a `_SPANS_PER_WINDOW`th of a window on, and counts for a candidate
-    only when no gap inside its span is a stall at that rate. None when no candidate agrees.
+    only when no gap inside its span is a stall at that rate; the spans' median must lie
+    within `_MATCH_TOLERANCE` of the candidate. None when no candidate agrees.
     """
     arrivals, frames, offsets = columns
     count = len(arrivals)
@@ -129,7 +128,7 @@ def _window_labels(
             if not usable.any():
                 continue
             measured = float(np.median(span_rates[first:stop][usable]))
-            if _nearest_rate(measured, candidates) == rate:
+            if abs(measured / rate - 1) <= _MATCH_TOLERANCE:
                 agreed = rate
                 break
         labels.append(agreed)
@@ -184,8 +183,9 @@ def find_rate_runs(
 ) -> list[RateRun]:
     """Every row of a spool assigned the rate its device really delivered at.
 
-    A rate holds when `_HELD_WINDOWS` labelled windows in a row carry it, the nominal rate
-    tried first; a switch between held rates lands where block durations change. Rows
+    Candidates are the nominal rate, then standard rates `_FAR_RATIO` or more from it, since
+    lost time inside a span reads as a slightly slower clock. A rate holds when `_HELD_WINDOWS`
+    labelled windows in a row carry it; a switch lands where block durations change. Rows
     before the first held rate take it, and with none held every row takes the nominal rate.
     """
     if index.size == 0:
@@ -193,7 +193,14 @@ def find_rate_runs(
 
     columns = _spool_columns(index)
     arrivals, frames, _ = columns
-    candidates = [nominal_rate, *sorted(set(STANDARD_RATES) - {nominal_rate})]
+    candidates = [
+        nominal_rate,
+        *(
+            rate
+            for rate in STANDARD_RATES
+            if max(rate / nominal_rate, nominal_rate / rate) >= _FAR_RATIO
+        ),
+    ]
     bounds = _window_bounds(arrivals, window_seconds)
     groups = _held_groups(
         _window_labels(columns, bounds, candidates, gap_tolerance_blocks, window_seconds)

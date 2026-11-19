@@ -744,12 +744,14 @@ def test_a_rejected_segment_is_truncated_at_its_neighbour_rather_than_summed_int
 
 def _tone_stream(stretches: list[tuple[float, float]], *, block_frames: int = 1024,
                  late_by: float = 0.004,
-                 pauses: tuple[tuple[float, float], ...] = ()) -> list[CapturedBlock]:
+                 pauses: tuple[tuple[float, float], ...] = (),
+                 clock_tick: float = 0.0) -> list[CapturedBlock]:
     """A 1 kHz tone from a device whose real rate changes between `stretches`.
 
     Each stretch is `(real_rate, seconds)`, with no gap between them. A pause is
     `(capture_second, seconds)` in which no frame is delivered at all. A block
-    arrives once its last frame is captured, late by up to `late_by`, never early.
+    arrives once its last frame is captured, late by up to `late_by`, never early,
+    read off a clock that only moves every `clock_tick` seconds when one is given.
     """
     rng = np.random.default_rng(7)
     blocks: list[CapturedBlock] = []
@@ -764,9 +766,12 @@ def _tone_stream(stretches: list[tuple[float, float]], *, block_frames: int = 10
             angles = phase + step * np.arange(block_frames)
             phase = float(angles[-1] + step)
             captured_until += block_frames / real_rate
+            arrival = captured_until + float(rng.uniform(0.0, late_by))
+            if clock_tick:
+                arrival = np.floor(arrival / clock_tick) * clock_tick
             blocks.append(
                 CapturedBlock(
-                    arrival=captured_until + float(rng.uniform(0.0, late_by)),
+                    arrival=float(arrival),
                     samples=(0.5 * np.sin(angles)).astype(np.float32),
                 )
             )
@@ -815,13 +820,14 @@ def test_16khz_audio_declared_as_48khz_keeps_its_length_and_pitch():
 
 
 @pytest.mark.parametrize(
-    ("before", "after"), [(48000.0, 16000.0), (16000.0, 48000.0), (44100.0, 48000.0)]
+    ("before", "after"),
+    [(48000.0, 16000.0), (16000.0, 48000.0), (48000.0, 32000.0), (24000.0, 48000.0)],
 )
 def test_a_rate_switch_without_a_gap_splits_on_the_block_it_happened_at(before, after):
     """A headset that changes profile mid-call changes rate with no stall to split on.
 
     Both sides of the switch keep their pitch and their place, whichever way the
-    rate moves, including between the two closest standard rates.
+    rate moves.
     """
     block_frames = 1024
     blocks = _tone_stream([(before, 10.0), (after, 10.0)], block_frames=block_frames)
@@ -840,8 +846,8 @@ def test_a_rate_switch_without_a_gap_splits_on_the_block_it_happened_at(before, 
 def test_16khz_declared_as_48khz_is_measured_across_the_pauses_between_sounds():
     """Windows delivers nothing while nothing plays, so the other side arrives in pieces.
 
-    A 150 ms pause every second is a stall at any rate the device might run at, and
-    no piece is long enough to measure alone; the rate is measured across them.
+    A 150 ms pause every second is a stall at any rate the device might run at, so
+    the stream comes in pieces; the windows that measure it run across them.
     """
     pauses = tuple((second + 0.5, 0.15) for second in range(20))
     blocks = _tone_stream([(16000.0, 20.0)], pauses=pauses)
@@ -856,10 +862,11 @@ def test_16khz_declared_as_48khz_is_measured_across_the_pauses_between_sounds():
 def test_a_right_48khz_declaration_survives_frequent_pauses():
     """Spans across a pause measure a slower clock than the device has.
 
-    With a 100 ms pause every 0.4 s most spans cross one; a span counts for a rate
-    only when no gap inside it is a stall at that rate, so 48 kHz is kept.
+    With a 200 ms pause every 0.6 s most spans cross one and measure about 24 kHz;
+    a span counts for a rate only when no gap inside it is a stall at that rate,
+    so 48 kHz is kept.
     """
-    pauses = tuple((0.4 * pause + 0.2, 0.1) for pause in range(75))
+    pauses = tuple((0.6 * pause + 0.3, 0.2) for pause in range(50))
     blocks = _tone_stream([(48000.0, 30.0)], pauses=pauses)
 
     runs = rate_runs_of(_spool_of(blocks)[0], 48000)
@@ -869,11 +876,12 @@ def test_a_right_48khz_declaration_survives_frequent_pauses():
     assert _dominant_hz(timeline, 20.0) == pytest.approx(1000.0, abs=10.0)
 
 
-def test_a_pause_just_before_a_switch_does_not_move_it():
+@pytest.mark.parametrize("pause_at", [9.5, 9.97])
+def test_a_pause_before_a_switch_does_not_move_it(pause_at):
     """The switch is found from the blocks' own durations, which a pause changes for one block."""
     block_frames = 1024
     blocks = _tone_stream(
-        [(48000.0, 10.0), (16000.0, 10.0)], block_frames=block_frames, pauses=((9.5, 0.3),)
+        [(48000.0, 10.0), (16000.0, 10.0)], block_frames=block_frames, pauses=((pause_at, 0.3),)
     )
     first_row_after = int(10.0 * 48000 / block_frames)
 
@@ -881,6 +889,47 @@ def test_a_pause_just_before_a_switch_does_not_move_it():
 
     assert [run.rate for run in runs] == [48000, 16000]
     assert abs(runs[1].start_row - first_row_after) <= 1
+
+
+@pytest.mark.parametrize(
+    ("rate", "every", "pause"), [(24000.0, 0.25, 0.02), (16000.0, 0.3, 0.05), (48000.0, 0.1, 0.011)]
+)
+def test_short_regular_pauses_never_pass_for_a_nearby_rate(rate, every, pause):
+    """A pause shorter than a stall still costs every span across it some time.
+
+    Spans across 8% of lost time measure a clock 8% slow, which is the distance
+    between neighbouring standard rates; only a rate far from the declared one is
+    ever believed, and only when the spans measure it closely.
+    """
+    pauses = tuple((every * index + every / 2, pause) for index in range(int(30 / every)))
+    blocks = _tone_stream([(rate, 30.0)], pauses=pauses)
+
+    runs = rate_runs_of(_spool_of(blocks)[0], int(rate))
+
+    assert [run.rate for run in runs] == [int(rate)]
+
+
+@pytest.mark.parametrize("after", [16000.0, 24000.0])
+def test_a_windows_clock_that_ticks_every_15_6_ms_still_finds_the_switch(after):
+    """Windows' monotonic clock moves in 15.625 ms ticks, coarser than a 48 kHz block."""
+    block_frames = 1024
+    blocks = _tone_stream(
+        [(48000.0, 10.0), (after, 10.0)], block_frames=block_frames, clock_tick=0.015625
+    )
+    first_row_after = int(10.0 * 48000 / block_frames)
+
+    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
+
+    assert [run.rate for run in runs] == [48000, int(after)]
+    assert abs(runs[1].start_row - first_row_after) <= 1
+
+
+def test_a_right_48khz_declaration_survives_a_windows_clock():
+    blocks = _tone_stream([(48000.0, 20.0)], clock_tick=0.015625)
+
+    runs = rate_runs_of(_spool_of(blocks)[0], 48000)
+
+    assert [run.rate for run in runs] == [48000]
 
 
 def test_a_rate_heard_only_in_pieces_shorter_than_two_windows_still_holds():
