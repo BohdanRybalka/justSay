@@ -4037,10 +4037,24 @@ async def test_a_level_from_a_dead_session_is_still_refused(
         recorder.cleanup()
 
 
-def test_a_track_measured_away_from_its_declared_rate_is_logged_as_a_warning(
-    audio_settings, caplog
+def test_a_track_measured_away_from_its_declared_rate_is_logged_but_placed_as_declared(
+    audio_settings, caplog, monkeypatch
 ):
-    """A future log of a garbled meeting has to show which side switched rate, and when."""
+    """A future log of a garbled meeting has to show which side ran at what rate, and when.
+
+    The measurement is a lead for whoever reads the log; the audio is still placed at
+    the rate each source declared, because arrivals cannot tell lost time from a slow clock.
+    """
+    from app.audio import meeting_recorder
+
+    placed_at: list[int] = []
+    place = meeting_recorder.place_on_timeline
+
+    def record_the_rate(*args, **kwargs):
+        placed_at.append(kwargs["nominal_rate"])
+        return place(*args, **kwargs)
+
+    monkeypatch.setattr(meeting_recorder, "place_on_timeline", record_the_rate)
     rates = {"microphone": (16000, 16000), "system": (48000, 16000)}
     spools = {}
     for source, (_, real_rate) in rates.items():
@@ -4075,3 +4089,4 @@ def test_a_track_measured_away_from_its_declared_rate_is_logged_as_a_warning(
         (logging.INFO, "Meeting microphone audio declared 16000 Hz; measured: 16000 Hz from 0.1 s"),
         (logging.WARNING, "Meeting system audio declared 48000 Hz; measured: 16000 Hz from 0.1 s"),
     }
+    assert placed_at == [16000, 48000]

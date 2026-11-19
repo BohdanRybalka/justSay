@@ -808,7 +808,7 @@ def test_16khz_declared_as_48khz_is_measured_across_the_pauses_between_sounds():
 def test_a_right_48khz_declaration_is_measured_as_48khz_through_frequent_pauses():
     """Spans across a pause measure a slower clock than the device has.
 
-    With a 200 ms pause every 0.6 s most spans cross one and measure about 24 kHz;
+    With a 200 ms pause every 0.6 s, the spans across a pause measure about 20 kHz;
     a span across a stall does not count, so 48 kHz is measured.
     """
     index = _device_index([(48000.0, 30.0)], pauses=tuple((0.6 * p + 0.3, 0.2) for p in range(50)))
@@ -891,7 +891,7 @@ def test_one_window_at_another_rate_is_not_enough_to_change_the_measurement():
 
 
 @pytest.mark.parametrize("seed", range(6))
-def test_every_row_of_any_spool_is_measured_exactly_once(seed):
+def test_any_spool_gets_runs_from_its_first_row_in_order(seed):
     """The measurement runs on every meeting write, so it must answer for any spool.
 
     Random block counts, rates, pauses, bursts and ties, including one block and
@@ -909,6 +909,15 @@ def test_every_row_of_any_spool_is_measured_exactly_once(seed):
     assert starts[0] == 0
     assert starts == sorted(starts)
     assert starts[-1] < count
+
+
+def test_an_empty_spool_has_no_runs_and_says_so():
+    index = np.zeros(0, dtype=INDEX_DTYPE)
+
+    runs = rate_runs_of(index, 48000)
+
+    assert runs == []
+    assert describe_rate_runs(index, runs, recording_start=0.0) == "no blocks"
 
 
 def test_the_log_line_names_each_measured_rate_and_when_it_began():

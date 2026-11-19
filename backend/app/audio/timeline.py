@@ -35,8 +35,8 @@ _FAR_RATIO = 1.3
 class RateRun:
     """From `start_row` until the next run's, a spool's device delivered at `rate`.
 
-    `rate` is a standard rate the arrivals held, or the nominal rate when no
-    rate held anywhere in the spool.
+    `rate` is the candidate the arrivals held, the nominal rate or a standard one,
+    or the nominal rate when none held anywhere in the spool.
     """
 
     start_row: int
@@ -62,9 +62,14 @@ class Segment:
 
 
 def _spool_columns(index: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Arrivals, frames per block, and each block's first frame followed by the total."""
+    """Arrivals, frames per block, and each block's first frame followed by the total.
+
+    Arrivals are copied out of the record array: `np.searchsorted` copies a strided
+    view on every call, which made one search per window quadratic in meeting length.
+    """
     frames = index["frames"].astype(np.int64)
-    return index["arrival"], frames, np.concatenate(([0], np.cumsum(frames)))
+    arrivals = np.ascontiguousarray(index["arrival"])
+    return arrivals, frames, np.concatenate(([0], np.cumsum(frames)))
 
 
 def _stall_rows(
@@ -201,8 +206,6 @@ def _switch_row(
     low, high = search
     before_rate, after_rate = rates
     rows = np.arange(max(low, 1), high)
-    if rows.size == 0:
-        return low
     durations = arrivals[rows] - arrivals[rows - 1]
     misfit_before = np.abs(durations - frames[rows] / before_rate)
     misfit_after = np.abs(durations - frames[rows] / after_rate)
@@ -219,7 +222,7 @@ def find_rate_runs(
     gap_tolerance_blocks: float,
     window_seconds: float,
 ) -> list[RateRun]:
-    """Every row of a spool assigned the rate its device really delivered at.
+    """Every row of a spool assigned the rate its device delivered at, as far as arrivals tell.
 
     Candidates are the nominal rate, then standard rates `_FAR_RATIO` or more from it, since
     lost time inside a span reads as a slightly slower clock. A rate holds when `_HELD_WINDOWS`
