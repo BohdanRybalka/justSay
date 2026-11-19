@@ -65,6 +65,10 @@ struct CaptureError: Error {
     let message: String
 }
 
+func failureMessage(_ error: Error) -> String {
+    (error as? CaptureError)?.message ?? "\(error)"
+}
+
 func parseBlockFrames(_ arguments: [String]) -> Int {
     guard let flagIndex = arguments.firstIndex(of: "--block-frames"),
           flagIndex + 1 < arguments.count,
@@ -181,6 +185,7 @@ final class SystemAudioTap {
     private var ioProcID: AudioDeviceIOProcID?
     private var pending: [Float] = []
     private var channels = 0
+    private var streamChannels = 0
     private var nonInterleaved = false
     private var tapBufferIndex = 0
     private var captureRate = outputRate
@@ -198,13 +203,12 @@ final class SystemAudioTap {
     func start() {
         do {
             try buildCapture()
-        } catch let error as CaptureError {
-            fail(error.message)
+            writeHeader(sampleRate: Int(outputRate))
+            try startIOProc()
         } catch {
-            fail("Building the capture failed: \(error)")
+            tearDownCapture()
+            fail(failureMessage(error))
         }
-        writeHeader(sampleRate: Int(outputRate))
-        startIOProc()
         listenForCaptureChanges()
         listenForOutputChanges()
     }
@@ -240,15 +244,11 @@ final class SystemAudioTap {
         }
         if channels == 0 {
             channels = tapChannels
-        } else if tapChannels != channels {
-            throw CaptureError(
-                message: "The rebuilt tap has \(tapChannels) channels, not the \(channels) "
-                    + "the stdout header declared"
-            )
         }
+        streamChannels = tapChannels
 
         try createAggregateDevice(tapUID: description.uuid.uuidString)
-        pinAggregateRate()
+        try pinAggregateRate()
         let tapStream = try resolveTapBufferIndex()
         tapBufferIndex = tapStream.index
         nonInterleaved = tapStream.format.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
@@ -257,19 +257,26 @@ final class SystemAudioTap {
         reportedConversionFailure = false
 
         logLine(
-            "Capturing \(channels) ch at \(Int(captureRate)) Hz from input buffer "
-                + "\(tapBufferIndex), writing \(Int(outputRate)) Hz"
+            "Capturing \(streamChannels) ch at \(Int(captureRate)) Hz from input buffer "
+                + "\(tapBufferIndex), writing \(channels) ch at \(Int(outputRate)) Hz"
         )
     }
 
-    /// The rate the aggregate runs at: `outputRate`, or the output device's own on macOS 14.
+    /// Set the rate the aggregate runs at: `outputRate`, or the output device's own on macOS 14.
     ///
-    /// A refused rate is not an error: the rate the stream really carries is read
-    /// back afterwards and converted from, whatever it is.
-    private func pinAggregateRate() {
+    /// On macOS 15+ a refused rate is only logged: the tap converts, and the rate the
+    /// stream really carries is read back and converted from. On macOS 14 the tap does
+    /// not convert, so a device rate that cannot be read or is not taken up is an error.
+    private func pinAggregateRate() throws {
         var rate = outputRate
-        if !tapConvertsRates(), let deviceID = defaultOutputDeviceID(),
-           let deviceRate = nominalSampleRate(deviceID) {
+        if !tapConvertsRates() {
+            guard let deviceID = defaultOutputDeviceID(), let deviceRate = nominalSampleRate(deviceID)
+            else {
+                throw CaptureError(
+                    message: "The default output device's rate cannot be read, and on macOS 14 "
+                        + "the tap runs at it"
+                )
+            }
             rate = deviceRate
         }
         var address = propertyAddress(kAudioDevicePropertyNominalSampleRate)
@@ -277,12 +284,24 @@ final class SystemAudioTap {
             aggregateID, &address, 0, nil, UInt32(MemoryLayout<Float64>.size), &rate
         )
         if status != noErr {
+            guard tapConvertsRates() else {
+                throw CaptureError(
+                    message: "The aggregate device refused \(Int(rate)) Hz with status \(status) "
+                        + "on macOS 14, where the tap does not convert"
+                )
+            }
             logLine("Setting the aggregate device to \(Int(rate)) Hz failed with status \(status)")
             return
         }
         let deadline = Date().addingTimeInterval(rateSettleSeconds)
         while nominalSampleRate(aggregateID) != rate, Date() < deadline {
             usleep(20_000)
+        }
+        if !tapConvertsRates(), nominalSampleRate(aggregateID) != rate {
+            throw CaptureError(
+                message: "The aggregate device did not settle at the output device's "
+                    + "\(Int(rate)) Hz on macOS 14, where the tap does not convert"
+            )
         }
     }
 
@@ -303,10 +322,10 @@ final class SystemAudioTap {
                     + "with a readable format, not the tap's one"
             )
         }
-        guard Int(format.mChannelsPerFrame) == channels else {
+        guard Int(format.mChannelsPerFrame) == streamChannels else {
             throw CaptureError(
                 message: "Input buffer 0 carries \(format.mChannelsPerFrame) channels but "
-                    + "the process tap reported \(channels) — refusing to capture it"
+                    + "the process tap reported \(streamChannels) — refusing to capture it"
             )
         }
         guard format.mSampleRate > 0 else {
@@ -363,19 +382,22 @@ final class SystemAudioTap {
         }
     }
 
-    private func startIOProc() {
+    private func startIOProc() throws {
         let procStatus = AudioDeviceCreateIOProcIDWithBlock(
             &ioProcID, aggregateID, queue
         ) { [weak self] _, inInputData, _, _, _ in
             self?.consume(inInputData)
         }
         guard procStatus == noErr, let procID = ioProcID else {
-            fail("AudioDeviceCreateIOProcIDWithBlock failed with status \(procStatus)")
+            ioProcID = nil
+            throw CaptureError(
+                message: "AudioDeviceCreateIOProcIDWithBlock failed with status \(procStatus)"
+            )
         }
 
         let startStatus = AudioDeviceStart(aggregateID, procID)
         guard startStatus == noErr else {
-            fail("AudioDeviceStart failed with status \(startStatus)")
+            throw CaptureError(message: "AudioDeviceStart failed with status \(startStatus)")
         }
     }
 
@@ -387,14 +409,18 @@ final class SystemAudioTap {
 
         var frames: [Float] = []
         if nonInterleaved {
-            frames = interleaved(buffers)
+            frames = remixed(interleaved(buffers), from: streamChannels)
         } else {
             let buffer = buffers[tapBufferIndex]
-            guard let data = buffer.mData, Int(buffer.mNumberChannels) == channels else { return }
+            let delivered = Int(buffer.mNumberChannels)
+            guard let data = buffer.mData, delivered > 0 else { return }
             let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-            frames = Array(
+            let samples = Array(
                 UnsafeBufferPointer(start: data.assumingMemoryBound(to: Float.self), count: count)
             )
+            frames = Int(buffer.mNumberChannels) == channels
+                ? samples
+                : remixed(samples, from: delivered)
         }
         guard !frames.isEmpty else { return }
 
@@ -406,11 +432,12 @@ final class SystemAudioTap {
         flushWholeBlocks()
     }
 
+    /// The stream's `streamChannels` planes, interleaved.
     private func interleaved(_ buffers: UnsafeMutableAudioBufferListPointer) -> [Float] {
         var planes: [UnsafePointer<Float>] = []
         var frames = Int.max
-        guard buffers.count >= tapBufferIndex + channels else { return [] }
-        for index in tapBufferIndex..<(tapBufferIndex + channels) {
+        guard buffers.count >= tapBufferIndex + streamChannels else { return [] }
+        for index in tapBufferIndex..<(tapBufferIndex + streamChannels) {
             guard let data = buffers[index].mData else { return [] }
             planes.append(UnsafePointer(data.assumingMemoryBound(to: Float.self)))
             frames = min(frames, Int(buffers[index].mDataByteSize) / MemoryLayout<Float>.size)
@@ -418,13 +445,31 @@ final class SystemAudioTap {
         guard !planes.isEmpty, frames > 0, frames != Int.max else { return [] }
 
         var samples: [Float] = []
-        samples.reserveCapacity(frames * channels)
+        samples.reserveCapacity(frames * planes.count)
         for frame in 0..<frames {
-            for channel in 0..<channels {
-                samples.append(planes[min(channel, planes.count - 1)][frame])
+            for plane in planes {
+                samples.append(plane[frame])
             }
         }
         return samples
+    }
+
+    /// Interleaved `samples` of `delivered` channels as the header's `channels`.
+    ///
+    /// A headset in its call profile may hand the mix over as mono: one channel is
+    /// copied to every channel, and from more than the header declares the first ones
+    /// are kept, so every frame written has the width the reader cuts blocks at.
+    private func remixed(_ samples: [Float], from delivered: Int) -> [Float] {
+        guard delivered > 0, delivered != channels else { return samples }
+        let frames = samples.count / delivered
+        var output: [Float] = []
+        output.reserveCapacity(frames * channels)
+        for frame in 0..<frames {
+            for channel in 0..<channels {
+                output.append(samples[frame * delivered + min(channel, delivered - 1)])
+            }
+        }
+        return output
     }
 
     /// `samples` at `captureRate`, interleaved, as the same audio at `outputRate`.
@@ -475,6 +520,9 @@ final class SystemAudioTap {
                     "Converting \(Int(captureRate)) Hz to \(Int(outputRate)) Hz failed: "
                         + "\(conversionError.map { "\($0)" } ?? "no reason given")"
                 )
+                DispatchQueue.main.async { [weak self] in
+                    self?.scheduleRebuild("a rate conversion failed", onlyIfChanged: false)
+                }
             }
             return []
         }
@@ -502,7 +550,9 @@ final class SystemAudioTap {
     }
 
     /// Rebuild when what the capture runs at changes: the aggregate's rate or its stream's format,
-    /// and on macOS 14 the default output device's rate, which the aggregate copies.
+    /// and on macOS 14 the default output device's rate, which the aggregate was built at.
+    ///
+    /// A change between building the capture and listening is caught by checking once now.
     private func listenForCaptureChanges() {
         var watched: [(AudioObjectID, AudioObjectPropertyAddress)] = [
             (aggregateID, propertyAddress(kAudioDevicePropertyNominalSampleRate))
@@ -522,6 +572,9 @@ final class SystemAudioTap {
                 captureListeners.append(listener)
             }
         }
+        if !captureIsCurrent() {
+            scheduleRebuild("a capture rate or format changed while it was built", onlyIfChanged: true)
+        }
     }
 
     /// Whether the capture still runs at the rate it was built for.
@@ -533,15 +586,17 @@ final class SystemAudioTap {
             aggregateID, kAudioDevicePropertyStreams, scope: kAudioObjectPropertyScopeInput
         )
         guard streams.count == 1, let format = streamFormat(streams[0]),
-              format.mSampleRate == captureRate
+              format.mSampleRate == captureRate,
+              Int(format.mChannelsPerFrame) == streamChannels
         else {
             return false
         }
         if tapConvertsRates() {
             return true
         }
-        guard let deviceID = defaultOutputDeviceID() else { return true }
+        guard let deviceID = defaultOutputDeviceID() else { return false }
         return nominalSampleRate(deviceID) == captureRate
+            && nominalSampleRate(aggregateID) == captureRate
     }
 
     /// Rebuild on every change of default output device: a headset connecting, disconnecting,
@@ -613,21 +668,21 @@ final class SystemAudioTap {
         tearDownCapture()
         do {
             try buildCapture()
+            try startIOProc()
         } catch {
+            tearDownCapture()
             failedRebuilds += 1
-            let message = (error as? CaptureError)?.message ?? "\(error)"
+            let message = failureMessage(error)
             guard failedRebuilds < rebuildAttempts else {
                 fail("Rebuilding the capture after \(reason) failed \(failedRebuilds) times: \(message)")
             }
             logLine("Rebuilding the capture after \(reason) failed, retrying: \(message)")
-            tearDownCapture()
             let retry = DispatchWorkItem { [weak self] in self?.rebuild(reason) }
             pendingRebuild = retry
             DispatchQueue.main.asyncAfter(deadline: .now() + rebuildRetrySeconds, execute: retry)
             return
         }
         failedRebuilds = 0
-        startIOProc()
         listenForCaptureChanges()
         logLine(
             "Rebuilt the capture after \(reason): \(Int(previousRate)) Hz before, "
@@ -641,7 +696,10 @@ final class SystemAudioTap {
     /// dispatch queue is a documented deadlock, and so is `queue.sync` from it.
     private func tearDownCapture() {
         if let procID = ioProcID, aggregateID != kAudioObjectUnknown {
-            AudioDeviceStop(aggregateID, procID)
+            let stopStatus = AudioDeviceStop(aggregateID, procID)
+            if stopStatus != noErr {
+                logLine("AudioDeviceStop failed with status \(stopStatus); destroying the device anyway")
+            }
             AudioDeviceDestroyIOProcID(aggregateID, procID)
             ioProcID = nil
         }
