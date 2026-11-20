@@ -658,6 +658,7 @@ final class SystemAudioTap {
         pendingRebuild = nil
         steadyMark?.cancel()
         guard rebuildsSinceSteady < rebuildAttempts else {
+            tearDownCapture()
             fail(
                 "The capture was rebuilt \(rebuildsSinceSteady) times without holding for "
                     + "\(Int(steadySeconds)) s; giving up after \(reason)"

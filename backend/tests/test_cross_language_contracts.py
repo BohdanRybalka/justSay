@@ -141,6 +141,8 @@ _SWIFT_HEADER_KEY_PATTERN = r'\\"(\w+)\\":'
 
 _SWIFT_HEADER_FORMAT_PATTERN = r'\\"format\\":\\"([A-Za-z0-9]+)\\"'
 
+_SWIFT_FIXED_CHANNELS = re.compile(r"^[ \t]*private let channels = (\d+)$", re.MULTILINE)
+
 _PYTHON_HEADER_KEY_PATTERN = r'header(?:\.get\(|\[)"(\w+)"'
 
 _TAP_BLOCK_FRAMES_FLAG = "--block-frames"
@@ -172,6 +174,7 @@ _SWIFT_CHANNEL_GUARDS: tuple[tuple[str, str], ...] = (
     ("consume", "remixed(samples, from: Int(buffer.mNumberChannels))"),
     ("remixed", "let frames = samples.count / delivered"),
     ("remixed", "for channel in 0..<channels"),
+    ("remixed", "min(channel, delivered - 1)"),
     ("resolveTapBufferIndex", "Int(format.mChannelsPerFrame) == streamChannels"),
 )
 
@@ -2165,6 +2168,13 @@ def test_the_macos_tap_helper_and_its_reader_agree_on_the_header() -> None:
     assert documented[0].get("format") == accepted_format.group(1), (
         f"the documented header declares format {documented[0].get('format')!r} "
         f"and macos_tap.py accepts {accepted_format.group(1)!r}"
+    )
+
+    fixed_channels = _SWIFT_FIXED_CHANNELS.search(_read(AUDIO_TAP_SWIFT))
+    assert fixed_channels and int(fixed_channels.group(1)) == documented[0].get("channels"), (
+        f"the documented header declares {documented[0].get('channels')} channels, but "
+        f"{AUDIO_TAP_SWIFT.name} no longer fixes its channel count at that number, so "
+        f"a capture can declare whatever width its first tap happened to have"
     )
 
 
