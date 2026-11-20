@@ -50,6 +50,7 @@ let outputRate: Float64 = 48000
 let rebuildSettleSeconds = 0.25
 let rebuildRetrySeconds = 1.0
 let rebuildAttempts = 10
+let steadySeconds = 5.0
 let rateSettleSeconds = 1.0
 
 func logLine(_ message: String) {
@@ -184,7 +185,7 @@ final class SystemAudioTap {
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
     private var pending: [Float] = []
-    private var channels = 0
+    private let channels = 2
     private var streamChannels = 0
     private var nonInterleaved = false
     private var tapBufferIndex = 0
@@ -193,7 +194,8 @@ final class SystemAudioTap {
     private var captureListeners: [PropertyListener] = []
     private var outputListener: PropertyListener?
     private var pendingRebuild: DispatchWorkItem?
-    private var failedRebuilds = 0
+    private var steadyMark: DispatchWorkItem?
+    private var rebuildsSinceSteady = 0
     private var reportedConversionFailure = false
 
     init(blockFrames: Int) {
@@ -241,9 +243,6 @@ final class SystemAudioTap {
               tapChannels > 0
         else {
             throw CaptureError(message: "The process tap delivers an unsupported stream format")
-        }
-        if channels == 0 {
-            channels = tapChannels
         }
         streamChannels = tapChannels
 
@@ -412,15 +411,12 @@ final class SystemAudioTap {
             frames = remixed(interleaved(buffers), from: streamChannels)
         } else {
             let buffer = buffers[tapBufferIndex]
-            let delivered = Int(buffer.mNumberChannels)
-            guard let data = buffer.mData, delivered > 0 else { return }
+            guard let data = buffer.mData else { return }
             let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
             let samples = Array(
                 UnsafeBufferPointer(start: data.assumingMemoryBound(to: Float.self), count: count)
             )
-            frames = Int(buffer.mNumberChannels) == channels
-                ? samples
-                : remixed(samples, from: delivered)
+            frames = remixed(samples, from: Int(buffer.mNumberChannels))
         }
         guard !frames.isEmpty else { return }
 
@@ -454,13 +450,13 @@ final class SystemAudioTap {
         return samples
     }
 
-    /// Interleaved `samples` of `delivered` channels as the header's `channels`.
+    /// Interleaved `samples` of `delivered` channels as whole frames of the header's `channels`.
     ///
-    /// A headset in its call profile may hand the mix over as mono: one channel is
-    /// copied to every channel, and from more than the header declares the first ones
-    /// are kept, so every frame written has the width the reader cuts blocks at.
+    /// A mono stream is copied to every channel, from a wider one the first channels are
+    /// kept, and a trailing partial frame is dropped, so every frame written has the
+    /// width the reader cuts blocks at.
     private func remixed(_ samples: [Float], from delivered: Int) -> [Float] {
-        guard delivered > 0, delivered != channels else { return samples }
+        guard delivered > 0 else { return [] }
         let frames = samples.count / delivered
         var output: [Float] = []
         output.reserveCapacity(frames * channels)
@@ -655,11 +651,19 @@ final class SystemAudioTap {
 
     /// Tear the capture down and build it again on whatever the machine now has.
     ///
-    /// Frames already buffered stay, and nothing is written until the new IOProc runs.
-    /// A build that fails is retried every `rebuildRetrySeconds`; after `rebuildAttempts`
-    /// this process exits, and the Python half reports the capture as stopped.
+    /// Frames already buffered stay, and nothing is written until the new IOProc runs. A failed
+    /// build is retried every `rebuildRetrySeconds`; once `rebuildAttempts` rebuilds pass without
+    /// a capture holding for `steadySeconds`, this process exits and the Python half reports it.
     private func rebuild(_ reason: String) {
         pendingRebuild = nil
+        steadyMark?.cancel()
+        guard rebuildsSinceSteady < rebuildAttempts else {
+            fail(
+                "The capture was rebuilt \(rebuildsSinceSteady) times without holding for "
+                    + "\(Int(steadySeconds)) s; giving up after \(reason)"
+            )
+        }
+        rebuildsSinceSteady += 1
         let previousRate = captureRate
         for listener in captureListeners {
             removeListener(listener)
@@ -671,18 +675,15 @@ final class SystemAudioTap {
             try startIOProc()
         } catch {
             tearDownCapture()
-            failedRebuilds += 1
-            let message = failureMessage(error)
-            guard failedRebuilds < rebuildAttempts else {
-                fail("Rebuilding the capture after \(reason) failed \(failedRebuilds) times: \(message)")
-            }
-            logLine("Rebuilding the capture after \(reason) failed, retrying: \(message)")
+            logLine("Rebuilding the capture after \(reason) failed, retrying: \(failureMessage(error))")
             let retry = DispatchWorkItem { [weak self] in self?.rebuild(reason) }
             pendingRebuild = retry
             DispatchQueue.main.asyncAfter(deadline: .now() + rebuildRetrySeconds, execute: retry)
             return
         }
-        failedRebuilds = 0
+        let steady = DispatchWorkItem { [weak self] in self?.rebuildsSinceSteady = 0 }
+        steadyMark = steady
+        DispatchQueue.main.asyncAfter(deadline: .now() + steadySeconds, execute: steady)
         listenForCaptureChanges()
         logLine(
             "Rebuilt the capture after \(reason): \(Int(previousRate)) Hz before, "

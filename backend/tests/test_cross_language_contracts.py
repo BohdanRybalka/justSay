@@ -168,7 +168,10 @@ _SWIFT_WHOLE_BLOCK_WRITES: tuple[str, ...] = (
 )
 
 _SWIFT_CHANNEL_GUARDS: tuple[tuple[str, str], ...] = (
-    ("consume", "Int(buffer.mNumberChannels) == channels"),
+    ("consume", "remixed(interleaved(buffers), from: streamChannels)"),
+    ("consume", "remixed(samples, from: Int(buffer.mNumberChannels))"),
+    ("remixed", "let frames = samples.count / delivered"),
+    ("remixed", "for channel in 0..<channels"),
     ("resolveTapBufferIndex", "Int(format.mChannelsPerFrame) == streamChannels"),
 )
 
@@ -2178,9 +2181,10 @@ def test_the_macos_tap_helper_and_its_reader_frame_blocks_the_same_way() -> None
 
     The channel count both sides multiply by is the one the header declares,
     which is what makes the two agree by construction rather than by luck. The
-    helper writes a buffer of another width only after remixing it to that
-    count, and refuses an aggregate whose stream disagrees with the tap; those
-    two checks are pinned below for the same reason the arithmetic is.
+    helper hands every buffer, of whatever width, to ``remixed``, which cuts it
+    into whole frames of that count, and refuses an aggregate whose stream
+    disagrees with the tap; both are pinned below for the same reason the
+    arithmetic is.
 
     So is the way the bytes leave the helper, which is what makes the reader's
     framing safe to trust rather than merely checked. ``flushWholeBlocks``
@@ -2250,7 +2254,7 @@ def test_the_macos_tap_helper_and_its_reader_frame_blocks_the_same_way() -> None
 
     for function, guard in _SWIFT_CHANNEL_GUARDS:
         assert guard in _swift_function_body(function), (
-            f"{AUDIO_TAP_SWIFT.name}'s {function} no longer checks {guard!r}, so "
+            f"{AUDIO_TAP_SWIFT.name}'s {function} no longer holds {guard!r}, so "
             f"a buffer whose channel count disagrees with the header would be "
             f"written into the stream and the reader has no way to notice"
         )
