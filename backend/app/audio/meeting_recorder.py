@@ -49,6 +49,8 @@ from app.audio.timeline import (
     MICROPHONE_TRACK,
     SYSTEM_TRACK,
     TRACK_COUNT,
+    describe_rate_runs,
+    find_rate_runs,
     normalize_in_place,
     place_on_timeline,
 )
@@ -284,18 +286,34 @@ def _mix_into(
             "rate_tolerance": settings.meeting_rate_tolerance,
             "chunk_frames": chunk_frames,
         }
-        for track, spool, nominal_rate in (
-            (MICROPHONE_TRACK, captured.microphone_spool, captured.microphone_rate),
-            (SYSTEM_TRACK, captured.system_spool, captured.system_rate),
+        for track, name, spool, nominal_rate in (
+            (MICROPHONE_TRACK, "microphone", captured.microphone_spool, captured.microphone_rate),
+            (SYSTEM_TRACK, "system", captured.system_spool, captured.system_rate),
         ):
             samples = spool.samples()
             mappings.callback(close_memmap, samples)
+            index = spool.index()
             place_on_timeline(
-                spool.index(),
+                index,
                 samples,
                 nominal_rate=nominal_rate,
                 out=timeline[:, track],
                 **common,
+            )
+            runs = find_rate_runs(
+                index,
+                nominal_rate,
+                gap_tolerance_blocks=settings.meeting_gap_tolerance_blocks,
+                window_seconds=settings.meeting_rate_window_seconds,
+            )
+            log.log(
+                logging.INFO
+                if all(run.rate == nominal_rate for run in runs)
+                else logging.WARNING,
+                "Meeting %s audio declared %d Hz; measured: %s",
+                name,
+                nominal_rate,
+                describe_rate_runs(index, runs, captured.recording_start),
             )
         normalize_in_place(timeline, chunk_frames)
         return write_wav_streaming(

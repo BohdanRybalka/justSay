@@ -16,7 +16,12 @@ from app.audio.analysis import to_mono
 from app.audio.config import AudioSettings
 from app.audio.meeting_spool import INDEX_DTYPE
 from app.audio.timeline import (
+    STANDARD_RATES,
+    RateRun,
     Segment,
+    _spool_columns,
+    describe_rate_runs,
+    find_rate_runs,
     normalize_in_place,
     place_on_timeline,
     resample_chunks,
@@ -27,6 +32,7 @@ from app.audio.timeline import (
 TARGET_RATE = 16000
 GAP_TOLERANCE = 1.5
 RATE_TOLERANCE = AudioSettings().meeting_rate_tolerance
+RATE_WINDOW_SECONDS = AudioSettings().meeting_rate_window_seconds
 CHUNK_FRAMES = AudioSettings().meeting_assembly_chunk_frames
 
 
@@ -728,3 +734,212 @@ def test_a_rejected_segment_is_truncated_at_its_neighbour_rather_than_summed_int
     )
 
     assert np.max(np.abs(timeline)) <= fill * 1.25
+
+
+def rate_runs_of(index: np.ndarray, nominal_rate: int) -> list[RateRun]:
+    return find_rate_runs(
+        index,
+        nominal_rate,
+        gap_tolerance_blocks=GAP_TOLERANCE,
+        window_seconds=RATE_WINDOW_SECONDS,
+    )
+
+
+def _device_index(stretches: list[tuple[float, float]], *, block_frames: int = 1024,
+                  late_by: float = 0.004,
+                  pauses: tuple[tuple[float, float], ...] = (),
+                  clock_tick: float = 0.0) -> np.ndarray:
+    """The spool index of a device whose real rate changes between `stretches`.
+
+    Each stretch is `(real_rate, seconds)`, with no gap between them. A pause is
+    `(capture_second, seconds)` in which no frame is delivered at all. A block
+    arrives once its last frame is captured, late by up to `late_by`; with a
+    `clock_tick` the reading is floored to it, so it may read up to a tick early.
+    """
+    rng = np.random.default_rng(7)
+    arrivals: list[float] = []
+    captured_until = 0.0
+    waiting = sorted(pauses)
+    for real_rate, seconds in stretches:
+        for _ in range(int(seconds * real_rate / block_frames)):
+            while waiting and captured_until >= waiting[0][0]:
+                captured_until += waiting.pop(0)[1]
+            captured_until += block_frames / real_rate
+            arrival = captured_until + float(rng.uniform(0.0, late_by))
+            if clock_tick:
+                arrival = float(np.floor(arrival / clock_tick) * clock_tick)
+            arrivals.append(arrival)
+    return np.array([(arrival, block_frames) for arrival in arrivals], dtype=INDEX_DTYPE)
+
+
+def test_16khz_audio_declared_as_48khz_is_measured_as_16khz_from_the_first_block():
+    """A headset in its call profile delivers 16 kHz while its header still says 48 kHz."""
+    index = _device_index([(16000.0, 20.0)])
+
+    assert rate_runs_of(index, 48000) == [RateRun(0, 16000)]
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [(48000.0, 16000.0), (16000.0, 48000.0), (48000.0, 32000.0), (24000.0, 48000.0)],
+)
+def test_a_rate_switch_without_a_gap_is_found_on_the_block_it_happened_at(before, after):
+    """A headset that changes profile mid-call changes rate with no stall to split on."""
+    block_frames = 1024
+    index = _device_index([(before, 10.0), (after, 10.0)], block_frames=block_frames)
+    first_row_after = int(10.0 * before / block_frames)
+
+    runs = rate_runs_of(index, 48000)
+
+    assert [run.rate for run in runs] == [int(before), int(after)]
+    assert abs(runs[1].start_row - first_row_after) <= 1
+
+
+def test_16khz_declared_as_48khz_is_measured_across_the_pauses_between_sounds():
+    """Windows delivers nothing while nothing plays, so the other side arrives in pieces.
+
+    A 150 ms pause every second is a stall at any rate the device might run at, so
+    the stream comes in pieces; the windows that measure it run across them.
+    """
+    index = _device_index([(16000.0, 20.0)], pauses=tuple((s + 0.5, 0.15) for s in range(20)))
+
+    assert [run.rate for run in rate_runs_of(index, 48000)] == [16000]
+
+
+def test_a_right_48khz_declaration_is_measured_as_48khz_through_frequent_pauses():
+    """Spans across a pause measure a slower clock than the device has.
+
+    With a 200 ms pause every 0.6 s, the spans across a pause measure about 20 kHz;
+    a span across a stall does not count, so 48 kHz is measured.
+    """
+    index = _device_index([(48000.0, 30.0)], pauses=tuple((0.6 * p + 0.3, 0.2) for p in range(50)))
+
+    assert [run.rate for run in rate_runs_of(index, 48000)] == [48000]
+
+
+@pytest.mark.parametrize("pause_at", [9.5, 9.97])
+def test_a_pause_before_a_switch_does_not_move_it(pause_at):
+    """The switch is found from the blocks' own durations, which a pause changes for one block."""
+    block_frames = 1024
+    index = _device_index(
+        [(48000.0, 10.0), (16000.0, 10.0)], block_frames=block_frames, pauses=((pause_at, 0.3),)
+    )
+    first_row_after = int(10.0 * 48000 / block_frames)
+
+    runs = rate_runs_of(index, 48000)
+
+    assert [run.rate for run in runs] == [48000, 16000]
+    assert abs(runs[1].start_row - first_row_after) <= 1
+
+
+@pytest.mark.parametrize(
+    ("rate", "every", "pause"), [(24000.0, 0.25, 0.02), (16000.0, 0.3, 0.05), (48000.0, 0.1, 0.011)]
+)
+def test_short_regular_pauses_never_pass_for_a_nearby_rate(rate, every, pause):
+    """Lost time inside a span reads as a slightly slower clock.
+
+    Spans across 8% of lost time measure a clock 8% slow, the distance between
+    neighbouring standard rates; only a rate far from the declared one is ever
+    measured, and only when the spans land within a few percent of it.
+    """
+    pauses = tuple((every * index + every / 2, pause) for index in range(int(30 / every)))
+    index = _device_index([(rate, 30.0)], pauses=pauses)
+
+    assert [run.rate for run in rate_runs_of(index, int(rate))] == [int(rate)]
+
+
+@pytest.mark.parametrize("after", [16000.0, 24000.0])
+def test_a_windows_clock_that_ticks_every_15_6_ms_still_finds_the_switch(after):
+    """Windows' monotonic clock moves in 15.625 ms ticks, most of a 48 kHz block."""
+    block_frames = 1024
+    index = _device_index(
+        [(48000.0, 10.0), (after, 10.0)], block_frames=block_frames, clock_tick=0.015625
+    )
+    first_row_after = int(10.0 * 48000 / block_frames)
+
+    runs = rate_runs_of(index, 48000)
+
+    assert [run.rate for run in runs] == [48000, int(after)]
+    assert abs(runs[1].start_row - first_row_after) <= 1
+
+
+def test_a_right_48khz_declaration_is_measured_as_48khz_on_a_windows_clock():
+    index = _device_index([(48000.0, 20.0)], clock_tick=0.015625)
+
+    assert [run.rate for run in rate_runs_of(index, 48000)] == [48000]
+
+
+def test_a_rate_heard_only_in_pieces_shorter_than_two_windows_still_holds():
+    """A sound, a pause, a sound: windows that only see a pause's edge say nothing.
+
+    Such a window is passed over, so the windows on either side of it still hold the
+    rate together even though no two labelled windows are neighbours.
+    """
+    pauses = tuple((2.2 * piece + 1.2, 1.0) for piece in range(15))
+    index = _device_index([(16000.0, 18.0)], pauses=pauses)
+
+    assert [run.rate for run in rate_runs_of(index, 48000)] == [16000]
+
+
+def test_one_window_at_another_rate_is_not_enough_to_change_the_measurement():
+    """A rate has to hold for two windows in a row before it is reported.
+
+    One window cannot tell a short stretch at another rate from a reader hiccup.
+    """
+    index = _device_index([(48000.0, 10.0), (16000.0, 1.3), (48000.0, 10.0)])
+
+    assert [run.rate for run in rate_runs_of(index, 48000)] == [48000]
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_any_spool_gets_runs_from_its_first_row_in_order(seed):
+    """The measurement runs on every meeting write, so it must answer for any spool.
+
+    Random block counts, rates, pauses, bursts and ties, including one block and
+    blocks that all arrive at once; the runs start at the first row and run in order.
+    """
+    rng = np.random.default_rng(seed)
+    count = int(rng.choice([1, 2, 5, 300, 3000]))
+    steps = rng.choice([0.0, 0.0213, 0.064, 0.2, 3.0], size=count, p=[0.2, 0.4, 0.3, 0.07, 0.03])
+    arrivals = np.cumsum(steps) if seed else np.zeros(count)
+    index = np.array([(arrival, 1024) for arrival in arrivals], dtype=INDEX_DTYPE)
+
+    runs = rate_runs_of(index, int(rng.choice(STANDARD_RATES)))
+
+    starts = [run.start_row for run in runs]
+    assert starts[0] == 0
+    assert starts == sorted(starts)
+    assert starts[-1] < count
+
+
+def test_arrivals_are_searched_as_a_contiguous_array():
+    """A spool index is a record array, and its arrival field is a strided view of it.
+
+    `np.searchsorted` copies a strided array on every call, and the measurement searches
+    once per window, so handing it the view makes a three-hour meeting take seconds to
+    write instead of a fraction of one.
+    """
+    index = _device_index([(48000.0, 2.0)])
+    assert not index["arrival"].flags.c_contiguous
+
+    arrivals, _, _ = _spool_columns(index)
+
+    assert arrivals.flags.c_contiguous
+    assert np.array_equal(arrivals, index["arrival"])
+
+
+def test_an_empty_spool_has_no_runs_and_says_so():
+    index = np.zeros(0, dtype=INDEX_DTYPE)
+
+    runs = rate_runs_of(index, 48000)
+
+    assert runs == []
+    assert describe_rate_runs(index, runs, recording_start=0.0) == "no blocks"
+
+
+def test_the_log_line_names_each_measured_rate_and_when_it_began():
+    index = _device_index([(48000.0, 9.0), (16000.0, 10.0)])
+
+    described = describe_rate_runs(index, rate_runs_of(index, 48000), recording_start=0.0)
+
+    assert described == "48000 Hz from 0.0 s, 16000 Hz from 9.0 s"
